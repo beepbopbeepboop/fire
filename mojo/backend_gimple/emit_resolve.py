@@ -534,6 +534,31 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
+            # The string pool, for the SAME reason as the funcptr marks above
+            # and for the same failure: `_str_pool_declared` is what stops each
+            # module re-declaring every name interned before it, and an
+            # imported module emits `static char * _slit_N;` for the names it
+            # finds NOT yet declared. A failed subtree's generated text is
+            # discarded here, but its marks were not rolled back, so every name
+            # it interned was left marked declared with nothing declaring it --
+            # and the root's real definition comes near the END of the
+            # translation unit, after the function bodies that reference it.
+            # The result is "_slit_10001 undeclared (first use in this
+            # function)" on hundreds of references, from a subtree that was
+            # never in the output at all. Rolling the mark back keeps the pair
+            # symmetric, and a name interned only by the failed subtree is
+            # simply never declared because nothing references it.
+            strpool_declared_before = set(gen._str_pool_declared)
+            # `_c_helpers_needed` is the same shape of mark as the string pool:
+            # a helper is emitted INLINE at the point that needs it, and
+            # `_emitted_c_helpers` is what keeps a second module from emitting
+            # a duplicate `static` definition. A failed subtree's text is
+            # discarded, so its helpers' definitions went with it -- but the
+            # marks said they were already emitted, and every surviving
+            # reference became an implicit declaration. Measured: 100+
+            # "implicit declaration of function '_mojo_sizeof_<Struct>'", one
+            # per AST node class in fire_compiler.py.
+            emitted_c_helpers_before = set(gen._emitted_c_helpers)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -618,6 +643,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._c_kw_struct_renames = gen._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
+                temp_gen.struct_bool_methods = gen.struct_bool_methods
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
                 # The module-qualified struct IDENTITY that guard feeds: which
                 # C name each colliding StructDef is emitted under, and which
@@ -667,6 +693,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._global_inline_defs = gen._global_inline_defs
                 temp_gen._emitted_allocs = gen._emitted_allocs
                 temp_gen._emitted_singletons = gen._emitted_singletons
+                # share by reference: a `sizeof`/`fnaddr` accessor is a
+                # file-scope `static` and every module's parts land in ONE
+                # translation unit, so a second module needing the same one is
+                # a gcc "redefinition of". Without this each temp_gen started
+                # with an empty dict AND an empty set, so `_c_helper_def`
+                # returned a second definition of a helper the root gen had
+                # already emitted. `_c_helpers_needed`'s own docstring says
+                # why handing back `''` still leaves the definition ahead of
+                # the caller.
+                temp_gen._c_helpers_needed = gen._c_helpers_needed
+                temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
                 # _module_stmts' union (see PERF_nested_module_compile_
@@ -1010,6 +1047,10 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
+                for _sp in list(gen._str_pool_declared - strpool_declared_before):
+                    gen._str_pool_declared.discard(_sp)
+                for _ch in list(gen._emitted_c_helpers - emitted_c_helpers_before):
+                    gen._emitted_c_helpers.discard(_ch)
                 # See `sub_toplevels_before` above: a declaration with no body
                 # behind it is a link error attributed to the wrong module.
                 if len(gen._sub_toplevels) > sub_toplevels_before:
@@ -1816,10 +1857,13 @@ def _inc_val(gen, base: str) -> str:
     return gen._new_val('int64_t', f'{base} + 1LL')
 
 
-def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
-    """Emit a call and return the result temp."""
+def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
+    """Emit a call and return the result temp.
+
+    `arg_nodes` is forwarded to `_emit_call` (see its docstring for what it
+    is and why it is optional)."""
     t = gen._new_temp(ret_type)
-    gen._emit_call(ret_type, t, fname, arg_pairs)
+    gen._emit_call(ret_type, t, fname, arg_pairs, arg_nodes)
     return t
 
 
@@ -3062,18 +3106,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         return
 
     if _inner is not None and node.kind == 'set':
-        # Same nesting, and the merge is one call rather than a loop:
-        # `mojo_set_update` walks the source's slots and re-adds each element
-        # under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`), so the
-        # result is deduplicated per element exactly as the single-clause
-        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B`
-        # is `update({elt for j in B} for each i in A)`.
+        # A set comprehension with 2+ clauses. Same park-the-remainder shape
+        # as the list branch below, but the merge is a per-ELEMENT ADD, not a
+        # list extend: `mojo_set_update` walks the source's slots and re-adds
+        # each element under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`),
+        # so the result is deduplicated per element exactly as the single-clause
+        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B` is
+        # `update({elt for j in B} for each i in A)`.
         gen._compr_pending_inner = None
         _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0])
-        _iv_raw = _as_str(_ir[1])
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if _it != 'MojoSet *':
+        if _it.endswith(' *') and _it != 'MojoSet *':
             _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
         gen._emit_call('void', '', 'mojo_set_update',
                        [('MojoSet *', res), ('MojoSet *', _iv)])
@@ -3093,12 +3137,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # expressions are lowered by the same `_char_to_cstr` + typed-set path
         # the single-clause case uses -- `for i in A for j in B` is
         # `update({k: v for j in B} for each i in A)`.
+        #
+        # Without this arm `{(i, j): i * j for i in range(2) for j in range(2)}`
+        # printed a TWO-entry dict whose keys were raw heap addresses baked
+        # into the generated C as decimal literals -- the ASLR-dependent class
+        # of wrong output, and the reason this case is worth its own arm rather
+        # than a widened list extend.
         gen._compr_pending_inner = None
         _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0])
-        _iv_raw = _as_str(_ir[1])
+        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
         _iv = _iv_raw
-        if _it != 'MojoDict *':
+        if _it.endswith(' *') and _it != 'MojoDict *':
             _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
         gen._emit_call('void', '', 'mojo_dict_update',
                        [('MojoDict *', res), ('MojoDict *', _iv)])
@@ -3140,23 +3189,36 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
-        # An element that is ITSELF a list/tuple (`[[5, j] for j in range(3)]`)
-        # carries a SECOND map, `_nested_elem_types`: what the inner containers
-        # hold. The single-clause path recorded only `_elem_types` here, so the
-        # result was describable as "a list of lists" and nothing more —
-        # `_list_repr_fn`'s `mojo_repr_list_intlists` branch needs the nested
-        # entry to pick the accessor that reads an inner slot as an int, and
-        # without it the generic walker read slot 0 of the first inner list
-        # through its None-sentinel heuristic, so the int 0 of `[5, 0]` printed
-        # as `None`. Mirrors _lower_list_literal's per-element carry (the same
-        # two lines, for the same reason, on the literal path).
-        if et == 'MojoList *' and ev in gen._elem_types:
-            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
-        # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
-        # the heterogeneous tuple's per-slot types so a later
-        # `for n, f in test_funcs:` reads each slot with the right accessor.
-        if et == 'MojoList *' and ev in gen._tuple_slot_types:
-            gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        # A comprehension whose element is a TUPLE or a nested LIST
+        # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
+        # record BOTH maps the equivalent list LITERAL records at
+        # emit_exprs.py's own "A list whose elements are TUPLES" branch —
+        # `_nested_elem_types` AND `_tuple_slot_types`. Carrying only the
+        # second was this bug, and it is silent and exit 0:
+        # `_list_repr_fn` picks the repr helper from `_nested_elem_types`,
+        # so a comprehension of tuples/lists fell to the generic
+        # `_mojo_repr_list`, whose None-sentinel heuristic renders a raw 0
+        # slot as `None`. Every non-zero slot happened to print, which is
+        # why only the ZEROS exposed it and why the bug looked like "the
+        # later slots lose their type": `[(5, j) for j in range(3)]`
+        # printed `[(5, None), (5, 1), (5, 2)]`.
+        #
+        # The doc's control case (`[[5, y] for y in ys]`, all values
+        # non-zero) is NOT actually correct, it is the same bug with the
+        # zeros absent: `[[5, y] for y in [0, 8]]` printed
+        # `[(5, None), (5, 8)]` — the zero AND the list element rendering
+        # as a tuple. Both are this one missing map.
+        #
+        # `setdefault` (as the literal path also uses) so the first
+        # iteration's answer is the one kept, exactly as the literal path
+        # behaves when a literal mixes shapes.
+        if et == 'MojoList *':
+            if ev in gen._elem_types:
+                # `_elem_types[res]` above stays 'MojoList *' (what res
+                # CONTAINS); `_nested_elem_types` says what those hold.
+                gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
         # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
         # unpack boxes `et` on the self-hosted path, so `et == 'char *'`
@@ -3207,9 +3269,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
-            # See the dict-literal case's identical comment: vt alone can't
-            # distinguish a real bool literal from a genuine int, so the
-            # shared store helper asks `is_python_bool_expr` instead.
+            # See the dict-literal case's identical comment: vt alone
+            # can't distinguish a real bool literal from a genuine int. `node.key`
+            # is the VALUE expression here -- the parser stores a dict
+            # comprehension as element=key_expr, key=val_expr (see the comment
+            # above `kt, kv = gen.lower_expr(node.element)`).
+            #
+            # The one store, as in the dict literal: the per-slot bool kind it
+            # decides is the whole-dict `mojo_mark_dict_bool_values` marker's
+            # successor (deleted; it made one bool value render every OTHER
+            # value in the dict as True/False), and its `_emit_call` is what
+            # resolves the placeholder key `_char_to_cstr` just handed out.
             gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
 
 

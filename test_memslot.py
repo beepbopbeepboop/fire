@@ -275,6 +275,90 @@ def main():
         finally:
             parent.release()
 
+    # ── a POOL: one admitted reservation as the ceiling on its own fan-out ───
+    # The hole this closes is bugs/MEMCAP_ab_sweep_per_file_reservations_are_
+    # covered_by_the_parent.md. `ab-aside`/`ab-bside` are `make` jobs admitted
+    # for `program` (55 GB) and their recipe is `make -j20`, one
+    # `tools/ab_run_one.py` per file. Every child asked for its own per-file
+    # `module` class, `covering()` said "already accounted for" because 24 <= 55,
+    # and each took NOTHING from the ledger — so the ledger's view of the
+    # machine was a single 55 GB holder against an allowance of twenty 24 GB
+    # ceilings. A per-process ceiling is not a bound on a sum: that is the
+    # 2026-09-29 shape (~30 processes at 30-43 GB each, every one inside its own
+    # ceiling) and it is what the reservation exists to prevent.
+    #
+    # Scaled to fit the file's arithmetic: a parent admitted for 6 of 10, a pool
+    # of 6, and three children of 3. Two fit inside the parent's own
+    # reservation; the third has to wait, which is the whole difference.
+    with tempfile.TemporaryDirectory() as d:
+        os.environ['MEMSLOT_DIR'] = d
+        os.environ['MEMSLOT_BUDGET_GB'] = '10'
+        os.environ['MEMSLOT_HELD'] = ''
+        parent = memslot.Slot(6, 'ab-bside', budget=10).acquire()
+        try:
+            child = dict(os.environ, **memslot.held_env(6, pool='ab-bside'))
+            probe = ("import sys, time, os; sys.path.insert(0, %r); import memslot;"
+                     "s = memslot.Slot(3, 'file' + sys.argv[1], pool=True).acquire();"
+                     "print('in', flush=True); time.sleep(2); s.release()"
+                     % os.path.join(HERE, 'tools'))
+            kids = [subprocess.Popen([sys.executable, '-c', probe, str(i)],
+                                     env=child, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+                    for i in range(3)]
+            time.sleep(1.2)
+            # The POOL LEDGER is the instrument, not process liveness: a child
+            # blocked on the pool is alive too, and a `readline()` on its pipe
+            # blocks until it is admitted, which is the very thing under test.
+            pool_file = os.path.join(d, 'ledger-ab-bside.json')
+            pool = json.load(open(pool_file)) if os.path.exists(pool_file) else {}
+            in_pool = pool.get('holders', [])
+            check("a pool bounds a fan-out by the reservation that admitted it",
+                  len(in_pool) == 2 and sum(h['gb'] for h in in_pool) == 6,
+                  f'{len(in_pool)} children hold {sum(h["gb"] for h in in_pool)} '
+                  f'of the 6 GB pool; a third would be 9 of the 6 reserved')
+            check("...and the machine ledger is not double-counted: it carries "
+                  "the parent alone",
+                  memslot.reserved_gb() == 6,
+                  f'{memslot.reserved_gb()} GB on the machine ledger; the '
+                  f"pool's usage is INSIDE the parent's reservation, not in "
+                  f"addition to it")
+            for p in kids:
+                p.wait(timeout=30)
+            check("...and the third is admitted once the first two are done",
+                  all(p.returncode == 0 for p in kids),
+                  f'{[p.returncode for p in kids]}')
+            left = json.load(open(pool_file))['holders'] if os.path.exists(pool_file) else []
+            check("...leaving no pool reservation behind", left == [],
+                  f'{left}; a pool entry that outlives its children is a leak '
+                  f'in the ledger')
+
+            # A child that does NOT opt in is unaffected: it is covered by the
+            # inherited reservation, as `make mojoc`'s recipe is.
+            r = subprocess.run([sys.executable, MEMSLOT, "--gb", "6", "--label", "recipe",
+                                "--", "true"], env=child,
+                               capture_output=True, text=True, timeout=30)
+            check("a child that does not opt into the pool is still covered by "
+                  "its ancestor's reservation",
+                  r.returncode == 0, 'rc=%s' % r.returncode)
+            # …and one that asks for MORE than the pool falls back to the
+            # machine-wide ledger rather than waiting forever for a turn its own
+            # parent is holding. The budget is 16 here so that 9 FITS the
+            # machine: what it does not fit is the pool's 6, which is the
+            # fallback being tested.
+            os.environ['MEMSLOT_BUDGET_GB'] = '16'
+            over = dict(os.environ, **memslot.held_env(6, pool='ab-bside'))
+            t0 = time.time()
+            big = subprocess.run([sys.executable, '-c', probe.replace('3,', '9,'), '0'],
+                                 env=over, capture_output=True, text=True, timeout=30)
+            check("a child asking for more than the pool takes its own "
+                  "reservation instead of deadlocking on the parent's",
+                  big.returncode == 0 and time.time() - t0 < 10,
+                  f'rc={big.returncode} after {time.time() - t0:.1f}s: '
+                  f'{big.stderr.strip()[-160:]}')
+        finally:
+            parent.release()
+            os.environ['MEMSLOT_HELD'] = ''
+
     # ---- backfill: small jobs sneak in on measured free memory and never delay the head of the queue
     with tempfile.TemporaryDirectory() as d:
         big = start(d, 10, 6, "big")                         # takes the WHOLE budget

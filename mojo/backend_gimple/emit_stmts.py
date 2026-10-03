@@ -711,6 +711,58 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
+def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
+    """Carry a value stored into a module global's type knowledge forward to
+    the global's NAME, so the read path can dispatch on the container it
+    really holds.
+
+    Both arms of "this assignment writes a globals-struct field" — the
+    `global x` store inside a function body and the module-level store in
+    `_toplevel()` — call this. They were two hand-maintained copies of the
+    same three facts, and they had already drifted: the `_in_toplevel_gen`
+    arm carried the `_actual_types` propagation and the `_func_declared_
+    globals` arm did not, so a `global N = <list>` followed by a read of `N`
+    in the same function read the boxed `int64_t` back with no kind at all.
+
+    `_actual_types` is the whole point. Without it a boxed `MojoDict *` /
+    `MojoList *` stored in a global loads back as a plain `int64_t` and the
+    subscript dispatch falls through to the generic `MojoList *` cast path
+    (BUG-2026-044). With it, `_lower_IdentExpr`'s global-read arm copies the
+    name's entry onto the read-back temp, which is what lets the next line
+    slice a list that the previous line made a list.
+
+    The CALLABLE return-type tables are the fourth fact, and both arms need
+    it for the same reason both arms need `_actual_types`: this function
+    RETURNS right here, so without the carry every store to a
+    `global`-declared name returns with all three tables still keyed on the
+    RHS TEMP rather than on the global's name. A module-level
+    `f = lambda: False` reached through either arm then printed `0` — the
+    `_func_declared_globals` arm's copy of this was the one that existed
+    first, and the `_in_toplevel_gen` arm is where an ordinary module-level
+    `f = lambda: False` goes, so it is the one a real program hits. See
+    `ginf.carry_callable_ret_types`.
+    """
+    if vtype == 'MojoDict *':
+        if v in gen._dict_val_types:
+            gen._dict_val_types[tname] = gen._dict_val_types[v]
+            if v in gen._dict_nested_val_types:
+                gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
+    elif vtype == 'MojoList *':
+        if v in gen._elem_types:
+            gen._elem_types[tname] = gen._elem_types[v]
+            if v in gen._nested_elem_types:
+                gen._nested_elem_types[tname] = gen._nested_elem_types[v]
+    if v in gen._actual_types:
+        gen._actual_types[tname] = gen._actual_types[v]
+    ginf.carry_callable_ret_types(gen, v, tname)
+    # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
+    # writes the per-function tables, which are keyed by the lowered VALUE, and
+    # this function RETURNS right here — so a store into a globals-struct field
+    # loses them the same way. A call through `_root_globals.<name>` still
+    # knows the NAME, which is what `_note_global_callable_store` is keyed on.
+    ginf._note_global_callable_store(gen, tname, v)
+
+
 def _gen_stmt_AssignStmt(gen, node):
     if isinstance(node.target, gimple_ctypes.IdentExpr) \
             and getattr(node, 'value', None) is not None:
@@ -893,23 +945,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # Without this, _dict_val_types[name] is never set for globals,
             # and d["key"] on a global dict falls back to mojo_dict_get_int
             # instead of mojo_dict_get_str — see BUG-2026-043.
-            if vtype == 'MojoDict *':
-                if v in gen._dict_val_types:
-                    gen._dict_val_types[tname] = gen._dict_val_types[v]
-                    if v in gen._dict_nested_val_types:
-                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-            elif vtype == 'MojoList *':
-                if v in gen._elem_types:
-                    gen._elem_types[tname] = gen._elem_types[v]
-                    if v in gen._nested_elem_types:
-                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
-            # ...and the callable return-type tables, which are the one
-            # propagation neither global branch below ever had: this function
-            # RETURNS right here, so every store to a `global`-declared name
-            # returned with all three tables still keyed on the RHS temp. A
-            # module-level `f = lambda: False` reached through one of these
-            # two branches printed `0`. See ginf.carry_callable_ret_types.
-            ginf.carry_callable_ret_types(gen, v, tname)
+            _note_global_store_types(gen, tname, vtype, v)
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -946,35 +982,13 @@ def _gen_stmt_AssignStmt(gen, node):
             # struct field's real declared C type, not the semantic one.
             gtype = gen._global_dst_ctype(tname)
             gen._safe_coerce_emit(vtype, gtype, v, field_ref)
-            # Propagate dict/list/set value-type tracking for module-level
-            # globals — the same fix as the _func_declared_globals branch above,
-            # but for the toplevel-gen path that module-level assignments take.
-            if vtype == 'MojoDict *':
-                if v in gen._dict_val_types:
-                    gen._dict_val_types[tname] = gen._dict_val_types[v]
-                    if v in gen._dict_nested_val_types:
-                        gen._dict_nested_val_types[tname] = gen._dict_nested_val_types[v]
-            elif vtype == 'MojoList *':
-                if v in gen._elem_types:
-                    gen._elem_types[tname] = gen._elem_types[v]
-                    if v in gen._nested_elem_types:
-                        gen._nested_elem_types[tname] = gen._nested_elem_types[v]
-            # Propagate _actual_types so the global load path (line 6481)
-            # sets the correct actual type instead of gtype (which may be
-            # int64_t).  Without this, a boxed MojoDict* or MojoList* stored
-            # in a global variable is loaded back as plain int64_t and the
-            # subscript dispatch falls through to the generic MojoList*
-            # cast path — see BUG-2026-044.
-            if vtype.endswith(' *') and v in gen._actual_types:
-                gen._actual_types[tname] = gen._actual_types[v]
-            elif v in gen._actual_types:
-                gen._actual_types[tname] = gen._actual_types[v]
-            # The callable return-type tables, for the same reason as the
-            # `_func_declared_globals` branch above: this is the path an
-            # ordinary MODULE-LEVEL `f = lambda: False` takes, and it returns
-            # here — without this the type stayed keyed on the RHS temp and
-            # `print(f())` printed `0`. See ginf.carry_callable_ret_types.
-            ginf.carry_callable_ret_types(gen, v, tname)
+            # Same tracking as the `_func_declared_globals` branch above —
+            # one helper for both, because they are two arms of the same
+            # decision (a store into this module's globals struct) and the
+            # `_func_declared_globals` arm was missing the `_actual_types`
+            # half that this one had. The callable return-type tables are in
+            # there too, for the reason the helper's own docstring gives.
+            _note_global_store_types(gen, tname, vtype, v)
             return
         # Regular local variable assignment
         if tname not in gen.var_types:
@@ -1012,11 +1026,31 @@ def _gen_stmt_AssignStmt(gen, node):
             # double value is a double — don't silently truncate it.
             if ctype in ('int', 'int64_t') and vtype == 'double':
                 ctype = 'double'
+            # Every "trust ground truth" rule below reads the pre-pass's
+            # `int`/`int64_t` hint as a STALE SCALAR that the freshly-lowered
+            # value refines, and pins the slot to this value's kind. That
+            # reading is wrong for a name the pre-pass found bound to
+            # containers/structs of MORE THAN ONE kind: there its `int64_t`
+            # is not a stale scalar but the honest join of conflicting
+            # containers, this assignment site is only the FIRST of several,
+            # and pinning to its kind makes every later branch's store a
+            # container-kind coercion `_sce_simple_emit` refuses.
+            # `gen._multi_kind_locals` (filled by `_infer_local_var_types`) is
+            # the one place that distinguishes the two meanings of that
+            # `int64_t`. Real: `Tools/build/umarshal.py`'s `r_object`, whose
+            # `retval` is a list, a dict, a set, a frozenset and a `Code` on
+            # five different branches.
+            #
+            # One gate for all of them rather than a check per rule: they are
+            # three steps of one decision, and an earlier attempt guarded only
+            # the container one and was immediately undone by the
+            # generalized-pointer one right below it.
+            _pin_to_ground_truth = tname not in ginf.multi_kind_locals(gen)
             # 'int' (bare) is the hallucination marker — no real answer. If the
             # value is actually a container pointer (e.g. a dict read whose value
             # type is a dict/list/set), trust ground truth so a later
             # .get()/subscript dispatches on the right container.
-            if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+            if _pin_to_ground_truth and ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                 ctype = vtype
             # Same rule, one step further: the pre-pass hint is a POINTER
             # that disagrees with a container value. `int` is the
@@ -1033,11 +1067,24 @@ def _gen_stmt_AssignStmt(gen, node):
             # int+list concat on the next line became `char * + MojoList *`
             # and gimple died with "internal compiler error: in build2".
             #
-            # `_mixed` is excluded from it deliberately: every rule in this
+            # A multi-kind name is excluded from it deliberately, by the ONE
+            # gate declared above rather than by `_mixed`: every rule in this
             # group is "trust THIS value", which is the one thing a name
-            # holding two container kinds cannot be trusted for, and letting
-            # it through here would undo the box two lines above.
-            if not _mixed and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') \
+            # holding two container kinds cannot be trusted for, and letting it
+            # through here would undo the box.
+            #
+            # The two are NOT the same predicate and are not merged here,
+            # because they answer from different evidence and each has its own
+            # real repro: `_mixed` is this function's own walk of
+            # `_cur_func_body` (a container kind disagreement, and it is what
+            # decides the box), while `_pin_to_ground_truth` is the PRE-PASS's
+            # `_infer_local_var_types` verdict, which also covers known struct
+            # pointers and which `resolve_shared` records under every spelling
+            # of the function's name. Widening one into the other would box
+            # names on evidence the other never had; the gate above is the one
+            # that must win, because it is the one whose false positives the
+            # `len(set(...))` fix in `_infer_local_var_types` removed.
+            if _pin_to_ground_truth and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *') \
                     and ctype != vtype:
                 ctype = vtype
             # Same "trust ground truth" principle, generalized to ANY pointer
@@ -1052,7 +1099,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # int64_t against that pointer value would truncate/reinterpret
             # it as an integer at the coercion below. See
             # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
-            if not _mixed and ctype in ('int', 'int64_t') \
+            if _pin_to_ground_truth and ctype in ('int', 'int64_t') \
                     and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
             # `s: Set[Int] = {}` — an ANNOTATED assignment declares a
@@ -1464,7 +1511,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', obj_v), ('MojoBytes *', idx_v), ('char *', v)])
                 else:
                     gen._emit_dict_int_value_store(obj_v, 'MojoBytes *', idx_v,
-                                                  vtype, v, node.value)
+                                                    vtype, v, node.value)
                 key_tmp = None
             else:
                 _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
@@ -1474,15 +1521,19 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
-                # A Python bool RHS goes through `mojo_dict_set_bool`, which
-                # tags THAT slot so the dict's repr says True/False for it and
-                # leaves every other value alone — see
-                # `emit_dict_int_value_store`'s docstring. A literal RHS was
-                # the only shape recognised, so `d['a'] = b` for a `b = True`
-                # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
-                # `print(b)` and `repr(b)` were already right.
+                # The one dict store of an integer-ish value, not a third
+                # spelling of it. A literal RHS used to be the only shape whose
+                # bool-ness was recognised, so `d['a'] = b` for a `b = True` and
+                # `d['a'] = 1 == 1` both printed `{'a': 1}` while `print(b)` and
+                # `repr(b)` were already right; `is_python_bool_expr` is the one
+                # predicate for that, and the store that follows is the one that
+                # carries the kind -- `mojo_dict_set_bool` tags THIS slot, in
+                # place of the dict-WIDE `mojo_mark_dict_bool_values` flag that
+                # made one bool value render every other value in the dict as
+                # True/False (deleted). Passing `vtype` as the value's declared
+                # type is what lets `_emit_call` coerce a pointer to int64_t.
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                              vtype, v, node.value)
+                                                vtype, v, node.value)
         else:
             # Opaque int-typed container: check if it's a list or dict
             if ot in ('int', 'int64_t'):
@@ -1533,8 +1584,10 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
+                    # The same one store the statically-typed arm above uses;
+                    # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                  vtype, v, node.value)
+                                                    vtype, v, node.value)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -1545,7 +1598,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
-                    gen._note_dict_callable_ret(_dsw_dp, v)
+                    gen._note_dict_callable_ret(_dsw_dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
@@ -2137,6 +2190,37 @@ def _gen_stmt_ReturnStmt(gen, node):
         # matters, regardless of how the value's own C type reads.
         if v in gen._elem_types:
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
+        # A `return` whose value is a container of a DIFFERENT kind than an
+        # earlier `return` in this same function: the function has no single
+        # container type, so its return slot is the box and a call site cannot
+        # know which container it holds. Recorded so the call site asks the
+        # runtime registries instead of guessing one kind and reading another
+        # one's memory — see `gen._multi_kind_return_funcs`.
+        _fk = gen.current_func_name
+        if (_fk and vtype in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                and gen.func_ret_type == 'int64_t'):
+            _seen = gen._multi_kind_return_kinds.setdefault(_fk, [])
+            if vtype not in _seen:
+                _seen.append(vtype)
+                if len(_seen) > 1:
+                    gen._multi_kind_return_funcs[_fk] = True
+        elif (_fk and gen.func_ret_type == 'int64_t'
+                and v in ginf.multi_kind_locals(gen)):
+            # The returned value is a LOCAL BOUND TO CONTAINERS OF MORE THAN
+            # ONE KIND (`ginf.multi_kind_locals`, see
+            # `resolve_shared._infer_local_var_types`), so it lowers to the
+            # box and the `vtype in (...)` arm above never sees a second
+            # kind: `def probe(box, kind): if kind == 1: box = [1, 2] else:
+            # box = {"a": 1}; return box` returned `box` on BOTH paths, so
+            # the disagreement lives in the local, not in the returns.
+            #
+            # The call site then took the `int64_t`-returning branch's
+            # DEFAULT — `_actual_types[t] = 'MojoList *'` — and read the dict
+            # through `mojo_repr_list_ints`: another container's memory, out
+            # of bounds, printing `[0]` where CPython prints `{'a': 1}`. The
+            # registry dispatch is the answer the caller has to be told
+            # about, and this is the same fact from the callee's side.
+            gen._multi_kind_return_funcs[_fk] = True
         # Same for a multi-value return's PER-SLOT types: `return cfg, Model(cfg)`
         # is a heterogeneous tuple (two different struct pointers) whose
         # single joined element type is the useless int64_t, so a caller's
@@ -2146,6 +2230,14 @@ def _gen_stmt_ReturnStmt(gen, node):
         # since unlike plain C it does not implicitly convert.
         if gen.current_func_name and v in gen._tuple_slot_types:
             gen._return_slot_types[gen.current_func_name] = gen._tuple_slot_types[v]
+        # Same idea for a returned CALLABLE: `def mk(): return lambda: False`
+        # hands back a `void *`, and the `mk()(...)` call site would then read
+        # the homogenized int64_t box. The lowered value is what
+        # `_lower_LambdaExpr` recorded the real type against, so this is the
+        # one site that can see it.
+        if gen.current_func_name and v in gen._callable_ret_types:
+            gen._return_callable_ret_types[gen.current_func_name] = \
+                gen._callable_ret_types[v]
         ret = gen.func_ret_type
         if ret == 'void':
             gen._emit(gimple_codegen._RETURN)
@@ -2802,7 +2894,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
-                                              vtype, v, node.value)
+                                                vtype, v, node.value)
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
@@ -2828,7 +2920,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
-                                                  vtype, v, node.value)
+                                                    vtype, v, node.value)
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
                 # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's
@@ -2854,6 +2946,25 @@ def _gen_stmt_MultiAssignStmt(gen, node):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
+    # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
+    # DOES unpack (fire_compiler.py's "Unpacking-target representation"; see
+    # bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md). Peel the
+    # redundant parens HERE, once, so every `_gen_for_*` below — and every
+    # `_declare_var` they call — sees a bare C identifier for a one-name
+    # target.
+    #
+    # Normalizing at the entry rather than in each lowering is the point: each
+    # of them used to answer "is this target a group?" with its own
+    # `startswith('(')` test, and that test cannot see the trailing comma, so
+    # it read `for (a,) in ...` as a one-name target too. With the parens gone
+    # by the time they run, `for_target_is_tuple` is the only thing any of them
+    # has to know, and it is the one that knows about the comma.
+    #
+    # Idempotent, so a module compiled twice (as an import and again inline)
+    # lands on the same target both times.
+    if isinstance(node.target, str) and not gimple_ctypes.for_target_is_tuple(node.target):
+        node.target = gimple_ctypes.for_target_single_name(node.target)
     # `for i in reversed(range(...))` — rewrite to an equivalent descending
     # `range(...)` ForStmt and take the fast integer-loop path, instead of
     # `_lower_builtin_reversed` (which only materializes list/str/bytes and

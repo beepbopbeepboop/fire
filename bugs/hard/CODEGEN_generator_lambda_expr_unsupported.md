@@ -9,6 +9,43 @@ current tree and did not need anything. What remains is listed precisely at the
 end of the section below: three defects, none of them a variadic one, each
 filed with its own doc.
 
+**State as of 2026-10-02 (no code change): this doc's OWN scope is closed and
+verified; the residue is four defects in four other docs, none of them in this
+one.** Re-measured the 25-shape matrix the 2026-09-29 entry describes — the
+three variadic rows (`lambda *a: add(a[0], a[1])`, `lambda *a: addall(a)`,
+`lambda *args, **kwargs: add(n, args[0])` capturing `n`), both ordinary-arity
+lambdas called as bare expressions, `sorted(key=...)`, `map`/`filter` with a
+lambda, a closure returned from a nested `def`, and a `*a, **k` lambda called
+through a subscript — all compile, link, run and agree with CPython on the
+current tree, unchanged by this session. The doc's two named targets are
+therefore done, not merely argued.
+
+The residue is the four rows of the table under "What is left, precisely"
+below. **Three of the four are claimed by other workers and are not this
+session's to touch**: `CODEGEN_lambda_bool_return_prints_as_int.md`,
+`CODEGEN_lambda_in_nested_def_body_never_emitted.md` and
+`CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` all belong
+to `bugs3-codegen-1-r2`. The fourth, found while running that matrix on
+2026-10-02, is a NEW doc written this session and is unclaimed:
+`bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md` — a
+capturing lambda inside a nested `def`, whose env-struct field types disagree
+with the stores into them (a hard `non-trivial conversion in 'var_decl'` for an
+`int` capture, a silent pointer decimal with exit 0 for a `char *` or `double`
+one). It is distinct from the nested-`def` row already in the table, which is
+about the body never being emitted at all.
+
+This doc cannot be deleted on the strength of that: its own bug (the variadic
+call convention) is fixed, which is the rule CLAUDE.md states, but it is cited
+by ~20 live locations including source comments in `mojo/backend_gimple/`
+(`cpp_core.py`, `cpp_async.py`, `emit_calls.py`), `mojo/middle/coro.py` and
+five `test_*.py` sites, so a `git rm` would orphan all of them — the exact rot
+`bugs/hard/README.md` catalogues. Deleting it together with repointing every
+one of those references is a docs pass that belongs with
+`bugs/DOCS_deleted_bug_doc_still_cited_in_three_places`, which is another
+worker's claim. **The right disposition for whoever closes the last of the
+four residue rows is: delete this doc in the same commit that repoints its
+references**, not before.
+
 ## Status (2026-09-29 — the variadic SIGSEGV is FIXED; the doc's two named targets re-tested; what is left is three OTHER bugs)
 
 ### Re-tested first, because the doc is not evidence
@@ -102,10 +139,13 @@ rather than argued.
 
 ### What is left, precisely — none of it a variadic defect
 
+Four rows as of 2026-10-02; the three 2026-09-29 rows are unchanged.
+
 | shape | CPython | compiled | doc |
 |---|---|---|---|
 | `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `bugs/CODEGEN_lambda_bool_return_prints_as_int.md` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
 | a lambda inside a **nested `def`** | correct | link error, body never emitted | `bugs/CODEGEN_lambda_in_nested_def_body_never_emitted.md` — the lifted function is declared and referenced, never defined. |
+| a **capturing** lambda inside a **nested `def`** (a second, distinct defect in the same shape, found 2026-10-02) | correct | **build failure** for an `int` capture, and a **silent pointer decimal, exit 0** for a `char *` or `double` one | `bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md` — the body IS emitted and the program links; the env struct's FIELD types disagree with the stores that fill them (`int z;` field against an `int64_t` store, `-fgimple`'s "non-trivial conversion in 'var_decl'"). The same program with the `def` at module scope is correct, so the trigger is the extra nesting level. Not the row above: that one never emits the body at all. |
 | `sorted(key=<any user function>)` | correct | interpreter crash | `bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` — so the compiled path cannot be diffed against the interpreter for that shape. |
 
 Two more were found and filed while measuring, and are also not this doc's:

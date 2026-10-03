@@ -1055,6 +1055,112 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
           f'is fixed, so the row outlives its own next step: {dangling}')
 
 
+def test_an_expect_marker_count_is_checked_against_the_run():
+    """A marker states how many cases fail; the run is asked whether it does.
+
+    The gap this closes is
+    `bugs/TEST_expect_marker_undercounts_the_failures_it_absorbs.md`. An
+    `expect=` marker forgives FAIL and ERROR wholesale, so a NEW failure
+    inside an already-marked test is absorbed silently and the tally still
+    says EXPECTED — the marker has become a category rather than a claim. It
+    was found on `formal-receiver-position`, whose marker said "2 of 12" and
+    whose file reported three, the third being a module-state refusal from a
+    different bug entirely.
+
+    So the count is now checkable, from two numbers that already exist: the one
+    the marker writes down and the one the harness prints. Both readings are
+    checked here against synthetic output first (a parser that matches nothing
+    reports green forever, which is the one thing a guard of this shape must
+    not be able to do), and then against the real registry, so a marker whose
+    prose shape stops matching its own rule is caught here rather than by a
+    gate that silently stops checking it.
+    """
+    check('expect count: the marker reader takes the leading count, past a '
+          'doc path',
+          suite.marker_failures('2 of 12: a thing') == 2
+          and suite.marker_failures(
+              'bugs/SOME.md — 36 failing: a thing') == 36,
+          'the two shapes the registry spells: "N of M:" and "N failing:"')
+    check('expect count: ...and reads a count out of the middle of prose only '
+          'when it leads',
+          suite.marker_failures(
+              'the marker said "2 of 12" until then') is None,
+          'an unanchored read picks up a number the marker is QUOTING rather '
+          'than claiming, which is how a stale count survives being quoted')
+
+    check('expect count: the run reader knows all three summary shapes',
+          suite.observed_failures('Results: 9 passed, 3 failed') == 3
+          and suite.observed_failures('[x86_64] PASS=59 FAIL=1 of 60') == 1
+          and suite.observed_failures('\n146/148 checks passed') == 2,
+          'Results:/PASS=FAIL=/checks-passed are the three families of harness '
+          'in this tree')
+    check('expect count: ...and reports no count as no count, not as zero',
+          suite.observed_failures('a fanout item with nothing to say') is None,
+          'a missing count read as 0 would make every marker agree')
+    check('expect count: an interim tally cannot make a test look better than '
+          'its final line',
+          suite.observed_failures('Results: 1 passed, 1 failed\n'
+                                  'Results: 3 passed, 2 failed') == 2,
+          'the largest count any summary line reports is the one used')
+
+    # The two verdicts, on synthetic specs whose output says what we say it
+    # says. The FAIL one is the point of the whole check; the EXPECTED one is
+    # the control that says it did not fire on a marker that is telling the
+    # truth, and the no-count one is the case that must stay silent.
+    def verdict(expect, output):
+        with Sandbox(m=dict(cmd=ok_cmd('pass'), expect=expect)):
+            spec = suite.REGISTRY['m']
+            state = {'m': suite.FAIL}
+            res = {'m': suite.Result(suite.FAIL, 0.0, output=output)}
+            suite._apply_expectations({'m': 1}, state, suite.Log(None), res)
+            return state['m']
+
+    check('expect count: a marker whose count matches the run is EXPECTED',
+          verdict('2 of 12: a thing', 'PASS=10 FAIL=2') == suite.EXPECTED,
+          'the control')
+    check('expect count: a NEW failure inside a marked test is a FAILURE, not '
+          'an absorbed EXPECTED',
+          verdict('2 of 12: a thing', 'PASS=9 FAIL=3') == suite.FAIL,
+          'this is the whole check: three failures against a marker that '
+          'claims two is a marker that no longer describes its test')
+    check('expect count: a marker with no count is left alone',
+          verdict('a whole-job condition, not a case count', 'nothing') ==
+          suite.EXPECTED,
+          'four markers in the registry describe a condition rather than a set '
+          'of cases, and inventing a number for them would be a fiction')
+
+    # …and the real registry, so the rule cannot rot into matching nothing.
+    counted = {n: suite.marker_failures(getattr(s, 'expect', '') or '')
+               for n, s in suite.REGISTRY.items()
+               if getattr(s, 'expect', '')}
+    stated = {n: c for n, c in counted.items() if c is not None}
+    check('expect count: most registered markers state a count',
+          len(stated) >= 12,
+          f'only {len(stated)} of {len(counted)} markers state one '
+          f'({sorted(stated)}); a rule with nothing to check reports green '
+          f'forever')
+    check('expect count: the counts the registry states are the ones the '
+          'reader sees',
+          stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
+                     'async-with-lock-guard': 2, 'coro-detached-async': 2,
+                     'coro-future-await': 17,
+                     'formal-receiver-position': 3,
+                     'gimple-async-runner': 36,
+                     'mutable-async-capture': 2, 'nested-async-generic': 2,
+                     'taskgroup': 3, 'transitive-closure-capture': 2,
+                     'x86-containers': 1},
+          f'the reader sees {stated}; a marker whose prose shape has drifted '
+          f'stops being checked, which is the failure this whole mechanism '
+          f'is for. `formal-toplevel`, `formal-module-attr` and '
+          f'`formal-external-call` are NOT here and that is the mechanism '
+          f'working: each `expect=` was removed when the rows it described '
+          f'were rewritten as build-and-RUN cases (the last one when '
+          f'`formal/model.py`\'s `type_position_nodes` answered the bracket-in-'
+          f'a-TYPE-position question the marker had been absorbing), so a '
+          f'pinned census that still listed any of them would be asserting a '
+          f'marker the tree no longer has.')
+
+
 # A Markdown table row that is unmistakably a status inventory: a pipe, a
 # backticked name, and a status word. Deliberately narrow, because the whole
 # value of this check is that it has no exemptions and no false positives —
@@ -2892,16 +2998,13 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # the point: every removal below is a test something now runs.
 # The reason the formal backend's per-construct suites give, said once. It is a
 # variable rather than a repeated literal because a literal repeated fifteen
-# times is fifteen places to forget to update, and this text names a file
-# (`bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`) that a
-# reader has to be able to grep for.
+# times is fifteen places to forget to update, and it is a sentence a reader can
+# match on when they want to know why a suite they just found is not in a gate.
 _FORMAL_SUITE_REASON = (
     'Builds and RUNS images on both architectures against CPython, one table '
     'entry per construct; run directly rather than from a gate because a run '
     'of one is minutes of real compilation. The construct and its bug doc are '
-    'named in the file\'s own docstring. '
-    'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
-    'what registering them properly would cost.')
+    'named in the file\'s own docstring.')
 
 
 UNREGISTERED = {
@@ -2923,8 +3026,7 @@ UNREGISTERED = {
     # (program, expected) built and run on both architectures against CPython —
     # so a per-file sentence would be fifteen copies of one sentence, and the
     # table's own comment is where a reader looks for what these have in
-    # common. `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`
-    # records the gap and what closing it properly costs.
+    # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
     'test_formal_admitted.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
@@ -3397,9 +3499,16 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
     being a way to be ungated: a registration that claims to be a dependency
     and that nothing declares a `deps` on is refused. The marker can therefore
     only ever be the statement "this is run, as a dependency, on purpose" — it
-    cannot be "this is not run". That is also why `dep` is not consulted for
-    the vacuity floor: with a synthetic sandbox spec in the checks below, the
-    rule is exercised on a registry that is deliberately not the real one.
+    cannot be "this is not run". It is also checked from the other side: a
+    `dep=True` registration that IS in a bucket is refused too, because the
+    marker is then not saying what it is for. The opt-out is a per-spec field
+    rather than a name list here for the reason the `--list` ratchets above
+    give — a list inside the checker is an excuse table, and an excuse table is
+    how the nineteen got in — so the census of what currently carries `dep=True`
+    is a check that reads the registry, not one that restates it. That is also
+    why `dep` is not consulted for the vacuity floor: with a synthetic sandbox
+    spec in the checks below, the rule is exercised on a registry that is
+    deliberately not the real one.
     """
     in_a_bucket = set()
     # `expand_bucket` is the runner's own answer to "what does this bucket
@@ -3428,6 +3537,19 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
           + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
                       if n not in in_a_bucket
                       and not getattr(s, 'dep', False)))
+    check('the buckets: a dep=True is in NO bucket, or the marker is a lie',
+          not [n for n, s in sorted(suite.REGISTRY.items())
+               if getattr(s, 'dep', False) and n in in_a_bucket],
+          'these claim to be dependencies but are in a bucket, so `dep=True` is '
+          'not saying what it is for: '
+          + ', '.join(n for n, s in sorted(suite.REGISTRY.items())
+                      if getattr(s, 'dep', False) and n in in_a_bucket))
+    check('the buckets: the dependency opt-out is not a blank cheque',
+          {n for n, s in suite.REGISTRY.items() if getattr(s, 'dep', False)}
+          == {'prooflib'},
+          'the one legitimate `dep=True` in the tree is `prooflib` (the Lean '
+          '.olean every proof job deps on); a second one has to be argued for '
+          'rather than copied')
     check('the buckets: a dep=True is earned — something depends on it',
           not [n for n, s in sorted(suite.REGISTRY.items())
                if getattr(s, 'dep', False) and n not in declared_deps],
@@ -3440,25 +3562,31 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
     # The rule on a registry built for the purpose, because a check that can
     # only be exercised by the real one is a check that goes red the first time
     # somebody registers a test and cannot say why. `Sandbox` ADDS to the real
-    # registry rather than replacing it, so the assertion is scoped to the five
-    # synthetic names — otherwise it would be re-asserting the two checks above
+    # registry rather than replacing it, so the assertion is scoped to the six
+    # synthetic names — otherwise it would be re-asserting the checks above
     # over the whole tree, which is how a check ends up passing for the wrong
     # reason.
-    synthetic = ('gated', 'ungated', 'as_dep', 'claimed_dep', 'needs_it')
+    synthetic = ('gated', 'ungated', 'as_dep', 'claimed_dep', 'needs_it',
+                 'dep_and_gated')
     with Sandbox(gated=dict(cmd=ok_cmd('pass')),
                  ungated=dict(cmd=ok_cmd('pass')),
                  as_dep=dict(cmd=ok_cmd('pass'), dep=True),
                  claimed_dep=dict(cmd=ok_cmd('pass'), dep=True),
-                 needs_it=dict(cmd=ok_cmd('pass'), deps=['as_dep'])):
+                 needs_it=dict(cmd=ok_cmd('pass'), deps=['as_dep']),
+                 dep_and_gated=dict(cmd=ok_cmd('pass'), dep=True)):
         saved = dict(suite.BUCKETS)
         try:
             suite.BUCKETS['probe'] = ['gated']
+            suite.BUCKETS['probe2'] = ['dep_and_gated']
             reached = {n for n in suite.expand_bucket('probe')
                        if n in suite.REGISTRY}
             check('the buckets: a bucket reaches a test and nothing else',
                   reached == {'gated'}, f'got {sorted(reached)}')
+            reached2 = {n for n in suite.expand_bucket('probe2')
+                        if n in suite.REGISTRY}
+            in_any_bucket = reached | reached2
             ungated = sorted(n for n in synthetic
-                             if n not in reached
+                             if n not in in_any_bucket
                              and not getattr(suite.REGISTRY[n], 'dep', False))
             check('the buckets: an ungated registration is named by the rule',
                   ungated == ['needs_it', 'ungated'],
@@ -3472,10 +3600,18 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
                             and n not in {d for s in suite.REGISTRY.values()
                                           for d in getattr(s, 'deps', ()) or ()})
             check('the buckets: a dep=True nothing depends on is named too',
-                  earned == ['claimed_dep'],
+                  earned == ['claimed_dep', 'dep_and_gated'],
                   f'got {earned}: `claimed_dep` declares dep=True and nothing '
                   f'depends on it, which is the loophole, and the rule has to '
                   f'reach it')
+            shadowed = sorted(n for n in synthetic
+                              if getattr(suite.REGISTRY[n], 'dep', False)
+                              and n in in_any_bucket)
+            check('the buckets: a dep=True that IS in a bucket is named too',
+                  shadowed == ['dep_and_gated'],
+                  f'got {shadowed}: `dep_and_gated` claims to be a dependency '
+                  f'and is named in `probe2`, so the marker is not saying what '
+                  f'it is for — the other direction of the same loophole')
         finally:
             suite.BUCKETS.clear()
             suite.BUCKETS.update(saved)
@@ -3772,11 +3908,11 @@ def main():
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
-                test_every_test_file_is_registered,
-                test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
-                test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
-                test_a_deleted_bug_doc_is_not_still_cited,
-                test_no_test_preflights_on_an_unbuildable_artifact,
+               test_every_test_file_is_registered,
+               test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
+               test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
+               test_a_deleted_bug_doc_is_not_still_cited,
+               test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
                # is the same defect as a test file in no bucket: the coverage
@@ -3800,6 +3936,7 @@ def main():
                test_over_provisioned_classes_are_reported_not_silently_kept,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
+               test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()

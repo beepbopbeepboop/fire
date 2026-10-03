@@ -181,8 +181,22 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     # UNLESS it is one of gen_module_impl's hardcoded dispatch tables (which
     # get a bare `MojoDict *` / `MojoSet *` field). Skip those names so the
     # pre-seed can never disagree with the home's field/accessor type.
-    _dispatch_only = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_TYPE_MAP',
-                      '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
+    # Derived from the module that DEFINES them rather than written out here.
+    # This list used to name the globals of `gimple_codegen.py`, which is where
+    # they lived before the split into `mojo/middle/` + `mojo/backend_gimple/`;
+    # `_TYPE_MAP` moved to `types.py` and several others with it, so a
+    # hand-kept list silently stopped covering them and every consumer of a
+    # moved dispatch table then found no cdecl entry -- "struct
+    # _mojo_middle_types_toplev has no member named '_TYPE_MAP'".
+    #
+    # `dispatch_table_global_ctype` in `mojo.middle.types` is the ONE table,
+    # and both this skip and `gen_module_impl`'s declaration sites read it.
+    # `... is not None`, not `set(<the table>)`: `set()` over a module-level
+    # container is a shape the self-hosted compiled path gets wrong (a
+    # module-level `set(<tuple literal>)` lowers to a value `len()` cannot
+    # take, "passing argument 1 of 'mojo_list_len' makes pointer from integer
+    # without a cast"), and membership is all this skip ever wanted from it.
+    _dispatch_only = gimple_ctypes.dispatch_table_global_ctype
     _out: dict = {}
     for _f, _stmts in _selfhost_parsed_modules(sd):
         _mod = _selfhost_module_name_for_path(sd, _f)
@@ -190,7 +204,7 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
             if not (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)):
                 continue
             _n, _v = _s.target.name, _s.value
-            if _n in _out or _n in _dispatch_only:
+            if _n in _out or _dispatch_only(_n) is not None:
                 continue
             if isinstance(_v, IntLiteral):
                 _out[_n] = (_mod, 'int', 'int64_t')
@@ -844,16 +858,93 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
 def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
-    annotated per the hoist GOTCHA."""
+    annotated per the hoist GOTCHA.
+
+    Records, per CONTAINER, the element C type of every value appended to
+    it anywhere in this module. The consumer
+    (`gen_module_impl`'s `_phase17_append_hits` loop) keys the answer on a
+    module GLOBAL's name, which is what makes the conclusion function-
+    independent: a registry populated by a constructor and read by a
+    different function is exactly the case this exists for, and the two gaps
+    named below are that case failing — with the whole of the observable
+    damage being a downstream method call on an element that read back as
+    `int64_t`.
+
+    Two receivers reach a module-level container, and only one of them was
+    recognised:
+
+    * `REGISTRY.append(x)` — a bare global name. Handled by the
+      `IdentExpr` test below, in every nesting kind this walks.
+    * `T.registry.append(x)` — a CLASS ATTRIBUTE, which reads as
+      `MemberExpr(obj=IdentExpr('T'), member='registry')` and is stored as
+      the synthesized `_classattr_T__registry` global
+      (`_class_attrs[T]['registry']`). The `IdentExpr` test rejected it, so
+      a class-level registry never recorded its element type and
+      `T.registry[0].method()` degraded to an `int64_t` receiver stub —
+      a pointer-sized decimal, exit 0.
+
+    And one NESTING kind reached nothing: the walk below descends into
+    `FunctionDef`, `IfStmt`, `WhileStmt`/`ForStmt`, `TryStmt` and
+    `WithStmt`, but not `StructDef`, so an append inside a constructor —
+    the overwhelmingly common registry shape — was invisible to the whole
+    pass. `self` is seeded as `<Struct> *` so `_quick_type` on the appended
+    argument resolves the same way it does in every other method.
+    """
     for _n in _node_list:
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
                 and _n.value.func.member == 'append'
-                and isinstance(_n.value.func.obj, IdentExpr)
                 and len(_n.value.args) == 1):
-            _append_hits.setdefault(_n.value.func.obj.name, []).append(
-                self._quick_type(_n.value.args[0]))
+            _p17_recv = None
+            if isinstance(_n.value.func.obj, IdentExpr):
+                _p17_recv = _as_str(_n.value.func.obj.name)
+            elif (isinstance(_n.value.func.obj, MemberExpr)
+                    and isinstance(_n.value.func.obj.obj, IdentExpr)):
+                # `Cls.NAME.append(x)` — resolve the class attribute to the
+                # `_classattr_<Cls>__<name>` global the class-attribute
+                # registration pass synthesizes, so the key this records is
+                # the same one that pass's consumer looks up. Plain
+                # `.name` access, NOT a dict lookup with a `None` default:
+                # `_class_attrs` is a `dict[str, dict[str, str]]` and its
+                # own `.get` result is untyped on the self-hosted compiled
+                # path (see `_ctor_lit_param_types`'s FLAT-dict note), so a
+                # nested lookup would compare a boxed int against a string
+                # and never match.
+                _p17_cls = _as_str(_n.value.func.obj.obj.name)
+                _p17_map = getattr(self, '_class_attrs', None)
+                if _p17_map:
+                    _p17_inner = None
+                    for _p17_k in _p17_map:
+                        if _as_str(_p17_k) == _p17_cls:
+                            _p17_inner = _p17_map[_p17_k]
+                            break
+                    if _p17_inner:
+                        for _p17_k2 in _p17_inner:
+                            if _as_str(_p17_k2) == _as_str(_n.value.func.obj.member):
+                                _p17_recv = _as_str(_p17_inner[_p17_k2])
+                                break
+            if _p17_recv is not None:
+                _append_hits.setdefault(_p17_recv, []).append(
+                    self._quick_type(_n.value.args[0]))
+        if isinstance(_n, StructDef):
+            # A constructor or any other method is a call site like any
+            # other; see this function's docstring. `self` is typed so
+            # `_quick_type(self)` below answers the struct pointer, exactly
+            # as the `FunctionDef` arm seeds a function's own parameters.
+            for _p17_m in (_n.methods or []):
+                _p17_saved = self.var_types
+                _p17_mark = self._scan_scratch_top
+                self.var_types = self._scratch_dict_copy(_p17_saved)
+                self.var_types['self'] = _as_str(_n.name) + ' *'
+                for _p17_pn, _p17_pt in (_p17_m.params or []):
+                    if _p17_pt:
+                        self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
+                _gmi_phase17_collect_appends(
+                    self, _p17_m.body or [], _append_hits)
+                self.var_types = _p17_saved
+                self._scan_scratch_top = _p17_mark
+            continue
         if isinstance(_n, FunctionDef):
             _saved = self.var_types
             _scratch_mark_17: int = self._scan_scratch_top
@@ -937,31 +1028,34 @@ def _gmi_container_ctype(v):
     return None
 
 
-def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict,
-                              param_bools) -> None:
+def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
+                              found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
     lifted closure all the same; `param_types`/`found` (dicts) threaded
     and annotated per the hoist GOTCHA, and the captured struct name is
     passed as `_sname` instead of the whole StructDef.
 
-    `param_bools` is the set of parameter names whose DECLARED annotation is
-    `bool`, which `param_types` cannot express: `_TYPE_MAP` maps `'bool'` to
-    `'int'` on purpose, so a `def __init__(self, flag: bool)` parameter and an
-    `int` one are the same string in that dict. The annotation is the only
-    place the difference exists, and it is what
-    `gen.struct_bool_fields` records — the table `is_python_bool_expr` reads
-    to decide whether `self.<f>` is a Python bool worth printing as
-    True/False rather than 1/0, and that the struct's own generated
-    `_mojo_repr_<Sn>` already reads. Without it the canonical Python shape
-    (`self.flag = flag` from a `flag: bool` parameter) had no bool evidence
-    anywhere and every spelling of `b.flag` printed `1`/`0`.
+    The bool evidence is read from `self._gmi_bool_params`, the per-method set
+    of parameter names whose DECLARED annotation is `bool`, which
+    `param_types` cannot express: `_TYPE_MAP` maps `'bool'` to `'int'` on
+    purpose, so a `def __init__(self, flag: bool)` parameter and an `int` one
+    are the same string in that dict. The annotation is the only place the
+    difference exists, and it is what `gen.struct_bool_fields` records — the
+    table `is_python_bool_expr` reads to decide whether `self.<f>` is a Python
+    bool worth printing as True/False rather than 1/0, and that the struct's
+    own generated `_mojo_repr_<Sn>` already reads. Without it the canonical
+    Python shape (`self.flag = flag` from a `flag: bool` parameter) had no
+    bool evidence anywhere and every spelling of `b.flag` printed `1`/`0`.
 
-    Required, not defaulted, and THREADED through every recursive call below
-    rather than defaulted to an empty set: the descent at the bottom walks
-    into `if`/`else`/`try`/`match`/nested-`def` bodies, so a defaulted
-    argument would silently drop the evidence for `def __init__(self, flag:
-    bool):` whose assignment sits inside a branch."""
+    On `self`, not a threaded argument, and that is deliberate on both counts.
+    Threading it would mean one more parameter through all seventeen
+    recursive calls below, every one of which is a place to forget it; and the
+    set has a lifetime narrower than the recursion — `gen_module_impl` REBUILDS
+    it per method, so one method's answer cannot leak into the next one's
+    fields. The descent below walks into `if`/`else`/`try`/`match`/nested-
+    `def` bodies, so this is read at every level of that descent rather than
+    captured once."""
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -981,7 +1075,19 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 v = node.value
                 if isinstance(v, IdentExpr):
                     ft = param_types.get(v.name, 'int64_t')
-                    if v.name in param_bools:
+                    # `self.flag = flag` with `flag: bool`. The field's own
+                    # ctype is a plain `int` -- `_TYPE_MAP` maps `'bool'` to
+                    # `'int'` -- so `ft` above carries no bool-ness at all and
+                    # every `_Bool` arm downstream (print, repr, str, the dict
+                    # store) has nothing to fire on: `print(b.flag)` printed
+                    # `1` where CPython prints `True`, in every spelling,
+                    # while `print(b)` said `flag=True` because the struct's
+                    # generated `__repr__` consults `struct_bool_fields`.
+                    # This assignment is the one place that knows BOTH that
+                    # the parameter is a bool and which field it feeds, which
+                    # is why the annotation has to be spent here rather than
+                    # recovered later.
+                    if v.name in self._gmi_bool_params:
                         self.struct_bool_fields.setdefault(_sname, set()).add(fn)
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
@@ -1159,9 +1265,9 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
     for _nn in body:
         if isinstance(_nn, StructDef):
             for _mm in _nn.methods:
-                _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found)
         elif isinstance(_nn, FunctionDef):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
         # Control-flow bodies, same reasoning: `_walk_ast` does not recurse
         # into them reliably self-hosted, so an assignment nested one level
         # down (`with self._cond: self._thread = threading.Thread(...)` in
@@ -1169,36 +1275,36 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
         # its field stayed unregistered. Mirrors the explicit per-node-type
         # recursion `_selfhost_walk_stmts_for_assign_targets` already uses.
         elif isinstance(_nn, IfStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
             for _ei in range(len(_nn.elifs)):
-                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ei][1], param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ei][1], param_types, found)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
         elif isinstance(_nn, ComptimeIfStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
             for _ec2 in range(len(_nn.elifs)):
-                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ec2][1], param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ec2][1], param_types, found)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
         elif (isinstance(_nn, WhileStmt) or isinstance(_nn, ForStmt)
                 or isinstance(_nn, ComptimeForStmt)):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
             _eb3 = getattr(_nn, 'else_body', None)
             if _eb3:
-                _gmi_collect_self_assigns(self, _sname, _eb3, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _eb3, param_types, found)
         elif isinstance(_nn, TryStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
             for _hi in range(len(_nn.handlers)):
-                _gmi_collect_self_assigns(self, _sname, _nn.handlers[_hi].body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.handlers[_hi].body, param_types, found)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
             if _nn.finally_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.finally_body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.finally_body, param_types, found)
         elif isinstance(_nn, WithStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
         elif isinstance(_nn, MatchStmt):
             for _ci in range(len(_nn.cases)):
-                _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found, param_bools)
+                _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
 
 def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /

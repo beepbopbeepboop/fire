@@ -519,6 +519,75 @@ def set_only(n: Int):
 
 
 def run_tests():
+    # A comprehension's `for` target that SHADOWS a live local of the same name
+    # must get its own C variable, and the element's own type must be the one
+    # it is assigned through. Both halves were the same one missing argument:
+    # `_compr_list_loop` called `_declare_var` WITHOUT
+    # `force=_compr_target_is_shadowed(...)` — the argument its three sibling
+    # comprehension loops all pass — so (1) first-decl-wins kept the enclosing
+    # variable and the loop wrote into it, and (2) the `target_type` read a few
+    # lines below saw the ENCLOSING type, took the "cast to int64_t if target
+    # is opaque" branch, and emitted `t = (int64_t)mojo_list_get_str (...)`
+    # into a `struct Token *`. That is gcc's "non-trivial conversion in
+    # 'var_decl'", which is how this was found (fire_compiler.py's own
+    # `_parse_comptime`; bugs/CODEGEN_comprehension_target_shadows_struct_local.md),
+    # and it took out `make mojoc`, `selfhost` and `bootstrap-stage2-cc` at
+    # once.
+    #
+    # Asserted on the generated C, not on the answer, because the answer was
+    # never the point: the shape did not compile. The `char *` declaration of
+    # the shadow is the load-bearing substring — it is what proves the element
+    # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
+    # line is the exact text the bug put there.
+    test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
+class Token:
+    def __init__(self, kind: String):
+        self.kind = kind
+
+def pick(s: String) -> Token:
+    return Token(s)
+
+def names() -> List:
+    var t = pick("outer")
+    var i: Int = 0
+    while i < 2:
+        t = pick("loop")
+        i = i + 1
+    return [t for t in ["a", "b"]]
+""", must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
+       must_not_have=["(int64_t) _t", "t = (int64_t)"])
+
+    # The same site with a `char *` local shadowed instead of a struct pointer.
+    # Before the fix this one COMPILED and printed the two string ADDRESSES as
+    # decimals, because the enclosing `char * t` declaration won and the
+    # comprehension's list element — a `char *` — was cast to int64_t and then
+    # handed to a `char *` variable; the aliasing was invisible precisely
+    # because the two types happened to agree in width. Asserting the shadow
+    # exists is what pins "a fresh binding", which is the property, rather than
+    # this particular type pair.
+    test_c_shape("comprehension_target_shadowing_a_char_star_local_gets_its_own", """\
+def outer(s: String) -> String:
+    return s
+
+def names() -> List:
+    var t = outer("outer")
+    var i: Int = 0
+    while i < 2:
+        t = outer("loop")
+        i = i + 1
+    return [t for t in ["a", "b"]]
+""", must_have=["char * _shadow", "_shadow1_t = "],
+       must_not_have=["(int64_t) _t"])
+
+    # A comprehension target that shadows NOTHING still declares the plain
+    # name, with no shadow. The `force=` argument is false in that case and the
+    # generated C has to be byte-identical to before, so this is the guard on
+    # the fix's blast radius: the common case must not grow a `_shadow` local.
+    test_c_shape("comprehension_target_shadowing_nothing_keeps_the_plain_name", """\
+def names() -> List:
+    return [t for t in ["a", "b"]]
+""", must_have=["  char * t;", "  t = _t"], must_not_have=["_shadow1_t"])
+
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
 struct P:
@@ -7215,6 +7284,506 @@ main()
         print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
+    def _cpython_stdout(src, preamble=''):
+        """CPython's stdout for `src`, or None if it does not run.
+
+        The oracle for the two tests below, so a change in what Python does
+        cannot turn either into a test that protects a wrong value.
+
+        `preamble` is written ABOVE `src` in the oracle file and into nothing
+        else: it exists for a fixture whose parameter annotations are Mojo type
+        names (`Float64`, `String`), which CPython cannot resolve — a
+        `def f(x: Float64)` is a NameError at def time, so the oracle arm below
+        would report "CPython does not run the fixture" for a fixture that is
+        perfectly runnable and the test could never pass. Naming the types as
+        their CPython equivalents keeps the oracle CPython's own answer for the
+        same program text: the annotation is erased by the def, so the values
+        and the prints are the program. It is deliberately NOT fed to the
+        compiled path, which has those names built in."""
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'oracle_case.py')
+            with open(entry, 'w') as fh:
+                fh.write(preamble)
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+        if py.returncode != 0:
+            return None
+        return py.stdout
+
+    def _compiled_stdout(src, mode='single-TU'):
+        """Compile `src` and return its stdout, or None if it does not build.
+
+        Returns None for a COMPILE failure too, so a caller reports the mode
+        and the gcc stderr rather than a value comparison against nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'case.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            c_src = gimple_codegen._run_pipeline(
+                src, filename=entry,
+                **({'do_imports': True} if mode == 'single-TU'
+                   else {'link_mode': True}))[0]
+            c_file = os.path.join(td, 'case.c')
+            exe = os.path.join(td, 'case.exe')
+            with open(c_file, 'w') as fh:
+                fh.write(c_src)
+            cc = subprocess.run(
+                [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                 os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=300)
+            if cc.returncode != 0:
+                return ('BUILD-FAILED', cc.stderr)
+            run = subprocess.run([exe], capture_output=True, text=True,
+                                 timeout=30)
+        return run.stdout
+
+    def test_callable_return_type_survives_its_carrier():
+        """A callable's return type must reach the call site through every
+        carrier that can sit between them — with CPython's stdout as the
+        expectation, on BOTH pipelines.
+
+        `mojo_fnptr_call_N` is the homogenized `int64_t` convention: the
+        RIGHT thing for the box it hands back, and the callee is the one that
+        knows the real type. `_callable_ret_types` carries it, keyed by the
+        lowered VALUE — which every carrier below breaks, in its own way:
+
+        - a LAMBDA BOUND TO A LOCAL: the value survives, and the store
+          propagates the table through the name. Worked already.
+        - a MODULE GLOBAL: the store boxes it into an `int64_t` struct field
+          and the call site reads back a fresh temp, so no value key matches.
+          `e = lambda: False; print(e())` printed `0`.
+        - the same global read from inside a FUNCTION: the store happens in
+          `_toplevel`, which is emitted after every ordinary function, so the
+          per-function reset wiped whatever the store had recorded.
+        - a DICT OF CALLABLES (`d = {"k": lambda: False}`): a second table
+          (`_dict_callable_ret`), gated on the dict's NAME, with the same
+          never-reset twin needed for a global.
+        - a FACTORY (`def mk(): return lambda: 2.5`): the result is cast
+          into a fresh temp before the outer `mk()()` sees it, so the answer
+          has to ride on the CallExpr node rather than on any value.
+
+        Bodies of all three interesting kinds (`_Bool`, `double`, `char *`)
+        are in every shape: the widened answer is a plausible number or a
+        pointer decimal for each, so a shape that passed by coincidence
+        would not be distinguishable from one that passed.
+        """
+        global _PASS, _FAIL
+        name = "callable_return_type_survives_its_carrier"
+        src = '''\
+e = lambda: False
+print(e())
+g = lambda x: x > 1
+print(g(5))
+print(g(0))
+f = lambda: 1.5
+print(f())
+s = lambda: "hi"
+print(s())
+d = {"k": lambda: False}
+print(d["k"]())
+def use_globals():
+    print(e())
+    print(d["k"]())
+    print(g(2))
+use_globals()
+def mk():
+    return lambda: 2.5
+def use_factory():
+    print(mk()())
+use_factory()
+def mk_bool():
+    return lambda: False
+def use_bool_factory():
+    print(mk_bool()())
+use_bool_factory()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_variadic_lambda_lowers_as_gimple_in_every_body():
+        """A `lambda *args: ...` must emit only legal GIMPLE operands, in
+        every body its reference site can land in.
+
+        The shape it emitted — `(void *)f`, `sizeof(S)`, and the three
+        parenthesized counts as bare call ARGUMENTS — is fine in plain C and
+        is a hard parse failure inside a `__GIMPLE`-tagged body, where the
+        body must already BE GIMPLE: a cast or a parenthesized
+        sub-expression is not a legal operand there. That is why this went
+        unnoticed for so long — the same lambda compiled from an ordinary
+        top-level statement or a free function (GCC lowers plain C to
+        GIMPLE itself) and died from a struct method or a nested `def`:
+
+            .c: In function 'K_get':
+            .c:5:37: error: expected expression before '(' token
+            _t2 = mojo_vararg_fn_new (_t1, 0, <<< error >>>);
+
+        All three carriers are here, each with a capturing variant too (the
+        env path spelled `sizeof(S)` inline as well), and CPython is the
+        expectation for the values — a build failure and a wrong value are
+        different defects and this checks both.
+        """
+        global _PASS, _FAIL
+        name = "variadic_lambda_lowers_as_gimple_in_every_body"
+        src = '''\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def plain(self):
+        return lambda *a: len(a)
+    def capturing(self):
+        return lambda *a: len(a) + self.n
+def _make():
+    def inner():
+        return lambda **k: len(k)
+    return inner
+def top():
+    return lambda *a: len(a)
+def main():
+    k = K(10)
+    print(top()(1, 2, 3))
+    print(k.plain()(1, 2, 3))
+    print(k.capturing()(1, 2, 3))
+    print(_make()()(a=1, b=2))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_scalar_given_a_char_star_parameter_is_stringified():
+        """A SCALAR passed where a `str` parameter is declared must be
+        `str(value)`, which is both Python's answer and the only answer that
+        is not a wild pointer.
+
+        `_emit_call`'s `ptype == 'char *'` branch used to reinterpret the
+        integer's BITS as an address (`(char *)(void *)(int64_t)5`), so
+        `class D: def __init__(self, w: str)` called as `D(5)` stored
+        address 5 in a `char *` field and the first `mojo_print` of it walked
+        to it and SIGSEGV'd with no output at all — while `D(2.5)` did not
+        even compile ("cannot convert to a pointer type"). It now goes
+        through `_stringify_value`, the same chokepoint `str()`, f-strings
+        and `%s` use.
+
+        The doc's repro is a struct method returning one of its own `str`
+        fields (`bugs/CODEGEN_method_returning_self_str_field_segfaults.md`,
+        removed with this fix), and it is reproduced here — including the
+        imported-sibling spelling, since the field read off the object and
+        the read back out of the method are two separate lowerings and a fix
+        to only one of them leaves the other wrong.
+
+        A BOXED value is in the same fixture for the reason the fix has to
+        be careful about it: an `int64_t` that really holds a `char *` is
+        also `ptype == 'char *'` on this path, and `_stringify_value`
+        answers it from `_actual_types` as a cast rather than as a decimal.
+        """
+        global _PASS, _FAIL
+        name = "scalar_given_a_char_star_parameter_is_stringified"
+        src = '''\
+class Dialog:
+    def __init__(self, widgetName: str):
+        self.widgetName = widgetName
+    def show(self):
+        return self.widgetName
+def pass_through(w):
+    return w
+def main():
+    a = Dialog(5)
+    print(a.widgetName)
+    print(a.show())
+    print(Dialog(2.5).show())
+    print(Dialog(True).show())
+    print(Dialog("plain").show())
+    print(Dialog(pass_through("boxed")).show())
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_ctor_of_a_container_reaches_the_comprehension():
+        """`list(x)` / `tuple(x)` / `set(x)` must COPY x, whatever reached
+        them — including a value whose container kind is not a compile-time
+        fact.
+
+        `_lower_comprehension` dispatches on the argument's STATIC type and has
+        no arm for a boxed `int64_t`/`void *`: it emitted
+        `/* TODO: comprehension over int64_t */` and produced an EMPTY list.
+        That is how `self.func_param_types[_mangled] = list(_pcs)` silently
+        became `[]` for every `GimpleGen_*` signature in the SELF-HOSTED
+        compiler (that table's element type is erased there, so `_pcs`
+        arrives as a bare handle), and how `list(_dflts)` walked a list of
+        `(name, default)` pairs as though it were a dict.
+
+        `def ident(x): return x` reproduces the erased shape in ordinary
+        source: the call's declared return type is its parameter's, so the
+        result is a boxed handle with no container kind attached. The list,
+        `tuple`, `sorted`, `sum`, `all`, `join` and `enumerate` rows are here
+        because they are the ones this change makes exactly right, and because
+        the last four share the chokepoint and must not drift from it.
+
+        `list(<a plain int>)` and `list(<a boxed dict>)` are NOT asserted
+        here, and both are named in the docstring's neighbour bug docs:
+        CPython raises TypeError where the compiled path answers `[]` for the
+        first (a SIGSEGV until this same change's fail-closed arm —
+        `bugs/CODEGEN_iterating_a_non_container_is_a_segfault.md`), and a
+        boxed dict's keys come back as their own addresses for the second
+        (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
+
+        A STRING argument is not asserted either, and that is a real defect
+        rather than a fixture convenience: `list(ident([1, 2, 3]))` in the
+        same function as `list(ident("abc"))` reads the first list's slots
+        with `mojo_list_get_str`, because one function's return ELEMENT type
+        is inferred once for the whole program and the string call site wins.
+        Measured, both pipelines: `["\\x18", "\\x1a", "�", "\\x02",
+        "\\x01"]` where CPython printed `[1, 2, 3]` — a five-element list of
+        bytes read out of a three-element int list. Recorded in
+        bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        """
+        global _PASS, _FAIL
+        name = "ctor_of_a_container_reaches_the_comprehension"
+        src = '''\
+def ident(x):
+    return x
+def main():
+    print(list(ident([1, 2, 3])))
+    print(tuple(ident([1, 2, 3])))
+    print(sorted(ident([3, 1, 2])))
+    print(sum(ident([1, 2, 3])))
+    print(all(ident([1, 2, 3])))
+    print(",".join(ident(["a", "b"])))
+    print(len(list(enumerate(ident(["x", "y"])))))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
+        """A list literal's per-slot kinds must survive a `return`.
+
+        `_lower_list_literal` records them on the VALUE
+        (`mojo_list_set_kinds`) and marks it in `gen._maybe_kinds_vals` — but
+        only while THAT function is being lowered. The compile-time NAME they
+        were recorded against dies at the boundary, and
+        `_infer_return_maybe_kinds` is the pass that exists to carry the fact
+        across; it recognised `struct.unpack` and nothing else, so the one
+        producer that is not a `struct.unpack` was the one it missed.
+
+        The cost was a segfault. `a`'s element type fell back to the
+        unknown-element default `str`, so EVERY read of it went through
+        `mojo_list_get_str` — and `a[0]` holds `2.5`'s IEEE-754 bit pattern
+        `0x4004000000000000`, which `strlen` walked to and died on
+        (bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md).
+
+        Both halves are asserted. The indexed reads need the per-slot kinds to
+        cross the boundary (the new `_return_value_slot_kinds`); the
+        ITERATION read needs only the boolean, and prints the string slot as
+        the decimal of its own pointer — recorded in the doc's Status as the
+        remaining half, because making it right needs per-slot runtime typing
+        in the loop body rather than an accessor choice.
+
+        The parameters are ANNOTATED on purpose: a parameter's declared type is
+        the only static evidence about what a slot will hold at this stage
+        (`_quick_type` on a parameter answers the erased `int64_t` before any
+        function's locals exist), and the unannotated spelling of the same
+        program has no such evidence to offer. That is also why the oracle gets
+        a preamble naming those two types as their CPython equivalents and the
+        compiled program does not — see `_cpython_stdout`."""
+        global _PASS, _FAIL
+        name = "a_returned_heterogeneous_list_keeps_its_slot_kinds"
+        src = '''\
+def mixed(x: Float64, s: String):
+    return [x, 1, s]
+def main():
+    a = mixed(2.5, "yy")
+    print(a[0])
+    print(a[1])
+    print(a[2])
+    print(len(a))
+main()
+'''
+        want = _cpython_stdout(src, preamble='Float64 = float\nString = str\n')
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not():
+        """`next(<user-defined iterator struct>)` is a real call, and the
+        `for` loop over the same object is a NAMED refusal.
+
+        `next(obj)` is Python's `type(obj).__next__(obj)`, which Mojo spells
+        `__next__`, and `_lower_call` lowers it to `<Struct>___next__(obj)`
+        whenever the receiver's type is resolvable. That half had no test, so
+        it could rot unnoticed — it is asserted here against CPython, on both
+        pipelines, with a receiver the codegen knows (a local struct
+        instance), which is the boundary the real 21-file failure sits
+        behind: `var iter = peekable(list)` types `iter` as `int64_t` because
+        `peekable` returns a `Self.IteratorOwnedType` across a module
+        boundary, and an un-inferred receiver has to stay a refusal
+        (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+
+        The loop half is the change here. Python's `__next__` signals
+        exhaustion by RAISING, and the compiled raise is
+        `mojo_exc_type_set (...)` + `mojo_raise ()` — nothing for a loop
+        condition to test — so a struct with `__next__` and no `__has_next__`
+        has no expressible loop condition. That emitted `cond = 0` with a
+        `/* TODO */` marker: the body runs zero times, silently, at exit 0.
+        It now calls the same `mojo_unsupported_iter` every other unsupported
+        iterable gets, so the diagnostic names the type, the reason and the
+        loop's file:line. The BEHAVIOUR is deliberately unchanged — the
+        runtime message already ends "the loop body runs zero times" — because
+        making the loop actually work is the type-inference project the doc
+        parks, and inventing a wrong loop here would be worse than both.
+
+        Asserted on the SHAPE (`mojo_unsupported_iter` present, the type named)
+        rather than on stderr, so the row does not depend on how the runtime
+        chooses to word its message; the value assertion above is what pins
+        that `next` itself is right."""
+        global _PASS, _FAIL
+        name = "next_on_a_user_struct_lowers_and_its_for_loop_says_why_not"
+        src = '''\
+class Counter:
+    def __init__(self, start, stop):
+        self.i = start
+        self.stop = stop
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.i >= self.stop:
+            raise StopIteration
+        v = self.i
+        self.i = v + 1
+        return v
+def main():
+    c = Counter(5, 8)
+    print(next(c))
+    print(next(c))
+    print(next(Counter(9, 10)))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        bad = []
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                bad.append(f"[{mode}] next() stdout {got!r} != CPython {want!r}")
+        loop_src = src + '''def drain():
+    c = Counter(1, 3)
+    for x in c:
+        print(x)
+drain()
+'''
+        try:
+            loop_c = compile_to_gimple(loop_src)
+        except Exception as e:
+            bad.append(f"the `for` shape did not compile: "
+                       f"{type(e).__name__}: {e}")
+            loop_c = ''
+        if loop_c:
+            if 'mojo_unsupported_iter' not in loop_c:
+                bad.append("the `for` over a Python-style iterator emitted no "
+                           "mojo_unsupported_iter — a dropped loop body is "
+                           "silently indistinguishable from an exhausted one")
+            if 'Counter (no __has_next__)' not in loop_c:
+                bad.append("the refusal does not name the type or the reason")
+        if bad:
+            for b in bad:
+                print(f"FAIL  {name}: {b}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -7961,6 +8530,70 @@ print("%r" % p)
                     f"emits the definition as {_emitted!r} — the forward "
                     f"declaration is emitted once per importing module, so "
                     f"every one of them is a conflicting-types error")
+        # The `**kwargs`-slot rows, which are the same kind of hand-written
+        # claim about the same source and drifted the same way: the index
+        # `MojoFunction___call__` carried was 3, the index for the older
+        # `(self, interpreter, *args, **kwargs)`, and the method is now
+        # `(self, *args, **kwargs)`. Unlike the signature tables above this
+        # one is an ARITHMETIC input rather than a type — every consumer
+        # derives a count from it (`_lower_named_call` keeps `kw_i - 1`
+        # ordinary params, `_lower_struct_method_call` keeps
+        # `kw_i - (2 if has_vararg else 1)`), so a stale index does not
+        # mistype anything: it keeps the wrong number of leading positionals
+        # as "fixed" arguments and emits one argument too many. Measured, two
+        # "too many arguments to function 'myinterpreter_MojoFunction___call__';
+        # expected 3, have 4" in the self-host closure, one per
+        # `BoundMethod.__call__` / `BoundClassMethod.__call__`.
+        #
+        # Derived here by walking `inspect`'s parameters with the SAME rules
+        # gen_module's own registration pass uses (`self` counts, `*args`
+        # counts once however many arguments it collects), so the check is
+        # against the convention rather than against the number that happens
+        # to be right today.
+        def _kwargs_slot_index(fn) -> int:
+            """The index `**kwargs` occupies, or -1 if the def has none.
+
+            Mirrors module_gen's `_kw_i` walk: every ordinary parameter
+            advances the index, the FIRST `*args` advances it once, a second
+            `*args` (there is no second) does not, and `**kwargs` stops it."""
+            idx = 0
+            seen_star = False
+            for _p in inspect.signature(fn).parameters.values():
+                if _p.kind == _p.VAR_KEYWORD:
+                    return idx
+                if _p.kind == _p.VAR_POSITIONAL:
+                    if seen_star:
+                        continue
+                    seen_star = True
+                idx += 1
+            return -1
+
+        kw_subjects = {
+            'MojoFunction___call__': myinterpreter.MojoFunction.__call__,
+        }
+        for bare, fn in kw_subjects.items():
+            if bare not in gimple_codegen._SELFHOST_KWARGS_SLOTS:
+                problems.append(f"{bare}: absent from _SELFHOST_KWARGS_SLOTS")
+                continue
+            want = _kwargs_slot_index(fn)
+            got = gimple_codegen._SELFHOST_KWARGS_SLOTS[bare]
+            if want != got:
+                problems.append(
+                    f"{bare}: _SELFHOST_KWARGS_SLOTS says **kwargs is at "
+                    f"index {got}, the source puts it at {want} "
+                    f"({list(inspect.signature(fn).parameters)}) — every "
+                    f"caller's fixed-argument count is derived from this "
+                    f"number, so a stale one emits a wrong-arity call")
+            want_star = any(p.kind == p.VAR_POSITIONAL
+                            for p in inspect.signature(fn).parameters.values())
+            got_star = gimple_codegen._SELFHOST_KWARGS_HAS_VARARG[bare]
+            if want_star != got_star:
+                problems.append(
+                    f"{bare}: _SELFHOST_KWARGS_HAS_VARARG says {got_star}, "
+                    f"the source's *args presence is {want_star} — the "
+                    f"packing emits one C MojoList* param for *args and only "
+                    f"one MojoDict* without it")
+
         # The header's hand-written compiler entry points, against the same
         # source. Only the ones the compiled path calls on ordinary code are
         # listed; the rest of the file is runtime plumbing, not a mirror of
@@ -7984,6 +8617,126 @@ print("%r" % p)
             print(f"FAIL  {name}:")
             for p in problems:
                 print(f"  {p}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_walk_ast_dataclass_cache_is_transparent():
+        """`_walk_ast_into`'s per-class "is this class a dataclass" cache
+        must be indistinguishable from asking `dataclasses.is_dataclass` on
+        every visit — which is what it did before, and what the docstring's
+        existing field-name cache already did for `dataclasses.fields`.
+
+        bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+        (Phase 9). The failure mode this guards is a walk that silently
+        STOPS descending: the dataclass test runs BEFORE the scalar
+        early-return precisely because on the compiled path every AST node is
+        an int64_t-boxed pointer and so tests as an `int` (see that
+        function's own comment), and a cache that answered "not a dataclass"
+        for a class that is one would drop every field under it — a wrong
+        artifact, not a slow one. So the invariant checked is the NODE LIST,
+        node for node and in order, not the call count.
+
+        Driven over a real parsed module (so the classes are the real AST
+        node types, not stand-ins) and over hand-built shapes that exercise
+        the two arms the cache has to keep apart: a genuine dataclass, a
+        plain non-dataclass object, a `type` object (which returns before
+        the dataclass question is ever asked and so must never be cached),
+        and the scalars."""
+        global _PASS, _FAIL
+        name = "walk_ast_dataclass_cache_is_transparent"
+        import mojo.middle.exprtypes as ET
+        import dataclasses as _dc
+        from fire_compiler import py_tokenize, Parser
+        import ast_rewriter
+
+        def parse_module(toks):
+            return ast_rewriter.rewrite(Parser(toks).parse_module()) or []
+
+        def _ref_into(node, out, depth=0):
+            """Verbatim pre-cache body: `dataclasses.is_dataclass` asked on
+            every visit, nothing remembered between them."""
+            if node is None:
+                return
+            if depth > ET._WALK_AST_MAX_DEPTH:
+                return
+            if isinstance(node, list) or isinstance(node, tuple):
+                for item in node:
+                    _ref_into(item, out, depth + 1)
+                return
+            out.append(node)
+            if isinstance(node, type):
+                return
+            if _dc.is_dataclass(node):
+                for _f in _dc.fields(node):
+                    _fname = _f.name if hasattr(_f, 'type') else _f
+                    _child = getattr(node, _fname, None)
+                    if _child is node:
+                        continue
+                    _ref_into(_child, out, depth + 1)
+                return
+            if isinstance(node, (str, int, float, bool)):
+                return
+            return
+
+        err = None
+        try:
+            src = ("class C:\n"
+                   "    def m(self):\n"
+                   "        return [x for x in range(3)]\n"
+                   "def f(a, b=2, *c, **d):\n"
+                   "    t = (a, b)\n"
+                   "    if a:\n"
+                   "        t = t + (c,)\n"
+                   "    return {'k': t, 'j': [a, b]}\n")
+            stmts = parse_module(py_tokenize(src))
+            for _s in stmts:
+                ref, got = [], []
+                _ref_into(_s, ref)
+                ET._walk_ast_into(_s, got)
+                if len(ref) != len(got):
+                    err = (f'node count {len(ref)} != {len(got)}')
+                    break
+                for _i, (_r, _g) in enumerate(zip(ref, got)):
+                    if type(_r) is not type(_g):
+                        err = f'node {_i}: {type(_r)} != {type(_g)}'
+                        break
+                if err:
+                    break
+            # The arms the cache keeps apart, on values a walk over a parsed
+            # module does not reach: a genuine dataclass (whose whole
+            # subtree must still be descended), a plain non-dataclass
+            # object, a `type` object, and the scalars. Each is compared
+            # node-for-node against the reference body rather than against
+            # a hand-written count, so a cache that stopped descending would
+            # show up as a length difference here.
+            for _probe in (stmts[0], ET, int, dict, "s", 5, 2.5, None, True,
+                           (1, 2), ['a']):
+                _ref, _got = [], []
+                _ref_into(_probe, _ref)
+                ET._walk_ast_into(_probe, _got)
+                if len(_ref) != len(_got):
+                    err = (f'probe {type(_probe)}: {len(_ref)} nodes, '
+                           f'got {len(_got)}')
+                    break
+                for _i, (_r, _g) in enumerate(zip(_ref, _got)):
+                    if type(_r) is not type(_g):
+                        err = f'probe {type(_probe)} node {_i}: {type(_r)} != {type(_g)}'
+                        break
+                if err:
+                    break
+            # A `type` object must never be cached as "not a dataclass":
+            # `ET._WALK_DATACLASS_CACHE` must not gain an entry for it, since
+            # it returns before the question is asked.
+            _t_before = ET._WALK_DATACLASS_CACHE.get(int)
+            ET._walk_ast_into(int, [])
+            if ET._WALK_DATACLASS_CACHE.get(int) is not _t_before:
+                err = 'a `type` object was cached in _WALK_DATACLASS_CACHE'
+        except Exception as _e:
+            err = f'{type(_e).__name__}: {_e}'
+        if err:
+            print(f"FAIL  {name}: {err}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -8045,7 +8798,14 @@ main()
         functions differ ONLY in whether their format argument is a literal
         or a variable, so a regression that widened the new guard (or a
         pre-existing bug that narrowed it) cannot pass one and fail the
-        other unnoticed."""
+        other unnoticed.
+
+        `_infer_return_maybe_kinds` returns `(maybe_kinds, slot_kinds)` — the
+        boolean half and the per-index half — so this reads element 0 of the
+        pair. `slot_kinds` is `''` for a `struct.unpack` result (that producer
+        has no per-slot spelling to carry; only a list literal does), which is
+        asserted too, since a nonempty answer here would mean the new
+        list-literal arm is answering for something it should not."""
         global _PASS, _FAIL
         name = "struct_unpack_computed_format_keeps_literal_half"
         src = '''\
@@ -8060,16 +8820,18 @@ def computed(fmt, buf):
         mg = __import__('mojo.backend_gimple.module_gen', fromlist=['x'])
         stmts = gimple_codegen.Parser(
             gimple_codegen.py_tokenize(src)).parse_module()
-        answers = {getattr(st, 'name', None):
-                   mg._infer_return_maybe_kinds(None, st.body, None)
-                   for st in stmts if getattr(st, 'name', None) in
-                   ('literal', 'computed')}
+        raw = {getattr(st, 'name', None):
+               mg._infer_return_maybe_kinds(None, st.body, st.params, None)
+               for st in stmts if getattr(st, 'name', None) in
+               ('literal', 'computed')}
+        answers = {k: v[0] for k, v in raw.items()}
         want = {'literal': True, 'computed': False}
         bad = {k: answers.get(k) for k, v in want.items() if answers.get(k) is not v}
+        bad.update({f"{k}.slot_kinds": v[1] for k, v in raw.items() if v[1]})
         if bad:
             print(f"FAIL  {name}: wrong static-kinds answer(s) {bad} "
-                  f"(want {want}); a computed format must answer False and a "
-                  f"literal mixed format True")
+                  f"(want {want} and no per-slot kinds); a computed format "
+                  f"must answer False and a literal mixed format True")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -8187,7 +8949,7 @@ outer([10, 20, 30])
         The parsers now unwrap a parenthesised single NAME to bare text and
         keep the parens for a 1-element group that really had a comma, so
         the surrounding parens are the disambiguation
-        (`fire_compiler.is_tuple_target`). Asserted against CPython on the
+        (`fire_compiler.for_target_is_tuple`). Asserted against CPython on the
         same text, on both pipelines: a shape whose right answer differs per
         engine is exactly what a hand-written expectation would get wrong.
 
@@ -8420,9 +9182,695 @@ print(resumes_after_next([7, 8, 9]))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_scalar_arity_min_max_params_are_not_containers():
+        """`max(a, b)` must not type `a` as a container.
+
+        `_ITERABLE_CONSUMING_BUILTINS` (infra_infer.py) lists `max`/`min`
+        because their ONE-argument form reduces an iterable, but their
+        MULTI-argument form is `a if a > b else b` — it compares scalars and
+        iterates nothing. Membership alone was therefore enough to mark an
+        unannotated param `is_iterated`, which types it `MojoList *` and
+        turns the very next line into a hard compile error: the 2-arg `max`
+        lowers to the runtime's single-iterable
+        `int64_t mojo_max(void *args)`, so gcc reports "too many arguments
+        to function 'mojo_max'; expected 1, have 2". Real:
+        `Lib/zipfile/__init__.py:1180`'s `n = max(n, self.MIN_READ_SIZE)`
+        inside `ZipExtFile._read1`, which typed `n` as `MojoList *` and
+        emitted
+        `int64_t __GIMPLE ZipExtFile__read1 (ZipExtFile * self, MojoList * n)`.
+
+        Three arities of the same builtin in one program, so the guard
+        cannot pass by disabling the container signal wholesale: `one(xs)`
+        must still infer `xs` as a container (the reduce form genuinely
+        iterates it), while `two(a, b)` and `three(a, b, c)` must not.
+        Asserted against CPython's own stdout rather than a literal, so
+        the reduce form's correctness is measured rather than assumed, and
+        on BOTH pipelines — the single-TU inline path and link mode, which
+        is where the zipfile failure actually surfaced."""
+        global _PASS, _FAIL
+        name = "scalar_arity_min_max_params_are_not_containers"
+        src = '''\
+def one(xs):
+    return max(xs)
+
+def two(a, b):
+    return max(a, b) + min(a, b)
+
+def three(a, b, c):
+    return max(a, b, c) - min(a, b, c)
+
+class R:
+    MIN_READ_SIZE = 4096
+
+    def read1(self, n):
+        return max(n, self.MIN_READ_SIZE)
+
+print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'scalar_arity.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'sa_{mode}.c')
+                exe = os.path.join(td, f'sa_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_list_sort_in_a_method_body_is_gimple_legal():
+        """`self.<field>.sort()` inside a METHOD must compile.
+
+        `l.sort()`'s lowering passed the `keys` argument as the literal
+        text `NULL`, which is a preprocessor macro rather than a gimple
+        expression, and — the part that makes it a hard error rather than a
+        wrong answer — a cast expression cannot appear inline as a gimple
+        call operand either, so the obvious typed-null substitution fails
+        just as hard. Both only bite in a `__GIMPLE`-tagged body, which is
+        what a METHOD's body is; the identical call in a module-level
+        function's body is plain C that GCC lowers itself, which is exactly
+        why this never showed up as a function-level case.
+
+        Real: `Lib/collections/__init__.py:1347`'s `UserList.sort`'s
+        `self.data.sort(*args, **kwds)`, reduced to a method whose body
+        calls `.sort()` on a list field.
+
+        All three call shapes are in one program — bare, `reverse=True`,
+        and `key=lambda v: -v` — because the `keys` argument is the one
+        that was illegal and the other two are what prove the fix did not
+        break them by taking a different path. Asserted against CPython's
+        stdout, and on BOTH pipelines."""
+        global _PASS, _FAIL
+        name = "list_sort_in_a_method_body_is_gimple_legal"
+        src = '''\
+class C:
+    def sort(self):
+        self.d = [3, 1, 2]
+        self.d.sort()
+        print(self.d)
+        self.d.sort(reverse=True)
+        print(self.d)
+        self.d.sort(key=lambda v: -v)
+        print(self.d)
+
+C().sort()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'list_sort.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'ls_{mode}.c')
+                exe = os.path.join(td, f'ls_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_dict_union_right_operand_is_converted_at_runtime():
+        """`dict | x` with `x`'s type unresolved must convert, not cast.
+
+        `mojo_dict_union` takes two `MojoDict *`. When the right operand's
+        static type is one, nothing to do. When it is not — an unannotated
+        parameter — the old code passed it straight into the `MojoDict *`
+        slot, which is a hard compile error:
+
+            passing argument 2 of 'mojo_dict_union' makes pointer from
+            integer without a cast
+
+        Real: `Lib/collections/__init__.py:1192`'s `UserDict.__ior__`'s
+        `self.data |= other`.
+
+        The obvious fix — cast the scalar — is the wrong one and is
+        deliberately NOT taken: a scalar slot may hold a real dict pointer
+        or an unrelated value, and a cast hands `mojo_dict_union` whatever
+        bits were there. So the conversion is a runtime test against the
+        runtime's own `mojo_is_registered_dict` predicate, with the
+        non-dict case becoming a fresh empty dict — which is Python's own
+        answer for a union with a non-mapping.
+
+        The assertion is on CPython's stdout, and the program returns the
+        union INLINE rather than through a function: an unannotated
+        function's return type is int64_t on this backend and a returned
+        container then prints as its address, which is a separate filed bug
+        (CODEGEN_unannotated_function_returning_container_prints_its_
+        address.md) and would otherwise make this test fail for the wrong
+        reason — or, worse, pass on a tree where the coercion is still
+        broken.
+
+        Both operand orders are in the program because the coercion is
+        applied to whichever side is unresolved. The merges are kept to
+        ONE application each: a second `|=` reorders the left operand's
+        keys, which is a separate runtime bug in `mojo_dict_update`
+        (RUNTIME_dict_update_discards_insertion_order.md, filed, verified
+        present with this change reverted) and is not what this test is
+        for."""
+        global _PASS, _FAIL
+        name = "dict_union_right_operand_is_converted_at_runtime"
+        src = '''\
+class D:
+    def __init__(self):
+        self.data = {'z': 9}
+    def merge(self, other):
+        self.data |= other
+        return self
+
+class E:
+    def __init__(self):
+        self.data = {'z': 9}
+    def merge(self, other):
+        return other | self.data
+
+d = D()
+d.merge({'a': 1})
+print(d.data)
+e = E()
+e.merge({'a': 1})
+print(e.data)
+print({'p': 1} | {'q': 2})
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'dict_union.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'du_{mode}.c')
+                exe = os.path.join(td, f'du_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_dict_literal_star_star_pair_merges_instead_of_storing():
+        """A `**expr` pair in a dict display must MERGE, not be stored.
+
+        PEP 448 mapping unpacking is spelled by the parser as a pair whose
+        KEY is `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the
+        NoneType sentinel (`fire_compiler.py`'s `_parse_dict_entry`;
+        `myinterpreter.py`'s `eval_DictLiteral` docstring states the
+        convention and is the reference reading). `_lower_dict_literal`
+        walked `node.pairs` as ordinary key/value stores, so the spread's own
+        dict went into the KEY slot and the sentinel into the value slot:
+
+            mojo_dict_set_int_kw (_t1, _t8, _t10);   /* _t8 = the dict */
+
+        which at run time is the runtime's own `mojo_dict_key_for` refusing a
+        dict as a key — `TypeError: unhashable type: 'dict'`, an unhandled
+        exception at exit 1, on `{'a': 1, **{'x': 2}}`. Every key the spread
+        should have contributed was also silently missing.
+
+        Measured well past a test program: this compiler's own
+        `mojo/backend_gimple/emit_infra.py::_reset_func` seeds
+        `gen._dict_val_types` with `**{k: v for k, v in
+        gen._global_dict_val_types.items() ...}`, so the SELF-HOSTED binary
+        raised this on every input including an empty file and wrote a
+        0-byte `.ci` at exit 0 — a silent wrong answer with no gcc error
+        anywhere in the closure, which is exactly what
+        `test_selfhost.py`'s `run_produced_binary` exists to catch.
+
+        Asserted on CPython's stdout for the same text, in BOTH pipeline
+        modes: the shapes cover a spread after a literal pair, a spread
+        before one, two spreads with a literal between them (source order is
+        what decides a key collision, so a merge that reorders is a wrong
+        answer), a spread whose operand is a dict COMPREHENSION (the shape
+        `_reset_func` uses), and a spread that overwrites a literal key.
+        Returns are inline for the same reason as the test above, and the
+        one literal value is `7` rather than `0` because a ZERO integer read
+        back out of a dict prints `None` on this backend — a separate,
+        pre-existing defect with no spread anywhere in it (verified against
+        `HEAD~4`), filed as
+        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
+        here would make this test red for the wrong reason."""
+        global _PASS, _FAIL
+        name = "dict_literal_star_star_pair_merges_instead_of_storing"
+        src = '''\
+def a(x: dict) -> dict:
+    return {'a': 1, **x}
+
+def b(x: dict) -> dict:
+    return {**x, 'b': 2}
+
+def c(x: dict, y: dict) -> dict:
+    return {**x, 'mid': 7, **y}
+
+def d(x: dict) -> dict:
+    return {**{k: v for k, v in x.items() if k != 'skip'}}
+
+def e(x: dict) -> dict:
+    return {'k': 0, **x}
+
+print(sorted(a({'z': 9}).items()))
+print(sorted(b({'y': 8}).items()))
+print(sorted(c({'p': 1}, {'q': 2}).items()))
+print(sorted(d({'keep': 1, 'skip': 2}).items()))
+print(sorted(e({'k': 1}).items()))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'dict_spread.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'dsp_{mode}.c')
+                exe = os.path.join(td, f'dsp_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout, run.stderr))
+            bad = [m for m, out, _e in results if out != want]
+            if bad:
+                _m, out, err = [(m, o, e) for m, o, e in results
+                                if m == bad[0]][0]
+                print(f"FAIL  {name}: {', '.join(bad)} printed {out!r}, "
+                      f"CPython printed {want!r} (stderr {err.strip()[:200]!r})")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_next_inside_for_over_same_iterator_is_one_ahead():
+        """`next(it)` inside `for x in it:` must read the element AFTER the
+        one the loop just yielded.
+
+        `it = iter(<list>)` lowers to a shared list plus an int64_t cursor
+        (`_try_bind_list_iter`), and both the `for` lowering and the
+        `next()` lowering read `mojo_list_get(lst, cur)` and then advance
+        `cur`. Each is right alone; together they were an off-by-one,
+        because the `for` advance happened in its post block AFTER the
+        body, so while the body ran the cursor still pointed AT the
+        element the loop had just handed to its target — and `next(it)`
+        read exactly that one again. `walk([1, 2, 3, 4])` printed
+        `[1, 1, 3, 3]` (two elements consumed, each reported twice, and
+        half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
+
+        It is silent and exit 0, and it is not a corner case: this is the
+        shape CPython's own
+        `Tools/cases_generator/analyzer.py::check_escaping_calls` uses.
+
+        Nested `def`s on purpose, for the same reason as the test above:
+        only a `__GIMPLE` body proves anything about the cast operand and
+        the literal-increment shapes these two lowerings share. Each helper
+        PRINTS from inside the closure rather than returning the list:
+        returning a `MojoList *` out of a nested def is a separate,
+        pre-existing defect (it prints a raw pointer decimal — reproduced
+        with no `next()` involved at all), and a regression test should not
+        depend on it.
+
+        The other four cases are in the same program because the fix moves
+        the advance from the loop's post block to the top of its body, and
+        each of those is a way that move could be wrong: `next(it, d)` on
+        exhaustion, a `continue` (whose target is the now-empty post block,
+        so it must not skip the advance), a `break`, and a string element
+        type rather than int64_t."""
+        global _PASS, _FAIL
+        name = "next_inside_for_over_same_iterator_is_one_ahead"
+        src = '''\
+def walk(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def with_default(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it, 0))
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def skipping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            if x % 2 == 0:
+                continue
+            out.append(x)
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def stopping(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            if x == 3:
+                break
+        print('|'.join([str(v) for v in out]))
+    inner()
+
+def strings(items):
+    def inner():
+        it = iter(items)
+        out = []
+        for x in it:
+            out.append(x)
+            out.append(next(it))
+        print('|'.join(out))
+    inner()
+
+walk([1, 2, 3, 4])
+with_default([9, 10])
+skipping([1, 2, 3, 4])
+stopping([1, 2, 3, 4])
+strings(['a', 'b'])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'next_ahead.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **{'do_imports': True} if mode == 'single-TU'
+                        else {'link_mode': True})[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'na_{mode}.c')
+                exe = os.path.join(td, f'na_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_program_written_inside_the_checkout_is_not_the_compiler():
+        """A user program's LOCATION must not change its generated C.
+
+        `_is_selfhost_source_dir` answered "is this the compiler's own
+        source?" by walking UP from the file's directory looking for a
+        `fire_compiler.py` ancestor, so it said True for every file under
+        this checkout — `.tmp/`, `build/`, `tools/`, anything. Both of its
+        call sites then ran unconditionally: one registered the
+        COMPILER's own AST-node struct layouts (`Scope`, `Token`, `Parser`,
+        `ReturnValue`, ...) into the `struct_field_types` a user program is
+        member-access-typed against, the other re-tokenized the compiler's
+        own sources into that program's gen. Measured at the time: the same
+        program compiled from inside vs outside the checkout produced 355
+        lines of C difference, all but the `#line` directive being exactly
+        those typedefs — for a program containing no AST nodes at all.
+
+        This was the third copy of "is this the compiler's own source?"
+        answered by a position test, after the two that
+        `bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_
+        value.md`'s fix consolidated into `methods_shared._is_selfhost_
+        source_file`. Both call sites already HAD the filename in hand, so
+        the file-level predicate dropped in without the ancestor walk, and
+        `_is_selfhost_source_dir` went with them.
+
+        `TMPDIR` is `<repo>/.tmp` here, so a plain `TemporaryDirectory` is
+        the interesting case rather than a vacuous one — but that is
+        asserted, not assumed, or this test would quietly stop testing
+        anything on a machine with a different `TMPDIR`.
+        """
+        global _PASS, _FAIL
+        name = "a_program_written_inside_the_checkout_is_not_the_compiler"
+        tmp = os.path.abspath(tempfile.gettempdir())
+        if not tmp.startswith(_PROJECT_DIR + os.sep):
+            print(f"SKIP  {name}: TMPDIR {tmp} is outside {_PROJECT_DIR}, "
+                  f"so the condition under test cannot arise")
+            return
+        # Exactly the names the `_is_selfhost_file` block registers into
+        # `struct_field_types` / `struct_boxed_fields` / `_field_elem_types`.
+        # Deliberately NOT "every AST node name": a LARGER block alongside
+        # that one registers ~57 more UNCONDITIONALLY, for reasons of its
+        # own, and folding those in here would make this test fail for a
+        # different bug than the one it is pinning.
+        gated_structs = (
+            'BinaryOp', 'BoundClassMethod', 'BoundMethod', 'BreakException',
+            'CallExpr', 'CompareChain', 'ContinueException', 'Interpreter',
+            'MemberExpr', 'MojoClass', 'MojoFunction', 'MojoInstance',
+            'MojoOverloadSet', 'Parser', 'ReturnValue', 'Scope',
+            'TernaryExpr', 'Token', 'UnaryOp', '_AutoStubCheckNamespace',
+            '_AutoStubNamespace', '_AutoStubValue', '_ComplexFloat',
+            '_MojoBoundComptimeFunction', '_MojoComplex', '_MojoSortFn',
+            '_MojoSortPartial')
+        src = '''\
+import os
+
+
+def helper(a, b):
+    return a + b
+
+
+class Box:
+    def __init__(self, v):
+        self.v = v
+
+    def get(self):
+        return self.v
+
+
+def run(path):
+    b = Box(helper(1, 2))
+    d = {'k': b.get()}
+    return len(d) + len(os.path.basename(path))
+
+
+print(run('x/y.txt'))
+'''
+        builds = []
+        with tempfile.TemporaryDirectory() as td:
+            for sub in ('loc1', 'loc2'):
+                d = os.path.join(td, sub)
+                os.mkdir(d)
+                prog = os.path.join(d, 'prog.py')
+                with open(prog, 'w') as fh:
+                    fh.write(src)
+                builds.append(gimple_codegen._run_pipeline(
+                    src, filename=prog, do_imports=True)[0])
+
+        injected = sorted({s for s in gated_structs
+                           if ('typedef struct %s ' % s) in builds[0]})
+        if injected:
+            print(f"FAIL  {name}: a user program written under the checkout "
+                  f"was handed the COMPILER's own AST struct layouts "
+                  f"({', '.join(injected)}) — "
+                  f"bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_"
+                  f"the_checkout.md")
+            _FAIL += 1
+            return
+        # The `#line` directive correctly carries each file's OWN path, so it
+        # is the one line allowed to differ between two directories.
+        strip = lambda c: [l for l in c.split('\n')
+                           if not l.startswith('#line ')]
+        if strip(builds[0]) != strip(builds[1]):
+            print(f"FAIL  {name}: the same program generated different C "
+                  f"depending only on which directory under the checkout "
+                  f"it was written in")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_cursor_advance_has_no_cast_operand_in_gimple()
     test_next_inside_for_over_same_iterator_advances_once()
     test_paren_name_vs_one_tuple_for_target_differ()
+    test_walk_ast_dataclass_cache_is_transparent()
+    test_scalar_arity_min_max_params_are_not_containers()
+    test_list_sort_in_a_method_body_is_gimple_legal()
+    test_dict_union_right_operand_is_converted_at_runtime()
+    test_dict_literal_star_star_pair_merges_instead_of_storing()
+    test_next_inside_for_over_same_iterator_is_one_ahead()
+    test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
@@ -8444,6 +9892,12 @@ print(resumes_after_next([7, 8, 9]))
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
     test_ast_walk_reaches_every_name_in_a_lambda_body()
+    test_callable_return_type_survives_its_carrier()
+    test_variadic_lambda_lowers_as_gimple_in_every_body()
+    test_scalar_given_a_char_star_parameter_is_stringified()
+    test_ctor_of_a_container_reaches_the_comprehension()
+    test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
+    test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

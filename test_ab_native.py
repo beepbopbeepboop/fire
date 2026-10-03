@@ -39,12 +39,19 @@ Four constraints shape the replacement, each verified rather than assumed:
     two concurrent runs of this test would otherwise overwrite each other's
     `.ci` in the one directory they cannot avoid. Tagged, they cannot collide.
   * The scratch dir must be under the WORKTREE, not the system temp dir.
-    `_is_selfhost_source_dir` (mojo/backend_gimple/module_gen.py) decides
-    whether a source is this compiler's own by walking UP from the file's
-    directory looking for `fire_compiler.py`; `<repo>/.tmp/...` still finds it
-    and `/tmp/...` does not. A scratch dir on the wrong side of that boundary
-    silently compiles the test corpus through a different code path, which
-    would make the A/B comparison meaningless.
+    This one is now a plain hygiene rule rather than a correctness one:
+    the backend's self-host predicate used to decide "is this the
+    compiler's own source?" by walking UP from the file's directory
+    looking for `fire_compiler.py`, so `<repo>/.tmp/...` found one and
+    `/tmp/...` did not, and the corpus was silently compiled through a
+    different code path depending on which side of that boundary the
+    scratch dir sat. That made the A/B comparison meaningless. The
+    predicate is gone (it is the file-level `_is_selfhost_source_file`
+    now, and the 12 AST-struct typedefs it used to inject into a user
+    program are pinned by `test_gimple.py`'s
+    `test_a_program_written_inside_the_checkout_is_not_the_compiler`);
+    keeping the scratch dir inside the worktree keeps that guarantee
+    under this test too, and keeps the run self-contained.
   * Sibling `--dump-full` resolution is relative to the source file's own
     directory (`_resolve_test_relative_module`), so the driver and its leaf
     modules travel together in the same private dir. That is why the corpus's

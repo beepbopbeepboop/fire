@@ -4,6 +4,47 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-01 — unchanged; both blockers re-measured, and the diagnosis below is CONFIRMED and sharpened
+
+Re-measured on the current tree (`python3 fire.py build`, sources copied from
+`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`):
+
+```
+Unsupported shape(s):
+  render: render: every `yield` must carry a value, and all values must agree
+    on one scalar type (int64_t/double/_Bool)
+  section: `for ... in render(...)` does not consume a generator this compile
+    has itself already translated via the C++20-coroutine path
+```
+
+Byte-identical to the entry below. This session worked the `render` half and
+**confirmed its root cause and then went further than the entry below
+believed was reachable**, so the finding is recorded in full, with the two
+steps that were measured to work and the one that is the real feature gap, in
+`bugs/CODEGEN_nested_generator_yield_type_and_delegation.md`:
+
+* `render`'s mixed yields are NOT a module-attribute read stubbed to 0 (this
+  doc's guess). They are a `for`-loop TARGET whose type is never looked up:
+  `yield ''` types `char *`, `for line in _render_table(...)` leaves `line` at
+  the `int64_t` default, and the same-type check refuses. The answer already
+  exists twice — `_yield_from_delegate_ctype` computes it for the
+  `yield from` spelling, and `_cpp_for_stmt`'s delegate branch declares the
+  loop target from it — so this is a missing lookup, not a widened guess.
+* behind it, `_cpp_iterable_is_delegatable_generator_call` cannot see a
+  TOP-LEVEL generator's original name at all, because
+  `_all_generator_names` is built from the POST-DESUGAR AST where the A3
+  stack-switch desugar has already renamed it `__mgco_<name>_body`.
+* past that, a nested generator consuming a top-level one needs the
+  enclosing parameters CAPTURED into the coroutine frame, and nothing does.
+
+Nothing landed from this session's work on it, deliberately: the two steps
+that were measured to work change which shapes reach a path that then fails
+with a g++ error naming an internal symbol, which is a net LOSS in diagnosis
+until the capture work lands with them.
+
+The `section` line is still the last attempt's reason, not an independent
+blocker — the entry below's advice to fix `render` first is correct.
+
 ## Status 2026-09-30 — unchanged; both of this file's blockers are shared with other c-analyzer files
 
 Re-verified against the current tree (`python3 fire.py build`, sources copied

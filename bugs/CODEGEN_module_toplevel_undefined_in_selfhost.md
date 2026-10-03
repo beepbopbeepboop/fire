@@ -140,6 +140,73 @@ five modules:
 **red for a reason that has nothing to do with the GPU offload work**, which is
 worth saying out loud whenever those three rows are quoted.
 
+
+## Status (2026-10-30 — still masked; the two compile-time blockers are being
+fixed elsewhere, and the link-time symptom is NOT reproducible from a small
+package)
+
+Measured on this tree, in this order:
+
+1. **Blocker 1 (`py_tokenize`'s arity) is fixed on two other branches.** The
+   source is `def py_tokenize(src: str)` (`fire_compiler.py:1325`, whose
+   docstring explains the ABI in full); `gimple_codegen.py`'s `_KNOWN_SIGS`
+   and `runtime/fire_runtime.h:1751` still declare the two-argument form, so
+   `test_gimple.py`'s
+   `handwritten_selfhost_signature_tables_match_the_source` row is RED here
+   with exactly the diagnostic this doc predicted. It is fixed in `05d8c42a`
+   ("codegen+runtime: `py_tokenize`'s pinned C ABI is ONE parameter, in both
+   tables", on `work/bugs3-codegen-2-r2`) and in `222e4dee` (on
+   `work/master-selfhost-fix2`). **Deliberately not duplicated here** — the
+   same two lines in the same two files, which would leave two parallel fixes
+   to merge. If neither branch is merged, this doc's blocker 1 is a two-line
+   change with a test already pointing at it.
+2. **Blocker 2 (`l.sort()` via the variadic stub) does not reproduce for a
+   boxed receiver.** `ident(d).sort()` — `d` a list reached through an
+   unannotated parameter, so the receiver is a boxed `int64_t` — lowers to
+   `mojo_list_sort (_t10, 0, 0, NULL)`, i.e. the CORRECT four-argument MojoList
+   method path (`emit_methods.py:4227`), not the `('sort', 'void sort(...);')`
+   stub. The stub is still declared in the preamble (`module_gen.py:8245`) and
+   unused for this shape. The doc's `cas.py:424` case is a value out of
+   `os.walk()`, with no static container type at all, which is a different and
+   unreached path; the narrowing measurement (does the generic stub route fire
+   for a receiver whose type NOTHING knows?) is one `probe3.py` run over an
+   `os.walk()`-shaped fixture and is worth doing before anyone changes the
+   stub list.
+3. **The link-time symptom itself is not reproducible from a small package.** A
+   package whose imported sibling has module-level statements (`pkg/sub.py`
+   with a module-level assignment, a `print`, and a function; `pkg/main.py`
+   importing it) compiles under `do_imports=True` with BOTH
+   `void __sub_toplevel(void);` and `void _toplevel(void);` declared and BOTH
+   bodies present — `gcc -fgimple` clean, and the linked binary's stdout is
+   byte-identical to CPython's. So the "57 declarations, 0 bodies" asymmetry
+   is NOT reachable through one sibling. It is presumably a scale or
+   depth-dependent effect in the whole-closure path.
+
+**What still needs a heavy run, and cannot be answered by a light worker:**
+the whole-closure shape is only observable in `fire.py --dump-full`'s output,
+so the "Localised" section's counts (`57` declarations, `0` bodies) cannot be
+re-measured, and `make stage2/mojo` cannot be used to tell whether blockers 1
+and 2 being cleared exposes the original defect or retires it. The integrator
+should run, in this order, once blockers 1 and 2 have merged:
+
+    make stage2/mojo
+
+and then, to turn the answer into a fact rather than an interpretation:
+
+    python3 - <<'EOF'
+    import re
+    s = open('stage1/fire.ci').read()
+    d = re.findall(r'^void _mojo_\w*_toplevel\(void\);$', s, re.M)
+    b = re.findall(r'^void _mojo_\w*_toplevel\(void\) \{$', s, re.M)
+    print(len(d), 'declarations', len(b), 'bodies')
+    EOF
+
+`d == 0` or `d == b` means retired; `d > b` reproduces it and the counts name
+the blast radius. `make stage2/mojo` reaching the LINK at all is itself the
+answer to blocker 1/2: a compile error there means a blocker is still live,
+not that this bug is fixed.
+
+
 ## ROOT CAUSE FOUND, and the link failure it was masking (2026-10-01)
 
 This bug is FIXED. Its two earlier "SUPERSEDED"/"masked" sections were both

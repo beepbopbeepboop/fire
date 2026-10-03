@@ -12,9 +12,10 @@ triple-quoted one as much as in a single-quoted one — and a backslash
 immediately before a closing run therefore leaves the literal UNTERMINATED.
 
 That rule has a consequence which used to be silent, and which is the whole
-reason this file exists
-(bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
-A source line reading
+reason this file exists: a triple-quoted literal holding a backslash before a
+closing run used to swallow the rest of the file (fixed in `fd10fd92`, which
+made an unterminated literal a REFUSAL — `-1` from `_scan_string_end` — where it
+had been "keep scanning"). A source line reading
 
     s = Q3 + backslash + Q3          # i.e. Q3 \ Q3
 
@@ -80,14 +81,21 @@ RUN_TIMEOUT = 60
 Q3 = '"' * 3          # a triple-quote run
 SQ3 = "'" * 3
 
-# (name, the literal's source text, expected value or None to mean "whatever
-# CPython computes", expected_ours_value)
+# (name, the literal's source text, OUR expected value, CPython's expected
+# value or None for "no cross-check")
 #
-# `ours` is the byte-exact content: source text between the delimiters, with no
-# escape processing. It is spelled out for every row rather than derived,
-# because "byte-exact" is a contract a reader has to be able to check by eye.
-# A row whose value is a real newline is written '\n' in the table below and
-# comes from a source line break.
+# `ours` (the THIRD column) is the byte-exact content: source text between the
+# delimiters, with no escape processing. It is spelled out for every row rather
+# than derived, because "byte-exact" is a contract a reader has to be able to
+# check by eye. A row whose value is a real newline is written '\n' in the
+# table below and comes from a source line break.
+#
+# The fourth column is the oracle: when it is given, `check_continuation`
+# requires BOTH sides to equal it, so a row carrying one is a row the two
+# engines agree on and a row leaving it `None` is a labelled divergence. The
+# two are not interchangeable and reading the table as (ours, theirs) is the
+# mistake that made the first version of the raw-literal rows below assert a
+# divergence that no longer existed.
 LITERALS = [
     # ── the plain shapes: one STRING token, content is what is between ──────
     ("triple_plain",        Q3 + "abc" + Q3,                "abc"),

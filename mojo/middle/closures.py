@@ -461,10 +461,34 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 if not _merged_caps:
                     continue
                 _shared_env = outer_name + "_" + "_".join(sorted(_members)) + "_env"
-                _merged_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
+                _shared_list = [(_cv, _merged_caps[_cv]) for _cv in sorted(_merged_caps)]
                 _shared_mut = frozenset([_mn for _mn in _merged_mut if _mn in _merged_caps])
                 for _mci in _member_cis:
-                    _mci.captures = list(_merged_list)
+                    # ONE list object for the whole group, not a `list()` copy
+                    # per member. Every member declares the same C struct, so
+                    # its field list is one fact about that struct; handing
+                    # each member its own copy is what let the group drift
+                    # apart the moment anything appended to it. The
+                    # transitive fixup at the end of this function DOES
+                    # append — a grandchild's capture the parent does not own
+                    # becomes the parent's own capture — and it appends to
+                    # whichever member it walks, so with per-member copies
+                    # only that member learned the new field. The struct
+                    # typedef is emitted from the FIRST member the emission
+                    # loop reaches (`_emitted_structs` dedupes by name), and
+                    # that member's list is what it printed, so a capture the
+                    # first member never learned was a `has no member named
+                    # 'self'` error in both the allocator and the body that
+                    # write it. Measured: `gen_module_impl`'s
+                    # `_is_foreign_main` <-> `_mk_round` call group shares
+                    # `gen_module_impl__is_foreign_main__mk_round_env`, and
+                    # `_mk_round`'s grandchild `_mk` captures `self`, so the
+                    # fixup appended it to `_mk_round` alone — while the
+                    # typedef came out of `_is_foreign_main`, three fields
+                    # and no `self`. With one shared list, whichever member
+                    # the fixup reaches first appends and every member (and
+                    # every env fill emitted from it) sees the field.
+                    _mci.captures = _shared_list
                     _mci.env_struct = _shared_env
                     _mci.mut_names = _shared_mut
 

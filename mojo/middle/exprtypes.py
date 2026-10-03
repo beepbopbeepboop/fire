@@ -14,6 +14,18 @@ from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
+# Whether a node's CLASS is a dataclass, cached beside the field names for
+# the same reason and on the same key. `dataclasses.is_dataclass` is a pure
+# function of its argument's type, so the per-class answer is static for the
+# life of the process exactly as the field-name tuple is — but it was being
+# re-asked on EVERY node visit, which at the 160-module struct chain this
+# file's walk utility is profiled on meant 4,207,567 calls costing 1.42s of a
+# 23.3s profiled run (6.1%) to re-derive an answer the very next line's
+# `_WALK_FIELD_NAMES_CACHE.get(type(node))` had already been keyed on.
+# `None` means "not a dataclass"; a tuple means "a dataclass, and these are
+# its field names". A class that is not a dataclass has no entry to compute,
+# so it is stored as `None` and never re-tested.
+_WALK_DATACLASS_CACHE: dict[type, bool] = {}
 _WALK_AST_MAX_DEPTH = 900
 
 def _walk_ast_into(node, out, _depth=0):
@@ -57,15 +69,20 @@ def _walk_ast_into(node, out, _depth=0):
     # never pre-registered and emitted `(uint64_t *)0` (repro:
     # std/test/memory/uninit_check/test_uninit_check_float64_poison). A
     # genuine int/str/float is never a dataclass, so this ordering is safe.
-    if dataclasses.is_dataclass(node):
-        fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
+    _nc = type(node)
+    _is_dc = _WALK_DATACLASS_CACHE.get(_nc)
+    if _is_dc is None:
+        _is_dc = dataclasses.is_dataclass(node)
+        _WALK_DATACLASS_CACHE[_nc] = _is_dc
+    if _is_dc:
+        fnames = _WALK_FIELD_NAMES_CACHE.get(_nc)
         if fnames is None:
             _raw = dataclasses.fields(node)
             _names = []
             for _f in _raw:
                 _names.append(_f.name if hasattr(_f, 'type') else _f)
             fnames = tuple(_names)
-            _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
+            _WALK_FIELD_NAMES_CACHE[_nc] = fnames
         for fname in fnames:
             _child = getattr(node, fname, None)
             if _child is node:
@@ -505,16 +522,107 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
         return True
     if isinstance(node, MemberExpr):
-        _bf = getattr(gen, 'struct_bool_fields', None)
-        if _bf:
-            for _ct in _receiver_ctypes(gen, node.obj):
-                _sn = _struct_name_of(_ct)
-                if _sn and node.member in (_bf.get(_sn) or ()):
-                    return True
+        return _is_python_bool_field(gen, node)
+    if isinstance(node, CallExpr):
+        return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'
     except Exception:
         return False
+
+
+def _is_python_bool_field(gen, node) -> bool:
+    """Is this `x.f` / `self.f` a struct field whose ANNOTATION says `bool`?
+
+    The fourth source `is_python_bool_expr` consults, and the one that
+    cannot be a ctype test. `_TYPE_MAP` maps `'bool'` to `'int'`, so
+    `_resolve_type('bool')` returns `'int'` and a `bool`-annotated field
+    occupies an ordinary integer slot: the field read lowers to `int`, the
+    struct declares `int flag`, and every `_Bool` arm downstream has
+    nothing to fire on. The bool-ness is destroyed before any chokepoint
+    could look at it, which is why `struct_bool_fields` exists — the
+    annotation is recorded while the StructDef is still readable (the
+    struct's own generated `__repr__` has consulted that table all along,
+    so `print(b)` said `flag=True` while `print(b.flag)` said `1`).
+
+    Resolving the RECEIVER's struct is the whole job, and there are two
+    spellings: `self.f` inside the struct's own method, where the current
+    struct is the answer, and `b.f` everywhere else, where the receiver is an
+    ordinary expression whose type has to be ASKED FOR -- through
+    `_receiver_ctypes`, which is the one place that knows a name's type can
+    live in four tables that genuinely disagree in coverage. Calling
+    `gen._quick_type` here instead answered `int64_t` for a module-scope
+    `b = Box(True, 5)`, because `_quick_type` reads `var_types`, which has no
+    entry for a module-level GLOBAL: every spelling of `b.flag` printed
+    `1`/`0` at module scope while the same field inside a function printed
+    `True`/`False`. A receiver this cannot type at all (a call result, a
+    subscript) answers False, which is the pre-existing behaviour of every
+    caller of the shared predicate.
+    """
+    _member = getattr(node, 'member', None)
+    if not _member:
+        return False
+    _bf = getattr(gen, 'struct_bool_fields', None)
+    if not _bf:
+        return False
+    _recv = getattr(node, 'obj', None)
+    if isinstance(_recv, IdentExpr) and _recv.name == 'self':
+        _sn = getattr(gen, '_current_struct_name', None)
+        if _sn and _member in (_bf.get(_sn) or ()):
+            return True
+    for _rt in _receiver_ctypes(gen, _recv):
+        if not _rt or not _rt.endswith(' *'):
+            continue
+        if _member in (_bf.get(_struct_name_of(_rt)) or ()):
+            return True
+    return False
+
+
+def _is_python_bool_method(gen, node) -> bool:
+    """Is this `x.m(...)` a method of a struct that RETURNS a `bool` field?
+
+    The fifth source `is_python_bool_expr` consults, and the shape most real
+    code uses: `def get(self): return self.flag`. The method's C return type
+    is inferred from its body, the body is a read of an `int` field, so the
+    inference lands on `int64_t` exactly as the direct read does — and
+    `print(b.get())` printed `1` where CPython prints `True`.
+
+    Note that `b.get() == True` was ALREADY right, because the comparison
+    produces a `_Bool`; a test that only checked the equality would pass
+    while every printing spelling was wrong, which is the same trap
+    `CODEGEN_repr_of_a_bool_prints_1.md` documents for print vs repr.
+
+    `struct_bool_methods` records only methods whose EVERY `return` hands
+    back a bool field (see module_gen.py's second per-method loop), so a
+    method that merely reads one is not claimed. As with the field case, the
+    answer is deliberately NOT a `_Bool` return type: that would make
+    `b.get() + 1` a GIMPLE operand-type error, which is the reason the real
+    fix (this document's option A, `_TYPE_MAP['bool'] = '_Bool'`) needs the
+    full gate and its own session.
+    """
+    _f = getattr(node, 'func', None)
+    if not isinstance(_f, MemberExpr):
+        return False
+    _bm = getattr(gen, 'struct_bool_methods', None)
+    if not _bm:
+        return False
+    try:
+        _rt = gen._quick_type(_f.obj)
+    except Exception:
+        return False
+    if not _rt or not _rt.endswith(' *'):
+        return False
+    return _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ())
+
+
+def _as_str_node(v) -> str:
+    """`v` as text, for an AST field read that may be boxed.
+
+    The self-hosted backend boxes a struct field read to `int64_t`, so a
+    bare comparison would compare an address; every other consumer in this
+    file goes through `fire_compiler._as_str` for the same reason."""
+    from fire_compiler import _as_str
+    return _as_str(v)
 
 
 def _receiver_key(e) -> str | None:

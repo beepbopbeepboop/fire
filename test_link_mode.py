@@ -535,6 +535,112 @@ def test_bare_import_sibling_struct_field_through_module() -> bool:
     return ok
 
 
+def test_module_scoped_cross_module_struct_ctor_both_import_spellings() -> bool:
+    """A cross-module struct CONSTRUCTOR called at MODULE scope, in BOTH
+    import spellings, with the field read straight off the result.
+
+    the module-scope cross-module struct constructor (its bug doc is deleted
+    by this fix; the mechanism is recorded in the pre-pass's own comment in
+    `module_gen.py` and in `bugs/hard/README.md`'s 2026-10-02 entry). Both
+    arms printed the `Parameter *`'s own pointer
+    bits as a decimal with exit 0, where CPython prints `v`, and the
+    function-scoped spelling of the same two lines was correct throughout —
+    which is what made it look scope-dependent rather than like a missing set
+    of call sites.
+
+    The mechanism, measured in one `compile_linked` dump of the module-scope
+    case against the function-scoped one: the cross-module constructor
+    FIELD-TYPE hint pre-pass collects its call sites by walking
+    `FunctionDef` bodies only, so a module-level `insp.Parameter('v', 7)` was
+    in no collected set. With no hint, the IMPORTED module compiled
+    `self.v = v` at the `int64_t` default while the client's own `x.v` was
+    typed `char *` from the string literal, and the value round-tripped
+    through an integer. It was not the import seam (both spellings were
+    equally affected, and both are correct inside a function) and not
+    module scope alone (the same-file case is correct at module scope).
+
+    Both arms are asserted, and the module-scope `show(...)` variant is in
+    `test_module_scoped_cross_module_ctor_arg_through_a_param` — a fix that
+    only repaired the direct-field-read spelling would leave that one red.
+    """
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f5.py': (
+            'import insp\n'
+            '\n'
+            'x = insp.Parameter(\'v\', 7)\n'
+            'print(x.v)\n'
+        ),
+        'f5b.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'x = Parameter(\'v\', 7)\n'
+            'print(x.v)\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f5.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f5.py')
+        rc2, stdout2 = _build_and_run(pkg, 'f5b.py', td)
+        py_rc2, py_stdout2 = _cpython_run(td, 'f5b.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
+          and stdout.strip() == 'v' and stdout2.strip() == 'v')
+    if not ok:
+        print(f"  ✗ module_scoped_cross_module_struct_ctor_both_import_spellings: "
+              f"bare rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r}) | from rc={rc2} stdout={stdout2!r} "
+              f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
+def test_module_scoped_cross_module_ctor_arg_through_a_param() -> bool:
+    """The same module-scope construction, but the object is passed to a
+    free function that calls a METHOD on it — the shape
+    `test_bare_import_sibling_struct_ctor_through_module` covers inside a
+    function body, and the one that reached the constructor-field-hint
+    pre-pass's *sibling* contract too. Both import spellings again, because
+    the missing call sites were in a collector shared by both.
+
+    Without a field-type hint the imported module's `__init__` typed `v`
+    `int64_t`, and `show` then received the boxed pointer: `v` came back as a
+    decimal address.
+    """
+    pkg = {
+        'insp.py': _LABEL_PY,
+        'f6.py': (
+            'import insp\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'print(show(insp.Parameter(\'v\', 7)))\n'
+        ),
+        'f6b.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'def show(p):\n'
+            '    return p.label()\n'
+            '\n'
+            'print(show(Parameter(\'v\', 7)))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f6.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f6.py')
+        rc2, stdout2 = _build_and_run(pkg, 'f6b.py', td)
+        py_rc2, py_stdout2 = _cpython_run(td, 'f6b.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
+          and stdout.strip() == 'v' and stdout2.strip() == 'v')
+    if not ok:
+        print(f"  ✗ module_scoped_cross_module_ctor_arg_through_a_param: "
+              f"bare rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r}) | from rc={rc2} stdout={stdout2!r} "
+              f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
 def test_dotted_sibling_import_qualifier_agrees() -> bool:
     """`from p.sub import tri` — a DOTTED module name — at MODULE scope, and
     again from inside a function. The mangled symbol's two halves come from
@@ -585,6 +691,128 @@ def test_dotted_sibling_import_qualifier_agrees() -> bool:
     return ok
 
 
+def test_builtin_open_is_not_ambiguous_from_transitive_siblings() -> bool:
+    """A bare `open(...)` that is the BUILTIN must build, even when two
+    transitively-imported siblings each define their own `open`.
+
+    `gen_module_impl`'s transitive-discovery loop used to register every
+    inlined sibling's top-level FunctionDef names into
+    `_own_imported_func_home` as well as into `_imported_func_home`. The
+    first of those two is documented as "THIS exact gen_module call's own
+    FromImportStmt scan — operating only on `stmts`, never shared across
+    temp_gens"; a sibling's *definition* is neither, and colliding two of
+    them flipped the key to `_AMBIGUOUS_FUNC_HOME`, which
+    `_func_qualifier` turns into a hard refusal for EVERY reference to
+    that name in the whole program. Measured on
+    `/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`, whose bare
+    `open(...)` uses are the builtin and which imports no `open` at all:
+    six unrelated siblings (codecs, tokenize, bz2, lzma,
+    compression.zstd._zstdfile, tarfile) each define one, and the file's
+    OWN compile unit is clean — the whole program was refused by this one
+    message. See
+    bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md.
+
+    The sibling bodies here PRINT when called, so "the builtin was used"
+    is asserted by their absence and not merely by the build succeeding —
+    a fix that silently picked one sibling's `open` would otherwise pass.
+
+    `f.read()`'s VALUE is deliberately not asserted: the compiled
+    file-read surface is a separate gap from the qualifier resolution
+    under test (measured: it answers 0 for both engines' `hello`), and
+    freezing today's wrong value here would lock that gap in. What is
+    asserted is what this fix is about — the build succeeds, and the
+    builtin ran rather than either sibling's shadow."""
+    pkg = {
+        'q/__init__.py': '',
+        'q/data.txt': 'hello\n',
+        'q/a.py': ('def open(name, mode="r"):\n'
+                   '    print("A_OPEN_CALLED")\n'
+                   '    return "A"\n'),
+        'q/b.py': ('def open(name, mode="r"):\n'
+                   '    print("B_OPEN_CALLED")\n'
+                   '    return "B"\n'),
+        'q/main.py': (
+            'import q.a\n'
+            'import q.b\n'
+            '\n'
+            'def main():\n'
+            '    f = open("q/data.txt")\n'
+            '    print("OPEN_OK")\n'
+            '\n'
+            'main()\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'q/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'q/main.py')
+    ok = (rc == 0 and stdout == 'OPEN_OK\n'
+          and 'OPEN_CALLED' not in stdout
+          and py_rc == 0 and py_stdout == stdout)
+    if not ok:
+        print(f"  ✗ builtin_open_is_not_ambiguous_from_transitive_siblings: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} "
+              f"{py_stdout!r})")
+    return ok
+
+
+def test_unannotated_param_with_disagreeing_call_sites() -> bool:
+    """An UNANNOTATED parameter whose call sites disagree on the argument's
+    type — here int vs str — used to be typed `char *` and SIGSEGV.
+
+    `module_gen.py`'s Pass 1.3d resolves such a parameter to `char *` /
+    `double` when the set of types observed at its call sites is unanimous. It
+    observed a `char *` from `f("s")` and NOTHING from `f(1)`: `_arg_scalar_type`
+    answers for a float or a string literal and has no answer for an integer
+    one. So the set was `{'char *'}` — one *observing* call site, vacuously
+    unanimous — and `f(1)`'s silence counted as agreement. The parameter came
+    out `char * f(char *)`, `f(1)` passed `(char *)1`, and `mojo_print` strlen'd
+    a small integer: exit -11, no output, for a program CPython prints
+    `1` / `s`.
+
+    Two defects had to be fixed together, because fixing only the first turns a
+    crash into a silent wrong answer: an integer argument must count as an
+    observation (`int64_t`), and a slot that is then left at the `int64_t`
+    default while provably MAY hold a string needs the runtime's own
+    discriminator at the point a C string is required (`mojo_cstr_or_int_str`,
+    which asks `mojo_boxed_is_str`). That second half has to follow the value
+    wherever it goes, so all four shapes that move it are here: read directly,
+    copied to a local, returned and printed at the call site, and returned
+    through a forwarding hop.
+
+    **In this file, not `test_gimple_runner.py`, which is where
+    `bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` said
+    this belonged.** Measured, and the reason is structural: that runner's
+    `compile_to_gimple` is the single-translation-unit path, where the whole-
+    program call-site walk never runs and the parameter is left at `int64_t`
+    by the default rather than by the bug. All four shapes passed there before
+    the fix and after it — a test there could not have failed. This file goes
+    through `driver.compile_program`, the pipeline `fire.py build` actually
+    uses, and both shapes exit -11 at the parent commit.
+    """
+    cases = [
+        # read directly
+        ('def g(x):\n    print(x)\n\n\ng(1)\ng("s")\n', '1\ns\n'),
+        # copied to a local first
+        ('def h(x):\n    y = x\n    print(y)\n\n\nh(1)\nh("s")\n', '1\ns\n'),
+        # returned and printed at the call site
+        ('def f(x):\n    return x\n\n\nprint(f(1))\nprint(f("s"))\n', '1\ns\n'),
+        # returned through a forwarding hop
+        ('def f(x):\n    return x\n\n\ndef g(x):\n    return f(x)\n\n\n'
+         'print(g(1))\nprint(g("s"))\n', '1\ns\n'),
+    ]
+    ok = True
+    for i, (src, want) in enumerate(cases):
+        with tempfile.TemporaryDirectory() as td:
+            rc, stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+            py_rc, py_stdout = _cpython_run(td, 'prog.py')
+        if not (rc == 0 and py_rc == 0 and stdout == py_stdout == want):
+            ok = False
+            print(f"  ✗ unannotated_param_disagreeing_call_sites[{i}]: "
+                  f"rc={rc} stdout={stdout!r} "
+                  f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
+    return ok
+
+
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
@@ -596,7 +824,11 @@ CASES = [
     test_sibling_class_constructor_field_function_scoped,
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
+    test_module_scoped_cross_module_struct_ctor_both_import_spellings,
+    test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,
+    test_builtin_open_is_not_ambiguous_from_transitive_siblings,
+    test_unannotated_param_with_disagreeing_call_sites,
 ]
 
 

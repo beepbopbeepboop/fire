@@ -1162,6 +1162,44 @@ def main():
 main()
 """, "5\n9\nhi\n")
 
+    # The SAME subscript callee, reached with a `MojoBoundMethod *` in the
+    # dict instead of a bare function pointer. `note_dict_callable_ret`
+    # consulted only `_callable_ret_types`, which is where a non-capturing
+    # closure and a lifted free function land; a struct method bound as a
+    # value (`C().m`) lands in `_bound_method_ret_types` instead. With no
+    # entry for the container, `dd['m'](4)` took the indirect-call stub and
+    # printed 0 at exit 0 — while `f = dd['m']; f(4)` in the same program
+    # printed CPython's 8, because the value in the dict was a perfectly
+    # good bound method all along and `mojo_fnptr_call_1` dispatches it. So
+    # this is a missing ENTRY, not a missing mechanism, and the named-local
+    # line is in the test as the control that says so.
+    #
+    # It reproduces only when the bound method is the dict's FIRST callable
+    # store: one lambda stored first puts the container in the table and the
+    # bound method then rides in on that entry, which is how the original
+    # bug report's `d['k'] = lambda a, b: a + b` repro looked already-fixed
+    # while this shape stayed broken. `g` is the control for THAT ordering
+    # dependence and `e` is the fixed shape: the two dicts differ only in
+    # what is stored first.
+    test_gimple_stdout("gimple_dict_held_bound_method_through_subscript", """\
+class C:
+    def m(self, x):
+        return x * 2
+
+def main():
+    dd = {}
+    dd['m'] = C().m
+    print(dd['m'](4))
+    f = dd['m']
+    print(f(5))
+    g = {}
+    g['cap'] = lambda x: x + 1
+    g['m'] = C().m
+    print(g['m'](4))
+main()
+""", "8\n10\n8\n")
+
+
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
     return False
@@ -1738,6 +1776,105 @@ def main():
 
 main()
 """, "1\n")
+
+    # A subclass that OVERRIDES a class-level constant read the BASE's value,
+    # silently, at exit 0 — and so did every method of its own, because a
+    # lifted `Child_who` reads `_classattr_Child__tag`, which
+    # `_mojo_classattr_init` had initialised from `Base`'s declaration:
+    #
+    #     _classattr_Base__tag  = 7;
+    #     _classattr_Child__tag = 7;      <- Child says 9
+    #     _classattr_Grand__tag = 7;      <- Grand says 11
+    #
+    # `_merge_struct_inheritance` builds a subclass's `.fields` as BASE
+    # declarations FIRST and the class's OWN last (its own docstring: "own
+    # members override every base"), and the class-attribute emitter broke on
+    # the FIRST match — so it took the base's. The whole chain read the root's
+    # value. `other`, which NO subclass overrides, is the control that the
+    # inherited declaration is still found when there is no own one.
+    test_gimple_stdout("gimple_subclass_overrides_a_class_constant", """\
+class Base:
+    tag = 7
+    other = 1
+
+class Child(Base):
+    tag = 9
+
+class Grand(Child):
+    tag = 11
+
+def main():
+    print(Base.tag, Child.tag, Grand.tag)
+    print(Base.other, Child.other, Grand.other)
+    b = Base()
+    c = Child()
+    print(b.tag, c.tag)
+main()
+""", "7 9 11\n1 1 1\n7 9\n")
+
+    # The `cls`-half of the same inheritance story, on the shape most real
+    # code uses: a `@classmethod` accessor reading `cls.<attr>`. The doc
+    # recorded this as needing a runtime class OBJECT ("feature-sized"), and
+    # it does not: the lifted method is emitted PER SUBCLASS and the fix above
+    # gives each one its own `_classattr_<Cls>__<attr>` initialiser, so the
+    # name-resolved `cls.tag` reads the right one for free. `Base.who()` is in
+    # the same test because a fix that made the subclass read its own value by
+    # also making the base read the subclass's would pass the first line.
+    test_gimple_stdout("gimple_inherited_classmethod_reads_its_own_cls", """\
+class Base:
+    tag = 7
+    @classmethod
+    def who(cls):
+        return cls.tag
+
+class Child(Base):
+    tag = 9
+
+def main():
+    print(Child.who())
+    print(Base.who())
+main()
+""", "9\n7\n")
+
+    # A capture DISCOVERY gap, not a truthiness gap, which is what
+    # bugs/CODEGEN_captured_string_local_reads_falsey.md reported it as. The
+    # lambda-capture scan walked a hand-grown list of AST child fields, and a
+    # field that was not on it was an UNDER-approximation of what the body
+    # reads: the name never reached the env struct, and the body read a hard
+    # `(int64_t)0; /* ct param or undeclared: p */` for it. `p` read as 0, so
+    # `p` was falsey, so `sorted` saw all-equal keys and preserved insertion
+    # order — which is why the symptom read as "sorted() didn't sort".
+    #
+    # The field list is now every child-node field on the parser's AST
+    # dataclasses, as one table. Each line below is a field that was missing,
+    # and each is a name the body really does read:
+    #   condition  — `d[k] if s else 0`, the doc's own shape
+    #   index      — `d[p]`, a captured name as a subscript key
+    #   pairs      — `{'k': s}`, a captured name as a dict value (the list
+    #                said `key`/`val`, which no AST node has had for a while)
+    #   start/stop — `s[1:]`
+    #   operands   — `0 < n < 3`, a comparison chain
+    #   kwargs     — `two(a=1, b=n)`
+    # Every spelling prints CPython's answer, and each one printed a
+    # plausible number or string before, at exit 0.
+    test_gimple_stdout("gimple_lambda_capture_of_every_ast_child_field", """\
+def two(a, b):
+    return a - b
+
+def main():
+    d = {'b': 2, 'a': 1}
+    p = 'b'
+    s = 'abc'
+    n = 1
+    print(sorted(d, key=lambda k: d[k] if s else 0))
+    print((lambda: d[p])())
+    print((lambda: {'k': s})())
+    print((lambda: s[1:])())
+    print((lambda: 0 < n < 3)())
+    print((lambda: two(a=1, b=n))())
+    print(sorted(d, key=lambda k: d[k] if n else 0))
+main()
+""", "['a', 'b']\n2\n{'k': 'abc'}\nbc\nTrue\n0\n['a', 'b']\n")
 
     # …as a sorted() key, the shape that also required the forward
     # declaration to mirror the definition's own parameter resolution (the
@@ -2989,6 +3126,128 @@ def main():
             tot += 1
     print(tot)
 """, "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
+
+    # ── A CONTAINER used as a dict key keys by its VALUE
+    # (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). A tuple word reached
+    # the dict as a bare address: `(p, os.path.getmtime(p))` built twice hit
+    # twice as often as it missed never, so every lookup grew the dict and the
+    # self-hosted `mojoc --dump-full fire.py` carried ~16 GB of it.
+    #
+    # What is asserted here is the whole key path, not one spelling: store,
+    # read, `in`, `get(k, default)`, a dict LITERAL key of the same tuple (the
+    # two must agree or one dict is two dicts), a NESTED tuple (whose inner
+    # list must be walked by value rather than addressed), and — the half that
+    # a literal-only test would pass by accident — a key whose string element
+    # is built at RUN time from a runtime value, so the two builds of it are
+    # different strings at different addresses. That last case is why the
+    # string slot is read by the model's own boxed-string discriminator rather
+    # than by a pointer-shape test.
+    test_gimple_stdout("gimple_tuple_dict_key_is_content_keyed", """\
+def main():
+    d = {}
+    k1 = ("a", 1)
+    k2 = ("a", 1)
+    k3 = ("a", 2)
+    d[k1] = "one"
+    d[("b",)] = "tuple1"
+    d[(1, 2)] = "ints"
+    print(d[k2], d.get(k3, "none"), d[k3] if k3 in d else "none")
+    print(d[("b",)], d[(1, 2)], d.get((2, 1), "none"), d.get(("a", 1), "none"))
+    d[k1] = "again"
+    print(d[k2], len(d))
+    lit = {(9, 9): "lit"}
+    lit[(9, 9)] = "lit2"
+    print(lit[(9, 9)], len(lit))
+    n = {}
+    n[(("x",), "y")] = 1
+    print(n[(("x",), "y")], n.get((("x",), "z"), "none"))
+    for name in ["alpha", "beta", "alpha"]:
+        e = {}
+        e[(name, len(name))] = 1
+        print(e[(name, len(name))], len(e))
+main()
+""", "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
+       "1 1\n1 1\n1 1\n")
+
+    # The other half of that doc, and the expensive one: a MISSING tuple key
+    # grew the dict by one entry per lookup, which is where ~16 GB of the live
+    # set on `mojoc --dump-full fire.py` went (a cache keyed by
+    # `(module, name)` re-inserting what it had just looked up, every call).
+    # stdout alone cannot see it, so this is the bounded-memory shape: the
+    # answer is identical with or without the leak, and only the peak is not.
+    #
+    # The four keys are built ONCE, before the loop, and only INDEXED inside it.
+    # That is deliberate: a tuple LITERAL in the loop allocates a list per
+    # iteration and nothing ever frees one, which measures a different (also
+    # real, also pre-existing) leak — ~180 B per literal, so 1.2 M of them is
+    # ~220 MB on its own — and would swamp the ~78 B per LOOKUP this is here to
+    # pin. What has to stay flat across the loop is the key rendering and the
+    # dict itself, and those are the only things that move when this test fails.
+    test_gimple_bounded_memory("gimple_tuple_dict_key_lookup_does_not_grow", """\
+def main():
+    keys = [("stable", 0), ("stable", 1), ("stable", 2), ("stable", 3)]
+    d = {}
+    for i in range(300000):
+        d[keys[i % 4]] = i
+        d[keys[i % 4]]
+        if keys[i % 4] in d:
+            d[keys[i % 4]] = i
+        d.get(keys[i % 4], 0)
+    print(len(d))
+    print(d[keys[3]])
+main()
+""", "4\n299999\n", 40)
+
+    # ── `with C():` with no `as` target still runs `__exit__`
+    # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+    # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
+    # item were appended from inside `if item.alias is not None:`, so the
+    # no-`as` spelling registered nothing: `__enter__` was called, the body ran,
+    # and NO teardown was emitted at all — not a wrong `__exit__` argument, no
+    # teardown. On a lock that wedges every other process for the life of the
+    # tree.
+    #
+    # It has to RUN to be a test: the generated C is well-formed either way and
+    # the body's own output is identical, which is why `test_runtime_diff.py`'s
+    # A/B engine comparison cannot see it. `__exit__` prints, so its absence is
+    # in stdout. Both spellings are in one program because the fix is exactly
+    # "the no-`as` spelling registers like the other one", and the loop is here
+    # because a per-iteration teardown leak is what the bug was FOR.
+    test_gimple_stdout("gimple_with_no_as_target_still_calls_exit", """\
+class Lock:
+    def __init__(self, name):
+        self.name = name
+        self.held = 0
+    def __enter__(self):
+        self.held = self.held + 1
+        print("enter", self.name, self.held)
+        return self.held
+    def __exit__(self, t, v, tb):
+        self.held = self.held - 1
+        print("exit", self.name, self.held)
+
+def work():
+    l = Lock("A")
+    with l:
+        print("body no as")
+    with l as n:
+        print("body as", n)
+    print("held after both", l.held)
+
+def loop():
+    for i in range(3):
+        with Lock("B"):
+            print("loop body", i)
+
+def main():
+    work()
+    loop()
+main()
+""", "enter A 1\nbody no as\nexit A 0\nenter A 1\nbody as 1\nexit A 0\n"
+       "held after both 0\n"
+       "enter B 1\nloop body 0\nexit B 0\n"
+       "enter B 1\nloop body 1\nexit B 0\n"
+       "enter B 1\nloop body 2\nexit B 0\n")
 
     # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
@@ -4614,6 +4873,59 @@ fn main():
     print(n.get(b'a'), n.get('a'), n.pop(b'a'), len(n), n['a'])
 """, "7 0 -1\n7 0 0\n-1 2\n7 8 0\n3 3 1\n9 9 3 2\nv v 0\n1.5\n1 2 1 1 2\n")
 
+    # `x in <dict>` where the DICT arrived at the test with its static type
+    # erased -- a dict handed to an unannotated parameter, which is what any
+    # cross-module table looks like -- used to go to `mojo_in_dispatch_int`,
+    # and that dispatcher had branches for a list and a set and no dict at
+    # all, so it fell off the end and answered False. Compiled, exit 0, no
+    # diagnostic; only the ANSWER was wrong, which is why the helper below
+    # has to take the dict as a parameter for this to be the erased path.
+    #
+    # Both key domains are covered because the erased view cannot tell them
+    # apart: a str key is a boxed `char *` in the same int64_t the integers
+    # use, so the dispatcher's dict branch has to decide between them (the
+    # existing `mojo_dict_contains_kw`), and a dict mixing the two domains
+    # is the case where deciding wrong is visible.
+    test_gimple_stdout("gimple_in_erased_dict_answers_membership", """\
+def count_str(keys, d) -> Int:
+    var n = 0
+    for k in keys:
+        if k in d:
+            n = n + 1
+    return n
+
+def count_int(keys, d) -> Int:
+    var n = 0
+    for k in keys:
+        if k in d:
+            n = n + 1
+    return n
+
+fn main():
+    var names = ["f0", "f1"]
+    var byname = {}
+    byname["f0"] = 1
+    byname["f1"] = 1
+    print(count_str(names, byname))
+    var nums = [1, 2]
+    var bynum = {}
+    bynum[1] = 1
+    bynum[2] = 1
+    print(count_int(nums, bynum))
+    # an absent key is still absent, and the mixed-domain dict answers both
+    print(count_str(["f0", "f9"], byname))
+    print(count_int([1, 9], bynum))
+    # a numeric STRING key and the integer it spells are one entry in this
+    # runtime (see _dict_set_raw's keykind note), so an erased int needle
+    # finds the "1" entry too -- the established answer for d["1"], asserted
+    # here because the new dict branch now shares that decision with the
+    # dict-subscript path and the two must not drift apart.
+    var numeric = {}
+    numeric["1"] = 100
+    print(count_int([1, 2], numeric), 1 if numeric["1"] == 100 else 0)
+    return 0
+""", "2\n2\n1\n1\n1 1\n")
+
     # A set's loop TARGET is a fresh binding, not a read of an existing
     # name, so two loops over sets of different element domains in one
     # function must both work. They did not: `_declare_var` is
@@ -5630,6 +5942,245 @@ def main():
 main()
 """, "1\n2\nTrue\nFalse\n7\n7\n")
 
+    # The CONSTRUCTOR half of the same cross-call struct contract
+    # (the ctor-direction cross-call struct contract in `module_gen.py`'s
+    # constructor observation pass). The receiver
+    # here is `self.w`, whose C type comes from `__init__`'s own unannotated
+    # `w`, so the only evidence anywhere is the `L(T(15))` CALL SITE — the
+    # free-function pass that fixes the case above cannot see it. Before the
+    # fix `w` stayed `int64_t`, the field inherited it, and `self.w.numel()`
+    # hit the generic no-op stub and returned the `T *`'s own bits: a
+    # pointer-sized garbage decimal, exit 0, no diagnostic.
+    test_gimple_stdout("gimple_ctor_param_used_only_as_field_then_receiver", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(15)).numel())
+
+main()
+""", "15\n")
+
+    # The same fix reached through a FREE FUNCTION's parameter instead of
+    # through a field, and with a second (`char *`) constructor argument
+    # beside it, so the struct answer has to be admitted per SLOT and not
+    # simply as "this constructor saw a struct somewhere".
+    test_gimple_stdout("gimple_ctor_param_struct_and_scalar_slots_are_independent", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w, tag):
+        self.w = w
+        self.tag = tag
+    def numel(self):
+        return self.w.numel()
+    def label(self):
+        return self.tag
+
+def mk(t):
+    return L(t, 'hi')
+
+def main():
+    x = mk(T(8))
+    print(x.numel(), x.label())
+
+main()
+""", "8 hi\n")
+
+    # The `self.<field>` constructor argument, resolved from the owning
+    # method's struct — and the one-hop chain that needs it: `Box(self.t)`
+    # inside `Holder.go` is only observable once `Holder.t` has a `T *`
+    # field type, which is itself written by the same observation pass from
+    # `Holder(T(4))` at the call site. So collection and application have to
+    # run to a fixpoint; one pass sees `Holder.t` as the int64_t default and
+    # the chain stops there.
+    test_gimple_stdout("gimple_ctor_param_self_field_argument_resolves_a_chain", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class Box:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+class Holder:
+    def __init__(self, t):
+        self.t = t
+    def go(self):
+        return Box(self.t).numel()
+
+def main():
+    print(Holder(T(4)).go())
+
+main()
+""", "4\n")
+
+    # A genuinely POLYMORPHIC constructor argument — `T` and `U` both passed
+    # into the same slot — must stay unresolved, which is the documented rule
+    # ("not unanimous over the call sites → leave it at the int64_t default").
+    # What is asserted is that the widening above does not resolve such a slot
+    # by picking a winner: both classes answer `0` for a method that does not
+    # read the field, so a resolved `T *` would still print `0 0` here and the
+    # test would pass either way — which is exactly why the receiver-reading
+    # variant lives in
+    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
+    # instead, where the two outcomes are actually distinguishable.
+    test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def tag(self):
+        return 0
+
+def main():
+    print(L(T(2)).tag(), L(U(2)).tag())
+
+main()
+""", "0 0\n")
+
+    # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
+    # constructor and read by a different function. The mechanism is recorded
+    # in `_gmi_phase17_collect_appends`' own docstring
+    # (mojo/middle/module_shared.py); its bug doc is deleted. The list
+    # is correct at runtime the whole way through; what is lost is the
+    # compile-time knowledge of what is IN it, so `REGISTRY[0].numel()`'s
+    # receiver is an `int64_t`, finds no matching user method, and hits the
+    # generic no-op stub — the `T *`'s own bits as a decimal, exit 0.
+    # `print(len(REGISTRY), ...)` printed `4` and the garbage in the same
+    # breath, which is what makes the shape easy to miss.
+    #
+    # Two halves had to change for this, and each is a half on its own:
+    # `_gmi_phase17_collect_appends` walked FunctionDef/If/While/For/Try/
+    # With but NOT `StructDef`, so an append inside a constructor — the
+    # dominant registry shape — was invisible to the whole pass.
+    test_gimple_stdout("gimple_global_registry_element_type_survives_a_function_boundary", """\
+REGISTRY = []
+
+class T:
+    def __init__(self, n):
+        self.n = n
+        REGISTRY.append(self)
+    def numel(self):
+        return self.n * 2
+
+def build(k):
+    T(k)
+
+def main():
+    for i in range(4):
+        build(i + 1)
+    print(len(REGISTRY), REGISTRY[0].numel())
+
+main()
+""", "4 2\n")
+
+    # The same conclusion read back through a comprehension and through a
+    # method that is not `numel`, so the fix is a real element type on the
+    # global rather than one call site happening to work.
+    test_gimple_stdout("gimple_global_registry_element_type_reaches_every_reader", """\
+REG = []
+
+class T:
+    def __init__(self, n):
+        self.n = n
+        REG.append(self)
+    def numel(self):
+        return self.n * 2
+    def tag(self):
+        return 't'
+
+def report():
+    return [r.numel() for r in REG]
+
+def main():
+    for i in range(3):
+        T(i + 1)
+    print(len(REG), report(), REG[2].tag())
+
+main()
+""", "3 [2, 4, 6] t\n")
+
+    # The CLASS-ATTRIBUTE spelling, which is a different receiver shape at
+    # the append site: `T.registry.append(self)` reads as
+    # `MemberExpr(obj=IdentExpr('T'), member='registry')`, so the collector's
+    # bare-`IdentExpr` test rejected it and the conclusion was never reached
+    # at all. Its key has to be the `_classattr_T__registry` global the
+    # class-attribute registration synthesizes, which is what makes the
+    # recorded answer reachable by the reader.
+    test_gimple_stdout("gimple_class_attribute_registry_element_type", """\
+class T:
+    registry = []
+    def __init__(self, n):
+        self.n = n
+        T.registry.append(self)
+    def numel(self):
+        return self.n
+
+class U:
+    registry = []
+    def __init__(self, n):
+        self.n = n
+        U.registry.append(self)
+    def numel(self):
+        return self.n * 7
+
+def main():
+    T(3)
+    U(4)
+    print(len(T.registry), T.registry[0].numel())
+    print(len(U.registry), U.registry[0].numel())
+
+main()
+""", "1 3\n1 28\n")
+
+    # A local list has always worked (populate and read in the same
+    # function), and it must keep working: it is the control that shows the
+    # fix is about where the element type is RECORDED, not about the read.
+    test_gimple_stdout("gimple_local_registry_element_type_unchanged", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n * 2
+
+def main():
+    reg = []
+    for i in range(4):
+        reg.append(T(i + 1))
+    print(len(reg), reg[0].numel())
+
+main()
+""", "4 2\n")
+
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a
     # type inference the class body never did — but only the bare spelling
@@ -5898,6 +6449,52 @@ print([1, 2])
 print({"a": 1})
 """, "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
+    # A container of structs prints its ELEMENTS through the element's own
+    # `__repr__` — the container rows of
+    # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+    # container_spellings.md, which printed a raw pointer decimal where CPython
+    # prints the object (and the decimal moves run to run, so no value
+    # comparison could pass).
+    #
+    # The mechanism: the codegen records, ON THE VALUE, how to render one
+    # element (`mojo_list_set_elem_repr(t, _mojo_elem_repr_P)`), because the
+    # element's static type is known where the list is built and is
+    # unrecoverable later — `_mojo_dispatch_repr` needs a runtime type TAG,
+    # which a struct-allocated value does not carry. The shim prefers the
+    # user's `__repr__` and falls back to the generated field dump, so a struct
+    # with no dunder reprs as `P(x='a')`, which is what it already printed on
+    # its own.
+    #
+    # Every spelling here is one where the element's type IS visible at the
+    # literal: a parameter, a local, a slice, a copy, a concatenation. The two
+    # shapes where it is not are filed, because each needs a type recorded
+    # somewhere it currently is not: an unannotated MODULE-LEVEL binding read
+    # at module level (boxed into an int64_t with no type anywhere), and a
+    # struct-typed FIELD inside another struct's field dump (the field's
+    # semantic type is not in `struct_field_types`, so the dump formats the
+    # slot as an integer). See the Status section of the bug doc.
+    test_gimple_stdout("gimple_container_element_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def containers(p: P):
+    print(repr([p]))
+    print(repr((p,)))
+    print(repr([p, p]))
+    print(repr([[p]]))
+    print(repr([p][0:2]))
+    print(repr(list([p])))
+    print(repr([p] + [p]))
+
+def main():
+    containers(P("a"))
+main()
+""", "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
+       "[R<a>, R<a>]\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
@@ -5967,7 +6564,15 @@ print({'ok': True, 'count': 3})
     # `b.n` (an `int` field) and `%d` of the bool are in the test
     # deliberately: they are RIGHT, and a fix that made them print True/False
     # or 1 would pass every other assertion in this file.
-    test_gimple_stdout("gimple_bool_annotated_struct_field", """\
+    #
+    # The reads are at MODULE SCOPE, which is the point of this spelling and
+    # not an incidental choice of fixture: `b` is then a module-level GLOBAL,
+    # so the receiver's type lives in `_global_var_types` and there is no
+    # `var_types` entry for it at all. `_receiver_ctypes` is the helper that
+    # knows this, and `_is_python_bool_field` asking `_quick_type` instead is
+    # what printed every line below as 1/0 while the same field read inside a
+    # function printed True/False.
+    test_gimple_stdout("gimple_bool_annotated_struct_field_at_module_scope", """\
 class Box:
     def __init__(self, flag: bool, n: int):
         self.flag = flag
@@ -5994,6 +6599,85 @@ if b.flag:
     print('then')
 """, "True\nFalse\nTrue\nTrue\nTrue\nTrue\n1\nTrue\nTrue\n5\n"
        "{'k': True}\n[True]\n[True, False]\n{'flag': True, 'n': 5}\nthen\n")
+
+    # A `bool`-ANNOTATED struct FIELD, which is the same class one level out
+    # from the two tests above: for a field the bool-ness is gone before any
+    # chokepoint can look at it. `_TYPE_MAP` maps `'bool'` to `'int'`, so
+    # `_resolve_type('bool')` returns `int`, the struct declares `int flag`,
+    # and every `_Bool` arm in print/repr/str/the dict store has nothing to
+    # fire on. Nine spellings printed `1` and none said anything about it.
+    # `struct_bool_fields` already existed and the struct's own generated
+    # `__repr__` already consulted it, which is exactly why this survived:
+    # `print(b)` said `flag=True` while `print(b.flag)` said `1`.
+    #
+    # Every consumer is reached through the ONE shared predicate
+    # (`is_python_bool_expr`), which gained a MemberExpr arm, so this test
+    # pins every spelling rather than the one that was easiest to look at.
+    # The `int` field in the same struct and `b.flag + 0` are the controls
+    # that a fix did not turn a bool field into something else.
+    #
+    # The reads are inside a function, where `b` is a LOCAL and so has a
+    # `var_types` entry — the spelling
+    # `gimple_bool_annotated_struct_field_at_module_scope` above covers is the
+    # same field through a module-level GLOBAL, and the two are separate
+    # regressions that separate as readily as separate cases: they resolve the
+    # receiver's struct through different tables.
+    test_gimple_stdout("gimple_bool_annotated_struct_field", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+    def get(self):
+        return self.flag
+
+def main():
+    b = Box(True, 5)
+    c = Box(False, 5)
+    print(b.flag)
+    print(repr(b.flag))
+    print(b.n)
+    print(c.flag)
+    print('%r' % (b.flag,))
+    print(f'{b.flag}')
+    print(str(c.flag))
+    print({'k': b.flag})
+    print(b.get())
+    print(repr(b.get()))
+    print(b.flag + 0)
+    print(b.flag == True)
+main()
+""", "True\nTrue\n5\nFalse\nTrue\nTrue\nFalse\n{'k': True}\n"
+       "True\nTrue\n1\nTrue\n")
+
+    # The two shapes the field case does NOT reach on its own, and the
+    # controls that keep them honest. A list of bool fields needs the list
+    # LITERAL's element type to be `_Bool`, because the generic list repr
+    # both formats a slot as "1" and reads a False (0) slot as the None
+    # sentinel -- `[1, None]`, not `[1, 0]`. A bool field read through a
+    # BOUND METHOD's receiver (`other.flag` where `other` is a `self`
+    # parameter) resolves the receiver's struct rather than `self`, which is
+    # the second spelling `_is_python_bool_field` has to answer.
+    test_gimple_stdout("gimple_bool_field_in_a_list_and_through_a_receiver", """\
+class Box:
+    def __init__(self, flag: bool):
+        self.flag = flag
+    def echo(self, other: Box):
+        return other.flag
+    def truthy(self):
+        if self.flag:
+            return 1
+        return 0
+
+def main():
+    b = Box(True)
+    c = Box(False)
+    print([b.flag])
+    print([b.flag, c.flag])
+    print(b.echo(c))
+    print(b.truthy())
+    print(c.truthy())
+main()
+""", "[True]\n[True, False]\nFalse\n1\n0\n")
 
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
@@ -6321,712 +7005,57 @@ def main():
 
     test_cross_module_ctor_scalar_field_type()
 
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
-    # §4 ("module.Class(...) construction is unresolved on every path"):
-    # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE
-    # object rather than its bare name — lowered to a generic "method call"
-    # whose receiver (the module marker) was echoed straight back as the
-    # "result", so `x` bound to the module handle and `x.widgetName` raised
-    # AttributeError at runtime.
-    def test_qualified_module_struct_construction():
+    # The `sizeof`/`fnaddr` accessor helpers are file-scope `static`s, and every
+    # module's parts land in ONE translation unit, so the sets that decide
+    # whether one has already been DEFINED must be shared into every
+    # `_compile_imported_module` temp_gen. They were not: each temp_gen
+    # started with an empty `_c_helpers_needed` dict AND an empty
+    # `_emitted_c_helpers` set, so `_c_helper_def` returned a second
+    # definition of a helper the root gen had already emitted, and gcc
+    # rejected the closure with `error: redefinition of
+    # '_mojo_sizeof_<X>_env'`.
+    #
+    # Asserted on the GENERATED .ci, not on a built binary: the smallest
+    # honest reproducer (two sibling modules with a same-named lifted
+    # closure) ALSO collides on the lifted FUNCTION's own name, which is a
+    # separate pre-existing defect (see that bug doc's "Related"), so a
+    # "does it compile" assertion here would be satisfied by the wrong one of
+    # the two being fixed. "Exactly one definition of each accessor" is the
+    # property, and it is what sharing buys.
+    def test_c_accessor_helpers_emitted_once_across_modules():
         global _PASS, _FAIL, _TIMEOUT
-        name = "qualified_module_struct_construction"
-        defn = ("class Dialog:\n"
-                "    def __init__(self, widgetName):\n"
-                "        self.widgetName = widgetName\n")
-        use = ("import xmodctor2_defn\n"
-               "\n"
-               "def main():\n"
-               "    x = xmodctor2_defn.Dialog(\"a\")\n"
-               "    print(x.widgetName)\n"
-               "\n"
-               "main()\n")
+        name = "c_accessor_helpers_emitted_once_across_modules"
+        mod = ("def pick(v):\n"
+               "    f = lambda x: x + v\n"
+               "    return f(1)\n")
+        files = {'xhelp_a.py': mod, 'xhelp_b.py': mod,
+                 'xhelp_main.py': "import xhelp_a\nimport xhelp_b\n"}
         try:
-            out = _compile_two_files_do_imports_and_run(
-                'xmodctor2_defn.py', defn, 'xmodctor2_use.py', use)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
+            with tempfile.TemporaryDirectory() as wd:
+                for fn, src in files.items():
+                    open(os.path.join(wd, fn), 'w').write(src)
+                ep = os.path.join(wd, 'xhelp_main.py')
+                from gimple_codegen import compile_to_gimple
+                c_code = compile_to_gimple(files['xhelp_main.py'],
+                                           do_imports=True, filename=ep)
         except Exception as e:
             print(f"FAIL  {name}: {e}")
             _FAIL += 1
             return
-        if out == "a\n":
+        sz = [ln for ln in c_code.splitlines()
+              if ln.startswith('static int64_t _mojo_sizeof_')]
+        fa = [ln for ln in c_code.splitlines()
+              if ln.startswith('static void * _mojo_fnaddr_')]
+        if len(sz) == 1 and len(fa) == 1:
             print(f"PASS  {name}")
             _PASS += 1
         else:
-            print(f"FAIL  {name}: expected 'a\\n', got {out!r}")
+            print(f"FAIL  {name}: expected exactly one definition of each "
+                  f"sizeof/fnaddr accessor across the closure, got "
+                  f"{len(sz)} sizeof and {len(fa)} fnaddr: {sz + fa}")
             _FAIL += 1
 
-    test_qualified_module_struct_construction()
-
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
-    # the part that is fixable without the type-inference project it is
-    # parked on: an iterator struct reached through `from mod import Struct`
-    # composes its protocol methods' C names with a hand-written
-    # `{Struct}___{method}__` f-string instead of `gen._struct_method_csym`,
-    # the tree's ONE composer — so the home-module qualifier was missing and
-    # the call went to a symbol nothing defines.
-    #
-    # The failure mode is worse than a link error. gcc's
-    # -Wimplicit-function-declaration fallback types the undeclared call as
-    # returning `int`, so `It___iter__(It *)` became an `int` and the `for`
-    # lowering assigned that int to an `It *`:
-    #
-    #   implicit declaration of function 'It___iter__'; did you mean 'itmod_It___iter__'?
-    #   assignment to 'It *' from 'int' makes pointer from integer without a cast
-    #
-    # and `next(obj)`'s `{Struct}___next__` had the identical defect.
-    #
-    # No CPython comparison here, deliberately: `__has_next__` is a Mojo-only
-    # protocol (CPython has no such method and would call `__next__` until it
-    # raises), so CPython cannot be the oracle for this fixture — running it
-    # loops forever. The expectation is hand-written and the assertion is
-    # the built binary's REAL stdout, plus a gcc run that must be clean
-    # (pre-fix it does not compile at all).
-    def test_cross_module_iterator_struct_protocol_symbols():
-        global _PASS, _FAIL, _TIMEOUT
-        name = "cross_module_iterator_struct_protocol_symbols"
-        defn = ("class It:\n"
-                "    def __init__(self):\n"
-                "        self.n = 0\n"
-                "    def __iter__(self):\n"
-                "        return self\n"
-                "    def __has_next__(self) -> Bool:\n"
-                "        return self.n < 3\n"
-                "    def __next__(self) -> Int:\n"
-                "        self.n = self.n + 1\n"
-                "        return self.n\n"
-                "\n"
-                "def make() -> It:\n"
-                "    return It()\n")
-        use = ("from xmoditer_defn import make, It\n"
-               "\n"
-               "def main():\n"
-               "    d = make()\n"
-               "    print(next(d))\n"
-               "    for x in d:\n"
-               "        print(x)\n"
-               "    e = It()\n"
-               "    print(next(e))\n"
-               "\n"
-               "main()\n")
-        try:
-            out = _compile_two_files_do_imports_and_run(
-                'xmoditer_defn.py', defn, 'xmoditer_use.py', use)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        # next(d) -> 1 (n becomes 1); the `for` then yields n=2,3 and stops
-        # at __has_next__ (n<3); next(e) on a fresh It -> 1.
-        if out == "1\n2\n3\n1\n":
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: expected '1\\n2\\n3\\n1\\n', got {out!r}")
-            _FAIL += 1
-
-    test_cross_module_iterator_struct_protocol_symbols()
-
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
-    # two REAL classes sharing a bare name across two modules. The single
-    # string this codegen used as a struct's C identity was the bare
-    # `StructDef.name`, so whichever module was processed first owned the
-    # field table and the second one's `self.<field>` accesses, field types
-    # and `__init__` call sites all resolved against the winner's. The
-    # helpers below compile 2 or 3 sibling files with do_imports=True, run
-    # the result, AND run the same source under CPython, and require the two
-    # stdouts to agree — so every assertion here is anchored to what Python
-    # actually answers, never to a value this compiler happens to produce.
-    def _compile_n_files_and_run(files: dict, entry: str, timeout=60,
-                                 extra_runtime=()):
-        """Write `files` ({name: source}), compile `entry` with
-        do_imports=True (the single-TU inline path), build with gcc -fgimple,
-        run, return (compiled_stdout, cpython_stdout, emitted_c). The emitted
-        C is handed back because a compile that SUCCEEDS can still be wrong
-        about its own shape, and the string-pool case below is one: what it
-        emits more than once is invisible to a zero exit code.
-
-        `extra_runtime` names more runtime translation units to link beside
-        `fire_runtime.c` — the coroutine set, for a fixture whose sibling
-        module yields. Without it such a program emits calls to
-        `___mojo_coro_yield_i` / `___mojo_gen_arg` and fails to LINK, which
-        says nothing about the shape under test. Raises on any failure with the
-        stage that failed in the message."""
-        with tempfile.TemporaryDirectory() as wd:
-            for name, src in files.items():
-                open(os.path.join(wd, name), 'w').write(src)
-            ep = os.path.join(wd, entry)
-            from gimple_codegen import compile_to_gimple
-            c_code = compile_to_gimple(files[entry], do_imports=True,
-                                       filename=ep)
-            # CPython's own answer for the identical program text, so the
-            # expectation is never a hardcoded string this repo chose. Taken
-            # INSIDE the `with`, while the source files still exist.
-            cp = subprocess.run([sys.executable, ep], capture_output=True,
-                                text=True, timeout=timeout, cwd=wd)
-            cp_out = cp.stdout
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
-                                         delete=False) as f:
-            f.write(c_code)
-            c_file = f.name
-        exe_file = c_file.replace('.c', '.exe')
-        try:
-            runtime_dir = os.path.join(HERE, 'runtime')
-            result = subprocess.run(
-                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
-                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')]
-                + list(extra_runtime),
-                capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0:
-                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
-            return run_executable_stdout(exe_file), cp_out, c_code
-        finally:
-            for p in (c_file, exe_file):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-    def _check_agrees_with_cpython(name, files, entry, timeout=60):
-        """Run `files` both ways; PASS only if compiled == CPython."""
-        global _PASS, _FAIL, _TIMEOUT
-        try:
-            got, want, _c = _compile_n_files_and_run(files, entry, timeout)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        if got == want:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
-            _FAIL += 1
-
-    # A comprehension's `for` target is a NEW binding in the comprehension's own
-    # scope, so it cannot reuse the enclosing function's C variable for that
-    # name. Every comprehension whose iterable lowers to a `MojoList *` goes
-    # through `_compr_list_loop` (whatever its result kind), and that was the
-    # one comprehension loop helper NOT passing `_declare_var(..., force=True)`
-    # — so the `char *` element was routed through an `(int64_t)` temp into the
-    # existing `struct Tok *` variable and gcc refused the whole program:
-    #
-    #   u.py:10:5: error: assignment to 'Tok *' from 'int64_t' makes pointer
-    #   from integer without a cast [-Wint-conversion]
-    #
-    # This was filed as a doc whose own next step was "reduce to a user-level
-    # reproducer", having failed to find one: its negative results (a struct
-    # VALUE local, an int64_t local, a `MojoList *` local, a `String` local, a
-    # dict local) all came out correct and the shape was reported as narrower
-    # than "shadows a struct pointer". It is not: this is that reproducer, six
-    # lines of plain Python, because a `class` lowers to a struct and so the
-    # fixture is something CPython can run and be the oracle for. Neither the
-    # loop-assigned local nor the `if`-nested `return` in the original report
-    # is needed. Both the compile and the values are asserted: the helper
-    # raises on a gcc failure, so before the fix this case failed at the
-    # compile and not on an answer.
-    #
-    # The second row is the same fix's other half. A comprehension's target
-    # does not outlive the comprehension, so the enclosing binding has to come
-    # back — `a = [t for t in names]` followed by `print(t.k)` must read the
-    # OUTER `t`, not the comprehension's last element. It is printed rather
-    # than returned on purpose: a heterogeneous list bound from a call result
-    # reads its elements back through the wrong accessor, which is its own
-    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call.md)
-    # and would otherwise be what made this case red.
-    _check_agrees_with_cpython("comprehension_target_shadows_struct_local", {
-        'compr_shadow.py': "class Tok:\n"
-                           "    def __init__(self, k):\n"
-                           "        self.k = k\n"
-                           "\n"
-                           "def peek(i):\n"
-                           "    return Tok(i)\n"
-                           "\n"
-                           "def f(names):\n"
-                           "    t = peek(0)\n"
-                           "    return [t for t in names]\n"
-                           "\n"
-                           "def g(names):\n"
-                           "    t = peek(3)\n"
-                           "    a = [t for t in names]\n"
-                           "    print(t.k)\n"
-                           "    return a\n"
-                           "\n"
-                           "def main():\n"
-                           "    r = f(['aa', 'bb'])\n"
-                           "    print(r[0])\n"
-                           "    print(r[1])\n"
-                           "    s = g(['cc'])\n"
-                           "    print(s[0])\n"
-                           "main()\n",
-    }, 'compr_shadow.py')
-
-    # The tuple-target half of the same comprehension target: `[(a, b) for a,
-    # b in pairs]` binds BOTH names, so both must be their own bindings (and
-    # both must come back afterwards). A `char *` slot against an enclosing
-    # struct-pointer slot of the same name was the same int64_t-into-pointer
-    # refusal as the single-target row.
-    _check_agrees_with_cpython("comprehension_tuple_target_shadows_struct_local", {
-        'compr_shadow2.py': "class Tok:\n"
-                            "    def __init__(self, k):\n"
-                            "        self.k = k\n"
-                            "\n"
-                            "def f(names):\n"
-                            "    a = Tok(7)\n"
-                            "    b = Tok(8)\n"
-                            "    return [a for a, b in names]\n"
-                            "\n"
-                            "def main():\n"
-                            "    r = f([['p', 'q'], ['r', 's']])\n"
-                            "    print(r[0])\n"
-                            "    print(r[1])\n"
-                            "main()\n",
-    }, 'compr_shadow2.py')
-
-    # An imported module's string-literal pool. Its doc
-    # (`CODEGEN_inline_import_string_pool_name_collision`) is FIXED and DELETED,
-    # so this comment is the record of what it reported and what is actually
-    # there.
-    #
-    # It reported a gcc `redefinition of 'char* _slit_10000'` from an inline
-    # compile of a package whose sibling yields strings. Re-measured on this
-    # tree, that cannot happen, for two independent reasons: the pool is SHARED
-    # across every gen in the closure (`temp_gen._str_pool = gen._str_pool` in
-    # `_compile_imported_module`), so two modules cannot mint the same `_slit_N`,
-    # and only the ROOT emits definitions, so there is one of those per name at
-    # most. And the shape the doc quoted — `static char * x;` at file scope
-    # followed by `static char * x = "...";` — is a tentative definition
-    # followed by the real one, which C allows (checked: `gcc -c` on exactly
-    # that file, and on the definition-first order too).
-    #
-    # What IS there, and was the doc's step 1 half right about, is that every
-    # imported module emits a pool block of its own in the DECLARATION form
-    # listing the WHOLE shared pool — so each module re-declared every name
-    # interned before it, one redundant line per name per module, quadratic in
-    # the imported-module count, in every `.ci` this backend writes. Legal C,
-    # invisible to any exit code, and dropped now: `GimpleGen._str_pool_declared`
-    # is shared the way `_regex_progs_defined` already is (the same job for the
-    # same reason), so a name is declared once per translation unit.
-    #
-    # Two assertions, because they are different claims. The emitted C must
-    # declare each pool name exactly once, whatever the module count — and the
-    # program must still print what CPython prints for the identical text, which
-    # is the part that would catch a filter that dropped a declaration some
-    # module's code needed (`gcc` would say so, but only for the modules this
-    # fixture happens to reach).
-    #
-    # The fixture is the doc's own program — a string-yielding sibling consumed
-    # with `next()` and then a `for`, the shape its next step asked a
-    # regression for — plus two more string-bearing siblings, so the pool is
-    # large enough for the duplication to be unmissable (before the fix this
-    # program emitted 13 names' worth of duplicate declarations).
-    _RUNTIME_DIR = os.path.join(HERE, 'runtime')
-
-    def _check_string_pool_declared_once(name, files, entry, timeout=60):
-        global _PASS, _FAIL, _TIMEOUT
-        # The fixture's sibling is a generator, so the image needs the
-        # coroutine runtime; `test_gimple_generator_runner.py` names the set
-        # (fire_coro.c / fire_coro_gen.c / fire_async_sched.c and the
-        # stack-switch context, which is an assembly file on arm64 and C
-        # elsewhere).
-        _coro_ctx = os.path.join(
-            _RUNTIME_DIR, 'fire_coro_ctx_aarch64.S'
-            if platform.machine().lower() in ('arm64', 'aarch64')
-            else 'fire_coro_ctx_generic.c')
-        extra_runtime = [os.path.join(_RUNTIME_DIR, f) for f in
-                         ('fire_coro.c', 'fire_coro_gen.c', 'fire_async_sched.c')]
-        extra_runtime.append(_coro_ctx)
-        try:
-            got, want, c_code = _compile_n_files_and_run(files, entry, timeout,
-                                                          extra_runtime)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        decls = re.findall(r'^static char \* (_slit_\d+);', c_code, re.M)
-        repeated = sorted({d for d in decls if decls.count(d) > 1})
-        if repeated:
-            print(f"FAIL  {name}: the emitted C declares {len(repeated)} pool "
-                  f"name(s) more than once ({repeated[:6]}…) — each imported "
-                  f"module emitted a declaration block for the whole shared "
-                  f"pool")
-            _FAIL += 1
-            return
-        if got != want:
-            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}  ({len(set(decls))} pool names, each declared "
-              f"once)")
-        _PASS += 1
-
-    #
-    # Every parameter here is ANNOTATED, and that is not decoration: an
-    # unannotated parameter of an IMPORTED function is typed from its call
-    # sites, and a call site spelled `mod.f(...)` is invisible to the pass that
-    # collects them, so such a parameter falls back to `int64_t` and `len(x)`
-    # on it reads a list header. Measured, pre-existing, and filed as
-    # bugs/CODEGEN_module_boundary_carries_no_value_types.md — the same reason
-    # this fixture has no cross-module `yield` either. This test is about the
-    # shape of the emitted C; a second defect must not be what makes it red.
-    _check_string_pool_declared_once("imported_string_pool_declared_once", {
-        'slitpool_rows.py': "def keep(line: str) -> str:\n"
-                            "    return line.partition('#')[0]\n",
-        'slitpool_words.py': "NAMES = ['alpha', 'beta', 'gamma', 'delta']\n"
-                             "def shout(word: str) -> str:\n"
-                             "    return word.upper() + '!'\n",
-        'slitpool_gaps.py': "SEPS = (',', ';', '\\t')\n"
-                            "def width(text: str) -> int:\n"
-                            "    return len(text) * 2\n",
-        'slitpool_main.py': "import slitpool_rows\n"
-                            "import slitpool_words\n"
-                            "import slitpool_gaps\n"
-                            "def main():\n"
-                            "    print(slitpool_rows.keep('a  # x'))\n"
-                            "    print(slitpool_words.shout(slitpool_words.NAMES[2]))\n"
-                            "    print(slitpool_gaps.width(slitpool_gaps.SEPS[1]))\n"
-                            "    for name in slitpool_words.NAMES:\n"
-                            "        print(name)\n"
-                            "main()\n",
-    }, 'slitpool_main.py')
-
-    # The two shapes the bug doc calls out as the LIVE residues, both
-    # re-measured on this tree before the fix: (a) a `str` field sharing a
-    # NAME with the winner's `int64_t` field was stored as a raw pointer
-    # into the winner's int slot, so reading it back printed a heap address
-    # (ASLR-varying, exit 0, no diagnostic) where CPython printed the
-    # string; (b) a 0-arg `mod_b.Dialog()` called the winner's 1-arg
-    # `__init__`, a hard gcc "too few arguments" compile error.
-    _check_agrees_with_cpython("same_bare_name_struct_shared_field_cname", {
-        'colln_mod_a.py': "class Dialog:\n"
-                          "    def __init__(self, n):\n"
-                          "        self.n = n\n",
-        'colln_mod_b.py': "class Dialog:\n"
-                          "    def __init__(self, unused):\n"
-                          "        self.n = 'hello'\n",
-        'colln_main.py': "import colln_mod_a, colln_mod_b\n"
-                         "def main():\n"
-                         "    a = colln_mod_a.Dialog(5)\n"
-                         "    b = colln_mod_b.Dialog(0)\n"
-                         "    print(a.n)\n"
-                         "    print(b.n)\n"
-                         "main()\n",
-    }, 'colln_main.py')
-
-    _check_agrees_with_cpython("same_bare_name_struct_ctor_arity", {
-        'colln2_mod_a.py': "class Dialog:\n"
-                           "    def __init__(self, n):\n"
-                           "        self.n = n\n",
-        'colln2_mod_b.py': "class Dialog:\n"
-                           "    def __init__(self):\n"
-                           "        self.n = 'hello'\n",
-        'colln2_main.py': "import colln2_mod_a, colln2_mod_b\n"
-                          "def main():\n"
-                          "    a = colln2_mod_a.Dialog(5)\n"
-                          "    b = colln2_mod_b.Dialog()\n"
-                          "    print(a.n)\n"
-                          "    print(b.n)\n"
-                          "main()\n",
-    }, 'colln2_main.py')
-
-    # The doc's §3 shape: the two classes share NO field name, so before the
-    # fix the loser's access degraded to a runtime AttributeError rather
-    # than a wrong value. Method dispatch has to reach the right class too:
-    # both `show` methods are same-named, and the loser's call site used to
-    # resolve to the winner's body.
-    _check_agrees_with_cpython("same_bare_name_struct_methods_and_fields", {
-        'colln3_mod_a.py': "class Dialog:\n"
-                           "    def __init__(self, widgetName: str):\n"
-                           "        self.widgetName = widgetName\n"
-                           "    def show(self):\n"
-                           "        return self.widgetName\n",
-        'colln3_mod_b.py': "class Dialog:\n"
-                           "    def __init__(self, result: str):\n"
-                           "        self.result = result\n"
-                           "    def show(self):\n"
-                           "        return self.result\n",
-        'colln3_main.py': "import colln3_mod_a, colln3_mod_b\n"
-                          "def main():\n"
-                          "    x = colln3_mod_a.Dialog('a')\n"
-                          "    y = colln3_mod_b.Dialog('b')\n"
-                          "    print(x.widgetName)\n"
-                          "    print(y.result)\n"
-                          "    print(x.show())\n"
-                          "    print(y.show())\n"
-                          "main()\n",
-    }, 'colln3_main.py')
-
-    # A `from mod import Dialog as X` binding must not change which class a
-    # module-qualified construction picks, and the two classes must stay
-    # independent when BOTH are constructed in one program (the shape where
-    # a single shared field table is most visible).
-    _check_agrees_with_cpython("same_bare_name_struct_from_import_alias", {
-        'colln4_mod_a.py': "class Dialog:\n"
-                           "    def __init__(self, n):\n"
-                           "        self.n = n\n",
-        'colln4_mod_b.py': "class Dialog:\n"
-                           "    def __init__(self, s: str):\n"
-                           "        self.s = s\n"
-                           "        self.n = 42\n",
-        'colln4_main.py': "from colln4_mod_a import Dialog\n"
-                          "import colln4_mod_b\n"
-                          "def main():\n"
-                          "    a = Dialog(3)\n"
-                          "    b = colln4_mod_b.Dialog('hi')\n"
-                          "    print(a.n)\n"
-                          "    print(b.s)\n"
-                          "    print(b.n)\n"
-                          "main()\n",
-    }, 'colln4_main.py')
-
-    # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
-    # and str(container) read the container's raw header bytes as a C
-    # string (`_stringify_value` had no container branch at all, unlike
-    # `print`'s dispatch, which was already correct for the same values).
-    test_gimple_stdout("gimple_fstring_and_str_of_containers", """\
-l = [1, 2, 3]
-print(f"{l}")
-print(str(l))
-s = {1, 2}
-print(f"{s}")
-d = {'a': 1}
-print(str(d))
-""", "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
-
-
-def main():
-    gcc = find_gcc()
-    result = subprocess.run([gcc, '--version'], capture_output=True)
-    if result.returncode != 0:
-        print(f"ERROR: gcc not found: {gcc}", file=sys.stderr)
-        sys.exit(1)
-
-    print("=" * 60)
-    print("GIMPLE EXECUTION TESTS")
-    print("=" * 60)
-
-    run_tests()
-
-    print()
-    print(f"Results: {_PASS} passed, {_FAIL} failed"
-          + (f", {_TIMEOUT} timed out" if _TIMEOUT else ""))
-    sys.exit(0 if _FAIL == 0 else 1)
-
-
-if __name__ == '__main__':
-    main()
-
-    # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
-    # cross-module constructor call whose only field-type evidence is an
-    # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
-    # `Parameter` defined in a SIBLING module) left the field `int64_t` in
-    # the DEFINING module's own compiled struct -- neither the same-module
-    # ctor-literal pass nor its one-hop `_ctxlit_*` companion ever sees a
-    # DIFFERENT module's call site. A scalar mismatch is a hard
-    # `gcc -fgimple` "non-trivial conversion" failure, so this failed to
-    # even COMPILE before the fix (`_xmod_ctor_field_hints`, mirroring the
-    # existing `_xmod_gen_param_hints` cross-module pattern).
-    def _compile_two_files_do_imports_and_run(defn_filename, defn_src,
-                                               use_filename, use_src, timeout=30):
-        """Write two sibling .py files, compile the SECOND with
-        do_imports=True (single-TU inline path), build with gcc -fgimple,
-        run, and return captured stdout. Raises on any failure, with the
-        stage that failed in the message (compile / gcc / run)."""
-        with tempfile.TemporaryDirectory() as wd:
-            open(os.path.join(wd, defn_filename), 'w').write(defn_src)
-            entry = os.path.join(wd, use_filename)
-            open(entry, 'w').write(use_src)
-            from gimple_codegen import compile_to_gimple
-            c_code = compile_to_gimple(use_src, do_imports=True, filename=entry)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-            f.write(c_code)
-            c_file = f.name
-        exe_file = c_file.replace('.c', '.exe')
-        try:
-            runtime_dir = os.path.join(HERE, 'runtime')
-            result = subprocess.run(
-                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
-                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0:
-                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
-            return run_executable_stdout(exe_file)
-        finally:
-            try:
-                os.unlink(c_file)
-            except Exception:
-                pass
-            if os.path.exists(exe_file):
-                try:
-                    os.unlink(exe_file)
-                except Exception:
-                    pass
-
-    def _compile_package_and_run(pkg_name, files, entry_relpath, timeout=60):
-        """Write `files` ({relpath: src}) into a temp PACKAGE directory,
-        compile `entry_relpath` with do_imports=True (single-TU inline
-        path), build with gcc -fgimple, run, and return captured stdout.
-        Returns (compiled_stdout, cpython_stdout) so the caller can compare
-        the compiled program against the interpreter on the SAME source —
-        the comparison this file's other helpers skip because their fixtures
-        have no imports to run twice."""
-        with tempfile.TemporaryDirectory() as wd:
-            for rel, src in files.items():
-                path = os.path.join(wd, pkg_name, rel)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                open(path, 'w').write(src)
-            entry = os.path.join(wd, pkg_name, entry_relpath)
-            from gimple_codegen import compile_to_gimple
-            c_code = compile_to_gimple(open(entry).read(),
-                                       do_imports=True, filename=entry)
-            # CPython, on the very same files, from the package's parent so
-            # the relative import resolves the same way it must for the
-            # compiled path (`python3 -m <pkg>.<entry>`).
-            cp = subprocess.run(
-                [sys.executable, '-m', pkg_name + '.' +
-                 entry_relpath[:-len('.py')].replace('/', '.')],
-                cwd=wd, capture_output=True, text=True, timeout=timeout)
-            cpython_stdout = cp.stdout
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-            f.write(c_code)
-            c_file = f.name
-        exe_file = c_file.replace('.c', '.exe')
-        try:
-            runtime_dir = os.path.join(HERE, 'runtime')
-            result = subprocess.run(
-                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
-                 c_file, os.path.join(HERE, 'runtime', 'fire_runtime.c')],
-                capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0:
-                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
-            return run_executable_stdout(exe_file), cpython_stdout
-        finally:
-            for p in (c_file, exe_file):
-                try:
-                    os.unlink(p)
-                except Exception:
-                    pass
-
-    def test_relative_underscore_module_mangled_suffix_agrees():
-        """A `from ._helper import f` (leading-dot relative import whose
-        module basename starts with `_`) must give the imported free
-        function ONE mangled C identifier across its declaration, its
-        definition and its call site — even when the defining and importing
-        modules DISAGREE about the callee's parameter types.
-
-        The disagreement is the point, not decoration. `count_items` infers
-        `items` as `MojoList *` from its own `for it in items:` body; the
-        importing module's own `_signature_ctypes` snapshot of the same
-        FunctionDef has no such evidence and freezes `int64_t`. The whole
-        program shares `_home_def_param_types` precisely so the definer's
-        committed signature — the one the emitted definition's overload
-        suffix is hashed from — wins that disagreement.
-
-        It did not, for any module whose name has BOTH a leading depth dot
-        and its own leading underscore: `_local_def_pts` published the entry
-        under `module_name.replace('.', '_')`, which spells `._helper` as
-        `__helper`, while every importer resolves the same module as
-        `_helper`. The read missed, the all-int64_t tier answered, the two
-        halves of one symbol hashed different suffixes, and the build died
-        at gcc with
-
-            implicit declaration of function '__helper_count_items_2dbb98';
-            did you mean '__helper_count_items_d07985'?
-
-        — the exact shape that refused Tools/c-analyzer's
-        c_parser/parser/__init__.py (`_common_set_capture_groups_37bd8e` vs
-        `..._6aabcf`). Asserted on the built binary's real stdout against
-        CPython's, so a future regression cannot pass by merely compiling:
-        the pre-fix state does not compile at all."""
-        global _PASS, _FAIL, _TIMEOUT
-        name = "relative_underscore_module_mangled_suffix_agrees"
-        files = {
-            '__init__.py': '',
-            '_helper.py': ("def count_items(items, stop):\n"
-                           "    n = 0\n"
-                           "    for it in items:\n"
-                           "        n = n + 1\n"
-                           "    return n\n"),
-            'main.py': ("from ._helper import count_items\n"
-                        "\n"
-                        "def main():\n"
-                        "    print(count_items(('a', 'b'), 0))\n"
-                        "\n"
-                        "main()\n"),
-        }
-        try:
-            got, want = _compile_package_and_run(
-                'uscore', files, 'main.py')
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        if want != "2\n":
-            print(f"FAIL  {name}: CPython baseline is not '2\\n' "
-                  f"(got {want!r}) — fixture is wrong, not the compiler")
-            _FAIL += 1
-            return
-        if got == want:
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
-            _FAIL += 1
-
-    test_relative_underscore_module_mangled_suffix_agrees()
-
-    def test_cross_module_ctor_scalar_field_type():
-        global _PASS, _FAIL, _TIMEOUT
-        name = "cross_module_ctor_scalar_field_type"
-        defn = ("class Parameter:\n"
-                "    def __init__(self, name, kind=0):\n"
-                "        self.name = name\n"
-                "        self.kind = kind\n")
-        use = ("from xmodctor_defn import Parameter\n"
-               "\n"
-               "def f():\n"
-               "    p = Parameter('v', 7)\n"
-               "    return p.name\n"
-               "\n"
-               "print(f())\n")
-        try:
-            out = _compile_two_files_do_imports_and_run(
-                'xmodctor_defn.py', defn, 'xmodctor_use.py', use)
-        except subprocess.TimeoutExpired as e:
-            print(f"TIMEOUT {name}: {e}")
-            _TIMEOUT += 1
-            return
-        except Exception as e:
-            print(f"FAIL  {name}: {e}")
-            _FAIL += 1
-            return
-        if out == "v\n":
-            print(f"PASS  {name}")
-            _PASS += 1
-        else:
-            print(f"FAIL  {name}: expected 'v\\n', got {out!r}")
-            _FAIL += 1
-
-    test_cross_module_ctor_scalar_field_type()
+    test_c_accessor_helpers_emitted_once_across_modules()
 
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
     # §4 ("module.Class(...) construction is unresolved on every path"):
@@ -7141,6 +7170,66 @@ if __name__ == '__main__':
 
     test_cross_module_iterator_struct_protocol_symbols()
 
+    # bugs/CODEGEN_unannotated_init_param_field_type_int64_residue.md (deleted
+    # with that fix): the cross-module constructor evidence above types a PARAM,
+    # but the `_xmod_ctor_field_hints` merge applied it to the FIELD whose name
+    # MATCHES the param. So a constructor that stores one param in two fields —
+    # `self.s = s` and `self.n = s` — typed only `self.s`, and `b.n` read back
+    # as a heap address: the same `char *` stored into an `int64_t` slot,
+    # silently wrong, exit 0, and ASLR-varying so no value comparison could ever
+    # pass. The identical class in ONE module was already right, which is what
+    # says the rule (type the param, then every field assigned from it) rather
+    # than "cross-module is hard".
+    #
+    # Both spellings are in one program because the fix is exactly "the second
+    # field types like the first", and CPython is run on the same source so the
+    # expected text is anchored rather than recorded.
+    def _test_cross_module_ctor_param_types_every_field():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "cross_module_ctor_param_types_every_field"
+        defn = ("class Dialog:\n"
+                "    def __init__(self, s):\n"
+                "        self.s = s\n"
+                "        self.n = s\n"
+                "\n"
+                "class Pair:\n"
+                "    def __init__(self, tag):\n"
+                "        self.first = tag\n"
+                "        self.second = tag\n"
+                "        self.of = [tag]\n")
+        use = ("import xmodctor3_defn\n"
+               "\n"
+               "def main():\n"
+               "    b = xmodctor3_defn.Dialog(\"hi\")\n"
+               "    print(b.s)\n"
+               "    print(b.n)\n"
+               "    p = xmodctor3_defn.Pair(\"t\")\n"
+               "    print(p.first)\n"
+               "    print(p.second)\n"
+               "    print(len(p.of))\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor3_defn.py', defn, 'xmodctor3_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        # `self.of = [tag]` is a list OF the param, not the param: it must stay
+        # a list, which is why this asserts its length rather than its contents.
+        want = "hi\nhi\nt\nt\n1\n"
+        if out == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {want!r}, got {out!r}")
+            _FAIL += 1
+    _test_cross_module_ctor_param_types_every_field()
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare

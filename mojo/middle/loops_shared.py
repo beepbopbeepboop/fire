@@ -66,6 +66,15 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                 _bp = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
                 return 'MojoBytes *', gen._coerce_to_type(
                     'int64_t', 'MojoBytes *', _bp)
+            if _sk[idx] == 'str':
+                # A `char *` slot: the raw word IS the pointer, so this is
+                # the string accessor and not a coercion. Only a
+                # heterogeneous list LITERAL carries this kind — a
+                # `struct.unpack` format cannot — including one that reached
+                # this value through a `return`
+                # (`gen._return_value_slot_kinds`).
+                return 'char *', gen._new_val(
+                    'char *', f"mojo_list_get_str ({lp}, {idx64})")
             return 'int64_t', gen._new_val(
                 'int64_t', f"mojo_list_get_int ({lp}, {idx64})")
         # Per-slot types recorded for this exact value, when it has them:

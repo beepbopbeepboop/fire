@@ -10,7 +10,102 @@ TEMPORARY" (reading it through a local fails identically).** Recorded
 findings in that section — `print([True, False])` and `print({1, 2})` — are
 fixed; this third, related one is not).
 
-## Repro
+## Status addendum (2026-10-01, `work/bugs3-codegen-2-r2` — the trigger is a `0`, not a comprehension, and floats SEGFAULT; the fix is a constructor-argument ELEMENT-type tracer and is NOT attempted)
+
+The doc's own last paragraph asks the right question — "which of the two losses
+is the real one?" — and the answer is **neither of them**. Re-measured on this
+tree against CPython 3.14.7 on the same text, ten cases in one program:
+
+```
+$ cat .tmp/ctorfield/c1.mojo          # B4.v is a bare `self.v = v` passthrough
+def names(targets):
+    out = []
+    t = pick("outer")
+    i = 0
+    while i < 2:
+        t = pick("loop")
+        out = out + [t.kind]
+        i = i + 1
+    if out:
+        return [t for t in targets]
+    return []
+    ... plus B4([1,2,3]).v, B4(["a","b"]).v, B4([str(i) for i in range(3)]).v,
+        B4([i for i in [0]]).v, B4([i for i in [0,1]]).v, x = [i for i in
+        range(3)]; show(x), y = [i for i in range(3)]; print(y)
+```
+
+| case | CPython | compiled | |
+|---|---|---|---|
+| `B4([i for i in range(3)]).v` | `[0, 1, 2]` | `[None, 1, 2]` | BROKEN |
+| `b = B4([i for i in range(3)]); print(b.v)` | `[0, 1, 2]` | `[None, 1, 2]` | BROKEN |
+| `B4([i for i in [0]]).v` | `[0]` | `[None]` | BROKEN |
+| **`B4([i for i in [0, 1]]).v`** | `[0, 1]` | `[None, 1]` | **BROKEN** (the doc records this one as *correct*) |
+| `B4([7, 8, 9]).v` | `[7, 8, 9]` | `[7, 8, 9]` | correct |
+| `B4([1, 2, 3]).v` | `[1, 2, 3]` | `[1, 2, 3]` | correct (accidentally) |
+| `B4(["a", "b"]).v` | `['a', 'b']` | `['a', 'b']` | correct |
+| `B4([str(i) for i in range(3)]).v` | `['0','1','2']` | `['0','1','2']` | correct |
+| `x = [i for i in range(3)]; show(x)` | `[0, 1, 2]` | `4394673584` | BROKEN |
+| `y = [i for i in range(3)]; print(y)` | `[0, 1, 2]` | `[0, 1, 2]` | correct |
+
+### Two scope corrections, both material
+
+**1. It is not a comprehension.** `B4([0, 5]).v` — a plain list LITERAL with a
+plain `0` — gives `[None, 5]`. The comprehension was never the trigger; the doc's
+`[i for i in [0,1]]` row was read as "correct" and is not. The real rule is:
+
+> a container-typed struct field read through a CONSTRUCTOR has no element type
+> (`_field_elem_types['B4']` is empty — measured, `struct_field_types['B4']` is
+> `{'v': 'MojoList *'}`), so the repr is the generic
+> `_mojo_repr_list` → `_mojo_generic_elem_repr` walker, and
+> `_mojo_generic_elem_repr(0)` returns `"None"`.
+
+Every "correct" row above is correct by having no `0` in it.
+
+**2. It is worse than a display bug: a double SEGFAULTS.**
+`B4([0.0, 5.0]).v` exits **-11** where CPython prints `[0.0, 5.0]`. The
+generic walker reads every slot through `mojo_list_get_int`, so a float's
+IEEE-754 bit pattern is handed to `mojo_repr_str` as a `char *`.
+
+**3. And the field is not the only path — a call boundary loses the same
+evidence.** `x = [i for i in range(3)]; show(x)` printed a pointer, while
+`y = [i for i in range(3)]; print(y)` is right. `print` is a call too, so the
+discriminator is not "across a call" either: it is that `print` has a
+container-typed overload that picks an accessor, and a user-defined `show` does
+not. That is the same family as
+`bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md`, and it says
+the missing evidence is the same missing evidence in both.
+
+### The fix, which the doc's "shape of the fix" was right about
+
+A constructor-argument ELEMENT-type tracer feeding `_field_elem_types`, one
+level deeper than the existing `_ctxlit_*` container-cTYPE pass in
+`mojo/backend_gimple/module_gen.py` (which is why `_field_elem_types['B4']` is
+empty while `struct_field_types['B4']['v']` is right). It needs a shared
+syntactic element-type classifier beside
+`mojo/middle/module_shared.py::_gmi_container_ctype` — that function answers
+the OUTER kind, and the new one answers what the elements hold, for a
+`ListExpr`/`SetExpr`/`TupleExpr` of literals AND for a `Comprehension` (whose
+`range()` iterable makes an `IdentExpr` element an `int64_t`, and whose
+`str(...)` element a `char *`).
+
+Not attempted here, and the reason is concrete rather than caution: the
+element-type vocabulary the classifier needs is `_mojo_type`'s
+(`int64_t` / `double` / `char *` / `_Bool` / a `MojoList *` for a nested
+container), and for the FLOAT case that vocabulary is not enough to be safe —
+recording `double` in `_field_elem_types` is what stops the segfault, but only
+if the repr walker then takes the `mojo_repr_list_doubles` route
+(`module_gen.py:688`, which already keys on
+`_field_elem_types[sn][fname] == 'double'`). So the two halves have to land
+together and be verified together, and that is a change to `module_gen.py`'s
+whole-program pass — not a drive-by beside the parser and comprehension work
+that made up this branch.
+
+The three sibling docs to read together, because they are one defect with three
+report sites: this one, `CODEGEN_list_element_read_defaults_to_str_across_a_call.md`,
+and (for the repr sentinel itself)
+`bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md`.
+
+## Repro (the doc's original, retained)
 
     class B4:
         def __init__(self, v):

@@ -5,6 +5,42 @@ the walk found 335; renaming it would churn every citation of it, and this
 doc's own lesson is that citations outlive their filenames. The first line is
 the subject.)*
 
+## Status, 2026-10-01: the count in this doc is an order of magnitude out, and the fix is one edit per occurrence
+
+Re-measured on this tree, because the first line below ("11 times") sent me
+looking for eleven and there are rather more than that:
+
+    $ grep -rno 'bugs/[A-Za-z0-9_]*\.md' --include=*.py --include=*.mojo --include=*.md . \\
+        | grep -v '^\./build/' | sort -u
+    … 269 distinct paths cited, 227 exist  →  130 DANGLING, 309 occurrences
+    $ … by file extension:   .py 209   .mojo 32   .md 68
+    $ … by area:   test_*.py 93   bugs/ 66   formal/ 50   mojo/ 47
+                   fire_compiler.py 19   myinterpreter.py 11   gimple_codegen.py 8
+                   tools/ 6   build_config.py 2   scripts/ 2   doc/ 2   fire.py 1
+                   ownership_destruct.py 1   driver.py 1
+
+So the eleven of the instance below are the tip. **The check this file asks for
+— a `bugs/*.md` path mentioned in a `.py`, a `.mojo` or another `.md`, verified
+to exist — cannot be added before the 309 are fixed**, because it would be red
+on its first day, and a check that is red on arrival is a check nobody runs.
+
+**Why this is not fixed here, and what the next agent should know.** The
+occurrences are spread over ~150 files, and the largest concentrations are all
+in another claim's write set: `fire_compiler.py`, `gimple_codegen.py`,
+`myinterpreter.py`, `mojo/backend_gimple/*` (47), `formal/*` (50) and
+`test_gimple*.py` (33). Rewriting a dangling citation is a one-line comment
+change, but doing 309 of them across files thirty parallel workers are editing
+is a merge-conflict generator, and the integrator merges and gates. The fix is
+mechanical and per-file; the coordination is the cost, and it wants an owner per
+area rather than a sweep.
+
+**The order that makes it cheapest**, from the measurement above: `doc/` and
+`tools/` first (8 occurrences, uncontended, and `tools/suite.py`'s own three
+citations are of a doc deleted by its own policy), then the `bugs/` docs (66 —
+each is a bug doc citing a sibling that has since been fixed, and the right
+answer there is usually to name the symptom, as `test_arm64_encoders.py` does
+after the 2026-09-30 merge), then the compiler sources last.
+
 ## SECOND INSTANCE, 2026-10-01 — eleven places, and this one hid a real bug
 
 `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md` is cited **11

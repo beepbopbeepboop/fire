@@ -166,7 +166,10 @@ fallback, so `ADialog("a")` silently becomes the string `"a"`.
   for existing was stale rather than the residue itself.
 - `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` — a read with no
   compile-time slot index needs one C type for a heterogeneous value. That is
-  the runtime's missing container tag (boxing), not a struct bug.
+  the runtime's missing container tag (boxing), not a struct bug. **RESOLVED,
+  and the doc deleted 2026-10-02**: the tag is what `mojo_list_get_boxed` /
+  `mojo_is_boxed` / `mojo_repr_boxed` are, beside the kinds side table on the
+  live `MojoList` address. No bug doc remains open for it.
 
 ---
 
@@ -188,8 +191,9 @@ Regression coverage: 5 new cases in `test_link_mode.py`, 2 in
 `bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md` — FIXED 2026-09-27,
 doc deleted. `_stringify_value` gained the same `MojoList *`/`MojoSet *`/
 `MojoDict *` branches (plus boxed-container re-typing) `print`'s dispatch
-already had. See `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md`'s
-residue note for the fix record.
+already had. The fix record for the mechanism it shares is at
+`mojo_list_set_kinds` / `mojo_list_get_boxed` in runtime/fire_runtime.c and at
+`_STRUCT_CALL_SIGS` in `mojo/backend_gimple/emit_methods.py`.
 
 ---
 

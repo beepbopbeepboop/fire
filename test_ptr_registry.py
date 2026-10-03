@@ -612,6 +612,136 @@ static void test_boxed_str_discrimination(void) {
     }
 }
 
+/* A CONTAINER used as a dict key keys by its VALUE
+ * (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). This is the runtime
+ * half of that fix and it is here rather than only in the gimple runner
+ * because two of its properties are invisible to a stdout comparison: the
+ * key string must be RELEASABLE (`mojo_cstr_or_int_release` has to tell a
+ * content key apart from a pool block, and pooling one would hand it out
+ * later as some integer's scratch), and a lookup must not leak. The ASan
+ * variant is what would catch either mistake -- a double free, a use of a
+ * pooled block, or the +78 B/lookup the walker had before its intermediate
+ * buffers were released. */
+static void test_dict_container_keys(void) {
+    /* two separately-built equal tuples, with the string slot in DIFFERENT
+     * buffers -- the whole point: an address-keyed dict misses here, and a
+     * key that merely happened to share one string literal would not */
+    MojoList *a = mojo_list_new();
+    char *sa1 = strdup("alpha");
+    mojo_list_append_str(a, sa1);
+    mojo_list_append_int(a, 1);
+    mojo_mark_as_tuple(a);
+    MojoList *b = mojo_list_new();
+    char *sb1 = strdup("alpha");
+    mojo_list_append_str(b, sb1);
+    mojo_list_append_int(b, 1);
+    mojo_mark_as_tuple(b);
+    assert(a != b);
+    int64_t wa = (int64_t)(intptr_t)a, wb = (int64_t)(intptr_t)b;
+
+    char *ka = mojo_cstr_or_int_str(wa);
+    char *kb = mojo_cstr_or_int_str(wb);
+    /* Python's own spelling, because the key IS that text now */
+    assert(strcmp(ka, "('alpha', 1)") == 0);
+    assert(strcmp(ka, kb) == 0);
+
+    MojoDict *d = mojo_dict_new();
+    mojo_dict_set_int(d, ka, 42);
+    assert(mojo_dict_get_int(d, kb) == 42);
+    assert(mojo_dict_contains(d, kb));
+    /* a MISS must not create an entry -- the growth this bug caused */
+    MojoList *m = mojo_list_new();
+    char *sm1 = strdup("absent");
+    mojo_list_append_str(m, sm1);
+    mojo_list_append_int(m, 1);
+    mojo_mark_as_tuple(m);
+    char *km = mojo_cstr_or_int_str((int64_t)(intptr_t)m);
+    assert(!mojo_dict_contains(d, km));
+    assert(d->used == 1);
+    /* ...and must not leak either: the same key string, rendered and dropped,
+     * many times over. */
+    for (int i = 0; i < 20000; i++) {
+        char *k = mojo_cstr_or_int_str((int64_t)(intptr_t)m);
+        mojo_cstr_or_int_release((int64_t)(intptr_t)m, k);
+    }
+    /* releasing a content key must not put it in the transient pool: the next
+     * integer key still gets a block of its own, and the dict is unharmed */
+    char *ik = mojo_cstr_or_int_str(5);
+    assert(strcmp(ik, "5") == 0);
+    mojo_cstr_or_int_release(5, ik);
+    assert(mojo_dict_get_int(d, kb) == 42);
+    mojo_cstr_or_int_release(wa, ka);
+    mojo_cstr_or_int_release(wb, kb);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)m, km);
+
+    /* a nested tuple: the inner list must be walked, not addressed, or the two
+     * builds below key differently */
+    MojoList *inner1 = mojo_list_new();
+    char *si1 = strdup("x");
+    mojo_list_append_str(inner1, si1);
+    mojo_list_append_int(inner1, 0);
+    mojo_mark_as_tuple(inner1);
+    MojoList *inner2 = mojo_list_new();
+    char *si2 = strdup("x");
+    mojo_list_append_str(inner2, si2);
+    mojo_list_append_int(inner2, 0);
+    mojo_mark_as_tuple(inner2);
+    MojoList *outer1 = mojo_list_new(), *outer2 = mojo_list_new();
+    mojo_list_append_int(outer1, (int64_t)(intptr_t)inner1);
+    char *so1 = strdup("y");
+    mojo_list_append_str(outer1, so1);
+    mojo_mark_as_tuple(outer1);
+    mojo_list_append_int(outer2, (int64_t)(intptr_t)inner2);
+    char *so2 = strdup("y");
+    mojo_list_append_str(outer2, so2);
+    mojo_mark_as_tuple(outer2);
+    char *o1 = mojo_cstr_or_int_str((int64_t)(intptr_t)outer1);
+    char *o2 = mojo_cstr_or_int_str((int64_t)(intptr_t)outer2);
+    assert(strcmp(o1, "(('x', 0), 'y')") == 0);
+    assert(strcmp(o1, o2) == 0);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)outer1, o1);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)outer2, o2);
+
+    /* a list with recorded kinds is read through the kinds-aware walker, so a
+     * float slot is a float and not its IEEE-754 bit pattern */
+    MojoList *mixed = mojo_list_new();
+    char *smf = strdup("f");
+    mojo_list_append_str(mixed, smf);
+    mojo_list_append_double(mixed, 2.5);
+    mojo_mark_as_tuple(mixed);
+    mojo_list_set_kinds(mixed, "pd");
+    char *mk = mojo_cstr_or_int_str((int64_t)(intptr_t)mixed);
+    assert(strcmp(mk, "('f', 2.5)") == 0);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)mixed, mk);
+
+    /* the empty tuple, and a tuple whose only slot is a string, because both
+     * are shapes a slot loop can get wrong at the boundary */
+    MojoList *empty = mojo_list_new();
+    mojo_mark_as_tuple(empty);
+    char *ek = mojo_cstr_or_int_str((int64_t)(intptr_t)empty);
+    assert(strcmp(ek, "()") == 0);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)empty, ek);
+    MojoList *one = mojo_list_new();
+    char *sso = strdup("solo");
+    mojo_list_append_str(one, sso);
+    mojo_mark_as_tuple(one);
+    char *ok = mojo_cstr_or_int_str((int64_t)(intptr_t)one);
+    assert(strcmp(ok, "('solo',)") == 0);   /* the single-element trailing comma */
+    mojo_cstr_or_int_release((int64_t)(intptr_t)one, ok);
+
+    /* The harness runs under ASan, whose leak check runs at exit, so every
+     * allocation this group makes is released here: the strdup'd slot strings
+     * (mojo_list_append_str stores the pointer it is given and never copies
+     * it) and the lists, whose `_reg_list`/`_reg_tuple` entries are removed by
+     * mojo_list_destroy -- a stale registration would let a LATER allocation
+     * alias a live key, which is the failure this whole doc is about. */
+    MojoList *all[] = {a, b, m, inner1, inner2, outer1, outer2, mixed, empty, one};
+    for (unsigned i = 0; i < sizeof all / sizeof *all; i++) mojo_list_free(all[i]);
+    char *owned[] = {sa1, sb1, sm1, si1, si2, so1, so2, smf, sso};
+    for (unsigned i = 0; i < sizeof owned / sizeof *owned; i++) free(owned[i]);
+    mojo_dict_free(d);
+}
+
 int main(int argc, char **argv) {
     const char *only = (argc > 1) ? argv[1] : NULL;
     int ran = 0;
@@ -623,6 +753,7 @@ int main(int argc, char **argv) {
     GROUP("dict_int_keys", test_dict_int_keys)
     GROUP("dict_set_inline", test_dict_set_inline)
     GROUP("dict_float_keys", test_dict_float_keys)
+    GROUP("dict_container_keys", test_dict_container_keys)
     GROUP("boxedstr", test_boxed_str_discrimination)
 #undef GROUP
     if (!ran) { fprintf(stderr, "no such group: %s\n", only); return 2; }
@@ -728,7 +859,8 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 # carrying an `expect=` with a reason and a bug-doc link, so a fix for it turns
 # into a FAILURE of that marker (drop the marker) instead of a silent no-op.
 GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
-                "dict_int_keys", "dict_set_inline", "dict_float_keys")
+                "dict_int_keys", "dict_set_inline", "dict_float_keys",
+                "dict_container_keys")
 KNOWN_BAD_GROUPS = ("boxedstr",)
 
 

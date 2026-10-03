@@ -760,10 +760,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             and it.func.index.name in gen._comptime_list_asts):
         list_ast = gen._comptime_list_asts[it.func.index.name]
         var0 = node.target
-        if isinstance(var0, str) and var0.startswith('(') and var0.endswith(')'):
-            tgt_names = gen._split_top_level_comma(var0[1:-1])
+        if gimple_ctypes.for_target_is_tuple(var0):
+            tgt_names = gimple_ctypes.target_slots(var0[1:-1].strip())
         else:
-            tgt_names = [var0]
+            tgt_names = gimple_ctypes.for_target_names(var0)
         for el in list_ast.elements:
             el_args = el.args if isinstance(el, gimple_ctypes.CallExpr) else [el]
             if len(el_args) < len(tgt_names):
@@ -812,7 +812,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
             and it.name in getattr(gen, '_list_iter_cursor', {})
-            and isinstance(var, str) and not gimple_ctypes._fc_is_tuple_target(var)
+            and isinstance(var, str) and not gimple_ctypes.for_target_is_tuple(var)
             and not getattr(node, 'else_body', None)):
         _gen_for_list_iter_cursor(gen, node, var)
         return
@@ -867,9 +867,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # loop target's C variable gets overwritten with), and force a fresh,
     # non-colliding C declaration for the loop target (see
     # `_declare_var(force=True)`).
-    target_names = (gen._split_top_level_comma(var[1:-1])
-                     if isinstance(var, str) and var.startswith('(') and var.endswith(')')
-                     else [var])
+    target_names = gimple_ctypes.for_target_names(var)
     shadow_name = None
     if (isinstance(it, gimple_ctypes.IdentExpr) and it.name in target_names
             and it_val == gen._c_names.get(it.name, it.name)):
@@ -1023,7 +1021,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _dsub_dp = gen._new_val('MojoDict *', f"{it_val}->_data")
                 gen._gen_for_dict(var, _dsub_dp, node.body, shadow_name=shadow_name)
             elif has_next in gen.func_return_types or nxt in gen.func_return_types:
-                gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
+                gen._gen_for_struct_iter(var, it_type, it_val, node.body,
+                                         shadow_name=shadow_name, node=node)
             else:
                 gimple_ctypes._debug_note(
                     'for loop dropped (no iterator protocol)',
@@ -1094,7 +1093,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and isinstance(node.iterable.func, gimple_ctypes.MemberExpr)
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
-                    and not (var.startswith('(') and var.endswith(')')))
+                    and not gimple_ctypes.for_target_is_tuple(var))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
@@ -1168,7 +1167,7 @@ def _gen_for_zip_longest(gen, node):
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
-    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip_longest lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != 2:
@@ -1402,7 +1401,7 @@ def _gen_for_zip(gen, node):
     # fire_compiler.py's own `for op, operand in zip(node.ops,
     # node.operands[1:]):`, silently dropping the rest of `emit`).
     target = _as_str(node.target)
-    if not (target.startswith('(') and target.endswith(')')):
+    if not gimple_ctypes.for_target_is_tuple(target):
         raise ValueError("zip() lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
@@ -1750,8 +1749,14 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
 
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                    share_var_with_sibling_arm: bool = False):
-    # Handle tuple unpacking: for (a, b) in list_of_tuples:
-    is_tuple = var.startswith('(') and var.endswith(')')
+    # Handle tuple unpacking: for (a, b) in list_of_tuples — and the 1-tuple
+    # `for (a,) in ...`, which unpacks too. `for_target_is_tuple` is what says
+    # so: a parenthesised single NAME (`for (a) in ...`) binds the whole item
+    # and must NOT be unpacked, and the two spellings differ by exactly one
+    # comma that the parser now keeps (fire_compiler.py's "Unpacking-target
+    # representation"). Reading the parens alone treated both as unpack, so
+    # `for (a,) in [(1,)]` printed `1` where CPython prints `(1,)`.
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
         # Bracket-aware split (a naive `inner.split(',')` turned a nested
@@ -2198,8 +2203,11 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                   int_keys: bool = False):
     """for k in dict — iterates over keys as char *."""
-    # Handle tuple target like '(name, alias)' — declare each name separately
-    is_tuple = var.startswith('(') and var.endswith(')')
+    # Handle tuple target like '(name, alias)' — declare each name
+    # separately. `for_target_is_tuple`, so the 1-tuple `for (k,) in d.items()`
+    # unpacks and the parenthesised single name `for (k) in d` does not; see
+    # _gen_for_list's note.
+    is_tuple = gimple_ctypes.for_target_is_tuple(var)
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
@@ -2748,7 +2756,8 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
-    is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
+    is_tuple_target = (gimple_ctypes.for_target_is_tuple(var)
+                       and tuple_slot_ctypes is not None)
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
     else:
@@ -2815,7 +2824,31 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
 def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     """`for x in it:` over a resumable list-iterator local — see
     `_gen_for_iter`'s call site. Resumes from the shared cursor and leaves
-    it exhausted."""
+    it exhausted.
+
+    The cursor advance belongs at the TOP of the body, immediately after
+    the read, not in `bb_post` after it. That is the Python invariant:
+    by the time the loop body runs, the iterator is already one past the
+    element just yielded, so a `next(it)` inside the body reads the
+    FOLLOWING one. With the advance in `bb_post`, `cur` still pointed AT
+    the element the loop had just handed to `var` while the body ran, and
+    `next(it)` read exactly that one again — so `walk([1,2,3,4])` below
+    printed `[1, 1, 3, 3]` (two elements consumed, each reported twice,
+    and half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
+
+    This is the same shape CPython's
+    `Tools/cases_generator/analyzer.py::check_escaping_calls` uses:
+
+        tkn_iter = iter(stmt.contents)
+        for tkn in tkn_iter:
+            ...
+                next(tkn_iter)
+
+    `bb_post` stays on `loop_stack` so `break`/`continue` still land
+    somewhere correct; it is now just the jump back to `bb_cond`. A
+    `continue` is still right, precisely because the advance has already
+    happened by the time the body is reached.
+    """
     li = gen._list_iter_cursor[node.iterable.name]
     lst, cur, elem = li['list'], li['cursor'], li['elem']
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
@@ -2906,8 +2939,14 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
 
 
 def _gen_for_struct_iter(gen, var: str, struct_type: str,
-                          obj_val: str, body: list, shadow_name: str | None = None):
-    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
+                          obj_val: str, body: list, shadow_name: str | None = None,
+                          node=None):
+    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__.
+
+    A struct that implements PYTHON's `__next__` and not Mojo's `__has_next__`
+    cannot drive this loop, and the refusal is now the same loud one every
+    other unsupported iterable gets rather than a silently false loop
+    condition — see the `else` below."""
     base = gimple_exprtypes._struct_name_of(struct_type)
 
     # Determine iterator type (may be the same struct or a separate iter type).
@@ -2949,9 +2988,32 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gen._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
         gen._emit(f"  {cond_t} = {hn_t} != 0;")
     else:
-        gimple_ctypes._debug_note('iterator loop emitted with false condition (no __has_next__)', iter_base)
+        # Python spells exhaustion by RAISING StopIteration out of `__next__`,
+        # and this loop has no way to see a raise: `raise StopIteration` inside
+        # the method lowers to `mojo_exc_type_set (...)` + `mojo_raise ()`
+        # (measured, `Counter___next__` in the generated C), which unwinds
+        # past the loop with nothing left to test. So a struct with `__next__`
+        # and no `__has_next__` has no expressible loop condition.
+        #
+        # It USED to emit `cond = 0` with a `/* TODO */` marker, which is the
+        # same zero-iteration behaviour the runtime diagnostic is built to
+        # describe — `mojo_unsupported_iter`'s own message ends "the loop body
+        # runs zero times" — except SILENTLY. So the program exits 0 having
+        # done nothing and nothing says which of its loops was dropped:
+        #
+        #     class Counter: __iter__ / __next__ but no __has_next__
+        #     for x in c: print(x)          # prints nothing, exit 0
+        #
+        # Calling the shared refusal is strictly that plus a greppable
+        # diagnostic naming the type and the loop's file:line, which is the
+        # whole reason `_emit_unsupported_iter` exists. It is the same call
+        # `_gen_for_iter`'s dispatch makes for a type with NEITHER method, so
+        # "this iterator protocol has no lowering" stops being a property of
+        # which half of the protocol the type happens to implement.
+        gimple_ctypes._debug_note('iterator loop has no __has_next__ (Python-style __next__ exhaustion is a raise)', iter_base)
+        gen._emit_unsupported_iter(f'{iter_base} (no __has_next__)', node)
         cond_t = gen._new_temp('_Bool')
-        gen._emit(f"  {cond_t} = 0;  /* TODO: no __has_next__ on {iter_base} */")
+        gen._emit(f"  {cond_t} = 0;")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
 
     gen._loop_depth += 1

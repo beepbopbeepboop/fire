@@ -40,6 +40,7 @@ Invoked directly:
     python3 test_formal_imports.py [-v]
 """
 import argparse
+import glob
 import json
 import os
 import platform
@@ -84,6 +85,7 @@ FIRE = os.path.join(HERE, "fire.py")
 _CAS_HOME = tempfile.mkdtemp(prefix="formal_imports_cas_")
 os.environ["GMOJO_HOME"] = _CAS_HOME
 CAS_IMPORTS_ROOT = os.path.join(_CAS_HOME, "cas", "formal-imports")
+import cas  # noqa: E402  — after GMOJO_HOME above, which is what cas reads
 
 
 def _drop_cas_home():
@@ -97,13 +99,24 @@ def cas_imports(arch="arm64"):
 def module_dylib(prefix, arch="arm64"):
     """The built library for `prefix`, found by prefix rather than by name.
 
-    A module library's file name is `<prefix>.<source-digest>.<arch>.dylib`:
-    the digest is there so two builds of the same module name cannot overwrite
-    each other, and the arch is there so the two architectures cannot either.
-    So the name is only stable up to the digest, and every test that wants a
-    library has to look it up. Globbing on `<prefix>.*.<arch>.dylib` still
-    pins the convention that matters — the arch really is in the name, and it
-    really is the last field — while tolerating the digest between.
+    A module library's file name is
+    `<prefix>.<source-digest>.<compiler-digest>.<arch>.dylib`: the source
+    digest is there so two builds of the same module name cannot overwrite each
+    other, the COMPILER digest is there because the CAS is shared by every
+    checkout on the machine and sibling worktrees routinely sit at different
+    commits with byte-identical module sources (measured: five distinct
+    `formal/build.py` digests behind one `struct.mojo`), and the arch is there
+    so the two architectures cannot either. So the name is only stable up to
+    the digests, and every test that wants a library has to look it up.
+    Globbing on `<prefix>.*.<arch>.dylib` still pins the convention that
+    matters — the arch really is in the name, and it really is the last field —
+    while tolerating the digests between.
+
+    **Exactly one** match is required, and that is now a real invariant rather
+    than an accident: with the compiler in the key, two checkouts at different
+    commits produce two DIFFERENT paths for the same module, so a stale library
+    from an earlier commit of this same tree no longer collides with the
+    current one — it is simply a second file, and this is what says so.
     """
     import glob
     found = sorted(glob.glob(os.path.join(
@@ -664,11 +677,15 @@ def test_a_module_dylib_is_published_only_signed(tmpdir, _shared):
     is the shape of a thousand "flaky" test reports, and it cannot be
     `expect=`-marked away.
 
-    The fix is `formal/imports.py::_staged_dylib`: the build happens in a
-    subdirectory of the target's own directory, holding the SAME BASENAME (the
-    basename is part of the artifact's identity — `@rpath/<basename>` is baked
-    into `LC_ID_DYLIB` and into the load command of everything that links it),
-    and `os.replace` publishes it whole. Same tree, so the replace is atomic.
+    The fix is `formal/build.py::_publish_signed_image`: the write and the
+    `codesign` happen in a subdirectory of the target's own directory holding
+    the SAME BASENAME (the basename is part of the artifact's identity —
+    `@rpath/<basename>` is baked into `LC_ID_DYLIB` and into the load command of
+    everything that links it), and `os.replace` publishes it whole. Same tree,
+    so the replace is atomic. It is ONE primitive for the program, the library
+    and the module dylib, rather than a second publish path in
+    `formal/imports.py`, which is where the module dylib's own builder would
+    otherwise have had to reimplement it.
 
     What is asserted, and it is asserted from INSIDE the window rather than by
     racing it, because a polling observer would pass by luck on an idle machine
@@ -681,7 +698,9 @@ def test_a_module_dylib_is_published_only_signed(tmpdir, _shared):
         signed" an OBSERVED property rather than a claim about the code;
       * the published file afterwards is signed, its install name is its own
         basename (the identity a staging FILE would have broken), its manifest is
-        beside it, and no staging directory is left behind.
+        beside it AND its manifest's `dylib`/`load_path` name the published
+        library rather than the staging directory the bytes came from, and no
+        staging directory is left behind.
     """
     import formal.build as FB
     from formal import imports as FI
@@ -730,7 +749,7 @@ def test_a_module_dylib_is_published_only_signed(tmpdir, _shared):
               f"codesign was handed {path!r}, which IS the published path: the "
               f"build wrote the library where a running image loads it and is "
               f"now signing it in place, so every concurrent reader can catch "
-              f"the unsigned half (formal/imports.py's _staged_dylib)")
+              f"the unsigned half (formal/build.py's _publish_signed_image)")
         for name, (ok, why) in zip([f for f in seen if f.endswith(".dylib")],
                                    checks):
             check(ok, f"while codesign was signing, {name!r} was already at "
@@ -754,7 +773,25 @@ def test_a_module_dylib_is_published_only_signed(tmpdir, _shared):
           "the manifest was not published beside the library, so every reader "
           "(the consumer's own manifest walk, external_declarations) finds a "
           "library with no exports")
-    leftovers = [f for f in os.listdir(out_dir) if f.startswith(".staging")]
+    # The manifest's OWN two path fields name the published library, and this is
+    # the hazard a staging directory created: `write_dylib_manifest` records
+    # `dylib` and `load_path` as `abspath` of the output it was handed, and
+    # `load_path` is what the executable puts in its own `LC_LOAD_DYLIB`. A
+    # manifest published from inside the staging directory therefore names a
+    # directory the publish then deletes, and the program that reads it links
+    # against a path that does not exist — which is exactly what happened when
+    # `formal/imports.py` owned its own staging publish. The build runs at the
+    # published path and only the BYTES are staged, so this holds by
+    # construction; it is asserted because "by construction" is what a
+    # refactor takes away.
+    payload = manifest(out)
+    for field in ("dylib", "load_path"):
+        check(os.path.abspath(payload.get(field) or "") == os.path.abspath(out),
+              f"the manifest's {field} is {payload.get(field)!r}, not the "
+              f"published library {out!r}; a consumer links against that path, "
+              f"and if it named a staging directory it was deleted before the "
+              f"link ran")
+    leftovers = [f for f in os.listdir(out_dir) if f.startswith(".stage")]
     check(not leftovers,
           f"the staging directory was left behind: {leftovers}")
 
@@ -2469,6 +2506,145 @@ def test_both_arch_libraries_coexist(tmpdir, _shared):
                       f"stderr: {err[-300:]}")
 
 
+def test_the_library_is_published_atomically(tmpdir, _shared):
+    """A reader never observes a library that is half-written or unsigned.
+
+    The measured flake this pins. `~/.gmojo/cas/formal-imports/<arch>/` is one
+    directory shared by every checkout on the machine, so a program linking
+    `mylib`'s library runs while an unrelated worktree rebuilds that exact
+    path. The publish used to be write → chmod → `codesign`, none of it atomic,
+    and for the gap between the chmod and the signature the file on disk is a
+    valid Mach-O with NO signature — which `dyld` refuses outright. Measured on
+    this tree: a fixed image died with `dyld: Library not loaded … missing code
+    signature` for roughly 1 run in 20 while sibling worktrees were building,
+    and passed on either side of the window, which is why it presented as a
+    flaky test rather than as a race.
+
+    Driven the same way rather than argued: a reader is run in a tight loop
+    across the whole publish, so any window at all shows up as a nonzero exit
+    with a `dyld` complaint. The rebuilder runs in a subprocess so it is a
+    genuinely separate writer, not an in-process one.
+    """
+    root = os.path.join(tmpdir, "atomic")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": PROG})
+    fresh_cas()
+    _r, prog = build(root, "prog.aout", arch="arm64")
+    lib = module_dylib("mylib")
+
+    # The rebuild, as its own process: a writer that recompiles and re-signs
+    # the very path the reader below loads, over and over. It drives the real
+    # `fire.py`, which is what a sibling worktree does anyway and is the honest
+    # shape of the hazard.
+    rebuilder = os.path.join(root, "rebuild.py")
+    with open(rebuilder, "w") as f:
+        f.write(
+            "import os, subprocess, sys, time\n"
+            f"root = {root!r}\n"
+            "env = dict(os.environ)\n"
+            f"env['GMOJO_HOME'] = {os.environ['GMOJO_HOME']!r}\n"
+            f"fire = {FIRE!r}\n"
+            "end = time.time() + int(sys.argv[1])\n"
+            "while time.time() < end:\n"
+            "    subprocess.run([sys.executable, fire, 'build', '--formal',\n"
+            "                    '--no-prove', '-o',\n"
+            "                    os.path.join(root, 'rebuild.aout'),\n"
+            "                    os.path.join(root, 'prog.mojo')],\n"
+            "                   capture_output=True, env=env, cwd=root)\n")
+    writer = subprocess.Popen(
+        [sys.executable, rebuilder, "25"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        bad = []
+        runs = 0
+        for _ in range(400):
+            runs += 1
+            code, err = run(prog)
+            if code != 42:
+                bad.append((code, (err or "").strip()[-200:]))
+                if len(bad) >= 3:
+                    break
+    finally:
+        writer.terminate()
+        writer.wait(timeout=60)
+    if not bad:
+        return
+    raise TestFailure(
+        f"{len(bad)} of {runs} runs of a program linking {lib} failed while "
+        f"that library was being republished (expected 42). First: "
+        + "; ".join(f"exit {c}: {e}" for c, e in bad[:3])
+        + ". A library that is published in place is observable half-written; "
+          "the publish has to be atomic.")
+
+
+def test_the_library_path_names_the_compiler_too(tmpdir, _shared):
+    """The cache key folds in the compiler, not only the module's source.
+
+    The shared-CAS hazard this closes is about the COMPILER, not the source.
+    Checkouts on this machine are routinely at different commits with
+    byte-identical module sources, and `~/.gmojo/cas` is one directory for all
+    of them: measured here, four sibling worktrees had five distinct
+    `formal/build.py` digests behind a single `formal/hostmods/struct.mojo`
+    digest, and they all wrote `struct.<src>.arm64.dylib`. Whichever finished
+    last replaced the others' library, so a program could link against a
+    library some other checkout's codegen produced — the wrong-artifact class
+    the source digest was added to prevent, one level up.
+
+    Asserted on the NAME, because that is the contract a stale library would
+    break: the name must change when the compiler does. Simulating a compiler
+    change is what makes this testable at all — the alternative is a second
+    checkout, which no unit test may rely on.
+    """
+    import formal.imports as I
+    root = os.path.join(tmpdir, "compkey")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": PROG})
+    fresh_cas()
+    _r, _p = build(root, "prog.aout", arch="arm64")
+    first = module_dylib("mylib")
+
+    # The rule itself, exercised directly: `module_dylib_path` is what decides
+    # the name, so it is what has to change when the compiler does. Driving it
+    # through `build` instead would only measure the in-process `_BUILT` cache,
+    # which is keyed by (arch, source path) and hands the first build's path
+    # straight back — a test that passes for the wrong reason.
+    real_fp = cas.formal_fingerprint
+    try:
+        base = I.module_dylib_path(cas_imports("arm64"), "mylib",
+                                   os.path.join(root, "mylib", "__init__.mojo"),
+                                   "arm64")
+        cas.formal_fingerprint = lambda: "f" * 40
+        other = I.module_dylib_path(cas_imports("arm64"), "mylib",
+                                    os.path.join(root, "mylib", "__init__.mojo"),
+                                    "arm64")
+    finally:
+        cas.formal_fingerprint = real_fp
+    if base == other:
+        raise TestFailure(
+            f"changing the compiler fingerprint left the library path at "
+            f"{os.path.basename(base)!r}, so two checkouts at different commits "
+            f"overwrite each other's library with an incompatible build")
+    if os.path.basename(first) != os.path.basename(base):
+        raise TestFailure(
+            f"the built library is {os.path.basename(first)!r} but "
+            f"module_dylib_path names {os.path.basename(base)!r}; the test "
+            f"below would then be checking a path nothing publishes to")
+    # And the fingerprint really is the compiler's, not a constant: two
+    # different values must give two different names, which is the property a
+    # sibling checkout relies on.
+    try:
+        cas.formal_fingerprint = lambda: "a" * 40
+        third = I.module_dylib_path(cas_imports("arm64"), "mylib",
+                                    os.path.join(root, "mylib", "__init__.mojo"),
+                                    "arm64")
+    finally:
+        cas.formal_fingerprint = real_fp
+    if third == other:
+        raise TestFailure(
+            "two DIFFERENT compiler fingerprints produced the same library "
+            "path, so the compiler component is not actually in the key")
+
+
 def test_reexported_type_reaches_the_importer(tmpdir, _shared):
     """A re-exported STRUCT TYPE is recognised as a type by the importer.
 
@@ -3051,6 +3227,10 @@ TESTS = [
      test_module_dylib_matches_the_programs_arch),
     ("both architectures' libraries coexist",
      test_both_arch_libraries_coexist),
+    ("a library is published atomically, never half-written",
+     test_the_library_is_published_atomically),
+    ("the library path names the compiler as well as the source",
+     test_the_library_path_names_the_compiler_too),
     ("a re-exported type reaches the importer",
      test_reexported_type_reaches_the_importer),
     ("a local Mojo module beats the host-module list",

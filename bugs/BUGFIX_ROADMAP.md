@@ -136,16 +136,23 @@ the number it was assigned when it was filed.
   heterogeneous list read with no kinds hands a double's IEEE-754 bit
   pattern to `strlen`), and the bound-method registry, which had no free
   at all until the closure-env work needed one.
-- the `struct` module and the `bytes` value type — both landed, and their
-  hard-bug reports have since been removed per the fully-fixed-is-deleted
-  rule. `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` had both its items
-  **closed 2026-09-27** (keyword arguments bound per CPython 3.14's measured
-  signature table; mixed int/float formats correct through every
-  statically-indexed read), and keeps only the residue it names: a read with
-  no compile-time slot index has no single right C type in a `MojoList`, and a
-  `Struct` reached through a class attribute has no recoverable format. The
-  `f"{list}"`/`str(list)` gap found on the way is its own doc,
-  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`.
+- the `struct` module and the `bytes` value type — both landed, and every
+  hard-bug report covering them has since been REMOVED per the
+  fully-fixed-is-deleted rule. The last of them,
+  `hard/CODEGEN_struct_kwargs_and_inline_unpack.md`, was deleted 2026-10-02:
+  both its items closed 2026-09-27 (keyword arguments bound per CPython
+  3.14's measured signature table — `_STRUCT_CALL_SIGS` in
+  `mojo/backend_gimple/emit_methods.py`; mixed int/float formats correct
+  through every statically-indexed read), and the residue it kept — a read
+  with no compile-time slot index has no single right C type in a
+  `MojoList`, and a `Struct` reached through a class attribute has no
+  recoverable format — **also closed 2026-09-29** by moving the per-slot
+  kinds onto the VALUE (a side table on the live `MojoList` address) and
+  boxing a read with no compile-time index (`mojo_list_set_kinds` /
+  `mojo_list_get_boxed` / `mojo_repr_boxed` in runtime/fire_runtime.c). The
+  mechanisms live in those definitions and in `_STRUCT_CALL_SIGS`. The
+  `f"{list}"`/`str(list)` gap found on the way was its own doc,
+  `CODEGEN_fstring_and_str_of_a_list_are_garbage.md`, also since deleted.
   `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
   2026-09-27** (plus three more wrong values found on the way:
   `partition`'s swapped no-match arms, its empty-separator case, and four

@@ -1,54 +1,79 @@
 # `next(<user-defined iterator struct>)` has no lowering, and the callee's
 # type is not inferred either
 
-## Status
+## Status (2026-10-30 — the `next` half is now PINNED by a test, the `for`
+## half stopped being silent, and the cross-module half is fixed. The
+## receiver's TYPE-INFERENCE gap is unchanged and is still parked.)
 
-OPEN, but for one reason instead of two. The RECEIVER'S TYPE half is still a
-type-inference project (see "What is missing"), but the other half — which
-was not this doc's subject and had been hiding behind it — is FIXED: a
-user-defined iterator struct reached through `from mod import Struct` spelled
-its protocol methods' C names with a hand-written `{Struct}___{method}__`
-f-string instead of `gen._struct_method_csym`, the tree's one composer, so
-the home-module qualifier was dropped and the call went to a symbol nothing
-defines. `emit_loops._gen_for_struct_iter` (all three of `__iter__`,
-`__has_next__`, `__next__`) and `_lower_call`'s `next(<struct>)` branch both
-did this; both now compose through `gen._struct_method_csym`.
+Three of this doc's claims are now settled by measurement, and none of the
+three had a test:
 
-Measured, on a two-module fixture (`xmoditer_defn.py` holding the struct +
-`make()`, `xmoditer_use.py` doing `next(d)` / `for x in d` / `next(e)`):
+* `next(<a user-defined iterator struct>)` compiles and RUNS correctly
+  whenever the receiver's type is resolvable. `def c = Counter(5, 8);
+  print(next(c))` prints `5`, `6` on both pipelines against CPython's `5`,
+  `6` — nothing undefined, nothing stubbed. The doc claimed this in "What is
+  fixed" but nothing asserted it, so the half that works could have rotted
+  into the same silence as the half that does not. It is now
+  `test_gimple.py::test_next_on_a_user_struct_lowers_and_its_for_loop_says_
+  why_not`, whose fixture also pins the `__iter__`-returning-self shape.
+* The `for` loop over the SAME object — a struct with `__next__` and no
+  `__has_next__` — emitted `cond = 0` with a `/* TODO: no __has_next__ */`
+  marker: the body runs zero times, silently, exit 0. It now calls the same
+  `mojo_unsupported_iter` every other unsupported iterable gets, so the
+  diagnostic names the type, the reason and the loop's file:line:
 
-before —
+      mojo_unsupported_iter: 'for' loop over unsupported iterable type
+      nextstruct.py:18: Counter (no __has_next__) (codegen has no lowering
+      for this container/iterator shape; the loop body runs zero times)
 
-    error: implicit declaration of function 'It___next__'; did you mean 'itmod_It___next__'?
-    error: implicit declaration of function 'It___iter__'; did you mean 'itmod_It___iter__'?
-    error: assignment to 'It *' from 'int' makes pointer from integer without a cast
+  The BEHAVIOUR is deliberately unchanged. Python's `__next__` signals
+  exhaustion by RAISING, and the compiled raise is `mojo_exc_type_set (...)` +
+  `mojo_raise ()` — verified in the generated `Counter___next__` — which
+  unwinds past the loop with nothing left for a condition to test. There is no
+  expressible loop condition, so the only honest options are "say so" (taken)
+  and "invent a wrong loop" (rejected, and what this doc's "What is missing"
+  already rules out).
 
-after — builds clean and prints `1 2 3 1` (`next(d)` advances n to 1 and
-returns 1; the `for` then yields n=2,3 and stops because `__has_next__` is
-`n < 3`; `next(e)` on a fresh `It` is 1).
+  Note what this does NOT do: it does not make the 21 files build. They fail
+  at the type-inference gap below, which is upstream of both halves.
+* The CROSS-MODULE half, which was not this doc's subject and had been hiding
+  behind the type-inference gap: a user-defined iterator struct reached
+  through `from mod import Struct` spelled its protocol methods' C names with
+  a hand-written `{Struct}___{method}__` f-string instead of
+  `gen._struct_method_csym`, the tree's one composer, so the home-module
+  qualifier was dropped and the call went to a symbol nothing defines.
+  `emit_loops._gen_for_struct_iter` (all three of `__iter__`, `__has_next__`,
+  `__next__`) and `_lower_call`'s `next(<struct>)` branch both did this; both
+  now compose through `gen._struct_method_csym`.
 
-Note the severity: gcc's `-Wimplicit-function-declaration` fallback types the
-undeclared call as returning `int`, so `It___iter__(It *)` became an `int`
-that was then assigned to an `It *` — a wrong pointer, not merely a missing
-symbol. So this was never going to stay a clean link error.
+  Measured, on a two-module fixture (`xmoditer_defn.py` holding the struct +
+  `make()`, `xmoditer_use.py` doing `next(d)` / `for x in d` / `next(e)`):
 
-Regression: `test_gimple_runner.py`'s
-`cross_module_iterator_struct_protocol_symbols`. It asserts the built
-binary's real stdout and that gcc is clean; pre-fix it does not compile at
-all. There is deliberately NO CPython comparison in that test:
-`__has_next__` is a Mojo-only protocol, so CPython has no such method and
-would call `__next__` until it raised — running the fixture under CPython
-loops forever.
+  before —
 
-## What is fixed (the receiver's type half, from an earlier session)
+      error: implicit declaration of function 'It___next__'; did you mean 'itmod_It___next__'?
+      error: implicit declaration of function 'It___iter__'; did you mean 'itmod_It___iter__'?
+      error: assignment to 'It *' from 'int' makes pointer from integer without a cast
 
-`_lower_call` now refuses a `next(...)` that matched none of its forms,
-instead of emitting the call to a symbol that does not exist
-(`mojo/backend_gimple/emit_calls.py`). That is what made this visible: the
-21 files above moved from a false PASS to a named, diagnosable refusal. The
-same refusal is what caught this compiler's own `next(iter(_seen))` in
-`_lower_call` — a link error thousands of lines from its cause, in the
-`fire1` build.
+  after — builds clean and prints `1 2 3 1` (`next(d)` advances n to 1 and
+  returns 1; the `for` then yields n=2,3 and stops because `__has_next__` is
+  `n < 3`; `next(e)` on a fresh `It` is 1).
+
+  Note the severity: gcc's `-Wimplicit-function-declaration` fallback types the
+  undeclared call as returning `int`, so `It___iter__(It *)` became an `int`
+  that was then assigned to an `It *` — a wrong pointer, not merely a missing
+  symbol. So this was never going to stay a clean link error. Its regression
+  is `test_gimple_runner.py`'s
+  `cross_module_iterator_struct_protocol_symbols`, which asserts the built
+  binary's real stdout and that gcc is clean; pre-fix it does not compile at
+  all. There is deliberately NO CPython comparison in that test: `__has_next__`
+  is a Mojo-only protocol, so CPython has no such method and would call
+  `__next__` until it raised — running the fixture under CPython loops
+  forever.
+
+So: two of the three halves are now FIXED and PINNED, and what remains is
+the receiver's type inference — a project this doc still parks on, with the
+21 files above still unbuildable because of it.
 
 ## What it looks like
 

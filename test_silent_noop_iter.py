@@ -189,6 +189,270 @@ def main():
 '''
 
 
+@case('comprehension_return_kind_is_not_neighbour_kind')
+def _():
+    # A local bound from a COMPREHENSION — a real container, whose C type
+    # depends on the comprehension's `kind` — returned from a function whose
+    # other branch returns a list.
+    #
+    # The local-type pre-pass (`infra_infer._prebound_local_ctypes`, which
+    # `_infer_return_type` overlays onto `var_types`) knew about
+    # `{a, b}`/`[a, b]`/`{k: v}` DISPLAYS but not about `{x for x in y}`:
+    # a `Comprehension` carries its kind as an attribute, so it does not fit
+    # the `type(...).__name__` table those three share. The local therefore
+    # typed as the int64_t box, the function's return type came out from its
+    # OTHER return statement alone (`MojoList *`), and the body then had to
+    # store a real `MojoSet *` into that `MojoList *` return slot — refused
+    # by `_sce_simple_emit`'s container-kind guard, which is the honest
+    # answer to a mis-typed store but leaves the file unbuildable.
+    #
+    # Real: `Apple/__main__.py`'s `lib_platform_files` (returns `names`, or
+    # a set comprehension of ignored names, or `set()`).
+    #
+    # The join is the point, and it is asserted by the reference stdout: the
+    # function's return type is the BOX (`int64_t`) precisely because its
+    # branches disagree on container kind, so the values must come back
+    # through each branch's own storage, not through one reinterpreted slot.
+    return '''def pick(names, kind):
+    if kind == 1:
+        return names
+    elif kind == 2:
+        ignored = {name for name in names if name.startswith("_sys")}
+    else:
+        ignored = set()
+    return ignored
+
+
+def main():
+    print(pick(["a", "b"], 1))
+    print(pick(["_sysconfigdata_x", "build-details.json"], 2))
+    print(pick(["_sysconfigdata_x"], 3))
+'''
+
+
+@case('multi_kind_local_is_the_box_not_the_first_kind')
+def _():
+    # One local bound to a LIST on one branch and a SET on another. Python is
+    # happy with this; the compiled representation cannot be either
+    # container, so it must be the box.
+    #
+    # `_infer_local_var_types` already reached that answer — it joins the two
+    # kinds and reports `int64_t` — but three separate "trust ground truth"
+    # rules in `_gen_stmt_AssignStmt` each read that `int64_t` as a STALE
+    # SCALAR hint the first assignment site refines, and pinned the slot to
+    # `MojoList *`. Every later branch's store was then a container-kind
+    # coercion `_sce_simple_emit` refuses, so the file did not build at all.
+    #
+    # Real: `Tools/build/umarshal.py`'s `Reader.r_object`, whose `retval` is a
+    # list, a dict, a set, a frozenset and a `Code` on five different
+    # branches. That file builds again.
+    #
+    # Printing both branches is what makes it a test rather than a build check:
+    # a box that "works" by being read as a list is exactly the failure, and
+    # the branch ORDER matters because the first assignment site is the one
+    # the pinning rules act on.
+    return '''def pick(kind):
+    if kind == 1:
+        box = [1, 2]
+    else:
+        box = {7, 8}
+    return box
+
+
+def main():
+    print(sorted(pick(1)))
+    print(sorted(pick(2)))
+'''
+
+
+@case('multi_kind_global_rebound_in_a_function_is_the_box')
+def _():
+    # The module-GLOBAL twin of `multi_kind_local_is_the_box_not_the_first_
+    # kind`, and the one shape Phase 1.7's global pre-scan structurally
+    # cannot see: `X = <kind A>` at module scope and `global X; X = <kind B>`
+    # inside a function are TWO assignments to ONE binding, so the two types
+    # must be JOINED — and every one of those pre-passes walks module-level
+    # statements only. `X` was therefore frozen at kind A forever, the
+    # cross-function store was coerced to kind A through a pointer cast, and
+    # the very next line — which slices the same global as the list it has
+    # just become — sliced a `char *` and emitted `char * + MojoList *`.
+    #
+    # Real: `Mac/BuildScript/build-installer.py`'s
+    # `FW_VERSION_PREFIX = "--undefined--"  # initialized in parseOptions`
+    # and `FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions", getVersion()]`.
+    # That file did not build at all before this; it builds now.
+    #
+    # Every line after the reassignment is a DIFFERENT consumer of the same
+    # binding, and each is printed rather than merely compiled: a slice, a
+    # `print` of the global itself (repr dispatch), and a method call on it.
+    # A box that "works" by being read as a `char *` fails all three, and the
+    # `configure()` return additionally pins the `return L[1:]` slice type —
+    # the shape whose `_quick_type` used to answer the box for a global.
+    return '''PREFIX = ["Library", "Frameworks"]
+SUFFIX = "undefined"
+
+
+def configure():
+    global SUFFIX
+    SUFFIX = PREFIX[:] + ["Versions", "3.14"]
+    return SUFFIX[:1]
+
+
+def main():
+    print(configure())
+    print(SUFFIX)
+    print("|".join(SUFFIX))
+'''
+
+
+@case('slicing_a_boxed_global_reads_the_container')
+def _():
+    # A module global is stored in an `int64_t` field — the codebase-wide
+    # convention for a container global — so `L` reads back as a box. Every
+    # other consumer of a box resolves its kind through `_get_actual_type`
+    # (`L[2]` included); the SLICE was the one that did not, and fell
+    # through to the generic pointer-arithmetic fallback, which on an
+    # `int64_t` is INTEGER addition. `L[1:]` emitted `t + 1` and printed
+    # `33067958273` where CPython prints `[20, 30, 40]`.
+    #
+    # Silent because `L[2]` was already right, which is what makes the
+    # subscript-vs-slice disagreement the property under test: the same
+    # binding, read two ways, must give the same answer. `S` is the `char *`
+    # counterpart, because resolving the box through `_get_actual_type` also
+    # newly reaches the `char *` slice branch (`mojo_cstr_slice`) for a
+    # boxed string global, and that must not change.
+    return '''L = [10, 20, 30, 40]
+S = "hello world"
+
+
+def main():
+    print(L[1:])
+    print(L[:2])
+    print(L[2])
+    print(S[6:])
+    print(S[:5])
+    for x in L[1:]:
+        print("item", x)
+'''
+
+
+@case('multi_kind_parameter_returned_is_the_box')
+def _():
+    # `multi_kind_local_is_the_box_not_the_first_kind`, one indirection on:
+    # the multi-kind name is a PARAMETER. Both `return`s hand back the SAME
+    # local, so the disagreement lives in the local's bindings and never in
+    # the return statements — which is exactly what made this one slip
+    # through. The parameter's own type came from usage evidence
+    # (`_infer_param_types`, which cannot see a binding), the return type
+    # inherited it, and the CALL SITE then applied the `int64_t`-returning
+    # branch's default of "`_actual_types` says `MojoList *`" and formatted
+    # the dict through `mojo_repr_list_ints` — another container's memory, out
+    # of bounds. `{'a': 1}` printed as `[0]`, exit 0.
+    #
+    # Both branches are printed because the property is that the two
+    # CALL SITES agree with the source, not that one of them is right: a
+    # caller-side fix that only recognised the dict would pass with the list
+    # arm still guessing.
+    return '''def probe(box, kind):
+    if kind == 1:
+        box = [1, 2]
+    else:
+        box = {"a": 1}
+    return box
+
+
+def main():
+    print(probe(None, 1))
+    print(probe(None, 2))
+'''
+
+
+@case('parameter_rebound_to_one_container_kind_is_not_multi_kind')
+def _():
+    # A parameter that is REASSIGNED, always to the SAME container kind, is
+    # not a multi-kind name — and treating it as one is not a safe
+    # over-approximation, because `_multi_kind_locals` does not merely
+    # annotate: it switches OFF the three "trust ground truth" rules in
+    # `_gen_stmt_AssignStmt`, so the parameter keeps whatever
+    # `_infer_param_types` guessed for it from its USES and every store is
+    # then judged against that guess.
+    #
+    # `expected` here is iterated and truth-tested, which is equally
+    # consistent with a list, so usage said `MojoList *`; all four branches
+    # assign a set, so bindings said `MojoSet *`, and
+    # `_sce_simple_emit`'s container-kind guard refused the file outright.
+    # Real: `Tools/c-analyzer/c_parser/match.py`'s `match_storage`, whose
+    # refusal is gone and that module now compiles past it.
+    #
+    # Every branch assigns a SET, deliberately: one dict among them would
+    # make the name genuinely multi-kind, which is the OTHER case (and the
+    # one the box answers) — mixing the two here would test that instead.
+    # The set comprehension iterates a SET rather than a list because the
+    # element type of a comprehension over an unannotated list PARAMETER is a
+    # separate, already-filed gap
+    # (bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md) and
+    # belongs to no case in this file.
+    #
+    # Both halves of the property are printed: the set survives the
+    # reassignment, AND the un-reassigned parameter next to it (usage and
+    # bindings agreeing, so nothing should change for it) still works — a
+    # fix that made every container parameter a set would pass the first
+    # line and fail the second.
+    return '''def pick(box, other):
+    if box is None:
+        box = {"a"}
+    elif box == "x":
+        box = {box}
+    else:
+        box = {v for v in box}
+    return sorted(box)
+
+
+def plain(items):
+    return items[0]
+
+
+def main():
+    print(pick(None, None))
+    print(pick("x", None))
+    print(pick({"q", "r"}, None))
+    print(plain(["first", "second"]))
+'''
+
+
+@case('next_iter_over_a_dict_items_expression')
+def _():
+    # `next(iter(<expression>))`, where the expression is not a bare name.
+    # Reading a dict's first entry this way is the ordinary Python idiom, and
+    # the `next(iter(x))` lowering existed only for `x` being an IdentExpr —
+    # so this shape matched no `next(...)` form at all and hit the
+    # whole-module refusal ("`next(...)` on next(CallExpr) has no lowering"),
+    # which is not a per-line diagnostic: it takes the whole file out of the
+    # compiled path. Real: `Apple/__main__.py`'s
+    # `next(iter(slice_parts.items()))`, twice.
+    #
+    # The `for k, v in d.items():` line is in the case on purpose: the
+    # destructuring form and the loop form read the SAME [key, value] pair,
+    # so they must print the same thing. That is the property, not just
+    # "compiles" — an element-type guess that made `next(iter(...))` disagree
+    # with the loop over the same list would still be wrong here.
+    #
+    # In one function, deliberately: a dict handed to a CALLEE does not carry
+    # its value type across the call boundary in this codegen (a separate,
+    # pre-existing gap that the `for` form shares — see
+    # bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md), so
+    # putting the pair read behind a call would test that instead of this.
+    return '''def main():
+    d = {"alpha": "one", "beta": "two"}
+    k, v = next(iter(d.items()))
+    print(k, v)
+    for k2, v2 in d.items():
+        print(k2, v2)
+        break
+    print("done")
+'''
+
+
 @case('container_kind_dict_keys')
 def _():
     # The same class with a dict: `mojo_dict_keys` is the real conversion

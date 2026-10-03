@@ -30,8 +30,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
     _as_str, _signed_int64, _signed_int64_c_literal,
-    is_tuple_target as _for_target_is_tuple,
-    for_target_slots as _for_target_slots,
+    for_target_is_tuple,
 )
 import regex_compile
 import mlir
@@ -1444,13 +1443,24 @@ def _cpp_expr(gen, e) -> str:
         # preamble declares that struct + `extern` instance (see
         # gen_module's generated_cpp assembly), so a generator body can
         # read a module global like any ordinary compiled function.
+        #
+        # WHICH module's struct is this module's own, never
+        # `_global_to_module.get(e.name)` — the same correction, for the
+        # same reason, as the one in `_lower_IdentExpr`'s bare-name
+        # global-read branch: that map is a shared, whole-transitive-tree,
+        # name-keyed "first module to claim this bare name wins" table,
+        # so a bare name (which in real Python can only ever mean THIS
+        # module's own global — a qualified `othermod.name` is a
+        # MemberExpr, not an IdentExpr) must not be routed by it. Two
+        # modules each declaring their own same-named global made a
+        # generator body read the loser's slot while the write half of
+        # the same name went to this module's own field.
         if (gen._cpp_declared is not None
                 and e.name not in gen._cpp_declared
                 and (e.name in gen._global_var_types
                      or e.name in gen._cpp_early_global_names)):
-            global_module = getattr(gen, '_global_to_module', {}).get(
-                e.name, gen._current_module_ctx or "root")
-            safe_mod = gimple_ctypes._c_field_name(str(global_module)) if global_module else "root"
+            safe_mod = gimple_ctypes._c_field_name(
+                str(gen._current_module_ctx or "root"))
             field = gimple_ctypes._c_field_name(e.name)
             # Same C++-keyword escaping the .cpp globals-struct typedef
             # uses (`operator`/`new`/... are fine in C, not in C++).
@@ -5609,7 +5619,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     # approximated — this emitter's break-flag protocol is shared with the
     # generic path and wiring a generator loop into it is a separate,
     # unexercised change.
-    if (isinstance(target, str) and not _for_target_is_tuple(target)
+    if (isinstance(target, str) and not for_target_is_tuple(target)
             and not s.else_body
             and isinstance(s.iterable, gimple_ctypes.IdentExpr)
             and s.iterable.name in getattr(gen, '_cpp_generator_var_api', {})):
@@ -5651,7 +5661,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     # leave it exhausted afterward, matching real Python's single-pass
     # iterator semantics. Must run BEFORE the generic bare-identifier list
     # case below, which would restart the scan from element 0.
-    if (isinstance(target, str) and not _for_target_is_tuple(target)
+    if (isinstance(target, str) and not for_target_is_tuple(target)
             and not s.else_body
             and isinstance(s.iterable, gimple_ctypes.IdentExpr)
             and s.iterable.name in getattr(gen, '_cpp_list_iter_cursor', {})):
@@ -5662,20 +5672,34 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if target not in declared:
             declared[target] = 'int64_t'
             lines.append(f"{indent}int64_t {target};")
-        # Same Python invariant as the GIMPLE
-        # `_gen_for_list_iter_cursor`: the cursor is the index of the next
-        # UNCONSUMED element, so the advance happens in the BODY as the
-        # element is read, not in the for-increment. A post-body advance
-        # would make a `next(it)` in the body re-read the element the loop
-        # just yielded (the
+        # The advance goes at the TOP of the body, not in the for-increment.
+        # Same Python invariant as the GIMPLE lowering's
+        # `_gen_for_list_iter_cursor`: `cur` is the index of the next
+        # UNCONSUMED element, so `next(it)` inside the body must read the
+        # element AFTER the one the loop just yielded, which is only true if
+        # the cursor has already moved by the time the body runs. With the
+        # advance in the for-increment, `cur` still pointed AT the current
+        # element while the body ran and `next(it)` re-read it — the identical
+        # off-by-one in both backends (the
         # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape).
+        #
+        # Two statements, read then advance, rather than one
+        # `mojo_list_get_int(lst, cur++)`: the GIMPLE lowering emits the
+        # advance as its own statement, so writing it the same way here is
+        # what makes the two backends' emitted text comparable for this
+        # shape instead of differing in an incidental way.
+        #
+        # The for-increment is therefore empty. A `continue` in the body
+        # jumps to the condition, skipping the (now empty) increment, which
+        # is correct precisely because the advance already happened above.
         lines.append(f"{indent}for (; {_li_cur} < mojo_list_len({_li_list}); ) {{")
-        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur}++);")
+        lines.append(f"{indent}    {target} = mojo_list_get_int({_li_list}, {_li_cur});")
+        lines.append(f"{indent}    {_li_cur}++;")
         for inner in s.body:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")
         return lines
-    if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
+    if gimple_ctypes.for_target_is_tuple(target):
         # `for (a, b) in enumerate(iterable):` — tuple-unpack loop target
         # (statistics.py's `for n, x in enumerate(iterable, start=1):`,
         # the one shape this scalar body model supports: enumerate's
@@ -5688,7 +5712,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # Depth-aware split — a naive `.split(',')` here breaks a
         # NESTED tuple target's own inner commas (`(i, (y, m, d))`
         # would wrongly split into 4 pieces: 'i', '(y', 'm', 'd)').
-        _names = [t.strip() for t in gimple_ctypes._split_top_level_commas(target[1:-1]) if t.strip()]
+        _names = gimple_ctypes.target_slots(target[1:-1].strip())
         # `for i, (a, b, ...) in enumerate(...):` — a NESTED tuple
         # target whose second element is ITSELF a (flat, depth-1)
         # tuple of plain names (calendar.py's `itermonthdays4`: `for
@@ -5700,7 +5724,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # either real-world case and isn't attempted here.
         _nested_inner = None
         if len(_names) == 2 and _names[1].startswith('(') and _names[1].endswith(')'):
-            _cand = [t.strip() for t in gimple_ctypes._split_top_level_commas(_names[1][1:-1]) if t.strip()]
+            _cand = gimple_ctypes.target_slots(_names[1][1:-1].strip())
             if _cand and all(gimple_ctypes.re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', n) for n in _cand):
                 _nested_inner = _cand
         if (_nested_inner is not None
@@ -6133,7 +6157,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # this narrow model never types a LOCAL set as string-valued;
         # matches `_gen_for_set`'s own int64_t-only assumption).
         if (not s.else_body and isinstance(target, str)
-                and not _for_target_is_tuple(target)
+                and not for_target_is_tuple(target)
                 and _cpp_receiver_ctype(gen, s.iterable) == 'MojoSet *'):
             _sexpr = gen._cpp_expr(s.iterable)
             _sit = gen._cpp_fresh_name("_mg_sit")
@@ -6347,9 +6371,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # the accessor matching that name's ALREADY-DECLARED
                 # type when known (an earlier declaration wins — its C++
                 # type cannot change), int64_t otherwise.
-                _tuple_names = (_for_target_slots(target)
-                                if isinstance(target, str)
-                                and _for_target_is_tuple(target) else None)
+                _tuple_names = (gimple_ctypes.target_slots(target)
+                                if gimple_ctypes.for_target_is_tuple(target) else None)
                 if _tuple_names:
                     _tupvar = gen._cpp_fresh_name("_mg_tup")
                     for _nm in _tuple_names:
@@ -6405,7 +6428,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if (_eff_elem is None
                         and not target_was_declared
                         and isinstance(target, str)
-                        and not _for_target_is_tuple(target)
+                        and not for_target_is_tuple(target)
                         and _cpp_body_str_evidence(target, s.body)):
                     # Unknown element provenance but the loop body itself
                     # uses the (single) target as a string — declare it
@@ -6528,7 +6551,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and s.iterable.name not in gen._cpp_declared
-                    and isinstance(target, str) and not _for_target_is_tuple(target)
+                    and isinstance(target, str) and not for_target_is_tuple(target)
                     and isinstance(iter_expr, str)
                     and iter_expr.startswith('_root_globals.')):
                 # The same module-level-global case with the global's C

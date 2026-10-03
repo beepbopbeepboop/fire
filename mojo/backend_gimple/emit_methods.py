@@ -635,8 +635,7 @@ def _struct_build_value_list(gen, arg_nodes, codes):
 # direction — the omission this replaces read `node.args` and never looked at
 # `node.kwargs` at all, so `struct.unpack_from(fmt, buf, offset=2)` ran with
 # offset 0 and returned well-formed data read from the WRONG PLACE, and
-# `struct.calcsize(fmt='<HH')` returned 0 where CPython raises
-# (bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md).
+# `struct.calcsize(fmt='<HH')` returned 0 where CPython raises.
 #
 # Per entry point:
 #   kw       parameter name -> its positional index. A name absent from this
@@ -1998,8 +1997,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # which stubs any unrecognized method to a literal `0` --
                 # every self-hosted `os.path.realpath(x)` silently returned
                 # NULL. Root cause of BLOW.md's ~15.8 GB/180 G-instruction
-                # fixed compile-time cost: `_is_selfhost_source_dir`
-                # (mojo/backend_gimple/module_gen.py) compares two
+                # fixed compile-time cost: the backend's
+                # `module_gen.py` self-host predicate compared two
                 # `os.path.realpath(...)` results, both of which came back
                 # 0 == 0 (trivially equal) for ANY input directory once
                 # compiled, so it always classified every compile as
@@ -4239,10 +4238,36 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             _kb = gimple_ctypes.TypeLattice.slot_kind_byte(
                 gen._elem_of(_keys_val))
             _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_kb]}'
+        # The `keys` argument, materialized into a LOCAL rather than
+        # written inline at the call.
+        #
+        # Two gimple-strict-mode rules bite here, and neither fires in an
+        # ordinary C body — which is why the module-level-FUNCTION spelling
+        # of this call has always compiled and the METHOD spelling never
+        # has (a method body is `void __GIMPLE <Struct>_<method> (...)`,
+        # where GCC's gimple frontend parses the text itself):
+        #
+        #   1. `NULL` is a preprocessor MACRO, not a gimple expression, so
+        #      it cannot appear as a call operand at all.
+        #   2. A cast EXPRESSION cannot appear inline as a call operand
+        #      either — `(MojoList *)0` is rejected just as hard, which is
+        #      why the obvious "swap NULL for a typed null" fix is not one.
+        #
+        # Both are shown by a ten-line standalone probe (a `__GIMPLE`
+        # function calling `mojo_list_sort` with each spelling in turn):
+        # only the form that puts a value in a local first compiles.
+        #
+        # `_build_sort_keys`'s own no-key answer stays the literal text
+        # `NULL` — both of ITS callers test for that exact string, so the
+        # sentinel is unchanged and only the emitted text differs.
+        _keys_arg = _keys_val
+        if _keys_arg == 'NULL':
+            _keys_null = gen._new_val('MojoList *', '(MojoList *)0')
+            _keys_arg = _keys_null
         gen._emit_call('void', '', 'mojo_list_sort',
                        [('MojoList *', ov), ('int', _skind),
                         ('int', '1' if _reverse else '0'),
-                        ('MojoList *', _keys_val)])
+                        ('MojoList *', _keys_arg)])
         # Python's list.sort() returns None; the compiled path's convention for
         # a mutator's value is int 0 (shared with append/extend/reverse).
         return 'int', gen._new_val('int', '0')

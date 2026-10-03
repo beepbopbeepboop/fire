@@ -28,7 +28,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    py_tokenize, Parser, _as_str, _as_dict, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
+    py_tokenize, Parser, _as_str, _as_dict, _as_list, _sms_key, _pair_key, _as_funcdef_node, _ptr_slot_in_range,
     _as_int, _as_intlit_node, _as_boollit_node, _as_structdef_node, _signed_int64, _signed_int64_c_literal,
 )
 from module_loader import load_module, get_symbol_type
@@ -39,6 +39,7 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
+import mojo.middle.infra_infer as ginf
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -47,12 +48,21 @@ import mojo.backend_gimple.device_select as _gmi_device_select
 import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
-from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
+import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.methods_shared import _is_selfhost_source_file
+from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.module_shared import *  # noqa: F401,F403
+# `import *` skips underscore-prefixed names, and this is the single accessor
+# the three dispatch-global sites below read. From `mojo.middle.types` rather
+# than `module_shared`, which `gimple_codegen` imports at ITS line 70:
+# reading it from there would close the cycle
+# `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
+# name would be unavailable at the moment the import ran.
+from mojo.middle.types import dispatch_table_global_ctype
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -214,100 +224,6 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         ipt.setdefault(fname, {})[pname] = call_type
 
 
-def _is_selfhost_source_dir(_dir: str) -> bool:
-    """Is `_dir` a directory holding a genuine checkout of this compiler's
-    own source (not necessarily THIS checkout)? Every real call site that
-    used to compare `_cur_abs == _SELFHOST_DIR` (or a `.startswith` prefix
-    of it) broke the moment the compiler's own `gimple_*.py`/fire_compiler.py
-    sources are compiled from a DIFFERENT checkout than the one currently
-    running as the driver — e.g. a downstream project (a GCC frontend)
-    vendoring a byte-identical copy of this compiler's backend at its own
-    path: `_SELFHOST_DIR` is hardcoded to wherever `gimple_codegen.py`
-    itself was loaded from, so an equality/prefix check against it is
-    FALSE for any other, otherwise-identical checkout (confirmed:
-    `/Users/mrs/net/gcc/gcc/fire`'s vendored copy). Same path-independent
-    signal `_run_pipeline`'s own `_selfhost_register_gimplegen` gate
-    already uses successfully (`_sh_sibling`): a `fire_compiler.py` living
-    right next to `_dir` is true only for a genuine compiler-source
-    directory, never for an ordinary user program's directory that
-    happens to contain a same-named file.
-
-    Defined HERE (not in gimple_codegen.py, its original home) and used
-    only within this file: a cross-module `from gimple_codegen import
-    _is_selfhost_source_dir` reference broke self-hosted with an
-    "unavailable in compiled mode (imported from an unresolved external/
-    relative module)" weak-stub fallback that always returned 0/False —
-    traced to `_local_sibling_module_exports`'s `gen._parsed_import(
-    'gimple_codegen')` itself returning a falsy path self-hosted (a
-    genuine, deeper self-hosted-only resolution gap for THIS one module
-    name, unrelated to this function specifically), even though the
-    shim's own compile resolves it fine. Every OTHER name imported from
-    gimple_codegen.py on the same import line is either a struct/class
-    type (never routed through this function-resolution path at all) or
-    a `gen`/`self`-first-param extracted GimpleGen helper already covered
-    by the separate, independently-working `_selfhost_extracted_fn_index`
-    mechanism — this plain, `str`-first-param utility function was the
-    only thing actually relying on the broken path. A local, single-file
-    definition sidesteps the whole cross-module resolution gap rather
-    than working around it."""
-    if not _dir:
-        return False
-    # NOT `_dir == _SELFHOST_DIR or _dir.startswith(_SELFHOST_DIR + os.sep)
-    # or ...`: this function's docstring already argues this equality-
-    # against-`_SELFHOST_DIR` signal is the WEAKER, position-dependent one
-    # (false for any vendored/downstream checkout) versus the sibling-file
-    # check below — and it is now additionally, actively BROKEN when this
-    # function itself runs self-hosted (i.e. compiled INTO `mojoc`, not run
-    # under the `python3 fire.py` shim). `_SELFHOST_DIR` is a module-level
-    # global defined in gimple_codegen.py; every cross-module *read* of a
-    # self-hosted module-level global falls back to its boxed int64_t
-    # "home" representation unless a separate pre-pass
-    # (`_seed_selfhost_module_globals`, gated by THIS function's own
-    # result) has already corrected its type for this call site — a
-    # chicken-and-egg gap this function cannot use to decide whether to run
-    # that very pre-pass. Confirmed via a direct debug print built into a
-    # rebuilt `mojoc`: reading `_SELFHOST_DIR` here evaluated to the bare
-    # integer `0`, not a path string, so `_dir.startswith(_SELFHOST_DIR +
-    # os.sep)` was really `_dir.startswith('0' + os.sep)`... and even after
-    # fixing `os.path.realpath` (BLOW.md's originally-suspected sole cause
-    # — real, but not sufficient) `_SELFHOST_DIR` still read back as the
-    # bare integer `0`, which Python's `+` coerces jointly with `os.sep`
-    # into `_dir.startswith(os.sep)` — trivially TRUE for every absolute
-    # path. Dropping the `_SELFHOST_DIR`-dependent checks entirely sidesteps
-    # this whole cross-module global-boxing gap rather than chasing it
-    # further; the sibling-file check the docstring already prefers needs
-    # no module-level global at all.
-    if os.path.isfile(os.path.join(_dir, 'fire_compiler.py')):
-        return True
-    # A subdirectory (`mojo/middle`, `mojo/backend_gimple`) of a genuine
-    # compiler-source tree: walk up to find the `fire_compiler.py` that
-    # marks the tree's root.
-    #
-    # `if not _cand: _cand = os.sep` (not `_cand = ... or os.sep`): for an
-    # absolute `_rdir` (`os.path.realpath` always returns one),
-    # `_rdir.split(os.sep)[:1]` joined back is `''` (`'/tmp'.split('/')[:1]
-    # == ['']`), and `os.path.isfile(os.path.join('', 'fire_compiler.py'))`
-    # silently degrades into a CWD-relative check instead of the intended
-    # filesystem-root one — invoking `./mojoc` from a CWD that happens to
-    # hold a `fire_compiler.py` (true for every dev checkout) would
-    # spuriously match here for an unrelated `_dir`. This was the
-    # mechanism BLOW.md originally (and incompletely) blamed; see the
-    # module docstring above and BLOW.md §0 for the fuller chain. The
-    # explicit `if not _cand:` (not `or os.sep`) deliberately avoids
-    # self-hosted `or` on strings — see CRASH.md's `and`/`or`
-    # mixed-operand miscompilation class.
-    _rdir = os.path.realpath(_dir)
-    for _p in range(len(_rdir.split(os.sep)), 0, -1):
-        _cand = os.sep.join(_rdir.split(os.sep)[:_p])
-        if not _cand:
-            _cand = os.sep
-        if os.path.isfile(os.path.join(_cand, 'fire_compiler.py')):
-            return True
-    return False
-
-
-
-
 def _free_func_param_ctypes(self, s) -> list:
     """`[self._param_ctype(pn, pt, s) for pn, pt in s.params]` as an
     EXPLICIT loop with a per-element unpack: the list-comprehension form
@@ -358,52 +274,165 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
-def _returns_kinds_valued(gen, node) -> bool:
+def _param_slot_kinds(params) -> dict:
+    """`{parameter name: per-slot kind byte}` for the ANNOTATED parameters of
+    a function definition.
+
+    This pre-pass runs over every body BEFORE the per-function locals exist,
+    so `gen._quick_type(IdentExpr('x'))` for a parameter answers the erased
+    `int64_t` for every parameter in the program — which is exactly what
+    made the list-literal arm of `_returns_kinds_valued` answer "homogeneous"
+    for `return [x, 1, s]` and hand a float's bits to `strlen`. A parameter's
+    DECLARED type is not erased: it is the annotation, and it is what the
+    slot will hold. Unannotated parameters contribute nothing, so the answer
+    stays as weak as it was for them rather than being invented.
+
+    `gimple_ctypes._mojo_type` is the shared annotation-to-C-type answer
+    (`_quick_type` itself goes through `_TYPE_MAP`), so the kind byte comes
+    from the same table the emitter's own `slot_kind_byte` mapping uses.
+    """
+    out = {}
+    if not params:
+        return out
+    for _p in params:
+        try:
+            _nm, _ann = _p[0], _p[1]
+        except (TypeError, IndexError):
+            continue
+        if not isinstance(_ann, str) or not _ann:
+            continue
+        out[_as_str(_nm)] = gimple_ctypes.TypeLattice.slot_kind_byte(
+            gimple_ctypes._mojo_type(_ann))
+    return out
+
+
+def _list_literal_slot_kinds(gen, node, param_kinds=None) -> list:
+    """`gen._struct_slot_kinds`' long-form spelling (`'double'` / `'str'` /
+    `'bytes'` / `'int'`) of a heterogeneous list LITERAL's per-slot kinds, or
+    `[]` for anything that is not one.
+
+    This is the per-index half of `_returns_kinds_valued`'s list arm, and it has
+    to be computed from the same inputs or the two disagree about which
+    literals are heterogeneous — so it shares `_param_slot_kinds` and
+    `TypeLattice.slot_kind_byte`, and the one-byte runtime alphabet
+    (`'d'`/`'p'`/`'s'`/`'l'`/`'i'`, `mojo_list_set_kinds`'s) is translated to
+    the long form `_struct_slot_kinds` uses. `'l'` (a nested container slot)
+    and `'n'` (`None`) fold to `'int'`: a raw word IS the right read for
+    both — the pointer, and 0 — and the alternative would be a per-slot
+    pointer type this table has never carried.
+
+    Both spellings are translated through ONE `_long` table rather than by
+    appending `param_kinds`' value and `slot_kind_byte(...)`'s value
+    side-by-side: `_param_slot_kinds` answers in the runtime's one-byte
+    alphabet, so an `IdentExpr` element and a literal element of the same type
+    have to reach this list in the same spelling or the same `a[1]` reads
+    through two different accessors depending on which arm filled its slot.
+
+    `[]` for a `*`-unpack element, matching the boolean arm: no compile-time
+    slot count means no per-slot kinds at all."""
+    if not isinstance(node, gimple_ctypes.ListExpr):
+        return []
+    _long = {'d': 'double', 'p': 'str', 's': 'bytes'}
+    out = []
+    for _el in node.elements:
+        if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+            return []
+        if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                isinstance(_el, gimple_ctypes.IdentExpr)
+                and _el.name == 'None')):
+            out.append('int')
+            continue
+        if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+            _pk = param_kinds.get(_as_str(_el.name))
+            if _pk is not None:
+                out.append(_long.get(_pk, 'int'))
+                continue
+        out.append(_long.get(gimple_ctypes.TypeLattice.slot_kind_byte(
+            gen._quick_type(_el)), 'int'))
+    return out
+
+def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
     """True when `node` is an expression that produces a value whose
     per-slot element kinds are recorded on the VALUE itself — a
     `struct.unpack` of a format that mixes kinds, a `Struct` handle's
-    `unpack`/`iter_unpack` on such a format, or a heterogeneous list/tuple
+    `unpack`/`iter_unpack` on such a format, or a heterogeneous list
     LITERAL. The kinds then survive a `return` even though the compile-time
     NAME they were recorded against does not, which is the whole reason this
     question needs answering at the callee (see `_infer_return_maybe_kinds`).
 
     Only literal formats answer, the same bar `_struct_ctor_format` sets:
     a computed format is not statically known, and guessing would be the
-    wrong-static-answer failure the whole table exists to avoid. The list
-    case is decided by the same rule `_lower_list_literal` records under —
-    a kind byte per element (`mojo_list_set_kinds`'s own alphabet, which
-    `_list_literal_slot_kind` maps), emitted only when they are not all the
-    same — so the two cannot disagree about which literals describe
-    themselves.
+wrong-static-answer failure the whole table exists to avoid.
 
-    The heterogeneous-literal case is what makes `def mixed(x: Float64, s:
-    String) -> List: return [x, 1, s]` readable through a call. Its
-    elements' joined type is `char *` (`TypeLattice.join` resolves
-    double-vs-char* to char*), so the caller binds the result's element type
-    from `_return_elem_types` and `a[p]` lowers to `mojo_list_get_str` — a
-    float slot's IEEE-754 bits handed to `strlen`, which SIGSEGVs. The kinds
-    ARE recorded, by the callee's own literal lowering; marking the call
-    result makes the read a boxed one and lets the runtime answer per slot."""
+    The list-literal arm was MISSING, and the omission is what
+    `bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md` is:
+    `_lower_list_literal` records the per-slot kinds of a heterogeneous
+    literal on the value (`mojo_list_set_kinds`) and marks it in
+    `gen._maybe_kinds_vals` — but only while THAT function is being
+    lowered. A `return [x, 1, s]` therefore described itself perfectly
+    and lost every word of it at the boundary, because this function
+    (which decides the cross-function half) did not recognise the one
+    producer that is not a `struct.unpack`. So
+    `def mixed(x: Float64, s: String): return [x, 1, s]` bound to a local in
+    the caller left that local's element type at the unknown-element default
+    `str`, and every read of it went through `mojo_list_get_str` — so `a[0]`,
+    which holds `2.5`'s IEEE-754 bit pattern `0x4004000000000000`, was handed
+    to `strlen` and the program died with SIGSEGV. Marking the callee makes
+    the call site register the result in `_maybe_kinds_vals`
+    (`emit_calls.py`'s `_lower_named_call`), which is the flag the subscript
+    and iteration lowerings already consult for `mojo_list_get_boxed`.
+
+    The heterogeneous-literal case is what makes
+    `def mixed(x: Float64, s: String) -> List: return [x, 1, s]` readable
+    through a call. Its elements' joined type is `char *` (`TypeLattice.join`
+    resolves double-vs-char* to char*), so the caller binds the result's
+    element type from `_return_elem_types` and `a[p]` lowers to
+    `mojo_list_get_str` — a float slot's IEEE-754 bits handed to `strlen`,
+    which SIGSEGVs. The kinds ARE recorded, by the callee's own literal
+    lowering; marking the call result makes the read a boxed one and lets the
+    runtime answer per slot.
+
+    The "not all the same kind" test is the emitter's own, applied
+    statically: one kind byte per element, from `_param_slot_kinds` where the
+    element is a bare parameter, else `_quick_type`. A `*`-unpack element has
+    no compile-time slot count and so no static per-slot kinds at all —
+    answering False for it keeps that case exactly where it was.
+
+    `gen is None` is the predicate's own no-type-context mode, which
+    test_gimple.py's struct-format case calls it in (that case is about the
+    CallExpr arm below and needs no types). With no context an identifier
+    element cannot be typed, so the literal half answers what it can — LITERAL
+    elements only — rather than claiming to have seen the whole literal. That
+    is also why the `gen is None` test sits where it does: a mode that
+    silently guessed `int64_t` for every element would answer "homogeneous"
+    for `return [1, 2, 3]` on a wrong premise rather than declining.
+
+    `TupleExpr` is in the isinstance test for the same reason it is in
+    `_lower_list_literal`'s: a tuple literal is a list literal that prints
+    with parentheses, and its per-slot kinds are recorded the same way."""
     if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
-        # `gen is None` is the predicate's own no-type-context mode, which
-        # test_gimple.py's struct-format case calls it in (that case is about
-        # the CallExpr arm below and needs no types). With no context an
-        # identifier element cannot be typed, so the literal half answers what
-        # it can — LITERAL elements only — rather than claiming to have seen
-        # the whole literal.
         _kinds = set()
         _saw_typed = False
         for _el in (node.elements or []):
-            if isinstance(_el, (gimple_ctypes.NoneLiteral,)) or (
-                    isinstance(_el, gimple_ctypes.IdentExpr) and _el.name == 'None'):
+            if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+                return False
+            if (isinstance(_el, gimple_ctypes.NoneLiteral) or (
+                    isinstance(_el, gimple_ctypes.IdentExpr)
+                    and _el.name == 'None')):
                 _kinds.add('n')
                 _saw_typed = True
-            elif gen is None:
                 continue
-            else:
-                _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
-                    gen._quick_type(_el)))
-                _saw_typed = True
+            if gen is None:
+                continue
+            if isinstance(_el, gimple_ctypes.IdentExpr) and param_kinds:
+                _pk = param_kinds.get(_as_str(_el.name))
+                if _pk is not None:
+                    _kinds.add(_pk)
+                    _saw_typed = True
+                    continue
+            _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._quick_type(_el)))
+            _saw_typed = True
         return _saw_typed and len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
@@ -436,7 +465,8 @@ def _returns_kinds_valued(gen, node) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
+def _infer_return_maybe_kinds(gen, body, params=None,
+                            callee_kinds=None) -> tuple:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -456,49 +486,119 @@ def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
     not — recorded rather than approximated, since over-approximating here
     would only cost a boxed read on a value the runtime then reports as
     unboxed, while under-approximating costs a wrong answer, and a missing
-    case is a missing case either way.
+`case is a missing case either way.
 
-    `func_def` is the definition this body belongs to, and its ANNOTATED
-    params are seeded into `var_types` for the duration of the walk: the
+    Returns `(maybe_kinds, slot_kinds)`:
+    `maybe_kinds` is the BOOLEAN half, which reaches the call site as
+    `gen._return_maybe_kinds` and becomes a `mojo_list_get_boxed` read for a
+    subscript or iteration with no compile-time index;
+    `callee_kinds` is the set of function names ALREADY known to hand one
+    back, so a value that travels out through TWO returns is found rather than
+    missed — see `_valued` below;
+    `slot_kinds` is the PER-INDEX half, the long-form kind name of every slot
+    of a returned heterogeneous list literal (`'double'` / `'str'` / `'bytes'`
+    / `'int'`, the spelling `gen._struct_slot_kinds` already uses). That one
+    is what makes a STATICALLY indexed read exact — `a[2]` on
+    `[x, 1, s]` has to come back as a `char *`, and the boolean alone can only
+    say "ask the runtime", which for a `char *` slot answers with the raw word.
+    `[]` when nothing per-index is known.
+
+    `params` is the definition's own parameter list, and it is threaded in for
+    the same reason `_infer_return_elem_type` takes `func_def`: the
     heterogeneous-literal test reads each element's type, and a parameter is
     the most ordinary element there is — `return [x, 1, s]` in
     `def mixed(x: Float64, s: String) -> List` is three elements of which two
-    are params. With `var_types` unseeded `_quick_type` answers int64_t for
-    every identifier, so all three read as one kind and the literal looks
-    homogeneous. Seed and restore are the same save/overlay/restore
-    `_infer_return_elem_type` does for the same reason."""
+    are params. This pre-pass runs before the per-function locals exist, so
+    `gen._quick_type(IdentExpr('x'))` answers the erased `int64_t` for every
+    parameter in the program and all three elements read as one kind.
+
+    It is read TWO ways, deliberately, because a parameter's type is needed by
+    two different consumers. `_param_slot_kinds` answers for a bare
+    `IdentExpr` element with no `gen` state at all, which is what makes the
+    `gen is None` no-type-context mode still able to say "heterogeneous"; and
+    `var_types` is overlaid with the same annotations so an element that is an
+    ARITHMETIC expression over a parameter (`return [x + 1, s]`) is typed too.
+    The overlay is saved and restored exactly as `_infer_return_elem_type`
+    does it, because this function is called from inside a fixpoint that owns
+    `gen.var_types`."""
+    _pk = _param_slot_kinds(params)
+    _ck = callee_kinds if callee_kinds is not None else ()
     _saved_vt = gen.var_types if gen is not None else None
     if gen is not None:
         gen.var_types = dict(_as_dict(_saved_vt))
-        if func_def is not None:
-            for _pname, _ptype in (func_def.params or []):
-                if _ptype:
-                    gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
+        for _p in (params or []):
+            try:
+                _pname, _ptype = _p[0], _p[1]
+            except (TypeError, IndexError):
+                continue
+            if isinstance(_ptype, str) and _ptype:
+                gen.var_types[_as_str(_pname)] = gimple_ctypes._mojo_type(_ptype)
+
+    def _valued(node) -> bool:
+        """Does this EXPRESSION produce a value whose per-slot kinds were
+        recorded on it?
+
+        `_returns_kinds_valued` answers from the expression's own shape. This
+        adds the one hop it cannot see: a call to a function that ITSELF
+        hands back such a value. `mixed` records the kinds on the literal it
+        returns, and `drop_one`'s `kept = mixed(...)` / `return kept` carries
+        that value out through a SECOND frame — which is the shape
+        test_gimple_runner.py's `gimple_kinds_survive_a_sibling_list_being_
+        freed` is, and with the hop missing `drop_one` was not marked, so
+        `b = drop_one()` was not registered in `_maybe_kinds_vals` and
+        `print(b[i])` reached for `mojo_list_get_str` on a list whose slot 0
+        holds `9.5`'s IEEE-754 bits: SIGSEGV after the first line. The whole
+        list's repr was right (the kinds ARE on the value), so the row looked
+        like a repr bug and was not one.
+
+        The callee's OWN name is what is matched, and both spellings the
+        method-mangling scheme produces are spelled here: a bare free
+        function and the `Struct_method` form `_mk` registers methods under.
+        """
+        if _returns_kinds_valued(gen, node, _pk):
+            return True
+        if not isinstance(node, gimple_ctypes.CallExpr):
+            return False
+        _f = node.func
+        if isinstance(_f, gimple_ctypes.IdentExpr):
+            return _as_str(_f.name) in _ck
+        if (isinstance(_f, gimple_ctypes.MemberExpr)
+                and isinstance(_f.obj, gimple_ctypes.IdentExpr)):
+            return f'{_as_str(_f.obj.name)}_{_as_str(_f.member)}' in _ck
+        return False
     bound: set = set()
+    kinds_out: list = []
     try:
         for _round in range(2):
             found = False
             for nd in _walk_ast(body):
                 if (isinstance(nd, gimple_ctypes.AssignStmt)
                         and isinstance(nd.target, gimple_ctypes.IdentExpr)):
-                    if _returns_kinds_valued(gen, nd.value) or (
+                    if _valued(nd.value) or (
                             isinstance(nd.value, gimple_ctypes.IdentExpr)
                             and nd.value.name in bound):
                         bound.add(nd.target.name)
                 elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
-                        and _returns_kinds_valued(gen, getattr(nd, 'value', None))):
+                        and _valued(getattr(nd, 'value', None))):
                     bound.add(nd.name)
                 elif isinstance(nd, gimple_ctypes.ReturnStmt):
                     v = getattr(nd, 'value', None)
-                    if _returns_kinds_valued(gen, v):
+                    if _returns_kinds_valued(gen, v, _pk):
+                        found = True
+                        kinds_out = (_list_literal_slot_kinds(gen, v, _pk)
+                                     or kinds_out)
+                    elif _valued(v):
                         found = True
                     elif (isinstance(v, gimple_ctypes.IdentExpr)
                           and v.name in bound):
                         found = True
             if found:
-                return True
-        return False
+                return True, kinds_out
+        return False, kinds_out
     finally:
+        # The `var_types` overlay above is this function's, and the fixpoint
+        # that calls it owns the real one; leaving the overlay behind would
+        # make every later round answer from annotations this body invented.
         if gen is not None:
             gen.var_types = _saved_vt
 
@@ -647,6 +747,12 @@ def _emit_reflection_dispatch(self, parts):
     # that was never generated ("implicit declaration of function
     # '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
     reflect_emitted = []
+    # Every struct that gets an element-repr shim below. A SET rather than the
+    # list, because the field-dump arm above asks "is there a shim for this
+    # field's type?" once per field of every reflected struct, and a `sn not in
+    # list` test is a linear scan of a list that can hold every struct in the
+    # closure.
+    elem_repr_names = set()
     for sn in reflect_structs:
         fields = self.struct_field_types.get(sn, {})
         if len(fields) == 0:
@@ -715,6 +821,12 @@ def _emit_reflection_dispatch(self, parts):
         )
     repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
                       for sn in reflect_emitted]
+    # Forward decls for the element-repr shims below, which the list-literal
+    # lowering names by name (`mojo_list_set_elem_repr(t, _mojo_elem_repr_X)`)
+    # and the `__repr__` symbols they call, which are emitted with the function
+    # bodies further down the file.
+    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
+                           for sn in reflect_emitted]
     # Same list as the getattr/setattr helpers above: this loop had its own
     # copy of the "skip field-less structs" condition, and the forward-decl
     # comprehension above had a third copy inside a comprehension `if` —
@@ -768,7 +880,21 @@ def _emit_reflection_dispatch(self, parts):
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
             elif ftype.endswith(' *'):
-                val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
+                # A field whose declared type is a struct this compile
+                # reflected is rendered through that struct's ELEMENT REPR
+                # shim, not through the tag-based dispatch: the field's type is
+                # written down right here, so there is nothing to discover at
+                # runtime, and `_mojo_dispatch_repr` cannot use it anyway for a
+                # struct-allocated value (no runtime type tag -- the same gap
+                # that made `[p]` print a pointer decimal). A field of a type
+                # with no shim keeps the dispatch, which is what reaches a
+                # non-reflected struct's own dumper.
+                _fsn = ftype[:-2].strip()
+                if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
+                    val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
+                                f'((int64_t)(intptr_t){fref}) : "None")')
+                else:
+                    val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
             part_exprs.append(f'"{fname}=", {val_expr}')
@@ -787,6 +913,33 @@ def _emit_reflection_dispatch(self, parts):
             f"  return {cat_chain};\n"
             f"}}\n"
         )
+        # The ELEMENT REPR shim for a list/tuple of this struct: the walker
+        # holds one `char *(*)(int64_t)` for a slot it reads as a word, and
+        # this is the typed function behind it. A shim rather than a cast of
+        # the real symbol into that pointer type, because calling
+        # `char *(Foo *)(void)` through a `char *(int64_t)` is undefined
+        # behaviour even where every ABI this targets passes it in the same
+        # register.
+        #
+        # A user's own `__repr__` wins, which is CPython's rule for a
+        # container element (a list reprs its elements with `repr`, not with
+        # `str`, and not with a field dump) and the reason this is a shim and
+        # not just `_mojo_repr_{sn}`: the field dump cannot see the dunder, and
+        # a struct-allocated element has no type tag for
+        # `_mojo_dispatch_repr` to dispatch on.
+        _erep = self._struct_method_csym(sn, '__repr__', '')
+        _erep_ok = self.func_return_types.get(_erep) == 'char *'
+        if _erep_ok:
+            elem_repr_fwd_decls.append(f'extern char *{_erep} ({sn} *);\n')
+        elem_repr_names.add(sn)
+        refl_parts.append(
+            f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
+            f"  {sn} *o = ({sn} *)(intptr_t)v;\n"
+            f"  if (!o) return \"None\";\n"
+            + (f"  return {_erep} (o);\n" if _erep_ok
+               else f"  return _mojo_repr_{sn} (o);\n")
+            + f"}}\n"
+        )
     parts.append("static char * _mojo_dispatch_repr (void *);")
     parts.append("static char * _mojo_repr_list (MojoList *);")
     parts.append("static char * _mojo_repr_dict (MojoDict *);")
@@ -796,6 +949,11 @@ def _emit_reflection_dispatch(self, parts):
         parts.append("/* Forward decls for generic repr() (mutual struct references) */")
         parts.append("\n".join(repr_fwd_decls))
         parts.append('')
+    if elem_repr_fwd_decls:
+        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
+                     "(a container of structs) */")
+        parts.append("\n".join(elem_repr_fwd_decls))
+        parts.append("")
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
         parts.extend(refl_parts)
@@ -902,6 +1060,18 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _i = 0; _i < _n; _i++) {\n"
                "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
                "    int64_t _e = mojo_list_get_int(lst, _i);\n"
+               "    /* The list's own ELEMENT REPR, when the codegen recorded\n"
+               "       one: this list's elements are a registered struct, and the\n"
+               "       generic reader below cannot know that -- a struct-allocated\n"
+               "       value carries no runtime type tag, so _mojo_dispatch_repr\n"
+               "       never finds it and the slot printed as a raw pointer\n"
+               "       decimal (bugs/CODEGEN_user_defined_dunder_repr_not_\n"
+               "       consulted_by_str_and_container_spellings.md). Asked FIRST\n"
+               "       because it is the most specific answer available; NULL\n"
+               "       means this list says nothing and the path below is\n"
+               "       unchanged. */\n"
+               "    char *_re = mojo_list_repr_elem(lst, _e);\n"
+               "    if (_re) { _buf = mojo_str_cat(_buf, _re); free(_re); continue; }\n"
                "    /* A registered 2-element element is a runtime-built PAIR\n"
                "       (zip / dict.items() / enumerate) and prints through the\n"
                "       pair walker, which gets slot 0 right where the generic\n"
@@ -1046,6 +1216,44 @@ def _class_field_decl(field):
     return None
 
 
+def _own_class_field_index(fields, name) -> int:
+    """Index of `name`'s OWN class-body declaration in `fields`, or -1.
+
+    `_merge_struct_inheritance` (gimple_codegen.py) builds a subclass's
+    `.fields` as BASE declarations FIRST and the class's own LAST — its own
+    docstring: "own members override every base". So after the merge a
+    subclass that OVERRIDES a base member has TWO declarations of that name
+    in `.fields`, and the subclass's own is the LAST one. Every
+    "first declaration of this name wins" scan over `.fields` therefore
+    resolves to the BASE's, which is the opposite of the rule the merge
+    documents.
+
+    Measured, silent wrong value at exit 0:
+
+        class Base:
+            tag = 7
+        class Child(Base):
+            tag = 9
+
+    emitted `_classattr_Child__tag = 7`, so `Child.tag` read 7, every
+    `cls.tag` inside `Child`'s own methods read 7, and
+    `class Grand(Child): tag = 11` read 7 too — the whole inheritance chain
+    took the ROOT's value.
+
+    The comparison is `_cfd[0] == name`, exactly as the scanning loops
+    already spell it, so the self-hosted answer for a boxed field read is
+    unchanged; `range(len(...))` rather than `reversed()` because the
+    self-hosted backend has no lowering for the lazy reverse iterator.
+    """
+    _pick = -1
+    _fl = _as_list(fields)
+    for _i in range(len(_fl)):
+        _cfd = _class_field_decl(_fl[_i])
+        if _cfd is not None and _cfd[0] == name:
+            _pick = _i
+    return _pick
+
+
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
     for node in _walk_ast(body):
@@ -1141,23 +1349,53 @@ def _gmi_expr_provably_str(e) -> bool:
     return False
 
 
-# The hardcoded dispatch tables (`_STMT_DISPATCH` etc.) that get a bare
-# `MojoDict *` / `MojoList *` / `MojoSet *` module-global field rather than
-# the boxed `int64_t` convention. A module-level tuple + explicit `==` loop:
-# `name in <a set literal>` returned True for UNRELATED names on the
-# self-hosted compiled path (`'arr' in _dispatch_names`), declaring an
-# ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
-# stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo).
-_DISPATCH_TABLE_NAMES = ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                         '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS')
-
-
+# The compiler-internal dispatch/type-table globals (`_STMT_DISPATCH` etc.)
+# that get a bare `MojoDict *` / `MojoList *` / `MojoSet *` module-global field
+# rather than the boxed `int64_t` convention. Membership is
+# `dispatch_table_global_ctype`'s (the ONE table the global-declaration and
+# seed sites also read, so a name added there is declared here too). This used
+# to be a module-level tuple of names with an explicit `==` loop, and before
+# that a set literal: `name in <a set literal>` returned True for UNRELATED
+# names on the self-hosted compiled path (`'arr' in _dispatch_names`),
+# declaring an ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
+# stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo). The
+# `... is not None` form keeps the dict's own lookup as the only membership
+# test, so the loop that outranked `in` is no longer reachable at all.
 def _is_dispatch_name(_n) -> bool:
-    _ns = _as_str(_n)
-    for _dn in _DISPATCH_TABLE_NAMES:
-        if _ns == _dn:
-            return True
-    return False
+    return dispatch_table_global_ctype(_as_str(_n)) is not None
+
+
+def _gmi_declare_table_global(gen, gname, global_decls) -> bool:
+    """Declare the module global `gname` with the C type
+    `dispatch_table_global_ctype` gives it, and record that type in BOTH of
+    `gen`'s global tables. Returns False — declaring nothing — for an ordinary
+    global, so the caller falls through to its own RHS-derived conclusion.
+
+    ONE place, called at the TOP of both module-global declaration scans, and
+    the reason it is at the top rather than per-RHS-shape is that the answer
+    has to be the same whichever scan reaches the name first. The home module's
+    own scan and every importer's re-declaration of the same name have to agree
+    about the field's C type, because a bare read of a dispatch global is
+    emitted as a direct `_<mod>_globals.NAME` load typed from
+    `_global_var_types` — so a home that boxes the field while an importer
+    declares it bare is a hard
+    "assignment to 'MojoSet *' from 'int64_t' makes pointer from integer
+    without a cast", once per read.
+
+    That is what consulting the table only from the DictExpr/ListExpr/SetExpr
+    rows did: `module_loader.py`'s `_C_KEYWORDS = frozenset({...})` is a CALL,
+    so its own scan never reached one of those rows, fell to the generic
+    int64_t fallback, and declared `int64_t _C_KEYWORDS` in
+    `_module_loader_toplev` while `gimple_codegen`/`module_gen`/`module_shared`
+    all declared the same name `MojoSet *`.
+    """
+    _forced = dispatch_table_global_ctype(gname)
+    if _forced is None:
+        return False
+    global_decls.append(f"{_forced} {gname};")
+    gen._global_var_types[gname] = _forced
+    gen._global_c_decl_types[gname] = _forced
+    return True
 
 
 # The container C types a constructor argument is allowed to resolve a
@@ -1168,7 +1406,7 @@ def _is_dispatch_name(_n) -> bool:
 # and is free to widen) is not: an answer here is acted on only when it is
 # unanimous across every call site, and "no evidence" always beats a guess.
 # Kept as a tuple + explicit `==` chain (not a `in <set literal>` test) for
-# the same self-hosted reason `_DISPATCH_TABLE_NAMES` above documents.
+# the same self-hosted reason `_is_dispatch_name` above documents.
 _CTOR_CONTAINER_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
 
 
@@ -1178,6 +1416,46 @@ def _gmi_is_ctor_container_ctype(t) -> bool:
         if _ts == _ct:
             return True
     return False
+
+
+def _lambda_ret_type(gen, node) -> str:
+    """The C return type `_lower_LambdaExpr` will declare for this lambda.
+
+    That lowering builds the synthetic body `return <node.body>` and calls
+    `_infer_return_type` on it, which is `TypeLattice.join_all` over
+    `_quick_type` of that one expression. Computed here from the same two
+    facts, so the answer is the lifted definition's declared type by
+    construction rather than by coincidence -- and available without
+    lifting, which is what lets the Phase 1.7 pre-scan record it.
+
+    `void` (a `None` body) is normalized to `int64_t`, matching the
+    lifted definition: `_collect_return_types` yields the `void` string for
+    a value-less `return`, and `_lower_fnptr_call_value`'s `ret_type ==
+    'void'` arm already handles it, so it needs no special case here."""
+    if node.body is None:
+        return 'int64_t'
+    return _as_str(TypeLattice.join_all([_as_str(gen._quick_type(node.body))]))
+
+
+def _lambda_pairs_ret_type(gen, pairs) -> str:
+    """The single callable return type stored in a dict LITERAL of lambdas,
+    or '' when they disagree (or are not all lambdas).
+
+    The unanimity-or-nothing rule is `note_dict_callable_ret`'s, applied at
+    the one site that knows every element before the dict exists. '' is the
+    ambiguous answer, and every consumer reads it with `or 'int64_t'`, so
+    this can only preserve the pre-existing behaviour, never invent one."""
+    agreed = ''
+    for _pair in pairs:
+        _val = _pair[1]
+        if not isinstance(_val, LambdaExpr):
+            return ''
+        _rt = _lambda_ret_type(gen, _val)
+        if agreed == '':
+            agreed = _rt
+        elif agreed != _rt:
+            return ''
+    return agreed
 
 
 
@@ -1748,12 +2026,12 @@ def gen_module_impl(self, stmts):
     # computed inline here since that flag is set further below).
     if (self.do_imports or self.link_imports):
         _sg_cf = getattr(self, '_current_filename', None)
-        if _sg_cf:
-            _sg_abs = os.path.abspath(os.path.dirname(_sg_cf))
-            if _is_selfhost_source_dir(_sg_abs):
-                _seed_selfhost_module_globals(self)
-                _seed_selfhost_struct_dict_field_types(self)
-                _seed_selfhost_return_elem_types(self)
+        # The FILE, not its directory: see the `_is_selfhost_file` comment
+        # at the other call site below for why the dir variant was over-broad.
+        if _sg_cf and _is_selfhost_source_file(_sg_cf):
+            _seed_selfhost_module_globals(self)
+            _seed_selfhost_struct_dict_field_types(self)
+            _seed_selfhost_return_elem_types(self)
 
     imported_code = []
     imported_stmts = []
@@ -1944,11 +2222,38 @@ def gen_module_impl(self, stmts):
             # `strutil._iter_significant_lines(infile)` shape.
             _xg_calls = []
             for _xg_fd in stmts:
-                if not isinstance(_xg_fd, FunctionDef):
+                if isinstance(_xg_fd, FunctionDef):
+                    for _xg_n3 in _walk_ast(_xg_fd.body):
+                        if isinstance(_xg_n3, CallExpr):
+                            _xg_calls.append((_xg_n3, _xg_fd))
+            # MODULE-level statements, with a `None` enclosing context. These
+            # were simply not in the set of sites either contract below saw,
+            # which is the whole of
+            # the module-scope cross-module constructor case:
+            # a module-scope `insp.Parameter('v', 7)` / `Parameter('v', 7)`
+            # records no cross-module constructor field hint, so the imported
+            # module compiled `self.v = v` at the `int64_t` default against a
+            # `char *` field and the client's own `x.v` read back the boxed
+            # pointer's decimal with exit 0. The function-scope spelling of
+            # the same two lines was always right, which is what made this
+            # look scope-dependent rather than like a missing site.
+            #
+            # `None` is already a value both consumers handle: the generator
+            # contract's `_xg_enc_map` lookup is guarded by
+            # `_xg_enclosing is not None`, and the constructor contract below
+            # ignores the enclosing context entirely.
+            #
+            # A `StructDef` is skipped rather than descended into, because its
+            # methods' bodies are already covered above with the method as the
+            # enclosing context; walking it here would re-record every one of
+            # them with `None`, and a container-typed field forwarded through
+            # a method parameter is a case the enclosing context decides.
+            for _xg_top in stmts:
+                if isinstance(_xg_top, (FunctionDef, StructDef)):
                     continue
-                for _xg_n3 in _walk_ast(_xg_fd.body):
+                for _xg_n3 in _walk_ast(_xg_top):
                     if isinstance(_xg_n3, CallExpr):
-                        _xg_calls.append((_xg_n3, _xg_fd))
+                        _xg_calls.append((_xg_n3, None))
 
             for _xg_call, _xg_enclosing in _xg_calls:
                 if isinstance(_xg_call.func, gimple_ctypes.IdentExpr):
@@ -2185,8 +2490,30 @@ def gen_module_impl(self, stmts):
                     for _ms in module_stmts:
                         if isinstance(_ms, FunctionDef):
                             self._global_inline_defs.add(_ms.name)
+                            # `_imported_func_home` ONLY, and never
+                            # `_note_own_func_home`: this observation is
+                            # "module _mn DEFINES a function named _ms.name"
+                            # — a whole-program fact about a SIBLING, which
+                            # is exactly what tier 3 (`_imported_func_home`,
+                            # setdefault/first-wins) is for. Recording it in
+                            # tier 2 as well put a sibling's definition into
+                            # the dict documented as "THIS exact gen_module
+                            # call's own FromImportStmt scan", so two
+                            # siblings each defining a common name collided
+                            # it to `_AMBIGUOUS_FUNC_HOME` and `_func_qualifier`
+                            # then refused EVERY reference to that name in the
+                            # whole program — including a bare `open(...)` in
+                            # a module that lexically imports nothing of the
+                            # kind, where the reference is the builtin.
+                            # Measured: `Lib/zipfile/__init__.py`, whose bare
+                            # `open(...)` uses are the builtin, was refused
+                            # outright because six unrelated siblings
+                            # (codecs, tokenize, bz2, lzma,
+                            # compression.zstd._zstdfile, tarfile) each define
+                            # `open` — see
+                            # bugs/COMPILE_FAIL_open_is_ambiguous_from_
+                            # transitive_registrations.md.
                             self._imported_func_home.setdefault(_ms.name, _mn)
-                            self._note_own_func_home(_ms.name, _mn, record_scope=False)
                         elif isinstance(_ms, StructDef):
                             for _m in _ms.methods:
                                 self._global_inline_defs.add(_m.name)
@@ -2207,8 +2534,17 @@ def gen_module_impl(self, stmts):
     }
 
     _cur_file = getattr(self, '_current_filename', None)
-    _is_selfhost_file = bool(_cur_file) and _is_selfhost_source_dir(
-        os.path.abspath(os.path.dirname(_cur_file)))
+    # `_is_selfhost_source_file`, not `_is_selfhost_source_dir`. The question
+    # is "is the file being compiled the compiler's own source?", and the file
+    # is right here. The dir variant walked UP looking for a `fire_compiler.py`
+    # ancestor, so it answered True for every descendant of this checkout —
+    # `.tmp/`, `build/`, `tools/`, `formal/`, anything — and a user program that
+    # merely sat inside the checkout was then handed the COMPILER's own
+    # AST-node struct layouts below (`Scope`, `Token`, `Parser`, ...). That
+    # was a 355-line difference in the generated C for a program with no AST
+    # in it at all, changing only because of where the file was written. See
+    # bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_the_checkout.md.
+    _is_selfhost_file = _is_selfhost_source_file(_cur_file)
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
             'parent': 'Scope *',
@@ -2362,8 +2698,43 @@ def gen_module_impl(self, stmts):
             'Scope_define', 'Scope_get', 'Scope_set', 'Scope___init__',
             '_char_replace_impl',
         ))
-        self._func_kwargs_slot['MojoFunction___call__'] = 3
-        self._func_kwargs_has_vararg['MojoFunction___call__'] = True
+        # The hand-written `**kwargs`-slot rows for self-host callables the
+        # derived registration pass below cannot reach (it is `isinstance(s,
+        # FunctionDef)` at MODULE level, so a struct METHOD never reaches it).
+        # One table, in `gimple_codegen` beside `_SELFHOST_SIGS`, so
+        # `test_gimple.py` checks it against the real `inspect` signature the
+        # way it checks those: it read 3 against an older
+        # `MojoFunction.__call__(self, interpreter, *args, **kwargs)` and the
+        # method is now `(self, *args, **kwargs)`, so `**kwargs` is at index
+        # 2. A stale index is not an imprecision —
+        # `_lower_struct_method_call`'s vararg merge keeps
+        # `kw_i - (2 if has_vararg else 1)` leading positionals as "fixed"
+        # arguments, so 3 made it keep `f(self.interpreter, ...)`'s FIRST
+        # positional and pack only the rest, and the call went out with one
+        # argument too many against a 3-parameter definition:
+        #
+        #     myinterpreter_MojoFunction___call__ (f, _t29, _t30, kwargs);
+        #     too many arguments to function; expected 3, have 4
+        #
+        # Two of those, one per `f(self.interpreter, self.instance, *args,
+        # **kwargs)` call site (`BoundMethod.__call__` and
+        # `BoundClassMethod.__call__`), the `**kwargs` materialisation passed
+        # POSITIONALLY as well as in its own slot.
+        # BARE names from the module-level `from gimple_codegen import`
+        # above, NOT `gimple_codegen._SELFHOST_KWARGS_SLOTS`. A qualified
+        # module-attribute read of a module-level CONSTANT does not survive
+        # the self-hosted compiled path: `_lower_MemberExpr` deliberately
+        # lowers `gimple_ctypes.X` as a bare `X` ("the qualifier is a
+        # Python-import artifact"), so the read lands on a name this module
+        # never declares. Every other `gimple_codegen.` read in this file is
+        # a FUNCTION call (`_selfhost_syms()`), which lowers by name and so
+        # was never affected; a bare `from`-import is the spelling this
+        # file's other gimple_codegen constants already use (`_EXPR_DISPATCH`,
+        # `_TYPE_MAP`, `_SELFHOST_DIR`).
+        for _kwrow, _kwidx in _SELFHOST_KWARGS_SLOTS.items():
+            self._func_kwargs_slot[_kwrow] = _kwidx
+            self._func_kwargs_has_vararg[_kwrow] = (
+                _SELFHOST_KWARGS_HAS_VARARG[_kwrow])
 
         self.struct_field_types['CallExpr'] = {
             'func': 'int64_t',
@@ -3384,6 +3755,32 @@ def gen_module_impl(self, stmts):
                 continue
             if _cname not in self.struct_field_types:
                 self.struct_field_types[_cname] = {}
+    # This module's OWN structs' constructor-param types, as proven by an
+    # IMPORTING module's literal call sites — the same table shape and the same
+    # key as `self._ctor_lit_param_types` above ("<struct>::<param>"), so the
+    # `pm` chain in the field pass below reads one key from one place and
+    # cannot tell (and does not need to) which module the evidence came from.
+    #
+    # Filtered to hints whose qualifier half is THIS module and which carry no
+    # conflict, mirroring the `_xmod_ctor_field_hints` merge further down: same
+    # `lstrip('.')` canonicalization, same "not unanimous → leave unresolved"
+    # rule. Built here, before the loop below replaces each `s.name` with its
+    # cname, and keyed by the same bare struct name the hint's own middle
+    # segment is (so a genuinely colliding pair — two modules both defining
+    # `Dialog` — resolves as neither does today, rather than as one of them
+    # twice).
+    _xf_own_ctor_params: dict = {}
+    if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
+        _xfq = self.module_name.lstrip('.').replace('.', '_').replace('-', '_')
+        for _xfk in self._xmod_ctor_field_hints:
+            if self._xmod_ctor_field_conflict.get(_xfk):
+                continue
+            _xfhq, _xfhs, _xfhp = _xfk.split('::', 2)
+            if _xfhq != _xfq:
+                continue
+            _xfpct = self._xmod_ctor_field_hints[_xfk]
+            if _xfpct:
+                _xf_own_ctor_params[_xfhs + '::' + _xfhp] = _xfpct
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
@@ -3749,15 +4146,16 @@ def gen_module_impl(self, stmts):
             already = set(self.struct_field_types[s.name].keys())
             for method in s.methods:
                 pm = {}
-                # Parameter names whose annotation says `bool`. Kept beside
-                # `pm` rather than folded into it because `_resolve_type`
-                # deliberately maps `'bool'` to `'int'` (see _TYPE_MAP), so
-                # the ctype dict cannot tell a bool parameter from an int one;
-                # `_gmi_collect_self_assigns` turns this set into
-                # `struct_bool_fields` entries, which is what makes
-                # `self.flag = flag` from a `flag: bool` parameter print as
-                # True/False instead of 1/0.
-                pbool = set()
+                # Which of this method's parameters say `bool` in their
+                # annotation. `_gmi_collect_self_assigns` reads it through
+                # `self` (see `GimpleGen._gmi_bool_params`) because that walk
+                # is the only place that knows which FIELD a parameter feeds,
+                # and re-walking the body here to recover that is exactly the
+                # quadratic-rescan cost
+                # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+                # rescan.md is about. Rebuilt per method, so one method's
+                # answer can never leak into the next one's fields.
+                self._gmi_bool_params = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}
                 for _mpj in (method.params or []):
                     # Indexed loop + `_as_str`, NOT `for pname, ptype in
@@ -3772,7 +4170,7 @@ def gen_module_impl(self, stmts):
                     if pname != 'self':
                         if ptype:
                             if _as_str(ptype).strip() == 'bool':
-                                pbool.add(pname)
+                                self._gmi_bool_params.add(pname)
                             pm[pname] = self._resolve_type(ptype)
                         elif pname in _defaults:
                             _dv = _defaults[pname]
@@ -3785,22 +4183,141 @@ def gen_module_impl(self, stmts):
                         elif (_as_str(method.name) == '__init__'
                               and (_as_str(s.name) + '::' + pname) in self._ctor_lit_param_types):
                             pm[pname] = self._ctor_lit_param_types[_as_str(s.name) + '::' + pname]
+                        elif (_as_str(method.name) == '__init__'
+                              and (_as_str(s.name) + '::' + pname) in _xf_own_ctor_params):
+                            # The same evidence, one module away: a constructor
+                            # called from an IMPORTING module with a literal
+                            # argument of this type. It has to be consulted
+                            # HERE, on the PARAM, rather than only in the
+                            # `_xmod_ctor_field_hints` merge further down,
+                            # because that merge is keyed by param name and
+                            # applied to the FIELD of the same name — so
+                            #
+                            #     class Dialog:
+                            #         def __init__(self, s):   # unannotated
+                            #             self.s = s
+                            #             self.n = s
+                            #
+                            # imported and called as `mb.Dialog("hi")` typed
+                            # `self.s` and left `self.n` at the `int64_t`
+                            # default: `b.s` printed `hi`, `b.n` printed a heap
+                            # address. Same class, ONE module, was already
+                            # right — and the reason is this line: typing the
+                            # PARAM is what lets `_gmi_collect_self_assigns`
+                            # (three lines below) type EVERY field the
+                            # constructor assigns that param to. It also keeps
+                            # the store and the field declaration agreeing: the
+                            # merge alone typed a field `double` while the
+                            # param stayed `int64_t`, and `self.g = f` then
+                            # stored 2.5 as the int 2, which read back as 2.0.
+                            #
+                            # The one-module table above is consulted FIRST, so
+                            # a module's own literal evidence still wins over
+                            # another module's; and an explicit annotation beats
+                            # both (the `if ptype:` arm above).
+                            pm[pname] = _xf_own_ctor_params[_as_str(s.name) + '::' + pname]
                         else:
                             pm[pname] = 'int64_t'
                 new_fields = {}
-                _gmi_collect_self_assigns(self, s.name, method.body, pm, new_fields, pbool)
+                _gmi_collect_self_assigns(self, s.name, method.body, pm,
+                                          new_fields)
                 for _nf_k in new_fields:
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])
                     existing_ft = self.struct_field_types[s.name].get(fn)
-                    can_override = (existing_ft == 'int' and ft.endswith(' *'))
+                    # Two "we did not know" answers may be REPLACED by this
+                    # pass's evidence, and both are exactly as contentless:
+                    #   * `'int'` — the struct emitter's own placeholder for a
+                    #     field with no annotation, so a pointer answer is
+                    #     strictly more information (the rule's own words).
+                    #   * `f"{s.name} *"` — what the `s.fields` VarDecl walk
+                    #     above writes when a field has neither annotation,
+                    #     inherited type, nor readable default ("we don't know
+                    #     what this field holds"). It is NOT a weaker spelling
+                    #     of the same ignorance, and letting it win is what
+                    #     typed a self-host field with a POINTER TO THE
+                    #     RECEIVER'S OWN STRUCT: that walk runs FIRST for each
+                    #     struct, so by the time a `self.X = <expr>`
+                    #     assignment is examined here the placeholder is
+                    #     already the field's declared type and the `can_override`
+                    #     test below let it stand. Measured, six hard gcc
+                    #     errors in the self-host closure, all one answer:
+                    #     `MojoFunction._interp`, `MojoOverloadSet._interp`
+                    #     (an UNANNOTATED `__init__` parameter, so the honest
+                    #     answer is the box) and `Parser._comptime_rhs_failures`
+                    #     (ANNOTATED `list`, so `MojoList *`) came out as
+                    #     `MojoFunction *` / `MojoOverloadSet *` / `Parser *`.
+                    #     It only reaches those three because the field's
+                    #     evidence lives in ANOTHER module's compile: the
+                    #     `VarDecl` placeholder this walk finds in `s.fields`
+                    #     was appended by the pass below while a SIBLING
+                    #     module was compiled, so the outer gen's own
+                    #     `struct_field_types` has no entry to protect — the
+                    #     two tables are per-gen while `StructDef.fields` is
+                    #     shared, which is why the placeholder is the only
+                    #     thing that survives.
+                    # `ft != existing_ft` keeps a field whose real type IS the
+                    # receiver's own struct (`self.next = other`, `self.parent
+                    # = owner`) exactly where it is: both sides answer the same
+                    # and nothing changes.
+                    can_override = ((existing_ft == 'int' and ft.endswith(' *'))
+                                    or (existing_ft == s.name + ' *'
+                                        and ft != existing_ft))
                     if fn not in self.struct_field_types[s.name] or can_override:
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
+            # A method that returns a `bool`-annotated FIELD hands back an
+            # `int`, because that is what the field's ctype is, so
+            # `print(b.get())` printed `1` where CPython prints `True`. Its
+            # own body is the evidence: EVERY `return` in it reads a bool
+            # field, which is the only shape recorded here -- a method that
+            # merely READS a bool field and returns something else is left
+            # alone, because answering True for that would trade a wrong
+            # value for a differently wrong one.
+            #
+            # A SEPARATE loop over the methods, not a step inside the one
+            # above: `__init__` is what registers the field, and a class may
+            # spell its getter first, so recording inside that loop would
+            # make the answer depend on declaration order.
+            if self.struct_bool_fields.get(s.name):
+                for _bm in s.methods:
+                    _rets = [_rn for _rn in _walk_ast(_bm.body)
+                             if isinstance(_rn, ReturnStmt)]
+                    if not _rets:
+                        continue
+                    # Which bare receiver names in this method denote a
+                    # struct: `self`, and any parameter annotated with a
+                    # struct name. Both come from the declaration, so
+                    # `return other.flag` in `def echo(self, other: Box)`
+                    # is recognised the same as `return self.flag`. A
+                    # receiver this cannot name is simply not claimed, which
+                    # is why the field check below is against the RECEIVER's
+                    # own bool fields and not this struct's.
+                    _recv_sn = {'self': _as_str(s.name)}
+                    for _mpj2 in (_bm.params or []):
+                        _pt2 = _mpj2[1]
+                        if _pt2 and _as_str(_pt2).strip() in self.struct_field_types:
+                            _recv_sn[_as_str(_mpj2[0])] = _as_str(_pt2).strip()
+                    _all_bool_field = True
+                    for _rn2 in _rets:
+                        _rv = _rn2.value
+                        _rname = ''
+                        if isinstance(_rv, MemberExpr) and isinstance(_rv.obj, IdentExpr):
+                            _rname = _as_str(_rv.obj.name)
+                        _rsn2 = _recv_sn.get(_rname)
+                        if not (_rsn2 is not None
+                                and _as_str(_rv.member) in (
+                                    self.struct_bool_fields.get(_rsn2) or ())):
+                            _all_bool_field = False
+                            break
+                    if _all_bool_field:
+                        self.struct_bool_methods.setdefault(
+                            s.name, set()).add(_as_str(_bm.name))
             if s.name in self._selfhost_hardcoded_struct_names:
                 continue
+
             # Same __getattr__ rule as _scan_body_for_local_field_access
             # below: a read of a member this struct never ASSIGNS is a
             # dynamic-attribute read on a __getattr__ struct — it must
@@ -4672,43 +5189,61 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
-    _mk_cache: dict = {}
-    def _mk(name, body, fdef=None):
-        _k = id(body)
-        _v = _mk_cache.get(_k)
-        if _v is None:
-            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
-        if _v:
-            self._return_maybe_kinds.add(name)
-    # NO default parameter: the self-hosted backend lowers a cross-module call
-    # with a default by re-declaring the callee's signature, and a default
-    # reached through `None` is one more thing to get right there. Every call
-    # site — including test_gimple.py's, which passes None for both — passes
-    # all three explicitly.
-    _mk_targets = []
-    for s in all_functions:
-        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk_targets.append((s.name, s.body, s))
-    for s in all_structs_for_methods:
-        if isinstance(s, StructDef):
-            _sk = _as_structdef_node(s)
-            for _m in _sk.methods:
-                if _m.name != '__init__':
-                    _mk_targets.append((f"{_sk.name}_{_m.name}", _m.body, _m))
-    # To a FIXPOINT, not once. `_returns_kinds_valued`'s call arm answers from
-    # `_return_maybe_kinds`, so a function that RETURNS another such function's
-    # value needs that callee answered first — and either order is possible in
-    # the source or across the closure's modules. One extra round covers the
-    # one-hop chain (`def drop_one(): var kept = mixed(...); return kept`,
-    # measured); the loop stops as soon as a round adds nothing, which is what
-    # a program with no such chain does after the first. `_mk_cache` is
-    # per-round for the same reason: an answer computed before its callee was
-    # known is not reusable after.
-    for _mk_round in range(4):
+    def _mk_round(callee_kinds):
+        # A FRESH cache per round, and that is load-bearing rather than
+        # wasteful: the answer depends on `callee_kinds`, so a cache shared
+        # across rounds would hand round 2 round 1's answers and the
+        # fixpoint would never move. Within a round the cache is what keeps
+        # it cheap — memoised by body identity, NOT by `(body, params)`,
+        # because two definitions never share a body node and the params
+        # are that node's own.
+        _mk_cache: dict = {}
+
+        def _mk(name, body, params=None):
+            _k = id(body)
+            _v = _mk_cache.get(_k)
+            if _v is None:
+                _v = _mk_cache[_k] = _infer_return_maybe_kinds(
+                    self, body, params, callee_kinds)
+            _maybe, _slotkinds = _v
+            if _maybe:
+                self._return_maybe_kinds.add(name)
+            if _slotkinds:
+                # A returned HETEROGENEOUS list literal, per slot. The
+                # boolean table above only reaches the call site as "ask
+                # the runtime", which is enough for a computed subscript
+                # and not enough for `a[2]`; this one reaches it as the
+                # exact kind of every slot, in the same long-form spelling
+                # `gen._struct_slot_kinds` carries for a `struct.unpack`
+                # result, so the statically indexed reads pick their
+                # accessor from it unchanged.
+                self._return_value_slot_kinds[name] = _slotkinds
+
+        for s in all_functions:
+            if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+                _mk(s.name, s.body, s.params)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                _sk = _as_structdef_node(s)
+                for _m in _sk.methods:
+                    if _m.name != '__init__':
+                        _mk(f"{_sk.name}_{_m.name}", _m.body, _m.params)
+
+    # Fixpoint, because the second half of the question is "does this
+    # function hand back what ANOTHER function hands back", and one
+    # function's answer can depend on another's. Bounded at four rounds:
+    # `self._return_maybe_kinds` only ever GROWS here, so the loop is
+    # monotone and the bound is a depth limit rather than a convergence
+    # guess. Round 1 passes no callee set (it is the round that finds the
+    # producers); rounds 2+ read the set the earlier rounds filled.
+    # Deliberately NOT inside Pass 2c's fixpoint below: `_walk_ast`
+    # materialises a whole body as a node list and that loop already runs
+    # over every function eight times per nesting level — putting a walk
+    # in there cost test_silent_noop_iter 5m00s -> 19m48s when it was tried.
+    _mk_round(None)
+    for _mk_iter in range(3):
         _mk_before = len(self._return_maybe_kinds)
-        _mk_cache = {}
-        for _t in _mk_targets:
-            _mk(*_t)
+        _mk_round(self._return_maybe_kinds)
         if len(self._return_maybe_kinds) == _mk_before:
             break
     for _pass2c_iter in range(8):
@@ -4921,6 +5456,25 @@ def gen_module_impl(self, stmts):
     # re-types parameters all over the backend, and a container entry there
     # has effects far past comparison.
     self._container_param_kinds: dict[str, dict[str, str]] = {}
+    # Function name -> the NAMES of its parameters left at the `int64_t`
+    # default whose call sites DISAGREE and include at least one string.
+    # That set is exactly the provably-may-be-string set: a slot is in it
+    # only because a `char *` literal was actually observed at one of its
+    # call sites and an `int64_t` at another. It is the ONLY input the
+    # runtime discriminator `mojo_cstr_or_int_str` may be applied to, because
+    # that discriminator is unsound for an arbitrary int64_t: a value in
+    # `[2^31, 2^47)` is pointer-SHAPED, so `print(2**40)` would hand a bare
+    # integer to `strlen` and trade a SIGSEGV for a worse one. Keyed by
+    # function name for the same reason `_container_param_kinds` is — a
+    # forwarding chain's second hop is a DIFFERENT slot with the same shape.
+    self._int64_may_hold_str: dict[str, set] = {}
+    # Functions whose RETURN VALUE may hold a string, by the same route (a
+    # `return` of a name in `_int64_may_hold_str`, or of another such
+    # function's result). The other half of the same property: the sets above
+    # are per-CALLING-scope names, and this is the whole-program answer for a
+    # call site's own result, which is where most consumers meet the value —
+    # `print(f(x))` never reads a parameter at all.
+    self._ret_may_hold_str: set = set()
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
@@ -5023,6 +5577,37 @@ def gen_module_impl(self, stmts):
                 self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
+    def _reconcile_param_container_kinds():
+        """Rewrite `_inferred_param_types` where a parameter's USAGE evidence
+        and its own body BINDINGS disagree about the container kind.
+
+        The two estimators see different things, and only one of them can see
+        the body: `_infer_param_types` reads uses (a subscript, an iteration, a
+        method call, a call the name is passed to) and runs before this
+        function exists; `resolve_shared._infer_local_var_types` reads
+        bindings, every assignment to the name in the whole body through every
+        branch. When they disagree about which CONTAINER it is, the binding
+        answer wins — see `funcs_shared.param_binding_ctype` for the rule and
+        why it is that narrow.
+
+        Applied to the shared table rather than at a reader, because that
+        table feeds the forward DECLARATION as well as the definition.
+        Correcting only the definition is `conflicting types for 'pick'` at
+        every call site, which is what the first attempt at this did.
+
+        Must run after `_inferred_var_types` is populated and before any
+        signature is emitted, which is why it is called from both of that
+        table's population loops rather than from one of them.
+        """
+        for _rn in list(getattr(self, '_inferred_var_types', None) or {}):
+            _rp = self._inferred_param_types.get(_rn)
+            if not _rp:
+                continue
+            for _rpn in list(_rp.keys()):
+                _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
+                if _fixed != _rp[_rpn]:
+                    _rp[_rpn] = _fixed
+
     for s in all_functions:
         if isinstance(s, FunctionDef):
             # `_as_funcdef_node`, not the isinstance-narrowed `s` directly:
@@ -5047,6 +5632,11 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     def _arg_scalar_type(caller_name, a, deep_str=False,
                          prefer_refined_param=False, caller_struct=None):
@@ -5153,7 +5743,7 @@ def gen_module_impl(self, stmts):
             return None
         return None
 
-    def _arg_struct_ptr_type(caller_name, a):
+    def _arg_struct_ptr_type(caller_name, a, caller_struct=None):
         """Observed STRUCT-POINTER C type of one call argument, or None.
 
         The struct-typed sibling of `_arg_scalar_type`, kept separate rather
@@ -5177,11 +5767,13 @@ def gen_module_impl(self, stmts):
         either crashed in a dict runtime helper or — silently, exit 0 — was
         boxed and printed as a decimal address.
 
-        Deliberately FREE-FUNCTION-only, so there is no `caller_struct` /
-        `self.<field>` arm: the only caller of this is the free-function
-        call-site walk, whose callers have no owning struct, and a `self`
-        field of one of a METHOD's parameters is already resolved by the
-        struct-method contract (Pass 1.3e) that owns that case.
+        `caller_struct` is passed by exactly ONE caller, the constructor
+        observation pass below, and only so its `self.<field>` argument shape
+        resolves — the same argument, and the same `caller_struct` value,
+        `_arg_scalar_type`'s own MemberExpr arm already handles (see the
+        `NamespaceReader(self._path)` note there). The free-function Pass
+        1.3d caller leaves it None, which is exactly the "no owning struct"
+        reading the arm falls back to, so its behaviour is unchanged.
 
         `IdentExpr` delegates to `_arg_scalar_type` (whose IdentExpr arm
         already returns the caller's own inferred type verbatim, whatever it
@@ -5205,11 +5797,21 @@ def gen_module_impl(self, stmts):
             return None
         if isinstance(a, gimple_ctypes.MemberExpr):
             # `<local>.<field>` whose local is a known `<Struct> *` — the
-            # shape a receiver forwards most often. Same resolution
-            # `_arg_scalar_type`'s MemberExpr arm does, minus its
+            # shape a receiver forwards most often — plus `self.<field>` when
+            # the call site is inside a method of a known struct. Same
+            # resolution `_arg_scalar_type`'s MemberExpr arm does, minus its
             # `char *`/`double` whitelist.
             _obj = a.obj
             if not isinstance(_obj, gimple_ctypes.IdentExpr):
+                return None
+            _own2 = caller_struct
+            if _as_str(_obj.name) == 'self':
+                if not _own2:
+                    return None
+                _ft2 = self.struct_field_types.get(_own2, {}).get(_as_str(a.member))
+                if (isinstance(_ft2, str) and _ft2.endswith(' *')
+                        and _ft2[:-2] in self.struct_field_types):
+                    return _ft2
                 return None
             _ot = self._inferred_var_types.get(_as_str(caller_name), {}).get(
                 _as_str(_obj.name))
@@ -5760,6 +6362,33 @@ def gen_module_impl(self, stmts):
                     _record_param_elem(callee, pnames[i], _fe, _fne)
 
                 st = _arg_scalar_type(caller_name, a)
+                if not st:
+                    # An int/bool/None literal contributes NOTHING above, and
+                    # that silence is the bug this records against: `f(1)`
+                    # alongside `f("s")` yielded `_scalar_obs['f']['x'] ==
+                    # {'char *'}` — one OBSERVING call site, vacuously
+                    # unanimous, resolved to `char *`, while the int call site
+                    # contributed absence that counted as agreement. The
+                    # parameter then declared `char * f(char *)`, and
+                    # `mojo_print((char *)1)` strlen'd a small integer:
+                    # SIGSEGV (exit -11) for a program CPython prints
+                    # `1` / `s`. Silence is asymmetric by construction here:
+                    # `g(1.5)` and `g("s")` are typed correctly, and `g(1)`
+                    # lands on `int64_t` only because `{'int64_t'}` fails the
+                    # `_has_dbl or _has_cs` whitelist below — nobody observed
+                    # it as one.
+                    #
+                    # LOCAL to this walk, deliberately NOT in
+                    # `_arg_scalar_type`: its other four consumers (the
+                    # struct-pointer observer, the struct-METHOD contract and
+                    # the two constructor observers) each whitelist its
+                    # answers differently, so widening what it returns changes
+                    # all four. That is a separate decision, deliberately not
+                    # taken here.
+                    if isinstance(a, (gimple_ctypes.IntLiteral,
+                                       gimple_ctypes.BoolLiteral,
+                                       gimple_ctypes.NoneLiteral)):
+                        st = 'int64_t'
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
                     # .setdefault(pnames[i], set()).add(st)` into typed
@@ -5905,6 +6534,21 @@ def gen_module_impl(self, stmts):
             _has_dbl = 'double' in types
             _has_cs = 'char *' in types
             if len(types) != 1 or not (_has_dbl or _has_cs):
+                # Disagreeing call sites (or evidence for nothing) → left at
+                # the `int64_t` default. If one of the observers was a `char *`
+                # this slot provably MAY hold a string, and that is the only
+                # fact a consumer is allowed to act on: record it, so
+                # `_gen_print` can route it through `mojo_cstr_or_int_str`
+                # rather than casting the raw bits to `char *`.
+                #
+                # The `continue`s below (annotated parameter, or a
+                # `_infer_param_types` resolution this pass is not entitled
+                # to overturn) are NOT here on purpose — those slots are
+                # already typed by real evidence, not by the int64_t
+                # default, so they never need the discriminator. Only a slot
+                # actually left at `int64_t` is recorded.
+                if _has_cs and ann.get(pname) is None:
+                    self._int64_may_hold_str.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
@@ -5950,6 +6594,111 @@ def gen_module_impl(self, stmts):
     # `gimple_dynamic_attribute_real_storage_and_attributeerror`). A method
     # call, by contrast, has exactly one lowering — the struct's own mangled
     # method — so there is nothing for the name-based fallback to get right.
+# Past 1.3d proper: propagate the may-hold-a-string property out of the
+    # slots recorded above. It is one property of a VALUE, and a value is not
+    # confined to the slot it arrived in -- `y = x` copies it, `return x`
+    # publishes it to every caller, and a caller hands its own property to the
+    # callee it calls. Without this, `print` only learns about a parameter read
+    # DIRECTLY (`print(x)`), so every shape that moves the value first printed
+    # the boxed pointer's decimal and exited 0 -- exactly the
+    # silent-wrong-value shape that recording the slot exists to prevent. That
+    # was measured for a local alias (`y = x`), a direct return (`return x`,
+    # printed at the call site), and a forwarding chain (`def g(x): return
+    # f(x)`), none of which the collection loop alone can reach: a callee like
+    # `f` in the third case has no call site of its own passing a literal, so
+    # it appears in no `_scalar_obs` entry at all.
+    #
+    # So this is an interprocedural fixed point with edges in three directions,
+    # each monotone in one direction only (a name is added, never removed):
+    #
+    #   forward-in-body       `y = x` within one function
+    #   backward-along-call   a caller's argument property becomes the callee's
+    #                         parameter property -- this is what carries `g`'s
+    #                         evidence into `f` in the forwarding chain
+    #   forward-along-call    a returned expression's property becomes the
+    #                         function's own return property
+    #
+    # Termination is by construction rather than by a visit budget: the only
+    # mutation anywhere is adding a name to one of a bounded number of sets,
+    # and a cycle (`def f(x): return f(x)`) simply never adds anything.
+    # Deliberately order-insensitive and conservative elsewhere: an assignment
+    # anywhere in the body adds its target, and a later overwrite is not
+    # subtracted. That is sound for the one consumer there is --
+    # `mojo_cstr_or_int_str` is exact for a small integer (it prints the
+    # integer) and wrong only for one in `[2^31, 2^47)`, and that bound is what
+    # the collection loop above exists to enforce by only ever seeding a slot a
+    # `char *` was really observed at.
+    _int_maybe = self._int64_may_hold_str
+    _ret_maybe: set = set()
+    # Per-function walk results, computed ONCE: the fixed point below re-scans
+    # them every round, and `_walk_ast` over every body of a 60-module closure
+    # is not something to repeat until convergence.
+    _calls: dict = {}        # fname -> [(callee, [arg nodes])]
+    _rets: dict = {}         # fname -> [returned expression nodes]
+    _copies: dict = {}       # fname -> [(target name, source name)]
+    _params: dict = {}       # fname -> [param names in order]
+    for _fname, _fn in _fn_by_name.items():
+        _params[_fname] = [_as_str(_pn) for _pn, _pt in (_fn.params or [])
+                           if not _as_str(_pn).startswith('*')]
+        _calls[_fname] = []
+        _rets[_fname] = []
+        _copies[_fname] = []
+        for _nd in _walk_ast(_fn.body):
+            if (isinstance(_nd, gimple_ctypes.AssignStmt)
+                    and isinstance(_nd.target, IdentExpr)
+                    and isinstance(_nd.value, IdentExpr)):
+                _copies[_fname].append((_as_str(_nd.target.name),
+                                        _as_str(_nd.value.name)))
+            elif isinstance(_nd, gimple_ctypes.ReturnStmt):
+                if _nd.value is not None:
+                    _rets[_fname].append(_nd.value)
+            elif (isinstance(_nd, gimple_ctypes.CallExpr)
+                    and isinstance(_nd.func, gimple_ctypes.IdentExpr)
+                    and _as_str(_nd.func.name) in _fn_by_name):
+                _calls[_fname].append((_as_str(_nd.func.name),
+                                       list(_nd.args or [])))
+
+    def _expr_may(fname, expr) -> bool:
+        """Does `expr`, read in `fname`'s own scope, carry the property?"""
+        if isinstance(expr, gimple_ctypes.IdentExpr):
+            return _as_str(expr.name) in _int_maybe.get(fname, ())
+        if (isinstance(expr, gimple_ctypes.CallExpr)
+                and isinstance(expr.func, gimple_ctypes.IdentExpr)):
+            return _as_str(expr.func.name) in _ret_maybe
+        return False
+
+    _changed = True
+    while _changed:
+        _changed = False
+        for _fname, _pairs in _copies.items():
+            _names = _int_maybe.setdefault(_fname, set())
+            for _t, _v in _pairs:
+                if _v in _names and _t not in _names:
+                    _names.add(_t)
+                    _changed = True
+        for _fname, _sites in _calls.items():
+            for _callee, _args in _sites:
+                _pn = _params.get(_callee)
+                if not _pn:
+                    continue
+                for _i, _a in enumerate(_args):
+                    if _i >= len(_pn):
+                        break
+                    if _expr_may(_fname, _a):
+                        _names = _int_maybe.setdefault(_callee, set())
+                        if _pn[_i] not in _names:
+                            _names.add(_pn[_i])
+                            _changed = True
+        for _fname, _exprs in _rets.items():
+            if _fname in _ret_maybe:
+                continue
+            for _e in _exprs:
+                if _expr_may(_fname, _e):
+                    _ret_maybe.add(_fname)
+                    _changed = True
+                    break
+    self._ret_may_hold_str = _ret_maybe
+
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
     for callee in sorted(_struct_obs):
@@ -5960,16 +6709,34 @@ def gen_module_impl(self, stmts):
         ann: dict = {}
         for _an_pn, _an_pt in (fn.params or []):
             ann[_as_str(_an_pn)] = _an_pt
-        # Direct receiver only — NOT rooted at a subscript/slice of the param,
-        # which is a container (`p[0].m()`) and not this param at all.
+        # A METHOD RECEIVER, or a direct argument to a struct CONSTRUCTOR call.
+        # Receiver: not rooted at a subscript/slice of the param, which is a
+        # container (`p[0].m()`) and not this param at all.
+        #
+        # Constructor argument: `def mk(t): return L(t, 'hi')` called as
+        # `mk(T(8))` is the same one-hop shape with no receiver anywhere —
+        # the struct is learned at `mk`'s call site and has to travel one more
+        # hop to reach `L.__init__`'s own parameter. This used to stop at the
+        # receiver restriction, so `L`'s slot got no evidence from `mk`'s body
+        # at all and `mk`'s parameter stayed `int64_t`: the pointer was
+        # re-boxed on the way in and `x.numel()` printed the box's decimal
+        # (the module-scope/module-global cases of the same family).
+        #
+        # Scoped to a BARE identifier argument (`L(t)`, never `L(t.n)` or
+        # `L(self.t)`), because that is the shape where the argument's own
+        # type IS the parameter's type; any derivation would make the
+        # observation about the derived expression rather than about `pname`.
         receiver_params: set = set()
         _rcalls: list = []
         self._calls_in_stmts(fn.body, _rcalls)
         for _rc in _rcalls:
-            if not isinstance(_rc.func, MemberExpr):
-                continue
-            if isinstance(_rc.func.obj, IdentExpr):
-                receiver_params.add(_as_str(_rc.func.obj.name))
+            if isinstance(_rc.func, MemberExpr):
+                if isinstance(_rc.func.obj, IdentExpr):
+                    receiver_params.add(_as_str(_rc.func.obj.name))
+            elif isinstance(_rc.func, IdentExpr) and _ctor_init_params.get(_as_str(_rc.func.name)):
+                for _rc_a in _rc.args:
+                    if isinstance(_rc_a, IdentExpr):
+                        receiver_params.add(_as_str(_rc_a.name))
         for pname in sorted(pmap):
             if pname not in receiver_params:
                 continue
@@ -6039,111 +6806,232 @@ def gen_module_impl(self, stmts):
 
     _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
     _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
-    # Constructor call sites live in free functions, at toplevel, AND inside
-    # struct METHODS — and the method case is the one real code hits most
-    # (`NamespaceReader(self._path)` in
-    # importlib/_bootstrap_external.py). `_caller_bodies` covers only the
-    # first two, so a `S(...)` constructed from a method body contributed no
-    # observation at all and the slot stayed unresolved. `_method_caller_
-    # bodies` (built by the Pass 1.3e method contract just above) already
-    # carries the owning StructDef as its second element, which is exactly
-    # what `self.<field>` resolution needs.
-    for _cname, _cstruct, _cbody in _method_caller_bodies:
-        calls = []
-        self._calls_in_stmts(_cbody, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            struct_name = _as_str(call.func.name)
-            pnames = _ctor_init_params.get(struct_name)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
-                if not st:
+    # This is the CONSTRUCTOR direction of
+    # the ctor-direction cross-call struct contract. The repro's
+    # receiver is `self.w` inside `L.numel`, whose type is whatever `__init__`'s
+    # own unannotated `w` was typed — so the evidence this pass needs is at
+    # the `L(T(15))` CALL SITE, and no free-function signature pass can see
+    # it. `_arg_scalar_type` returns None for a struct-constructor argument
+    # (`L(T(15))`'s `T(15)` is a CallExpr, and the IdentExpr arm's answer is
+    # filtered to nothing unless it is `char *`/`double`), so before this the
+    # slot had no evidence at all: `__init__`'s `w` stayed `int64_t`, the field
+    # `w` inherited it, and `self.w.numel()` degraded to the generic no-op
+    # stub — a pointer's own bits printed as a decimal, exit 0.
+    #
+    # A struct pointer shares `_ctor_scalar_obs` rather than getting its own
+    # map, unlike Pass 1.3d's `_struct_obs`/`_scalar_obs` split, because here
+    # a slot holds exactly ONE ctype and any two different answers are a
+    # genuine conflict of equal standing. Pass 1.3d's split exists only because
+    # its `_scalar_obs` set is shared across a whole free function's params
+    # and its scalar admission rule is a `char *`/`double` whitelist; a
+    # `<Struct> *` landing in that same set would suppress an otherwise
+    # unanimous `char *` on a DIFFERENT parameter. Here the comparison is
+    # always against the same `<struct>::<param>` key, so one map with the
+    # existing "different from what is already recorded → conflict" rule
+    # expresses both cases correctly and needs no second set of maps.
+    #
+    # Both `_method_caller_bodies` (below) and `_caller_bodies` are walked,
+    # for the reason the scalar observer's own comment gives: a `S(...)`
+    # constructed from a method body is a real and common shape
+    # (`NamespaceReader(self._path)` in importlib/_bootstrap_external.py),
+    # and `_method_caller_bodies` additionally carries the owning StructDef,
+    # which is what resolves a `self.<field>` argument.
+    #
+    # COLLECTION and APPLICATION run to a small bounded fixpoint, because each
+    # can feed the other and neither sees the other's output within one pass.
+    # The concrete case that needs it is the `self.<field>` argument above: a
+    # `Box(self.t)` inside `Holder.go` can only be observed once `Holder.t`
+    # itself has a `T *` field type, and that type is written by the
+    # APPLICATION half below from the very same observation map. One pass sees
+    # `Holder.t` as the `int64_t` default and records no evidence for
+    # `Box.w`; the second sees the `T *` and resolves it. The same one-hop
+    # structure Pass 1.3e solves for pure method-forwarding chains, and the
+    # same bound, for the same reason (a bounded number of hops is all real
+    # code has; an unbounded one would be a closure). Re-collecting is
+    # idempotent by construction: `_ctor_scalar_obs` records the first answer
+    # per key and only ever adds a conflict flag on a DISAGREEMENT, so a
+    # second round over the same evidence cannot change any key.
+    for _ctor_round in range(4):
+        _ctor_changed = False
+        for _cname, _cstruct, _cbody in _method_caller_bodies:
+            calls = []
+            self._calls_in_stmts(_cbody, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
                     continue
-                _skey = struct_name + '::' + _as_str(pnames[i])
-                _sprev = _ctor_scalar_obs.get(_skey, '')
-                if not _sprev:
-                    _ctor_scalar_obs[_skey] = st
-                elif _sprev != st:
-                    _ctor_scalar_conflict[_skey] = True
-    for caller_name, body in _caller_bodies:
-        calls = []
-        self._calls_in_stmts(body, calls)
-        for call in calls:
-            if not isinstance(call.func, IdentExpr):
-                continue
-            struct_name = _as_str(call.func.name)
-            pnames = _ctor_init_params.get(struct_name)
-            if not pnames:
-                continue
-            for i, a in enumerate(call.args):
-                if i >= len(pnames):
-                    break
-                st = _arg_scalar_type(caller_name, a)
-                if not st:
+                struct_name = _as_str(call.func.name)
+                pnames = _ctor_init_params.get(struct_name)
+                if not pnames:
                     continue
-                _skey = struct_name + '::' + _as_str(pnames[i])
-                _sprev = _ctor_scalar_obs.get(_skey, '')
-                if not _sprev:
-                    _ctor_scalar_obs[_skey] = st
-                elif _sprev != st:
-                    _ctor_scalar_conflict[_skey] = True
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _skey = struct_name + '::' + _as_str(pnames[i])
+                    st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
+                    if not st:
+                        st = _arg_struct_ptr_type(_cname, a, _cstruct)
+                    if not st:
+                        continue
+                    _sprev = _ctor_scalar_obs.get(_skey, '')
+                    if not _sprev:
+                        _ctor_scalar_obs[_skey] = st
+                    elif _sprev != st:
+                        _ctor_scalar_conflict[_skey] = True
+        for caller_name, body in _caller_bodies:
+            calls = []
+            self._calls_in_stmts(body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                struct_name = _as_str(call.func.name)
+                pnames = _ctor_init_params.get(struct_name)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    _skey = struct_name + '::' + _as_str(pnames[i])
+                    st = _arg_scalar_type(caller_name, a)
+                    if not st:
+                        st = _arg_struct_ptr_type(caller_name, a, None)
+                    if not st:
+                        continue
+                    _sprev = _ctor_scalar_obs.get(_skey, '')
+                    if not _sprev:
+                        _ctor_scalar_obs[_skey] = st
+                    elif _sprev != st:
+                        _ctor_scalar_conflict[_skey] = True
 
-    for _csn in _ctor_init_params:
-        _init = _ctor_init_methods.get(_csn)
-        if not _init:
-            continue
-        _ann = {}
-        for _ap2 in (_init.params or []):
-            _ann[_as_str(_ap2[0])] = _ap2[1]
-        _init_defaults = getattr(_init, 'param_defaults', {}) or {}
-        for pname in _ctor_init_params[_csn]:
-            _skey2 = _csn + '::' + pname
-            # VETO: this observer only ever produces `char *` / `double`
-            # / a `<Struct> *`, so it cannot see the container-literal
-            # evidence the pass above collected. Without the veto,
-            # `Thing([1, 2])` beside `Thing("s")` found this observer's own
-            # evidence unanimous and typed the field `char *` — a silent
-            # wrong answer where the documented rule is "not unanimous →
-            # leave unresolved, the int64_t default". Veto-only by
-            # construction: it can refuse a slot, never resolve one, so it
-            # cannot widen what this pass already accepted.
-            _lit_ct_obs = self._ctor_container_lit_obs.get(_skey2, '')
-            if self._ctor_container_lit_conflict.get(_skey2) or (
-                    _lit_ct_obs and _lit_ct_obs != _ctor_scalar_obs.get(_skey2, '')):
+        for _csn in _ctor_init_params:
+            _init = _ctor_init_methods.get(_csn)
+            if not _init:
                 continue
-            _st2 = _ctor_scalar_obs.get(_skey2, '')
-            # FLAT dicts + string comparison, NOT `types not in ({'double'},
-            # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
-            # set-of-sets membership test is unreliable self-hosted, and a
-            # nested dict's `.get` returns an untyped int, so neither the
-            # inner membership nor the set comparison worked.
-            if _st2 != 'double' and _st2 != 'char *':
-                continue                        # none, or not unanimous
-            if _ctor_scalar_conflict.get(_skey2):
-                continue                        # mixed scalar evidence
-            _resolved_type = _st2
-            if _ann.get(pname) is not None:
-                continue                        # respect explicit annotation
-            if pname in _init_defaults:
-                continue                        # respect default-value inference
-            self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
-            for node in _walk_ast(_init.body):
-                if not isinstance(node, AssignStmt):
+            _ann = {}
+            for _ap2 in (_init.params or []):
+                _ann[_as_str(_ap2[0])] = _ap2[1]
+            _init_defaults = getattr(_init, 'param_defaults', {}) or {}
+            for pname in _ctor_init_params[_csn]:
+                _skey2 = _csn + '::' + pname
+                # VETO: this observer only ever produces `char *` / `double`
+                # / a `<Struct> *`, so it cannot see the container-literal
+                # evidence the pass above collected. Without the veto,
+                # `Thing([1, 2])` beside `Thing("s")` found this observer's own
+                # evidence unanimous and typed the field `char *` — a silent
+                # wrong answer where the documented rule is "not unanimous →
+                # leave unresolved, the int64_t default". Veto-only by
+                # construction: it can refuse a slot, never resolve one, so it
+                # cannot widen what this pass already accepted.
+                _lit_ct_obs = self._ctor_container_lit_obs.get(_skey2, '')
+                if self._ctor_container_lit_conflict.get(_skey2) or (
+                        _lit_ct_obs and _lit_ct_obs != _ctor_scalar_obs.get(_skey2, '')):
                     continue
-                tgt = node.target
-                if not (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
-                        and tgt.obj.name == 'self'):
+                _st2 = _ctor_scalar_obs.get(_skey2, '')
+                # FLAT dicts + string comparison, NOT `types not in ({'double'},
+                # {'char *'})` over a nested `dict[str, dict[str, set]]`: the
+                # set-of-sets membership test is unreliable self-hosted, and a
+                # nested dict's `.get` returns an untyped int, so neither the
+                # inner membership nor the set comparison worked.
+                #
+                # A `<Struct> *` observation is admitted here too, and only that
+                # one extra shape: the observer above can now return a struct
+                # pointer, and admitting it here is what carries that evidence
+                # into `pm` (the `__init__` parameter's own C type) and hence
+                # into the field `self.w = w` writes. It stays a strictly
+                # narrower widening than Pass 1.3d-struct's, which required the
+                # parameter to be a METHOD RECEIVER in the callee's body —
+                # there is no such requirement here, because for a CONSTRUCTOR
+                # the whole point is that the parameter is only ever stored in
+                # a field and read back through it, and refusing to admit it is
+                # what left `self.w.numel()` reading `int64_t.numel()`
+                # (the ctor-direction cross-call struct contract).
+                # Admission still requires unanimity (the conflict dict above),
+                # a registered struct, and no container-literal veto.
+                if _st2 != 'double' and _st2 != 'char *':
+                    if not (_st2.endswith(' *') and _st2[:-2] in self.struct_field_types):
+                        continue                # none, or not unanimous
+                if _ctor_scalar_conflict.get(_skey2):
+                    continue                    # mixed scalar evidence
+                _resolved_type = _st2
+                if _ann.get(pname) is not None:
+                    continue                    # respect explicit annotation
+                if pname in _init_defaults:
+                    continue                    # respect default-value inference
+                if self._ctor_lit_param_types.get(_csn + '::' + pname) == _resolved_type:
                     continue
-                v = node.value
-                if isinstance(v, IdentExpr) and v.name == pname:
-                    _fld_types = self.struct_field_types.setdefault(_csn, {})
-                    if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
-                        _fld_types[tgt.member] = _resolved_type
+                _ctor_changed = True
+                self._ctor_lit_param_types[_csn + '::' + pname] = _resolved_type
+                for node in _walk_ast(_init.body):
+                    if not isinstance(node, AssignStmt):
+                        continue
+                    tgt = node.target
+                    if not (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
+                            and tgt.obj.name == 'self'):
+                        continue
+                    v = node.value
+                    if isinstance(v, IdentExpr) and v.name == pname:
+                        _fld_types = self.struct_field_types.setdefault(_csn, {})
+                        if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
+                            _fld_types[tgt.member] = _resolved_type
+
+        # The CALLER-side twin of the same fixpoint: a free function's
+        # unannotated parameter that is FORWARDED straight into a
+        # constructor slot now knows what that slot holds, so it is that
+        # struct pointer. Without this the constructor is typed correctly at
+        # its own definition but the forwarding function's parameter stays
+        # `int64_t`, and the value is re-boxed on the way in —
+        # `def mk(t): return L(t, 'hi')` called as `mk(T(8))` printed
+        # `L`'s receiver's own pointer bits instead of `8`.
+        #
+        # This is the mirror image of the rule `_infer_param_types` already
+        # applies to containers ("a parameter passed to a callee whose own
+        # parameter was inferred as a container is a container"), and it needs
+        # the same admission discipline Pass 1.3d-struct's application loop
+        # documents: an explicit annotation wins, a defaulted parameter keeps
+        # its default-derived type (a call site omitting the argument would
+        # otherwise feed the default through the refined C type), and only a
+        # no-evidence type is replaced.
+        for _cpn, _cbody2 in _caller_bodies:
+            _cpcalls: list = []
+            self._calls_in_stmts(_cbody2, _cpcalls)
+            for _cpc in _cpcalls:
+                if not isinstance(_cpc.func, IdentExpr):
+                    continue
+                _cp_pnames = _ctor_init_params.get(_as_str(_cpc.func.name))
+                if not _cp_pnames:
+                    continue
+                for _cp_i, _cp_a in enumerate(_cpc.args):
+                    if _cp_i >= len(_cp_pnames):
+                        break
+                    if not isinstance(_cp_a, IdentExpr):
+                        continue
+                    _cp_argn = _as_str(_cp_a.name)
+                    _cp_fn = _fn_by_name.get(_as_str(_cpn))
+                    if not _cp_fn:
+                        continue
+                    _cp_ann = None
+                    _cp_isdef = False
+                    for _cp_p, _cp_pt in (_cp_fn.params or []):
+                        if _as_str(_cp_p) == _cp_argn:
+                            _cp_ann = _cp_pt
+                            break
+                    if _cp_ann is not None:
+                        continue                # respect explicit annotation
+                    _cp_dfl = getattr(_cp_fn, 'param_defaults', {}) or {}
+                    if _cp_argn in _cp_dfl:
+                        continue                # respect default-value inference
+                    _cp_slot = _as_str(_cpc.func.name) + '::' + _as_str(_cp_pnames[_cp_i])
+                    _cp_st = self._ctor_lit_param_types.get(_cp_slot, '')
+                    if not (_cp_st.endswith(' *') and _cp_st[:-2] in self.struct_field_types):
+                        continue
+                    _cp_cur = self._inferred_param_types.get(_as_str(_cpn), {}).get(_cp_argn)
+                    if _cp_cur is not None and _cp_cur not in _STRUCT_FALLBACKS:
+                        continue
+                    if _cp_cur == _cp_st:
+                        continue
+                    _ctor_changed = True
+                    self._inferred_param_types.setdefault(_as_str(_cpn), {})[_cp_argn] = _cp_st
+        if not _ctor_changed:
+            break
 
     for _gm_stmt in stmts:
         if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
@@ -6789,6 +7677,11 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{_as_str(s.name)}_{_as_str(m.name)}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
+                # Same key, for the sibling table the ASSIGNMENT SITE reads
+                # mid-body under `current_func_name` — see
+                # `ginf.alias_multi_kind_locals`.
+                ginf.alias_multi_kind_locals(self, key, m)
+    _reconcile_param_container_kinds()
 
     self._param_generator_api: dict[str, dict[str, str]] = {}
     self._fn_returns_generator: dict[str, str] = {}
@@ -7267,6 +8160,24 @@ def gen_module_impl(self, stmts):
             for _k, _v in _value.pairs[1:]:
                 _vt = TypeLattice.join(_vt, self._quick_type(_v))
             self._global_dict_val_types[_gname] = _vt
+            # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
+            # needs is the callee's return type, and the dict's own value
+            # type (`void *`) does not carry it. Recorded with the same
+            # unanimity-or-nothing rule `note_dict_callable_ret` applies at a
+            # runtime store (a dict has one value slot, so the answer is only
+            # usable when every callable in it agrees).
+            self._global_dict_callable_ret[_gname] = \
+                _lambda_pairs_ret_type(self, _value.pairs)
+        elif isinstance(_value, LambdaExpr):
+            # `e = lambda: False` at module scope. The lambda's own C return
+            # type is `join_all([_quick_type(body)])` -- exactly what
+            # `_infer_return_type` computes for the synthetic
+            # `return <body>` body `_lower_LambdaExpr` builds -- so this
+            # records the lifted definition's declared return type without
+            # lifting anything. It has to be here, in the pre-scan, because
+            # a function that CALLS `e` is emitted before `_toplevel`
+            # lowers the lambda at all.
+            self._global_callable_ret_types[_gname] = _lambda_ret_type(self, _value)
 
     def _phase17_scan_try_branches(_try_stmt):
         """Collect {name: C type} for every AssignStmt/MultiAssignStmt
@@ -7388,6 +8299,114 @@ def gen_module_impl(self, stmts):
                     _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
                                        if _gname in _joined else _t)
         return _joined
+
+    def _phase17_scan_global_reassignments() -> dict:
+        """`{name: {pointer-shaped C type, ...}}` for every assignment any
+        FUNCTION BODY in this compile makes to a name it declared `global`.
+
+        The one thing the flat module-level scans above structurally cannot
+        see. Under real Python scoping
+
+            FW_VERSION_PREFIX = "--undefined--"        # module level
+            def parseOptions():
+                global FW_VERSION_PREFIX
+                FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions", getVersion()]
+
+        is two assignments to ONE binding, so the two types must be JOINED —
+        but every Phase 1.7 pass walks module-level statements only
+        (`_phase17_own_stmts`), so the name was frozen at `char *` from its
+        first line forever. That is not a cosmetic mismatch: the field
+        emitter, the assignment-site coercion and the read path all route
+        through one conclusion, so the reassignment was coerced to `char *`
+        (a silent re-typing of a `MojoList *`) and the NEXT line — which
+        slices the same global as the list it has just become — sliced a
+        `char *` and then emitted `char * + MojoList *`, a g++ error naming
+        two types the source never mixed.
+
+        Deliberately NOT `ginf._each_binding`, which is the one walker for the
+        three LOCAL overlays and which deliberately stops at a nested
+        `FunctionDef` because a nested def's names are its own locals. Here
+        the relationship is exactly inverted: a `global N` inside a nested
+        `def` still names the MODULE binding, at any nesting depth, so this
+        walker descends. Same traversal order as `_each_binding` (pre-order,
+        every branch that can bind), so the two cannot disagree about which
+        statements bind what.
+
+        Types come from `self._quick_type`, the SAME estimator every other
+        global scan consults, and only a pointer-shaped answer counts as
+        evidence. That is deliberate in both directions: an `int64_t`
+        (unknown) answer contributes nothing rather than being read as a
+        third kind, and no new RHS-type table is introduced for a question
+        the shared estimator already answers. `_quick_type` already resolves
+        `FW_PREFIX[:] + ["Versions", ...]` to `MojoList *` — its BinaryOp
+        row unions the operand kinds with `int64_t` neutral — so this needs
+        no Phase 1.7 table change of its own, and therefore cannot change
+        what any OTHER caller of `_phase17_value_type` sees."""
+        out: dict = {}
+
+        def collect(body) -> list:
+            """Every statement of `body` (and of any `def` nested in it) as a
+            flat pre-order list. Lists, never a generator: this file is in
+            the self-host closure, where a coroutine's symbols are
+            referenced but never defined (`_each_binding`'s own docstring)."""
+            seq: list = []
+            def walk(stmts):
+                for s in (stmts or []):
+                    seq.append(s)
+                    if isinstance(s, FunctionDef):
+                        walk(s.body)
+                    elif isinstance(s, IfStmt):
+                        walk(s.then_body)
+                        walk(getattr(s, 'else_body', None))
+                        for _c, eb in (getattr(s, 'elifs', None) or []):
+                            walk(eb)
+                    elif isinstance(s, (WhileStmt, ForStmt)):
+                        walk(getattr(s, 'body', None))
+                        walk(getattr(s, 'else_body', None))
+                    elif isinstance(s, WithStmt):
+                        walk(s.body)
+                    elif isinstance(s, TryStmt):
+                        walk(s.body)
+                        for h in (getattr(s, 'handlers', None) or []):
+                            walk(getattr(h, 'body', None))
+                        walk(getattr(s, 'else_body', None))
+                        walk(getattr(s, 'finally_body', None))
+            walk(body)
+            return seq
+
+        for _fn_stmt in _phase17_stmts:
+            if not isinstance(_fn_stmt, FunctionDef):
+                continue
+            # Two rounds over one collected list rather than threading the
+            # declared set through the walk: Python scoping makes `global N`
+            # cover the WHOLE function regardless of where the statement
+            # sits relative to the assignments, so the answer cannot depend
+            # on traversal order and does not need to.
+            _seq = collect(_fn_stmt.body)
+            _declared: set = set()
+            for _s in _seq:
+                if isinstance(_s, GlobalStmt):
+                    for _nm in (_s.names or []):
+                        _declared.add(_as_str(_nm))
+            if not _declared:
+                continue
+            for _s in _seq:
+                if isinstance(_s, AssignStmt):
+                    _targets = [_s.target]
+                elif isinstance(_s, MultiAssignStmt):
+                    _targets = list(_s.targets or [])
+                else:
+                    continue
+                for _tgt in _targets:
+                    if not isinstance(_tgt, IdentExpr):
+                        continue
+                    _tn = _as_str(_tgt.name)
+                    if _tn not in _declared:
+                        continue
+                    _qt = self._quick_type(_s.value)
+                    if _qt and _qt.endswith('*'):
+                        out.setdefault(_tn, set()).add(_qt)
+        return out
 
     for _scan_stmt in _phase17_stmts:
         if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
@@ -7514,39 +8533,107 @@ def gen_module_impl(self, stmts):
         self, _phase17_mod,
         stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
 
-    _EARLY_DISPATCH_DICTS = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
-    _EARLY_DISPATCH_SETS = {'_CMP_OPS'}
     # Indexed iteration + `_as_str`, NOT `for _gn, _gt in ....items()`: the
     # self-hosted 2-tuple unpack boxes BOTH slots to int64_t, so `_gn in
-    # self._global_c_decl_types` (plain-str keys) missed, `_gn in
-    # _EARLY_DISPATCH_DICTS` missed, and the final `else` wrote a
-    # decimal-address key with an erased value — `_BIN_OPS`/`_CMP_OPS`
-    # never got the `MojoDict *`/`MojoSet *` cdecl entry this loop exists
-    # to seed, so `_own_overlay_global_ctype`'s container rule could not
-    # return it and the module struct field came out `int64_t _BIN_OPS`
+    # self._global_c_decl_types` (plain-str keys) missed, the dispatch-name
+    # test missed, and the final `else` wrote a decimal-address key with an
+    # erased value — `_BIN_OPS`/`_CMP_OPS` never got their cdecl entry this
+    # loop exists to seed, `_own_overlay_global_ctype`'s container rule could
+    # not return it, and the module struct field came out `int64_t _BIN_OPS`
     # where the shim emits `MojoDict *`.
     _early_gvt_items = list(self._global_var_types.items())
     for _egi in range(len(_early_gvt_items)):
         _gn = _as_str(_early_gvt_items[_egi][0])
         _gt = _early_gvt_items[_egi][1]
-        # Dispatch-table check BEFORE the `already in _global_c_decl_types`
+        # Dispatch-table lookup BEFORE the `already in _global_c_decl_types`
         # skip: the Phase-1.7 scan (above) writes the generic scalar
         # `int64_t` placeholder for any global whose RHS it cannot resolve
         # (`_BIN_OPS = _GD_BIN_OPS`, an imported alias), so testing
         # membership first would skip exactly the names this loop exists to
         # preserve. `_own_overlay_global_ctype`'s documented rule 1 is that
-        # these container entries WIN over a scalar own-conclusion.
-        if _gn in _EARLY_DISPATCH_DICTS:
-            self._global_c_decl_types[_gn] = 'MojoDict *'
-        elif _gn in _EARLY_DISPATCH_SETS:
-            self._global_c_decl_types[_gn] = 'MojoSet *'
+        # these container entries WIN over a scalar own-conclusion — which is
+        # exactly why the answer has to be the name's REAL type and not a
+        # blanket `MojoDict *`: this lands in the SHARED bare-name-keyed
+        # `_global_c_decl_types`, so a wrong kind here re-types the OWNING
+        # module's own correct conclusion ("cannot coerce MojoSet * to
+        # MojoDict *", four modules of the self-host closure). A name the table
+        # does not carry is not forced at all, which is the honest "this scan
+        # knows nothing about it" and leaves the owner's conclusion standing.
+        _forced = dispatch_table_global_ctype(_gn)
+        if _forced is not None:
+            self._global_c_decl_types[_gn] = _forced
         elif _gn in self._global_c_decl_types:
             continue
         elif _gt in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             self._global_c_decl_types[_gn] = 'int64_t'  # boxed by default
         else:
             self._global_c_decl_types[_gn] = _gt
+
+# A global whose BINDING carries values of more than one C type has no
+    # single C type, and the box is the honest declaration — the same answer
+    # `resolve_shared._infer_local_var_types` reaches for a LOCAL bound to
+    # containers of more than one kind. Two tables get two different answers
+    # on purpose, because they answer two different questions:
+    #
+    #  * the C FIELD is the box (`_global_c_decl_types`), because a
+    #    `int64_t` slot is the only field that can hold either kind. This is
+    #    already the convention for every container global (see
+    #    `_gscan_declare_global`'s DictExpr/ListExpr/SetExpr rows and
+    #    `_own_overlay_global_ctype`'s container rule), and it is what
+    #    `_global_dst_ctype` coerces the cross-function store to, so the
+    #    store no longer re-types a `MojoList *` through a `char *` cast.
+    #  * the SEMANTIC type (`_global_var_types`, which the read path uses)
+    #    is the kind the FUNCTION bodies store, when they agree on one. A
+    #    read of this global in any path that reaches the reassignment sees
+    #    that kind, and the read path's own convention (`_lower_IdentExpr`:
+    #    a container `gtype` reads back as an `int64_t` temp carrying the
+    #    container in `_actual_types`) is exactly what every consumer —
+    #    slice, subscript, `in`, print — already dispatches on. With the box
+    #    in `_global_var_types` instead, every one of those consumers saw a
+    #    bare `int64_t` and fell through to its scalar path: `L[:]` became
+    #    INTEGER arithmetic on the box.
+    #
+    # When the function bodies store MORE THAN ONE kind there is no semantic
+    # answer to give, so that case keeps the box in both tables and every
+    # consumer falls back to what it already did for an untracked `int64_t`.
+    # Stated rather than papered over: a read that precedes the reassignment
+    # sees the reassigned kind. That is a real residual of any static answer
+    # here, it is the same trade `_infer_local_var_types` makes for a
+    # multi-kind local, and the alternative — refusing the file — helps
+    # nobody.
+    #
+    # Runs LAST among the global passes, and overwrites all three tables,
+    # because the decision is only knowable once the module-level kinds are
+    # in: `_global_c_decl_types` is set above from `_global_var_types`, and
+    # `_own_overlay_global_ctype` reads both. Setting only one of the three
+    # would leave the field freeze and the assignment site disagreeing — the
+    # exact failure `_own_overlay_global_ctype` exists to prevent.
+    #
+    # A name with no module-level pointer kind is left alone: `global N` with
+    # no `N =` at module scope names no binding this codegen materializes, so
+    # there is nothing to reconcile.
+    _mgk: set = set()
+    for _rgname, _rgkinds in _phase17_scan_global_reassignments().items():
+        _rgbase = self._global_var_types.get(_rgname, '')
+        _rgall = set(_rgkinds)
+        if _rgbase.endswith('*'):
+            _rgall.add(_rgbase)
+        elif _rgbase:
+            # A scalar module-level kind cannot conflict with a pointer:
+            # every cross-function kind here IS pointer-shaped, so this is a
+            # genuine re-typing (an int global replaced by a container, or the
+            # reverse) rather than two kinds in conflict. Out of scope here:
+            # nothing downstream can represent it and it is not what the
+            # box answers.
+            continue
+        if len(_rgall) < 2:
+            continue
+        _rgsem = (_rgkinds.pop() if len(_rgkinds) == 1 else 'int64_t')
+        self._global_var_types[_rgname] = _rgsem
+        self._own_global_var_types[_rgname] = _rgsem
+        self._global_c_decl_types[_rgname] = 'int64_t'
+        _mgk.add(_rgname)
+    self._multi_kind_globals = _mgk
 
     func_parts: list[str] = []
 
@@ -8319,8 +9406,16 @@ def gen_module_impl(self, stmts):
     if our_mod != "root":
         all_modules_to_declare["root"] = True
 
-    for _mgk in self._module_globals:
-        all_modules_to_declare[_as_str(_mgk)] = True
+    # `_mgmod`, NOT `_mgk`: the latter is this function's own
+    # `self._multi_kind_globals` local (`_mgk: set = set()`, above), and on the
+    # self-hosted compiled path a `for` target REBINDS the slot rather than
+    # introducing a new one — so this loop assigned a `char *` module name into
+    # a slot the type table had declared `MojoSet *`, and every module of the
+    # self-host closure whose globals struct was declared after this point
+    # failed gcc with "assignment to 'MojoSet *' from incompatible pointer type
+    # 'char *'".
+    for _mgmod in self._module_globals:
+        all_modules_to_declare[_as_str(_mgmod)] = True
 
     # Scan `stmts`/`imported_stmts` for `import`/`from ... import` targets
     # through the hoisted `_gmi_scan_import_modules` helper, NOT
@@ -8585,9 +9680,15 @@ def gen_module_impl(self, stmts):
             # value-correctness issue, and neither hoisting location fixed
             # it — plain lists + `==` sidestep the MojoSet/MojoDict
             # runtime entirely for this specific (tiny, cold) check.
-            _dispatch_dict_names = ['_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                                    '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT']
-            _dispatch_set_names = ['_CMP_OPS']
+            # Same ONE table (`dispatch_table_global_ctype`, from
+            # `mojo.middle.types`), for the same reason: this copy was written
+            # before the globals moved out of gimple_codegen.py and had not
+            # been updated, so a `from mojo.middle.types import _TYPE_MAP`
+            # declared nothing and every read of it failed at C compile time.
+            # It needs NO list of its own — not even the dict/set split the
+            # two hand-kept lists used to carry, because the type is now the
+            # table's answer rather than a property of which list a name was
+            # written into.
             # `stmt.name_alias_strs` + `_fi_name`/`_fi_alias`, NOT
             # `stmt.names`/`alias[0]`/`alias[1]` — `FromImportStmt.names`
             # is `list[(str, str|None)]`, and its OWN dataclass docstring
@@ -8613,16 +9714,38 @@ def gen_module_impl(self, stmts):
                 if local_name != orig_name:
                     _check_names.append(local_name)
                 for check_name in _check_names:
-                    if check_name in _dispatch_dict_names and check_name not in _declared_globals:
-                        global_decls.append(f"MojoDict * {check_name};")
+                    _forced = dispatch_table_global_ctype(check_name)
+                    if _forced is not None and check_name not in _declared_globals:
+                        # THE TABLE is the answer, by the same helper both
+                        # declaration scans use.
+                        #
+                        # The blanket `MojoDict *` this replaced declared a
+                        # frozenset global (`_C_KEYWORDS`, `_C_RESERVED_FUNCS`)
+                        # as a dict, and because the answer lands in the SHARED
+                        # bare-name-keyed `_global_c_decl_types`,
+                        # `_own_overlay_global_ctype`'s rule 1 then made that
+                        # FOREIGN answer beat the owning module's own correct
+                        # `MojoSet *` — "cannot coerce MojoSet * to MojoDict *
+                        # (incompatible container kinds)" for four modules of
+                        # the self-host closure.
+                        #
+                        # THE TABLE, not `_global_var_types`, is the second half
+                        # of the same fix: this loop runs BEFORE the
+                        # AssignStmt/VarDecl scans below, so whatever it writes
+                        # into `_declared_globals` stops them from re-deriving
+                        # the name. Preferring the seeded `_global_var_types`
+                        # here therefore decided the FIELD for the whole module
+                        # — and for an alias RHS (`_BIN_OPS = _GD_BIN_OPS`) the
+                        # seeded value is the useless `int64_t` the Phase-1.7
+                        # scan could not resolve, so `_mojo_middle_types_toplev`
+                        # and `_gimple_codegen_toplev` both declared
+                        # `int64_t _BIN_OPS` where the toplevel body then stored
+                        # the accessor's real `MojoDict *` ("assignment to
+                        # 'int64_t' from 'MojoDict *'", 5 sites). One helper
+                        # across this site, the two declaration scans and the
+                        # early-cdecl seed is what makes them one answer.
                         _declared_globals[check_name] = True
-                        self._global_c_decl_types[check_name] = 'MojoDict *'
-                        self._global_var_types[check_name] = 'MojoDict *'
-                    elif check_name in _dispatch_set_names and check_name not in _declared_globals:
-                        global_decls.append(f"MojoSet * {check_name};")
-                        _declared_globals[check_name] = True
-                        self._global_c_decl_types[check_name] = 'MojoSet *'
-                        self._global_var_types[check_name] = 'MojoSet *'
+                        _gmi_declare_table_global(self, check_name, global_decls)
         elif isinstance(stmt, ImportStmt):
             for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
@@ -8686,14 +9809,32 @@ def gen_module_impl(self, stmts):
         which names are real struct fields, or code that resolves a
         name via Phase 1.7's `_global_var_types`/`_global_to_module`
         emits `_<mod>_toplev.NAME` for a field this scan never
-        declared, i.e. 'struct _X_toplev has no member named NAME'."""
+        declared, i.e. 'struct _X_toplev has no member named NAME'.
+
+        A name in `self._multi_kind_globals` is left ALONE, and that guard is
+        load-bearing rather than an optimisation. This scan runs AFTER the
+        `global`-reassignment join (which is the only pass that can see a
+        cross-function assignment, so its conclusion is strictly newer), and
+        every branch below writes `_global_var_types[gname]` /
+        `_global_c_decl_types[gname]` from the MODULE-LEVEL RHS — re-freezing
+        the narrow kind the join had just reconciled. The two scans are the
+        re-derivation sites the analysis in
+        `bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md` named, and this
+        is the second one; the first (the field-freeze loop's
+        `_own_overlay_global_ctype`) already prefers the own-overlay
+        conclusion, which only helps once this scan stops overwriting it.
+        Real: `FW_VERSION_PREFIX = "--undefined--"` at module level and a list
+        at :703 — without the guard the field came out `char *` again and the
+        next line's slice of the same name was typed as a string."""
+        if gname in getattr(self, '_multi_kind_globals', ()):
+            return
+        # The dispatch/type-table globals answer from the ONE table, before
+        # any RHS-shape row below — see `_gmi_declare_table_global`.
+        if _gmi_declare_table_global(self, gname, global_decls):
+            return
         if isinstance(value, DictExpr):
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoDict * {gname};")
-                self._global_c_decl_types[gname] = 'MojoDict *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoDict * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoDict * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoDict *'
         elif isinstance(value, ListExpr) or isinstance(value, TupleExpr):
             # `isinstance(v, ListExpr) or isinstance(v, TupleExpr)`, NOT a
@@ -8703,20 +9844,12 @@ def gen_module_impl(self, stmts):
             # `int64_t`; the field-freeze loop's fallback then declared it
             # a bare `MojoList *` (array_ops_jit stage1-vs-stage2 parity
             # under MOJO_NO_SHIM=1).
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoList * {gname};")
-                self._global_c_decl_types[gname] = 'MojoList *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoList * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoList *'
         elif isinstance(value, SetExpr):
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoSet * {gname};")
-                self._global_c_decl_types[gname] = 'MojoSet *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoSet * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoSet * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoSet *'
         elif isinstance(value, IntLiteral) or isinstance(value, BoolLiteral):
             global_decls.append(f"int {gname};")
@@ -8845,39 +9978,30 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
         else:
-            # A hardcoded dispatch-table global assigned from a non-literal
-            # RHS (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from
-            # generated_dispatch import ... as ...` aliases) must KEEP its
-            # real container ctype, exactly like the DictExpr/ListExpr/
-            # SetExpr branches above do via `_is_dispatch_name`. Without
-            # this the generic `_quick_type` fallback rewrote
-            # `_global_c_decl_types[gname]` to the boxed `int64_t` — after
-            # this function's own earlier reconcile loop had correctly
-            # seeded `MojoDict *` — so `_own_overlay_global_ctype`'s
-            # container rule could not return it and the struct field came
-            # out `int64_t _BIN_OPS` where the shim emits `MojoDict *`.
-            if _is_dispatch_name(gname):
-                _dt = ('MojoSet *' if _as_str(gname) == '_CMP_OPS'
-                       else 'MojoDict *')
-                global_decls.append(f"{_dt} {gname};")
-                self._global_var_types[gname] = _dt
-                self._global_c_decl_types[gname] = _dt
+            # A dispatch-table global assigned from a non-literal RHS
+            # (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from
+            # generated_dispatch import ... as ...` aliases) was answered at
+            # the TOP of this function from the one table, so there is
+            # nothing left to special-case here: what remains is the generic
+            # `_quick_type` fallback, and it must not see a table name at all
+            # (it would rewrite `_global_c_decl_types[gname]` to the boxed
+            # `int64_t` that `module_loader`'s `int64_t _C_KEYWORDS` used to
+            # disagree with every importer's `MojoSet *`).
+            qt = self._quick_type(value) or 'int64_t'
+            if qt.endswith(' *') or qt == 'char *':
+                global_decls.append(f"{qt} {gname};")
+                self._global_var_types[gname] = qt
+                self._global_c_decl_types[gname] = (
+                    'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                    else qt)
+            elif qt == '_Bool':
+                global_decls.append(f"int {gname};")
+                self._global_var_types[gname] = 'int'
+                self._global_c_decl_types[gname] = 'int'
             else:
-                qt = self._quick_type(value) or 'int64_t'
-                if qt.endswith(' *') or qt == 'char *':
-                    global_decls.append(f"{qt} {gname};")
-                    self._global_var_types[gname] = qt
-                    self._global_c_decl_types[gname] = (
-                        'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                        else qt)
-                elif qt == '_Bool':
-                    global_decls.append(f"int {gname};")
-                    self._global_var_types[gname] = 'int'
-                    self._global_c_decl_types[gname] = 'int'
-                else:
-                    global_decls.append(f"int64_t {gname};")
-                    self._global_var_types[gname] = 'int64_t'
-                    self._global_c_decl_types[gname] = 'int64_t'
+                global_decls.append(f"int64_t {gname};")
+                self._global_var_types[gname] = 'int64_t'
+                self._global_c_decl_types[gname] = 'int64_t'
 
     # `{gname: init_code}` captured at declaration time — the later
     # field-order loop's re-scan for the matching AssignStmt
@@ -8894,6 +10018,13 @@ def gen_module_impl(self, stmts):
             _declared_globals[gname] = True
             if stmt.value is not None:
                 _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
+            # The second of the two declaration scans, and the same table
+            # answers here — `funcs_shared.py`'s `_SELFHOST_EXTRA_FIELD_CACHE:
+            # dict = {}` is a VarDecl, so a guard only in `_gscan_declare_global`
+            # would box its home field `int64_t` while every importer declared
+            # the same name `MojoDict *`.
+            if _gmi_declare_table_global(self, gname, global_decls):
+                continue
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved
@@ -9252,7 +10383,30 @@ def gen_module_impl(self, stmts):
                 else:
                     init_val = '0'
             elif init_val.startswith('"') or init_val.startswith("'"):
-                pass
+                if c_type.endswith(' *'):
+                    pass
+                else:
+                    # A POINTER literal initializing a NON-pointer field.
+                    # Reachable only for a BOXED global, and the boxing
+                    # convention is what makes it reachable at all: a
+                    # container global's C field is `int64_t` (see
+                    # `_own_overlay_global_ctype`'s container rule and the
+                    # DictExpr/ListExpr/SetExpr rows of
+                    # `_gscan_declare_global`), and so is a global whose
+                    # binding carries values of more than one kind (see the
+                    # `_phase17_scan_global_reassignments` driver above).
+                    # A module-level string initializer for either is
+                    # therefore a `char *` meeting an `int64_t` field:
+                    # `initialization of 'long long int' from 'char *' makes
+                    # integer from pointer without a cast [-Wint-conversion]`
+                    # (Mac/BuildScript/build-installer.py's
+                    # `FW_VERSION_PREFIX = "--undefined--"`, whose field
+                    # became the box because `parseOptions` later assigns it
+                    # a list). Box it the same way every runtime boxing site
+                    # does — pointer, then `void *`, then the integer — so
+                    # the static initializer is an explicit conversion
+                    # rather than an implicit one.
+                    init_val = f'(int64_t)(void *){init_val}'
             elif init_val.lstrip('-').isdigit():
                 pass
             else:
@@ -9311,7 +10465,15 @@ def gen_module_impl(self, stmts):
             for aname in _ca_map:
                 mangled = _as_str(_ca_map[aname])
                 aname = _as_str(aname)
-                for field in s.fields:
+                # Stop at the class's OWN declaration of `aname`, which is the
+                # LAST one in the merged `.fields` (see
+                # `_own_class_field_index`). Scanning to the first match took
+                # the BASE's value for every override. The range is that one
+                # index, not "up to it": a range ending at it still `break`s
+                # on the inherited declaration earlier in the list.
+                _own_idx = _own_class_field_index(s.fields, aname)
+                for _pick in range(_own_idx, _own_idx + 1):
+                    field = _as_list(s.fields)[_pick]
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]

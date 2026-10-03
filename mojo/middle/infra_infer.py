@@ -333,11 +333,46 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # containers in every call, but in the shape this fires on (a numeric
     # kernel) they are being consumed element-wise and the caller passes a
     # real list.
+    #
+    # `min`/`max`/`divmod`/`round` are here for their ONE-argument form only,
+    # and `_SCALAR_ARITY_BUILTINS` below is what keeps that true — see its own
+    # comment for why the arity test is not optional.
     _ITERABLE_CONSUMING_BUILTINS = {
         'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
         'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
         'min', 'max', 'divmod', 'round',
     }
+
+    # Builtins in `_ITERABLE_CONSUMING_BUILTINS` whose MULTI-argument form
+    # consumes SCALARS and never iterates anything.
+    #
+    # Python's own arity rule: `max(iterable, ...)` is the reduce form and
+    # does consume the argument; `max(a, b)` is `a if a > b else b` and
+    # touches neither argument as a container. So the set membership above is
+    # only half the question — it is necessary but not sufficient, and
+    # treating it as sufficient types a SCALAR parameter as `MojoList *`.
+    #
+    # Real, and a hard compile error rather than an imprecision:
+    # `Lib/zipfile/__init__.py:1180`'s `n = max(n, self.MIN_READ_SIZE)`
+    # inside `ZipExtFile._read1` typed `n` as `MojoList *`, so the emitted
+    # signature was `int64_t __GIMPLE ZipExtFile__read1 (ZipExtFile * self,
+    # MojoList * n)` and the `max(n, ...)` call hit
+    # "too many arguments to function 'mojo_max'; expected 1, have 2"
+    # (`mojo_max`'s runtime prototype is the single-iterable
+    # `int64_t mojo_max(void *args)`). Reduced to a self-contained repro:
+    #
+    #     class R:
+    #         MIN_READ_SIZE = 4096
+    #         def _read1(self, n):
+    #             n = max(n, self.MIN_READ_SIZE)   # n: MojoList *, so the
+    #             return n                          # 2-arg max() is a hard error
+    #     R()._read1(3)
+    #
+    # `divmod(a, b)` and `round(x, n)` are the same shape and are listed for
+    # the same reason; they are corrected here rather than when they are
+    # first hit, because the rule is one rule and a partial list of names is
+    # how the original defect survived.
+    _SCALAR_ARITY_BUILTINS = frozenset(('min', 'max', 'divmod', 'round'))
 
     # Methods that exist ONLY on Python `bytes` (never on str/list/dict/set):
     # `.decode()` turns bytes into str, `.hex()` renders bytes as an ASCII
@@ -705,7 +740,21 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                             # passing a real list hits "invalid operands to
                             # binary *" (real: a Linear-layer forward whose
                             # input vector reached it only through map()).
-                            if func_name in _ITERABLE_CONSUMING_BUILTINS:
+                            #
+                            # `len(expr.args) > 1` is load-bearing for the
+                            # scalar-arity builtins: `max(a, b)`/`min(a, b)`/
+                            # `divmod(a, b)`/`round(x, n)` compare their
+                            # arguments and iterate nothing, so treating
+                            # membership alone as iteration evidence types a
+                            # scalar param as `MojoList *` — which is a hard
+                            # compile error, not an imprecision, because the
+                            # 2-arg `max` then lowers to the single-iterable
+                            # `mojo_max(void *args)`. See
+                            # `_SCALAR_ARITY_BUILTINS`'s own comment and
+                            # bugs/COMPILE_FAIL_zipfile___init__.md.
+                            if (func_name in _ITERABLE_CONSUMING_BUILTINS
+                                    and not (func_name in _SCALAR_ARITY_BUILTINS
+                                             and len(expr.args) > 1)):
                                 _F['is_iterated'] = True
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
                     # `struct.pack("<f", x)`: a statically-known format code
@@ -1485,6 +1534,43 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
+
+def _container_literal_ctype(value) -> str:
+    """The container C type a LITERAL-constructing expression produces, or
+    None if it is not one.
+
+    `_CONTAINER_LITERAL_CTYPES` cannot hold the comprehension case on its
+    own: a `Comprehension` node carries its kind as an ATTRIBUTE, not as a
+    node type, so all three of `{...}`, `[...]` and `{k: v ...}` share the
+    one class name and the three answers (`MojoDict *` / `MojoList *` /
+    `MojoSet *`) cannot be keyed by `type(...).__name__`. Dispatching on
+    `kind` here is the same decision `_quick_type` /
+    `_lower_comprehension` already make, which is the point: this table
+    exists to OVERLAY what `_quick_type` would say about a local once the
+    table can see the local's bindings, so the two must not disagree about
+    which node shapes are containers.
+
+    Without it, `s = {x for x in y}` bound a local that no pass here could
+    type, so a function returning it inferred its return type from its
+    OTHER return statements alone: `def f(names, kind): if kind == 1: return
+    names; ...; return ignored` inferred `MojoList *` (from `names`) and
+    the body then had to store a real `MojoSet *` into that `MojoList *`
+    return slot — refused honestly by `_sce_simple_emit`'s container-kind
+    guard (`Apple/__main__.py`'s `lib_platform_files`, `Tools/build/
+    umarshal.py`'s `r_object`)."""
+    t = _CONTAINER_LITERAL_CTYPES.get(type(value).__name__)
+    if t:
+        return t
+    if isinstance(value, gimple_ctypes.Comprehension):
+        if value.kind == 'dict':
+            return 'MojoDict *'
+        if value.kind == 'set':
+            return 'MojoSet *'
+        # 'list', and 'generator' — a generator expression lowers to a
+        # materialized list (`_lower_comprehension`'s own table).
+        return 'MojoList *'
+    return None
+
 def _each_binding(body: list) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing
     through control flow and never into a nested `FunctionDef` (which has its
@@ -1559,7 +1645,10 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
     a local rebound to a different STRUCT kind is not a retyping at all --
     it is a value of no single C type, and the honest answer is the box.
     So a name is recorded only while every pointer-shaped binding of it
-    agrees (see `_conflicting` below).
+    agrees (see `_conflicting` below), and a name whose bindings do NOT
+    agree is recorded as the box rather than dropped -- the box is the
+    answer, and recording it is the only way it reaches the consumer (the
+    `note` body's own comment says why dropping it was not the same thing).
 
     That exception is not a refinement, it is the whole ballgame for
     `fire_compiler.Parser._parse_expr`. Its `left` is first bound by the
@@ -1608,7 +1697,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # already had an identical fix.
             cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
         else:
-            t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            t = _container_literal_ctype(n.value)
             if t:
                 cand = t
             else:
@@ -1657,8 +1746,27 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
         if prev is not None and prev != cand:
             # Two pointer-shaped bindings of one name, and they disagree: the
             # name holds values of more than one C type, so there is no
-            # pointer type to record and the int64_t box is the answer.
-            del out[name]
+            # pointer type to record — and the answer is the box, which this
+            # now RECORDS rather than dropping.
+            #
+            # Dropping it used to mean "whatever `var_types` already says",
+            # and `var_types` is seeded for a PARAMETER from usage evidence
+            # alone (`_infer_param_types`), which cannot see a binding at all.
+            # So a parameter rebound to two container kinds took the guess:
+            # `def probe(box, kind): if kind == 1: box = [1, 2] else: box =
+            # {"a": 1}; return box` inferred `MojoList *`, and the caller
+            # then read the dict through `mojo_repr_list_ints` — another
+            # container's memory, out of bounds, printing `[0]` where CPython
+            # prints `{'a': 1}`. The box is what the docstring above already
+            # calls "the honest answer"; recording it is what makes it reach
+            # the consumer instead of being overwritten by a narrower guess.
+            #
+            # It stays a conflict for the rest of the walk (the name is never
+            # re-typed), and `_infer_return_type_with_locals` treats an
+            # `int64_t` entry here as authoritative over `var_types` — the
+            # join of two kinds cannot be beaten by any narrower answer, and
+            # every other ctype this function records is a real pointer.
+            out[name] = 'int64_t'
             conflicting.add(name)
             return
         out[name] = cand
@@ -1720,7 +1828,7 @@ def _dict_value_locals(gen, body: list) -> dict:
             return                       # first store wins
         vt = gen._quick_type(n.value)
         if vt == 'int64_t':
-            lit = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            lit = _container_literal_ctype(n.value)
             if lit is not None:
                 vt = lit
         if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
@@ -1753,7 +1861,18 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     `Tools/wasm/wasi/__main__.py`).
 
     The overlay is temporary and additive: a name already in `var_types`
-    keeps the type an earlier pass decided for it."""
+    keeps the type an earlier pass decided for it — with ONE exception. An
+    `int64_t` entry is `_prebound_local_ctypes`' CONFLICT verdict (the only
+    way that function produces `int64_t`), i.e. this body binds the name to
+    two pointer types that disagree, and it overrides. The earlier entry is,
+    for a parameter, usage evidence from `_infer_param_types`, which cannot
+    see a binding at all and so cannot know the name is retyped; for a local
+    it is whatever a pre-pass guessed. Neither can be right once the body has
+    been read, and the narrower of the two answers is the dangerous one: a
+    function whose `return`s disagree inferred `MojoList *` and the caller
+    then read a `MojoDict` through `mojo_repr_list_ints`, out of bounds.
+    Every other ctype recorded here is a real pointer, so the rule cannot
+    fire for anything else."""
     _locals = _prebound_local_ctypes(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
     if not _locals and not _dict_vals:
@@ -1762,7 +1881,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     _scratch_mark_ml: int = gen._scan_scratch_top
     _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
-        if _n not in _merged:
+        if _n not in _merged or _t == 'int64_t':
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
@@ -1791,6 +1910,62 @@ def _infer_return_type(gen, body: list) -> str:
     (free functions, struct methods, lifted closures, lambdas) goes
     through this one entry point, so the fix cannot be half-applied."""
     return _infer_return_type_with_locals(gen, body)
+
+
+def multi_kind_locals(gen) -> set:
+    """The locals of the function `gen` is CURRENTLY emitting that
+    `resolve_shared._infer_local_var_types` found bound to containers/structs
+    of more than one kind — the names whose declared C type must be the box
+    rather than any one of those kinds.
+
+    One resolver because the two sides spell the same function differently and
+    neither spelling is wrong: the pre-pass records it as the source-level
+    name (`_r_object` for a method, `r_object` for a same-named free
+    function), while the consumer is mid-body and holds
+    `gen.current_func_name`, the mangled C symbol (`Reader__r_object`).
+
+    Every candidate spelling is UNIONed rather than the first hit taken, which
+    matters because a struct method and a free function can share a name — a
+    real collision in `Tools/build/umarshal.py`, where the method is
+    `Reader._r_object` and a plain `r_object` also exists. First-hit-wins
+    would silently drop whichever one it did not pick.
+    """
+    tbl = getattr(gen, '_multi_kind_locals', None) or {}
+    fname = _as_str(getattr(gen, 'current_func_name', '') or '')
+    cands = [fname]
+    if '__' in fname:
+        cands.append(fname.replace('__', '_', 1))
+    if '_' in fname:
+        cands.append(fname.rsplit('_', 1)[0])
+    out: set = set()
+    for c in cands:
+        got = tbl.get(c)
+        if got:
+            out |= set(got)
+    return out
+
+
+def alias_multi_kind_locals(gen, key: str, func) -> None:
+    """Re-file `_infer_local_var_types`' `_multi_kind_locals` entry for `func`
+    under `key` as well.
+
+    `_infer_local_var_types` is handed a bare `FunctionDef`, so for a struct
+    METHOD it only knows the method's own name (`_r_object`) — but the
+    consumer is mid-body and holds `gen.current_func_name`, the mangled C
+    symbol (`Reader__r_object`, i.e. `f"{Struct}_{method}"`). The caller that
+    DOES know both is the one building `_inferred_var_types`, and it already
+    computes exactly this key for the sibling table, so the alias is filed
+    there rather than guessed at from the method name (guessing is what made an
+    earlier attempt of this resolver miss: `Reader__r_object` split on `__`
+    yields `r_object`, not `_r_object`).
+    """
+    tbl = getattr(gen, '_multi_kind_locals', None)
+    if tbl is None:
+        return
+    got = tbl.get(_as_str(getattr(func, 'name', '')))
+    if got:
+        tbl.setdefault(_as_str(key), set()).update(got)
+
 
 def _prepass_list_elem(gen, elements) -> str:
     """Element type of a container literal for the pre-pass. Mirrors

@@ -23,7 +23,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal, _split_top_level_commas as _fc_split_top_level_commas, is_tuple_target as _fc_is_tuple_target, for_target_slots as _fc_for_target_slots
+from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -540,8 +540,12 @@ def _struct_slot_kinds(codes):
     whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
     property of the VALUE, not of whether it was bound to a local; a read
     with no compile-time slot index (iteration, a computed subscript) still
-    has no single right C type, which is the residue named in
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    has no single right C type. That residue was closed in the RUNTIME, by
+    moving the per-slot kinds onto the live `MojoList` (a side table keyed on
+    its address) and boxing a read with no compile-time index — see
+    `mojo_list_set_kinds` / `mojo_list_get_boxed` / `mojo_repr_boxed` in
+    runtime/fire_runtime.c and `_lower_LambdaExpr`'s env-field block in
+    emit_calls.py for the consumers.
     """
     out = []
     for c in codes or ():
@@ -562,8 +566,9 @@ def _struct_elem_ctype(codes):
     That degradation is now confined to reads with no compile-time slot
     index: `_struct_slot_kinds` carries the real per-slot kinds, and the
     subscript, the `a, b = t` destructuring target and the whole-result repr
-    all consult it. See
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
+    all consult it. See `_struct_slot_kinds` / `_struct_attr_format` in
+    mojo/backend_gimple/emit_methods.py, which are where those consumers are
+    written."""
     if not codes:
         return 'int64_t'
     kinds = set()
@@ -624,6 +629,95 @@ _LIBM_FN_RETVALS = {
     'isnan': 'int', 'isinf': 'int', 'isfinite': 'int',
 }
 
+# The dispatch-table and type-table MODULE GLOBALS, with the C DECLARATION
+# TYPE each one really has. ONE mapping, because four sites need this same fact
+# and each used to carry its own hand-written copy -- and the copies drifted the
+# moment the globals moved from `gimple_codegen.py` into `mojo/middle/types.py`
+# under the module split, which is how "struct _mojo_middle_types_toplev has no
+# member named '_TYPE_MAP'" happened.
+#
+# THE TYPE IS PART OF THE KEY'S ANSWER, and a bare "a dispatch table is a
+# `MojoDict *`" is wrong for eleven of the twenty-four: ten are sets
+# (`_CMP_OPS` is declared `_CMP_OPS: set` in `generated_dispatch.py`; the rest
+# are `frozenset`s or `{...}` set literals) and two are plain strings and two
+# are not containers at all. That mis-typing is not cosmetic. Each answer is
+# written into the SHARED, bare-name-keyed `_global_c_decl_types`, and
+# `_own_overlay_global_ctype`'s rule 1 ("a container cdecl beats a scalar
+# own-conclusion") then lets it beat the OWNING module's own correct
+# conclusion -- so module_loader's `_C_KEYWORDS = frozenset({...})` found
+# `_global_c_decl_types['_C_KEYWORDS'] == 'MojoDict *'` and refused to coerce:
+#
+#     # ERROR: compiling imported module 'module_loader': cannot coerce
+#     #   MojoSet * to MojoDict * (incompatible container kinds)
+#
+# for four modules of the self-host closure, `selfhost`/`mojoc` red.
+#
+# Read the global's own DEFINITION before adding a name -- a `{...}` literal
+# with no `key: value` pairs is a SET, not a dict. `'int64_t'` is the BOX: the
+# value is right and there is no typed accessor, which is the convention
+# `_gscan_declare_global`'s own non-dispatch arms use for exactly that case
+# (`_FIXED_ARRAY_ANN_RE` is a compiled regex; its pattern source lives in
+# `_regex_patterns` and `.finditer()` is lowered from that string, so the
+# object itself is never read at run time).
+#
+# `dispatch_table_global_ctype` below is the ONLY way out of this table, so
+# membership ("is this one of ours?") and the type ("what C type is it?")
+# cannot come apart the way a name-list-plus-a-parallel-type-list pair does.
+_DISPATCH_TABLE_GLOBAL_CTYPES = {
+    # ── dicts ──
+    '_STMT_DISPATCH': 'MojoDict *',
+    '_EXPR_DISPATCH': 'MojoDict *',
+    '_BIN_OPS': 'MojoDict *',
+    '_TYPE_MAP': 'MojoDict *',
+    '_SIGNED': 'MojoDict *',
+    '_UNSIGNED': 'MojoDict *',
+    '_FLOAT': 'MojoDict *',
+    '_LIBM_FN_RETVALS': 'MojoDict *',
+    '_SELFHOST_EXTRA_FIELD_CACHE': 'MojoDict *',
+    # ── `frozenset`s and `{...}` set literals ──
+    '_CMP_OPS': 'MojoSet *',
+    '_C_KEYWORDS': 'MojoSet *',
+    '_C_RESERVED_FUNCS': 'MojoSet *',
+    '_FORCE_RENAME_RESERVED': 'MojoSet *',
+    '_CPP_KEYWORD_FIELDS': 'MojoSet *',
+    '_C_PARAM_EXTRA_KEYWORDS': 'MojoSet *',
+    '_PSEUDO_DUNDER_ATTRS': 'MojoSet *',
+    '_LIST_RETURNING_METHODS': 'MojoSet *',
+    '_STR_RETURNING_METHODS': 'MojoSet *',
+    '_SCALAR_INT_TYPES': 'MojoSet *',
+    '_SCALAR_FLOAT_TYPES': 'MojoSet *',
+    # ── plain strings ──
+    '_CPP_CALLABLE_CTYPE': 'char *',
+    '_CPP_CALLABLE_CTYPE_1ARG': 'char *',
+    '_UNKNOWN_FIELD_CTYPE': 'char *',
+    # ── no typed accessor: the box ──
+    '_FIXED_ARRAY_ANN_RE': 'int64_t',
+}
+
+
+def dispatch_table_global_ctype(name) -> str | None:
+    """The C declaration type for the compiler-internal table global `name`,
+    or None when it is not one of ours.
+
+    ONE accessor for the whole table, rather than the table plus a names list:
+    a `name -> ctype` mapping and a parallel `names` list can disagree, and
+    that disagreement has been a build break twice (see
+    `_DISPATCH_TABLE_GLOBAL_CTYPES`'s own comment) -- `selfhost` red with
+    "cannot coerce MojoSet * to MojoDict *". `... is not None` is therefore
+    also the ONE membership test, which is the other half of what a name list
+    was for.
+
+    A FUNCTION, and not a bare read of the dict at each call site: these sites
+    are in other modules (`mojo/backend_gimple/module_gen.py`,
+    `mojo/middle/module_shared.py`, `gimple_codegen.py`), and a cross-module
+    call is the one shape that does not depend on how the self-hosted compiled
+    path represents another module's globals. A module-level `dict.get` and a
+    module-level `in` over a dict literal both happen to work there today; a
+    cross-module ATTRIBUTE read of one does not, and a `tuple(<dict>)` /
+    `set(<tuple>)` derived view of the table does not either, so neither this
+    function nor its callers may be "simplified" into either."""
+    return _DISPATCH_TABLE_GLOBAL_CTYPES.get(name)
+
 _SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
@@ -633,12 +727,14 @@ def _split_top_level_commas(s: str) -> list[str]:
     `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
     itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`).
 
-    A thin re-export of `fire_compiler._split_top_level_commas`, which is the
-    one implementation (it strips each part; every caller here did its own
-    `.strip()` at the use site). This module cannot `from fire_compiler import
-    *` — see the note at its import block — so the name is bound explicitly to
-    keep ONE splitter rather than the four this used to have."""
-    return _fc_split_top_level_commas(s)
+    This is fire_compiler.split_top_level_commas under the name this module's
+    ~25 callers already use, and it is an ALIAS rather than a second copy: the
+    same bracket-aware split serves a bracket annotation AND an
+    unpacking-target string, and a trailing-comma 1-tuple target is only
+    expressible if every reader drops the empty slot it leaves (see
+    fire_compiler.py's "Unpacking-target representation" section). Two copies
+    would be free to disagree about exactly that."""
+    return split_top_level_commas(s)
 
 def _class_attr_ctype(v) -> str | None:
     """C pointer type for a container-valued class-body attribute initializer
@@ -1791,17 +1887,17 @@ def _compute_exc_descendants(all_struct_defs):
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
     `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
-    preserves) into its LEAF variable names. Bracket-aware at every
-    level: a naive `.split(',')` tore nested slots into paren-carrying
-    fragments that then leaked into declared-name sets (or worse, into
-    emitted C declarations verbatim)."""
-    t = target.strip()
-    if _fc_is_tuple_target(t):
-        names = []
-        for part in _fc_for_target_slots(t):
-            names.extend(_unpack_target_leaf_names(part))
-        return names
-    return [t] if t else []
+    preserves) into its LEAF variable names.
+
+    `fire_compiler.for_target_names` under the name this module's callers
+    already use, and an alias rather than a second walk: this is a
+    representation fire_compiler.py OWNS (see its "Unpacking-target
+    representation" section), and a second recursion over the same text is
+    exactly where the `(a,)` / `(a)` confusion came from — this copy stripped
+    the outer parens and recursed unconditionally, so it read a
+    parenthesised single NAME as a one-slot group and a 1-tuple as the same
+    thing. It is also what knows about the trailing comma."""
+    return for_target_names(target)
 
 def _declared_vars_body(stmts) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
@@ -1812,10 +1908,16 @@ def _declared_vars_body(stmts) -> set[str]:
         elif isinstance(node, ForStmt):
             tgt = node.target
             name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
-            if _fc_is_tuple_target(name):
+            # Every target shape through the ONE leaf-name reader, with no
+            # "is it parenthesised?" test of its own. That test is what this
+            # used to do, and it is the reason a 1-tuple `'(a,)'` and a
+            # parenthesised name `'(a)'` were indistinguishable here: both
+            # took the paren branch and both produced the same one-element
+            # set, which happened to be right for NAMES and is why the
+            # distinction had to be pushed down to `for_target_is_tuple`
+            # rather than fixed here.
+            if isinstance(name, str) and name:
                 result.update(_unpack_target_leaf_names(name))
-            elif name:
-                result.add(name)
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)

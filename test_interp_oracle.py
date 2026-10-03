@@ -189,6 +189,48 @@ def main():
     print((a | b).get("B"))
     print(m.get("A", "dflt"))
 ''',
+    # A USER-DEFINED function handed to a builtin as a CALLBACK. The
+    # interpreter's `MojoFunction.__call__` demanded the interpreter as a
+    # first POSITIONAL argument, so every caller had to volunteer it —
+    # `Interpreter.invoke` does, and a builtin cannot. `sorted([1,2,3],
+    # key=lambda a: -a)` therefore ran `_invoke` with the callee's first real
+    # ARGUMENT in the interpreter's slot and died with
+    # "AttributeError: 'int' object has no attribute 'scope'". `sorted(key=k)`
+    # with a `def`, `min`/`max(key=)` (which additionally IGNORED the key
+    # entirely), `map(f, xs)`, a `list.sort(key=)`, a generic
+    # `f(*args)`, and a `__call__`-on-the-instance callback are all here
+    # because they are all the same hole reached from a different direction.
+    "user_function_as_a_builtin_callback": '''\
+class Callable:
+    def __init__(self, n):
+        self.n = n
+
+    def __call__(self, a):
+        return a + self.n
+
+
+def by_neg(a):
+    return -a
+
+
+def main():
+    print(sorted([1, 2, 3], key=lambda a: -a))
+    print(sorted([1, 2, 3], key=by_neg))
+    print(sorted([3, 1, 2], key=abs))
+    print(min([3, 1, 2], key=lambda a: -a))
+    print(max([3, 1, 2], key=lambda a: -a))
+    print(min([3, 1, 2]))
+    print(max([3, 1, 2]))
+    print(list(map(lambda a: a + 1, [1, 2])))
+    xs = ["bb", "a", "ccc"]
+    xs.sort(key=len)
+    print(xs)
+    var = lambda *a: len(a)
+    print(var(1, 2))
+    kw = lambda **k: len(k)
+    print(kw(a=1, b=2))
+    print(sorted([1, 2, 3], key=Callable(10)))
+''',
 }
 
 

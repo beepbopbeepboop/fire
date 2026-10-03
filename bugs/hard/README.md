@@ -16,16 +16,50 @@ Last updated 2026-10-01.
 
 | doc | one line |
 |---|---|
-| `CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` | a cross-module struct constructor called at **module scope** (not inside a function) is mistyped, in BOTH import spellings and neither is the import seam: the bare-`import` spelling prints the object's own pointer as a decimal with exit 0, the `from`-import spelling fails the build outright with `non-trivial conversion in 'var_decl'`. The same four cases inside a function body, and the same two cases with the class in the same file, are all correct. Found 2026-09-30 next to the deleted row below. |
 | `CODEGEN_function_scoped_import_module_not_inlined.md` | a function-scoped `from X import Y` records Y's signature/exports and then returns without compiling the module: Y's `X.Y(...)` construction returns `0`, and reading a class attribute prints `unavailable in compiled mode` with exit 0. The module-scoped spelling of the same import works. **New 2026-09-26.** |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
 
 | doc | what remains |
 |---|---|
-| `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26**, and the residue under the second one **FIXED 2026-09-29**: the per-slot kinds now travel with the VALUE (a side table on the live `MojoList` address, `mojo_list_set_kinds`) instead of dying with one compile-time C name, so a copy, a slice, a concat, a returned value and a class attribute's `Struct` handle all read back correctly; and a read with no compile-time slot index — iteration, a computed subscript — is **boxed** (`mojo_list_get_boxed` + `mojo_repr_boxed`), which also fixes the heterogeneous `[1, 2.5]` literal that the doc named as the root cause underneath it. A uniform format records nothing and pays nothing. One thing the work uncovered is a DIFFERENT bug and is filed separately: a function returning a `MojoList *` it built in a local is typed `int64_t`, so the caller print()s the address and iterating it segfaults (pre-existing, not `struct`). |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **the kw-only-callable blocker is FIXED for the same-module case, 2026-09-29.** `walk_tree` and `iter_files_by_suffix` now compile and produce CPython's text; the stack-switch `kwonly params (v0)` gate is a representability question instead of a blanket refusal, and a callable-valued parameter's default is a real function address instead of a NULL pointer (which used to SIGSEGV on **every** path, ordinary `def`s included — that half was not in the doc). Residue: `_walk_tree`/`glob_tree` still refuse because their defaults name an **imported** module's function, undecidable at A3's eligibility time, and that same gap is a live SIGSEGV on the ordinary path (`bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`); `iter_files`'s variadic lambda and `process_filenames`' `Exception(...)`-as-a-value are separate and outside this bug, so the file still does not build. |
+
+### 2026-10-02: two more rows closed, and the third one's *diagnosis* replaced with its two real causes
+
+`CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` (OPEN, the
+2026-09-30 row) and `CODEGEN_cross_function_container_element_type.md` are
+**fixed and deleted**. Both were diagnosed as a scope or an identity problem
+and were neither; in both cases the real cause is a set of CALL SITES a pass
+never collected, which is a much smaller and much more checkable defect than
+either doc's "exact next step" section claimed to need.
+
+The module-scope one: the cross-module constructor field-type hint pre-pass
+collects its sites by walking `FunctionDef` bodies only, so a module-level
+`insp.Parameter('v', 7)` was in no collected set. Not the import seam (both
+spellings were equally wrong, and both were right inside a function) and not
+module scope alone (the same-file case is correct at module scope, because in
+one translation unit the struct's own field table is registered before the
+module's statements are emitted). One line: extend the site collector.
+
+The container-element one is two independent halves of the same pass, and
+naming them separately is the transferable part. `gen._elem_types` is a
+per-function map keyed by lowered C value, which is why a container shared
+across functions loses its element type — but the pass that is supposed to
+conclude otherwise (`_gmi_phase17_collect_appends`, keyed on a module GLOBAL's
+name and so function-independent by construction) had two gaps of its own: it
+walked `FunctionDef`/`If`/`While`/`For`/`Try`/`With` but **not `StructDef`**, so
+an append inside a constructor — the dominant registry shape — was invisible
+to the whole pass; and its receiver test required a bare `IdentExpr`, so the
+class-attribute spelling `T.registry.append(self)` was rejected as well. The
+doc's own fix sketch — a `_value_sources` provenance chain through
+`_coerce_to_type` — is not needed for either, because the pass that already
+exists for exactly this question was simply not being asked.
+
+Both fixes are worth reading together with the two rows above them: three of
+the five instances of cause (c) in this file were "one spelling of a working
+site collection was never wired up", and in every case the cheap check was to
+write both spellings of the same program down side by side and diff.
 
 ## Closed reports are deleted, not kept as monuments
 
@@ -42,9 +76,11 @@ made concrete: on 2026-09-26 two closed reports were re-tested and **both
 still had live, silent, wrong-value residue** that their own text did not
 have. Keeping the file did not prevent that; it hid it, behind a CLOSED
 banner that everyone had stopped reading. The residue became new OPEN docs
-(`CODEGEN_bytes_silent_wrong_values.md` and
-`CODEGEN_struct_kwargs_and_inline_unpack.md`), which is the honest home for
-it. Mechanistic knowledge that still matters lives in the source comment
+(`CODEGEN_bytes_silent_wrong_values.md` and what was then
+`CODEGEN_struct_kwargs_and_inline_unpack.md`), which was the honest home for
+it. **Both of those are themselves gone now** — closed and deleted, the
+`struct` one on 2026-10-02 — which is the arc the next paragraph describes,
+run to its end. Mechanistic knowledge that still matters lives in the source comment
 that explains the mechanism, not in a doc about a bug that no longer exists.
 
 **The bytes doc followed the same arc, one round further, and is now gone
@@ -76,7 +112,7 @@ new OPEN doc above rather than losing the residue:
 | removed | residue now tracked in |
 |---|---|
 | `CODEGEN_bytes_value_type.md` | (both now closed and removed) |
-| `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` |
+| `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` (itself closed and deleted 2026-10-02) |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
 | `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` — itself closed and removed 2026-09-29 |
 | `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` — itself **fixed and removed 2026-10-01** by `work/hard-coro-yield`; its residue is now in `../CODEGEN_generator_param_loop_target_kinds_still_unresolved.md` |
@@ -219,12 +255,20 @@ is to write both spellings of the same program down side by side and diff
 their answers, which took two builds here and would have closed the row on
 2026-09-27.
 
-The residue the closure turned up belongs to a different bug and is filed in
-this directory:
-
-| found while fixing it | filed as |
-|---|---|
-| the same cross-module construction at **module scope** rather than inside a function is mistyped in BOTH import spellings — a pointer decimal, exit 0, on one, a hard `non-trivial conversion` build failure on the other | `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` |
+The residue the closure turned up belonged to a different bug. It was
+**fixed and deleted on 2026-10-02**: a cross-module struct constructor
+called at **module scope** (rather than inside a function) was mistyped
+in BOTH import spellings — a pointer decimal, exit 0. The cause was a
+missing set of CALL SITES, not a missing seam: the cross-module
+constructor field-type hint pre-pass in `module_gen.py` collected its
+sites by walking `FunctionDef` bodies only, so a module-level
+`insp.Parameter('v', 7)` was in no collected set and the imported module
+compiled `self.v = v` at the `int64_t` default against a `char *` field.
+It was filed on 2026-09-30, three days after the row above, by the same
+kind of one-spelling-at-a-time reading that row records — and the two
+are the same lesson from opposite ends, since this one's own first
+measurement blamed module SCOPE when the function-scope spelling of the
+same two lines had been right all along.
 
 ### 2026-10-01: the two-hop row above, and a fourth instance of cause (c) — closed by a MERGE, not by an edit
 
