@@ -545,6 +545,83 @@ def test_word_rule_moved_only_where_measured():
           'and the integer scalars still are')
 
 
+def test_the_tagged_box_accessors_are_declared_and_callable():
+    """Six names the library has always exported, and no header declared.
+
+    They are the TAGGED box representation — a container as one 64-bit word with
+    a kind tag beside every element, which is what FORMAL.md §5 converges on —
+    written, compiled into the runtime dylib and exported, and refused by
+    `gimple_runtime_callable` for want of a DECLARATION.  That is the whole of
+    ceiling 2 in `bugs/FORMAL_runtime_library_on_the_link_line.md`, and it is a
+    header gap rather than a capability limit: five of the six are word-shaped
+    and were callable the moment a header said so.
+
+    Each half is checked separately because they can come apart:
+
+      * the TABLE says five are word-shaped, and the two float-crossing names
+        are not — `mojo_tagged_double` returns a `double` and `mojo_double_bits`
+        takes one, and a `double` is one machine word but not one value on this
+        path (`_WORD_SCALARS`).  Declaring them changed nothing about that, and
+        the check is here so a later edit cannot quietly widen it;
+      * a program CALLS them, links the library, and RUNS on both
+        architectures.  `box = 0` is the one argument a formal program can
+        produce, and the accessors are total on it: an empty box has no element
+        0, so `mojo_tagged_tag_dyn(0, 0)` reads the out-of-range answer
+        `MOJO_TAG_NONE` and the typed readers read 0.  `MOJO_TAG_NONE` is 4 and
+        not 0, so the number says the call went THROUGH the library rather than
+        that a call to nowhere returned a zero — which is what a stubbed or
+        mis-bound call would also produce.
+    """
+    tagged = ('mojo_tagged_int', 'mojo_tagged_word_dyn', 'mojo_tagged_tag_dyn',
+              'mojo_tagged_str', 'mojo_tagged_list')
+    for name in tagged:
+        entry = M.runtime_abi_entry(name)
+        check(entry is not None,
+              f'{name} is declared by a runtime header now', name)
+        if entry is not None:
+            check(entry['word'],
+                  f'{name} is word-shaped — every type crossing the boundary '
+                  f'is one word', entry['signature'])
+        check(M.gimple_runtime_callable(name, provided=True),
+              f'{name} is callable: a word-shaped, library-provided entry point')
+    for name in ('mojo_tagged_double', 'mojo_double_bits'):
+        entry = M.runtime_abi_entry(name)
+        check(entry is not None, f'{name} is declared too', name)
+        if entry is not None:
+            check(not entry['word'],
+                  f'{name} is still NOT a value on this path — a double crosses '
+                  f'the boundary as one word but is not one value',
+                  entry['signature'])
+        msg = build_expecting_refusal(
+            'def main():\n'
+            f'    var x = {name}({"0.5" if "bits" in name else "0, 0"})\n'
+            '    return 0\n', 'taggedfloat')
+        check(msg != '', f'a call to {name} is still refused')
+    # The trap the doc names, left alone on purpose: `mojo_open`/`mojo_close`
+    # are declared in fire_runtime.c as the C library's, while the SYMBOL the
+    # dylib exports is the Mojo stdlib's renamed pair behind the same name.
+    # Declaring the C one would put a signature in front of a definition it does
+    # not match, which is the misresolved-export class
+    # `build_stdlib_dylib.runtime_export_entries` reports by name.
+    for name in ('mojo_open', 'mojo_close'):
+        check(M.runtime_abi_entry(name) is None
+              or 'MojoFileHandle' not in
+              (M.runtime_abi_entry(name) or {}).get('signature', ''),
+              f'{name} is not declared with the C signature the symbol does '
+              f'not implement',
+              str(M.runtime_abi_entry(name)))
+    src = ('def main():\n'
+           '    printf("tag=%d word=%d int=%d", mojo_tagged_tag_dyn(0, 0),\n'
+           '           mojo_tagged_word_dyn(0, 0), mojo_tagged_int(0, 0))\n'
+           '    return 0\n')
+    for arch in ('arm64', 'x86_64'):
+        r = build(src, 'tagged', arch=arch)
+        rc, out = run(r)
+        check('tag=4 word=0 int=0' in out,
+              f'{arch}: the tagged accessors run and answer MOJO_TAG_NONE on '
+              f'an empty box', f'exit {rc!r}, stdout {out!r}')
+
+
 def main():
     test_word_shaped_call_links_and_runs()
     test_image_carries_the_load_command()
@@ -560,6 +637,7 @@ def main():
     test_bind_audit_not_weakened()
     test_module_dylib_carries_the_load_command()
     test_word_rule_moved_only_where_measured()
+    test_the_tagged_box_accessors_are_declared_and_callable()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")

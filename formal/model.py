@@ -12084,6 +12084,34 @@ def list_elem_kind(kind):
     return kind.split(":", 1)[1] if ":" in kind else None
 
 
+def subscript_element_kind(base_kind):
+    """What `base[i]` yields, given what `base` is: a blob's element, or a BYTE.
+
+    The one place that question is answered, because the blob case and the
+    `char *` case are the same subscript with two different answers and the
+    kind table used to answer only the first: `list_elem_kind` asks
+    `is_list_kind`, a string is not a blob, so `s[0]` classified as NOTHING —
+    the permissive direction everywhere it was read — and one refusal built on
+    that nothing never fired.  Measured, BOTH architectures, from a GREEN build:
+    `printf("[%s]", s[0])` printed nothing and died of SIGSEGV, exit 139,
+    because `%s` is the one conversion that dereferences and it walked bytes at
+    address 97 looking for a NUL.  So the value kind of a subscript of a
+    `char *` is an INTEGER, and that is not a guess about the representation: a
+    string on this path IS a bare `char *` and both emitters load one byte
+    (`arm64_codegen._emit_subscript_load`'s `LDRB` at width 1), which is why
+    `printf("%d", s[0])` has always printed 97 and `s[0] == 46` has always been
+    true.  `printf_arg_text_evidence`'s last row now sees the truth and refuses,
+    and `len(s[0])` gets the honest "an integer has no length" instead of "the
+    source does not say".
+
+    NOT the SLICE: `s[1:3]` is a new string, not a byte, and the slice arm of
+    `kind_of` answers it separately (`FORMAL_string_value_model.md`).
+    """
+    if base_kind == STR_KIND:
+        return INT_KIND
+    return list_elem_kind(base_kind)
+
+
 def is_list_kind(kind) -> bool:
     """True when `kind` names a list/tuple/set blob of any element kind."""
     return isinstance(kind, str) and kind.startswith(LIST_PREFIX)
@@ -13118,7 +13146,7 @@ class ValueKinds:
             return INT_KIND
         if isinstance(e, F.SubscriptExpr):
             if not isinstance(e.index, F.SliceExpr):
-                # A dict subscript is a KEY SCAN, and its answer is a claim
+# A dict subscript is a KEY SCAN, and its answer is a claim
                 # about ONE element word — a word that a store writes and
                 # nothing else does. So the initializer this function ran is
                 # asked whether it wrote the key, and that is a question a KIND
@@ -13126,12 +13154,14 @@ class ValueKinds:
                 # `d["b"]` reads a slot nothing put a list into.
                 # `dict_literal_key_value_kind` carries the gate and returns
                 # None for every shape it cannot vouch for, so the fallback
-                # below — the LIST case, where the base's element kind IS the
-                # subscript's kind — is reached exactly as before.
+                # below is reached exactly as before — and that fallback is
+                # `subscript_element_kind`, not a bare `list_elem_kind`, so a
+                # `char *` still answers INT (`s[0]` is a BYTE, which is what
+                # makes `printf("%s", s[0])` a refusal rather than a SIGSEGV).
                 keyed = self._dict_subscript_kind(e)
                 if keyed is not None:
                     return keyed
-                return list_elem_kind(self.kind_of(e.obj))
+                return subscript_element_kind(self.kind_of(e.obj))
         return None
 
     def _dict_subscript_kind(self, e):
@@ -16131,10 +16161,10 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
         # The MEMBER name, read off the class body rather than sliced out of
         # the lifted name: `method_function_name` is what produced that name, so
         # asking it the other way round is the one spelling of "which method is
-        # this" that cannot drift from the key.
-        member = next((m.name for m in struct_methods(st)
-                       if method_function_name(st.name, m.name) == fn.name),
-                      fn.name)
+        # this" that cannot drift from the key — and it is `method_member_name`
+        # rather than a second copy of that loop, because the one-field rebind
+        # refusal needs the same two names for the same method.
+        member = method_member_name(st, fn)
         out[fn.name] = ReceiverWriteback(recv, st.name, member)
     return out
 
@@ -16851,6 +16881,150 @@ def receiver_rebound_from_a_word_refusal(fn_name: str, receiver: str,
         f"constructor rebinds its own object) or another receiver of the same "
         f"type, which copies the address and leaves the caller's slot pointing "
         f"where the writes land")
+
+
+def method_member_name(struct_def, fn) -> str:
+    """The name the SOURCE gave the method `fn` of `struct_def`.
+
+    Asked the only way that cannot drift from the lifted symbol: the other way
+    round, by asking which of the struct's own methods lifts to `fn`'s name.
+    `fn.name` is the answer whenever the join fails, so a method that reached
+    this without an owner (a lifted lambda, a synthesized constructor) still
+    names something rather than nothing — and the caller is a diagnostic, which
+    must never raise on the question it is asking.
+    """
+    return next((m.name for m in struct_methods(struct_def)
+                 if method_function_name(getattr(struct_def, "name", ""),
+                                         m.name) == getattr(fn, "name", None)),
+                getattr(fn, "name", ""))
+
+
+def receiver_own_type_names(fn, owner, structs_by_name=None):
+    """`(parameters, locals)` — names `fn` can hold a REFERENCE to an object of
+    the RECEIVER'S OWN STRUCT TYPE in.
+
+    One recogniser for both receiver rules, and the reason it returns two sets
+    rather than one is that the two rules then disagree about them: a parameter
+    is an object the CALLER owns, so pointing the receiver at it copies an
+    address the caller's slot already holds (fine for a frame receiver, and for
+    a one-field receiver it is a copy of a word into the caller's object, which
+    Python does not do), while a local is callee-private, so Python's later
+    stores through the rebound receiver are invisible outside — which a frame
+    receiver gets exactly right by rebinding its own address, and which no
+    one-field receiver can deliver at all.
+
+    **A name is in one of these sets only from a DECLARATION.** A parameter
+    annotated with the struct (`other: R`, `other: Self`) or assigned from a
+    construction of it (`var t = R()`); a name that merely has a field read on
+    it, or a method called on it, is a WORD — this repository's own source calls
+    `.strip()` on strings all day, and a census that counted those reported 52
+    sites of which 28 were not objects at all.
+
+    `owner` is the StructDef the method belongs to and is what reduces a bare
+    `Self`; it is required, because without it `other: Self` names nothing and
+    the answer would silently lose exactly the spelling this exists for.
+    """
+    owner_name = getattr(owner, "name", None)
+    decls = structs_by_name if structs_by_name is not None else (
+        {owner_name: owner} if owner_name else {})
+    params = {n for n, st in parameter_declared_structs(
+        fn, decls, owner).items() if getattr(st, "name", None) == owner_name}
+    locals_ = set()
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+            continue
+        target = (node.target if isinstance(node, F.AssignStmt)
+                  else getattr(node, "name", None))
+        name = target.name if isinstance(target, F.IdentExpr) else (
+            target if isinstance(target, str) else None)
+        value = getattr(node, "value", None)
+        if not name or name in params or not isinstance(value, F.CallExpr):
+            continue
+        if call_callee_name(value.func) in (owner_name, "Self"):
+            locals_.add(name)
+    return params, locals_
+
+
+def one_field_receiver_rebind_refusal(owner: str, member: str, receiver: str,
+                                      value: str, what: str) -> str:
+    """Why a ONE-FIELD struct's mutator may not rebind its receiver to a name of
+    its own type — the one receiver store this path cannot deliver.
+
+    The sibling of `receiver_rebound_from_a_word_refusal`, which is about a
+    receiver pointed at something that is not an object at all. This one is
+    about a receiver pointed at a perfectly good object of its own type, and it
+    is a DIFFERENT defect with the opposite sign: nothing is dropped, the wrong
+    thing is copied.
+
+    **The mechanism, because it is the opposite of the frame receiver's.** A
+    multi-field struct's receiver is the ADDRESS of a frame of 8-byte slots, so
+    the caller and the callee share storage and a rebinding changes only which
+    object the method writes through — which is Python's own semantics, measured
+    on both architectures and pinned by `test_formal_run.py`'s
+    `both_arch_receiver_copied_from_another_keeps_the_callers_value`. A
+    one-field struct has no frame: its receiver IS its single word
+    (`_rewrite_self_fields` collapses `recv.<field>` onto `recv`), and its
+    mutating method HANDS THAT WORD BACK so the caller stores it over the object
+    (`receiver_writeback_name`) — which is what makes `self.a = self.a + 4`
+    reach the caller at all. So for one field the same source text means
+    "assign the CALLER", and a rebinding delivers an assignment Python never
+    asked for:
+
+        struct T:
+            var a: Int
+            def take(out self, other: Self):
+                self = other
+
+    CPython runs that and leaves the caller's object alone — Python has no
+    "assign the receiver" operation at all, so after `self = other` the method's
+    own `self.a` reads and writes go to `other` and the caller sees nothing.
+    Measured on BOTH architectures from a GREEN build: this printed the OTHER
+    object's value.
+
+    **Why it is refused rather than delivered or dropped.** Delivering it is
+    impossible: a one-field mutator's one return word is already the receiver,
+    and Python's own semantics for this store is a write into `other`'s caller —
+    a second word this ABI does not have. Dropping it (suppressing the
+    write-back) would be right when the method stores nothing else afterwards
+    and silently wrong when it does, because Python's later `self.a = v` goes
+    through the alias and this path has nowhere to put it. So the shape is
+    named, and `what` says which of the two it is: a parameter (an object the
+    caller already holds) or a local of the method.
+
+    **What is NOT this defect**, because the corpus is full of it and the rule
+    must not cost a file: a store to the receiver's own word. `self = self + 4`,
+    `self = False`, `self = <a value the method computed>` — 28 of the 51
+    hand-written `self = …` sites in this repository and the stdlib
+    (`tools/formal_receiver_rebind_census.py`) — means "my field is now this",
+    the write-back is the mechanism that delivers it, and `self.a = other.a`
+    means the same thing spelled as a field store.
+    """
+    return (
+        f"{owner}.{member}() assigns its receiver `{receiver}` the name "
+        f"`{value}`, and `{value}` is {what} of this method and holds a "
+        f"`{owner}`, so this is "
+        f"Python REBINDING a local name rather than storing into the object the "
+        f"caller holds: Python has no \"assign the receiver\" operation at all, "
+        f"so after `{receiver} = {value}` this method's own `{receiver}.<field>` "
+        f"reads and writes go to `{value}` and the caller's object is untouched. "
+        f"CPython runs that source and answers with the value the caller already "
+        f"had. On this path the receiver of a struct of ONE field is that field "
+        f"— a word, not an address — and a mutating method HANDS THE WORD BACK "
+        f"so the caller stores it over its object (`formal/model.py`'s "
+        f"`receiver_writeback_name`, which is what makes "
+        f"`{receiver}.<field> = {receiver}.<field> + 4` reach the caller). So "
+        f"the rebinding is delivered as a COPY and the caller reads `{value}`'s "
+        f"value where the source says it keeps its own: measured on BOTH "
+        f"architectures, this builds, runs, prints the other object's value and "
+        f"exits 0. It cannot be delivered — one return word is already the "
+        f"receiver, and Python's own reading of the store is a write into "
+        f"`{value}`'s own caller — and it cannot simply be dropped, because "
+        f"Python sends every later `{receiver}.<field> = …` through the alias "
+        f"and this path has no second word to carry that. Spell the store as "
+        f"`{receiver}.<field> = {value}.<field>`, which copies the value and is "
+        f"what the source means when the object being changed is the receiver's, "
+        f"and give the method a name of its own for the other one."
+    )
 
 
 def construction_mismatch_refusal(target: str, callee: str, summary: str,

@@ -1,9 +1,14 @@
 # FORMAL_receiver_stored_in_a_field: a frame address in a struct field, and a parameter whose declared type no call site agrees with
 
-**Status: OPEN, NOT FIXED. Two constructs, both in the "other refusal" bucket
-until `fbaed39b` gave the bucket markers for them, and both unowned. They are
-one document because they were measured together and they are the two rows a
-planner would otherwise have to split by hand out of a 183-file bucket.**
+**Status: row A's RULE is landed (a delegating constructor is no longer
+refused, and the locally-built half still is); the 24 files are still blocked,
+by a DIFFERENT and more interesting rule, measured in §6. Row B is unmeasured
+here and now has a census that produces its list without a sweep (§7).**
+
+Both constructs were in the "other refusal" bucket until `fbaed39b` gave the
+bucket markers for them, and both were unowned. They are one document because
+they were measured together and they are the two rows a planner would otherwise
+have to split by hand out of a 183-file bucket.
 
 **Re-measured 2026-10-02 on `work/formal8-10`, without a sweep, and ROW A's
 24 FILES ARE THE DELEGATING CONSTRUCTOR — 13 of the 14 sites are an
@@ -11,10 +16,7 @@ planner would otherwise have to split by hand out of a 183-file bucket.**
 has the census, the instrument, its one weakness, and the rule the measurement
 decides. Row B is untouched: its list needs a sweep, because the refusal
 compares call sites inside one image and a parse-and-walk instrument cannot
-answer it.
-
-Named and measured by the `task:formal2-sweep-3` re-sweep of the `formal-batch3`
-tree, arm64 and x86-64, 630 files each (`bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`).
+answer it — §7 says what can be answered without one.
 
 | row | files blocked | in-file | both arches | source |
 |---|---|---|---|---|
@@ -23,6 +25,50 @@ tree, arm64 and x86-64, 630 files each (`bugs/FORMAL_sweep_work_map_2026-10-01_b
 
 Neither row is claimed. `python3 tools/control.py claims` shows no owner for
 either as of 2026-10-01; they are enqueued in the work map §7.
+
+## 0. What landed, 2026-10-03 (`work/formal10-4`): row A's rule, and why the
+## 24 files are still refused
+
+`formal/build.py`'s `_frame_field_store_is_sound` replaces the flat refusal with
+the rule §5's census selects, and the rule is about the VALUE, not the slot:
+
+> A field store of a frame address is sound when the frame ARRIVED — it is a
+> parameter of this method, so the CALLER reserved it and it cannot outlive
+> anything this function owns — **and** the slot is an ordinary word.
+
+Measured on both architectures, a delegating constructor across a module
+boundary now builds and computes the right number —
+`test_formal_run.py`'s `byref_delegating_constructor_stores_a_parameter_frame`,
+where `peek` reads `7` and `8` out of the frame the constructor stored, so a copy
+or a re-created block would answer 1 — and
+`byref_refuse_a_field_store_of_a_frame_built_here` pins the negative half
+(`var t = R()` in the method: that frame is built HERE, in this method's own
+scratch, and the slot may outlive the call).
+
+**And the 24 files are still blocked, which is the finding worth more than the
+rule.** A delegating constructor over a struct **of this module** is refused by
+`model.struct_nested_frame_fields`' PLACEMENT, not by the store:
+
+| the store is now allowed | what refuses the same program next |
+|---|---|
+| `self.src = <a parameter>`, field typed with an IMPORTED struct | nothing — it builds and runs (§0's case) |
+| `self.src = <a parameter>`, field typed with a struct of THIS module | `construction_nested_slot_refusal` at the construction site, and `_nested_frame_levels`'s `_REASSIGNED` arm at a read |
+| `self.f = <a parameter>`, field declared as a framed struct of this module | `constr_refuse_an_init_store_over_a_placed_nested_frame`'s own case, unchanged |
+
+The reason is that this module PLACES a frame in such a slot: the constructor
+reserves a block for it in the object's own block and stores that block's
+address, so a pointer stored over it leaves a word where every reader computes a
+frame base from it. That is a real hazard, and it is why the rule requires an
+ordinary word — `struct_nested_frame_fields` IS the placement decision, and a
+rule that ignored it would trade a loud refusal for a wrong answer.
+
+**So the blocker for the corpus is the PLACEMENT decision, and the next step is
+narrower than §3 assumed:** `struct_nested_frame_fields` does not look at what
+the constructor STORES. A field whose `__init__` stores a name rather than
+building a nested frame there is not a placed frame — it is a pointer slot — and
+teaching the placement that is one predicate over the constructor's own body.
+That predicate is what `FORMAL_struct_construction_shapes.md` is already about,
+which is why this doc stops here rather than reaching into it.
 
 ---
 

@@ -3326,6 +3326,36 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    return 0\n",
      "refuse:reads a field of a field", None),
+    # The NEGATIVE half of `byref_delegating_constructor_stores_a_parameter_frame`
+    # in `BYREF_CASES`, and the case that keeps that rule from being written as
+    # "a method may store a frame in a field". The one fact that separates them
+    # is WHERE the frame was made: `r` arrived as a parameter, so the CALLER
+    # reserved it and it cannot outlive the slot; `t` is built here, in this
+    # method's own scratch, and the slot may well outlive the call — the object
+    # `h` is the caller's and `h.src` is read after `grab` has returned.
+    #
+    # Nothing reads `h.src` in this program on purpose. The store itself is the
+    # defect, so a case that also read the field would be decided by whichever
+    # of the two rules came first, and the needle here would be a sentence about
+    # a read.
+    ("byref_refuse_a_field_store_of_a_frame_built_here",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Holder:\n"
+     "    var src: R\n"
+     "    var n: Int\n\n"
+     "    def grab(out self):\n"
+     "        var t = R()\n"
+     "        t.a = 5\n"
+     "        t.b = 6\n"
+     "        self.src = t\n"
+     "        self.n = 1\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var h = Holder()\n"
+     "    h.grab()\n"
+     "    return h.n\n",
+     "refuse:is stored in the field 'self.src'", None),
     # A callee this module does not compile cannot know the frame's layout.
     # This is the ONE shape left of four (see the two cases below and the
     # cross-module one in CROSS_MODULE_CASES): `mojo_print` is defined nowhere
@@ -3921,6 +3951,53 @@ CROSS_MODULE_CASES = [
               "    fill_a(got, 2)\n"
               "    var same2 = memcmp(got, want, 2)\n"
               "    return same * 10 + same2\n"}, 0, None),
+    # A DELEGATING CONSTRUCTOR: a method that stores its own PARAMETER into one
+    # of its fields, which is 13 of the 14 hand-written `recv.field = <a frame>`
+    # sites in this repository and the stdlib (`tools/formal_frame_field_census.py`).
+    # It used to be refused as "a S receiver is stored in the field 'self.src',
+    # so it outlives the frame it names", and that was false about it: the frame
+    # was reserved by the CALLER, in the caller's own scratch, so it cannot
+    # outlive the slot it is stored in — both are the caller's. What the refusal
+    # was right about is the OTHER lifetime, the one where the frame is built
+    # HERE (`byref_refuse_a_field_store_of_a_frame_built_here`), and the one
+    # where the slot is not a plain word (the placed nested frame, which
+    # `constr_refuse_an_init_store_over_a_placed_nested_frame` pins).
+    #
+    # It reads through the field by PASSING it, and the callee is in the other
+    # module, which is the only way this field can be read at all: a read
+    # through a nested frame of this module's own struct is a different
+    # construct with its own placement rules (`_nested_frame_levels`'s
+    # `_REASSIGNED` arm). So the assertion is the whole point — `peek` computes
+    # 7*10 + 8 = 78 from the frame it was handed, so a stored COPY, a
+    # re-created block, or any word other than the caller's `S` address leaves
+    # `n` alone and answers 1.  The multiplier is 2 rather than 10 so the
+    # expected exit status fits in a byte, which every case in this suite
+    # requires (see the retraction in BUG.md): CPython's answer is
+    # (7*10 + 8) * 2 + 1 = 157.
+    ("byref_delegating_constructor_stores_a_parameter_frame",
+     {"mod": "struct S:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def peek(s: S) -> Int:\n"
+             "    return s.a * 10 + s.b\n",
+      "main": "from byref_xmod import S, peek\n"
+              "\n"
+              "struct Holder:\n"
+              "    var src: S\n"
+              "    var n: Int\n"
+              "\n"
+              "    def fill(out self, r: S):\n"
+              "        self.src = r\n"
+              "        self.n = 1\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = S()\n"
+              "    r.a = 7\n"
+              "    r.b = 8\n"
+              "    var h = Holder()\n"
+              "    h.fill(r)\n"
+              "    return peek(h.src) * 2 + h.n\n"}, 157, None),
     # The NEGATIVE half, and the one that makes the positive case above worth
     # anything: the same shape with the two modules declaring the same NUMBER of
     # fields in a different ORDER. `Q.v` is slot 0 and the caller's slot 0 is
@@ -5792,6 +5869,85 @@ BOTH_ARCH_CASES = [
      "    return 0\n"
      "def main(n: Int) -> Int:\n"
      "    return f(0)\n", 0, "t=3 i=3"),
+    # A BYTE out of a string, and the two rows that say the rule that produces it
+    # (`model.subscript_element_kind`) did not take the byte away from the
+    # readers that want a NUMBER.  `s[i]` is the byte on this path, so `%d` of it
+    # and `s[0] == 97` are true and were true before the rule existed; a change
+    # that made the subscript refuse would be a working program traded for a
+    # diagnostic, and these are the rows that notice.  Every expected value is
+    # the ASCII code of the character: `s[0]` is `'a'` = 97, `s[1]` is `'b'` = 98,
+    # `s[2]` is `'c'` = 99, and `97 == 97` is 1.
+    ("both_arch_string_byte_renders_as_a_number",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%d][%d][%d][%d]\", s[0], s[1], s[2], s[0] == 97)\n"
+     "    return 0\n", 0, "[97][98][99][1]"),
+    # …and through `print`, which is the half of the rule that is NOT a refusal:
+    # `_print_call` asks the KIND, and "the source does not say" was a
+    # `print() cannot tell whether SubscriptExpr is a string or a number` about a
+    # value the model can now classify.  The row is here for the same reason as
+    # the one above it — a NEW emission is worth less than a pinned one.
+    ("both_arch_print_of_a_string_byte_renders_the_byte",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    print(s[0])\n"
+     "    return 0\n", 0, "97"),
+    # THE GUARDS for the one-field receiver rebinding rule, and they are the
+    # reason the rule is scoped to a name of the receiver's OWN TYPE rather than
+    # written as "never rebind a one-field receiver". Both of these are the
+    # mechanism that rule sits next to, and both are how 28 of the 51
+    # hand-written `self = …` sites in this repository and the stdlib are spelled
+    # (`self = self & rhs`, `self = False`, `self = _binary_op(self, rhs)`).
+    #
+    # `self.a = other.a` is the field store the rewrite collapses onto `self`
+    # and the write-back exists to deliver: CPython copies 2 into `x` and so
+    # does this. `self = self + 4` is the same store spelled as a rebinding of
+    # the receiver's own word: CPython's `x` is 5 and so is this. A rule that
+    # matched the TARGET rather than the VALUE would refuse both and cost
+    # `std/builtin/bool.mojo`, whose `__iand__`/`__ior__`/`__ixor__` are the
+    # second row verbatim.
+    ("both_arch_one_field_stores_through_the_receiver_still_reach_the_caller",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def take(out self, other: Self):\n"
+     "        self.a = other.a\n"
+     "\n"
+     "    def bump(out self):\n"
+     "        self = self + 4\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.take(y)\n"
+     "    x.bump()\n"
+     "    printf(\"a=%d\", x.a)\n"
+     "    return 0\n", 0, "a=6"),
+    # …and the SCOPE of the rule, which is the receiver WRITE-BACK and not the
+    # rebinding: a PLAIN receiver on a one-field struct is never handed back, so
+    # nothing this method does to its own word can reach the caller and Python's
+    # rebinding semantics are already what happens. `x` keeps 1, which is
+    # CPython's answer, and a rule that ignored the receiver's convention would
+    # refuse a program that is right.
+    ("both_arch_one_field_plain_receiver_rebinding_is_left_alone",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def peek(self, other: Self) -> Int:\n"
+     "        var t = other\n"
+     "        self = t\n"
+     "        return self\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.peek(y)\n"
+     "    printf(\"a=%d\", x.a)\n"
+     "    return 0\n", 0, "a=1"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -9564,6 +9720,40 @@ PRINTF_TEXT_CASES = [
      "    print(\"50% done\")\n"
      "    print(\"100%\")\n"
      "    return 0\n", 0, "50% done\n100%"),
+    # A SUBSCRIPT of a string, and the last shape the family had: `s[0]` is a
+    # BYTE on this path — a string is a bare `char *` and both emitters load one
+    # byte out of it (`_emit_subscript_load`'s `LDRB` at width 1) — so the value
+    # kind of `s[i]` is an integer, and the kind table did not say so: `s[0]` is
+    # a `SubscriptExpr`, `kind_of` asked `list_elem_kind` of a `char *`, a string
+    # is not a blob, and the answer was NOTHING.  Nothing is the permissive
+    # direction everywhere it is read, so the row above never fired.  Measured on
+    # BOTH architectures before this case existed, from GREEN builds: nothing
+    # printed and SIGSEGV, exit 139 — `%s` walking bytes at address 97 looking
+    # for a NUL.  `model.subscript_element_kind` is what closes it, by making
+    # the model say what the representation already is.
+    ("printf_s_of_a_string_byte_is_refused",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%s]\", s[0])\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # THE GUARD, and the reason the byte is a fact rather than a defect to
+    # refuse: a conversion that does not DEREFERENCE renders the word whatever it
+    # is, so `%d` of `s[0]` is 97 — `'a'` — and `s[0] == 97` is true.  If the
+    # subscript rule ever turned a byte into a refusal by the back door, this is
+    # the row that says so.  The two BUILDING rows of this rule are in
+    # `BOTH_ARCH_CASES`, because they have to run on both machines to be an
+    # assertion about the representation rather than about one emitter.
+    # …and `len` of the byte, which is the third reader of the same fact and the
+    # one that goes from "the source does not say" to an honest refusal.  Before
+    # the rule the answer was the permissive one; the needle is the sentence
+    # about an integer, so a reader can tell which of the two messages this is.
+    ("len_of_a_string_byte_is_refused",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%d]\", len(s[0]))\n"
+     "    return 0\n",
+     "refuse:an integer has no length", None),
 ]
 
 
@@ -12526,6 +12716,64 @@ EQ_DISPATCH_CASES = [
      "    r = 5\n"
      "    return r.a\n",
      "refuse:r is assigned 5 in main()", None),
+    # THE RECEIVER HALF OF THE WIDE OWNER, and it is the one shape in this group
+    # whose defect is a WRONG ANSWER rather than a refusal, because a struct of
+    # ONE field has no address-shaped cause: its receiver IS its single word.
+    #
+    #     struct T:
+    #         var a: Int
+    #         def take(out self, other: Self):
+    #             self = other
+    #
+    # CPython runs that and leaves the caller's object alone — Python has no
+    # "assign the receiver" operation, so after `self = other` the method's own
+    # `self.a` goes to `other` and `x` is untouched (`a=1`). This path builds,
+    # runs, prints the OTHER object's value and exits 0, because a one-field
+    # mutator's word is HANDED BACK and stored over the caller's object
+    # (`formal/model.py`'s `receiver_writeback_name`) — the same mechanism that
+    # makes `self.a = self.a + 4` reach the caller at all.
+    #
+    # The rule cannot be asked after `_rewrite_self_fields`, which collapses
+    # `recv.<field>` onto `recv` and makes this text identical to a field store
+    # that must keep working, so `formal/build.py`'s
+    # `_collect_one_field_receiver_rebinds` runs before it and
+    # `model.receiver_own_type_names` recognises the two spellings of "a
+    # reference to an object of the receiver's own type" from declarations.
+    # Measured exposure: 0 sites in 1002 files (`tools/
+    # formal_receiver_rebind_census.py` counts 51 hand-written `self = …` in
+    # one-field methods, 23 constructions and 28 values the method computed, and
+    # not one name of the receiver's own type).
+    ("one_field_receiver_rebound_to_a_parameter_is_refused",
+     "struct T:\n"
+     "    var a: Int\n"
+     "    def take(out self, other: Self):\n"
+     "        self = other\n"
+     "def main(n):\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.take(y)\n"
+     "    return x.a\n",
+     "refuse:`other` is a parameter of this method and holds a `T`", None),
+    # …and the LOCAL spelling, which is a different object with the same answer:
+    # `t` belongs to this method, so Python's later stores through the rebound
+    # receiver mutate something nobody outside can name, and this path has no
+    # way to deliver that either. A rule that recognised only the parameter
+    # spelling would let this one through.
+    ("one_field_receiver_rebound_to_a_local_of_its_own_type_is_refused",
+     "struct T:\n"
+     "    var a: Int\n"
+     "    def grab(out self):\n"
+     "        var t = T()\n"
+     "        t.a = 9\n"
+     "        self = t\n"
+     "def main(n):\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    x.grab()\n"
+     "    return x.a\n",
+     "refuse:`t` is a local of this method and holds a `T`", None),
     # THE RECEIVER HALF of the row above, and it is a separate rule because the
     # rule above's two REPAIRS do not exist for a receiver: a receiver is not
     # a name the caller can re-declare, and "copy the value out of it first" is

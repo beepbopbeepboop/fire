@@ -1011,26 +1011,22 @@ def _is_cpython_stdlib(name: str) -> bool:
     name this returns True for, the answer is "it is the host's own standard
     library" — a fact about the target, not a gap in the backend.
 
-    Two authorities, in order, and no list of our own: formal.imports's
-    HOST_MODULES (the set the build itself consults, so the two agree by
-    construction) and then the running interpreter's own
-    sys.stdlib_module_names. The second one is not redundant: on this tree
-    `__future__`, `ctypes`, `asyncio` and `concurrent.futures` are all CPython
-    standard-library modules that HOST_MODULES does not list, so the build
-    words those failures "not a stdlib or sibling module" and 36 of them would
-    otherwise be filed as unresolved imports — implying a defect in the source
-    that does not exist. Reading the interpreter's own table keeps that
-    classification correct as CPython grows, with nothing to maintain here.
+    **A DELEGATION, and it used to be a second reader of the same fact.** This
+    copy existed because the build's own diagnostic consulted only the
+    hand-classified tiers and so worded `binascii`, `ctypes`, `asyncio` and 219
+    other CPython modules as "not a stdlib or sibling module"; the sweep then
+    read `sys.stdlib_module_names` to correct the verdict the build had already
+    printed, which is a report disagreeing with the message it is reporting on.
+    `formal/imports.py::is_cpython_stdlib` now asks the oracle in the place that
+    decides the WORDING, so the two cannot come apart, and this answers from it.
+    An import that cannot be had at all still answers False, which narrows
+    nothing and raises nothing: the caller keeps its own behaviour.
     """
-    top = name.split(".")[0]
     try:
-        from formal.imports import HOST_MODULES
-        if name in HOST_MODULES or top in HOST_MODULES:
-            return True
+        from formal.imports import is_cpython_stdlib
+        return bool(is_cpython_stdlib(name))
     except Exception:
-        pass
-    names = getattr(sys, "stdlib_module_names", None)
-    return bool(names) and top in names
+        return False
 
 
 def _short(detail: str, limit: int = 68) -> str:

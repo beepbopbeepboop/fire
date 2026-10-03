@@ -4342,6 +4342,73 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     return False
 
 
+def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name) -> None:
+    """PARK a ONE-FIELD struct's mutator that rebinds its receiver to a name of
+    its own struct type.
+
+    **This runs BEFORE `_rewrite_self_fields`, and that is the whole design.**
+    That rewrite collapses `recv.<sole field>` onto `recv` — it is what makes a
+    one-field struct's field and its receiver the same storage — so after it,
+    `self.a = other.a` and a hand-written `self = other` are the SAME TEXT with
+    OPPOSITE meanings, and no later pass can tell them apart. Measured on both
+    architectures: the field store answers `a=2` (CPython agrees) and the
+    rebinding also answers `a=2` where CPython answers `a=1`, because a
+    one-field mutator's word is handed back to the caller and stored over the
+    object (`model.receiver_writeback_name`) — so the rebinding is delivered as
+    a copy of an object Python never copies. `_collect_receiver_rebinds` is
+    therefore right to skip one-field owners, and right for the wrong reason to
+    be asked at all: it cannot see the difference.
+
+    **Only the ALIASING spellings are parked**, and that is what the census
+    decided (`tools/formal_receiver_rebind_census.py`: 51 hand-written
+    `receiver = <value>` sites in the one-field methods of this repository and
+    the stdlib, of which 23 are a construction of their own struct and 28 are a
+    value the method computed — `self = self & rhs`, `self = False`,
+    `self = _binary_op(self, rhs)` — and NONE is a name of the receiver's own
+    type). A store to the receiver's own word is what those 28 mean and what the
+    write-back exists to deliver; refusing them would cost `std/builtin/
+    bool.mojo` and every other in-place operator in the corpus, for a construct
+    that is not a defect.
+
+    Parked rather than raised for the reason every finding in this family is:
+    the refusal must not preempt the import diagnosis, and this question cannot
+    be asked until the imports are known. `check_receiver_rebinds` raises it.
+    """
+    if owner is None or not M.struct_is_one_field(owner):
+        return
+    # A receiver that is not MUTATING is never handed back, so nothing this
+    # method does to its own word can reach the caller and Python's rebinding
+    # semantics are already what happens. The same predicate the write-back
+    # mechanism itself is decided by, so the two cannot disagree about which
+    # methods the rule is about.
+    if M.receiver_writeback_name(fn) is None:
+        return
+    receivers = M.struct_receivers(owner)
+    if not receivers:
+        return
+    params, locals_ = M.receiver_own_type_names(fn, owner, structs_by_name)
+    aliases = {n: "a parameter" for n in params}
+    aliases.update({n: "a local" for n in locals_})
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+            continue
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        else:
+            target = (node.target.name
+                      if isinstance(node.target, F.IdentExpr) else None)
+            value = node.value
+        if not isinstance(target, str) or target not in receivers:
+            continue
+        if not isinstance(value, F.IdentExpr) or value.name not in aliases:
+            continue
+        fn._one_field_receiver_rebind = (
+            target, value.name,
+            "a parameter" if value.name in params else "a local",
+            getattr(owner, "name", None), M.method_member_name(owner, fn))
+        return
+
+
 def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
     """PARK every method that rebinds its own receiver to something that is not
     a construction of its own struct.
@@ -4451,13 +4518,27 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
 
 
 def check_receiver_rebinds(functions) -> None:
-    """Raise the receiver-rebound findings `_collect_receiver_rebinds` parked.
+    """Raise the receiver-rebound findings the two collectors parked.
 
     One finding, for the reason `check_frame_holder_rebinds` raises one: a
     method with three of them has one defect with three lines, and the first is
     enough to act on. The message is `model`'s, so both backends word this
     construct identically — a receiver's meaning is a property of the by-
-    reference design, not of an instruction either backend chose."""
+    reference design, not of an instruction either backend chose.
+
+    TWO findings, and the one-field one is raised first because it is the one
+    only a pre-rewrite pass can see: `_collect_one_field_receiver_rebinds` runs
+    before `_rewrite_self_fields` collapses `recv.<field>` onto `recv`, so by
+    the time anything else asks, a field store and a rebinding are the same
+    text. A method that has both would otherwise be reported as the multi-field
+    defect it is not.
+    """
+    for fn in functions:
+        parked = getattr(fn, "_one_field_receiver_rebind", None)
+        if parked:
+            target, value, what, owner_name, member = parked
+            raise CodegenError(M.one_field_receiver_rebind_refusal(
+                owner_name or "this struct", member, target, value, what))
     for fn in functions:
         findings, owner = getattr(fn, "_receiver_rebinds", (None, None))
         if not findings:
@@ -6862,6 +6943,10 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
         elif isinstance(node, F.AssignStmt) \
                 and isinstance(node.target, F.MemberExpr) \
                 and isinstance(node.value, F.IdentExpr):
+            if _frame_field_store_is_sound(
+                    fn, node.target, node.value, holders,
+                    (owners or {}).get(fn.name), structs_by_name):
+                continue
             _refuse_holder_use(
                 fn, node.value, holders, by_name,
                 f"is stored in the field {_member_chain(node.target)!r}, so it "
@@ -7213,6 +7298,71 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                 #    here: the call site that has to be caught can be in a
                 #    function that holds no frame at all, and those are skipped
                 #    by the `if not hs` guard above.
+
+
+def _frame_field_store_is_sound(fn, target, value, holders, owner,
+                                structs_by_name) -> bool:
+    """True when storing this frame address into this FIELD cannot outlive it.
+
+    The question the field-store refusal cannot answer from the SLOT, answered
+    from the VALUE instead. The hazard is a lifetime mismatch: a frame belongs
+    to the function that reserved its bytes, so an address that outlives those
+    bytes is a dereference of reclaimed stack. Which means the store is sound
+    exactly when the frame was created by a function that OUTLIVES whatever
+    holds the slot — and the one fact this path has about a frame's creator is
+    whether it ARRIVED or was BUILT here.
+
+    Three conditions, and each one is load-bearing:
+
+      * **THE SLOT IS AN ORDINARY WORD.** `model.struct_nested_frame_fields` is
+        the placement decision: when a field's declared type names a framed
+        struct of THIS module and nothing outside `__init__` writes it, the
+        constructor reserves a block for it in the object's own block and stores
+        that block's ADDRESS in the slot. A pointer stored over such a slot
+        leaves a word where every reader computes a frame base from it, which is
+        `model.construction_nested_slot_refusal`'s hazard seen from the store
+        side, and `constr_refuse_an_init_store_over_a_placed_nested_frame` pins
+        it. A field typed with an IMPORTED struct, or declared without a type
+        this module can place, is a plain word, and a plain word is all this
+        rule needs it to be.
+      * **THE VALUE IS A FRAME HOLDER**, or there is nothing here to judge: the
+        refusal below is this walk's business only for a name that holds a
+        frame.
+      * **THE VALUE IS A PARAMETER of this function — it ARRIVED, it was not
+        built here.** A frame that came in as an argument was reserved by the
+        CALLER, in the caller's own scratch, so it is at least as long-lived as
+        everything this function can reach: the receiver whose field is being
+        written is itself such a parameter, every object this function builds
+        dies before it returns (a returned frame is copied into the caller's
+        scratch by `model.struct_returned_frame_sites`, not aliased), and
+        nothing on this path is heap-allocated at all. So `self.f = <a
+        parameter>` — a DELEGATING CONSTRUCTOR, which is 13 of the 14 corpus
+        sites — stores the caller's own frame into the caller's own word, and
+        both die together.
+
+    **A local does not qualify, and that is the real case.**
+    `self.f = t` where `var t = R()` was BUILT here reserves `t`'s bytes in
+    THIS function's scratch, and the slot may well outlive the call. That is the
+    defect the refusal was written for and it stays refused.
+
+    `owner` is this method's struct (`None` for a plain function, where the rule
+    has no receiver to reason about and declines), and a target that is a CHAIN
+    longer than one field is declined too: `self.a.b = r` writes into the frame
+    at `self.a`, which is a different slot with a different lifetime.
+    """
+    if value.name not in holders or owner is None:
+        return False
+    if not isinstance(target, F.MemberExpr) \
+            or not isinstance(target.obj, F.IdentExpr):
+        return False
+    if target.obj.name not in M.struct_receivers(owner):
+        return False
+    if target.member in {name for name, _slot, _st
+                         in M.struct_nested_frame_fields(
+                             owner, structs_by_name or {})}:
+        return False
+    return value.name in {n for n, _ann in M.incoming_args(fn)
+                          if isinstance(n, str)}
 
 
 def _container_values(node) -> list:
@@ -11510,6 +11660,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     from formal.imports import imported_modules as _imported_modules
     _this_unit_modules = tuple(_imported_modules(stmts) or ())
     for fn in functions:
+        # A one-field struct's mutator that rebinds its receiver to a name of its
+        # own type. Asked HERE, at the top of the loop, because
+        # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
+        # and after that a field store and a rebinding are the same text — the
+        # shape is unanswerable anywhere later in the pipeline.
+        _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
+                                            structs_by_name)
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
         _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
