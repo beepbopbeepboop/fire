@@ -903,8 +903,15 @@ REFUSE_CASES = [
      ["repr", "SEGFAULTS"]),
     ("default_factory_is_refused_with_its_reason", DEFAULT_FACTORY,
      ["default_factory", "nowhere to keep the result"]),
+    # The needle is the half that is STILL the reason, and it moved when the
+    # layout merge landed: the old message said "this path's struct has no
+    # base-class field merge at all", which stopped being true and would have
+    # sent the reader looking for a merge that is in `model.py`. What remains is
+    # that everything the DATACLASS path generates is read off the class's own
+    # body, so `field(default=…)` in a BASE and an `InitVar` in a base are not
+    # seen.
     ("inheritance_is_refused_with_its_reason", INHERITANCE,
-     ["inherits from", "no base-class field merge"]),
+     ["inherits from", "own class body"]),
     ("post_init_is_refused_with_its_reason", POST_INIT,
      ["__post_init__", "no point in that sequence"]),
     ("an_unknown_option_is_refused_by_name", UNKNOWN_OPTION,

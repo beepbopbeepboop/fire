@@ -9612,6 +9612,50 @@ CONSTRUCTION_CASES = [
      "    if p.get(0) != 0 or p.get(1) != 0:\n"
      "        return 20 + p.get(0)\n"
      "    return 7\n", 7, None),
+    # ── an EXCEPTION constructed with its message ──────────────────────────
+    #
+    # CPython's `BaseException.__new__` fills `args` from the caller's
+    # arguments, so `raise E("boom")` carries the message with nothing declared
+    # in `E` — which is why every exception class in CPython can be raised with
+    # a message and why this path's field list used to have nowhere to put one:
+    # a class whose body is a docstring derives NO fields, so the construction
+    # was refused for the arity. `formal/model.py`'s `CPYTHON_EXCEPTION_BASES`
+    # is the fix: a base from that table contributes `args`, base first, so the
+    # message lands in the slot CPython puts it in.
+    #
+    # The exit status is 1 and the output empty, and both are what this path
+    # documents for a `raise` (`formal`'s has no unwinder: a raise flushes the
+    # enclosing `finally` clauses and exits). What this row pins is that the
+    # BUILD accepts the construction at all — before the merge this was a
+    # refusal on both architectures, byte for byte.
+    ("constr_an_exception_carries_its_message",
+     "struct Plain5(Exception):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom5():\n"
+     "    raise Plain5(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom5()\n"
+     "    except:\n"
+     "        pass\n"
+     "    return 0\n", 1, None),
+    # The same with a field of its own, which is the boundary the doc measured:
+    # `args` is inherited FIRST, so the message goes where CPython puts it and
+    # the subclass's own field keeps its own default — `Plain6("m").tag` is 0 in
+    # CPython, not "m".
+    ("constr_an_exception_with_a_field_takes_the_message_in_args",
+     "struct Plain6(Exception):\n"
+     "    var tag: int = 0\n"
+     "\n"
+     "def make6() -> Int:\n"
+     "    var e = Plain6(\"the message\")\n"
+     "    return e.tag\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"tag=%d\", make6())\n"
+     "    return 0\n", 0, "tag=0"),
 ]
 
 # ── a one-field HOLDER's CONSTRUCTOR store: which refusal answers it ──
@@ -10658,6 +10702,87 @@ CONSTRUCTION_REFUSALS = [
      "    var b = bytes(3)\n"
      "    return 0\n",
      "refuse:constructing bytes is refused on this path", None),
+    # ── INHERITANCE: the fields a class has because a BASE declares them ────
+    #
+    # `formal/model.py`'s `attach_inherited_fields` merges a declared base's
+    # fields into the subclass's layout, base first. These four rows are the
+    # three things that merge is FOR, plus the one thing it cannot do.
+    #
+    # (1) The layout itself. Before, `s.x` through a subclass was refused with
+    # a sentence claiming the program raises an AttributeError — false, because
+    # the class INHERITS `x`. The program below is the reduction the merge was
+    # written for, and it answers CPython on both architectures.
+    ("constr_inherit_a_field_through_the_subclass",
+     "class Base2:\n"
+     "    def __init__(self):\n"
+     "        self.x = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.x\n"
+     "\n"
+     "class Sub2(Base2):\n"
+     "    pass\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub2()\n"
+     "    s.x = n\n"
+     "    printf(\"x=%d\", s.get())\n"
+     "    return 0\n", 0, "x=10"),
+    # (2) The ORDER, which is what decides which value lands in which slot and
+    # is CPython's dataclass order: the base's fields first, the subclass's
+    # after. Both classes are two-or-more fields wide on purpose — see the
+    # refusal row below for why a one-word base cannot be in this picture.
+    ("constr_inherit_the_bases_fields_before_its_own",
+     "class Base3:\n"
+     "    x: int\n"
+     "    z: int\n"
+     "\n"
+     "class Sub3(Base3):\n"
+     "    y: int\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub3(1, 2, 3)\n"
+     "    printf(\"x=%d z=%d y=%d\", s.x, s.z, s.y)\n"
+     "    return 0\n", 0, "x=1 z=2 y=3"),
+    # (3) A base this image does not declare. The refusal used to say "no
+    # fields at all" and told the reader to declare the fields, which is advice
+    # about a class whose missing fields are not the problem: it INHERITS them.
+    # The needle is the base's NAME, because that is what the reader has to go
+    # and look for.
+    ("constr_refuse_an_undeclared_base_by_name",
+     "class MyErr(Widget):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    return 0\n",
+     "refuse:derives from 'Widget', which this image does not declare", None),
+    # (4) What the merge CANNOT do, and the reason this is a refusal and not a
+    # gap in the merge: a method is compiled against the layout of the class
+    # that DECLARES it, and a call site carries no receiver type to check with,
+    # so a base whose receiver IS its field cannot receive a subclass whose own
+    # fields pushed it over the one-word line. Left alone this reads a frame
+    # ADDRESS as the field's value — a wrong answer rather than a missing one.
+    ("constr_refuse_a_subclass_whose_base_methods_would_change_layout",
+     "class Base4:\n"
+     "    def __init__(self):\n"
+     "        self.x = 7\n"
+     "\n"
+     "class Sub4(Base4):\n"
+     "    def __init__(self):\n"
+     "        self.y = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    s = Sub4()\n"
+     "    printf(\"x=%d y=%d\", s.x, s.y)\n"
+     "    return 0\n",
+     "refuse:do not agree on what a receiver IS", None),
 ]
 
 
