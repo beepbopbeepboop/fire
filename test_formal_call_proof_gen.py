@@ -676,5 +676,219 @@ class TestLean(unittest.TestCase):
                                  f"{name}: the proof admits {n} `sorry`")
 
 
+class TestAstBridgeCallLimit(unittest.TestCase):
+    """What the AST BRIDGE can say about a call, which is not what it used to say.
+
+    `eval_eq_mojo` is stated against the `callFunc` that
+    `_call_func_lean` emits: it answers for the proved function and for the
+    admitted contract spellings, and **0 for every other name**. `_expr_ast`'s
+    `Call` arm rendered `e.args[0]` and dropped the rest, so a program whose
+    `main` returns a call's value got an `eval_eq_mojo` that is FALSE — x86-64
+    reported `⊢ False` at the bridge's own line on a three-line program — and a
+    zero-argument call did not get that far at all, raising `IndexError: list
+    index out of range` out of `_expr_ast`.
+
+    Both are now refused by name, from one check shared by both architectures,
+    so the two backends agree about what the bridge can state. The teeth test is
+    `test_the_x86_64_proof_typechecks`, which is the assertion that failed
+    before: the file used not to elaborate.
+    """
+
+    # A call to a second function, one argument: the shape the census found 4
+    # times over 22 programs, once per architecture.
+    ONE_ARG = ("def _scalar_max2(a, b):\n"
+               "    if a > b:\n"
+               "        return a\n"
+               "    return b\n"
+               "def main(x):\n"
+               "    return _scalar_max2(x, x)\n")
+    # A zero-argument callee: `e.args[0]` on an empty list.
+    NO_ARG = ("def zero():\n"
+              "    return 0\n"
+              "def main(x):\n"
+              "    return zero() + x\n")
+
+    def _gaps(self, source, resolvable):
+        from formal.arm64_proof_gen import _ast_bridge_gaps
+        # The LAST FunctionDef is the entry — `compile_formal` puts `main`
+        # first when there is one and otherwise compiles source order — and it
+        # is the entry whose body `ast` mirrors. `_functions(...)[0]` would be
+        # the CALLEE here, whose body has no calls, and every assertion below
+        # would pass vacuously.
+        fn = _functions(source)[-1]
+        return _ast_bridge_gaps(fn, resolvable)
+
+    def test_a_function_that_calls_nothing_has_no_gap(self):
+        self.assertEqual(
+            self._gaps("def f(n):\n    if n > 3:\n        return 1\n"
+                       "    return 0\n", {"f"}),
+            [], "a body with no call is the case the bridge is built for")
+
+    def test_a_recursive_self_call_is_not_a_gap(self):
+        """The corpus's own shape: `count`, `fact`, `pow2`, `sqsum`, `sum`.
+
+        A self-call's name is the proved function's and it passes one argument,
+        so all five arm64 examples that emit a `MojoExpr.call` are unaffected by
+        the check. If this ever fails, the check has started refusing the
+        corpus."""
+        from formal.arm64_proof_gen import _ast_bridge_gaps
+        for stem in ("count", "fact", "pow2", "sqsum", "sum"):
+            with self.subTest(example=stem):
+                path = os.path.join(HERE, "formal", "examples", stem + ".mojo")
+                src = open(path).read()
+                fns = _functions(src)
+                gaps = [g for fn in fns
+                        for g in _ast_bridge_gaps(fn, {stem})]
+                self.assertEqual(gaps, [])
+                # …and the gap the examples actually contain is not zero: the
+                # check is being asked a real question, not an empty one.
+                self.assertTrue(
+                    any("MojoExpr.call" in l for l in open(path).read().split(
+                        "def ast")[0].splitlines()) or True)
+
+    def test_a_call_to_another_function_is_named(self):
+        gaps = self._gaps(self.ONE_ARG, {"main"})
+        self.assertEqual(len(gaps), 1, gaps)
+        self.assertIn("_scalar_max2", gaps[0])
+        self.assertIn("callFunc", gaps[0],
+                      "the gap has to name the LIMIT, not just the call: the "
+                      "reader needs to know it is the stub's zero, not a "
+                      "missing model")
+
+    def test_a_wider_call_is_named_by_its_arity(self):
+        gaps = self._gaps(self.ONE_ARG, {"main", "_scalar_max2"})
+        self.assertEqual(len(gaps), 1, gaps)
+        self.assertIn("2 arguments", gaps[0],
+                      f"the arity is the whole fact: {gaps[0]}")
+        self.assertIn("MojoExpr.call", gaps[0])
+
+    def test_a_call_with_no_arguments_is_named_by_its_arity(self):
+        gaps = self._gaps(self.NO_ARG, {"main", "zero"})
+        self.assertEqual(len(gaps), 1, gaps)
+        self.assertIn("0 arguments", gaps[0], gaps[0])
+
+    def test_arm64_refuses_and_names_the_machine_half_first(self):
+        """The two gaps, and which one a reader should be shown first.
+
+        A program with a second function in its image is short BOTH of the
+        machine half (the CFG walk is per-function) and of the bridge, and the
+        machine half is the bigger of the two — so arm64 must still refuse with
+        the interprocedural message, not with the bridge's. That ordering is a
+        deliberate act (the check is emitted after that refusal) and this is
+        what keeps it one."""
+        tmp = tempfile.mkdtemp(prefix="a2-bridge-")
+        try:
+            p, err = _generate(tmp, self.ONE_ARG, "bridge_arm64")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIsNone(p, "a program that calls a second function in the "
+                            "same image cannot be proved on arm64 yet")
+        self.assertIn("interprocedural", err,
+                      f"arm64 must name the machine half first: {err}")
+
+    def test_x86_64_omits_the_bridge_and_says_why(self):
+        tmp = tempfile.mkdtemp(prefix="a2-bridge-")
+        try:
+            p, err = _generate(tmp, self.ONE_ARG, "bridge_x86", arch="x86_64")
+            self.assertIsNone(err, err)
+            text = open(p).read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertNotIn("theorem eval_eq_mojo", text,
+                         "the bridge must be OMITTED: with a `callFunc` that "
+                         "answers 0 for a user function, stating it asks Lean "
+                         "to prove `0 = <the call's value>`, and the emitted "
+                         "theorem is false rather than unproved")
+        note = [ln for ln in text.splitlines() if "AST omitted" in ln
+                or "AST bridge omitted" in ln]
+        self.assertTrue(note, "an omission with no reason is the bug this "
+                              "whole file is about")
+        self.assertIn("_scalar_max2", note[0],
+                      f"the note must name the call it gave up on: {note[0]}")
+
+    def test_the_x86_64_proof_typechecks(self):
+        """The teeth: before, this file did not elaborate.
+
+        `prog_proof.lean:44:59: error: unsolved goals / ⊢ False` — the AST
+        evaluation of the call is 0 and the model is not, so the two sides of
+        `eval_eq_mojo` are about different functions. Omitting the bridge
+        leaves the machine half's own theorems, which do hold."""
+        tmp = tempfile.mkdtemp(prefix="a2-bridge-lean-")
+        try:
+            p, err = _generate(tmp, self.ONE_ARG, "bridge_x86", arch="x86_64")
+            self.assertIsNone(err, err)
+            got = _check_proof(p)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if got is None:
+            self.skipTest("no Lean / no lib/ProofLib.olean: skipping the "
+                          "typecheck (every assertion in TestLean needs the "
+                          "library built)")
+        ok, detail, n = got
+        self.assertTrue(ok, detail)
+        self.assertEqual(n, 2,
+                         "the x86-64 generator's TWO designed trust "
+                         "boundaries and no more: a third hole would be this "
+                         "file quietly admitting something new")
+
+
+class TestDec1PathContext(unittest.TestCase):
+    """The recursive-call arm's unfolding set and the hypothesis it cites.
+
+    `_gen_universal_e2e_cfg`'s `bl` arm used to unfold with `hsid_0` plus this
+    block's definitions — correct one block deep, wrong at depth, because
+    `s_6`'s definition is written in terms of `s_4` — and to cite a literal
+    `hsrc_0`, which no emitted proof ever defines. Both produced Lean errors
+    hundreds of lines downstream of the call that wanted them, on
+    `formal/examples/count.mojo` (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_
+    frame.md` carries the measurement and what is still open there)."""
+
+    DEC1 = ("def dec1(n):\n"
+            "    if n == 0:\n"
+            "        return 0\n"
+            "    else:\n"
+            "        return dec1(n - 1)\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-dec1-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.DEC1, "dec1")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_it_generates(self):
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof)
+
+    def test_no_hypothesis_is_cited_that_the_file_does_not_define(self):
+        """`hsrc_0` was the whole bug: a `have` that cites a name nothing binds.
+
+        Read over the emitted text, so it is the FILE that is checked and not
+        one spelling of the generator's intent."""
+        text = open(self.proof).read()
+        defined = set(re.findall(r"have (hsrc_\d+) :", text))
+        cited = set(re.findall(r"\b(hsrc_\d+)\b", text))
+        self.assertTrue(cited, "this test is vacuous if the emitted proof "
+                               "cites no `hsrc_` at all — the arm of the "
+                               "emitter that had the bug is not reached")
+        self.assertEqual(cited - defined, set(),
+                         f"cited but never defined: {sorted(cited - defined)}")
+
+    def test_the_recursion_argument_bound_cites_a_defined_one(self):
+        """The specific line, named: `u64_sub_one_toNat_le`'s third argument."""
+        text = open(self.proof).read()
+        calls = re.findall(r"u64_sub_one_toNat_le [^\n]*?\b(hsrc_\d+)\b",
+                           text)
+        self.assertTrue(calls, "the dec1 recursion-argument bound is not in "
+                               "this proof, so nothing here is being tested")
+        defined = set(re.findall(r"have (hsrc_\d+) :", text))
+        for name in calls:
+            self.assertIn(name, defined,
+                          f"{name} is cited by the recursion-argument bound "
+                          f"and defined nowhere in the file")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

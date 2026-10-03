@@ -3003,6 +3003,16 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
+    # `test_formal_proof_breadth.py` was listed here when it landed on
+    # 2026-10-03 with the note that the registering commit deletes the excuse,
+    # and is REGISTERED now (`formal-proof-breadth-tool` in the `proofs`
+    # bucket).  Re-measured on the merged tree: 7.9 s wall, 0.135 GB peak, and
+    # still NO Lean run — every assertion is about the census TOOL (its 60-item
+    # workload is a function of the tree, one function per file, closed and
+    # parseable, and three programs with known verdicts classify into the
+    # classes the census table depends on). The census itself is not a test and
+    # is not meant to be gated; this is the instrument's own check.
+
     'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
         'expansion, CR, an unterminated literal, and a backslash line '
         'continuation inside a raw literal \u2014 build-and-run against CPython '

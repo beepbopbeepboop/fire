@@ -508,6 +508,10 @@ MEASURED_PEAK_GB = {
     # building and RUNNING a formal image per group on both architectures.
     'formal-tempfile':       (0.051, 'measured'),
     'formal-textwrap':       (0.050, 'measured'),
+    # …and the census instrument from `work/formal14-proofs-breadth`, measured
+    # the same way: 7.9 s, no Lean, and the largest of the three new ones at
+    # 0.135 GB because 22 of its 60 items compile a formal image.
+    'formal-proof-breadth-tool': (0.135, 'measured'),
     # …and the one `work/formal13-1` brought in, a pure SOURCE check over
     # `HOST_OWNED_BLOBS` and the `hostmods` it describes: 0.036 GB and 0.63 s,
     # the same cost class as the two below it and measured the same way one at a
@@ -2533,6 +2537,30 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
+# The instrument behind `bugs/FORMAL_proof_coverage_census_2026-10-03.md`, and
+# only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
+# this repository's own `*.py` through `compile_formal(prove=True, …)` on both
+# architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
+# that says they will be re-quoted. So what is registered here is the check that
+# those numbers stay COMPARABLE across runs — the 60 identifiers are a function
+# of the tree rather than of the clock, every emitted program is a closed module
+# that reads nothing it does not define, and three programs with known verdicts
+# classify into the classes the census table depends on.
+#
+# That is 7 tests and NO Lean run, which is the point: the census's own
+# Lean-dependent numbers are its ledger's business and the instrument is cheap
+# and always available, so it can be checked on every change to itself.
+# Measured 2026-10-03 on the merged tree under `tools/memslot.py --gb 8`, peak
+# by `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss`: **0.135 GB, 7.9 s**.
+# `mem='tiny'` from that peak, and it is a `module`-class workload in the sense
+# that matters here — 22 of the 60 items compile formal images — which is why
+# `FORMAL_BUILD_INPUTS` is in its key: an edit under `mojo/` changes what it
+# observes.
+test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_proof_breadth.py', 'tools/formal_proof_breadth.py',
+            'lib/ProofLib.lean'] + FORMAL_BUILD_INPUTS,
+     desc='the proof-breadth census instrument: deterministic, closed, honest')
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2783,7 +2811,13 @@ BUCKETS = {
                 # `formal-core-hostmods`'s reason and not `check`'s: they build
                 # and EXECUTE a formal image per group on both backends, so
                 # 35.8 s and 15.8 s is real work rather than an analysis.
-                'formal-tempfile', 'formal-textwrap'],
+                'formal-tempfile', 'formal-textwrap',
+                # …and the census instrument, for `formal-call-proofgen`'s
+                # reason and not `check`'s: it runs `compile_formal` with
+                # `prove=True` over 60 items, so 22 of them build an image and
+                # the `proof-crash` vs `proof-refused` distinction it pins is
+                # only observable with the generator actually running.
+                'formal-proof-breadth-tool'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

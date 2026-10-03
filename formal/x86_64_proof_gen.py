@@ -191,14 +191,46 @@ def _str_assigned(fn):
     return out
 
 
-def _ast_value(fn, func_name: str) -> str:
+def _first_sentence(e) -> str:
+    """Why a probe raised, in one line, for the omission note that quotes it.
+
+    The reasons are written as paragraphs on purpose — they name the limit, the
+    measurement and the next step, which is what a reader of the generated file
+    needs. A note in the generated file has one line to work with, so this takes
+    the first sentence and stops; the rest is in the refusal the build prints.
+    """
+    text = " ".join(str(e).split())
+    head = text.split(". ")[0].strip()
+    return (head if head.endswith(".") else head + ".")[:400]
+
+
+def _ast_value(fn, func_name: str, admitted: dict = None) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
 
     Raises whatever the shared emitter raises for a construct the untyped
-    AST model has no form for (a call, a print, a method call); the caller
-    then drops the bridge rather than emitting a value that does not
-    typecheck."""
+    AST model has no form for (a call the bridge cannot resolve, a call of
+    another arity, a print, a method call); the caller then drops the bridge
+    rather than emitting a value that does not typecheck — and, for a call,
+    rather than emitting a value that typechecks into a FALSE theorem.
+
+    The gap check is the shared `arm64_proof_gen._ast_bridge_gaps` and it runs
+    BEFORE the translation, because the translation itself cannot detect the
+    problem: `_expr_ast`'s `Call` arm renders the first argument and drops the
+    rest, so a two-argument call produced a well-typed `ast` whose evaluation
+    is not the source's. Measured on `def main(x): return _scalar_max2(x, x)`:
+    `eval_eq_mojo` came out `⊢ False` at the bridge's own line, on a program
+    of three lines whose every other theorem checked."""
     from formal import arm64_proof_gen as AP
+    # The resolvable names are read off the ADMITTED CONTRACTS this generator
+    # was handed — the same list it passes to `_call_func_lean` below — rather
+    # than off the arm64 generator's spelling→Lean map, because each generator
+    # must be consistent with the `callFunc` IT emits and that is the one it
+    # builds here.
+    resolvable = {func_name} | {c["name"] for c in (admitted or [])
+                                if isinstance(c, dict) and c.get("name")}
+    gaps = AP._ast_bridge_gaps(fn, resolvable)
+    if gaps:
+        raise NotImplementedError(AP._ast_gap_message(gaps))
     body = "[" + ", ".join(AP._stmts_ast(fn.body)) + "]"
     # `AP._param_list_lean` and not a local spelling of the parameter list:
     # `MojoFunc.mk` carries the source's parameter NAMES and this backend's
@@ -222,7 +254,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _ast_value(fn, func_name)     # probe: may raise
+    _ast_value(fn, func_name, admitted)   # probe: may raise
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -689,27 +721,30 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # Either the AST value could not be built (a construct the untyped
         # model has no form for) or the shape's bridge is not closed. Both
         # mean the same thing here: omit the bridge and say which.
+        #
+        # The reason is the RAISED message, not a fixed sentence: this used to
+        # be one hard-coded paragraph naming "calls, prints and method calls",
+        # which was aspirational for calls — `_expr_ast` rendered every one of
+        # them and the false `eval_eq_mojo` reached Lean — and which therefore
+        # described a behaviour the code did not have. Quoting the message
+        # means a new gap is described by the gap's own words.
         try:
-            _ast_value(fn, func_name)
+            _ast_value(fn, func_name, _admitted)
             reason = ("this function's shape (recursive/looping): the bridge "
                       "is not closed yet")
-            section = (f"/- AST bridge omitted: {reason}. -/\n")
-        except Exception:                           # noqa: BLE001
-            section = ("/- AST bridge omitted: this function's body has no "
-                       "form in the untyped AST model (calls, prints and "
-                       "method calls have none). Correctness would have to "
-                       "come from the machine value flow alone. -/\n")
+        except Exception as e:                      # noqa: BLE001
+            reason = _first_sentence(e)
+        section = (f"/- AST bridge omitted: {reason.rstrip('.')}. Correctness "
+                   f"would have to come from the machine value flow alone. -/\n")
     else:
         # Guarded on its own: the probe inside `_eval_eq_mojo_section` sits
         # behind the typed-function early return, so a TYPED function whose
         # body has no AST form reached this unguarded call and raised out of
         # the build instead of omitting the AST.
         try:
-            ast_value = _ast_value(fn, func_name)
-        except Exception:                           # noqa: BLE001
-            section = ("/- AST omitted: this function's body has no form in "
-                       "the untyped AST model (a for-loop, break/continue or "
-                       "a method call). -/\n")
+            ast_value = _ast_value(fn, func_name, _admitted)
+        except Exception as e:                      # noqa: BLE001
+            section = (f"/- AST omitted: {_first_sentence(e)} -/\n")
         else:
             parts.append(f"/- AST for {func_name} (mirrors source code). -/\n"
                          f"def ast : MojoFunc := {ast_value}\n")
