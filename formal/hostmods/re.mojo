@@ -114,13 +114,15 @@ LIMITS, MEASURED, NOT ASSUMED
    LSR and ASR against Apple's assembler for all 64 amounts — the coverage
    whose absence let it sit there. `>>` was always right, and still is.
 
-2. **A FUNCTION'S FRAME IS A FIXED 128 KiB**, so recursion past about 61
-   frames runs off the end of the 8 MiB main stack and SEGFAULTS with no
-   refusal. Measured: `deep(61)` prints, `deep(62)` dies. The parser here is
-   recursive and is therefore depth-capped at `MAXDEPTH`; the MATCHER is not
-   recursive at all (it is a loop with an explicit stack in the arena), which
-   is why a pattern with a `*` over a long subject is fine where a recursive
-   matcher would not be. Filed as `bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`.
+2. **A FUNCTION'S FRAME IS A FIXED 128 KiB**, so recursion used to run off the
+   end of the 8 MiB main stack and SEGFAULT with no refusal. There is now a
+   guard for it: a function on a call-graph cycle compares SP against a floor
+   and exits `model.STACK_TRAP_STATUS` instead of dying, so the ceiling is
+   about 59 frames here (`deep(59)` prints, `deep(60)` exits 2) rather than a
+   signal. The parser here is recursive and is therefore depth-capped at
+   `MAXDEPTH`; the MATCHER is not recursive at all (it is a loop with an
+   explicit stack in the arena), which is why a pattern with a `*` over a long
+   subject is fine where a recursive matcher would not be.
 
 3. **`list.append()` IN A LOOP IS A SILENT EXIT(1)** and a list built by a
    comprehension stops at 256 elements, so every array in here is a list LITERAL

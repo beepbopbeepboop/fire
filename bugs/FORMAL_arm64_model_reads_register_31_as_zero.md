@@ -1,10 +1,18 @@
 # FORMAL_arm64_model_reads_register_31_as_zero: the arm64 model cannot read SP into a general register, so a stack-floor guard has no step and cannot be proved
 
-**Status: OPEN, measured, not started. It is the one thing standing between
-`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md` and a guard, and it
-is a PROOF-side change: it edits `lib/ProofLib.lean`, so it cannot be landed
-while the eight proof-checking suites are `disabled=` behind
-`bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`.**
+**Status: OPEN, measured, not started — and no longer blocking anything, which
+is worth more than the fix would have been. The stack-floor guard LANDED on
+2026-10-03 (`formal/model.py`: `STACK_TRAP_STATUS`,
+`STACK_FLOOR_BUDGET_BYTES`, `recursive_function_names`) WITHOUT this change,
+because the guard reads SP into a scratch register with `ADD Xd, SP, #imm` —
+one of the handful of forms whose `Rn = 31` case the model already spells as
+`s.sp` — and the `CMP` after it names two ordinary registers. Measured through
+`run_lean` against the real `lib/ProofLib.olean`: `ADD X16, SP, #0` yields
+`s.sp`, `SUB X16, X16, #1920, LSL #12` yields `sp - 7.5 MiB`, and `B.LO` on
+that compare takes the unsigned-lower branch. So this document is still a real
+defect — a shifted-register form naming X31 is still modelled as zero — and
+it is now a defect in the MODEL rather than a blocker in front of a guard. It
+is a PROOF-side change and remains unlanded.**
 
 **Area:** FORMAL (the machine model, both architectures).
 
@@ -68,10 +76,12 @@ at the centre of it.
 **4. x86-64 does not have the gap**, and that is not a consolation:
 `x86_get_reg` (`:76-82`) maps index 4 to `s.rsp` directly, because SysV's
 register 4 IS `rsp` in a `CMP r/m64, r64` — there is no XZR/SP ambiguity to get
-wrong. So the x86-64 half of the guard can be written and proved today, and the
-arm64 half cannot. Shipping only the x86-64 one is the two-backend split
-`FORMAL_formal_frame_size_bounds_recursion_depth.md` exists to close: one
-machine refusing at depth 500 and one machine dying at depth 62.
+wrong. Both halves of the guard were therefore landable, and both landed, on
+2026-10-03: the x86-64 one because of this paragraph, and the arm64 one because
+the guard does not spell `CMP SP, Xm` at all. (This section is what the
+two-backend split in the stack-floor bug doc was warning about, and it is
+recorded here because the way round it was a way round the SPLIT, not a way
+round the gap.)
 
 **5. The shadow-counter alternative is worse, and it is worth recording so it is
 not proposed next.** The guard does not have to compare SP: a counter of bytes
@@ -117,9 +127,10 @@ argument for it beyond the model gap.
    every concrete `Rn` it uses. `simp` with `decide` should do it; if the
    generator ever instantiates with a SYMBOLIC `Rn`, that is the case that will
    not close, and it is the one to find first.
-4. Then, and only then, the guard itself — steps 2–4 of the ordering in
-   `FORMAL_formal_frame_size_bounds_recursion_depth.md`, whose step 1 has
-   landed.
+4. Then, and only then, a guard that can SPELL `CMP SP, Xm` and be proved over
+   it. The guard that landed does not spell it (see the Status), so this is now
+   about making the model able to say what the machine does, not about
+   unblocking anything.
 
 **The dependency to be honest about before starting:** steps 1–3 are changes to
 the proof side, and the suites that check the proof side

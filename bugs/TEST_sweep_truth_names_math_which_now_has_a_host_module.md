@@ -4,9 +4,9 @@
 `test_formal_sweep_truth.py` is the formal sweep's own truth test and
 `formal8-12` holds that claim — a fix belongs with whoever owns it, and this
 document is the measurement so that they do not have to re-derive it.**
-Found 2026-10-02 while running the narrow suites for an unrelated change
-(`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`); it is **not** caused
-by that change and reproduces on the tree as committed.
+Found 2026-10-02 while running the narrow suites for an unrelated change (the
+stack-floor guard, whose doc has since been deleted with its fix); it is **not**
+caused by that change and reproduces on the tree as committed.
 
 **It is in the everyday gate**: `tools/suite.py` registers `formal-sweep-truth`
 with `deps=['preflight']` and it is in `[check,gate,proofs]`, so every

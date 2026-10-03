@@ -22622,7 +22622,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     at the address the slot holds.
 
     **The image is never empty, and that is a change of policy rather than an
-    oversight** (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    oversight** (`model.STACK_FLOOR_BUDGET_BYTES`, whose guard reads the word
+    below).
     The two reserved words are the backend's own bookkeeping rather than any
     program's storage, so they exist whether or not the module declares a
     global — which means `has_globals` is true of every image and `__DATA` is
@@ -22690,7 +22691,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # finds it clear must treat the floor as UNKNOWN rather than as zero —
     # which is the safe direction for the guard this word exists for, because a
     # zero floor compares as "nothing is below the stack pointer" and so never
-    # fires (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    # fires (`model.STACK_FLOOR_BUDGET_BYTES`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
 
