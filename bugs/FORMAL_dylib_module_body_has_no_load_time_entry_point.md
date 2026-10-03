@@ -53,91 +53,97 @@ for having imported it. The blocked files are this repository's own —
 `tools/pipeline.py`, `formal/macho_linker.py` and others — so this is the row that
 keeps the repository's own modules out of the formal corpus.
 
-## The two halves, which are different projects
+## The 13 statements that make the row, which is what a fix has to run
 
-The row splits on a question the source answers, and the split is not a matter of
-taste: **does the body contain CODE, or only VALUES?**
+**Measured 2026-10-03** by asking `model.module_body` the same question the dylib
+path asks, one line of Python per module (no build):
 
-### Half 1 — 4 files, and there is no code to run
-
-`formal/x86_64.py`'s whole top level is `COND_O = 0x0`, `COND_NO = 0x1`, …
-`determinism_trace.py`'s is `_MASK = 0x7FFFFFFF`, `_TRUTHY = ('1', 'true', …)`,
-`_iota = 0`. Every statement is an assignment whose value is a literal or a
-container literal.
-
-**Those are not statements that must run; they are the image's static data**, and
-this backend already knows how to say so:
-
-* `model._static_initializer(value)` returns `("int", n)` / `("str", text)` /
-  `("blob", shape, words)` for exactly those, and `("unknown", None)` for anything
-  else — "deliberately exhaustive over what a `__DATA` word can hold and honest
-  about the rest".
-* `model.collect_global_slots` already gives a name that a function WRITES a slot
-  whose `init` is that static initializer, and `model.build_data_image` already
-  writes every slot's `init` into the image (with the link-time address fixups both
-  linkers need).
-* A name nothing writes and whose value is a literal is not in the slot table at
-  all: `_substitute_module_constants` folds it at every read, so it needs no storage
-  and no initializer.
-
-So for this half the correct lowering is: **no function is emitted, the body's
-values are the image's data, and the refusal does not apply.** That is a narrowing
-of the check from "the body is non-empty" to "the body has an EFFECT in it"
-(`model.module_body`'s kinds are already the discriminator; the per-statement
-question is `_static_initializer` on each assignment's value).
-
-**Not started here**, for the reason in "What is left" item 2.
-
-### Half 2 — 12 files, and a load-time initializer is the only correct answer
-
-`module_loader.py` and `tools/memslot.py` compute:
-
-```python
-HERE = os.path.dirname(os.path.abspath(__file__))      # module_loader.py:25, memslot.py:67
-STDLIB_PATH = _find_stdlib_path()                      # module_loader.py:126
-_module_loader = ModuleLoader()                         # module_loader.py:1050
-if __name__ == "__main__":                              # memslot.py:420
+```
+determinism_trace.py   1 statement   _ENABLED = None                    (line 67)
+formal/x86_64.py       1 statement   RETURN_REG = Reg.RAX               (line 66)
+module_loader.py       5 statements  _C_KEYWORDS = frozenset({...})     (line 13)
+                                    HERE = os.path.dirname(...)        (line 25)
+                                    STDLIB_PATH = _find_stdlib_path()   (line 126)
+                                    TEST_PATH = os.path.join(...)      (line 127)
+                                    _module_loader = ModuleLoader()     (line 1050)
+tools/memslot.py       6 statements  HERE = os.path.dirname(...)        (line 67)
+                                    DEFAULT_BUDGET_GB = 96.0            (line 68)
+                                    SNEAK_MAX_GB = 8.0                  (line 80)
+                                    SNEAK_CAP_GB = 32.0                 (line 81)
+                                    SNEAK_MARGIN_GB = 16.0              (line 82)
+                                    if __name__ == "__main__":          (line 420)
 ```
 
-Those are **effects**: the values do not exist until something runs. An importer
-that calls `_find_stdlib_path()` needs that call to have happened first, so the
-code has to run at load, before any dependent's code.
+**Nine are computed values and four are float literals** — and the float ones are
+body only because this path cannot fold a float, which is a separate (and honest)
+finding at the end of "What is left".
 
-**The only correct home for it is a load-time initializer**: a `__mod_init_func`
-entry in the dylib's `__DATA` pointing at the module body, which dyld runs in
-dependency order (a dependent's initializer runs after its dependencies'), and
-which the custom linkers must not dead-strip. That is an emitter feature in **two**
-object writers (`formal/arm64_codegen.py`'s Mach-O path and
-`formal/x86_64_codegen.py`'s ELF path), plus a linker section each — a real project,
-not a patch. **It is not started here.**
+**Why these four modules and not the other 412 files in the sweep:** `module_body`
+exempts every top-level store the IMAGE already holds, in two ways — a value that
+folds and is substituted at each read (`X = 5`), and a name that is a `__DATA` slot
+whose initializer the image lays out before anything runs (`X = ["a", "b"]`, which
+is storage-shaped rather than foldable). `determinism_trace.py`'s `_MASK`,
+`_MASK63` and `_iota` are all in the first class and are therefore **not** body:
+the one statement that keeps that module out is `_ENABLED = None`, and `None` is
+neither a foldable literal nor a slot initializer (`_static_initializer` answers
+`("unknown", None)`, because one untagged word cannot say whether a 0 arrived as
+`None` or as the integer 0). That is the whole of its 2-file row, and the reason
+is a representation question, not a lowering one.
 
-The alternative — exporting `__mod_init__` and having each importer's module body
-call its dependencies' — needs a "has this run" flag per module image to avoid
-double initialization when a module is reachable by two paths, which is more
-machinery for the same result and one more thing to get wrong.
+**And that exemption is MEASURED, not read off a docstring.** A module with exactly
+that shape — `COUNT = 5` (folded) and `NAMES = ["alpha", "beta"]` (a slot), plus a
+function that reads the first and one that writes it — builds as a dylib today, and
+a program linking it prints `first=5@second=7@width=2@@` and exits 0, which is what
+CPython prints for the same text
+(`test_formal_cross_module.py::test_a_module_stores_that_the_image_already_holds_cross_the_boundary`,
+added with this document). **A dylib's `__DATA` already carries what the image
+holds.** An earlier draft of this document claimed 4 of the 16 files were blocked by
+bodies with "no code to run" and would need no entry point; the measurement says
+otherwise and the draft was wrong.
 
 ## What is left, in order
 
-1. **Write the test that does not exist: a program reading another module's WRITTEN
-   global gets the right number.** `test_formal_dylib.py` has
-   `test_exported_functions_execute` (ctypes into a built dylib) and
-   `test_executable_links_a_dylib` (a program linking one) — the harness is there.
-   No test asserts that a `__DATA` slot **in a dylib** carries its static
-   initializer. Until one does, relaxing the refusal in half 1 converts a loud
-   refusal into a **silent wrong answer** (`X = 5` read as 0), which is the one
-   trade this refusal exists to refuse. **This is the first thing to do and it is a
-   test, not a change.**
-2. **Then half 1**: narrow the dylib-path refusal to a body with an effect in it,
-   with `_static_initializer` as the discriminator, reusing `collect_global_slots`
-   and `build_data_image` unchanged. Measured ceiling: **4 files** (`formal/x86_64.py`
-   ×2, `determinism_trace.py` ×2), and the 1 file that uses a declared name is
-   `formal/macho_linker.py` behind `formal/x86_64.py`.
-3. **Then half 2**, as its own project: `__mod_init_func` in both emitters, plus the
-   `control.py guard`-visible memory cost of an image that now runs code at load.
-   Measured ceiling: **12 files**, 0 of which use anything the two refusing modules
-   declare — so half 2's honest value is "12 files stop being blocked by an import
-   they do not use", and it should be weighed against the risk of running code at
-   load time in an image whose whole discipline is refusing what it cannot represent.
+**0. DONE on this branch, and it is what makes the rest possible: the
+precondition test, and the measurement that says the precondition holds.**
+
+`test_formal_cross_module.py::test_a_module_stores_that_the_image_already_holds_cross_the_boundary`
+(a module with `COUNT = 5` and `NAMES = ["alpha", "beta"]`, read and written from
+another image) **builds, runs, and matches CPython exactly** —
+`first=5@second=7@width=2@@`, exit 0 — and its control
+`test_a_module_body_with_code_in_it_is_still_refused` pins the refusal for a body
+that genuinely must run (`COMPUTED = compute()`), by words.
+
+**So the `__DATA` in a dylib already carries what the image holds**, and the next
+step is not gated on a measurement any more. Before this test, nothing in the suite
+asserted it: every other case in that file crosses the boundary with a VALUE and
+never with the module's own initialized data, so a slot that read as `0` where the
+source says `5` would have left the file green.
+
+1. **The load-time initializer**, in both object writers, plus a linker section
+   each — `formal/arm64_codegen.py`'s Mach-O path and `formal/x86_64_codegen.py`'s
+   ELF path. The function to emit already exists (`_module_body_function`); what is
+   missing is anything that calls it, and a section the custom linkers must not
+   dead-strip. Measured ceiling: **16 files.**
+2. **Then measure whether the row is worth it, before building it.** The nine
+   computed stores are `frozenset({...})`, `os.path.dirname(...)` (×2),
+   `os.path.join(...)`, `_find_stdlib_path()`, `ModuleLoader()`, `Reg.RAX`, and
+   `None` — and three of those are calls into `os`, which on this target is a host
+   module with no Mojo source except through `formal/hostmods/os/`. **A module
+   whose body calls a host module may be unbuildable here for a second, permanent
+   reason, and then the initializer buys 9 files rather than 16.** That question is
+   answerable by asking whether each of the four modules builds with its body
+   deleted, which is four builds.
+3. **Separately, and worth more than its file count says: a module-level FLOAT
+   constant is body, and it should not be.** Four of `tools/memslot.py`'s six body
+   statements are `DEFAULT_BUDGET_GB = 96.0`, `SNEAK_MAX_GB = 8.0`,
+   `SNEAK_CAP_GB = 32.0`, `SNEAK_MARGIN_GB = 16.0` — float literals that
+   `collect_module_symbols` does not fold (`site` is `rebound`, not `assigned`, so
+   `_is_folded_constant` declines them), which makes them "code that has to run".
+   The reader is then told *"this module's API is its top-level statements
+   (AssignStmt, IfStmt)"*, which is a statement about the module's API and not
+   about the one fact that matters: **this path has no float value for a store to
+   produce.** Refusing a float constant by name is the honest answer and it is a
+   small change; it unblocks **0 files** and improves a message.
 
 ## What is NOT the next step
 

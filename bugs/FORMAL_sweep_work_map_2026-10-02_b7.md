@@ -16,9 +16,10 @@ the caveat that dominates every earlier map in this series** (`…_b6.md` §2.3,
   where the remaining coverage is.**
 * **The largest unowned codegen row in the corpus is 16 files, and it is a
   refusal that is CORRECT** — a dylib has no entry point for a module's top-level
-  code — so its next step is not a bug fix but a design measurement nobody has
-  made (§6, and the doc filed with it). The two rows above it are 163 and 43 files
-  of pure import closure.
+  code — so its next step is a load-time initializer in two object writers, gated
+  on a four-build measurement nobody has made (§6). The two rows above it are 163
+  and 43 files of pure import closure. **Its precondition test is landed and green
+  (§6), so nothing about it is blocked on a measurement any more.**
 
 **Claim** `sweep:7` on `work/formal11-sweep`. This tree is `master` at `e7fbe6ef`
 ("Merge branch 'work/formal8-10'"), which includes the `formal3/4/5` batches.
@@ -367,7 +368,7 @@ omission.
 |---|---|---|
 | module exports no public functions (`binary_heap.mojo`) | 165 | **the row is 164/165 closure** (§3.1). The real blocker is one file: `std/collections/binary_heap.mojo` is itself refused on `len(self._data)`, "a slot's declared type is not a value this path can supply" — the value-model premise, whose probe is a **stdlib edit** and therefore not makeable from a repository worktree. `FORMAL_dylib_export_loops_and_frame_bounds` (`formal10-2`) is the live claim on the export rule; `FORMAL_dylib_export_gate_ceiling.md` was **deleted** on this tree (`0fbd2874`), so the "ceiling 0" measurement it held is retired with it and re-measuring it is open |
 | other refusal (`builtin_slice.mojo`) | 43 closure + 8 in-file | the closure half is `formal10-2`'s `FORMAL_builtin_slice_optional_field_is_a_frame_holder` (a returned frame cannot cross a dylib boundary); the 8 in-file rows are §3.2's list |
-| **a module whose API is its top-level statements** | **16** | **unowned and unclaimed — §6, and filed as `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`.** 1 use in 16 |
+| **a module whose API is its top-level statements** | **16** | **unowned and unclaimed — §6, and filed as `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`.** 1 use in 16. Its precondition test now exists and passes; the work left is a load-time initializer in two object writers, and the doc's item 2 is a four-build measurement of whether that is worth 16 files or 9 |
 | a module's ATTRIBUTE read as a value (`sys.argv` ×6, `sys.stderr`, `sys.executable`, `os.environ`, `ast.ClassDef`, `stat.S_IXUSR`) | 11 (all in-file) | `FORMAL_module_state_no_storage` (`formal8-7`); its own Status says the ceiling on folding these reads is 0 of 6, measured per use |
 | bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 10 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal10-5`); **4 of 4 blocked files use `tile`**, so that half is work; the `random.mojo`/`format_int.mojo` halves are 1 of 3 and 1 of 2 |
 | MLIR dialect construct | 5 | `formal-mlir-gpu` / `formal2-mlir-comptime`; `FORMAL_known_limits.md` §2. `_select.mojo` is 1 file and **is** work (1 of 1 use it) |
@@ -379,46 +380,51 @@ omission.
 
 ---
 
-## 6. The largest unowned row, and why its next step is a measurement
+## 6. The largest unowned row, and what it actually needs
 
 `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`, filed with this
-map. The row in one paragraph:
+map, with the measurement below. The row in one paragraph:
 
 `formal/build.py` refuses to compile **any** module with top-level statements into
 a **dylib**, because a library has no entry point that would run them, and the
 refusal's own comment says why it is right: emitting the body would produce a
 function nothing calls, so the file would build, link, and do nothing at load. **16
-files** are refused this way, and **15 of the 16 do not use anything the refusing
-module declares** — they are refused for having imported it.
+files** are refused this way, by four modules, and **15 of the 16 do not use
+anything the refusing module declares** — they are refused for having imported it.
 
-**The row splits in two, and the split is not a matter of taste:**
+**The row is one project, and it is not the project a first reading of the refusal
+suggests.** `model.module_body` already exempts every top-level store the image
+holds — a value that folds (`X = 5`) and a name that is a `__DATA` slot whose
+initializer the image lays out (`X = ["a","b"]`) — so most of this repository's
+modules are not "an API that is its top-level statements". Asking `module_body` the
+same question the dylib path asks, per module, gives the whole row in 13
+statements:
 
-* **4 files** are blocked by modules whose entire top level is
-  **foldable assignments** — `formal/x86_64.py` (`COND_O = 0x0`, …) and
-  `determinism_trace.py` (`_MASK = 0x7FFFFFFF`, …). **There is no code there to
-  run.** A module-level name the build can fold is substituted at every read, and
-  one a function writes gets a `__DATA` slot whose static initializer
-  `model._static_initializer` already computes (`("int", n)`, `("str", text)`,
-  `("blob", shape, words)`). Allowing that body would emit no function at all and
-  change no address — so **this half needs no load-time entry point, only the
-  refusal narrowed to "a body with an EFFECT in it"**.
-* **12 files** are blocked by `module_loader.py` and `tools/memslot.py`, whose
-  bodies compute (`HERE = os.path.dirname(os.path.abspath(__file__))`,
-  `STDLIB_PATH = _find_stdlib_path()`, `if __name__ == "__main__":`). Those DO need
-  code to run before any importer's code, and the only correct place to put it is a
-  **load-time initializer** (`__mod_init_func` in the dylib's `__DATA`, which dyld
-  runs in dependency order before the dependent's own initializers). That is an
-  emitter feature in two object writers, not a refusal to relax, and **it is not
-  started here**.
+| module | body | statements |
+|---|---|---|
+| `determinism_trace.py` | 1 | `_ENABLED = None` |
+| `formal/x86_64.py` | 1 | `RETURN_REG = Reg.RAX` |
+| `module_loader.py` | 5 | `frozenset({...})`, `os.path.dirname(...)`, `_find_stdlib_path()`, `os.path.join(...)`, `ModuleLoader()` |
+| `tools/memslot.py` | 6 | `os.path.dirname(...)`, **four float literals**, `if __name__ == "__main__":` |
 
-**The measurement nobody has made, and the reason this row is not simply "fix the
-16 files":** whether the `__DATA` static initializers a dylib emits today are
-already correct for a name its own functions write. The machinery exists
-(`build_data_image` writes every slot's `init` into the image; the library path
-merges per-module slot tables in `formal/build.py`) but **no test asserts a
-program reading another module's written global gets the right number**, and until
-one does, relaxing the refusal converts a loud refusal into a silent wrong answer —
-the exact trade the refusal's comment refuses to make. **Write that test first.**
+**Nine are computed values; four are float constants that are body only because
+this path cannot fold a float** — a message defect worth more than its file count
+(§5 and the doc). `_MASK`, `_MASK63` and `_iota` in `determinism_trace.py` are all
+folded and are **not** body, so that module's 2-file row rests entirely on
+`_ENABLED = None`, which is a representation question (`None` is word 0 and one
+untagged word cannot say it from the integer 0).
+
+**The precondition is measured, and it holds.** A dylib's `__DATA` already carries
+what the image holds: a module with `COUNT = 5` and `NAMES = ["alpha","beta"]`, read
+and written from another image, prints `first=5@second=7@width=2@@` and exits 0,
+matching CPython — the test added with this map
+(`test_formal_cross_module.py::test_a_module_stores_that_the_image_already_holds_cross_the_boundary`,
+with a control that a body which must run is still refused). Before it, nothing in
+the suite asserted it, so a slot reading `0` where the source says `5` would have
+left every case green. **The remaining work is a load-time initializer**
+(`__mod_init_func`, in two object writers and two linkers), which is a project and
+not a patch — and the doc's item 2 says the cheap measurement that decides whether
+it is worth 16 files or 9 is four builds.
 
 ---
 
