@@ -598,14 +598,29 @@ CAUSES = (
     ("a String method that returns a SHORTER string writes the receiver's bytes",
      (("returns a SHORTER string",),)),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
-    # the callee hands the receiver back and the caller has to store it. One
-    # value-model fact with three wordings: a formal value is one 64-bit word,
-    # and it is already carrying the receiver. 0 files measured at the time of
-    # writing (the refusal is newer than the last sweep), and the fix for each
-    # wording is named in the message — the row is here so a swept file that
-    # lands on it reads as this construct rather than as `other refusal`.
-    ("a one-field struct's mutator has no convention to write its answer back",
-     (("mutating method",),)),
+    # the callee has to hand the receiver back somehow. Four wordings and one
+    # cause, because one convention covers the receiver and what is refused is
+    # the four shapes it does not.
+    #
+    # **Re-pointed and renamed 2026-10-03** (`work/formal15-mutator-return-abi`).
+    # The mechanism is now BY REFERENCE — the mutator receives the address of the
+    # caller's one-word cell and writes the receiver back through it — which
+    # removed the wording that was this cause's headline: "both changes its
+    # receiver and returns a value", which is `BinaryHeap.pop()` and the 165-file
+    # `binary_heap.mojo` sweep row. The old marker was the single word
+    # `"mutating method"`, which matched two of the four wordings and would have
+    # dropped the other two into `other refusal` silently — the failure mode this
+    # module's own docstring names. Four alternatives now, one per wording.
+    #
+    # The old LABEL said the cause was that the answer had nowhere to go back to,
+    # which is false as of that commit: it goes back through the address. What is
+    # refused is the four shapes the convention does not reach, so the label says
+    # that.
+    ("a one-field mutator's receiver hand-off is refused",
+     (("declares no return type, so the call has no value",),
+      ("is not a place this path can take the address of",),
+      ("is called in the same argument list that reads",),
+      ("two hidden-word conventions",))),
 )
 
 def _check_cause_shape():

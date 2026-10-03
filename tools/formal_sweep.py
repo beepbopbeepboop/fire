@@ -852,17 +852,32 @@ _REFUSAL_FAMILIES = (
      "receiver stored in a container"),
     # A one-field struct's MUTATING method, where the receiver is the struct
     # itself, so the callee hands the receiver back and the caller has to store
-    # it. Three wordings and one family, because one mechanism refuses all three
-    # and the family's own marker would be a phrase ("a mutating method") that no
-    # message contains. Each wording is its own row in
-    # `bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md`'s successor
-    # work: the fix for each is in the message.
-    ("both changes its receiver and returns a value",
-     "one-field mutator has no return convention"),
-    ("rather than as a statement of its own",
-     "one-field mutator has no return convention"),
-    ("is not a name this path can store through",
-     "one-field mutator has no return convention"),
+    # it. FOUR wordings and one family, because one mechanism refuses all four
+    # and the family's own marker would be a phrase ("a mutating method") that
+    # no message contains. Each wording is its own row in the fix's message.
+    #
+    # **All four markers were re-pointed on 2026-10-03** and the family was
+    # RENAMED, because the mechanism underneath them changed: the receiver is
+    # now handed over by reference (`model.receiver_writeback_name`, mechanism in
+    # its docstring) rather than returned in the return register, which removed
+    # the refusal that used to be the headline of this family ("both changes its
+    # receiver and returns a value" — `BinaryHeap.pop`) and left three narrower
+    # ones. A marker list that keeps matching a wording nothing emits is the
+    # same rot as one that drops the wording it IS matching: this family would
+    # have read as three live findings for a message no build produces.
+    #
+    # The rename is the honest half. "no return convention" named the DEFEAT —
+    # there was no way to write the answer back — and the mechanism now has a
+    # convention, so the family is about the shapes the convention does not
+    # cover. The four wordings, in the order `model.py` raises them:
+    ("declares no return type, so the call has no value",
+     "one-field mutator receiver hand-off"),
+    ("is not a place this path can take the address of",
+     "one-field mutator receiver hand-off"),
+    ("is called in the same argument list that reads",
+     "one-field mutator receiver hand-off"),
+    ("two hidden-word conventions",
+     "one-field mutator receiver hand-off"),
     # A method on a value whose receiver is a frame address, stated as a
     # description of the call rather than as a receiver placement.
     ("is a method on a", "method call on a value"),
