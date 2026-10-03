@@ -5145,6 +5145,211 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     return None
 
 
+# ── `int(s, base)`: a PARSE, not a conversion ─────────────────────────────────
+#
+# A conversion takes one operand and `int(x)` for a NUMBER is one: it is an
+# `IntN(...)` width/sign change and `INT_TYPE_CTORS` is the table of them. What
+# is not a conversion is `int(s, base)`, where the first operand is TEXT and the
+# second is a parameter of the same operation rather than a second value. The
+# two backends each carried the refusal for that as a private copy of one arity
+# test, which is why a construct the language has and the target can express was
+# refused identically on both machines with a message about arity.
+#
+# The answer needs no new storage and no new value: it is a machine word, which
+# is what a formal value already is, and `strtoll` is libc, already on the link
+# line and already used for `strlen` and `strncmp`. What the lowering CANNOT
+# skip is the validation — `strtoll` returns 0 for a string with no digits in it
+# where CPython raises `ValueError` — so the emitters pass an `endptr` and stop
+# the program when it is not at the end (see `int_parse_trap_message`).
+#
+# The one-operand `int(s)` is in the SAME table and was the worse defect: with
+# one operand the old arity test did not fire, so a string was read as the NUMBER
+# its bit pattern is and `int("41")` answered the ADDRESS OF THE LITERAL. The two
+# architectures answered different addresses for the same program
+# (`a=48694217` on arm64, `a=4449243` on x86-64, measured), which is the
+# divergence this pair of backends is not allowed to have.
+
+#: C's six whitespace characters, as the NUL-terminated string `strspn` measures
+#: a run against. In `model.py` and not in either emitter because it is a fact
+#: about CPython's `int(s)` that BOTH backends have to honour, and two copies of
+#: a six-character set is two chances for them to disagree about whether
+#: `int(" 41 ")` is 41.
+C_WHITESPACE = " \t\n\v\f\r"
+
+#: `0` is CPython's "detect the base from the prefix". It is named here because
+#: the REFUSAL below has to name what it refuses, and it is not a base this path
+#: accepts — see `int_parse_base_is_valid`.
+INT_PARSE_BASE_AUTO = 0
+INT_PARSE_BASE_MIN = 2
+INT_PARSE_BASE_MAX = 36
+
+
+def int_parse_base_is_valid(base) -> bool:
+    """Whether `base` is a base both CPython's `int(s, base)` and `strtoll` take.
+
+    `2..36`, and nothing else. **`0` is NOT valid**, which is the one decision
+    here that a reader is most likely to disagree with, so it is measured rather
+    than argued: CPython's auto-detection and C's are the same function with
+    three different rules, and `strtoll` is the only implementation available on
+    this path.
+
+    | spelling | CPython | `strtoll(s, &end, 0)` |
+    |---|---|---|
+    | `"41"` | 41 | 41 |
+    | `"0x1f"` | 31 | 31 |
+    | `"0o17"` | 15 | stops at `o` — 0 |
+    | `"0b1"` | 1 | stops at `b` — 0 |
+    | `"017"` | `ValueError` | 15 |
+    | `"00"` | 0 | 0 |
+    | `"1_000"` | 1000 | 1 |
+    | `"  41  "` | 41 | 41 (leading skipped, trailing needs the `strspn` the emitters do) |
+
+    Three of those are a WRONG ANSWER rather than a missing one: `0o`/`0b` would
+    answer 0 for a value that is 15 and 1, and `017` answers 15 where CPython
+    raises. Answering them needs CPython's rule written out — skip whitespace,
+    take a sign, apply it to the digits rather than to the string, then decide
+    among four prefixes and validate the digit class — which is a mini-parser in
+    two backends for a spelling whose only user in this repository is
+    `mlir.py`'s `int(head, 0)` on a hex string, and `int(head, 16)` says the same
+    thing. So base 0 is REFUSED by name, which is the direction this path takes
+    everywhere else: `model.int_parse_base_refusal` states the bases that do
+    work rather than approximating one that does not.
+    """
+    return (isinstance(base, int) and not isinstance(base, bool)
+            and INT_PARSE_BASE_MIN <= base <= INT_PARSE_BASE_MAX)
+
+
+def int_parse_lowering(name: str, operands: list, text_of) -> tuple:
+    """`("parse", base)` | `("convert", None)` | `("refuse", reason)`.
+
+    The decision is arch-free and it is HERE rather than in either backend's
+    conversion emitter, for the reason every other rule on this path lives here:
+    both backends carried the same refusal as two copies of one arity test, and
+    two copies are how a construct ends up answered one way on arm64 and another
+    on x86-64.
+
+    `text_of(op)` is the emitter's THREE-WAY question "is this operand text",
+    the same shape `printf_text_conversion_refusal` is written against and for
+    the same reason:
+
+    | `text_of` | meaning | `int(op)` | `int(op, base)` |
+    |---|---|---|---|
+    | `True` | the operand is a string | a parse in base 10 | a parse in `base` |
+    | `False` | it is not, and the source says so | a conversion (unchanged) | refused |
+    | `None` | the source does not say | a conversion (unchanged) | refused |
+
+    **`None` is the permissive direction and it is load-bearing.** An
+    unannotated parameter is a word this build cannot classify, and
+    `int(n)` where `n` really is a number is the conversion this path has always
+    performed; reading "not known to be text" as "text" would parse a number as
+    digits, and reading it as "not text" for the ONE-operand form would refuse
+    every numeric `int(x)` in the corpus. So the one-operand form keeps today's
+    answer for an undecided operand and the two-operand form refuses, where the
+    second operand's meaning makes guessing impossible in both directions.
+
+    A base is a COMPILE-TIME constant here (`fold_literal_expr`, which also
+    answers `0 - 1` and `1 * -1`), because `strtoll` takes it as an immediate in
+    both lowerings and because a base computed at run time is a different
+    question: it would need a register and, on arm64, a frame slot to survive
+    the call. It is refused by name rather than approximated.
+    """
+    if len(operands) == 1:
+        if text_of(operands[0]) is True:
+            return ("parse", 10)
+        return ("convert", None)
+    if len(operands) != 2:
+        return ("refuse", int_parse_arity_refusal(name, len(operands)))
+    if text_of(operands[0]) is not True:
+        return ("refuse", int_parse_non_text_refusal(name, spelled(operands[0])))
+    base = fold_literal_expr(operands[1])
+    if base is None:
+        return ("refuse", int_parse_base_refusal(
+            name, spelled(operands[1]),
+            "it is not a constant the build knows, and the base is passed to "
+            "`strtoll` as an immediate in both lowerings — a base read at run "
+            "time would need a slot of its own to survive the call, and it is a "
+            "different question from a stated one"))
+    if not int_parse_base_is_valid(base):
+        why = ("0 is CPython's \"detect the base from the prefix\", and this "
+               "path cannot: `strtoll` is the only parser here and its "
+               "auto-detection is not CPython's — `int(\"0o17\", 0)` is 15 and "
+               "`strtoll` gives 0, `int(\"0b1\", 0)` is 1 and `strtoll` gives "
+               "0, and `int(\"017\", 0)` RAISES where `strtoll` gives 15. Two "
+               "of those are wrong answers rather than missing ones, and the "
+               "alternative is CPython's prefix rule written out by hand in "
+               f"both backends. Say the base: {INT_PARSE_BASE_MIN} through "
+               f"{INT_PARSE_BASE_MAX} are exact, and `int(s)` is base "
+               f"{INT_PARSE_BASE_MIN + 8}"
+               if base == INT_PARSE_BASE_AUTO else
+               f"{base} is not a base (CPython's `int(s, base)` takes "
+               f"{INT_PARSE_BASE_MIN}..{INT_PARSE_BASE_MAX})")
+        return ("refuse", int_parse_base_refusal(name, spelled(operands[1]),
+                                                 why))
+    return ("parse", int(base))
+
+
+def int_parse_arity_refusal(name: str, got: int) -> str:
+    """`f(x, y, z)` where a conversion or a parse takes at most two."""
+    return (f"{name}(...) takes exactly one value to convert on this path "
+            f"(got {got} argument(s))")
+
+
+def int_parse_non_text_refusal(name: str, operand: str) -> str:
+    """`int(x, base)` where the first operand is not text.
+
+    A different refusal from the arity one on purpose: the arity message is
+    about a count, and the count here is right. What is wrong is the CATEGORY —
+    the second operand is a BASE, and a base is a parameter of a parse, so this
+    is only a question when the first operand is a string. CPython raises
+    `TypeError` for the same program.
+    """
+    return (f"{name}({operand}, ...) is refused on this path: the second "
+            f"operand of this call is a BASE, so the first is a string to parse "
+            f"and `{operand}` is not one this build knows to be text. "
+            f"`{name}(x)` with one operand is still the number conversion it "
+            f"always was; it is the second operand that makes this a parse, and "
+            f"a parse of a number is not a question this path answers")
+
+
+def int_parse_base_refusal(name: str, base: str, why: str) -> str:
+    """A base this path cannot state to `strtoll`.
+
+    The whole reason is the `why`, and it is a parameter rather than a sentence
+    here because the two reasons are genuinely different facts about different
+    things: a base read at RUN TIME is a register and a slot to keep across the
+    call, and base 0 is a RULE this path does not have. Both are refusals and
+    both are about the second operand, so one wording is one sentence each.
+    """
+    return f"{name}(s, {base}) is refused on this path: {why}."
+
+
+def int_parse_trap_message(base: int) -> str:
+    """The ONE text a failed parse writes to fd 2 before it stops the program.
+
+    For BOTH backends, because two architectures printing two different sentences
+    for one limit is how a reader ends up looking for a construct one of them
+    invented — and the shape is `list_append_overflow_message`'s, which is the
+    only other place on this path where a bounded operation that cannot be
+    decided at build time stops at run time and says which bound it hit.
+
+    **Why a stop and not an answer.** `strtoll` returns 0 and leaves `errno` set
+    when it finds no digits, and returns the digits it managed when the rest of
+    the string is not in the base; CPython raises `ValueError` for both. This
+    path has no exception, so the two arms are refused rather than answered: the
+    `endptr` is checked against the end of the string and the program stops if
+    it is not there. `0` is not available as the answer either — `int("0")` is 0
+    and `formal/hostmods/argparse.mojo`'s own `is_decimal` says so — so nothing
+    here distinguishes "parsed zero" from "parsed nothing" but the endptr.
+    """
+    spelled_base = f"base {base}"
+    return (f"ValueError: this program called int(s, ...) on a string that is "
+            f"not an integer in {spelled_base}, and left it at least as it "
+            f"found it. CPython raises ValueError for that program; this "
+            f"formal image has no way to raise, so it stops here rather than "
+            f"answer the 0 strtoll returns for a string with no digits in "
+            f"it.\n")
+
+
 def _is_zero_literal(e) -> bool:
     """True for the integer literal `0` and for `0 - 0`, and nothing else.
 

@@ -3410,6 +3410,102 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._pop_slot(Reg.RAX)
         self._emit_mov_imm(Reg.RAX, 0)             # None
 
+    def _conversion_operand_is_text(self, operand) -> object:
+        """True / False / None: does this conversion's operand hold text.
+
+        The three-way answer `model.int_parse_lowering` and
+        `model.printf_text_conversion_refusal` are both written against, asked
+        here through `model.string_operand_is_string` so that the string reader
+        is `_expr_str_kind`'s — the flow-sensitive one that tracks what THIS
+        function's emission has bound, a parameter's annotation and a
+        `comptime` binding included.
+
+        `None` is the permissive direction and is the whole reason `int(n)` keeps
+        working: an unannotated parameter is a word this build cannot classify,
+        and reading "not known to be text" as text would parse a number as
+        digits.
+        """
+        if M.string_operand_is_string(self._expr_str_kind(operand)):
+            return True
+        return None
+
+    def _emit_int_parse(self, text_expr, base: int) -> None:
+        """`int(s, base)` — `strtoll(s, &end, base)`, and the `end` is checked.
+
+        The arm64 twin (`ARM64Codegen._emit_int_parse`), on the same decision
+        from `formal/model.py` and the same message, and the steps are the same
+        four because they are the four things CPython's `int(s)` asks:
+
+        1. `strtoll(s, &end, base)` — libc, already on this link line for
+           `strlen` and `strncmp`, and the answer is a machine word, which is
+           what a formal value already is, so nothing new is stored;
+        2. `end == s` means no digit was consumed, and CPython raises rather
+           than answering 0;
+        3. `*end` past any TRAILING whitespace is a NUL when the whole string was
+           consumed, and CPython accepts the padding (`int("  41  ")` is 41), so
+           the run is measured with `strspn` over `model.C_WHITESPACE`;
+        4. otherwise the program stops with a named message on fd 2, because a
+           silent `exit(1)` is the worst of the three answers this path can give
+           (`_emit_list_append`'s docstring is the argument) and because 0 is not
+           available as the answer — `int("0")` is 0.
+
+        32 bytes of frame below RSP, as a multiple of 16 so RSP is still aligned
+        at each call, which is the SysV requirement and the same reason every
+        other RSP movement here is. `[rsp+0]` the string, `[rsp+8]` the `endptr`
+        `strtoll` writes and `[rsp+16]` the value it returns.
+
+        The `end == s` comparison is 64-bit and through a REGISTER: two pointers
+        four bytes apart compare equal as bytes, so a byte-width test would call
+        `int("4x1")` … fine and `int("xy")` … not, which is not a rule.
+        """
+        self._while_counter += 1
+        trap = f"{self.func_name}_ip{self._while_counter}_trap"
+        endl = f"{self.func_name}_ip{self._while_counter}_end"
+        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 32))
+        self._emit_expr(text_expr)                       # RAX = s
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RAX))
+        # An expression's result is in RAX; SysV's first INTEGER argument is in
+        # RDI, and arm64 needing nothing here (X0 is both) is exactly why this
+        # line was missing until the program faulted.
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, 8))   # &end
+        self._emit_mov_imm(Reg.RDX, base)
+        self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
+        self._emit_extern_call("strtoll")
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 16, Reg.RAX))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 8))     # RCX = end
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDX, Reg.RSP, 0))     # RDX = s
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.RDX))
+        self.asm.emit(encode_je_rel8(0))
+        self.asm.emit_label_rel8(trap, here_offset=-1)
+        # The POINTER to the remainder, not the byte at it: `strspn` takes
+        # a `const char *`. arm64 gets this for free (X0 already holds it).
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RCX))         # RDI = end
+        self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
+        self.asm.emit_label_rip(self._intern_string(M.C_WHITESPACE),
+                                here_offset=-4)
+        self._emit_mov_imm(Reg.RDX, 0)
+        self._emit_extern_call("strspn")                            # RAX = run
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RCX, Reg.RAX))
+        # ONE BYTE, not eight: `*past` is a NUL when the string was consumed, and
+        # an 8-byte load there has the NUL in its low byte and whatever follows
+        # the string in the other seven, so the word is non-zero and every parse
+        # of a valid string stops.
+        self.asm.emit(encode_movzx_r64_rm8(Reg.RCX, Reg.RCX, 0))
+        self.asm.emit(encode_test_r64_r64(Reg.RCX, Reg.RCX))
+        self.asm.emit(encode_jne_rel8(0))
+        self.asm.emit_label_rel8(trap, here_offset=-1)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, 32))
+        self.asm.emit(encode_jmp_rel8(0))
+        self.asm.emit_label_rel8(endl, here_offset=-1)
+        self.asm.label(trap)
+        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
+        self._emit_call_exit(M.SHIFT_TRAP_STATUS)
+        self.asm.label(endl)
+        self.asm.label(endl)
+
     def _emit_overflow_diagnostic(self, text: str) -> None:
         """`write(2, text, len)` — say WHICH bound was hit before stopping.
 
@@ -6825,6 +6921,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # conversion has one operand, and two of them, positioned or named, is
         # not a conversion.
         operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+        # `int(s)` and `int(s, base)` are a PARSE, not a conversion, and the
+        # decision is `model.int_parse_lowering`'s so that arm64 cannot answer
+        # this differently. It has to be asked here, before the zero-operand and
+        # arity arms below, because those two are about a CONVERSION's arity and
+        # a parse has a different one.
+        if name in M.INT_TYPE_CTORS:
+            verdict = M.int_parse_lowering(
+                name, operands, self._conversion_operand_is_text)
+            if verdict[0] == "parse":
+                self._emit_int_parse(operands[0], verdict[1])
+                return
+            if verdict[0] == "refuse":
+                raise CodegenError(verdict[1])
         if not operands:
             # The ONE zero-operand conversion this path can answer, and the
             # reason is a property of STRINGS and of nothing else: a literal
