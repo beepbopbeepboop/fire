@@ -8378,6 +8378,24 @@ def _lean_export_id(name: str) -> str:
 _EXPORT_FUEL_BASE = 200000
 
 
+def _export_extent(exports: list, entry: int, base: int, code_size: int) -> int:
+    """The end of one export's OWN code: the next export's entry, or the end of
+    the image for the last one.
+
+    This is `DylibExport.exportEnd` (`lib/ProofLib.lean`), computed in Python
+    because the emitter needs it as a literal and the library needs it as a
+    fold over the export table it is given.  The two are the same rule, and the
+    library's version is what the emitted `exportEnd_here` proves, so a drift
+    between them is a file that does not typecheck rather than a proof about a
+    different address.  It is written ONCE here: three callers want it (the
+    total proof's CFG frame, the contract's block, and nothing else), and three
+    spellings of "the next export's entry, or the image's end" are three
+    readings that agree until the day one of them is edited.
+    """
+    later = sorted(e["entry"] for e in exports if e["entry"] > entry)
+    return later[0] if later else base + code_size
+
+
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
                        exports: list) -> str:
     """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
@@ -8398,8 +8416,7 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     arbitrary state's arbitrary `x30` -- so the census was counting two holes
     that no proof could ever fill.
     """
-    later = sorted(e["entry"] for e in exports if e["entry"] > entry)
-    func_end = later[0] if later else base + len(code)
+    func_end = _export_extent(exports, entry, base, len(code))
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -8410,6 +8427,15 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
             fn=None, tw_extra="DylibExport.exportFuel",
             tc={"typed": False, "vtypes": {}, "call_types": {}},
             cond_branches=set(), code_name="dylib_code", sr_name="dylib",
+            # The halt address AND the initial link register, both the EXPORT's
+            # own end rather than the image's -- which is what `runExport` now
+            # uses (`DylibExport.exportEnd`).  The walk's CFG is already
+            # `[entry, func_end)`, so the default (`base + len(code)`) was
+            # inconsistent with it for every export but the last: the emitted
+            # theorem was about a run that continued into the next export, and
+            # `total_of_halts` rejected it as a type mismatch.  For a one-export
+            # image the two are the same number, so that case is unchanged.
+            exit_at=func_end,
             frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
             no_change=True, halt_only=True, fuel=_EXPORT_FUEL_BASE,
             # The fuel is emitted in its ARITHMETIC form, `BASE + PATH * n`, not
@@ -8559,17 +8585,19 @@ def _dylib_spec_lean(fn) -> str:
 
 
 def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
-                          spec: str, func_end: int | None = None) -> str:
+                          spec: str, func_end: int) -> str:
     """Emit a PROVED per-export contract for one dylib export.
 
     `spec` is Lean source for `fun n => <expr>`, from `_dylib_spec_lean`.
-    Three parts, deliberately not fused into one opaque term:
+    `func_end` is the end of THIS export's own code — the next export's entry,
+    or the image's end for the last one, which is `DylibExport.exportEnd`.  Four
+    parts, deliberately not fused into one opaque term:
 
       * the body's composed effect, as a `Block` plus a `BlockCert` -- a chain
         of `m` one-step rewrites, each applying the `dylib_sr_i` lemma the
         generator ALREADY emits, with the running `pc` pinned to instruction
         `i`'s address;
-      * the two facts that make it the export's body -- it ends at the image's
+      * the two facts that make it the export's body -- it ends at the export's
         exit, and no intermediate state is already there;
       * `hreg`, the machine agreeing with the source-derived spec.
 
@@ -8584,30 +8612,38 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     and a return jumps to `x30`. That is `hx30`, and `bv_decide` gets it from
     the same bitvector computation that gets `hreg`.
 
-    **The scope: the export has to BE the image.** `Contracts.ExportBody`'s
-    `atExit` is stated at `image.base + image.codeSize`, the end of the WHOLE
-    image, and `pcs` is the block's own address list -- so a block for one
-    export of several cannot end where `atExit` says it must. Rather than
-    emit a `Block` that does not typecheck (which is what this did, and which
-    nothing caught because `hreg` was a `sorry` and the `BlockCert` was never
-    reached), an export that is not the whole image keeps the NAMED
-    `sorry` obligation. Same for a body with a branch anywhere but at its end:
-    `Refine.Block.step` is one function of one state, which a conditional
-    branch does not have.
+    **The block is the export's OWN extent, `[entry, func_end)`.**  It used to be
+    the whole image's, and `Contracts.ExportBody`'s `atExit` was stated at the
+    IMAGE's end to match -- which is why a dylib with more than one export could
+    never have a proved per-export contract: the block a `BlockCert` is about
+    was not a block the export could run. `DylibExport.exportEnd` is now the
+    exit for both `startState`'s `x30` and `runProg`, so `func_end` is the
+    address every one of these facts is about, and the two can no longer
+    disagree. What is left is a body with a branch anywhere but at its end:
+    `Refine.Block.step` is one function of one state, which a conditional branch
+    does not have.
 
-    Returns "" in all of those cases, so the caller keeps the obligation
-    rather than emitting something unchecked.
+    Returns "" in that case, so the caller keeps the obligation rather than
+    emitting something unchecked.
     """
+    # This export's own words, and where they sit in the IMAGE's word numbering.
+    # The per-instruction lemmas are indexed by the image-wide word number, so a
+    # block for the second export of several reads `dylib_sr_k0 …` and the
+    # offset is the reason `k0` is computed rather than assumed to be 0.
+    k0 = (entry - base) // 4
+    m = (func_end - entry) // 4
+    if m < 2 or entry + m * 4 != func_end or (entry - base) % 4:
+        return ""
     words = [int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)]
-    m = len(words)
-    if m < 2:
+    if k0 + m > len(words):
         return ""
-    if entry != base or (func_end is not None and func_end != base + len(code)):
-        # Not the whole image: `ExportBody.atExit` is about the image's exit.
-        return ""
-    pcs = [base + i * 4 for i in range(m)]
-    exit_pc = base + len(code)
+    words = words[k0:k0 + m]
+    # The block's own address list: the export's, and the only addresses any
+    # premise below is about. `Contracts.noEarly`'s `u < pcs.length` is what
+    # makes these the addresses a caller can reason about.
+    pcs = [entry + i * 4 for i in range(m)]
+    exit_pc = func_end
     rhss = []
     for w in words:
         idx = _step_branch_index(w)
@@ -8639,6 +8675,18 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     out = [f"namespace {ident}_contract\n",
            f"def start (n : UInt64) : Arm64State :=\n"
            f"  Contracts.startState dylib_image {ident} n\n",
+           # THE EXIT, AS A FACT RATHER THAN A FOLD TO UNFOLD.  Every premise of
+           # `Contracts.ExportBody` below is stated at `DylibExport.exportEnd`,
+           # which is a fold over the image's export table, and `bv_decide`
+           # cannot unfold a fold -- it abstracts what it cannot see and answers
+           # with a spurious counterexample.  So the table is folded ONCE, here,
+           # by a proof: `native_decide` over a literal export list, and if the
+           # fold ever said something other than this export's own end, the file
+           # would not typecheck instead of quietly proving something about a
+           # different address.
+           f"theorem exportEnd_here :\n"
+           f"    DylibExport.exportEnd dylib_image {ident} = {exit_pc} := by\n"
+           f"  native_decide\n",
            # `S0` is named rather than left to `autoImplicit`: an undefined `S0`
            # elaborates as a free VARIABLE of function type, so `S0 s` would be
            # an arbitrary function applied to the start state and every `hpc0`
@@ -8780,8 +8828,13 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                 # the two sides the same term: `rfl`, not a case split.  The
                 # `simp only [arm64_runs]` is there to iota-reduce the runner's
                 # `match` on `arm64_step`, which a rewrite cannot see into.
+                # `dylib_sr_{k0 + i}`, not `dylib_sr_{i}`: the per-instruction
+                # lemmas are numbered over the IMAGE's words, and this block is
+                # the export's own range.  `hpc{i}` is at `entry + 4i`, which is
+                # the same address as `base + 4(k0 + i)`, so the lemma's own
+                # `s.pc = …` premise is satisfied by the literal.
                 L += [f"    simp only [arm64_runs, "
-                      f"dylib_sr_{i} ({prev}) hpc{i}]",
+                      f"dylib_sr_{k0 + i} ({prev}) hpc{i}]",
                       "    rfl"]
             else:
                 # The library's own runner equation, with `hseq` discharged by
@@ -8790,7 +8843,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                 # sides of the bump condition are the same term.
                 L += [f"    exact runs_cons_seq ({prev}) (st{i} ({prev})) "
                       f"dylib_code {k - i - 1}",
-                      f"      (dylib_sr_{i} ({prev}) hpc{i}) (by rfl)"]
+                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) (by rfl)"]
         L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
         L.append("  rfl")
         out.append("\n".join(L))
@@ -8818,6 +8871,16 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # register read is the same either way.  So the one `if` the composed
     # effect keeps is projected through here and never reaches `bv_decide`.
     pre = (f"  simp only [S{m}, arm64_reg_pc]\n" if pc_writes[m - 1] else "")
+    # The exit, resolved BEFORE the big unfold and as its own step.  It cannot
+    # go in the `_UNF` set: `simp` simplifies a rewrite rule's own arguments
+    # first, so with `dylib_image` and the export's name in the same set the
+    # `exportEnd` term is already a literal structure by the time
+    # `exportEnd_here` is offered, and the lemma silently stops matching --
+    # measured as `bv_decide` reporting a spurious counterexample that names the
+    # unresolved fold.  Two steps, `simp` then `rw`, so the rewrite sees the
+    # term `exportEnd_here` is about before either is unfolded.
+    exit_step = (f"  simp only [start, Contracts.startState]\n"
+                 f"  rw [exportEnd_here]\n")
     out.append(
         f"/-- THE SPEC, checked against the machine: the result register is the\n"
         f"    source-derived spec.  `bv_decide` discharges the prologue/epilogue\n"
@@ -8825,7 +8888,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
         f"    `UInt64` -- there is no address arithmetic to do by hand. -/\n"
         f"theorem hreg : ∀ n : UInt64,\n"
         f"    arm64_reg 0 (S{m} (start n)) = {spec} n := by\n"
-        f"  intro n\n" + pre +
+        f"  intro n\n" + pre + exit_step +
         f"  simp only [{_UNF}]\n"
         f"  simp (disch := decide) [{_MEM}]\n"
         f"  all_goals bv_decide")
@@ -8836,7 +8899,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
         f"    part, so there is no `if` in it to decide. -/\n"
         f"theorem hx30 : ∀ n : UInt64,\n"
         f"    (S{m - 1} (start n)).x30 = UInt64.ofNat {exit_pc} := by\n"
-        f"  intro n\n"
+        f"  intro n\n" + exit_step +
         f"  simp only [{_UNF}]\n"
         f"  simp (disch := decide) [{_MEM}]\n"
         f"  all_goals bv_decide")
@@ -8859,13 +8922,16 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
             f"  simp only [st{m - 1}, hx, UInt64.toNat_ofNat]\n"
             f"  decide")
 
-    # The two facts that make it the export's BODY.
+    # The two facts that make it the export's BODY.  Both are stated at
+    # `DylibExport.exportEnd`, so `exportEnd_here` turns the goal into the
+    # literal the rest of the proof is about before `show` is asked to compare.
     if pc_writes[m - 1]:
         at_exit = (
             f"  atExit := by\n"
             f"    intro n\n"
             f"    have hx : (S{m - 1} (start n)).x30 = "
             f"UInt64.ofNat {exit_pc} := hx30 n\n"
+            f"    simp only [exportEnd_here]\n"
             f"    show (S{m} (start n)).pc = {exit_pc}\n"
             f"    simp only [S{m}]\n"
             f"    rw [if_neg (ret_ne n)]\n"
@@ -8875,6 +8941,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
         at_exit = (
             f"  atExit := by\n"
             f"    intro n\n"
+            f"    simp only [exportEnd_here]\n"
             f"    show (S{m} (start n)).pc = {exit_pc}\n"
             f"    rw [S{m}_pc (start n) rfl]\n"
             f"    decide")
@@ -8909,6 +8976,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
         f"  noEarly := by\n"
         f"    intro n u hu su hrun\n"
         f"    have hu' : u < {m} := by simpa [body] using hu\n"
+        f"    simp only [exportEnd_here]\n"
         f"    show su.pc ≠ {exit_pc}\n"
         # `Contracts.ExportBody` states this over `image.code` and
         # `startState image export_`; the lemmas above are over `dylib_code`
@@ -8984,28 +9052,27 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # `_spec` is among them only for an export that HAS a spec.  An export
         # whose spec `_dylib_spec_lean` derives from its source gets the
         # contract PROVED, with `bv_decide` checking the machine against it; if
-        # the contract cannot be emitted (the export is not the whole image, or
-        # its body is not straight-line) the SAME spec becomes a named `sorry`
-        # obligation -- open, and true.  An export whose spec cannot be derived
-        # gets NO contract claim at all, because the only spec available without
-        # one is `fun n => n`, which is false for every export in the tree that
-        # is not the identity.  That asymmetry is deliberate: a spec is a claim
-        # about the source, and guessing one turns an honest absence into a
-        # believed falsehood.
+        # the contract cannot be emitted (its body is not straight-line, so it
+        # is not one function of one state) the SAME spec becomes a named
+        # `sorry` obligation -- open, and true.  An export whose spec cannot be
+        # derived gets NO contract claim at all, because the only spec
+        # available without one is `fun n => n`, which is false for every export
+        # in the tree that is not the identity.  That asymmetry is deliberate:
+        # a spec is a claim about the source, and guessing one turns an honest
+        # absence into a believed falsehood.
         spec = specs.get(export["name"])
         entry = export["entry"]
-        # The export's own extent, the same one `_dylib_total_proof` walks: the
-        # contract's `Block` is `pcs` over that range, so it has to be told.
-        later = sorted(e["entry"] for e in exports if e["entry"] > entry)
-        func_end = later[0] if later else base + len(code)
+        # The export's own extent, `DylibExport.exportEnd`: the contract's
+        # `Block` is `pcs` over that range AND the address its `atExit` and
+        # `noEarly` are stated at, so it has to be told.
+        func_end = _export_extent(exports, entry, base, len(code))
         contract = (_dylib_contract_proof(ident, base, entry, code, spec,
                                          func_end) if spec else "")
         if not contract and spec:
             # A spec WAS derived from the source and the contract still could
-            # not be emitted -- the export is not the whole image (so
-            # `Contracts.ExportBody`'s `atExit`, which is stated at the IMAGE's
-            # exit, is not this block's to satisfy), or its body is not
-            # straight-line.  The obligation is then stated against THAT spec,
+            # not be emitted -- its body is not straight-line, so
+            # `Refine.Block.step` (one function of one state) has nothing to
+            # say about it.  The obligation is then stated against THAT spec,
             # which is a true claim left open.
             #
             # It used to be stated against `(fun n => n)` here and in the
@@ -9017,12 +9084,10 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
             contract = (
                 f"/-- OBLIGATION, not proved: this export agrees with the\n"
                 f"    specification derived from its source.  The contract could\n"
-                f"    not be emitted -- `Contracts.ExportBody`'s `atExit` is\n"
-                f"    stated at the IMAGE's exit, so a block for one export of\n"
-                f"    several cannot end where it must, and a body with a branch\n"
-                f"    is not one function of one state -- so the claim is left\n"
-                f"    open rather than proved.  The spec is the source's own; none\n"
-                f"    is guessed. -/\n"
+                f"    not be emitted -- a body with a branch is not one function\n"
+                f"    of one state, so it is not a `Refine.Block` -- so the\n"
+                f"    claim is left open rather than proved.  The spec is the\n"
+                f"    source's own; none is guessed. -/\n"
                 f"theorem {ident}_spec :\n"
                 f"    Refine.export_result_spec dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
