@@ -585,6 +585,109 @@ class TestSystemModuleCall(unittest.TestCase):
                       "the tool's contract with a reader who has not read it")
 
 
+# ── 4b. a file with SEVERAL unresolvable imports, all named at once ─────────
+#
+# `formal/imports.py`'s `unresolvable_import_errors` reports every blocker in
+# one message, one indented line per module, instead of raising on whichever
+# came first in the statement list. The measurement that asked for it is
+# `bugs/FORMAL_admitted_contracts_sweep_measurement.md`, and the part of it that
+# matters to THIS file is that a per-module breakdown drawn from a diagnostic
+# naming one of a file's blockers is a sample of how the file's imports are
+# written: fixing `subprocess` on eight files moved them from "refused for
+# `subprocess`" to "refused for `tempfile`" without moving one file out of
+# `not-answerable/host-import`.
+#
+# So the property is ORDER-INDEPENDENCE of the class and the reason, and
+# COMPLETENESS of the reason — the two are separate assertions because the rule
+# below (`mods[-1]`) gets them wrong in separate ways: it drops the other names,
+# and in a shape whose last name is whatever sorted last it also lets the sort
+# order decide the class.
+_MULTI_HOST = (
+    "build: prog.mojo imports 2 modules this backend cannot build, and every "
+    "one of them is named here rather than only the first: fixing one moves "
+    "the file to the next\n"
+    "  prog.mojo imports 'glob', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile\n"
+    "  prog.mojo imports 'tempfile', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile")
+_MULTI_MIXED = (
+    "build: prog.mojo imports 2 modules this backend cannot build, and every "
+    "one of them is named here rather than only the first: fixing one moves "
+    "the file to the next\n"
+    "  prog.mojo imports 'nope_xyz', which is not a stdlib or sibling module, "
+    "and no such file exists\n"
+    "  prog.mojo imports 'tempfile', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile")
+_MULTI_SRC = "import glob\nimport tempfile\n\ndef main():\n    return 1\n"
+
+
+class TestSeveralUnresolvableImports(unittest.TestCase):
+    def test_every_name_is_in_the_reason(self):
+        cls, reason = S.classify(False, _MULTI_HOST, source=_MULTI_SRC,
+                                 path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_HOST)
+        self.assertEqual(reason, "glob, tempfile",
+                         "the reason is the per-class breakdown's key, so a "
+                         "reason naming one of several blockers is a "
+                         "breakdown that measures import order")
+
+    def test_the_class_does_not_depend_on_which_name_is_last(self):
+        """The same set, lines swapped: same class, same reason.
+
+        This is the assertion that would fail if the rule were left as
+        `mods[-1]` over the whole message, since the two orderings disagree
+        about which name that is.
+        """
+        lines = _MULTI_HOST.splitlines()
+        swapped = "\n".join([lines[0], lines[2], lines[1]])
+        self.assertEqual(S.classify(False, _MULTI_HOST, source=_MULTI_SRC,
+                                    path="prog.mojo"),
+                         S.classify(False, swapped, source=_MULTI_SRC,
+                                    path="prog.mojo"))
+
+    def test_the_worst_reason_wins(self):
+        """A file importing a host module AND a module that does not exist is
+        blocked by the second, and filing it as host-import would file a
+        missing-module finding under "not fixable here"."""
+        cls, reason = S.classify(False, _MULTI_MIXED, source=_MULTI_SRC,
+                                 path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_UNRESOLVED)
+        self.assertIn("nope_xyz", reason)
+        self.assertIn("tempfile", reason)
+
+    def test_a_chain_is_still_the_innermost_one(self):
+        """The multi-module rule must not swallow the chain rule.
+
+        `mods[-1]` is RIGHT for a chain: the last `imports '…'` is the innermost
+        import, and naming the outer module instead would blame a module that
+        resolves perfectly well. So a message that is one import wrapping
+        another is still classified by the inner one, and by it alone.
+        """
+        cls, reason = S.classify(
+            False,
+            "build: a.mojo imports 'b', which cannot be built either: "
+            "b.mojo imports 're', which is a host module (CPython standard "
+            "library), which has no Mojo source for this backend to compile",
+            source="import b\n", path="a.mojo")
+        self.assertEqual(cls, S.CLASS_HOST)
+        self.assertEqual(reason, "re")
+
+    def test_a_single_module_keeps_the_single_sentence(self):
+        """The wording every needle in the tree is written against.
+
+        `formal/imports.py` gives a one-module file `unresolvable_import_error`
+        verbatim, so this message classifies exactly as it did before the
+        several-module shape existed.
+        """
+        cls, reason = S.classify(
+            False,
+            "build: prog.mojo imports 'nope_xyz', which is not a stdlib or "
+            "sibling module, and no such file exists",
+            source="import nope_xyz\n", path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_UNRESOLVED)
+        self.assertEqual(reason, "nope_xyz")
+
+
 # ── 4. an interpreter that cannot import the backend ─────────────────────────
 #
 # Every file in a sweep is answered by `fire.py build --formal` in a child of

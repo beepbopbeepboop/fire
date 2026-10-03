@@ -1120,7 +1120,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
     from formal.imports import (build_module_dylib, dylib_chain,
                                 imported_modules, own_module_identity,
                                 resolve_module_path,
-                                unresolvable_import_error)
+                                unresolvable_import_errors)
     mods = imported_modules(stmts)
     if not mods:
         return []
@@ -1148,18 +1148,41 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         # written concurrently by unrelated builds, so a name collision there
         # is a live hazard and not only a theoretical one.
         out_dir = os.path.join(cas_dir(), "formal-imports", arch)
-        chain = []
+        # EVERY import resolved BEFORE any of them is built, and the whole set
+        # reported if any of them is unresolvable. Raising inside the build loop
+        # named whichever came first in the statement list, so the module a file
+        # was refused for was decided by the order its imports are written in and
+        # by which modules happen to be in `HOST_MODULES` at all — the
+        # measurement is in `bugs/FORMAL_admitted_contracts_sweep_measurement.md`,
+        # where adding `subprocess.mojo` moved eight files from "refused for
+        # `subprocess`" to "refused for `tempfile`" without moving a single file
+        # out of `not-answerable/host-import`, and the per-module breakdown
+        # before and after that change measured two different things.
+        #
+        # Resolving first is also cheaper in the failure case and the same
+        # statement: a file with three unresolvable imports does not build the
+        # two libraries it could have before reporting any of them.
+        resolved = []
+        missing = []
         for mod in mods:
             path = resolve_module_path(mod, relative_to=source_path)
             if path is None:
-                # One wording for one condition, and it is BUILT next to the
-                # rules that decide which of the two reasons applies
-                # (formal/imports.py's `unresolvable_import_error`): the same
-                # error is raised there for an unresolvable import inside a
-                # DEPENDENCY, and two messages for one cause is how a real
-                # failure ends up filed under the wrong heading.
-                raise ImportBuildError(
-                    unresolvable_import_error(source_path, mod))
+                missing.append(mod)
+            else:
+                resolved.append((mod, path))
+        if missing:
+            # One wording for one condition, and it is BUILT next to the rules
+            # that decide which of the reasons applies (formal/imports.py's
+            # `unresolvable_import_error` / `unresolvable_import_errors`): the
+            # same error is raised there for an unresolvable import inside a
+            # DEPENDENCY, and two messages for one cause is how a real failure
+            # ends up filed under the wrong heading. One module keeps the
+            # single sentence verbatim, which is the wording every needle in
+            # the tree is written against.
+            raise ImportBuildError(
+                unresolvable_import_errors(source_path, missing))
+        chain = []
+        for mod, path in resolved:
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
                                            project_root=source_path,

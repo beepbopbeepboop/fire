@@ -523,8 +523,75 @@ def test_unresolvable_import_is_a_clean_error(tmpdir, _shared):
           f"{text[-400:]}")
 
 
+def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
+    """Every blocker in one diagnostic, and the SAME set whatever the order.
+
+    `unresolvable_imports` above raises inside the loop that builds the modules,
+    so it reported whichever unresolvable import came first in the statement
+    list. The measurement is in
+    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: fixing
+    `subprocess` on eight files moved them from "refused for `subprocess`" to
+    "refused for `tempfile`", no file moved out of `not-answerable/host-import`,
+    and the per-module breakdown before and after measured two different things
+    — which is a diagnostic whose subject is the ORDER of a file's import lines.
+
+    Three assertions, because each of them is a different way the property can
+    come back:
+      * all three names are in the message (completeness — a reader with three
+        modules to remove is told about three);
+      * the message is the SAME for both orders (order-independence), which is
+        what makes a census drawn from it a measurement rather than a sample of
+        how the file is written;
+      * the resolvable import is NOT named as a blocker, so "all of them" cannot
+        be satisfied by listing every import the file has.
+
+    The single-module wording is pinned by the test above, and it is a separate
+    function rather than a branch inside this one: a `refuse:` case in
+    `test_formal_run.py`, a needle in `test_formal_sweep_truth.py` and the
+    chain the sweep peels are all written against that sentence, and "several"
+    must not cost the single case its wording.
+    """
+    root = os.path.join(tmpdir, "many")
+    os.makedirs(root)
+    orderings = {
+        "alpha": "import glob\nimport tempfile\nimport sys\n",
+        "omega": "import tempfile\nimport glob\n",
+    }
+    for tag, imports in orderings.items():
+        write_tree(root, {f"{tag}.mojo":
+                          imports + "def main():\n  return 1\n"})
+    fresh_cas()
+    texts = {}
+    for tag in orderings:
+        result, out = build(root, f"{tag}.aout", expect_ok=False)
+        check(result.returncode != 0,
+              f"{tag}: an unresolvable import must fail the build")
+        check(not os.path.isfile(out),
+              f"{tag}: an executable was written despite unresolved imports")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("Traceback" not in text,
+              f"{tag}: an unresolved import should be a clean error:\n"
+              f"{text[-400:]}")
+        for mod in ("glob", "tempfile"):
+            check(mod in text,
+                  f"{tag}: the diagnostic names {mod!r} nowhere, so fixing it "
+                  f"only reveals the next one:\n{text[-400:]}")
+        check("'sys'" not in text,
+              f"{tag}: the message lists an import that RESOLVES "
+              f"(formal/hostmods/sys.mojo), so \"every blocker\" has become "
+              f"\"every import\":\n{text[-400:]}")
+        texts[tag] = text
+    # The two files differ only in the order of two import lines, so the
+    # sentences have to be identical once the file's own name is set aside.
+    same = texts["alpha"].replace("alpha", "F")
+    other = texts["omega"].replace("omega", "F")
+    check(same == other,
+          "the same file with its import lines in the other order produced a "
+          f"different diagnostic:\n  {same.strip()[-300:]}\n  "
+          f"{other.strip()[-300:]}")
+
+
 def test_no_import_needs_no_dylib(tmpdir, _shared):
-    """The common case must stay exactly as cheap as it was."""
     root = os.path.join(tmpdir, "solo")
     os.makedirs(root)
     write_tree(root, {"prog.mojo": "def main():\n  return 7\n"})
@@ -2179,6 +2246,8 @@ TESTS = [
     ("a mutual import terminates and works", test_import_cycle_terminates),
     ("an unresolvable import is a clean error",
      test_unresolvable_import_is_a_clean_error),
+    ("every unresolvable import is named, whatever the order",
+     test_several_unresolvable_imports_are_all_named),
     ("a program with no imports builds no dylib",
      test_no_import_needs_no_dylib),
     ("a struct method is callable across modules",

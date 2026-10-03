@@ -1431,6 +1431,44 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
             f"is {kind}")
 
 
+def unresolvable_import_errors(source_path: str, module_names) -> str:
+    """The same sentence for a file with SEVERAL unresolvable imports, one line each.
+
+    **One sentence per module, sorted, and every module named**, which is what
+    makes the diagnostic a property of the FILE rather than of the order its
+    imports happen to be written in. One-at-a-time was the only shape here for
+    years, and its measurement is
+    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: a file importing
+    `subprocess`, `tempfile` and `glob` was refused for whichever came first in
+    its statement list, so which module the diagnostic — and any census built
+    from it — named changed when an unrelated import was added anywhere in the
+    file. Fixing `subprocess` moved the file from "refused for `subprocess`" to
+    "refused for `tempfile`", and a per-module breakdown drawn from those names
+    measured a different thing before and after a change that moved no file.
+
+    The SORT is what makes it order-independent, and the per-module lines are
+    what makes it complete: a reader who has three modules to remove is told
+    about three, and `tools/formal_sweep.py` can classify a file by the whole
+    set instead of by whichever name it happened to parse last.
+
+    One module still gets `unresolvable_import_error`'s single sentence verbatim,
+    because that is the wording every needle in the tree — a `refuse:` case, a
+    message a test asserts on, a chain the sweep peels — is written against, and
+    "several" must not cost the single case its wording.
+    """
+    mods = sorted(set(module_names))
+    if len(mods) == 1:
+        return unresolvable_import_error(source_path, mods[0])
+    lines = "\n".join(f"  {unresolvable_import_error(source_path, m)}"
+                      for m in mods)
+    return (f"{os.path.basename(source_path)} imports {len(mods)} modules "
+            f"this backend cannot build, and every one of them is named here "
+            f"rather than only the first: fixing one moves the file to the "
+            f"next, and a diagnostic that reports one blocker at a time is a "
+            f"diagnostic that has to be re-run to discover the rest\n"
+            f"{lines}")
+
+
 def imported_struct_defs(source_path: str, stmts: list,
                          project_root: str = None) -> list:
     """The StructDefs reachable through the modules `source_path` imports.

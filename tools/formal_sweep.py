@@ -583,6 +583,21 @@ _EXTERN_MARK = "import(s) dyld cannot resolve"
 # before and is now fully wrong.
 _EXTERN_BUILD_MARK = "symbol(s) that nothing provides"
 _IMPORT_RE = re.compile(r"imports '([^']+)'")
+# ONE message naming SEVERAL of a file's unresolvable imports, one indented
+# line each, which is what `formal/imports.py`'s `unresolvable_import_errors`
+# produces when a file has more than one. It exists because `_IMPORT_RE` alone
+# cannot read it: `mods[-1]` below is right for a CHAIN (the innermost import is
+# the one with no source) and wrong for this shape, where every name is at the
+# SAME level and the last one is whatever sorted last. That is the measurement in
+# `bugs/FORMAL_admitted_contracts_sweep_measurement.md` — a per-module
+# breakdown drawn from a diagnostic that named one of a file's blockers decided
+# by the order its imports are written in.
+#
+# Matched on the LEAD, which is the part only this shape has, so a chained
+# message (one import wrapping another) cannot be read as a list of siblings.
+_MULTI_IMPORT_RE = re.compile(
+    r"imports (?P<n>\d+) modules this backend cannot build[^\n]*\n"
+    r"(?P<body>(?:[ \t]+.*\n?)*)")
 # A quoted dotted identifier, whatever the sentence around it says. Used only
 # as a CANDIDATE, confirmed against the file's own source below — a codegen
 # diagnostic quotes nothing of this shape (`self.<field>` is in backticks), and
@@ -1399,6 +1414,31 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     target = _target_limit(_terminal_reason(detail))
     if target:
         return target
+    # SEVERAL of this file's own imports, all at one level. Handled before the
+    # single-import rule below, which would take the last name in the message —
+    # and here the last name is the alphabetically last one, so the class and
+    # the breakdown would be decided by sorting rather than by the file.
+    multi = _MULTI_IMPORT_RE.search(detail)
+    if multi:
+        names = sorted(set(_IMPORT_RE.findall(multi.group("body"))))
+        if names:
+            # The WORST of the reasons the build gave, not the best: a file that
+            # imports one host module and one module that does not exist at all
+            # is blocked by the second, and calling the whole file host-import
+            # would file a missing-module finding under "not fixable here".
+            if _UNRESOLVED_MARK in multi.group("body"):
+                cls = CLASS_UNRESOLVED
+            elif _HOST_MARK in multi.group("body"):
+                cls = CLASS_HOST
+            else:
+                # A wording this tool has not learned to read, kept in its own
+                # bucket for the reason the single-import rule keeps one: the
+                # backend refused for a reason that was not recognised, and
+                # counting that as coverage is what this classification exists
+                # to prevent.
+                cls = CLASS_UNKNOWN
+            return cls, (", ".join(names) if cls != CLASS_UNKNOWN
+                         else f"import message not recognised: {_short(detail)}")
     mods = _IMPORT_RE.findall(detail)
     if mods:
         # The build's own two wordings, which partition the ImportBuildError
