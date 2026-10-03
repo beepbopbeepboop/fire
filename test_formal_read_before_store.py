@@ -374,7 +374,7 @@ CASES = [
     ("try_else_clause_still_refuses_an_unstored_read",
      "    try:\n        if n:\n            p = 1\n    except ValueError:\n"
      "        pass\n    else:\n        sink(p)\n    return 0\n", "refuse"),
-    # ── a `finally` and "the body may have RAISED" ──────────────────────────
+    # ── a `finally` and every point the body LEAVES EARLY ──────────────────
     # The clause runs on every way out, including an exception, and that one
     # path is not one of the arms — so it was modelled separately, as a fallback
     # used when the body has no fall-through exit, and it pointed at the try's
@@ -387,9 +387,10 @@ CASES = [
     ("try_finally_clause_reads_what_the_body_stored_ok",
      "    try:\n        exes = []\n        sink(n)\n        return 0\n"
      "    finally:\n        sink(exes)\n", "ok"),
-    # …and the edge is still there for the store it exists to catch: a name
-    # bound LATER in the body is skipped by every path that raises before it, so
-    # the clause reads an unbound name when `n` is falsey and CPython raises.
+    # …and a name bound LATER in the body is not in the clause's IN set: the
+    # clause is emitted at every point the body leaves early (`_flush_pending_
+    # finally` walks the pending frames at the `return`/`raise`/`break`/
+    # `continue` site), so it reads whatever the register held at THAT point.
     ("try_finally_clause_still_refuses_a_later_store",
      "    try:\n        p = 1\n        if n:\n            q = 2\n"
      "    finally:\n        sink(q)\n    return 0\n", "refuse"),
@@ -403,6 +404,80 @@ CASES = [
     ("finally_does_not_store_refused",
      "    try:\n        pass\n    finally:\n        pass\n"
      "    return p\n", "refuse"),
+    # ── the rule that replaced "the body may have raised", in both directions ──
+    #
+    # The predecessor rule used to be `arm_exits or [body_first]` — the arms'
+    # fall-through, or the body's FIRST block when the body had no fall-through
+    # at all — and the reason it gave was an EXCEPTION. This backend has none:
+    # `_emit_try` skips the handler arms and `RaiseStmt` flushes the pending
+    # finallys and then `exit(1)`s, so that path does not exist in the emitted
+    # image at all.
+    #
+    # What DOES exist is the early-exit flush, and the row below is the program
+    # it hid: `body_exits` is non-empty here (the `if`'s false arm falls
+    # through), so the old rule added NO edge and the build accepted it. The
+    # arm64 image ran it as
+    #
+    #     8432255232        # sink's argument: a word nobody wrote
+    #     exit 100          # CPython: UnboundLocalError, exit 1
+    #
+    # which is the worst outcome this path has — right-looking, exits 0, and the
+    # number changes with the build. `test_formal_run.py` carries the same
+    # program as a `refuse:` row on both architectures.
+    ("finally_clause_runs_at_every_point_the_body_leaves_early_refused",
+     "    try:\n        if n > 0:\n            return 100\n        v = 7\n"
+     "    finally:\n        sink(v)\n    return 0\n", "refuse"),
+    # …and the inverse, which is the direction a fix like this can get wrong:
+    # when the clause's only entries are points that HAVE stored the name, it
+    # is a dominating store and the check must stay silent. The `return 0` is
+    # after `v = 7` on every path, so the clause reads a bound name.
+    ("finally_after_every_store_is_still_ok",
+     "    try:\n        v = 7\n        if n > 0:\n            return 100\n"
+     "        return 0\n    finally:\n        sink(v)\n", "ok"),
+    # …and the same clause when NO body path falls through, which is where the
+    # copies come from alone. `arm_exits` is empty here, so a rule that ran the
+    # clause only from the fall-through would not emit a copy at all and would
+    # miss this; the two `return`s are the only entries, and one of them is
+    # before the store.
+    ("finally_is_still_checked_when_no_body_path_falls_through_refused",
+     "    try:\n        if n > 0:\n            return 1\n        v = 7\n"
+     "        return 0\n    finally:\n        sink(v)\n", "refuse"),
+    # A `break` that ESCAPES the try flushes the clause (`_flush_pending_
+    # finally(self._loops[-1]["fin_depth"])` with the try's frame below that
+    # depth), and it does so before the store — so the clause reads `v` unbound
+    # for `n == 0`, which is the one probe value that breaks out on the first
+    # iteration.
+    ("break_out_of_the_try_reaches_the_clause_refused",
+     "    for i in range(3):\n        try:\n            if n > 0:\n"
+     "                break\n            v = 7\n        finally:\n"
+     "            sink(v)\n    return 0\n", "refuse"),
+    # …and a `break` out of a loop the BODY opened does not: control stays
+    # inside the body and reaches the clause by falling through, past the store.
+    # The row that says the two are not the same edge.
+    ("break_inside_the_try_body_does_not_reach_the_clause_ok",
+     "    try:\n        v = 7\n        for i in range(3):\n"
+     "            if n > 0:\n                break\n        sink(n)\n"
+     "    finally:\n        sink(v)\n    return 0\n", "ok"),
+    # ── the clause's own fall-through, and the dead code after it ──────────
+    # When neither the body nor the `else` can fall through, `_emit_try`
+    # suppresses the clause's fall-through (`need_fallthrough = False`, once a
+    # `return`/`raise` has flushed the frame) and the statement after the try
+    # is DEAD. The old rule judged it on the state at the body's first block,
+    # which refused `try: … total = … / finally: cleanup` then `print(total)`
+    # on seven files of this repository — every one of them a program CPython
+    # runs, because nothing ever reaches the `print`. `_definitely_stored`
+    # top-initializes a block with no predecessor, so an empty `pending` here
+    # answers it the safe way.
+    ("dead_code_after_an_always_returning_try_is_not_a_refusal_ok",
+     "    try:\n        total = 1\n        if n:\n            total = 2\n"
+     "        return 0\n    finally:\n        sink(n)\n    return total\n",
+     "ok"),
+    # …and the LIVE version of the same shape: the body falls through, so the
+    # clause is reached and `total` dominates it.
+    ("a_fall_through_body_still_reaches_the_clause_ok",
+     "    try:\n        total = 1\n        if n:\n            total = 2\n"
+     "        sink(n)\n    finally:\n        sink(n)\n    return total\n",
+     "ok"),
     # `except ... as e` binds `e` for the handler only. Treating it as defined
     # everywhere is the conservative direction (it can only ever hide a report,
     # never invent one), and this row is the pin for that decision.
@@ -897,10 +972,81 @@ TRY_ELSE_SHAPES = [
     # 5 the handler, 6 the `else`'s `sink(p)`: the clause is entered from the
     # body's own exits — the branch's false edge and its storing arm — and from
     # neither the header nor anything outside the body.
-    ("try_else_is_entered_from_every_body_exit",
+("try_else_is_entered_from_every_body_exit",
      "    q = 1\n    try:\n        if n:\n            p = 1\n"
      "    except ValueError:\n        pass\n    else:\n        sink(p)\n",
-     6),
+      6),
+]
+
+
+# (name, body, the copies of the `finally` clause and each one's predecessors,
+#  the block the statement after the try lands in, a block that must be
+#  UNREACHABLE)
+#
+# The same argument as the two groups above, for the `finally` clause — and the
+# group that matters most, because the rule it pins was wrong in the direction
+# that produces a silently incorrect binary rather than a refusal.
+#
+# `_flush_pending_finally` emits a pending clause's statements AT the
+# `return`/`raise`/`break`/`continue` site, and `_emit_try` emits them again at
+# the fall-through, so the image holds ONE COPY PER EARLY EXIT plus one — and
+# only the last is followed by the statement after the try. Hence the list of
+# copies rather than a single block: a rule that entered the clause once from
+# both sets would say the code after the try is reached with the intersection
+# over all of them, which is missing every name stored after an early exit, and
+# refused `test_gimple_runner.py:263` — `try: py = run(…); if …: return;
+# want_out = py.stdout / finally: unlink(entry)`, then `got.stdout == want_out`
+# — which is the ordinary "compute it, then compare" shape.
+#
+# What the rule replaced was `arm_exits or [body_first]`, justified by "the body
+# may have raised". This backend has no unwinder — `_emit_try` skips the handler
+# arms and `RaiseStmt` flushes and then `exit(1)`s — so that edge was a path the
+# emitted image does not have, and the path it does have was missing.
+FINALLY_SHAPES = [
+    # 0 entry, 1 the try (header), 2 the body's `if`, 3 `return 100`,
+    # 4 `v = 7`, 5 the FALL-THROUGH copy of the clause, 6 the copy emitted at
+    # `return 100`, 7 `return 0`.
+    #
+    # The early copy is entered from block 3, which has not stored `v`, so `v`
+    # is missing from ITS IN set and the build refuses — which is what the
+    # binary was getting wrong. The fall-through copy is entered from block 4,
+    # which has, and `v` is in its IN set. Neither copy is entered from the
+    # body's first block 2, which is the point the old rule used.
+    ("finally_is_copied_to_every_point_the_body_leaves_early",
+     "    try:\n        if n > 0:\n            return 100\n        v = 7\n"
+     "    finally:\n        sink(v)\n    return 0\n", [(5, [4]), (6, [3])],
+     7, None),
+    # 0 entry, 1 the try, 2 `v = 7`, 3 the body's `if`, 4 and 5 the two
+    # `return`s, 6 the clause. No body path falls through, so there is no
+    # fall-through copy at all — `_emit_try` set `need_fallthrough = False` —
+    # and both entries are AFTER the store, so `v` is in the copy's IN set and
+    # the check is silent. The direction a fix that only ever adds predecessors
+    # gets wrong.
+    ("no_fall_through_copy_when_no_body_path_falls_through",
+     "    try:\n        v = 7\n        if n > 0:\n            return 100\n"
+     "        return 0\n    finally:\n        sink(v)\n", [(6, [4, 5])],
+     None, None),
+    # 0 entry, 1 the try, 2 `total = 1`, 3 the body's `if`, 4 `total = 2`,
+    # 5 `return 0`, 6 the clause, 7 `return total`. Block 7 has NO predecessor
+    # and is therefore unreachable, which is the whole of the dead-code class:
+    # the old rule judged it on the state at the body's FIRST block, and that
+    # is what refused `try: … total = … / finally: cleanup` then
+    # `print(total)` on seven files of the repository — every one of them a
+    # program CPython runs, because nothing ever reaches the `print`.
+    ("nothing_follows_a_finally_whose_body_cannot_fall_through",
+     "    try:\n        total = 1\n        if n:\n            total = 2\n"
+     "        return 0\n    finally:\n        sink(n)\n    return total\n",
+     [(6, [5])], None, 7),
+    # …and the early copies are checked even when there is no fall-through copy
+    # to hang them off, which is the row a rule that runs the clause only from
+    # `arm_exits` gets wrong: 0 entry, 1 the try, 2 the body's `if`,
+    # 3 `return 1`, 4 `v = 7`, 5 `return 0`, 6 the clause's one copy, entered
+    # from both exits. `v` is missing from block 3's OUT, so the copy reads it
+    # unbound — and CPython raises `UnboundLocalError` for exactly that.
+    ("the_early_copies_are_checked_with_no_fall_through_copy",
+     "    try:\n        if n > 0:\n            return 1\n        v = 7\n"
+     "        return 0\n    finally:\n        sink(v)\n", [(6, [3, 5])],
+     None, None),
 ]
 
 
@@ -954,6 +1100,63 @@ def check_entry_shape() -> list:
                 bad.append(f"{name}: block {b.index} lists the entry block as "
                            f"a predecessor; only the body's first block "
                            f"({first}) may")
+    return bad
+
+
+def check_finally_shape() -> list:
+    """Every failure in FINALLY_SHAPES, as strings."""
+    bad = []
+    for name, body, copies, after, dead in FINALLY_SHAPES:
+        fn = the_function(parse_module("def probe(n):\n" + body,
+                                       filename=f"{name}.mojo"))
+        blocks, _entry = M._build_cfg(fn.body)
+        head = next(b.index for b in blocks
+                    if b.stmts and type(b.stmts[0]).__name__ == "TryStmt")
+        clause = set(c for c, _p in copies)
+        for c, want_preds in copies:
+            if not 0 <= c < len(blocks):
+                bad.append(f"{name}: the graph has {len(blocks)} blocks and the "
+                           f"row names the clause's copy at {c}, so the shape "
+                           f"the rule builds is not the shape this row pins")
+                continue
+            got = sorted(blocks[c].preds)
+            if got != sorted(want_preds):
+                bad.append(f"{name}: the `finally` clause's copy at {c} is "
+                           f"entered from {got}, not {sorted(want_preds)}")
+            if not blocks[c].preds:
+                bad.append(f"{name}: the `finally` clause's copy at {c} has no "
+                           f"predecessor, so the fixpoint reads it as "
+                           f"unreachable and the clause is never checked — every "
+                           f"early exit in the body reaches it")
+        body_first = next(b.index for b in blocks[head + 1:]
+                          if b.preds == [head])
+        for c in clause:
+            if not 0 <= c < len(blocks):
+                continue
+            if body_first in blocks[c].preds:
+                bad.append(f"{name}: the `finally` clause's copy at {c} is "
+                           f"entered from the body's FIRST block {body_first}, "
+                           f"which is the fallback the exception reading used — "
+                           f"this backend has no unwinder, so no point can raise "
+                           f"into the clause")
+        # The clause's FALL-THROUGH copy is the only one the statement after the
+        # try follows, and `_emit_try` emits it only where the body falls
+        # through. `dead` is the block that must therefore have no predecessor
+        # at all when no path does.
+        fall = [c for c, _p in copies
+                if 0 <= c < len(blocks) and blocks[c].succs]
+        if after is not None:
+            reached = sorted({b.index for b in blocks
+                              for c in fall if c in b.preds})
+            if reached != [after]:
+                bad.append(f"{name}: the statement after the try is in "
+                           f"{reached or 'no block'}, not {after} — only the "
+                           f"fall-through copy of the clause is followed")
+        if dead is not None and (dead >= len(blocks) or blocks[dead].preds):
+            bad.append(f"{name}: block {dead} follows the `finally` clause and "
+                       f"is reachable, but no body path "
+                       f"falls through, so `_emit_try` suppresses the clause's "
+                       f"fall-through and the code after the statement is dead")
     return bad
 
 
@@ -1103,12 +1306,16 @@ def main():
     for problem in check_try_else_shape():
         failed += 1
         print(f"  FAIL  try-else-shape: {problem}")
+    for problem in check_finally_shape():
+        failed += 1
+        print(f"  FAIL  finally-shape: {problem}")
     for problem in check_own_names():
         failed += 1
         print(f"  FAIL  own-names: {problem}")
     print(f"read-before-store: PASS={passed} FAIL={failed} "
           f"({len(ENTRY_SHAPES)} graph shapes, "
           f"{len(TRY_ELSE_SHAPES)} try/else graph shapes, "
+          f"{len(FINALLY_SHAPES)} finally graph shapes, "
           f"{len(OWN_NAMES)} which-names rows)")
     return 1 if failed else 0
 
