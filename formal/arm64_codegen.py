@@ -6761,6 +6761,32 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
+        # A CALLEE THIS FUNCTION BINDS.  `func(i)` inside a function that took
+        # `func` as a parameter is a call through a VALUE, and `name not in
+        # self._functions` below cannot tell it from a call to a C symbol: both
+        # are "a name this unit does not compile", and the extern path's job is
+        # to emit a call to a symbol, so it emitted a call to a symbol spelled
+        # `func`.  The image was then caught by the bind audit four stages
+        # later, as a symbol nothing on the link line provides — a true
+        # statement, and one that says nothing about the construct, so
+        # `stdlib/std/algorithm/backend/cpu/map.mojo` (whose only statement is
+        # `func(i)`) was classified `not-answerable/unresolved-extern` rather
+        # than as the codegen gap it is.
+        #
+        # Asked HERE, at the one line that takes the extern path, and not in the
+        # link audit: a name a function binds is a word in a register, a spill
+        # slot, a receiver's frame or a `__DATA` cell, so there is no code
+        # address in it for a call to land on.  The decision and the words are
+        # `model.callee_is_a_bound_value` / `model.callee_value_refusal`, read
+        # by x86-64 from the same two, so the architectures cannot disagree
+        # about one call.
+        if not is_extern_call and name not in self._functions \
+                and M.callee_is_a_bound_value(self._cur_fn, name):
+            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
+            # flattens to `c`, and a refusal that names `c` sends the reader
+            # to the wrong line. `member_chain_text` prints both spellings.
+            raise CodegenError(M.callee_value_refusal(
+                name, self._cur_fn, M.member_chain_text(e.func)))
         is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the
