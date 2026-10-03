@@ -63,6 +63,39 @@ and the floor-division decision as miscompiles, hundreds of times, and the
 signal would be worthless.
 
     python3 tools/formal_fuzz.py --minimize path/to/prog.mojo [--kind x86]
+
+ONE TOOL, BOTH ARCHITECTURES
+---------------------------
+`--backends x86_64,arm64` (the default) is the whole of the differential claim:
+each program is built twice and the two images are compared with each other as
+well as with CPython, because a bug both machines share is invisible to a
+CPython-only check whenever CPython is what is wrong about the MODEL. Run it
+with `--backends x86_64` to halve the cost when only one architecture is in
+scope. The arm64 and x86-64 fuzz claims are this file with a different
+`--backends`; a second generator would be a second set of oracle bugs.
+
+WHAT IS NOT COVERED, so the next reader does not have to measure it
+-----------------------------------------------------------------
+`--mix` names the construct families: `core` (arithmetic, comparisons, loops,
+augmented assignment), `calls` (module-level helpers, nested calls, tail
+recursion), `strings`, `lists`, `classes` (a `class` with fields, so the frame
+receiver). Deliberately absent, each for a stated reason:
+
+  * `struct` with DECLARED fields (`var a: int`) — `var` is a keyword CPython
+    cannot parse, so the two engines would stop running the same text. `class`
+    covers the same frame-receiver machinery in a spelling both accept.
+  * pointers and `malloc` — every value is a word here; `Pointer[Int32]` and
+    the augmented-assignment ladder are in `test_formal_x86_64_parity.py`.
+  * floats — this path is int-only (a float literal truncates), so a `double`
+    is a word and a fuzz oracle built on one would be testing the model, not
+    the lowering.
+  * a variadic `printf` with more than five operands — arm64 refuses a variadic
+    call whose arguments pass the register file, so a program with more than
+    seven of them is not a two-architecture case at all. The stack-argument
+    convention is covered by `test_formal_run.py`'s `BOTH_ARCH_CASES` ladder.
+  * file descriptors, dylibs, imports, `comptime` — the families the module
+    suites own; a fuzz program that opened a file would make the comparison
+    depend on the filesystem.
 """
 import argparse
 import json
