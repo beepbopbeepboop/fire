@@ -2767,6 +2767,31 @@ def _build_cfg(body) -> tuple:
                 # which is what `bugs/FORMAL_read_before_store_what_is_left.md`
                 # measured as `try: … total = … / finally: cleanup` then
                 # `print(total)` refused on seven files.
+                #
+                # ── AND THE CLAUSE IS EMITTED MORE THAN ONCE, which is not a
+                # detail of the same rule but a second half of it ────────────
+                #
+                # `_flush_pending_finally` emits the clause's statements AT an
+                # early exit, and `_emit_try` emits them again at the
+                # fall-through — so the image holds one copy per early exit plus
+                # one, and only the LAST is followed by the statement after the
+                # try. ONE `run` entered from both sets says the code after the
+                # try is reached with the clause's IN over ALL of them, and that
+                # IN is an intersection: a name stored after an early exit is
+                # missing from it, so the statement after the try was refused
+                # for a name the fall-through path had stored.
+                #
+                # Measured on `test_gimple_runner.py:263` — `try: py = run(…);
+                # if py.returncode != 0 …: return; want_out = py.stdout /
+                # finally: unlink(entry)`, then `got.stdout == want_out` — which
+                # is the ordinary "compute it, then compare" shape and which the
+                # single-`run` form refused.
+                #
+                # So the clause is run once per copy: once from the falling-
+                # through entries, whose exits are what the statement after the
+                # try is reached from; and once from the early exits, whose exits
+                # reach nothing, because each of those copies is emitted at a
+                # point the function or the loop leaves.
                 fin = getattr(s, "finally_body", None)
                 if fin is not None:
                     early = _leaves_early(blocks, body_start, body_end,
@@ -2774,9 +2799,18 @@ def _build_cfg(body) -> tuple:
                     if else_start is not None:
                         early += _leaves_early(blocks, else_start, else_end,
                                                outer_loops)
-                    fin_exits = run(fin, loops, arm_exits + early)
-                    pending = (fin_exits
-                               if (body_exits or else_exits) else [])
+                    if not arm_exits:
+                        # No copy is emitted at a fall-through, so nothing
+                        # follows the statement.
+                        pending = []
+                    else:
+                        pending = run(fin, loops, arm_exits)
+                    # The early copies are emitted either way, and each of them
+                    # reads the frame as it stood at that point, so a body whose
+                    # every path leaves is exactly where the clause's reads have
+                    # to be checked.
+                    if early:
+                        run(fin, loops, early)
                 else:
                     pending = arm_exits
                 cur = None
