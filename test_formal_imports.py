@@ -869,6 +869,65 @@ def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
           f"{text[-300:]}")
 
 
+def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
+    """`shlex` is a standard-library module, so the diagnostic says so.
+
+    `formal/imports.py`'s two tiers are how anything downstream says WHY a
+    file is out of reach — `host_module_tier` is what a coverage report asks —
+    and a name in NEITHER tier falls through to module RESOLUTION and is
+    reported "not a stdlib or sibling module, and no such file exists". For
+    `shlex` that sentence is false: it is a standard-library module, and it is
+    the one diagnostic in this family that misidentifies what kind of thing
+    the name is. A false statement about the TARGET, in a message nobody wrote
+    a rule for.
+
+    Which tier is a judgement and not a formality, so both halves are checked:
+    the tier decides the wording (`unresolvable_import_error` asks
+    `_is_host_module`, not which tier), so a name classified into the wrong
+    one gives a true sentence for the wrong reason. `shlex` is `modelled` and
+    not `unreachable` because it is pure computation over strings — a state
+    machine over a byte string, the same shape as `re` and `fnmatch`, both
+    written. The streaming `shlex.shlex` reader is a generator over
+    `readline`, which is the `fnmatch.iglob` shape and is not in reach by the
+    same argument; `split`/`quote`/`join` are.
+
+    The premise is asserted against CPython's own list rather than trusted:
+    the whole failure is a name that IS in the standard library being reported
+    as not one."""
+    import sys as _sys
+    import formal.imports as I
+    check("shlex" in _sys.stdlib_module_names,
+          "precondition: shlex is a CPython standard-library module, which is "
+          "the fact the diagnostic used to deny")
+    check("shlex" in I.HOST_MODELLED,
+          "shlex is not in HOST_MODELLED: it needs nothing a freestanding "
+          "image does not have, so calling it unreachable would be a "
+          "permanent-fact claim about the target and it is not one")
+    check(not I._host_tier_conflicts(),
+          "a name in two tiers is a partition bug: %s"
+          % I._host_tier_conflicts())
+    check(I.host_module_tier("shlex") == "modelled",
+          "host_module_tier('shlex') is %r, so a coverage report counts it as "
+          "neither tier" % I.host_module_tier("shlex"))
+    root = os.path.join(tmpdir, "shlex")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": "import shlex\ndef main():\n  return 1\n"})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    check(result.returncode != 0,
+          "a host-module import is still refused — this test is about the "
+          "WORDING, and a build that succeeded would be a different bug")
+    text = (result.stderr or "") + (result.stdout or "")
+    check("host module" in text,
+          "the refusal must name the real reason (a CPython host module): "
+          f"{text[-300:]}")
+    check("not a stdlib or sibling module" not in text,
+          "the refusal still calls a standard-library module something that "
+          f"does not exist: {text[-300:]}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -2211,6 +2270,8 @@ TESTS = [
      test_a_relative_import_at_the_root_builds_one_library),
     ("a host module is refused despite a same-named sibling",
      test_host_module_still_refused_despite_same_named_sibling),
+    ("a standard-library module in no tier is not reported as a typo",
+     test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
