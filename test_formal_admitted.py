@@ -35,6 +35,7 @@ reaches past the answer is an unproved assertion wearing a proof's clothes.
   registry   the partition, the Lean shapes, the scope rule, the ratchet
   emitted    the generated Lean carries one countable `sorry` per contract
   subprocess / ctypes / fcntl / futures / threading   the differential groups
+  surface     the MEASURED call surface builds and refuses, on both backends
   runtime    an admitted call REFUSES at run time, with a status that cannot be
              mistaken for a child's
 """
@@ -90,7 +91,9 @@ ADMITTED_COUNTS = {
     "shutil": 0,
     "stat": 0,
     "struct": 0,
-    "subprocess": 7,
+    "subprocess": 12,               # run/call/check_call/check_output/getoutput/
+                                   # getstatusoutput/Popen + popen_{wait,poll,
+                                   # kill,terminate,communicate}
     "sys": 0,
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
     "time": 0,
@@ -534,11 +537,283 @@ def group_subprocess(tmpdir, cas_root, verbose):
     want_bs = " ".join(str(_cp_bs(v)) for v in (-1, 0))
     check(bs == [want_bs],
           f"subprocess.validate_bufsize: image {bs}, CPython [{want_bs!r}]")
+
+    # ── the wrappers' own keyword rules ───────────────────────────────────────
+    # `run` and `check_output` are not `Popen`; they are three lines of argument
+    # checking wrapped around it, and all 508 of this repository's
+    # `capture_output=` call sites sit inside those three lines.  These rows are
+    # the second half of the differential claim: the codes are read out of the
+    # module source (`model_const`, never written here) AND each row's
+    # expectation is CPython's own exception for the same real keyword
+    # combination.  The `capture_output=False` row is in the table on purpose —
+    # it is the row that shows the rule is about PRESENCE and not truth, which a
+    # table of only `capture_output=True` would not distinguish from
+    # `capture_output` being ignored entirely.
+    KW = {n: model_const("subprocess", n) for n in
+          ("ARG_OK", "ARG_STDIN_AND_INPUT", "ARG_STDOUT_AND_CAPTURE",
+           "ARG_STDOUT_NOT_ALLOWED", "ARG_CHECK_NOT_ALLOWED")}
+
+    def _verdict(fn, **kw):
+        """CPython's exception CLASS for `fn(**kw)`, or None when it accepted it.
+
+        `accepted` is separated from the rest by KIND the same way the `args`
+        table above separates an `OSError` from a `TypeError`: a refusal is
+        `ValueError` or `TypeError` and a host failure is an `OSError` subclass,
+        so a row that says "accepted" asserts CPython got past the argument check
+        and failed where this table cannot see.
+        """
+        try:
+            fn([sys.executable, "-c", "pass"], **kw)
+            return None
+        except (ValueError, TypeError, OSError) as e:
+            return type(e).__name__
+
+    def _kw_row_agrees(expect, w):
+        """Does CPython's verdict match the code the model returned?
+
+        `expect` says whether the model claims CPython refused.  When it does,
+        CPython must have raised a `ValueError` and nothing else — a `TypeError`
+        is a different refusal and an `OSError` is not a refusal at all.  When
+        the model says "accepted", CPython must NOT have raised a `ValueError`
+        or a `TypeError`; an `OSError` or no exception at all both mean it got
+        past the wrapper's checks, which is all this table claims.
+        """
+        if expect != KW["ARG_OK"]:
+            return w == "ValueError"
+        return w not in ("ValueError", "TypeError")
+
+    run_rows = [
+        # (name, model's (has_input, has_stdin, capture_output, has_stdout,
+        #  has_stderr), expected code, the keyword combination CPython gets)
+        ("nothing",         (0, 0, 0, 0, 0), KW["ARG_OK"], {}),
+        ("input+stdin",     (1, 1, 0, 0, 0), KW["ARG_STDIN_AND_INPUT"],
+         dict(input=b"x", stdin=S.PIPE)),
+        ("capture+stdout",  (0, 0, 1, 1, 0), KW["ARG_STDOUT_AND_CAPTURE"],
+         dict(capture_output=True, stdout=S.PIPE)),
+        ("capture+stderr",  (0, 0, 1, 0, 1), KW["ARG_STDOUT_AND_CAPTURE"],
+         dict(capture_output=True, stderr=S.PIPE)),
+        # THE ORDER ROW.  CPython checks `input`/`stdin` first, so this
+        # combination raises that message and not the `capture_output` one; a
+        # model that checked them the other way round would agree on four rows
+        # out of five and be wrong about the one a caller hits when it passes
+        # both.
+        ("input+stdin+capture", (1, 1, 1, 1, 0), KW["ARG_STDIN_AND_INPUT"],
+         dict(input=b"x", stdin=S.PIPE, capture_output=True)),
+        ("capture=False+stdout", (0, 0, 0, 1, 0), KW["ARG_OK"],
+         dict(capture_output=False, stdout=S.PIPE)),
+    ]
+    got = _run("sprun", ["import subprocess", "", "def main():"] +
+               [f'    printf("%lld\\n", subprocess.validate_run('
+                f'{", ".join(str(v) for v in row[1])}))'
+                for row in run_rows], tmpdir, cas_root)
+    bad = []
+    for (name, model_args, expect, kw), g in zip(run_rows, got):
+        if int(g) != expect:
+            bad.append(f"run/{name}: image {g}, the model's own table says "
+                       f"{expect}")
+            continue
+        w = _verdict(S.run, **kw)
+        if not _kw_row_agrees(expect, w):
+            bad.append(f"run/{name}: the model says {expect} and CPython "
+                       f"raised {w or 'nothing'}")
+    check(not bad, "subprocess.validate_run disagrees with CPython:\n    "
+                   + "\n    ".join(bad))
+
+    co_rows = [
+        ("stdout kwarg",  (1, 0, 0, 0, 0), KW["ARG_STDOUT_NOT_ALLOWED"],
+         dict(stdout=S.PIPE)),
+        ("check kwarg",   (0, 1, 0, 0, 0), KW["ARG_CHECK_NOT_ALLOWED"],
+         dict(check=True)),
+        # `check_output` forwards to `run`, so `capture_output` raises run's
+        # message and not `check_output`'s own — measured, and the reason this
+        # is ONE function in the model.
+        ("capture",       (0, 0, 0, 0, 1), KW["ARG_STDOUT_AND_CAPTURE"],
+         dict(capture_output=True)),
+        ("clean",         (0, 0, 0, 0, 0), KW["ARG_OK"], {}),
+    ]
+    got = _run("spco", ["import subprocess", "", "def main():"] +
+               [f'    printf("%lld\\n", subprocess.validate_check_output('
+                f'{", ".join(str(v) for v in row[1])}))'
+                for row in co_rows], tmpdir, cas_root)
+    bad = []
+    for (name, model_args, expect, kw), g in zip(co_rows, got):
+        if int(g) != expect:
+            bad.append(f"check_output/{name}: image {g}, the model's own table "
+                       f"says {expect}")
+            continue
+        w = _verdict(S.check_output, **kw)
+        if not _kw_row_agrees(expect, w):
+            bad.append(f"check_output/{name}: the model says {expect} and "
+                       f"CPython raised {w or 'nothing'}")
+    check(not bad, "subprocess.validate_check_output disagrees with CPython:\n    "
+                   + "\n    ".join(bad))
+
+    # ── the constructors whose FIELD is a word ────────────────────────────────
+    # 88 call sites in this tree spell `TimeoutExpired` (81), `CalledProcessError`
+    # (4) and `CompletedProcess` (3), and none of the three is a type on this
+    # path.  What is answerable about all three is one integer field, so the
+    # model returns it and the expectation is read off a real CPython object.
+    ctor_src = ["import subprocess", "", "def main():",
+                '    printf("%lld %lld %lld\\n", '
+                'subprocess.CompletedProcess(["a"], 7, stdout=1, stderr=2), '
+                'subprocess.CalledProcessError(3, "cmd"), '
+                'subprocess.TimeoutExpired("cmd", 30))']
+    got = _run("spctor", ctor_src, tmpdir, cas_root)
+    want_ctor = " ".join(str(v) for v in (
+        S.CompletedProcess(["a"], 7, stdout=b"x", stderr=b"y").returncode,
+        S.CalledProcessError(3, "cmd").returncode,
+        S.TimeoutExpired("cmd", 30).timeout))
+    check(got == [want_ctor],
+          f"subprocess field constructors: image {got}, CPython [{want_ctor!r}]")
+
     if verbose:
         print(f"    {len(cases)} argument shapes (each against CPython's own "
-              f"exception class), 3 constants, 3 returncodes, 2 bufsizes")
-    return True, (f"subprocess: {len(cases)} argument shapes and 8 other "
-                  f"decisions agree with CPython")
+              f"exception class), 3 constants, 3 returncodes, 2 bufsizes, "
+              f"{len(run_rows)} run keyword rules, {len(co_rows)} check_output "
+              f"keyword rules, 3 field constructors")
+    return True, (f"subprocess: {len(cases) + len(run_rows) + len(co_rows)} "
+                  f"refusal shapes and 11 other decisions agree with CPython")
+
+
+def group_subprocess_surface(tmpdir, cas_root, verbose):
+    """The MEASURED call surface BUILDS, and every admitted call REFUSES.
+
+    This is the half of `subprocess` the differential table above cannot see.  A
+    differential test compares verdicts, and every verdict in it comes from a
+    function that is already callable — so the table is green whether or not a
+    caller can CALL the module at all, and it was: before `run` declared
+    `capture_output`, every one of this tree's 547 `subprocess.run` call sites
+    failed the build with `unexpected keyword argument`, and the module was
+    "modelled" for nobody.
+
+    So this walks the surface the tree actually spells — measured by
+    `test_formal_subprocess.py`, which fails if a name appears without being
+    modelled — and asserts two things per program on BOTH backends: it builds,
+    and running it stops with `ADMITTED_EXIT_STATUS` and names the contract that
+    stopped it.  A model that accepted a keyword and then answered differently
+    would fail the second half, which is the failure `formal/admitted.py`'s scope
+    rule exists to prevent.
+
+    Both backends because a hostmod is a dylib and a dylib is emitted twice, and
+    "it builds on the one I happened to run" is not a claim about the module.
+    """
+    for backend in BACKENDS:
+        for label, body in _SUBPROCESS_SURFACE:
+            lines = ["import subprocess", "", "def main() -> int:"] + body
+            name = f"spsurf-{backend}-{label.replace(' ', '_').replace('.', '_')}"
+            # `_run` builds AND runs, and raises on a failed build, so reaching
+            # the next line already says the surface compiles on this backend.
+            out = _run(name, lines, tmpdir, cas_root, backend)
+            if label == DECIDED_LABEL:
+                check(out == ["-1 -2 -3"],
+                      f"{name}: the DECIDED half must ANSWER, and the constants "
+                      f"are the only thing it can answer here; the image "
+                      f"printed {out}")
+                continue
+            aout = os.path.join(tmpdir, f"t_{abs(hash(name))}.aout")
+            check(os.path.isfile(aout), f"{name}: no image to run")
+            p = subprocess.run([aout], capture_output=True, text=True, timeout=60)
+            check("ADMITTED contract" in p.stdout,
+                  f"{name}: an admitted call must name its contract on stdout; "
+                  f"stdout was {p.stdout[:200]!r}")
+            check(p.returncode == A_ADMITTED_EXIT_STATUS,
+                  f"{name}: exited {p.returncode}, and an admitted call must "
+                  f"exit {A_ADMITTED_EXIT_STATUS} — outside 0..255, so it cannot "
+                  f"be read as a child's status")
+            # WHICH operation it came from.  A row that nests two admissions
+            # (`popen_wait(Popen(...))`) is stopped by the inner one, so the row
+            # names every operation whose refusal is a correct answer for it —
+            # asserting the outer one would be asserting which call happens
+            # first, which is a fact about the source and not about the model.
+            named = [n for n in _SUBPROCESS_ACCEPTS[label] if n in p.stdout]
+            check(named, f"{name}: the refusal must name one of "
+                         f"{_SUBPROCESS_ACCEPTS[label]}; stdout was "
+                         f"{p.stdout[:200]!r}")
+    if verbose:
+        for backend in BACKENDS:
+            print(f"    {backend}: {len(_SUBPROCESS_SURFACE) - 1} admitted "
+                  f"operations refuse, 1 decided surface answers")
+    return True, (f"the measured call surface builds on "
+                  f"{len(BACKENDS)} backends and every admitted call refuses "
+                  f"with status {A_ADMITTED_EXIT_STATUS}")
+
+
+# The surface `group_subprocess_surface` builds, one program per operation, in the
+# SPELLING this repository uses — the keywords are the point, so each row is the
+# call as the tree writes it rather than a tidied version of it.  `decided` is the
+# one row that is not an admission: it is the decidable half, which must ANSWER.
+DECIDED_LABEL = "decided"
+
+_SUBPROCESS_SURFACE = [
+    (DECIDED_LABEL, [
+        '    printf("%lld %lld %lld\\n", subprocess.PIPE(), '
+        'subprocess.STDOUT(), subprocess.DEVNULL())']),
+    ("run", [
+        '    return subprocess.run(["./x"], capture_output=True, text=True, '
+        'timeout=120, cwd="/tmp", check=True)']),
+    ("run", [
+        '    return subprocess.run(["./x"], env="A=1", shell=0, errors="strict",'
+        ' input="", stdout=0, stderr=0, stdin=0)']),
+    ("call", ['    return subprocess.call(["./x"], timeout=30, cwd=".")']),
+    ("check_call", ['    return subprocess.check_call(["./x"], cwd=".", env="")']),
+    ("check_output", [
+        '    printf("%s\\n", subprocess.check_output(["./x"], timeout=30, '
+        'stderr=0, text=True))']),
+    ("getoutput", ['    printf("%s\\n", subprocess.getoutput("ls -l"))']),
+    ("getstatusoutput", ['    return subprocess.getstatusoutput("ls -l")']),
+    ("Popen", [
+        '    return subprocess.Popen(["./x"], stdout=subprocess.PIPE(), '
+        'stderr=subprocess.STDOUT(), cwd=".", start_new_session=True)']),
+    ("Popen", [
+        '    return subprocess.Popen(["./x"], bufsize=0, stdin=0, text=True, '
+        'pass_fds=0, errors="", preexec_fn=0)']),
+    ("Popen.wait", [
+        '    return subprocess.popen_wait(subprocess.Popen(["./x"]), '
+        'timeout=30)']),
+    ("Popen.poll", [
+        '    return subprocess.popen_poll(subprocess.Popen(["./x"]))']),
+    ("Popen.kill", [
+        '    return subprocess.popen_kill(subprocess.Popen(["./x"]))']),
+    ("Popen.terminate", [
+        '    return subprocess.popen_terminate(subprocess.Popen(["./x"]))']),
+    ("Popen.communicate", [
+        '    printf("%s\\n", subprocess.popen_communicate('
+        'subprocess.Popen(["./x"]), input=0, timeout=5))']),
+]
+
+# Which refusal each row of `_SUBPROCESS_SURFACE` may report, by the string the
+# model prints.  A row that makes ONE admitted call names that one; the five
+# `popen_*` rows nest a `Popen` inside, so the inner refusal is the one that fires
+# and both are correct answers for the row.
+_SUBPROCESS_ACCEPTS = {
+    "run": ("subprocess.run",),
+    "call": ("subprocess.call",),
+    "check_call": ("subprocess.check_call",),
+    "check_output": ("subprocess.check_output",),
+    "getoutput": ("subprocess.getoutput",),
+    "getstatusoutput": ("subprocess.getstatusoutput",),
+    "Popen": ("subprocess.Popen",),
+    "Popen.wait": ("Popen.wait", "subprocess.Popen"),
+    "Popen.poll": ("Popen.poll", "subprocess.Popen"),
+    "Popen.kill": ("Popen.kill", "subprocess.Popen"),
+    "Popen.terminate": ("Popen.terminate", "subprocess.Popen"),
+    "Popen.communicate": ("Popen.communicate", "subprocess.Popen"),
+}
+
+# `ADMITTED_EXIT_STATUS`, read out of the module rather than written here, so a
+# change to the number the model exits with is a change to the model and this
+# file follows it instead of asserting a stale copy.
+def _admitted_exit_status():
+    from formal import imports as _I
+    import fire_compiler as _F
+    for st in _I.module_statements(os.path.join(A.HOSTMODS_ROOT,
+                                                "subprocess.mojo")):
+        if isinstance(st, _F.AssignStmt) and \
+                getattr(st.target, "name", None) == "ADMITTED_EXIT_STATUS":
+            return int(getattr(st.value, "value", None))
+    raise TestFailure("subprocess.mojo declares no ADMITTED_EXIT_STATUS")
+
+A_ADMITTED_EXIT_STATUS = _admitted_exit_status()
 
 
 def _construct_ok():
@@ -831,6 +1106,7 @@ GROUPS = {
     "counts": group_counts,
     "emitted": group_emitted,
     "subprocess": group_subprocess,
+    "subprocess-surface": group_subprocess_surface,
     "ctypes": group_ctypes,
     "fcntl": group_fcntl,
     "futures": group_futures,
@@ -840,8 +1116,217 @@ GROUPS = {
 
 # The pure-Python checks, run in `main` alongside the groups so a run with no
 # group still ratchets.
+def _spelled_surface():
+    """`({name: {keywords}}, {names read as a VALUE})` over every `subprocess.*`.
+
+    TWO SETS, and the split is the point rather than bookkeeping.  A name
+    CALLED is answered by a function the model declares, and its keywords have to
+    be that function's parameters.  A name READ AS A VALUE — `stdout=subprocess.
+    PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
+    model can declare: a function is not a word and a class is a frame blob, so
+    those sites need
+    `bugs/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
+    both as "the tree spells this name" hid half the gap, which is the mistake
+    this rewrite exists to remove.
+
+    Read with `ast` over every `.py` under the repository, because the number it
+    produces is the number `formal/hostmods/subprocess.mojo`'s docstring quotes
+    and `test_the_modelled_surface_covers_what_the_tree_spells` checks against.
+    One walk, one implementation, two consumers — a second `ast` pass in the
+    ratchet would be free to disagree with the one that wrote the docstring, and
+    the disagreement would be a call site nobody modelled.
+
+    `build/`, `cas/` and `.tmp/` are skipped because they are OUTPUT: a compiled
+    artifact or a leftover work directory spelling `subprocess` measures nothing
+    about the source.
+    """
+    import ast
+    skip = {"build", "cas", ".git", ".tmp", "__pycache__", "node_modules"}
+    calls = {}
+    value_reads = set()
+    for dirpath, dirs, files in os.walk(HERE):
+        dirs[:] = sorted(d for d in dirs if d not in skip)
+        for name in sorted(files):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8",
+                                      errors="replace").read())
+            except SyntaxError:
+                continue
+            called = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fnode = node.func
+                if not (isinstance(fnode, ast.Attribute)
+                        and isinstance(fnode.value, ast.Name)
+                        and fnode.value.id == "subprocess"):
+                    continue
+                called.add(fnode.attr)
+                calls.setdefault(fnode.attr, set()).update(
+                    k.arg for k in node.keywords if k.arg)
+            # Every `subprocess.<name>` that is NOT the callee of a call is a
+            # value read, and `ast.walk` visits the `Attribute` either way.
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "subprocess"):
+                    continue
+                if node.attr not in called:
+                    value_reads.add(node.attr)
+    return calls, value_reads
+
+
+def _modelled_subprocess_names():
+    """The names `formal/hostmods/subprocess.mojo` actually declares.
+
+    From the PARSED module rather than a list here, for the reason `model_const`
+    gives: a list in this file is a second place for the model's surface to be
+    wrong in without anything noticing, which is how a differential test stops
+    being differential.
+    """
+    from formal import imports as I
+    import fire_compiler as F
+    path = os.path.join(A.HOSTMODS_ROOT, "subprocess.mojo")
+    names = set()
+    for st in I.module_statements(path):
+        if isinstance(st, F.FunctionDef) and st.name:
+            names.add(st.name)
+    return names
+
+
+# The `subprocess.` names this tree READS AS A VALUE, which
+# `formal/hostmods/subprocess.mojo` deliberately does not answer, each with the
+# reason.  The model declares all three constants as zero-argument FUNCTIONS —
+# `subprocess.PIPE()` binds and `stdout=subprocess.PIPE` does not, because a
+# function is not a word and a module-level name is folded at every read on this
+# path.  A name reaching this table is a DELIBERATE absence somebody wrote
+# down; a value-read in neither the model nor this table is a FAILURE.
+_SUBPROCESS_VALUE_ABSENT = {
+    "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
+            "value needs a module-level name that is a folded literal — "
+            "bugs/FORMAL_module_state_no_storage.md",
+    "STDOUT": "as PIPE",
+    "DEVNULL": "as PIPE",
+    "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
+                       "blob (formal/hostmods/struct.mojo is what a struct "
+                       "looks like)",
+    # `except subprocess.TimeoutExpired:` needs the CLASS.  An arm whose body is
+    # `raise`/`pass`/`continue`/`break` still builds today — the arm is not
+    # lowered, and the refusal `formal/build.py` prints is about the ARM's body
+    # (FORMAL.md phase 7, no exception unwinder), not about this name — so the
+    # 81 sites in this tree are blocked on the unwinder, not on the name.  The
+    # model's `TimeoutExpired` FUNCTION covers the `subprocess.TimeoutExpired(…)`
+    # construction sites; this row covers the 81 that want the type.
+    "TimeoutExpired": "the EXCEPTION CLASS an `except` arm names; the model's "
+                      "TimeoutExpired function covers construction, not "
+                      "catchability (FORMAL.md phase 7)",
+}
+
+
+def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
+    """Every `subprocess.*` this tree writes is either modelled or written down.
+
+    The ratchet that keeps `subprocess.mojo` from drifting away from its callers,
+    and it is the only one of these checks that would notice a NEW call site.  The
+    differential tables above test the model's verdicts and the surface group
+    tests that a hand-written selection of calls bind; neither can notice that
+    somebody started calling `subprocess.run(..., newflag=True)` tomorrow, because
+    nothing here knows what the tree spells.
+
+    The failure it is aimed at is the one `bugs/FORMAL_host_import_row_5_measured.md`
+    §`subprocess` records: a module that is "modelled" for nobody, green in every
+    differential test, and callable by zero of its callers.  A keyword the callers
+    use and the model does not declare is exactly that, and it is invisible until
+    somebody counts the call sites — which is what this does.
+    """
+    spelled, value_reads = _spelled_surface()
+    modelled = _modelled_subprocess_names()
+    check(spelled,
+          "the walk found no `subprocess.*` call at all, so it is not "
+          "measuring what it claims — the skip list or the AST walk is wrong")
+    undeclared = sorted(n for n in spelled if n not in modelled)
+    check(not undeclared,
+          "this tree CALLS `subprocess.` names that formal/hostmods/subprocess."
+          "mojo does not declare: " + ", ".join(undeclared) + "\n"
+          "    A name here is a call site nothing answers: the build refuses it "
+          "with `exports no <name>` and a differential test stays green, which "
+          "is the failure bugs/FORMAL_host_import_row_5_measured.md names. "
+          "Declare it, or record why not.")
+    # The KEYWORDS are the half that bit: `run` was declared with one parameter
+    # and 508 of these call sites pass `capture_output`.  Checked per function,
+    # because the model's `run` and its `call` take different keywords and CPython
+    # refuses the ones they do not have.
+    bad_kw = []
+    for fn_name, kws in sorted(spelled.items()):
+        declared = _modelled_subprocess_params(fn_name)
+        if declared is None:
+            continue
+        for kw in sorted(kws):
+            if kw not in declared:
+                bad_kw.append(f"subprocess.{fn_name}(..., {kw}=...): the model "
+                              f"declares no `{kw}`")
+    check(not bad_kw,
+          "keywords this tree passes that the model does not declare:\n    "
+          + "\n    ".join(bad_kw)
+          + "\n    Each is a build refusal at every call site that uses it. The "
+            "parameters are read out of the module source, so this cannot "
+            "disagree with what the model publishes.")
+    # The value reads are the second half and they are NOT satisfied by a
+    # function of the same name: `stdout=subprocess.PIPE` needs a WORD and
+    # `subprocess.PIPE` is a function, so the call site is refused while
+    # `subprocess.PIPE()` beside it builds.  That is the whole
+    # `FORMAL_module_state_no_storage.md` gap, and a ratchet that treated the
+    # name as covered would be green over six refused call sites.
+    unexplained = sorted(n for n in value_reads
+                         if n not in _SUBPROCESS_VALUE_ABSENT)
+    check(not unexplained,
+          "this tree READS `subprocess.` names as VALUES that nothing answers: "
+          + ", ".join(unexplained) + "\n"
+          "    A value read needs a folded module-level literal, not a "
+          "function (bugs/FORMAL_module_state_no_storage.md), so declaring one "
+          "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
+          "reason, or fix the module-state gap.")
+    stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)
+    check(not stale,
+          "_SUBPROCESS_VALUE_ABSENT records names the tree no longer reads as a "
+          f"value: {stale}. A row nobody reads is a claim about the callers "
+          "that stopped being true, which is the same failure `expect=` on a "
+          "test that starts passing is there to report.")
+    return True, (f"{len(spelled)} called `subprocess.` name(s) with "
+                  f"{sum(len(v) for v in spelled.values())} keyword(s), all "
+                  f"modelled with matching parameters; "
+                  f"{len(value_reads)} value-read name(s), all recorded absent "
+                  f"({sorted(value_reads)})")
+
+
+def _modelled_subprocess_params(name):
+    """The parameter names `formal/hostmods/subprocess.mojo` gives `name`, or None.
+
+    None means the name is not a modelled FUNCTION (a constant read as a value,
+    or a type), and there is no parameter list to compare against — the caller
+    handles that case in `_SUBPROCESS_ABSENT`.
+    """
+    from formal import imports as I
+    import fire_compiler as F
+    path = os.path.join(A.HOSTMODS_ROOT, "subprocess.mojo")
+    for st in I.module_statements(path):
+        if not (isinstance(st, F.FunctionDef) and st.name == name):
+            continue
+        out = set()
+        for p in (getattr(st, "params", None) or []):
+            if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+                out.add(p[0])
+        return out
+    return None
+
+
 PURE = [("the emitted Lean is inert where nothing is admitted",
-         test_a_file_that_reaches_none_generates_no_hole)]
+         test_a_file_that_reaches_none_generates_no_hole),
+        ("the modelled surface covers what the tree spells",
+         test_the_modelled_surface_covers_what_the_tree_spells)]
 
 
 def _pure_call(fn, tmpdir):
