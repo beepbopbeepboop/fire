@@ -4908,6 +4908,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
+        # The dict question, asked here for the same reason the `for`-in walk
+        # asks it and for the same reason `model.walk_stride` exists: a dict is
+        # a PAIR blob, so at the element stride this scan compares half the
+        # VALUES against the needle and can only see half the keys. arm64 asks
+        # the same predicate (`_is_dict_subscript`) at the same point.
+        is_dict = self._is_dict_subscript(right)
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                   # needle
         self._emit_expr(right)
@@ -4925,10 +4931,28 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_cmp_r64_r64(Reg.R8, Reg.R10))
         self._emit_setcc_bool(Reg.R11, "setae")
         self._emit_jcc_bool(Reg.R11, COND_NE, notfound_label)
-        self._emit_elem_addr(Reg.R9, Reg.R8, Reg.RDI)
+        self._emit_elem_addr(Reg.R9, Reg.R8, Reg.RDI,
+                             header=M.BLOB_HEADER_BYTES,
+                             scale=M.walk_shift(is_dict))
         self.asm.emit(encode_mov_r64_rm64(Reg.RDI, Reg.RDI, 0))
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))   # needle
-        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.R10))
+        # The needle into RSI, and NOT into R10.  R10 holds the COUNT, and a
+        # scan that reloads the needle over it replaces the bound with the
+        # needle itself on the first iteration: `i >= needle` is false for
+        # every index a blob has, so a MISS walked straight out of the blob
+        # into whatever the frame holds next.  Measured on this backend, with
+        # arm64 answering the same two programs correctly: `xs = ["ab", "cde"]`
+        # then `"zz" in xs` died with SIGSEGV (exit 139), and the same shape
+        # over a dict with a missing key did too — while a HIT answered
+        # correctly, because the runaway scan reaches the next key on the way
+        # past the end.  With an INTEGER needle the bound is the needle's own
+        # value, so the scan read up to 999 words of adjacent frame and
+        # returned "not found" — a wrong answer whenever one of those words
+        # happened to be the needle.  This is the file's own rule ("re-loaded
+        # every iteration rather than held in registers, because the body
+        # clobbers every register there is") applied to the one register the
+        # body must not clobber.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RSI, Reg.RSP, 0))   # needle
+        self.asm.emit(encode_cmp_r64_r64(Reg.RDI, Reg.RSI))
         self._emit_setcc_bool(Reg.R11, "sete")
         # Equal -> found. (Jumping to `found` on NOT-equal is the same
         # inverted-polarity trap as the loop exit above.)
@@ -5012,7 +5036,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 # address computed next is relative to it.
                 self._emit_setcc_bool(Reg.R8, "setae")
                 self._emit_jcc_bool(Reg.R8, COND_NE, false_label)
-                self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+                # The STRIDE is the dict question, asked here and on the same
+                # terms on arm64.  A dict pair blob is `[npairs][k0][v0]
+                # [k1][v1]…` — `_emit_dict` writes it and
+                # `_emit_dict_lookup_addr` scans it at 16 bytes a pair — so one
+                # COUNT is one PAIR, and at `scale=3` this walk reads
+                # `k0, v0, k1`: a `for k in d` bound half the values, skipped
+                # half the keys, and every one of them exited 0.  Measured on
+                # both architectures: `{10: 100, 20: 200}` printed `10 100`
+                # where CPython prints `10 20`, and a three-pair table printed
+                # `30 1 10`.  `_is_dict_subscript` is the same three-source
+                # predicate the subscript path asks, so a dict that is a dict
+                # there is the same dict here.
+                if self._is_dict_subscript(it):
+                    self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                         header=M.BLOB_HEADER_BYTES,
+                                         scale=M.walk_shift(True))
+                else:
+                    self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI,
+                                         header=M.BLOB_HEADER_BYTES,
+                                         scale=M.walk_shift(False))
                 self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
                 if len(tnames) == 1:
                     self._store_var(tnames[0], Reg.RAX)
