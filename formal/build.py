@@ -2582,45 +2582,15 @@ def _check_declared_parameter(functions, callee, position, pname, want,
 # here as well; `model.py` needs them for its own refusals and a model function
 # must not reach up into the build pass for a string, so the model owns the one
 # implementation and this file calls it.
+#
+# This file's OWN copy was the older of the two and its `def` shadowed this alias
+# three lines below it, so the comment above described a state the file was not
+# in and every build refusal that quoted a value whose callee was not a bare
+# name printed `CallExpr` where the source wrote `c.f[0]()`.  It is deleted; the
+# two arms it alone carried — `BinaryOp` and the set half of the display — live
+# in `model.expr_spelling` now, so the model is the whole of the spelling rather
+# than the newer half of it.  See `formal/model.py::expr_spelling`.
 _expr_spelling = M.expr_spelling
-
-
-def _expr_spelling(node) -> str:
-    """The source's own spelling of an expression, as far as a name needs one.
-
-    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
-    reader to the AST to find the call, which is the opposite of what a
-    diagnostic quoting a call site is for.  A shape with no short spelling is
-    named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it.
-
-    The OPERATOR arms came later than the rest and the reason is a message that
-    read `G is read in bump() at BinaryOp` — a true statement, a placeholder,
-    and useless, because the reader's question is which read.  Every refusal that
-    quotes a value goes through this one function, so the fix belongs here rather
-    than in each caller."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
-    if isinstance(node, F.MemberExpr):
-        return _member_chain(node)
-    if isinstance(node, F.BinaryOp):
-        return (f"{_expr_spelling(node.left)} {node.op} "
-                f"{_expr_spelling(node.right)}")
-    if isinstance(node, F.UnaryOp):
-        return f"{node.op}{_expr_spelling(node.operand)}"
-    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return (f"{'(' if isinstance(node, F.TupleExpr) else ''}"
-                f"{', '.join(_expr_spelling(e) for e in node.elements)}"
-                f"{')' if isinstance(node, F.TupleExpr) else ''}")
-    if isinstance(node, F.SubscriptExpr):
-        return f"{_expr_spelling(node.obj)}[{_expr_spelling(node.index)}]"
-    for attr in ("value", "name"):
-        v = getattr(node, attr, None)
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)
-    return type(node).__name__
 
 
 def _call_spelling(call, arg, position, pname) -> str:

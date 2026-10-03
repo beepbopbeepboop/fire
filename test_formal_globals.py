@@ -928,6 +928,39 @@ REFUSALS = [
      "is read in bump() at `G + 1`, before anything in that function has "
      "assigned it"),
 
+    # THE SAME REFUSAL, and the row above is what makes this one legible: both
+    # messages are `model.shadowed_module_global_read_refusal`, so they differ
+    # only in what they QUOTE, and what they quote is the value spelled by the
+    # one `_expr_spelling` the build pass is supposed to have.
+    #
+    # It had two. `formal/build.py` carried `_expr_spelling = M.expr_spelling`
+    # and then, three lines below, a `def _expr_spelling` that shadowed it —
+    # the older of the two, whose `CallExpr` arm required a BARE `IdentExpr`
+    # callee. So this row's value, `G.h[0]()`, came out as the literal text
+    # `CallExpr`: a true statement, an obvious placeholder, and useless in the
+    # one job the sentence has, which is naming the read so a reader can find it
+    # in their own file. The row above, `G + 1`, is spelled by the arm that copy
+    # alone carried for `BinaryOp` — which is why deleting it is only correct
+    # with that arm ported, and why the two rows are adjacent rather than one
+    # being a comment on the other.
+    #
+    # `TypeList.reduce[Self._mapper]()` and `Intrinsics.read[0]()` are the real
+    # shape behind it: the new-modular stdlib is full of comptime
+    # specializations, and a comptime specialization's callee is a SUBSCRIPT.
+    # (Deliberately a subscripted MEMBER call rather than a real specialization:
+    # the question here is what the spelling function does with the node shape,
+    # and a program that reaches a genuine `TypeList` would be testing the
+    # stdlib rather than the spelling.)
+    ("local_shadow_of_global_quotes_a_subscripted_callee",
+     "G = 5\n"
+     "\n"
+     "def main(n):\n"
+     "    y = G.h[0]()\n"
+     "    G = 1\n"
+     "    return y\n",
+     "is read in main() at `G.h[0]()`, before anything in that function has "
+     "assigned it"),
+
     # THE HALF THAT KEEPS THE TWO ROWS ABOVE HONEST. Resolving a module-level
     # initializer's operand names against the names bound SO FAR is what makes
     # `comptime _B = _A // 2` fold, and the question a reader has to be able to
