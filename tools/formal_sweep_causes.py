@@ -496,6 +496,19 @@ CAUSES = (
      (("is one of the module-global slots in this image's",),
       ("which this path compiles into the synthetic function the startup stub "
        "enters",))),
+    # A `try`'s HANDLER ARM with a body, and the one row in this table whose
+    # refusal is CORRECT rather than a gap — so its number is a census, not a
+    # target. `formal` has no exception unwinder: a `raise` flushes the
+    # enclosing `finally` clauses and exits, so no edge runs from a raise site
+    # into an arm, and every statement in the arm would be missing from the
+    # program that runs. It is here because the dylib-module-body row's removal
+    # (2026-10-03) made 5 files report it for the first time and they landed in
+    # `other refusal`, which is the place a table like this exists to keep them
+    # out of: "refused on purpose" and "nobody has looked" are different
+    # answers for a reader deciding what to do next. Keyed on the clause only
+    # this message carries.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     (("is a handler arm with a body this path cannot put in the image",),)),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the
@@ -509,15 +522,6 @@ CAUSES = (
     # threaded through, which has no lowering here. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
-    # A module whose API IS its top-level statements, imported by another
-    # module: this path compiles an import into a dylib, and a dylib has no
-    # entry point to run a module body at load time, so the module would build,
-    # link, and do nothing — the silent no-op one level down from the
-    # executable path's own. Distinct from `module exports no public
-    # functions` (which is about what a dylib PUBLISHES): this is about
-    # whether it would RUN anything. 2 files + their importers on both arches.
-    ("a module whose API is its top-level statements, imported by another",
-     (("this module's API is its top-level statements",),)),
     # A local read before anything in the function stores it. `formal/build.py`
     # enforces this for module-global names and not for locals, which is what
     # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` measures; 1

@@ -1420,34 +1420,96 @@ def test_a_module_stores_that_the_image_already_holds_cross_the_boundary(
           f"{text!r}")
 
 
-def test_a_module_body_with_code_in_it_is_still_refused(tmpdir, _):
-    """The CONTROL for the case above: a body that must RUN is still refused.
+# The module whose body must RUN, and the program that proves it did.
+#
+# `COMPUTED = compute()` is not foldable and not a slot initializer — the value
+# does not exist until something calls `compute()` — so it is a statement with an
+# effect, and an effect nothing performs is the silent no-op this boundary exists
+# to prevent. It used to be REFUSED ("this module's API is its top-level
+# statements … a library has no entry point to run them"), which was honest about
+# the container and cost 16 files of this repository; the entry point was what was
+# missing, and both object writers now emit one.
+#
+# `print` and not `printf`, and that is so the CPython oracle still applies:
+# every other case in this file compares with CPython, and `printf` is the one
+# thing the module side of the comparison cannot use — this file's own note says
+# the modules "get no shim, because they are imported for their declarations and
+# print nothing". This is the first module here that PRINTS, and `print` is what
+# keeps the oracle an oracle instead of a second copy of the expectation.
+# `compute` is DEFINED BEFORE the store that calls it, and that is the oracle's
+# requirement rather than the source's: this backend hoists a `def`, so the two
+# orders compile alike, but CPython runs the statements top to bottom and a call
+# to a function defined lower down is a `NameError` — which would have made the
+# CPython side print half its output and die, and the case would then be asserting
+# against a half-answer.
+BODY_LIB = """\
+print("body")
+LITERAL = 3
 
-    `COMPUTED = compute()` is not foldable and not a slot initializer — the value
-    does not exist until something calls `compute()` — so this module's API really
-    is its top-level statements and a dylib has nowhere to run it. Asserted by
-    WORDS, because the words are the product: whoever adds the load-time
-    initializer has to change this case deliberately, and the message it removes
-    has to change with it.
+
+def compute() -> Int:
+    return 7
+
+
+COMPUTED = compute()
+
+
+def get() -> Int:
+    return LITERAL
+"""
+
+# The program declares a `main` because this file's CPython harness ends with
+# `sys.exit(main(0))` — every case here is shaped so both sides run `main`, and
+# the formal side's startup stub calls it too.
+BODY_PROG = """\
+from computed import get
+
+
+def main(k):
+    print("main", get())
+    return 0
+"""
+
+
+def test_a_module_body_runs_at_load_across_the_boundary(tmpdir, _):
+    """A library's module body runs WHEN THE LIBRARY LOADS, before `main`.
+
+    This is the CONTROL that replaced "a body with code in it is refused", and
+    it is the same claim as the case above read from the other side: that one
+    pins the stores the IMAGE holds, this one pins the statement the image has
+    to RUN. Both are needed because they are two different ways a module's own
+    top level can fail to arrive — a wrong word in `__DATA`, and a body that
+    never executed — and only the first was covered before.
+
+    The body's effect is a `print` because that is the one thing a library can do
+    that is observable from the PROGRAM's stdout and from nowhere else; and it
+    comes FIRST because the position is the claim: a load-time initializer runs
+    after the library's dependencies are mapped and before `main`, which is where
+    CPython puts a module body's statements at import. So `body` then `main 3`
+    is the whole answer, and it is compared with CPython on the same text so the
+    two lines are two independent readings rather than one written down twice.
+
+    The program reaches the library through its `import`, not through
+    `--link-dylib`: two copies of one module on one link line would run the body
+    twice, and a case about "the body ran once, at load" must not be the thing
+    that puts the module on the line twice.
     """
     fresh_cas()
     root = os.path.join(tmpdir, "globbody")
     os.makedirs(root)
-    write_tree(root, {
-        "computed.mojo": "LITERAL = 3\nCOMPUTED = compute()\n\n\n"
-                         "def compute() -> Int:\n    return 7\n\n\n"
-                         "def get() -> Int:\n    return COMPUTED\n",
-    })
-    result, _out = build_dylib(root, "computed.dylib", ["computed.mojo"],
-                               expect_ok=False)
-    refuses(result, "this module's API is its top-level statements")
+    write_tree(root, {"computed.mojo": BODY_LIB, "prog.mojo": BODY_PROG})
+    text, rc = agrees_with_cpython(
+        tmpdir, "module body at load time", root, "prog.aout", expect_exit=0)
+    check(text == "body\nmain 3\n",
+          f"the module body's statements did not run at load time, or ran in "
+          f"the wrong order against main: {text!r}")
 
 
 TESTS = [
     ("a module's own folded and slot stores cross the boundary",
      test_a_module_stores_that_the_image_already_holds_cross_the_boundary),
-    ("a module body with code in it is still refused",
-     test_a_module_body_with_code_in_it_is_still_refused),
+    ("a module body runs at load time, before main",
+     test_a_module_body_runs_at_load_across_the_boundary),
     ("`from m import f as g` calls the function it stands for",
      test_a_from_import_alias_calls_the_function_it_stands_for),
     ("an alias of a NON-exported name is refused by name",

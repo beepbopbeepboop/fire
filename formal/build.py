@@ -162,6 +162,13 @@ def _module_body_function(body: list, declares: list = None) -> F.FunctionDef:
                            value=F.IntLiteral(value=0, line=0, col=0, raw=""))],
                        line=getattr(body[0], "line", 0) if body else 0,
                        col=0)
+    # Tagged, and the tag is `model.MODULE_BODY_TAG`'s rather than a second
+    # spelling of the name: this function is the one thing that can BUILD a body
+    # wrapper, and the load-time initializer that runs it is asked for by a list
+    # of wrappers (`model.module_body_functions`) which cannot match on the name —
+    # `compile_formal_dylib` renames the second and later body of a multi-source
+    # library apart, because both emitters key their function tables by name.
+    setattr(fn, M.MODULE_BODY_TAG, True)
     return fn
 
 
@@ -178,18 +185,6 @@ def _synthetic_main() -> F.FunctionDef:
         if isinstance(s, F.FunctionDef) and s.name == "main":
             return s
     raise FormalBuildError("synthetic main failed to parse")
-
-
-def _first_body_where(body: list) -> str:
-    """"line N: " for the first statement of a module body, or "".
-
-    A diagnostic that can point at a line should, and the line is the only
-    thing that distinguishes `sep = "/"` at the top of a file from the same
-    store three hundred lines down. Empty when the body carries no line
-    numbers, because a message reading "line : " is worse than one that does
-    not mention a line at all."""
-    line = getattr(body[0], "line", 0) if body else 0
-    return f"line {line}: " if line else ""
 
 
 def _refuse_unlowerable_module_body(body: list) -> None:
@@ -1797,18 +1792,22 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # knows the pair, and `_prepare_functions` is what every reader below
     # consults.
     M.publish_target(M.target_for(arch, fmt or default_format(arch)))
+    # `synthetic=False`: a library gets no `def main(): return 0` of its own,
+    # because it has no entry point to call it — the module body runs from the
+    # load-time initializer instead, and a module with neither a body nor a
+    # function has nothing to run and nothing to export (which is
+    # `no_public_api_reason`'s question, asked a few lines below).
     #
-    # `as_dylib=True` because a LIBRARY has no entry point. A module whose API
-    # is its top-level statements — `sep = "/"` — compiles here to a dylib that
-    # exports nothing, has no code to run the store, and is then refused by
-    # `no_public_api_reason` for the wrong reason ("no public functions"), which
-    # sends the reader looking for a missing `def` when the file has exactly
-    # what it meant to write. The body is refused by name here instead, which is
-    # the same message the executable path gives and the same answer the reader
-    # needs: a module-level store needs storage, and this path has none
-    # (`bugs/FORMAL_module_state_no_storage.md`).
+    # The body used to be REFUSED here, on the reasoning that a library has
+    # nowhere to run it — which was the largest unowned row of the formal sweep
+    # (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §6): 16 files in this
+    # repository refused for importing one of four modules, 15 of them for
+    # nothing they used. The absence was the entry point and it now exists, so
+    # the body is lowered here like any other function and the library carries a
+    # `__init_offsets` section (Mach-O) or `.init_array` (ELF) entry pointing at
+    # it.
     functions, structs, symbols, slots = _prepare_functions(
-        stmts, synthetic=False, as_dylib=True)
+        stmts, synthetic=False)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -11463,26 +11462,34 @@ def refuse_member_reads_through_a_literal_base(functions: list) -> None:
 
 
 def _prepare_functions(stmts: list, synthetic: bool = True,
-                       extra_structs: list = None,
-                       as_dylib: bool = False) -> tuple:
+                       extra_structs: list = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
 
-    `as_dylib` says this unit is being compiled as a LIBRARY rather than as a
-    program, and it is the one thing that differs between the two: a dylib has
-    no entry point, so nothing would ever call the module body, and a module
-    whose whole content is its top-level statements would compile to a library
-    that computes nothing at load time and exports nothing — the same silent
-    no-op, one level down, and the reason the dylib path must not pretend the
-    body is code. The refusal is raised by the caller (after imports resolve,
-    so a file with a bad import still reports the import), and is the same
-    message the executable path would give for a body it cannot lower.
+    ONE pipeline for both entry points, and it is one pipeline for the module
+    BODY as much as for a function: a program enters its body through the
+    startup stub (`entry_function` puts it first) and a LIBRARY enters it
+    through the load-time initializer both object writers now emit
+    (`__TEXT,__init_offsets` in a Mach-O library, `.init_array` in an ELF one),
+    so the body is lowered the same way for both and — this is the change that
+    made the pipeline shareable — a body is refused only when it CANNOT be
+    lowered, not because the container has no way to run it.
 
-    ONE pipeline for both entry points. It was two, and they had drifted:
-    the executable path skipped method lifting and call rewriting entirely,
-    so `c.get()` built an image that bound a symbol named `c.get` and died in
-    dyld, while the dylib path handled it. Anything that changes what gets
-    compiled has to happen here or the two front ends disagree about the same
-    source file.
+    It was two, and they had drifted: the executable path skipped method lifting
+    and call rewriting entirely, so `c.get()` built an image that bound a symbol
+    named `c.get` and died in dyld, while the dylib path handled it. And the
+    dylib path REFUSED the whole body — `formal/build.py`'s former `as_dylib`
+    branch, whose comment was right that a library with no entry point would
+    compile the module's top level to a function nothing ever runs, and whose
+    conclusion was that the body must therefore not be compiled at all. The
+    missing half was an entry point, and 16 files in this repository paid for
+    the absence (15 of them for having imported the offending module, not for
+    using anything it declares). The refusal that is left is
+    `_refuse_unlowerable_module_body`, asked for BOTH paths and for the same
+    reason: a file-level `return`, `global`, `break`, `yield` or `await` means
+    something only at file level and has no meaning inside the function the body
+    becomes, so it is still refused — by the same code, with the same words, and
+    the executable and library paths cannot answer differently about one source
+    file.
 
     Returns (functions, structs, symbols, slots) — the structs are passed to
     the codegen so a `S(...)` constructor and a `self.<field>` access can be
@@ -11528,40 +11535,26 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # backends cannot lower is still reported as a construct rather than as a
     # top-level-statement problem.
     body = M.module_body(stmts, symbols)
-    if as_dylib:
-        # …and on the DYLIB path the WHOLE body is refused, not just the
-        # file-level-only shapes, because a library has no entry point for any
-        # of it. Emitting `__module_body__` into a dylib would produce a
-        # function nothing calls, exported or not: the module's top-level code
-        # would be compiled, dead, and the file would build and link and do
-        # nothing at load time — the same silent no-op one level down, which is
-        # worse than the executable case because a caller linking the library
-        # has no way to see that the store never ran.
-        #
-        # Said HERE, before `no_public_api_reason` gets its turn, because that
-        # check reports "this module has no public functions" for a module
-        # whose content IS its top level, which sends the reader looking for a
-        # missing `def` in a file that has exactly what it meant to write.
-        if body:
-            kinds = sorted({type(s).__name__ for s in body})
-            raise CodegenError(
-                f"{_first_body_where(body)}this module's API is its "
-                f"top-level statements ({', '.join(kinds[:4])}"
-                f"{' …' if len(kinds) > 4 else ''}), and a library has no "
-                f"entry point to run them. This path compiles an import into "
-                f"a dylib, and the code that would run a module's top level "
-                f"is not called at load time, so it would compile to a "
-                f"function nothing ever runs — the file would build, link, "
-                f"and do nothing, which is the same silent no-op an "
-                f"executable had. A module-level name has no storage either: "
-                f"every value a formal program can name lives in a function's "
-                f"own stack scratch, reclaimed when the function returns "
-                f"(bugs/FORMAL_module_state_no_storage.md). Give the module a "
-                f"function and call it — `def sep(): return \"/\"` instead of "
-                f"`sep = \"/\"` — which is the same program with a "
-                f"representation.")
-    else:
-        _refuse_unlowerable_module_body(body)
+    # Asked for BOTH paths, which is the whole of what changed here. This check
+    # is about the BODY and not about the container: a file-level `return`,
+    # `global`, `break`, `yield` or `await` has no meaning inside the function
+    # the body becomes, so it is refused whichever image is being built — and the
+    # same words, from the same code, so the two front ends cannot answer
+    # differently about one source file.
+    #
+    # What used to be here instead was a refusal of the WHOLE body on the dylib
+    # path, on the reasoning that a library has no entry point to run it. That
+    # reasoning was right about the container and wrong about the remedy: the
+    # absence was an entry point, and a library has one — the load-time
+    # initializer, `__TEXT,__init_offsets` in a Mach-O image and `.init_array`
+    # in an ELF one, which both object writers now emit from the addresses the
+    # emitters report in `info["mod_init_addrs"]`. So the body is compiled for
+    # both and run by whichever mechanism that image has. A store the body
+    # computes and drops is not lost by being dropped: a module-level name has no
+    # storage here (`bugs/FORMAL_module_state_no_storage.md`) and every read of
+    # one is refused by name, so nothing in the image could have observed the
+    # value — the same premise `module_body`'s two exemptions rest on.
+    _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
     # A `try`'s handler arm with a BODY is refused here, before anything is
@@ -14148,6 +14141,17 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # `model.STACK_FLOOR_BUDGET_BYTES`. A library with no module globals has the
     # same two reserved words every other image has.
     has_globals = True
+    # Does this library have a module body to run at LOAD time, and where. Both
+    # containers need to know BEFORE the code is emitted, and for the same reason
+    # they need `has_globals`: a load-time initializer is a section (Mach-O) or
+    # a `.dynamic` entry (ELF) whose SIZE moves everything laid out after it, so
+    # the code offset — and therefore the base the code is emitted for — depends
+    # on it. `ordered` already knows the answer (`model.module_body_functions`
+    # finds the wrappers `_module_body_function` tagged), and the emitters report
+    # the OFFSETS afterwards; `has_mod_init` is the pre-compile half of that fact
+    # and the consistency check below is what keeps the two halves from drifting.
+    mod_init_addrs: list = []
+    has_mod_init = bool(M.module_body_functions(ordered))
     if fmt == "elf":
         # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
         # code starts after a load-command list whose SIZE depends on whether
@@ -14169,6 +14173,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         except CodegenError as e:
             raise FormalBuildError(str(e))
         external_syms = info.get("external_syms") or []
+        mod_init_addrs = _mod_init_addrs(info, has_mod_init, source_paths)
         unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
                                            "library", dylib_exports)
         if unaccounted:
@@ -14183,14 +14188,16 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             got = elf.compute_got_addrs(
                 len(code), external_syms, vaddr=elf.DYLIB_BASE,
                 soname=elf_soname, exports=exports,
-                needed=elf.elf_needed(elf_deps, True))
+                needed=elf.elf_needed(elf_deps, True),
+                has_init_array=has_mod_init)
             codegen.asm.resolve_extern(got)
             code = bytes(codegen.asm.sections["text"])
         binary = elf.build_elf_dylib(
             code, elf.DYLIB_BASE, exports, elf_soname,
             external_syms=external_syms,
             deps=elf.elf_needed(elf_deps, bool(external_syms)),
-            globals_image=globals_image(fmt))
+            globals_image=globals_image(fmt),
+            mod_init_addrs=mod_init_addrs)
         with open(output, "wb") as f:
             f.write(binary)
         os.chmod(output, 0o755)
@@ -14227,7 +14234,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         code, info = codegen.compile(
             ordered,
             base_addr=TEXT_BASE + dylib_code_offset(
-                install_name, False, dep_install, has_globals),
+                install_name, False, dep_install, has_globals, has_mod_init),
             emit_startup=False, structs=library_structs)
         external_syms = info.get("external_syms") or []
         if external_syms:
@@ -14237,7 +14244,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     dylib_exports=dylib_exports)
             code_file = dylib_code_offset(install_name, True, dep_install,
-                                          has_globals)
+                                          has_globals, has_mod_init)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
                                          emit_startup=False,
@@ -14249,6 +14256,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             code = bytes(codegen.asm.sections["text"])
         else:
             external_syms = []
+        mod_init_addrs = _mod_init_addrs(info, has_mod_init, source_paths)
     except CodegenError as e:
         raise FormalBuildError(str(e))
 
@@ -14275,10 +14283,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     binary = build_macho_dylib(
         code,
         TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
-                                      dep_install, has_globals),
+                                      dep_install, has_globals,
+                                      has_mod_init),
         exports, install_name, arch=arch, external_syms=external_syms,
         deps=dep_install, dep_syms=dep_syms,
-        globals_image=globals_image("macho"))
+        globals_image=globals_image("macho"),
+        mod_init_addrs=mod_init_addrs)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
@@ -14323,6 +14333,36 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     if prove:
         _prove_dylib_result(result, code, info, exports, ordered, output, check)
     return result
+
+
+def _mod_init_addrs(info: dict, has_mod_init: bool, source_paths: list) -> list:
+    """The library's load-time initializer ADDRESSES, or `[]` for no body.
+
+    `has_mod_init` is the answer BEFORE the code was emitted — the container's
+    load-command size depends on it, which is why it is decided from the
+    function list (`model.module_body_functions`) rather than from anything the
+    emitters say. `info["mod_init_addrs"]` is the answer AFTER, and the two
+    have to be the same question or the image is wrong in a way nothing else
+    catches: an initializer array whose SECTION was never declared is a segment
+    nobody maps, and an image whose code was emitted for a base that assumed the
+    section and does not carry it puts every function 80 bytes from where the
+    `__init_offsets` entry says it is.
+
+    So it is checked rather than assumed, and the refusal names the library —
+    because "the emitters reported no module body and the function list says
+    there is one" is a compiler bug with no reader-facing repair, and the next
+    thing to do with it is find out which of the two is wrong.
+    """
+    addrs = list(info.get("mod_init_addrs") or [])
+    if bool(addrs) != bool(has_mod_init):
+        raise FormalBuildError(
+            f"{os.path.basename(source_paths[0])}: this library has "
+            f"{'a' if has_mod_init else 'no'} module body to run at load time "
+            f"and the code generator reported "
+            f"{len(addrs)} initializer address(es), so the image's "
+            f"load-time entry section and its contents disagree. That is a "
+            f"compiler bug, not a property of this module")
+    return addrs
 
 
 def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,

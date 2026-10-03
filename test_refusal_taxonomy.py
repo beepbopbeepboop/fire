@@ -24,7 +24,18 @@ protecting, and they are not the same thing:
    into "other". The samples below are real messages, abbreviated at clause
    boundaries, and each asserts the family it must land in.
 
-3. **A count that reads like a gap and is not one.** The cause table in
+3. **A marker for a message the backend can no longer produce is rot with a
+   sample attached to it.** The family "a module whose API is its top-level
+   statements, imported by another" and its sample were removed on
+   2026-10-03 with the dylib-module-body row it keyed on (§6 of
+   `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose doc was deleted with
+   the fix): both object writers emit a load-time initializer, so the refusal
+   that named it no longer exists and a sample of a message nothing produces is
+   a sample that can only rot. A family is removed when its message stops being
+   reachable, and the test that says so is this file's list — the absence of a
+   row is the only record that the message is gone.
+
+4. **A count that reads like a gap and is not one.** The cause table in
    `tools/formal_sweep_causes.py` ranks by what a fix would have to CHANGE, and
    prints `FILES BLOCKED` with an explicit warning that it is an upper bound.
    For a cause whose refusal is about a MODULE's boundary rather than a
@@ -283,7 +294,18 @@ CAUSE_SAMPLES = [
     ("a module-global name has no storage",
      "encode_sxtb_wd_wn: '_SXT_BASES' is bound at module level, and this path "
      "has no module-global storage for it"),
-    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
+    # A `try` handler arm with a body. This is the refusal that appeared for 5
+    # files when the dylib-module-body row was closed, and it is CORRECT by
+    # design — `formal` has no unwinder, so an arm's body cannot be in the image
+    # and dropping it silently would be a wrong-but-exit-0 answer. It is in the
+    # taxonomy because "refused on purpose" and "nobody has looked" are
+    # different answers, and `other refusal` cannot tell them apart.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     "memslot.py: line 407: `ValueError` as e is a handler arm with a body "
+     "this path cannot put in the image, so it is refused rather than "
+     "dropped: `formal` has no exception unwinder, so no edge runs from a "
+     "raise site into an arm"),
+    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
     # than from a sweep log, because the shape it refuses did not exist as a
     # distinct message until a module body was recognised as the module's own
     # writer — before that, a name whose value a call computes and a name read
@@ -503,9 +525,6 @@ CAUSE_SAMPLES = [
      "constructing ModuleSpecGenerator with arguments is a call to a "
      "user-defined `__init__` whose body this path does not inline: a read of "
      "'self' in the right-hand side"),
-    ("a module whose API is its top-level statements, imported by another",
-     "ab_filelist.py: line 12: this module's API is its top-level statements "
-     "(AssignStmt, IfStmt), and a library has no entry point to run them"),
     ("a local read before its first assignment",
      "load: 'f' is read at line 22 before anything in this function stores "
      "it, and CPython raises UnboundLocalError for that program"),

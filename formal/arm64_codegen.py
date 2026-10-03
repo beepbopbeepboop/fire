@@ -830,6 +830,21 @@ dylib_exports: list = None, globals_base: int = None,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
             "test_input": self.test_input,
+            # ADDRESSES (not offsets into `code` — `asm.label` records
+            # `org + len(text)`, so a label is already the address the image
+            # will map), in emission order, for the load-time initializer a
+            # LIBRARY emits: `__TEXT,__init_offsets` in a Mach-O image,
+            # `.init_array` in an ELF one. A container writes them into a
+            # pointer array verbatim, which is only correct because this image
+            # is loaded at the address it was linked at (no slide, no
+            # rebase). Empty for every module with no body — which is every
+            # program on this path, since a program enters its body through
+            # the startup stub instead — so the key is inert unless a dylib
+            # reads it.
+            "mod_init_addrs": [
+                self.asm.labels[f.name]
+                for f in M.module_body_functions(functions)
+                if f.name in self.asm.labels],
             # PCs of the branches that test an `if`/`elif`/`while`/ternary
             # condition.  The proof generator needs these because a
             # short-circuit `and`/`or` in a condition emits a CBZ/CBNZ that

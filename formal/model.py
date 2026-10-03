@@ -22486,15 +22486,44 @@ def fold_literal_expr(node, names=None):
 def fold_module_value(node, names=None):
     """The value of a module-level INITIALIZER this build knows, or None.
 
-    Two folders, deliberately separate and deliberately in this order.
+    Three folders, deliberately separate and deliberately in this order.
     `fold_literal_expr` stays literal-only — its own comment is right that every
     operator added there is one more way for a fold to be wrong, and it is
-    shared with the struct-field and class-constant readers, which have no
-    target to consult. This second folder answers the one initializer shape
-    that is not a value the source wrote but a QUESTION the build can answer:
-    a `#kgen.param.expr<…>` template about the target this build is emitting
-    (`std/sys/info.mojo`'s `_TargetType` machinery, and the `_PLUGIN_COUNT`
-    arithmetic beside it).
+    shared with the struct-field, class-constant and default-parameter readers,
+    which have no target to consult and are not asking the same question. This
+    one answers the two initializer shapes that are not a value the source
+    wrote plainly:
+
+    * a `#kgen.param.expr<…>` template about the target this build is emitting
+      (`std/sys/info.mojo`'s `_TargetType` machinery, and the `_PLUGIN_COUNT`
+      arithmetic beside it);
+    * a `FloatLiteral`, truncated toward zero.
+
+    **The float arm is the module-level one, and where it sits is the whole
+    argument for it.**  `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
+    each lower a `FloatLiteral` with `int(expr.value)` — "formal is int-only;
+    truncate toward zero (matches a C cast)" — and `formal/types.py` types it as
+    `DEFAULT_INT_TYPE` for the same reason, so a module-level float constant was
+    the ONE literal whose value both backends already knew and neither folder
+    answered.  The consequence was not a missing capability but a wrong
+    classification: `collect_module_symbols` got `None`, so the name was recorded
+    `rebound` rather than `assigned`, `module_body`'s `_is_folded_constant`
+    declined it, and a store the image holds became "code that has to run" — a
+    dylib was then refused for having a body at all, and told the reader that
+    "this module's API is its top-level statements", which is a statement about
+    the module's API and not about the one fact that matters (`96.0` is a
+    constant, and four of the six body statements of this repository's own
+    `tools/memslot.py` are float constants).
+
+    Substituting the truncated word at a read is exactly what the same literal
+    written at that read site would produce — the folder answers a question about
+    the CONSTANT, and the emitters answer the same question the same way about a
+    literal.  That is the test this arm has to pass to live in this folder rather
+    than in `fold_literal_expr`: for `x = 2.5; return x` the image is 2 on both
+    sides of the substitution, so folding decides nothing about the value and
+    only about whether the store is redundant.  A float that is NOT a literal
+    (`X = 2.5 * other`) is still not folded, so its name stays `rebound` and a
+    read of it is refused by name rather than guessed.
 
     The result is not a guess because the target is not a guess: it is the
     `arch`/`fmt` pair `compile_formal` was called with, which the linker is
@@ -22519,6 +22548,17 @@ def fold_module_value(node, names=None):
     got = target_template(node)
     if got is not None and got[0] == "value":
         return got[1]
+    # `int()`, not `round()` and not a bit pattern: it is the expression both
+    # emitters evaluate for a `FloatLiteral` and `formal/types.py`'s
+    # `DEFAULT_INT_TYPE` already means, so this arm and the emitters cannot
+    # disagree about the word a float constant is. A `bool` cannot arrive here
+    # (`fold_literal_expr` returns one for a `BoolLiteral` and returned above),
+    # and a `nan`/`inf` spelling has no literal node to reach this.
+    if isinstance(node, F.FloatLiteral):
+        try:
+            return int(node.value)
+        except (TypeError, ValueError, OverflowError):
+            return None
     return None
 
 
@@ -22764,6 +22804,31 @@ _MODULE_BODY_BINDINGS = ("AssignStmt", "VarDecl", "AugAssignStmt",
 # `def main` has that called by its body or not at all, and the startup stub
 # branches to `functions[0]`, which is this one.
 MODULE_BODY_NAME = "__module_body__"
+
+# The attribute `_module_body_function` stamps the wrapper it builds, and the one
+# reader of it. A TAG rather than the NAME because the name is not a reliable
+# key: a library is compiled from SEVERAL sources, each of which may have a body,
+# and `formal/build.py::compile_formal_dylib` renames the second and later of one
+# name apart (`__module_body____ov2`) because the emitters key their function
+# tables by name. Matching the name would find one of N bodies in a library built
+# from N files with one, and the load-time initializer array would then run one
+# file's top level and silently drop the rest — which is the silent no-op this
+# mechanism exists to end, reintroduced one level down.
+MODULE_BODY_TAG = "_module_body"
+
+
+def module_body_functions(functions: list) -> list:
+    """The module-body wrappers in `functions`, in the order given.
+
+    The list and not the first one, for the reason `MODULE_BODY_TAG` gives: a
+    library can be compiled from several sources and each may carry a body, and
+    every one of them is code the source says runs when the module is imported.
+    The consumers are the two object writers' load-time initializer arrays (one
+    pointer each, in this order) and `formal/build.py`'s "does this library have a
+    body at all", which is a question about the list being non-empty.
+    """
+    return [f for f in (functions or [])
+            if getattr(f, MODULE_BODY_TAG, False) is True]
 
 
 def entry_function(functions: list):

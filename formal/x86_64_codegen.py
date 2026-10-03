@@ -806,6 +806,16 @@ class X86_64Codegen:
             "extern_calls": extern_calls,
             "test_input": self.test_input,
             "cond_branches": sorted(self._cond_branch_pcs),
+            # ADDRESSES (not offsets into `code` — `asm.label` records
+            # `org + len(text)`, so a label is already the mapped address), in
+            # emission order, for the load-time initializer a LIBRARY emits:
+            # `.init_array` here and `__TEXT,__init_offsets` on the Mach-O
+            # side. Empty for every module with no body, which is every program
+            # on this path (a program enters its body through the startup stub).
+            "mod_init_addrs": [
+                self.asm.labels[f.name]
+                for f in M.module_body_functions(functions)
+                if f.name in self.asm.labels],
         }
         return code, info
 

@@ -682,6 +682,204 @@ def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
               f"would collide in one process")
 
 
+# ── the load-time initializer, in BOTH containers ──────────────────────────
+#
+# A library has no `main`, so a module body compiled into one is a function
+# nothing calls — the file builds, links, and does nothing at load time, which
+# is the silent no-op one level down from the executable path's own and cost 16
+# files of this repository (the dylib-module-body row, §6 of
+# `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`). Each object writer therefore
+# emits the loader's own mechanism for "call this when the image loads", and each
+# one is a DIFFERENT mechanism, so each is checked in its own container:
+#
+#   * Mach-O: a `__TEXT,__init_offsets` section of type `S_INIT_FUNC_OFFSETS`
+#     holding 32-bit offsets from the image's mach_header. NOT the
+#     `__DATA,__mod_init_func` pointer array the name suggests — measured on this
+#     platform (macOS 26.6.2), a correct 8-byte pointer in a correct
+#     `S_MOD_INIT_FUNC_POINTERS` section is parsed, loaded and never called, and
+#     `S_INIT_FUNC_OFFSETS` in `__TEXT` is what `clang` emits and dyld runs.
+#   * ELF: an `.init_array` named by `DT_INIT_ARRAY`/`DT_INIT_ARRAYSZ`, which is
+#     what `elf/dl-init.c` walks for every object it loads.
+#
+# The Mach-O half is also RUN, under Rosetta, because "the section is there and
+# says the right thing" is a claim about the file and the subject is the
+# program's stdout.
+BODY_MODULE = """\
+printf("body@")
+LITERAL = 3
+
+
+def compute() -> Int:
+    return 7
+
+
+COMPUTED = compute()
+
+
+def get() -> Int:
+    return LITERAL
+"""
+
+# `printf` and not `print`, because `print` on this path is Python's and does
+# not format: `print("main=%d@@", get())` prints `main=%d@@ 3`. And the program
+# reaches the library through its IMPORT and not through `--link-dylib`, because
+# a library carrying a load-time initializer that is on the link line twice runs
+# its body twice, and this case is about the body running once.
+BODY_PROGRAM = """\
+from x86body import get
+
+
+def main():
+    printf("main=%d@@", get())
+    return 0
+"""
+
+
+def test_a_module_body_is_a_load_time_initializer(tmpdir, shared):
+    """Both containers carry the initializer, and the Mach-O one actually runs.
+
+    Read out of the FILES rather than out of the build's result dict, because a
+    dict is a claim: the section header, the dynamic tags and the bytes the
+    image carries are the artifact, and the two are cross-checked against each
+    other — the value in the image must be the address the emitters reported,
+    which is two independent readings of one fact rather than one read twice.
+
+    The x86-64 program at the end is the level at which a wrong container or an
+    unread initializer is distinguishable from a working one: the library is
+    linked into a real image, the image runs under Rosetta 2, and its stdout
+    must contain the body's line BEFORE `main`'s — which is also the only way to
+    see that the initializer runs at LOAD rather than at first call.
+    """
+    from formal import elf
+    from formal.build import compile_formal_dylib
+    from formal.macho_linker import TEXT_BASE
+    from formal.model import MODULE_BODY_NAME
+
+    src = os.path.join(tmpdir, "x86body.mojo")
+    with open(src, "w") as f:
+        f.write(BODY_MODULE)
+
+    # ── Mach-O ──────────────────────────────────────────────────────────────
+    macho_out = os.path.join(tmpdir, "x86body.dylib")
+    result = compile_formal_dylib([src], output=macho_out, arch="x86_64",
+                                  fmt="macho", prove=False, check=False)
+    addrs = list(result["info"]["mod_init_addrs"])
+    check(len(addrs) == 1,
+          f"a module with one body reported {len(addrs)} initializer "
+          f"address(es): {addrs}")
+    with open(macho_out, "rb") as f:
+        data = f.read()
+    _ident, segs = segments_and_sections(data)
+    found = section(segs, "__init_offsets")
+    check(found is not None,
+          "the library has no __TEXT,__init_offsets section, so the module "
+          "body is a function nothing calls: the file builds, links, and does "
+          "nothing at load time")
+    addr, size, offset = found
+    check(size == 4 * len(addrs),
+          f"__init_offsets is {size} bytes for {len(addrs)} initializer(s); "
+          f"the entries are 4-byte offsets from the mach_header")
+    check(offset + size <= len(data),
+          f"__init_offsets runs to {offset + size}, past the image's "
+          f"{len(data)} bytes")
+    for i, want in enumerate(addrs):
+        got = struct.unpack_from("<I", data, offset + i * 4)[0]
+        check(got == want - TEXT_BASE,
+              f"initializer {i} is the offset {got:#x} and the emitted "
+              f"function is at {want:#x}, which is {want - TEXT_BASE:#x} from "
+              f"the mach_header at {TEXT_BASE:#x}")
+    text_addr, text_size, _ = section(segs, "__text")
+    check(text_addr <= addrs[0] < text_addr + text_size,
+          f"the initializer points at {addrs[0]:#x}, which is outside "
+          f"__TEXT [{text_addr:#x}, {text_addr + text_size:#x}) — it would be "
+          f"a jump into nothing")
+
+    # ── ELF ─────────────────────────────────────────────────────────────────
+    elf_out = os.path.join(tmpdir, "x86body.so")
+    eresult = compile_formal_dylib([src], output=elf_out, arch="x86_64",
+                                   fmt="elf", prove=False, check=False)
+    eaddrs = list(eresult["info"]["mod_init_addrs"])
+    # The COUNT is the agreement that matters and the addresses cannot be: the
+    # two containers map their code at different bases (`TEXT_BASE` and
+    # `elf.DYLIB_BASE`) and lay it out differently, so a Mach-O address and an
+    # ELF address for the same function are different numbers by construction.
+    # Both containers seeing exactly the body's count is what says they found
+    # the same module body; the VALUE is checked inside each container below,
+    # against that container's own emitted address.
+    check(len(eaddrs) == len(addrs),
+          f"the two containers disagree about how many load-time "
+          f"initializers this module has: {len(addrs)} vs {len(eaddrs)}")
+    with open(elf_out, "rb") as f:
+        edata = f.read()
+    head = elf._read_header(edata, elf_out)
+    dyn = elf._dyn_entries(edata, head)
+    tags = [t for t, _v in dyn]
+    check(elf.DT_INIT_ARRAY in tags and elf.DT_INIT_ARRAYSZ in tags,
+          f"the ELF library carries no DT_INIT_ARRAY/DT_INIT_ARRAYSZ, so no "
+          f"loader has anything to call: tags {[hex(t) for t in tags]}")
+    arr = elf.dyn_tag(dyn, elf.DT_INIT_ARRAY)
+    asize = elf.dyn_tag(dyn, elf.DT_INIT_ARRAYSZ)
+    check(asize == 8 * len(eaddrs),
+          f"DT_INIT_ARRAYSZ is {asize} for {len(eaddrs)} initializer(s); an "
+          f"array of pointers is 8 bytes each")
+    # The array has to be inside a segment a loader MAPS, not merely present in
+    # the file: that is the failure a reader that trusts `.dynamic` cannot see.
+    mapped = []
+    for p_type, _flags, _poff, p_va, p_fsz, _pmsz in \
+            elf._program_headers(edata, head):
+        if p_type == 1:
+            mapped.append((p_va, p_va + p_fsz))
+    check(any(lo <= arr and arr + asize <= hi for lo, hi in mapped),
+          f"DT_INIT_ARRAY names {arr:#x}+{asize}, which no PT_LOAD maps "
+          f"(segments {[(hex(a), hex(b)) for a, b in mapped]})")
+    for i, want in enumerate(eaddrs):
+        got = struct.unpack_from("<Q", elf._at_vaddr(edata, head, arr, asize),
+                                 i * 8)[0]
+        check(got == want,
+              f"initializer {i} is {got:#x} in the image and {want:#x} in the "
+              f"code the emitter produced")
+
+    # ── and it RUNS, on the Mach-O side, under Rosetta ─────────────────────
+    prog = os.path.join(tmpdir, "bodyprog.mojo")
+    with open(prog, "w") as f:
+        f.write(BODY_PROGRAM)
+    out = os.path.join(tmpdir, "bodyprog.aout")
+    built = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "--backend=x86_64", "-o", out, prog],
+        capture_output=True, text=True, timeout=600)
+    check(built.returncode == 0,
+          f"an x86-64 program importing a module with a body failed to build: "
+          f"{(built.stderr or built.stdout).strip()[-400:]}")
+    got = run_x86_64(out)
+    check(got.stdout == "body@main=3@@",
+          f"the x86-64 image printed {got.stdout!r}, expected "
+          f"'body@main=3@@' — the module body's statement has to run at load, "
+          f"before main")
+    check(got.returncode == 0,
+          f"the x86-64 image exited {got.returncode}, expected 0")
+
+    # And the CONTROL: a module with no body writes no initializer at all, so
+    # every image the tree built before this existed is unchanged. The same
+    # library shape, minus the two statements that make it a body.
+    plain = os.path.join(tmpdir, "x86plain.mojo")
+    with open(plain, "w") as f:
+        f.write("def get() -> Int:\n    return 3\n")
+    presult = compile_formal_dylib([plain], output=os.path.join(
+        tmpdir, "x86plain.dylib"), arch="x86_64", fmt="macho", prove=False,
+        check=False)
+    check(presult["info"]["mod_init_addrs"] == [],
+          f"a module with no body reported "
+          f"{presult['info']['mod_init_addrs']} as load-time initializers")
+    with open(os.path.join(tmpdir, "x86plain.dylib"), "rb") as f:
+        pdata = f.read()
+    _pid, psegs = segments_and_sections(pdata)
+    check(section(psegs, "__init_offsets") is None,
+          "a module with no body carries a __init_offsets section, so every "
+          "library in the tree changed shape for a construct most of them do "
+          "not have")
+
+
 TESTS = [
     ("x86-64 dylib stubs are jmpq *(%rip)",
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),
@@ -691,6 +889,8 @@ TESTS = [
      test_the_dylib_container_is_what_the_caller_asked_for),
     ("an ELF module dylib is a loadable object",
      test_an_elf_module_dylib_is_a_loadable_object),
+    ("a module body is a load-time initializer in both containers",
+     test_a_module_body_is_a_load_time_initializer),
     ("the ELF dylib refuses what it cannot represent",
      test_the_elf_dylib_refuses_what_it_cannot_represent),
     ("an ELF image with a module import is refused",
