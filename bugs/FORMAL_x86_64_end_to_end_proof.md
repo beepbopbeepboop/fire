@@ -1,19 +1,20 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
-## Status (2026-10-02 — the last admitted SIDE CONDITION is closed; one `hrip` sorry, ten loops and `group3:idiv` left)
+## Status (2026-10-02 — B24 closed; the last `terminates` sorry was a FALSE theorem, not missingness)
 
 | | 2026-09-26 | 2026-10-01 | 2026-10-02 |
 |---|---|---|---|
 | `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 44 agree, 1 WRONG (`udivmod`) | unchanged (not re-measured; not touched) |
 | `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus step-lemma APPLICABILITY at 17 lemmas x 38 real encodings, 354 hypotheses | 151/57, applicability at **22 lemmas x 48 real encodings, 482 hypotheses** |
 | `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** | **32** |
-| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** | **1** (`wide_recv`) |
-| no finite path tree | 19 (4 loop, 15 uncovered form) | **12** (10 loop, 2 not) | **12** (10 loop, 2 not) |
+| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** | **0** |
+| no finite path tree | 19 (4 loop, 15 uncovered form) | **12** (10 loop, 2 not) | **13** (10 loop, 2 uncovered form, **1 returns into a caller**) |
 | value theorem — proved / open | 3 / 0 | 3 proved, 12 open | 3 proved, 12 open |
 | failing | 0 | **0** | **0** |
 
 **B24. A form name covering every SIB load, wired to one register pair.** Fixed
-2026-10-02, `work/formal8-14`.
+2026-10-02, `work/formal8-14`. `augassign` off the `sorry` list, and the proof
+count 31 → 32.
 
 `mov_r64_rm64_sib` is what `_shapes` calls *every* no-displacement SIB memory
 load, and `_FORMS` wired it to `x86_step_mov_rax_sib_rsp`, whose statement pins
@@ -56,14 +57,53 @@ same `4c 8b 1c 24` encoding with the old pinned `dst`, it reports
 ``hypothesis 10 `3 + x86_rex_r 76 = 0` does not hold at 4c 8b 1c 24 — the lemma
 is vacuous there``.
 
-`augassign` is the whole visible effect: **31 → 32 proved with no sorry, 2 → 1
-with a sorry**, over the same 45 examples, with `failing` at 0. `wide_recv` is
-the remaining one and is a different problem (below).
-
 The general lesson, and it is B2's own: **a form NAME is a promise about every
 encoding that reaches it**, so the applicability check has to be keyed on the
 generator's form names and not on a hand-written list of lemmas. A lemma with
 no row is a lemma nobody is asking about.
+
+**B25. The `sorry` that was left was a theorem that is not TRUE.** Same commit.
+
+The last `terminates` sorry was `wide_recv`, and the entry below describes its
+residual goal as a memory-separation problem: "`b` is not a literal, `a + 8 <= b`
+has no `decide` to give it". That is what the goal LOOKS like. What it is, is a
+false statement.
+
+`wide_recv`'s path contains a `call` — it is the only example in the corpus that
+has one — and the path tree made every `ret` the end of the run. So the chain
+stopped at the CALLEE's return and the closing fact was
+
+```lean
+have hrip : s40.rip = 0
+```
+
+while the model's own `ret` successor is
+`rip := (mem_read_bytes s39.mem (s39.rsp.toNat) 8).toNat`, and the word in that
+slot is the return address the `call` at 4294967946 pushed:
+`UInt64.ofNat (4294967946 + 5)` = **4294967951**. So `hrip` claims 0 and the
+machine says 4294967951, the theorem is unprovable at any cost, and the reason
+it reports `proved, 1 sorry` rather than `FAIL` is that the `sorry` sits inside
+the closing fact's guard.
+
+Two consequences, and the second is the lesson:
+
+* **A `sorry` is not a unit of missingness.** This one was covering for a claim
+  that was wrong. Closing it required changing the TREE, not the proof.
+* **The same defect is the whole of `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.**
+  That doc measured a 24-argument call timing out at `whnf` and concluded the
+  closing `simp` does not scale. The 24-argument program's chain ends in the same
+  false `hrip` — its `call` at 4294968254 pushes 4294968259 — so its timeout is
+  `simp` grinding at a goal that cannot be closed, and neither raising the
+  heartbeat budget nor splitting the `simp` can help. See that doc.
+
+`ret` with a frame to return to is now its own reported outcome, so the case
+says why instead of proving something untrue. The `sorry` count going 1 → 0 is
+therefore **not** a proof getting stronger: `wide_recv` moved from the proved
+column to the "no tree" column, where it belongs, and
+`bugs/FORMAL_x86_64_endto_end_proof.md`'s "STILL OPEN" note on `wide_recv` is
+superseded — what remains there is the return-following, not a separation lemma
+parameterised over a symbolic address (though that is still needed once the tree
+follows the return).
 
 Everything below is the 2026-10-01 state and is left as written.
 
@@ -642,8 +682,14 @@ there is 1 left.)*
   `decide` to give it, and no amount of repeating helps. This is the real form of
   B18, and closing it needs the separation lemma parameterised over a symbolic
   address with the inner read's own separation supplied — a two-level statement,
-  not a repeat count. **STILL OPEN, and now the only `terminates` sorry in the
-  corpus.**
+  not a repeat count.
+  **SUPERSEDED as a diagnosis (B25).** The goal's shape is as described and its
+  cause is not: `wide_recv`'s path contains a `call`, the tree stopped at the
+  callee's `ret`, and the closing fact was `s40.rip = 0` where the machine pops
+  4294967951. Nothing about a two-level separation statement will close a goal
+  that is false. The symbol**ic**-address separation is still real work — it is
+  what the step after a `ret` needs once the tree follows the return — but it is
+  not what was wrong here.
 * `augassign` — a single admitted SIDE CONDITION on a `mov rax, [rsp]` step (the
   SIB form), not a `hrip`. `simp [read_i32_le, read_i8, hb]` reports `False`, so
   one of that instruction's byte facts is not in `all_bytes`. Worth ten minutes:
@@ -763,6 +809,18 @@ B24 is the shape to look for when the count will not move: take the generated
 file, replace `all_goals sorry` with `all_goals trace_state`, and read the goal.
 It is `⊢ False`, and the question is never "which byte fact is missing" but
 "which instruction is this lemma about".
+
+**And B25 is the other shape, one level further out.** `wide_recv`'s `sorry` was
+not in a side condition at all — it was in the final `hrip`, and the goal there
+was `⊢ (mem_read_bytes …) = 0`, not `⊢ False`. A `False` goal at least tells you
+something contradicted; this one just sat there being unprovable, and the reading
+was "the separation is hard". It was `s_N.rip = 0` where the machine pops the
+address after a `call`. So there are two questions to ask of a `sorry`, in this
+order: **is the goal `False` (a side condition that does not hold) or is it a
+positive claim that is not true (a theorem that cannot be proved)?** The first is
+B1/B24 territory. The second means the TREE is wrong, and no amount of lemma
+work reaches it — `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+is the same defect in a program too long to read by hand.
 
 If you are adding a form: the four places that must agree are `_FORMS` (lemma,
 `takes_imm`, side conditions), `_SUCCS` (the successor shape), the branch in

@@ -38,23 +38,25 @@ using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
   Measured 2026-10-02 over all 45 examples: **terminates proved with no sorry
-  32, proved with a sorry 1, no finite tree 12 (10 loops and two that leave the
-  function), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0
-  and value 3 / 0 when the twenty-odd forms below were wired.
+  32, proved with a sorry 0, no finite tree 13 (10 loops, two whose leaves leave
+  the function, and one whose run continues into the caller after a `ret`),
+  failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0 and value
+  3 / 0 when the twenty-odd forms below were wired, and 31 / 2 / 12 on
+  2026-10-01.
 
-  The last step from 2 to 1 was NOT a new lemma but a re-generalised one, and it
-  is the shape B2 describes one level up: `mov_r64_rm64_sib` is a form NAME that
-  covers `mov <any r64>, [rsp]`, and it was wired to `x86_step_mov_rax_sib_rsp`,
-  a single register pair whose statement pins the REX byte to `0x48` and the
-  destination to the literal field `rax`. So the `4c 8b 1c 24` that
-  `_pop_slot(Reg.R11)` emits — five of them in this corpus — was proved as
-  `48 8b 04 24`. Its two byte hypotheses were FALSE, the side-condition guard
-  admitted them, and `augassign` reported `terminates: proved, 1 sorry` about a
-  chain containing a step that is not the instruction the machine runs. Both
-  no-displacement SIB lemmas are now general over the REX byte and over the
-  register named, which is what the two disp siblings already were, and both
-  now have rows in `formal/x86_64_model_coverage_test.py` — which they did not
-  have, and that omission is why nothing said so.
+  The `sorry` count reached 0 by two DIFFERENT routes, and the second is why it
+  is worth reading rather than celebrating. `augassign` lost its `sorry` to a
+  re-generalised lemma (`mov_r64_rm64_sib` was proved as `mov rax, [rsp]` and so
+  proved `mov r11, [rsp]` too — the two REX bytes and two destination registers,
+  applied by FORM NAME, with the false byte hypotheses admitted by the
+  side-condition guard; B2 over a whole addressing mode). `wide_recv` lost its
+  `sorry` by ceasing to be PROVED at all: its path contains a `call`, the tree
+  made the callee's `ret` the end of the run, and the closing `hrip` claimed
+  `rip = 0` where the machine pops the address the `call` pushed. A `sorry` is
+  not a uniform unit of missingness — one of them was covering for a claim that
+  was wrong — so `no tree: the run continues into the caller` is a BETTER outcome
+  than `proved, 1 sorry` and the same number of sorries is not the same strength
+  of theorem.
 
   The `sorry` count fell from 25 to 2 for a reason that is worth stating on its
   own, because it is a sentence in `X86.lean` that was wrong: the memory
@@ -115,6 +117,18 @@ skipped silently -- the point is to know what is and is not proved.
 
     * `group3:div` is skipped wherever it appears, for the same reason the
       per-instruction certificates skip it: the step is not total.
+
+    * A path that RETURNS INTO A CALLER is declined, and it is the one limit
+      here that is not a gap in the proof but a falsehood in it.  `call` pushes
+      a return address and `ret` pops one, so a function that calls another does
+      not finish where the callee finishes; the tree used to make every `ret`
+      the end of the run, the chain stopped at the callee's return, and the
+      closing `hrip : s_N.rip = 0` claimed the exit sentinel where the machine
+      has the address after the `call`.  Reported as `no tree: the run
+      continues into the caller after the callee's ret`, and `wide_recv` is the
+      only example in the corpus it applies to.  Following the return is the fix
+      and it needs the separation at each `ret`; see
+      `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
 
 Usage: python3 formal/x86_64_endtoend_test.py [file.mojo ...]
 """
@@ -1114,12 +1128,46 @@ class _Node:
         self.kids = []
 
 
+class _NoTree(ValueError):
+    """`_tree` declined to build a path, with the REASON as a kind.
+
+    B21's lesson, one more time: three different outcomes — no step lemma, a
+    loop, and a path that leaves the function — were all being reported as
+    failures, and at one point the suite read "36 failing out of 43" when the
+    real number was 2. A fourth kind joins them, and it is the only one of the
+    four that means the theorem could not be TRUE rather than that it was not
+    proved: the path reaches a `ret` that returns into a caller, so the chain
+    would have to continue past the frame the prover stops at.
+
+    It is a distinct class rather than a message prefix so the reporter cannot
+    come to depend on parsing English to tell the cases apart.
+    """
+
+    def __init__(self, kind, detail):
+        super().__init__(detail)
+        self.kind = kind
+
+
 def _tree(code, info, shapes):
     """The path tree from the entry, or None if it loops or leaves the body.
 
     A loop is reported as None rather than walked: the chain proves one path, so a
     back edge has no finite unfolding here.  Four of the examples have one and
     they are named in the test output as needing induction.
+
+    **A `call` pushes a return address, and that is what makes `rets`.**  The
+    instruction after the call is the address the callee's `ret` will pop, so it
+    goes on a LIFO rather than being stepped here; and a `ret` with a non-empty
+    `rets` is NOT the end of the run — see the `ret` branch, which is where the
+    interesting part is. The stack exists so that case can be RECOGNISED: a tree
+    that treated every `ret` as the end could not tell "this program finishes
+    here" from "this program returns to its caller", and it emitted a false
+    theorem for the second.
+
+    Reading the return address off the encoding (`m + 5`) rather than off
+    `node.succ` is deliberate: it is the same literal the model's
+    `x86_step_call_rel32` pushes (`UInt64.ofNat (m + 5)`), which is what makes
+    the two agree about where the machine goes next.
 
     **A loop is a REVISITED ADDRESS, not a length.**  The test for it used to be
     `depth > 64`, one frame per instruction, which conflated "this path is long"
@@ -1139,7 +1187,7 @@ def _tree(code, info, shapes):
     by_addr = {base + i.offset: (i, f, r) for i, f, r in shapes}
     deep = max(256, sys.getrecursionlimit() - 200)
 
-    def build(addr, state, depth, seen):
+    def build(addr, state, depth, seen, rets):
         if depth > deep or addr in seen:
             return None
         seen = seen | {addr}
@@ -1156,8 +1204,8 @@ def _tree(code, info, shapes):
             n = 6 if form == "jcc_rel32" else 2
             nxt = addr + n
             node = _Node(insn, form, raw, addr, "jcc", state, nxt)
-            taken = build(addr + n + off, None, depth + 1, seen)
-            fell = build(nxt, None, depth + 1, seen)
+            taken = build(addr + n + off, None, depth + 1, seen, rets)
+            fell = build(nxt, None, depth + 1, seen, rets)
             if taken is None or fell is None:
                 return None
             # `by_cases h : P` presents the `P` case FIRST, so the taken path
@@ -1169,7 +1217,7 @@ def _tree(code, info, shapes):
                    if form == "jmp_rel32"
                    else int.from_bytes(raw[1:2], "little", signed=True))
             node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
-            node.kids = [build(addr + off, None, depth + 1, seen)]
+            node.kids = [build(addr + off, None, depth + 1, seen, rets)]
             return None if node.kids[0] is None else node
         if form == "call_rel32":
             # A CALL IS A JUMP, and the tree has to follow the TARGET.  It used
@@ -1185,28 +1233,78 @@ def _tree(code, info, shapes):
             # That is B22's lesson (a form with a lemma conceals the state of
             # everything after it) with the concealment on the other side: the
             # lemma was right, the TREE was wrong, and only the sorry count said
-            # so.  `count`, `fact`, `fib`, `pow2`, `sqsum` and `sum` are the
-            # six that recurse, so their target is a back edge and the honest
-            # answer is `loops`; the non-recursive callers get a real proof.
+            # so.
             #
-            # What the path does NOT get is the instruction AFTER the callee
-            # returns: the node's successor is the target, so the continuation
-            # in the caller is never built.  That is a real limit and it is
-            # invisible today because it only costs anything when the
-            # continuation itself calls something, which no example in the corpus
-            # does.
+            # The callee is walked with a FRESH `seen`, because the caller's
+            # `seen` cannot cross a frame boundary: calling the same function
+            # twice in a row is two calls and not a cycle, and sharing `seen`
+            # made the second one look like a loop -- `wide_recv` calls one
+            # method body three times (`set_x`, `get_x`, `get_y`, all the same
+            # address) and came back as "body loops, or branches out of the
+            # function", naming two reasons when there is one. A loop INSIDE the
+            # callee is still caught, because the callee's own addresses
+            # accumulate as it steps.
+            #
+            # A BACKWARD call is a back edge and is the honest answer here, the
+            # same test `_has_loop` makes on the same bytes: `count`, `fact`,
+            # `fib`, `pow2`, `sqsum` and `sum` all recurse, so their target is at
+            # or below the call and they report `loops` with no tree built at
+            # all.  Left to a fresh `seen` they would recurse in PYTHON until the
+            # interpreter's limit, which reaches the same answer by a much worse
+            # route.
             off = int.from_bytes(raw[1:5], "little", signed=True)
+            if off + 5 <= 0:
+                return None
             node = _Node(insn, form, raw, addr, "jmp", state, addr + 5 + off)
-            node.kids = [build(addr + 5 + off, None, depth + 1, seen)]
+            node.kids = [build(addr + 5 + off, None, depth + 1, frozenset(),
+                               rets + (addr + 5,))]
             return None if node.kids[0] is None else node
         if form == "ret":
+            # A `ret` is the end of the RUN only when there is nothing to return
+            # to: `X86State.init` gives a stack of zeroes, so the OUTERMOST
+            # `ret` pops address 0 and `x86_exec_go_exit` stops there.  A `ret`
+            # with a frame to return to pops the return address the matching
+            # `call` pushed, the machine carries on in the CALLER, and the
+            # address it pops is a literal in the image -- not 0.
+            #
+            # Treating every `ret` as the end is what made this prover emit a
+            # theorem that is FALSE rather than one it could not prove: the
+            # chain stopped at the callee's return and the closing fact
+            # `s_N.rip = 0` claimed the run had reached the exit sentinel, while
+            # the model says `s_N.rip` is `(mem_read_bytes …)`, which is the
+            # address after the `call`.  Nothing reported it: `simp` grinds on
+            # a goal that is not true until a heartbeat or wall bound fires, and
+            # that reads as "the chain is too long" rather than "the chain
+            # claims something untrue" -- which is the diagnosis the 24-argument
+            # program in `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+            # was filed with, and it is not what is wrong.
+            #
+            # So the case is DECLINED, with its own reason, rather than walked.
+            # Walking it is the fix and it is not free: the step after a `ret`
+            # has to prove `s_k.rip = <literal>` from `(mem_read_bytes s_{k-1}.mem
+            # s_{k-1}.rsp.toNat 8).toNat`, which is a memory-separation fact over
+            # the whole chain, and measured on `wide_recv` (112 steps, four
+            # calls) that one `simp [hs97]` exhausts the 4 000 000 heartbeat
+            # budget in 110 s -- and a heartbeat timeout is NOT catchable by the
+            # `try` guard the side conditions use, so the file dies instead of
+            # admitting. The next step is in that bug doc; what is right today is
+            # to say the theorem cannot be stated yet rather than to emit a false
+            # one. See B21 on why the fourth outcome needs its own line.
+            if rets:
+                # Kept under the 60 characters the reporter prints, and it is a
+                # MESSAGE rather than a prefix the caller parses -- the kind is
+                # the machine-readable half, and `detail[:60]` here is only
+                # there so this sentence is not itself cut in half.
+                raise _NoTree(
+                    "call",
+                    "the run continues into the caller after the callee's ret")
             return _Node(insn, form, raw, addr, "ret", state, None)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
-        node.kids = [build(addr + insn.length, None, depth + 1, seen)]
+        node.kids = [build(addr + insn.length, None, depth + 1, seen, rets)]
         return None if node.kids[0] is None else node
 
     try:
-        root = build(entry, "i0", 0, frozenset())
+        root = build(entry, "i0", 0, frozenset(), ())
     except RecursionError:
         # One Python frame per instruction, so a straight line longer than the
         # interpreter's own limit cannot be walked at all.  `None` is the answer
@@ -1694,7 +1792,7 @@ def main(argv):
         print("lean not found (see ./lean-toolchain)")
         return 1
     val_ok = val_gap = term_ok = term_gap = 0
-    fails = notree = noform = 0
+    fails = notree = noform = nocall = 0
     for t in targets:
         name = os.path.basename(t)[:-5]
         try:
@@ -1756,12 +1854,27 @@ def main(argv):
         try:
             ok, sorries, err = _run_lean(emit_terminates(t))
         except ValueError as exc:
-            if _has_loop(t):
+            # Three reasons a path cannot be built, kept apart for B21's reason,
+            # plus the fourth kind the `_NoTree` docstring is about.  `_has_loop`
+            # is asked LAST because a path that returns into a caller can also
+            # contain a loop, and "loops" would then be the wrong reason -- the
+            # run reaches rip = 0 nowhere on that path either way, but only one
+            # of them is what stopped the walk.
+            if isinstance(exc, _NoTree):
+                kind, detail = exc.kind, str(exc)
+            elif _has_loop(t):
+                kind, detail = "loops", ""
+            else:
+                kind, detail = "form", str(exc)
+            if kind == "loops":
                 notree += 1
                 ts = "  loops (no finite path tree)"
+            elif kind == "call":
+                nocall += 1
+                ts = "  no tree: %s" % detail[:60]
             else:
                 noform += 1
-                ts = "  no tree: %s" % str(exc)[:38]
+                ts = "  no tree: %s" % detail[:38]
         else:
             if ok and not sorries:
                 term_ok += 1
@@ -1778,8 +1891,9 @@ def main(argv):
           % (val_ok, val_gap))
     print("  terminates : %d proved with no sorry, %d proved with a sorry"
           % (term_ok, term_gap))
-    print("               %d no finite tree (%d loop, %d uncovered form)"
-          % (notree + noform, notree, noform))
+    print("               %d no finite tree (%d loop, %d uncovered form, "
+          "%d returns into a caller)" % (notree + noform + nocall, notree,
+                                          noform, nocall))
     print("  failing    : %d" % fails)
     return 1 if fails else 0
 

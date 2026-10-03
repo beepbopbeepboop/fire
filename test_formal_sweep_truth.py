@@ -887,6 +887,176 @@ class TestLeanLauncher(unittest.TestCase):
                         "which is the net UNDER a launcher that lacks these")
 
 
+# ── 7. the x86-64 end-to-end tree: does `terminates` mean what it says ──────
+#
+# `formal/x86_64_endtoend_test.py` states one theorem per example — "for EVERY
+# input the model runs this image to the exit pc" — and proves it by walking the
+# path the machine actually takes. The walk used to make EVERY `ret` the end of
+# the run, so a function that CALLS another stopped at the callee's return and
+# the closing fact `s_N.rip = 0` claimed the run had reached the exit sentinel.
+# It had not: `ret` pops `(mem_read_bytes …)`, which after a `call` is the
+# address that `call` pushed.
+#
+# That is the one outcome in this reporter that is not "not proved" but "cannot
+# be true", and it was invisible twice over. The proof attempt ground on the false
+# goal until a heartbeat or wall bound fired, so the report read as a chain that
+# was too long — and `wide_recv` came back `terminates: proved, 1 sorry`, a green
+# resting on a false claim, and the only example in the corpus whose path
+# contains a call.
+#
+# So the return address is tracked (`rets`), and a `ret` with a frame to return to
+# is its own reported outcome. These cases are Lean-free: they drive `_tree` over
+# hand-built images, because what is under test is the SHAPE of the walk and a
+# proof is a 100-second way to learn that a tree is wrong.
+
+
+def _image(*chunks):
+    """`(code, shapes)` — bytes plus the `[(insn, form, raw)]` `_shapes` builds.
+
+    Decoded with the real `formal/x86_64_decode.py`, so a case cannot disagree
+    with the decoder about what an instruction IS, which is the mistake
+    `formal/x86_64_model_coverage_test.py` records about hand-written encodings.
+    """
+    import formal.x86_64_decode as D
+    from formal.x86_64_endtoend_test import _shapes
+    code = b"".join(chunks)
+    insns, off = [], 0
+    while off < len(code):
+        insn = D.decode_one(code, off)
+        insns.append(insn)
+        off = insn.next_offset
+    return code, _shapes(code, insns)
+
+
+def _call(displacement: int) -> bytes:
+    return b"\xe8" + int(displacement).to_bytes(4, "little", signed=True)
+
+
+def _calling(prologue: bytes, callee: bytes, tail: bytes = b"") -> bytes:
+    """`prologue ; call <callee> ; tail ; callee` — one image, callee placed after.
+
+    The displacement is computed from the byte offset of the `call` rather than
+    written down, because the displacement is measured from the END of the
+    instruction and getting that off by one gives a target in the middle of the
+    caller — which reads as "no tree" and says nothing about the case.
+    """
+    here = len(prologue)
+    body = prologue + _call(0) + tail + callee
+    target = len(prologue) + 5 + len(tail)
+    return body[:here] + _call(target - (here + 5)) + body[here + 5:]
+
+
+#: `push rbp ; mov rbp, rsp ; … ; ret` — a leaf function's prologue and epilogue.
+PROLOGUE = b"\x55\x48\x89\xe5"
+EPILOGUE = b"\xc9\xc3"          # leave ; ret
+NOPFRAME = b"\x48\x81\xec\x10\x00\x00\x00"   # sub rsp, 16
+
+
+class TestX86EndToEndTree(unittest.TestCase):
+    """The path tree, and the outcome each shape of it has to be reported as."""
+
+    #: Where the images below are placed.  Any address works — the model
+    #: addresses the code function absolutely — and a round one makes a
+    #: disassembled failure readable.  `func_offset` is that ABSOLUTE address,
+    #: which is what `formal.build` reports and what `_tree` looks up in a table
+    #: keyed by `base + offset`.
+    BASE = 0x1000
+
+    def _tree(self, code, shapes, entry=None):
+        from formal.x86_64_endtoend_test import _tree
+        return _tree(code, {"base_addr": self.BASE,
+                            "func_offset": self.BASE if entry is None
+                            else entry}, shapes)
+
+    def test_a_leaf_function_still_ends_at_its_ret(self):
+        """The ordinary case, and the one the new bookkeeping must not break."""
+        from formal.x86_64_endtoend_test import _paths
+        code, shapes = _image(PROLOGUE, NOPFRAME, EPILOGUE)
+        root = self._tree(code, shapes)
+        self.assertIsNotNone(root)
+        (path,) = _paths(root)
+        self.assertEqual(path[-1].form, "ret")
+        self.assertEqual([n.form for n in path],
+                         ["push_r64", "mov_rm64_r64_reg", "alu_ri32:sub_rsp",
+                          "leave", "ret"])
+
+    def test_a_call_that_returns_is_its_own_outcome_not_a_proof(self):
+        """`call` pushes a return address and `ret` pops one.
+
+        The caller below is `push rbp ; call far ; mov rax, 0 ; ret` and the callee
+        is `push rbp ; leave ; ret`. Walking it must DECLINE, naming the reason,
+        because the theorem it would emit claims the run stops at the callee's
+        `ret` and the machine carries on into `mov rax, 0`.
+        """
+        from formal.x86_64_endtoend_test import _NoTree
+        MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
+        code, shapes = _image(_calling(PROLOGUE, PROLOGUE + EPILOGUE,
+                                       MOV_EAX_0 + b"\xc3"))
+        with self.assertRaises(_NoTree) as cm:
+            self._tree(code, shapes)
+        self.assertEqual(cm.exception.kind, "call")
+        self.assertIn("caller", str(cm.exception))
+
+    def test_calling_one_function_twice_is_two_calls_not_a_loop(self):
+        """The second call re-enters an address the path has already been in.
+
+        A `seen` set shared across the frame boundary makes that a cycle, and the
+        report then says "loops" -- a second, different, wrong reason, on a path
+        that has not looped.  This is `wide_recv`, which calls one method body
+        three times (`set_x`, then `get_x`, then `get_y`).
+
+        Laid out by hand rather than spliced: `call A ; call B ; mov rax, 0 ;
+        ret`, then the callee, and each displacement is computed from its own
+        offset.  The `seen` set that would catch this mistake is the one the
+        SECOND call walks into, so the case has to actually contain two calls --
+        one call into a callee that itself calls once would not reach it.
+        """
+        from formal.x86_64_endtoend_test import _NoTree
+        callee = PROLOGUE + EPILOGUE
+        MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
+        first = len(PROLOGUE)
+        second = first + 5
+        target = second + 5 + len(MOV_EAX_0) + 1
+        code = (PROLOGUE
+                + _call(target - (first + 5))
+                + _call(target - (second + 5))
+                + MOV_EAX_0 + b"\xc3" + callee)
+        self.assertEqual(len(code), target + len(callee),
+                         "the callee must start where the two calls point")
+        _, shapes = _image(code)
+        with self.assertRaises(_NoTree) as cm:
+            self._tree(code, shapes)
+        self.assertEqual(cm.exception.kind, "call")
+
+    def test_a_backward_call_is_a_loop_and_not_the_call_outcome(self):
+        """`jmp` back to the function's own entry is recursion, and `_has_loop`
+        names it `loops`. Deciding it here instead keeps the two reasons apart:
+        a path that both returns and loops would be reported as `loops`."""
+        from formal.x86_64_endtoend_test import _NoTree
+        # entry is 0, the call at 0x10 reaches back to 0x00.
+        at = 0x10
+        pad = b"\x90" * (at - len(PROLOGUE))
+        # the call sits at `at`, so its target is `at + 5 + off` and the entry is 0
+        code, shapes = _image(PROLOGUE + pad + _call(-(at + 5)))
+        root = self._tree(code, shapes)
+        self.assertIsNone(root, "a backward call must build no tree at all")
+        self.assertNotIsInstance(root, _NoTree)
+
+    def test_a_backward_jump_is_still_a_loop(self):
+        from formal.x86_64_endtoend_test import _NoTree
+        code, shapes = _image(PROLOGUE + b"\x90\x90\x90"
+                              + b"\xeb\xf7" + b"\xc3")
+        self.assertIsNone(self._tree(code, shapes))
+
+    def test_the_declining_outcome_is_a_ValueError_so_the_handler_still_sees_it(self):
+        """`main()` catches `ValueError` to reach the reason split, so a new kind
+        that did not derive from it would be an uncaught traceback rather than a
+        reported line."""
+        from formal.x86_64_endtoend_test import _NoTree
+        self.assertTrue(issubclass(_NoTree, ValueError))
+        self.assertEqual(_NoTree("call", "x").kind, "call")
+
+
 # ── 6. the estate: nothing launches Lean outside the launcher ───────────────
 #
 # A bound that a second launch site does not share is not a policy, it is a
