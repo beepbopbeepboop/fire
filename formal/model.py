@@ -14960,6 +14960,114 @@ def _strip_type_args(text: str) -> str:
     return text if cut is None else text[:cut]
 
 
+def _split_type_args(text: str) -> list:
+    """The texts INSIDE the outermost `[...]` pair, top level split on commas.
+
+    The complement of `_strip_type_args`, and the reason `List[Box]` can say
+    which STRUCT its elements are where `List` alone cannot.  Splitting on top
+    level commas only: `List[Dict[String, Int]]` is ONE argument, and a naive
+    `split(",")` would hand back `Dict[String` and `Int]]`, neither of which
+    names a struct.
+    """
+    depth, cut, close = 0, None, None
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                cut = i
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if cut is None or close is None:
+        return []
+    inner, args, start = text[cut + 1:close], [], 0
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(inner[start:i].strip())
+            start = i + 1
+    args.append(inner[start:].strip())
+    return [a for a in args if a]
+
+
+def _strip_type_decorations(text: str, self_type: str | None = None):
+    """`text` with every leading `_TYPE_DECORATIONS` marker removed, or None.
+
+    The loop `annotation_base_name` and `annotation_type_arg_base` both need,
+    and one copy of it because the two answer questions about the SAME
+    declaration: a decoration in front of a type does not change which type it
+    names, and a `self_type` supplied for `Self` means the same thing to both.
+
+    `None` for a marker with nothing after it (`out Self` reduced, a bare
+    `mut`), and for a function-typed declaration (`fn(x: Int) -> Int` names no
+    struct either way).  Both are the unagreed direction.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for deco in _TYPE_DECORATIONS:
+            if text == deco:
+                if deco == "Self" and self_type and self_type.isidentifier():
+                    return self_type
+                return None
+            if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
+                text = text[len(deco):].strip()
+                if text.startswith("["):
+                    depth, close = 0, None
+                    for i, ch in enumerate(text):
+                        if ch == "[":
+                            depth += 1
+                        elif ch == "]":
+                            depth -= 1
+                            if depth == 0:
+                                close = i
+                                break
+                    if close is None:
+                        return None
+                    text = text[1:close].strip()
+                changed = True
+    if "(" in text:
+        return None
+    return text
+
+
+def annotation_type_arg_base(ann, arg: int = 0,
+                             self_type: str | None = None) -> str | None:
+    """The bare name of the `arg`-th type ARGUMENT, or None.
+
+    `List[Box]` → `Box`, `StaticList[Box, 3]` → `Box`, `List` → None,
+    `List[Self.T]` → `T`, `Dict[String, Int]` → `Int` at `arg=1`.
+
+    This is the reader `annotation_base_name` cannot be, and the reason it is a
+    separate function rather than a flag: the base answers "is this a LIST",
+    which every `List[...]` agrees on, while this answers "of WHAT", and the
+    element type is the whole of what a subscript receiver's type is made of.
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` is that measurement —
+    `def drain(vals: List, …)` declares no element and no pass over the source
+    can supply one, while `def drain(vals: List[Box], …)` states it outright.
+
+    Every doubtful answer is None, in the same direction as its sibling: an
+    annotation with no brackets, an empty argument, one that does not reduce to
+    an identifier, and a qualified name that is not a `Self` type-parameter
+    access.  A caller that is handed None cannot claim a struct, which is the
+    only safe reading of "the source does not say".
+    """
+    text = _strip_type_decorations(ann.strip() if isinstance(ann, str) else "",
+                                   self_type)
+    if not text:
+        return None
+    args = _split_type_args(text)
+    if arg >= len(args):
+        return None
+    return annotation_base_name(args[arg], self_type=self_type)
+
+
 def annotation_base_name(ann, self_type: str | None = None) -> str | None:
     """The bare type name a declared type names, or None if it names nothing.
 
@@ -15009,39 +15117,13 @@ def annotation_base_name(ann, self_type: str | None = None) -> str | None:
     """
     if not isinstance(ann, str):
         return None
-    text = ann.strip()
-    # Leading markers, repeatedly: `unsafe mut Pointer`.  A marker followed by a
-    # BRACKET wraps the type rather than qualifying it — `ref[Inner]` is a
-    # reference TO an `Inner` — so the bracket's contents are what is left to
-    # reduce, and the loop continues on them so `ref[ref[Inner]]` works too.
-    changed = True
-    while changed:
-        changed = False
-        for deco in _TYPE_DECORATIONS:
-            if text == deco:
-                if deco == "Self" and self_type and self_type.isidentifier():
-                    return self_type
-                return None
-            if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
-                text = text[len(deco):].strip()
-                if text.startswith("["):
-                    depth, close = 0, None
-                    for i, ch in enumerate(text):
-                        if ch == "[":
-                            depth += 1
-                        elif ch == "]":
-                            depth -= 1
-                            if depth == 0:
-                                close = i
-                                break
-                    if close is None:
-                        return None
-                    text = text[1:close].strip()
-                changed = True
+    text = _strip_type_decorations(ann.strip(), self_type)
+    if text is None:
+        return None
     # A CALLABLE type (`fn(x: Int) -> Int`) is a function pointer here and names
     # no struct, so it is the untyped direction rather than a base of `fn`.
-    if "(" in text:
-        return None
+    # (Decided inside `_strip_type_decorations`, so the sibling reader of a
+    # type's ARGUMENTS cannot answer "yes" where this one answers "no".)
     text = _strip_type_args(text)
     if not text or not (text[0].isalpha() or text[0] == "_"):
         return None
@@ -15099,6 +15181,217 @@ def parameter_declared_structs(fn, decls: dict, owner=None) -> dict:
         if st is not None:
             out[pname] = st
     return out
+
+
+# ── What STRUCT does an expression name ───────────────────────────────────
+#
+# Dispatch on this path is by NAME: a method call is lifted to `S_m(recv, …)`
+# from the method name alone, and a one-word struct's sole field IS its
+# receiver.  Both need the same missing fact — which struct a receiver
+# expression denotes — and there was no reader for it, so every consumer grew
+# its own recogniser and `formal/build.py`'s `_receiver_shape_refusal` was
+# left to refuse `bs[0].get()` with a message asking for a predicate nobody had
+# built (`bugs/FORMAL_method_call_on_a_subscripted_receiver.md`).
+#
+# The predicate is here, in the shared model, because it is asked by a build
+# pass (the lift), by the frame analysis (which must agree about when a
+# receiver's type is known, or the two refuse the same program for different
+# reasons) and by both backends.  ONE answer, and every doubtful case answers
+# None.
+
+CONTAINER_TYPE_NAMES = ("List", "list", "StaticList", "Tuple", "tuple",
+                        "Set", "set", "InlineStaticList", "Array", "array")
+
+
+def list_element_structs(fn, structs_by_name: dict, decls: dict,
+                         owner=None) -> dict:
+    """`{name: ONE-FIELD struct}` for every name in `fn` holding a LIST of them.
+
+    The SUBSCRIPT half of `receiver_struct`'s question — "which struct does
+    `bs[0]` hold" — for the two spellings that state it:
+
+      * a local bound to a container LITERAL of constructor calls, `var bs =
+        [Box(), Box()]`.  The element type is the constructor's own declaration,
+        and the calls must agree: a literal holding two different structs (or a
+        constructor and an integer) claims nothing, which is `_kind_of_elements`'s
+        unanimity rule applied to a stricter question — a name that could be two
+        things is not a type;
+      * a PARAMETER declared `List[Box]` — `annotation_type_arg_base` for the
+        element, against `CONTAINER_TYPE_NAMES` for the container.  `List` with
+        no argument declares no element and claims nothing, which is row 4 of
+        the doc's table and the shape no pass over the source can answer.
+
+    Only a ONE-FIELD struct is answered, and that restriction is what makes every
+    answer sound rather than merely likely: the receiver of a one-field struct
+    IS its field (`struct_fits_one_word`), so the element WORD of the blob is the
+    struct and `bs[0].get()` can be lifted to `Box_get(bs[0])` with the element
+    word as the receiver.  A multi-field struct in a container is a frame address
+    in a container with no layout for it, which is refused by name and loudly
+    (`wide_receiver_by_reference_refusal`), so answering it here would replace a
+    true refusal with a wrong answer.
+
+    The first spelling wins over the second: a local that is assigned two
+    different container literals claims nothing rather than taking whichever was
+    seen last, because `ValueKinds` is deliberately flow-insensitive for the same
+    reason and two readers of one set of bindings must not disagree.
+    """
+    out, seen_binding = {}, set()
+
+    def _one_kind(elems):
+        kinds = set()
+        for el in (elems or []):
+            if not isinstance(el, F.CallExpr) or not isinstance(el.func,
+                                                               F.IdentExpr):
+                return None
+            st = (structs_by_name or {}).get(el.func.name)
+            if st is None:
+                return None
+            kinds.add(st.name)
+        return kinds.pop() if len(kinds) == 1 else None
+
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                           F.IdentExpr):
+            target, value = node.target.name, node.value
+        if not target or not isinstance(value, (F.ListExpr, F.TupleExpr,
+                                                F.SetExpr)):
+            continue
+        if target in seen_binding:
+            out.pop(target, None)
+            continue
+        seen_binding.add(target)
+        name = _one_kind(value.elements)
+        st = (structs_by_name or {}).get(name) if name else None
+        if st is not None:
+            out[target] = st
+    self_type = getattr(owner, "name", None) or None
+    shape = function_param_shape(fn)
+    starred = {n for n in (shape.vararg, shape.kwarg) if n}
+    for pname, ann in shape.fixed:
+        if not pname or pname in starred or pname in out \
+                or pname in seen_binding:
+            continue
+        if annotation_base_name(ann, self_type=self_type) \
+                not in CONTAINER_TYPE_NAMES:
+            continue
+        elem = annotation_type_arg_base(ann, self_type=self_type)
+        st = (structs_by_name or {}).get(elem) if elem else None
+        if st is not None:
+            out[pname] = st
+    return {name: st for name, st in out.items()
+            if struct_is_one_field(st)}
+
+
+def receiver_struct(expr, fn, structs_by_name: dict, owner=None,
+                    bound: dict = None, elems: dict = None, functions=None):
+    """The ONE-FIELD struct `expr` denotes, or None when nothing says which.
+
+    The receiver-type predicate, and it is ONE function for the reason
+    `struct_frame_slot_candidates` is: two consumers asking "which struct does
+    this receiver name" and answering differently is how the same program gets
+    two verdicts.  The build pass lifts the call and the frame analysis then
+    reads a parameter list it would not otherwise have had, so the two cannot
+    disagree by construction — but only if they ask the same question, and this
+    is where they ask it.
+
+    Four sources, which is the census in
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md`'s table:
+
+      * a SUBSCRIPT — `bs[0]`, `messages[i]`.  The element type of `elems`, which
+        `list_element_structs` built from the two spellings that state one;
+      * a CALL — `S()`, or a call whose declared return type names a struct.  The
+        constructor's own declaration, and for the second the callee's `-> T` out
+        of `functions` read by `annotation_base_name`;
+      * a bare NAME — `self`, a parameter declared with a struct annotation, or a
+        name bound to a constructor call (`bound`, which the caller already
+        computed for the one-word field rewrite and passes in rather than
+        recomputing: two walks of one set of bindings is two recognisers);
+      * a FIELD — `self.mojo_value`, `Tensor.registry`.  The field's DECLARED
+        type, read by `struct_field_declared_type`, which is the one reader of a
+        declared type and so cannot answer differently from a field's own
+        analysis.
+
+    `bound` and `elems` are the caller's per-function tables; both default to
+    None, which means "no evidence in hand from the caller" and not "empty",
+    because the binding-derived sources have no other way to see the function's
+    statements.  A caller that has the tables passes them; a caller with nothing
+    gets the declaration-only sources, which are the ones that hold at every call
+    site whether or not this image contains one.
+
+    **The answer is a ONE-FIELD struct or nothing.**  `struct_is_one_field` is
+    the gate every source passes through, and it is what lets a caller use the
+    answer as a VALUE rather than as a name: the word `bs[0]` already holds is
+    the struct, so `Box_get(bs[0], …)` passes the receiver this path would have
+    passed for a local.  A multi-field struct's receiver is an address of a frame
+    that belongs to the function which created it, which is a different lifetime
+    and a different refusal, and this predicate does not speak for it.
+    """
+    st = _receiver_struct_source(expr, fn, structs_by_name, owner, bound,
+                                 elems, functions or {})
+    return st if st is not None and struct_is_one_field(st) else None
+
+
+def _receiver_struct_source(expr, fn, structs_by_name: dict, owner,
+                            bound: dict, elems: dict, functions: dict):
+    """The struct ONE source names, or None.  `receiver_struct`'s four rows."""
+    structs_by_name = structs_by_name or {}
+    bound = bound or {}
+    self_name = getattr(owner, "receiver", None) or "self"
+    if isinstance(expr, F.SubscriptExpr):
+        base = expr.obj
+        # `a.b[0]` — the element type of a field's value.  There is no table
+        # for that (a field's list is not a name), so it claims nothing.
+        return (elems or {}).get(base.name) if isinstance(base, F.IdentExpr) \
+            else None
+    if isinstance(expr, F.CallExpr):
+        if not isinstance(expr.func, F.IdentExpr):
+            return None
+        st = structs_by_name.get(expr.func.name)
+        if st is not None:
+            return st
+        callee = functions.get(expr.func.name)
+        ret = getattr(callee, "return_type", None)
+        base = annotation_base_name(ret, self_type=getattr(owner, "name", None))
+        return structs_by_name.get(base) if base else None
+    if isinstance(expr, F.IdentExpr):
+        st = bound.get(expr.name)
+        if st is not None:
+            return st
+        if owner is not None and expr.name == self_name:
+            return owner
+        return parameter_declared_structs(fn, structs_by_name,
+                                          owner).get(expr.name)
+    if isinstance(expr, F.MemberExpr):
+        holder, path = _single_field_chain(expr)
+        if path is None:
+            return None
+        st = bound.get(holder)
+        if st is None and owner is not None and holder == self_name:
+            st = owner
+        if st is None:
+            return None
+        base, _ann, _why, declared = struct_field_declared_type(st, path)
+        return structs_by_name.get(base) if (declared and base) else None
+    return None
+
+
+def _single_field_chain(expr) -> tuple:
+    """`(holder name, field)` for a ONE-LEVEL MemberExpr chain, else `("", None)`.
+
+    `x.f` is a field of a name and this can answer it.  `x.f.g` is a field of a
+    FIELD, whose holder is itself an expression with no declared type in reach,
+    so it claims nothing rather than pretending the leaf's holder is `x` — the
+    two would differ about a struct that nests one-field structs, which is the
+    chain `_one_word_sole_field_chain` already walks and which this predicate
+    does not duplicate.  A subscript anywhere in the chain claims nothing for
+    the same reason.
+    """
+    if not isinstance(expr.obj, F.IdentExpr):
+        return "", None
+    return expr.obj.name, expr.member
 
 
 def struct_field_declared_type(struct_def, name) -> tuple:

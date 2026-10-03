@@ -6809,6 +6809,59 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
+def _rewrite_list_element_sole_field(node, elems: dict, chains: dict):
+    """`bs[0].f` → `bs[0]` when `f` is that element struct's ONLY field.
+
+    The same identity `_rewrite_self_fields` applies to a local, for the one
+    receiver spelling that has no local to hang it on, and it is what replaced
+    the two answers this used to give — both of them wrong, both of them green:
+
+      * the LOAD fell to arm64's "no object model, so the field reads as 0" arm
+        and x86-64's twin, so `printf("%d", bs[0].k)` printed 0 for a `k` the
+        constructor had put there;
+      * the STORE (`formal/arm64_codegen.py`'s `AssignStmt` arm for a
+        `MemberExpr` target with no local-slot key) evaluated both sides for
+        their effects and DROPPED it, so `bs[0].k = 3` was a statement with no
+        statement in it, and a program that built, ran, and computed the
+        constructor's zero.
+
+    Both are answered by one rewrite rather than by two emitters, because the
+    answer is that the element word IS the struct: `bs[0]` is already the word
+    `bs[0].k` names, so the subscript store writes the element and the load
+    reads it.  **Rewriting here and not in the backends is what makes the two
+    architectures agree by construction** — there is one emitter decision to
+    make and it is made before either of them sees the node.
+
+    `elems` is `model.list_element_structs`'s table and `chains` the same
+    per-function chains `_rewrite_self_fields` uses, so both rewrites read one
+    answer about each name.  The chain is matched rather than the single field
+    name, because a one-field struct can be a one-field struct OF another one
+    (`struct Box: var inner: OneWord`), and `bs[0].inner.v` is the same word as
+    `bs[0]` — `bs[0].inner.p` is not, and a name check would rewrite it.
+
+    A subscript whose index is a NAME keeps its own subscript, so
+    `bs[0].k` → `bs[i].k` reads `bs[i]`'s element and never `bs[0]`'s — the
+    rewrite replaces the MemberExpr, so the subscript it was written on is the
+    one that survives.
+    """
+    if isinstance(node, list):
+        for i, x in enumerate(node):
+            node[i] = _rewrite_list_element_sole_field(x, elems, chains)
+        return node
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.SubscriptExpr):
+        recv = node.obj
+        base = recv.obj
+        if isinstance(base, F.IdentExpr) and base.name in (elems or {}):
+            sole = (chains or {}).get(base.name)
+            if sole and _is_sole_field_prefix(node.member, sole):
+                return recv
+    for name in getattr(node, "__dataclass_fields__", {}):
+        setattr(node, name,
+                _rewrite_list_element_sole_field(getattr(node, name), elems,
+                                                  chains))
+    return node
+
+
 def _rewrite_one_word_field_method_calls(node, one_word: dict,
                                          structs_by_name: dict,
                                          receiverless=()) -> None:
@@ -10264,25 +10317,33 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
+        # The two tables the receiver-position rewrites read, built HERE and
+        # before both of them rather than beside their old callers, because a
+        # rewrite whose evidence is computed after it has run is a rewrite that
+        # sees nothing. `one_word` is what `_rewrite_self_fields` and
+        # `_lift_one_word_field_method` have always read; `elems` is the same
+        # question about a LIST rather than a single word, and it is what makes
+        # a SUBSCRIPT receiver liftable (`model.list_element_structs`). One
+        # walk of the bindings each, neither recomputed by a consumer.
+        st = method_owners.get(fn.name)
+        one_word = _one_word_field_map(fn, structs_by_name, st)
+        if st is not None and M.struct_is_one_field(st):
+            one_word["self"] = st
+        chains = {name: _one_word_sole_field_chain(one, structs_by_name)
+                  for name, one in one_word.items()}
+        elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
+                                       st)
+        elem_chains = {name: _one_word_sole_field_chain(one, structs_by_name)
+                       for name, one in elems.items()}
         _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
                               fn.name,
-                              _this_unit_modules)
+                              _this_unit_modules, elems)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
-        # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's sole field directly.  The table holds
-        # the STRUCT and the chain is derived from it in one line, because the
-        # rewrite below needs the struct and the rewrite after that needs the
-        # chain — one recognition of "this name is a one-word word", read twice.
-        one_word = _one_word_field_map(fn, structs_by_name,
-                                       method_owners.get(fn.name))
-        st = method_owners.get(fn.name)
-        if st is not None and M.struct_is_one_field(st):
-            one_word["self"] = st
         # A method call THROUGH a one-word field, lifted while the field's
         # DECLARED type can still be read — the identity below is about the same
         # storage but it keeps the method name and loses the struct, and a
@@ -10292,9 +10353,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # source of the shape).
         _rewrite_one_word_field_method_calls(fn.body, one_word,
                                              structs_by_name, receiverless)
-        mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
-                   for name, one in one_word.items()}
-        _rewrite_self_fields(fn.body, mapping)
+        _rewrite_self_fields(fn.body, chains)
+        # …and the same identity through a SUBSCRIPT receiver. After the lift
+        # above, so a method call has already become `Box_get(bs[0], …)` and only
+        # field reads and writes are left; after `_rewrite_self_fields`, so both
+        # rewrites have read the one table.
+        if elems:
+            _rewrite_list_element_sole_field(fn.body, elems, elem_chains)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
         # this a struct of nothing but constants — which the width rule now
@@ -10520,12 +10585,19 @@ def _method_call_target(call, owners: dict):
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
     has no owner to lift to.  A receiver that is not a bare NAME is `None` too,
-    and that is a limit of the RECOGNITION rather than of the construct: the one
-    receiver whose declared type settles an ambiguous name is a one-word field,
-    and `_lift_one_word_field_method` is where that case is answered — it runs
-    immediately after this one, on the same `one_word` table, and it can lift an
-    ambiguous `m` where this cannot because it reads the field's DECLARED TYPE
-    instead of the spelling.
+    and that is no longer a limit of the recognition: the receiver whose TYPE is
+    established lifts through `_subscript_receiver_target`, and a `MemberExpr`
+    receiver is answered by `_lift_one_word_field_method`, which reads the
+    field's DECLARED type instead of the spelling and so can lift an ambiguous
+    `m` where this cannot.  All three are `model.receiver_struct`, asked
+    differently.
+
+    `elems` is the per-function table of "names holding a LIST of a one-field
+    struct", and it is what answers the subscript case.  Passing it in rather
+    than computing it here is why `_rewrite_method_calls` needs no `fn`: the
+    table is a property of the function, built once by the caller that has the
+    function, and a pass that rebuilt it would be a second walk of the same
+    bindings.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
@@ -10536,6 +10608,53 @@ def _method_call_target(call, owners: dict):
     if owner is None:
         return None
     return owner, func.member, func.obj
+
+
+def _subscript_receiver_target(call, elems: dict):
+    """`bs[0].m(x)` → `(owner name, m, bs[0])` when the element type says which.
+
+    The receiver-type predicate's one use at the LIFT, and the shape
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` is entirely about: a
+    receiver that is a subscript has no name to lift from, so dispatch by name
+    has nothing to work with, and the doc's four sources say the element type is
+    what settles it.
+
+    `elems` is `model.list_element_structs`'s table, so the struct here is the
+    one `model.receiver_struct` would answer for the same expression — the
+    predicate is asked in ONE place and the table is its per-function cache, so
+    the build pass and the frame analysis cannot hold different opinions about
+    which receiver's type is known.  That is what
+    `frame_opaque_position_refusal`'s method sentence asks for ("What closes this
+    is the method's declaration reaching the analysis"), and it is reached here
+    rather than there: the lift happens first, so the frame analysis sees
+    `Box_get(bs[0], …)` — a bare-name call with the parameter list in hand —
+    and never has to answer the question at all.
+
+    `None` for a method the ELEMENT's struct does not declare, even when the
+    module-wide table knows the name from some other struct.  That is the guard
+    this predicate needs: `bs[0].peek()` where only `Other` declares `peek` must
+    be refused rather than lifted to `Other_peek(bs[0])`, which would be a
+    plausible-looking wrong answer for two structs of the same shape.  The call
+    then falls through to `_receiver_shape_refusal`, which names the receiver as
+    the source spells it.
+
+    The owner is returned as its NAME, because `owners` and `wide` are both keyed
+    by it: the caller uses it as `wide[owner]` and in `method_function_name(
+    owner, member)`, so a StructDef here would be a dict key where a string is
+    meant.
+    """
+    func = call.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    recv = func.obj
+    if not isinstance(recv, F.SubscriptExpr) or not elems:
+        return None
+    st = elems.get(recv.obj.name) if isinstance(recv.obj, F.IdentExpr) else None
+    if st is None:
+        return None
+    if not any(m.name == func.member for m in M.struct_methods(st)):
+        return None
+    return st.name, func.member, recv
 
 
 def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
@@ -10561,7 +10680,7 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None, fn_name: str = None,
-                          imported=()) -> None:
+                          imported=(), elems: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -10588,11 +10707,15 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     `Struct_m(recv, a)` reach the callee's parameters identically.  See
     `_specialized_method_call`.
 
-    A receiver that is NOT a bare name, with a method name that IS in `owners`,
-    is REFUSED — see `model.subscript_receiver_method_refusal`, which carries
-    the argument for why that has to happen here rather than being left to the
-    link audit. Before it, `bs[0].get()` compiled to a call against a symbol
-    spelled `get`."""
+    **A receiver that is a SUBSCRIPT lifts too**, which is what `elems` is for
+    (`_subscript_receiver_target`).  Before this, a receiver that is not a bare
+    name with a method name that IS in `owners` was REFUSED — see
+    `model.subscript_receiver_method_refusal`, which carries the argument for
+    why that has to happen rather than being left to the link audit.  It does
+    still happen, for every receiver whose type nothing establishes; what
+    changed is that a receiver whose type IS established no longer needs the
+    refusal, and `u1.mojo`'s `bs[0].get()` — before this, a link-audit failure
+    naming the bare symbol `get` — now builds and runs."""
     # `model.rewrite_tree`, and the walk it brings with it: `IfStmt.elifs` is a
     # list of TUPLES, so a recursion that tests `isinstance(node, list)` stops
     # dead at the first `elif` while `model.iter_nodes` — which every LATE check
@@ -10607,6 +10730,8 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
         if not isinstance(n, F.CallExpr):
             return n
         target = _method_call_target(n, owners)
+        if target is None:
+            target = _subscript_receiver_target(n, elems)
         if target is None:
             why = _receiver_shape_refusal(n, owners, fn_name, imported)
             if why is not None:
