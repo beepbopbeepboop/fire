@@ -22265,16 +22265,18 @@ def field_access_refusal(name: str, fn_name: str, root: str,
     the raiser had no way to know and which was false about a real program —
     `var b = Bag(); b.n = 4` against a `--link-dylib` library whose source was
     no longer readable, where the binding is a construction and the struct is
-    declared in a file this build does not have
-    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`). So the
+    declared in a file this build does not have. So the
     message states what the raiser knows — the base is not classified, and a
     field needs a classification to be lowered — and the REPAIRS are the two
-    that are actually available, which is the other half of that document's
-    finding: "bind the base from a constructor THIS MODULE declares" is
+    that are actually available, which is the other half of the same finding:
+    "bind the base from a constructor THIS MODULE declares" is
     impossible to follow for a struct this module does not and cannot declare,
     and suggesting the reader declare it here would be worse than useless — it
     would be a DIFFERENT type with the same name, and the frame the library's
-    methods are called on would not be it."""
+    methods are called on would not be it. That other half now has its own
+    message, `undeclared_linked_struct_refusal`, raised by the build pass where
+    the construction is and the library is known; this one is what is left when
+    the base is not a construction this pass can see the type of."""
     who = f"{fn_name}: " if fn_name else ""
     if holder:
         return (f"{who}{name!r} is a field of {root!r}, which the build "

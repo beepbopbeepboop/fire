@@ -5436,8 +5436,7 @@ def check_construction_shapes(functions, structs_by_name,
     and nothing else, so it can say the base is unclassified but cannot say the
     struct is one hop away in a manifest. Both are refusals today and this is
     still one; what changed is that it now names the struct, the library and the
-    two repairs
-    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`).
+    two repairs.
 
     The early `return` for an image with no structs at all used to stand in
     front of both branches, and that is exactly the image the second branch is

@@ -817,7 +817,6 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     is readable, or link the module by IMPORT) and NOT the one that does not
     (re-declare the struct here, which would be a different type with the same
     name and a layout the library's methods were not compiled against).
-    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
     """
     import json
     fresh_cas()

@@ -1092,7 +1092,7 @@ def linked_struct_owners(linked: list) -> dict:
     is still readable, and the struct's NAME is in every one of them. So a
     manifest alone can say "this image links a library that has `Bag`", which is
     the fact a build-pass refusal needs when the declaration itself is missing
-    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`).
+    (`check_construction_shapes`'s `undeclared_linked_struct_refusal` arm).
 
     The struct name is the `signature` up to its last `.`, because that is what
     `_formal_exports` writes there — `f"{struct}.{method}"`, so `Bag.__len__`
