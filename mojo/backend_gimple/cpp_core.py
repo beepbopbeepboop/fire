@@ -6886,6 +6886,31 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
             return lines
+        # An iterable that is a CALL is almost always one shape here — a callable
+        # bound to a local or to a parameter (`for row in _get_reader(lines,
+        # ...)`, `for entry in _walk(root)`) — and the flat "type: CallExpr"
+        # it used to report named neither the callee nor why it could not be
+        # typed, so ONE real blocker looked like an undifferentiated gap in
+        # five unrelated places (c_common/tables.py's `read_table`,
+        # c_analyzer/__init__.py's `check_all`, c_common/fsutil.py's
+        # `glob_tree`/`_walk_tree`, Lib/glob.py's `_iglob`, Lib/os.py's
+        # `walk`). Naming the callee is what lets those share ONE next step
+        # instead of each re-deriving it.
+        #
+        # Gated on the callee being a bare name this unit has DECLARED, which
+        # is the whole shape: a module-level or imported function callee is
+        # resolved earlier in this function and never reaches here.
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name in declared):
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a `for` over a call through the callable-valued "
+                f"local/parameter '{s.iterable.func.name}(...)' is not "
+                "supported in a compiled generator/coroutine body: what that "
+                "call RETURNS is not knowable here (it depends on which "
+                "callable the caller passes), and a `for` target needs the "
+                "returned ITERATOR's element type. It needs the callable's "
+                "signature discovered from its call sites first.")
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"unsupported for-loop iterable type: {type(s.iterable).__name__}")
     raise gimple_exprtypes._UnsupportedGeneratorShape(

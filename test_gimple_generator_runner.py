@@ -515,6 +515,45 @@ def _foreign_cpp_module_global_value():
         globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
 
 
+def _cpp_for_over_callable_local_is_named():
+    # `for x in <call through a callable-valued local/parameter>` must name
+    # the callee. The refusal it used to raise was a flat
+    # "unsupported for-loop iterable type: CallExpr", which named neither
+    # the call nor the reason — so the SAME blocker read as five unrelated
+    # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
+    # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
+    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
+    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
+    # re-derive what to do about it. It stays a refusal — the callee's
+    # return type genuinely is not knowable in this body model — but now says
+    # which call and what would unblock it.
+    #
+    # The default `walk=os.walk` is the real shape: a kw-only parameter
+    # defaulting to the function itself, which is also what keeps the
+    # generator off the A3 path (see `_foreign_a3_generator_handle_next`).
+    test_generator_refused(
+        "cpp_for_over_callable_param_names_the_callee", """\
+def walk_tree(root, *, walk=len, start=[]):
+    for entry in walk(root):
+        yield entry
+
+def main():
+    print(sum(walk_tree('a')))
+""", "callable-valued local/parameter 'walk(...)'")
+    # The negative half: an iterable this emitter DOES support must keep its
+    # own path, and a call this emitter CAN resolve must never reach the new
+    # branch — both would be silent behaviour changes if the gate were too
+    # wide. `sum` is the resolved-callee case for the second.
+    test_generator_stdout("cpp_for_over_callable_param_leaves_resolved_callees_alone", """\
+def rows(xs, *, start=[]):
+    for x in xs:
+        yield x * 2
+
+def main():
+    print(sum(rows([1, 2, 3])))
+""", "12\n")
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so
@@ -4135,6 +4174,7 @@ def main():
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
+    _cpp_for_over_callable_local_is_named()
     _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
