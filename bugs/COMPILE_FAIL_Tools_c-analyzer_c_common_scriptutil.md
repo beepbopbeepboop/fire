@@ -4,6 +4,84 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-02 — items 1 and 2 are FIXED; `iter_marks` compiles. ONE blocker left, and it is item 3
+
+Fresh `python3 fire.py build -o .tmp/out/ca/scriptutil
+.tmp/ca/c-analyzer/c_common/scriptutil.py` on `ad7ffd96` (sources copied
+from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`), arm64, ~2 s. The
+complete refusal list:
+
+```
+_iter_filenames: a call to unresolved callee 'process(...)' is not supported in a
+                 compiled generator/coroutine body (not a builtin this emitter
+                 supports, a known module-level/imported function, a same-module
+                 struct constructor, or a declared callable-value local)
+```
+
+**`iter_marks` is gone from the list** — it compiles and runs. So are items
+1 and 2 of the entries below, which this entry records as landed rather
+than re-asserts:
+
+* **Item 1 (the module-member VALUE read).** `div = os.linesep` beside
+  `end = f'{mark}{os.linesep}'` disagreed on the yield slot because the
+  read had no type. Fixed in two commits, `12106a4b` and `c260fdc1`:
+  `_cpp_module_global_field` reads the constant off the module's OWN
+  `_module_globals` field triple (or, for a marker that is never inlined,
+  off the new shared `builtin_module_constant` table — `os` and `signal`
+  have no field row to read, and the ordinary GIMPLE path's two literal
+  dicts for them are now that one table);
+  `_cpp_expr_static_ctype` answers the same question for a CONDITION; and
+  `_infer_simple_expr_ctype`/`_generator_yield_ctype` take a new
+  `module_global_types` hint, seeded per generator unit in all three cpp
+  unit emitters. `div` is now a `char *` local and the yields agree.
+  Regressions `cpp_coroutine_body_reads_foreign_module_constant`,
+  `cpp_coroutine_body_compares_foreign_module_constant` and
+  `cpp_coroutine_body_reads_marker_module_constant` in
+  `test_gimple_generator_runner.py`, all compiled-vs-CPython.
+* **Item 2 (`Exception(...)` as a value).** `onempty =
+  Exception('no filenames provided')` is now an emission site plus the
+  matching local type (`_cpp_exc_ctor_value`), commit `7374f254`; the
+  local still HOLDS the message, which is this model's one exception
+  representation and what the ordinary path already produced for the same
+  source. Regression `cpp_coroutine_exception_ctor_as_value`.
+
+### The one that is left, and why it is a different kind of work
+
+`_iter_filenames`'s `process(filenames, relroot=relroot)` — `process` is an
+unannotated PARAMETER of `_iter_filenames`, so the callee is a value, not a
+function. This is the item the entry below calls "a separate capability
+(callable-value-local signature discovery), not a tweak", and nothing in
+this round changed that assessment.
+
+Three things are needed together, and none is a one-liner:
+
+1. The callee's real signature. This model has exactly two callable-value
+   ctypes (`_CPP_CALLABLE_CTYPE`, zero-arg, and
+   `_CPP_CALLABLE_CTYPE_1ARG`), and this call passes two arguments, so
+   there is no representation to call it through yet. What is missing is
+   the discovery itself: `_cpp_declared` carries no return type for a
+   callable-valued parameter, and the ordinary path's
+   `_PLAIN_CALLSITE_PARAM_KINDS` (`mojo/middle/coro.py`) answers a
+   different question — a value KIND for a yield slot, not a C signature.
+2. The returned ITERATOR's element type, for the same reason the
+   `for`-over-a-callable refusal is (see
+   `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` — the same
+   blocker one function over, where the refusal now NAMES
+   `_get_reader(...)` instead of reporting an undifferentiated
+   `CallExpr`).
+3. Whatever `process` is expected to return in each of the four shapes
+   `_iter_filenames` then distinguishes (`isinstance(peeked, str)` /
+   `len(peeked) == 4`), which needs element access as well.
+
+Also still open in this file, unchanged by this round and untouched by it:
+`iter_files`' lambda-with-`*a/**k` refusal and `_iter_filenames`' five
+further shapes after this one (`yield from
+fsutil.process_filenames(...)`, `iterutil.peek_and_iter`,
+`iterutil.iter_many`, a lambda inside a tuple yield, `yield from items` on
+a non-generator local). Note `iterutil` itself does not compile — its
+`next(...)` on a plain identifier has no lowering — and this file's whole
+closure depends on it.
+
 ## Status 2026-10-01 — THREE blockers are now TWO; `track_progress_compact` has cleared, and `iter_marks`' real cause is narrower than recorded below
 
 Fresh `python3 fire.py build .tmp/ca/c_common/scriptutil.py` (sources copied

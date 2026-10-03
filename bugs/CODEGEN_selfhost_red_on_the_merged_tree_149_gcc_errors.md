@@ -1,5 +1,34 @@
 # `selfhost` is red on the merged bug-batch tree: 149 gcc errors, two families, neither marked
 
+## Re-measured 2026-10-02 on `work/bugs4-7-c` @ `ad7ffd96`: 157, and four further commits move it by ZERO
+
+`python3 tools/suite.py selfhost` -> FAIL (211 s) / FAIL (220 s) on the same
+tree with the branch's four commits reverse-applied in between, so the two
+runs differ only by them:
+
+| | unique `error:` lines in `build/suite.log` |
+|---|---|
+| tree WITHOUT this branch's four commits | 157 |
+| tree WITH them | 157 |
+
+and the two error SETS are byte-identical (`diff` of the
+`<file> | <error>` pairs, line numbers stripped). So the 149 in the title
+and below was a property of an earlier tree, not of this one; the number
+moved with unrelated merges and the red did not. Kept in the title because
+the title is what `rg`-es for this bug; treat 149 as history and the two
+157 rows as the measurement.
+
+The four commits are `12106a4b` (a module constant read in a coroutine
+body), `7374f254` (an exception constructor used as a value),
+`c260fdc1` (one shared `builtin_module_constant` table) and `ad7ffd96` (a
+`for`-over-callable refusal that names the callee). None of them touches a
+declaration site, which is the honest reason the count is unmoved: every
+error here is a definition the referencing code needs, and none of those
+four changes emits or suppresses a definition.
+
+The tree still needs `expect=` or `disabled=` on `selfhost`; that call is
+the integrator's (see NOT DONE), not this branch's.
+
 ## What was run
 
 ```sh
