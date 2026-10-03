@@ -99,8 +99,6 @@ WHAT IS HERE, AND WHAT EACH ONE ANSWERS
     register's worth of bits, which is the original failure and is why
     `sqrt`, `exp`, `sin` and the rest are not here. Printing a double needs a
     reader; passing one needs a declaration, and only one of the two exists.
-    """
-
 WHAT IS NOT HERE, AND WHY — the absences worth naming
 ----------------------------------------------------
   * Every float-valued function, for the register reason above. The list is

@@ -3835,12 +3835,20 @@ def _build_cfg(body) -> tuple:
     # A block that falls out of the FUNCTION needs no successor for the fixpoint
     # either: it is the last block, and `_definitely_stored` reads IN sets, not
     # exits.
+    #
+    # `preds` is NOT filled in here.  It used to be a single pass over `succs` at
+    # the end of the build, which cannot serve `_preheader_literals`: that is
+    # called from INSIDE the build — a loop header's condition has to be decided
+    # while its own block is being emitted — and it reads `preds` to find the
+    # blocks that reach it, so at that moment `preds` was empty and every
+    # `_preheader_literals` answer was "the loop may not run".  `edge` now adds
+    # to both lists together, so a second pass here would APPEND each
+    # predecessor twice: `b.preds` would read `[head, head]` for a one-edge
+    # block and the shape tests that compare a predecessor LIST — the
+    # `b.preds == [head]` in `test_formal_read_before_store.py`'s
+    # `check_finally_shape` among them — would fail on a graph that is correct.
     entry = new([])
     run(body, [], [entry.index])
-    for b in blocks:
-        for d in b.succs:
-            if d is not None and 0 <= d < len(blocks):
-                blocks[d].preds.append(b.index)
     return blocks, entry.index, cond_names
 
 
