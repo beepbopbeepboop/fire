@@ -1165,7 +1165,7 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
 
 
 def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
-    """222 names: CPython ships them, this table classifies none of them.
+    """238 names: CPython ships them, this table classifies none of them.
 
     The same defect as the row above, one tier wider, and it was 222 names wide
     rather than one because `shlex` was fixed by adding ONE tier entry while the
@@ -1196,7 +1196,7 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
           "precondition: this test is about the names in NO tier, and there are "
           f"only {len(unclassified)} of them now — if they have been "
           "classified, this row is about nothing and should go")
-    for name in ("binascii", "cmath", "getopt", "html", "tomllib"):
+    for name in ("binascii", "cmath", "getopt", "tomllib"):
         check(name in _sys.stdlib_module_names,
               f"precondition: {name} is a CPython standard-library module, "
               "which is the fact the diagnostic used to deny")
@@ -1207,6 +1207,17 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
               f"{name} is expected to be in no tier — this row is about the "
               "wording of an UNCLASSIFIED name, and if it has been classified "
               "the row above is the one that applies")
+    # `html` was in that list and left it on 2026-10-03: it is one of the six
+    # names `test_no_standard_library_module_is_left_in_neither_tier` above
+    # placed, and `modelled` is right for it (five character replacements over a
+    # string, needing no object this target lacks). `html` is asserted to be in
+    # a tier THERE, deliberately — the two rows are the two arms of the wording,
+    # so a name cannot quietly satisfy both.
+    check(I.host_module_tier("html") == "modelled",
+          "html is no longer in no tier, so this row is not about it: it is "
+          "the one word in 'a standard-library module with no tier' that a "
+          "classified name must NOT produce, and the row above is where its "
+          "placement is pinned")
     check(I.is_cpython_stdlib("os.path"),
           "a dotted name is matched on its TOP component, like "
           "`_is_host_module` and `host_module_tier`")
