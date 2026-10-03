@@ -487,6 +487,10 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             gen._funcptr_builtins_needed.add(c_name)
             static_name = f'_funcptr_{c_name}'
             t = gen._new_val('void *', f'{static_name}')
+            # The BARE name, not `c_name`: CPython's repr is the name the
+            # source wrote (`<function step at 0x...>`), and `c_name` is the
+            # mangled C symbol (`step_9f63a2`) or a module qualifier.
+            gen._func_value_names[t] = name
             return 'void *', t
         else:
             # For non-identifier expressions like ((int)0), emit directly
@@ -543,6 +547,10 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         gen._funcptr_builtins_needed.add(c_name)
         static_name = f'_funcptr_{c_name}'
         t = gen._new_val('void *', f'{static_name}')
+        # The BARE name, for the reason the sibling branch gives: CPython's
+        # repr is the name the source wrote, and `c_name` is the mangled C
+        # symbol (`step_9f63a2`) or a module qualifier (`mod_a_thing`).
+        gen._func_value_names[t] = name
         return 'void *', t
     # Module-level global variable (persistent type known across functions).
     # Also catches `global x` declarations inside functions (_func_declared_globals).

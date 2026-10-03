@@ -299,7 +299,13 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 543),
+    # 543 -> 544 (2026-10-02, this branch), for `mojo_sprintf_ptr` — the
+    # `<function f at 0x...>` spelling `print(f)` needs, because a function
+    # value is a `void *` and `TypeLattice.printf_fmt` has no format for a
+    # pointer, so `print(f)` used to `sprintf` one with `%d` (undefined
+    # behaviour; a decimal address on this target). One name: the codegen half
+    # is a `print` dispatch arm, which adds no runtime entry point.
+    for header, want in (('fire_runtime.h', 544),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

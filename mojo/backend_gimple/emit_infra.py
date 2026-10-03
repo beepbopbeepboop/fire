@@ -208,6 +208,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
     gen._boxed_vals = set()
+    # Same scope and same reason as `_boxed_vals` above: the writers are
+    # `_lower_IdentExpr`'s two function-value branches and the sole reader is
+    # `print`, all inside one function's lowering, and the keys are SSA temp
+    # names that cannot outlive it.
+    gen._func_value_names = {}
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
@@ -398,6 +403,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # self-hosted compiler, so it is emptied where every other per-function
     # table is.
     gen._boxed_vals.clear()
+    gen._func_value_names.clear()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -4893,6 +4899,24 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # builtin-returning bool (any/all/isinstance/in) reaches here.
             rv = gen._call_expr('char *', 'mojo_repr_bool', [('_Bool', aval)])
             gen._emit(f'  {print_fn} ({rv});')
+        elif aval in getattr(gen, '_func_value_names', ()):
+            # A FUNCTION OBJECT. `TypeLattice.printf_fmt` has no format for a
+            # pointer, so this used to reach the generic path below and
+            # `sprintf(..., "%d", (void *)fn)` — undefined behaviour on a
+            # 64-bit target, which is where the decimal address
+            # (`print(step)` -> 74387272) came from. CPython prints
+            # `<function step at 0x...>`: the NAME is the part that was
+            # missing, and the address was never wrong.
+            _fname = gen._func_value_names[aval]
+            _lit = gen._intern_string(
+                f'<function {_fname} at %p>')
+            _ft = gen._new_val('char *', _lit)
+            _fp = gen._new_temp('void *')
+            _fs = gen._new_temp('char *')
+            gen._emit(f'  {_fp} = (void *){aval};')
+            gen._emit(f'  {_fp} = (void *)(intptr_t)(int64_t){_fp};')
+            gen._emit(f'  {_fs} = mojo_sprintf_ptr ({_ft}, {_fp});')
+            gen._emit(f'  {print_fn} ({_fs});')
         else:
             t = gen._new_temp('char *')
             vp = gen._new_temp('void *')
