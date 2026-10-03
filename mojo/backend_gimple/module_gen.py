@@ -830,6 +830,18 @@ def _emit_reflection_dispatch(self, parts):
         bool_fields = self.struct_bool_fields.get(sn, set())
         nullable_containers = self.struct_nullable_container_fields.get(sn, set())
         part_exprs = []
+        # `owned` is the answer to ONE question per field: is the string this
+        # field's expression produces a heap buffer the dump owns? It cannot be
+        # derived from the emitted text afterwards, because the shapes differ in
+        # ownership (`mojo_repr_int` strdups; `"True"` is a literal; a NULL list
+        # renders as a literal `[]` while a non-NULL one renders as a cat chain),
+        # and a wrong `free()` here is a crash rather than a leak. So it is
+        # decided where the expression is BUILT, below, next to the shape it
+        # describes, and `None` (undecided) is never a legal answer: every branch
+        # sets it. `owned` is `True`, `False`, or `('if', cond)` for "owned only
+        # when `cond` holds", which is what a NON-NULLABLE container field needs
+        # (its helper returns a literal for a null pointer, and the dump must not
+        # free that).
         for fname, ftype in fields.items():
             if fname == '__mojo_type_id':
                 continue
@@ -845,33 +857,46 @@ def _emit_reflection_dispatch(self, parts):
             # through to the ordinary int repr.
             if fname in bool_fields:
                 val_expr = f'({fref} ? "True" : "False")'
+                owned = False
             elif fname in boxed and ftype in (
                     'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
+                owned = True
             elif ftype == 'char *':
-                val_expr = f'({fref} ? mojo_repr_str({fref}) : "None")'
+                val_expr = f'({fref} ? mojo_repr_str({fref}) : _mojo_repr_none())'
+                owned = True
             elif ftype == '_Bool':
                 val_expr = f'({fref} ? "True" : "False")'
+                owned = False
             elif ftype in ('double', 'float'):
                 val_expr = f'mojo_repr_float((double){fref})'
+                owned = True
             elif ftype == 'MojoList *':
                 if self._field_elem_types.get(sn, {}).get(fname) == 'double':
                     list_repr = f'mojo_repr_list_doubles({fref})'
                 else:
                     list_repr = f'_mojo_repr_list({fref})'
                 if fname in nullable_containers:
-                    val_expr = f'({fref} ? {list_repr} : "None")'
+                    val_expr = f'({fref} ? {list_repr} : _mojo_repr_none())'
+                    owned = True
                 else:
                     val_expr = list_repr
+                    # A null list renders as a LITERAL `"[]"`/`"()"` in every
+                    # `mojo_repr_list_*` helper, so the dump owns this field's
+                    # string only when the pointer is there to make it.
+                    owned = ('if', fref)
             elif ftype == 'MojoDict *':
                 if fname in nullable_containers:
-                    val_expr = f'({fref} ? _mojo_repr_dict({fref}) : "None")'
+                    val_expr = f'({fref} ? _mojo_repr_dict({fref}) : _mojo_repr_none())'
+                    owned = True
                 else:
                     val_expr = f'_mojo_repr_dict({fref})'
+                    owned = ('if', fref)
             elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                 val_expr = f'mojo_repr_int((int64_t){fref})'
+                owned = True
             elif ftype.endswith(' *'):
                 # A field whose declared type is a struct this compile
                 # reflected is rendered through that struct's ELEMENT REPR
@@ -885,35 +910,68 @@ def _emit_reflection_dispatch(self, parts):
                 _fsn = ftype[:-2].strip()
                 if _fsn and f'_mojo_elem_repr_{_fsn}' in elem_repr_names:
                     val_expr = (f'({fref} ? _mojo_elem_repr_{_fsn}'
-                                f'((int64_t)(intptr_t){fref}) : "None")')
+                                f'((int64_t)(intptr_t){fref}) : _mojo_repr_none())')
+                    owned = True
                 else:
-                    val_expr = f'({fref} ? _mojo_dispatch_repr((void *){fref}) : "None")'
+                    # `strdup` around the dispatch, and this is the same remedy
+                    # `_mojo_repr_dict` applies to its two non-owned answers (and
+                    # `_key_slot_str` on the dict-key path): `_mojo_dispatch_repr`
+                    # ends in `mojo_repr_obj`, which hands back a shared static
+                    # buffer, so its result is not uniformly ours to free.
+                    # Copying it here gives the FIELD dump one ownership answer
+                    # for every branch without inventing a second ownership
+                    # story for the function itself, which its other caller (the
+                    # `repr()` site) also has no release point for.
+                    val_expr = (f'({fref} ? strdup(_mojo_dispatch_repr((void *){fref}))'
+                                f' : _mojo_repr_none())')
+                    owned = True
             else:
                 val_expr = f'mojo_repr_int((int64_t){fref})'
-            part_exprs.append(f'"{fname}=", {val_expr}')
-        cat_chain = f'strdup("{sn}(")'
-        for i, pe in enumerate(part_exprs):
-            sep = ', ' if i > 0 else ''
-            if sep:
-                cat_chain = f'mojo_str_cat_free({cat_chain}, ", ")'
-            name_lit, val_e = pe.split(', ', 1)
-            cat_chain = f'mojo_str_cat_free({cat_chain}, {name_lit})'
-            # The chain releases its LEFT operand, which is always a buffer
-            # this chain built -- that is the whole of the per-print leak for
-            # a struct dump with F fields (O(F^2) bytes), and it is the same
-            # fix `mojo_str_cat_free`'s own comment in runtime/fire_runtime.c
-            # describes. The RIGHT operand (`val_e`) is left alone on purpose:
-            # it is one of a dozen expressions whose ownership differs (a
-            # `mojo_repr_*` helper owns its return, a `"True"`/`"None"` literal
-            # does not), and a wrong `free()` here is a crash rather than a
-            # leak. Those per-field strings are the remaining half of this
-            # family and are not what this change claims.
-            cat_chain = f'mojo_str_cat_free({cat_chain}, {val_e})'
-        cat_chain = f'mojo_str_cat_free({cat_chain}, ")")'
+                owned = True
+            part_exprs.append((f'"{fname}="', val_expr, owned))
+        # The body is STATEMENTS, not one nested `return`, whenever at least one
+        # field's string is the dump's to release: GIMPLE has no comma operator,
+        # so a per-field `free()` cannot live inside the expression that cats it,
+        # and the value has to be materialized in a temp first. That is the shape
+        # `_mojo_repr_dict` and `_mojo_repr_list` already use for exactly this
+        # reason. A struct with no owned field keeps the old single-expression
+        # body, so nothing that cannot leak here is churned.
+        _any_owned = any(_o is not False for _n, _v, _o in part_exprs)
+        if not _any_owned:
+            cat_chain = f'strdup("{sn}(")'
+            for i, pe in enumerate(part_exprs):
+                sep = ', ' if i > 0 else ''
+                if sep:
+                    cat_chain = f'mojo_str_cat_free({cat_chain}, ", ")'
+                name_lit, val_e, _own = pe
+                cat_chain = f'mojo_str_cat_free({cat_chain}, {name_lit})'
+                cat_chain = f'mojo_str_cat_free({cat_chain}, {val_e})'
+            cat_chain = f'mojo_str_cat_free({cat_chain}, ")")'
+            repr_body = f"  if (!obj) return strdup(\"None\");\n  return {cat_chain};\n"
+        else:
+            body_lines = []
+            body_lines.append(f'  if (!obj) return strdup("None");')
+            body_lines.append(f'  char *_buf = strdup("{sn}(");')
+            body_lines.append('  char *_v;')
+            for i, (name_lit, val_e, own) in enumerate(part_exprs):
+                if i > 0:
+                    body_lines.append(f'  _buf = mojo_str_cat_free(_buf, ", ");')
+                body_lines.append(f'  _buf = mojo_str_cat_free(_buf, {name_lit});')
+                body_lines.append(f'  _v = {val_e};')
+                body_lines.append('  _buf = mojo_str_cat_free(_buf, _v);')
+                if own is True:
+                    body_lines.append('  free(_v);')
+                elif isinstance(own, tuple) and own and own[0] == 'if':
+                    body_lines.append(f'  if ({own[1]}) free(_v);')
+                elif own is False:
+                    # A LITERAL, and the only shape that is not ours to free.
+                    # Its own answer, at the site that knows it.
+                    body_lines.append('  /* a string literal: not ours to free */')
+            body_lines.append('  return mojo_str_cat_free(_buf, ")");')
+            repr_body = "\n".join(body_lines) + "\n"
         refl_parts.append(
             f"static char * _mojo_repr_{sn} ({sn} *obj) {{\n"
-            f"  if (!obj) return strdup(\"None\");\n"
-            f"  return {cat_chain};\n"
+            + repr_body +
             f"}}\n"
         )
         # The ELEMENT REPR shim for a list/tuple of this struct: the walker
@@ -959,6 +1017,19 @@ def _emit_reflection_dispatch(self, parts):
         parts.append("")
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
+        # The OWNED spelling of "None", for the field dumps below. A literal in a
+        # `p ? <allocating repr> : "None"` ternary is what stopped that dump from
+        # having ONE ownership answer per field: the chain could not release a
+        # field's string without risking a `free()` of static storage, so it
+        # released none of them. One helper, defined once beside the walkers that
+        # use it, puts the fallback on the same footing as every other branch —
+        # and it is a literal-to-owned adapter, not a second implementation of
+        # any repr rule (`_mojo_generic_elem_repr`'s own comment records the same
+        # remedy for the same reason).
+        parts.append(
+            "static char * _mojo_repr_none (void) {\n"
+            "  return strdup(\"None\");\n"
+            "}\n")
         parts.extend(refl_parts)
         tag_cases_get = "\n".join(
             f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'

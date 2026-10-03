@@ -3233,6 +3233,55 @@ main()
        "[b'', b'b']\n"
        "3.5\n")
 
+    # The generated STRUCT field dump (`_mojo_repr_<Struct>`), which reaches
+    # this through the element-repr shim — a struct-allocated value carries no
+    # runtime type tag, so `print(p)` alone would not get here
+    # (`mojo_repr_obj`'s `<object at 0x...>`), and the list is what supplies the
+    # answer.
+    #
+    # Its cat chain released its LEFT operand and nothing else, so every field's
+    # own string survived the print: six fields here, so six leaked buffers per
+    # line, 176.7 B/iteration measured over a 4x range of loop counts against
+    # 80.4 after. Each field shape carries its OWN ownership answer now, decided
+    # where the expression is built: `mojo_repr_int`/`_str`/`_float` strdup or
+    # malloc, `_mojo_generic_elem_repr` owns its return on every branch, a
+    # `"True"`/`"None"` literal does not, and a NON-NULLABLE container field is
+    # released only when its pointer is there (a null list renders as a literal
+    # `"[]"` in every `mojo_repr_list_*` helper, so freeing that would be a
+    # crash). The nullable spellings get their `"None"` fallback from one
+    # `_mojo_repr_none()`, which is what lets a mixed ternary have ONE answer.
+    #
+    # `ps` is hoisted out of the loop ON PURPOSE: `[p]` would allocate a fresh
+    # list per iteration and measure that instead (~310 B/iteration, and it is
+    # a different defect). The residual 80.4 B/iteration this case still shows
+    # is also not the struct dump — it is the top-level repr result `print` asks
+    # for and never frees, which a plain `print([1, 2, 3])` loop leaks too (16.4
+    # B/iteration) and which `gimple_printed_container_does_not_grow`'s 40 MB
+    # ceiling is too loose to see. Filed, not fixed here:
+    # bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md.
+    _P_REPR = ("[P(n=7, f=1.5, s='hi', l=[1, 2], d={'a': 1}, inner=Inner(k=3))]\n")
+    test_gimple_bounded_memory("gimple_printed_struct_repr_does_not_grow", """\
+class Inner:
+    def __init__(self):
+        self.k = 3
+
+class P:
+    def __init__(self):
+        self.n = 7
+        self.f = 1.5
+        self.s = "hi"
+        self.l = [1, 2]
+        self.d = {"a": 1}
+        self.inner = Inner()
+
+def main():
+    p = P()
+    ps = [p]
+    for i in range(100000):
+        print(ps)
+main()
+""", _P_REPR * 100000, 14)
+
     # ── `with C():` with no `as` target still runs `__exit__`
     # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
     # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
