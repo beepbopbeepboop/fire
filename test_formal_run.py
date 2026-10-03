@@ -6911,6 +6911,42 @@ BOTH_ARCH_CASES = [
      "    printf(\"%d\", c._value)\n"
      "    return 0\n",
      0, "9"),
+    # ── `~` IS BITWISE, and it is in THIS group for a reason ────────────
+    #
+    # The PROOF layer modelled `~x` as `x = 0` -- Python's `not`, not its `~` --
+    # so the source model of every program using `~` was a model of a different
+    # program, on both backends at once, and `eval_eq_mojo` did not catch it
+    # because `evalExpr` made the same mistake (`bugs/FORMAL_the_semantic_model_
+    # renders_a_bitwise_not_as_a_logical_one.md`). The MACHINE half was right all
+    # along, which is what makes these rows the ones that had to be written: the
+    # fix was a model fix, and a model fix with no executed case beside it is a
+    # claim with nothing under it. `test_formal_eval_eq_mojo_bridge.py` carries
+    # the model and the run-test assertions; these are the codegen rows, and they
+    # are in `BOTH_ARCH_CASES` because `~` is an ARM64 `MVN`/`ORN` and an x86-64
+    # `NOT`, two encodings and two step lemmas for one meaning.
+    #
+    # `~10` is -11, printed as `%lx` because a process exit status is eight bits
+    # and 0xfffffffffffffff5 is not. CPython computes the same three answers on
+    # the same expressions.
+    ("both_arch_bitwise_not_complements_every_bit",
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%lx\", ~10)\n"
+     "    return 0\n", 0, "fffffffffffffff5"),
+    # The row that says BITWISE: a LOGICAL `not 0` is 1 and a bitwise `~0` is all
+    # ones, so a model or a lowering that swapped them answers 1 here.
+    ("both_arch_bitwise_not_of_zero_is_all_ones",
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%lx\", ~0)\n"
+     "    return 0\n", 0, "ffffffffffffffff"),
+    # The doc's own reproducer: `& ~31` is the ordinary 32-byte-align idiom and
+    # this repository writes it in three places. `n` is the entry argument, 10
+    # (`formal/build.py`'s `test_input`), so (10 + 48) & ~31 = 58 & 0x…ffe0 =
+    # 32 -- a mask of all ones would give 58 and a logical `not` would give a
+    # number no align could produce.
+    ("both_arch_and_of_a_complemented_align_mask",
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%ld\", (n + 48) & ~31)\n"
+     "    return 0\n", 0, "32"),
 ]
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here

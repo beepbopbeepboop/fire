@@ -29,7 +29,8 @@ from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
-                          parse_type_name, _range_args, uses_typed_model)
+                          mask_of, parse_type_name, _range_args,
+                          uses_typed_model)
 
 # Fallback leaf word for structured value-flow obligations the generator
 # cannot yet close automatically.  It is assembled from two halves because a
@@ -587,6 +588,15 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         op = _expr_go(e.operand, param, env, vtypes, call_types, scope)
         if e.op == "-":
             return f"(0 - {op})"
+        if e.op == "~":
+            # `~` is BITWISE complement and `not` is the logical one, so the two
+            # get different answers here.  Reading `~x` as `x = 0` modelled
+            # `not` for a program whose machine answer is MVN (arm64) / NOT
+            # (x86-64) -- and the run test caught it, because the run tests are
+            # `native_decide` over the machine model.  `^^^` is the spelling
+            # `^` already uses and `UInt64.xor` is 64-bit, so the whole
+            # complement is one term with no library helper.
+            return f"({op} ^^^ 0xFFFFFFFFFFFFFFFF)"
         return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go(e.left, param, env, vtypes, call_types, scope)
@@ -827,6 +837,16 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
         t = infer_expr(e, vtypes, call_types)
         if e.op == "-":
             return _t_wrap(f"(0 - {op})", t)
+        if e.op == "~":
+            # At the DECLARED WIDTH, which is not the same thing as at 64: a
+            # 32-bit `~x` is `t32s (x ^^^ 0xFFFFFFFF)`, and writing the 64-bit
+            # mask there would only be saved by `_t_wrap`'s masking commuting
+            # with a low mask -- one coincidence, not one rule.  The machine
+            # complements 64 bits and then truncates (`_emit_trunc` after MVN /
+            # NOT), so the mask is the operand's own width and the wrapper says
+            # how the narrow result is read back.
+            return _t_wrap(
+                f"({op} ^^^ 0x{mask_of(resolve(t)):x})", t)
         return f"(if {op} = 0 then (1 : UInt64) else (0 : UInt64))"
     if isinstance(e, BinOp):
         l = _expr_go_t(e.left, param, env, vtypes, call_types, scope)
@@ -1681,7 +1701,14 @@ def _expr_ast(e) -> str:
     if isinstance(e, String):
         return 'MojoExpr.var ""'
     if isinstance(e, Unary):
-        opname = "neg" if e.op == "-" else "not"
+        # `~` and `not` are different operators, so they get different NAMES:
+        # `evalExpr` reads `"not"` as the logical one (`if x = 0 then 1 else 0`)
+        # and `"bnot"` as the bitwise complement (`^^^` every bit).  Spelling `~`
+        # `not` here is what made `eval_eq_mojo` agree with a model that was
+        # itself wrong -- the bridge compared two renderings of `not` for a
+        # program whose machine answer is MVN/NOT, and agreed about a different
+        # program than the one that ran.
+        opname = {"-": "neg", "~": "bnot"}.get(e.op, "not")
         return f'(MojoExpr.unop "{opname}" ({_expr_ast(e.operand)}))'
     if isinstance(e, BinOp):
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
@@ -2000,7 +2027,10 @@ _STEP_CONDS = [
     (0xffff0fe0, 0x9a9f07e0),  # 30 CSET
     (0xffe00000, 0xF9000000),  # 31 STR unsigned offset
     (0xffc00000, 0xA9400000),  # 32 LDP offset
-    (0xffe00000, 0x0A200000),  # 33 ORN register
+    # 33 is ORN (SHIFTED REGISTER), the only ORN an image can contain -- it is
+    # `MVN`'s encoding. See `_WORK_STEP`'s note for why the index is unchanged
+    # and the condition is not the one that was here.
+    (0xffe0fc00, 0xAA200000),  # 33 ORN (shifted register) = MVN's encoding
     (0xfffffc1f, 0xD61F0000),  # 34 BR
     (0xffe0001f, 0xD4000001),  # 35 SVC
     (0xffe0fc00, 0x13001c00),  # 36 SXTB
@@ -2260,11 +2290,17 @@ def _step_rhs(w: int, idx: int):
         return (f"some (arm64_set_reg {d2} (arm64_set_reg {d1} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) "
                 f"(mem_read_u64 s.mem ({addr} + 8).toNat))")
-    if idx == 33:  # ORN register
-        rn = (w >> 10) & 0x1f
+    if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
+        # OR NOT inverts the SECOND source, and `Rn` is bits [9:5] / `Rm` is
+        # bits [20:16] (the assembler gives `orn x0, x1, x2` = 0xaa220020).
+        # This arm read `Rn` from [14:10] and complemented it, which is not the
+        # encoding of any instruction -- and for the one ORN this backend emits,
+        # `MVN Rd, Rm` (the alias for `ORN Rd, ZR, Rm`), it answers all ones
+        # instead of `~Rm`.
+        rn = (w >> 5) & 0x1f
         rm = (w >> 16) & 0x1f
-        return (f"some (arm64_set_reg {rd} s ((arm64_reg {rn} s) ^^^ "
-                f"(0xffffffffffffffff : UInt64) ||| arm64_reg {rm} s))")
+        return (f"some (arm64_set_reg {rd} s (arm64_reg {rn} s ||| "
+                f"((arm64_reg {rm} s) ^^^ 0xffffffffffffffff)))")
     if idx == 34:  # BR Xn
         rn = (w >> 5) & 0x1f
         return f"some {{ s with pc := (arm64_reg {rn} s).toNat }}"
@@ -2436,9 +2472,9 @@ def _step_rhs_generic(idx: int):
         addr = f"(s.sp + UInt64.ofNat ({_I12} * 8))"
         return (f"some (arm64_set_reg {_RN} (arm64_set_reg {_RD} s "
                 f"(mem_read_u64 s.mem {addr}.toNat)) (mem_read_u64 s.mem ({addr} + 8).toNat))")
-    if idx == 33:
-        return (f"some (arm64_set_reg {_RD} s ((arm64_reg {_RT2} s) ^^^ "
-                f"(0xffffffffffffffff : UInt64) ||| arm64_reg {_RM} s))")
+    if idx == 33:  # ORN (shifted register): Rd = Rn OR (NOT Rm)
+        return (f"some (arm64_set_reg {_RD} s (arm64_reg {_RN} s ||| "
+                f"((arm64_reg {_RM} s) ^^^ (0xffffffffffffffff : UInt64))))")
     if idx == 34:
         return f"some {{ s with pc := (arm64_reg {_RN} s).toNat }}"
     if idx == 35:
@@ -2505,7 +2541,14 @@ _WORK_STEP = [
     (30, "work_step_cset", [(0xffff0fe0, 0x9a9f07e0)]),
     (31, "work_step_str_uoff", [(0xffe00000, 0xf9000000)]),
     (32, "work_step_ldp_off", [(0xffc00000, 0xa9400000)]),
-    (33, "work_step_orn", [(0xffe00000, 0x0a200000)]),
+    # ORN (SHIFTED REGISTER), which is the only ORN `formal/arm64.py` emits and
+    # therefore the only one an image can contain.  `0x0a200000` -- what this
+    # entry said until the ORN arm was corrected -- is ORN (IMMEDIATE): bit 30
+    # is what separates the two classes, and no lowering here builds an `if`-bit
+    # mask in an ORN, so the old entry matched nothing and every `~x` was an
+    # unmodelled word (`_step_branch_index` returned `None`, so the block's run
+    # certificate could not be built and proof generation refused the program).
+    (33, "work_step_orn", [(0xffe0fc00, 0xaa200000)]),
     (34, "work_step_br", [(0xfffffc1f, 0xd61f0000)]),
     (35, "work_step_svc", [(0xffe0001f, 0xd4000001)]),
 ]
