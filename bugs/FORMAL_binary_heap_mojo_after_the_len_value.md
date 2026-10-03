@@ -163,6 +163,71 @@ The one thing a reader should take from this: **a plan that reads §3 of the
 sweep map as "one file has to lower first, then 164 files move" is wrong about
 the second half.** `binary_heap.mojo` lowering is necessary and not sufficient.
 
+## 2b. What is BEHIND the export gate, measured 2026-10-03: it is `tile.mojo`, and the row is claimed
+
+`bugs/FORMAL_sweep_work_map_2026-10-03_b9.md` §3 records the state of the row
+after `formal/monomorph.py` landed: **163 files, "module exports no public
+functions", 162 of them naming nothing `binary_heap.mojo` declares.** §2 above
+says the gate is wall two and that fixing wall one is necessary and not
+sufficient. This section is the other half of that sentence, measured rather
+than argued: **what the row's files hit if wall two stops being a wall.**
+
+The probe lifts wall two the only way it can be lifted without answering the
+ABI question — it treats a module nobody binds a concrete name from as "no
+library needed", which is the decision `formal/imports.py::build_module_dylib`
+would have to make per edge. It does that by returning `None` for a module whose
+library the export gate refuses, printing each skip with the module and the
+consumer that asked for it, so the number below is a count of refusals lifted and
+not an assertion that one was:
+
+```python
+# .tmp/probe_export_gate.py, scratch — see the map's §6
+orig = I.build_module_dylib
+def patched(module_name, source_path, *a, **kw):
+    try:
+        return orig(module_name, source_path, *a, **kw)
+    except B.FormalBuildError as e:
+        if "has no public functions" not in str(e):
+            raise
+        print(f"[probe] SKIPPED {module_name} for consumer {kw.get('_parent')}")
+        return None
+```
+
+Ten of the 163, sampled across the stdlib (`bugs/sweeps/sweep-arm-9.txt`, arm64;
+the x86-64 arm's log is identical for these paths). **Every one of the ten
+skips exactly one module, and every one moves off this row:**
+
+```
+[probe] SKIPPED .binary_heap (binary_heap.mojo) for consumer std.collections
+build: <file> imports '<X>', which cannot be built either: tile.mojo:
+workgroup_function[…](…) calls a name this unit does not compile, so the
+brackets cannot be bound …
+```
+
+**8 of 10 on `tile.mojo`'s bracketed specialization, 2 on
+`builtin_slice.mojo`'s Optional unwrap.** So:
+
+* **fixing this row moves 0 of the 163.** That is the same answer §1.2 recorded
+  on 2026-09-30 for a smaller sample and the same answer §2 records for wall
+  one, now with wall two lifted as well — the row has two walls and the second
+  one hides a third row that is 8-in-10 where the 163 are.
+* **`tile.mojo`'s row reads 4 files today only because `binary_heap.mojo`
+  masks it.** Its doc is `bugs/FORMAL_stdlib_tile_row_is_a_specialization_
+  through_a_function_value.md` and it is **claimed** (`formal16-7`), so the
+  number belongs to that claim and not to this one.
+* **The decision this row still needs is therefore a decision and not a
+  project**, and it is small enough to state: *does the importing module bind
+  any CONCRETE name of the dependency?* If not, no library is needed and the
+  edge can be dropped. `monomorph.py` already answers exactly that question one
+  level in, for instantiations. **It is not a light worker's row** for two
+  reasons that are about the tree and not about the size: it is
+  `formal/imports.py`'s closure walk, and it reverses a pinned decision —
+  `test_formal_imports.py::test_a_module_with_no_boundary_symbol_is_refused`
+  exists to FAIL if a template-only module ever builds, and its docstring says
+  why ("the only way to make it build is to publish the template under its base
+  name, and that is a run-time wrong answer rather than a build error").
+  Whoever takes it has to answer that test rather than route around it.
+
 ## 3. What is left in `binary_heap.mojo`, in the order the build reaches it
 
 Both architectures, same five, same order, same reasons. Reproduce with the
