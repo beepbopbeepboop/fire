@@ -61,6 +61,20 @@ COND_LE = 0xE       # signed less-or-equal
 COND_G = 0xF        # signed greater
 
 
+def cond_negated(cc: int) -> int:
+    """The opposite condition code.
+
+    Every pair above differs in the low bit — O/NO, B/AE, E/NE, BE/A, S/NS,
+    P/NP, L/GE, LE/G — so flipping it negates the condition. Named rather than
+    written `cc ^ 1` at the call site because a construct that needs both
+    polarities of ONE comparison should read as that: the for-range loop's head
+    test leaves the loop and its back edge re-enters it, and the two must be the
+    same comparison or the loop's exit does not agree with its continuation
+    (`formal/x86_64_codegen.py`'s `_emit_loop`).
+    """
+    return cc ^ 1
+
+
 # formal's x86-64 calling convention (System V AMD64 integer argument order).
 # Chosen to match the host ABI so the extern path (printf/exit via dyld or the
 # ELF dynamic linker) needs no thunk.

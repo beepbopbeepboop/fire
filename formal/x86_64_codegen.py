@@ -2439,12 +2439,38 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
         """while, or for over range(), with an optional else clause.
 
+        A `while` is the obvious layout:
+
             start:  <test>          --done--> false:
                     <body>
-            step:   [for: i += step]
-                    jmp start
+            step:   jmp start
             false:  [<else body>]
             end:
+
+        A `for … in range(…)` is NOT the same shape, and the whole difference is
+        one rule: **CPython binds the loop variable to each value the iteration
+        produces, so after the loop it holds the LAST one** — while this layout
+        tests the counter before it is advanced, so its exit path arrives one
+        past. Measured on a five-line program: `for i in range(0, 3): …` then
+        `print(i)` is 2 under CPython and was 3 here.
+
+            start:  <test>          --done--> false:
+                    fallthrough to body:
+            body:   <body>
+            step:   [for: i += step]
+                    <test>          --again--> body:
+                    [for: i -= step]
+                    jmp false
+            false:  [<else body>]
+            end:
+
+        The `i -= step` is on the exit path and not on the way into the body,
+        which is what makes `break` right as well: `break` leaves the counter at
+        the value the body last had — the last value CPython bound — and jumps
+        past it. Restoring on EVERY exit, including an empty range, would be one
+        instruction shorter and would be wrong: `i = 0` before an
+        `for i in range(0, 0)` is `0` under CPython and would print `-step`.
+        Hence the head test being separate from the test at the bottom.
 
         `break` jumps to end (skipping the else); `continue` jumps to step, so
         a for-loop still advances its counter."""
@@ -2452,6 +2478,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
         end_label = f"{fn}_loop{wid}_end"
@@ -2484,31 +2511,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                             "fin_depth": len(self._pending_finally)})
         try:
             self.asm.label(start_label)
+            leave_cc = None
             if for_range:
-                self._load_var(target, Reg.RAX)
-                self._load_var(end_tmp, Reg.R11)
-                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
-                self._record_cond_branch()
-                # The branch LEAVES the loop, so its condition is the negation
-                # of the loop's own: an ascending range runs while i < end and
-                # exits on i >= end, a descending one runs while i > end and
-                # exits on i <= end. (The `while` form below cannot get this
-                # wrong, because it branches on the negation of a value the
-                # condition expression already produced.) Signed, since the
-                # counter and the bound are int64 values.
-                cc = COND_LE if descending else COND_GE
-                self._emit_jcc(cc, false_label)
+                leave_cc = COND_LE if descending else COND_GE
+                self._emit_for_test(target, end_tmp, leave_cc, false_label)
             else:
                 self._emit_truthy_word(cond)
                 self._emit_branch_if_false(false_label)
 
+            self.asm.label(body_label)
             for s in body:
                 self._emit_stmt(s)
 
             self.asm.label(step_label)
             if for_range:
                 self._emit_for_inc(target, step_val, step_tmp, lit_step)
-            self._emit_jmp(start_label)
+                # The loop-back test is the same comparison as the head test
+                # with the opposite polarity, emitted by the same helper, so the
+                # two cannot drift into disagreeing about when the loop ends.
+                self._emit_for_test(target, end_tmp, cond_negated(leave_cc),
+                                    body_label)
+                self._emit_for_restore(target, step_val, step_tmp, lit_step)
+                self._emit_jmp(false_label)
+            else:
+                self._emit_jmp(start_label)
 
             self.asm.label(false_label)
             for s in (else_body or []):
@@ -2519,24 +2545,65 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._for_depth -= 1
             self._loops.pop()
 
+    def _emit_for_test(self, target: str, end_tmp: str, cc: int,
+                       label: str) -> None:
+        """CMP the counter against the bound and jump to `label` on `cc`.
+
+        `cc` is a CONDITION CODE, and the caller supplies both polarities of the
+        same comparison: the loop head jumps on the one that leaves the loop and
+        the loop back edge on its negation. Both go through here so the two
+        cannot be spelled differently.
+
+        The branch LEAVES the loop when its condition is the negation of the
+        loop's own: an ascending range runs while i < end and leaves on
+        i >= end, a descending one runs while i > end and leaves on i <= end.
+        (The `while` form cannot get this wrong, because it branches on the
+        negation of a value the condition expression already produced.) Signed,
+        since the counter and the bound are int64 values.
+        """
+        self._load_var(target, Reg.RAX)
+        self._load_var(end_tmp, Reg.R11)
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+        self._record_cond_branch()
+        self._emit_jcc(cc, label)
+
     def _emit_for_inc(self, target: str, step, step_tmp: str, lit_step) -> None:
         """Advance a for-range counter by `step`."""
+        self._emit_for_step(target, step, step_tmp, lit_step, subtract=False)
+
+    def _emit_for_restore(self, target: str, step, step_tmp: str,
+                          lit_step) -> None:
+        """Walk the counter BACK by `step`, on the loop-exit path.
+
+        Shares `_emit_for_inc`'s body with the direction flipped, because a step
+        the advance can lower and the restore cannot would leave the value the
+        loop exits with undefined for exactly the spellings a program is most
+        likely to use. `_emit_loop`'s docstring is why the restore is here."""
+        self._emit_for_step(target, step, step_tmp, lit_step, subtract=True)
+
+    def _emit_for_step(self, target: str, step, step_tmp: str, lit_step,
+                       subtract: bool) -> None:
         self._load_var(target, Reg.RAX)
         if lit_step is not None:
             if lit_step == 0:
                 raise CodegenError("range() step must not be zero")
-            if 0 < lit_step <= 0x7FFFFFFF:
-                self.asm.emit(encode_add_r64_imm32(Reg.RAX, lit_step))
-            elif -0x80000000 <= lit_step < 0:
-                self.asm.emit(encode_sub_r64_imm32(Reg.RAX, -lit_step))
+            # `imm` is the amount to move BY, and `enc` is how to move it: a
+            # negative literal means SUB, and an ADD of the negated immediate is
+            # the only other spelling (x86-64's imm32 is signed, so ADD takes the
+            # negation directly).
+            amount = -lit_step if subtract else lit_step
+            enc_add = encode_sub_r64_imm32 if amount < 0 else encode_add_r64_imm32
+            if abs(amount) <= 0x7FFFFFFF:
+                self.asm.emit(enc_add(Reg.RAX, abs(amount)))
             else:
-                self.asm.emit(encode_mov_r64_imm32(Reg.R11, lit_step))
+                self.asm.emit(encode_mov_r64_imm32(Reg.R11, amount))
                 self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
         else:
             # A negative literal arrives as UnaryOp('-', IntLiteral(n)), so
             # both spellings have to reduce to a static step.
             self._load_var(step_tmp, Reg.R11)
-            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+            self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R11) if subtract
+                          else encode_add_r64_r64(Reg.RAX, Reg.R11))
         self._store_var(target, Reg.RAX)
 
     # ── containers ───────────────────────────────────────────────────

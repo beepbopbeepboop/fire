@@ -2774,6 +2774,74 @@ CASES = [
      " 1 << 32, 1 << 40, (1 << 32) >> 32, 1024 >> 5, 1 >> 32)\n"
      "    return 0\n",
      0, "128 256 4294967296 1099511627776 1 32 0"),
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # The two ANSWERED rows of this group are `BOTH_ARCH_CASES`
+    # (`both_arch_two_field_store_through_a_plain_receiver_still_reaches_it`
+    # and the `__init__` guard beside it); these two are here because a
+    # `refuse:` expectation is what `run_case` dispatches on both backends.
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    ("refuse_a_one_field_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
+    # The `+=` spelling is a separate AST node (`AugAssignStmt`), so the rule
+    # reads it explicitly and a fix that only walked `AssignStmt` would pass the
+    # row above and miss this one — which is the shape every in-place operator
+    # in the stdlib is written with.
+    ("refuse_a_one_field_augmented_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a += 5\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -6435,6 +6503,71 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    # …and the WIDTH is the whole rule, so the two-field spelling of the same
+    # program is the guard: its receiver is a frame address the caller still
+    # owns, so the store lands and CPython's answer is already this path's.
+    ("both_arch_two_field_store_through_a_plain_receiver_still_reaches_it",
+     "class D:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "        self.b = 5\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "def main(n):\n"
+     "    d = D()\n"
+     "    d.bump()\n"
+     "    printf(\"a=%d\", d.get())\n"
+     "    return 0\n", 0, "a=12"),
+    # And the CONSTRUCTOR is not refused, because it is not a call: its stores
+    # are inlined into the construction site, which is where CPython runs them.
+    # `one_field_reader_is_not_a_mutator` and `both_arch_zero_arg_init_stores_a
+    # _one_field_scalar` cover the read and the zero-argument spelling; this row
+    # is the one where a plain receiver's `__init__` takes a PARAMETER and stores
+    # it, so the refusal cannot be "plain receivers are refused" by accident.
+    ("both_arch_one_field_init_stores_its_parameter_through_a_plain_receiver",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(self, v: Int):\n"
+     "        self.a = v\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = T(9)\n"
+     "    printf(\"a=%d\", t.get())\n"
+     "    return 0\n", 0, "a=9"),
     # ── the STACK FLOOR (`formal/model.py`: `stack_floor_guarded_names`,
     # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
     #
@@ -11510,6 +11643,169 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", 5 and 9, 0 or 9)\n"
      "    return 0\n", 0, "9 9"),
+
+    # ── WHAT A `for … in range(…)` LEAVES IN ITS COUNTER ────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 1 reduces to the first row
+    # below), and it was a SILENT wrong answer on both architectures: the loop
+    # tests the counter before it advances it, so the exit path arrives one past
+    # the last value the body saw, and `for i in range(0, 3)` left `i == 3`
+    # where CPython leaves 2. Nothing else in this file read a range counter
+    # after its loop, which is why ~700 hand-written cases never saw it.
+    #
+    # Every row's expected value is CPython's, and the arithmetic is in the row
+    # rather than taken on trust. The counter after a loop is CPython's LAST
+    # BOUND value, which for a step of 2 is not one less than the exit value.
+    #
+    # The one case still wrong, and it is a bug doc rather than a row here:
+    # pinning "prints 0" where CPython prints 7 would make the defect the
+    # expectation. `for i in range(0, 0)` over a counter that already held a
+    # value stores `start` before it tests, and CPython's `for` binds the target
+    # only when the iteration produces one —
+    # `bugs/FORMAL_for_range_over_an_empty_range_overwrites_a_preassigned_counter.md`.
+    ("both_arch_for_range_leaves_the_counter_at_the_last_value_it_bound",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    ("both_arch_for_range_step_leaves_the_counter_one_step_back",
+     "def main(n):\n"
+     "    for i in range(0, 5, 2):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    ("both_arch_for_range_descending_leaves_the_counter_at_the_last_value",
+     "def main(n):\n"
+     "    for i in range(3, 0, -1):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=1"),
+    # `break` leaves the counter where the body last had it, which is the last
+    # value CPython bound — so the restore on the exit path must NOT run for a
+    # break, or this row would print 1.
+    ("both_arch_for_range_break_leaves_the_counter_where_break_ran",
+     "def main(n):\n"
+     "    for i in range(0, 9):\n"
+     "        if i == 2:\n"
+     "            break\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    # `continue` re-enters through the counter advance, so the value after the
+    # loop is the last one the TEST rejected — here 4, since `range(0, 5)` last
+    # yielded 3 and the skipped `continue` on 4 still advanced and tested.
+    ("both_arch_for_range_continue_advances_before_it_tests_again",
+     "def main(n):\n"
+     "    for i in range(0, 5):\n"
+     "        if i == 4:\n"
+     "            continue\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    # …and the `else` arm runs on exhaustion, with the counter already restored,
+    # so the two are asserted together rather than one at a time.
+    ("both_arch_for_range_else_runs_with_the_counter_already_restored",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    else:\n"
+     "        printf(\"else i=%d\", i)\n"
+     "    return 0\n", 0, "else i=2"),
+    # The loop in a FUNCTION, which is where the counter is a spill slot rather
+    # than a register: the restore has to go through the same load/operate/store
+    # path the advance does, and a fix that only handled the register home would
+    # pass every row above and fail this one.
+    ("both_arch_for_range_restores_a_spilled_counter_too",
+     "def last(k):\n"
+     "    s = 0\n"
+     "    for i in range(0, k):\n"
+     "        s = s + i\n"
+     "    return i\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"i=%d\", last(4))\n"
+     "    return 0\n", 0, "i=3"),
+    # NESTED: the inner loop's restore must not disturb the outer counter, which
+    # is the value the outer loop keeps testing. Both were one past before.
+    ("both_arch_nested_for_range_restores_only_its_own_counter",
+     "def main(n):\n"
+     "    for i in range(0, 2):\n"
+     "        for j in range(0, 3):\n"
+     "            x = j\n"
+     "    printf(\"i=%d j=%d\", i, j)\n"
+     "    return 0\n", 0, "i=1 j=2"),
+    # A `while` is untouched by the fix and says so: its counter is the user's
+    # own increment, so there is nothing to restore and this row must not move.
+    ("both_arch_while_counter_is_unchanged_by_the_for_range_fix",
+     "def main(n):\n"
+     "    i = 0\n"
+     "    while i < 3:\n"
+     "        i = i + 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=3"),
+
+    # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 206 reduces to the last row
+    # below), and it was silent on both architectures. `infer_expr` returns
+    # `None` for an expression with no declared type — a bare literal, or an
+    # operator whose operands are both typeless — and `None` means "this value
+    # takes the type of its context", not "this value is unsigned". Reading it
+    # as unsigned made `print` choose `%llu`, so `print(0 - 3)` printed
+    # 18446744073709551613. The confusing part, and the reason a hand-written
+    # case did not catch it: `v = 0 - 3; print(v)` printed `-3` all along,
+    # because an ASSIGNMENT resolves the flexible type to the default. The
+    # difference had no name in the source — only whether the expression was
+    # printed directly or bound first.
+    #
+    # `types.cmp_signed` is the one decision both backends and both proof
+    # generators read, so this is a single change with a single blast radius;
+    # these rows are the four places it reached.
+    ("both_arch_print_of_a_flexible_negation_is_signed",
+     "def main(n):\n"
+     "    print(0 - 3)\n"
+     "    return 0\n", 0, "-3"),
+    ("both_arch_print_of_a_flexible_folded_negation_is_signed",
+     "def main(n):\n"
+     "    print(-(1 + 2))\n"
+     "    return 0\n", 0, "-3"),
+    # The comparison half, and the row that matters most: a constant expression
+    # with no declared type was compared with UNSIGNED condition codes, so
+    # `(0 - 5) < 3` was FALSE — `-5` was 0xFFFF…FB. Both directions are here
+    # because a fix that made every constant comparison signed would pass the
+    # first and fail nothing here.
+    ("both_arch_a_constant_comparison_is_signed_in_both_directions",
+     "def main(n):\n"
+     "    printf(\"%d %d\", 1 if (0 - 5) < 3 else 0,"
+     " 1 if (0 - 5) > 3 else 0)\n"
+     "    return 0\n", 0, "1 0"),
+    # The row the fuzzer reduced to: a negation of a REMAINDER. `%` returns a
+    # typeless value (both operands typeless), so `-(…)` was flexible and
+    # printed unsigned: 18446744073709551614 where CPython prints -2.
+    ("both_arch_print_of_a_negated_flexible_remainder_is_signed",
+     "def main(n):\n"
+     "    print(-(2 % 5))\n"
+     "    return 0\n", 0, "-2"),
+    # THE GUARD, and it is the row that decides whether the fix is safe rather
+    # than a blanket "everything is signed": a DECLARED unsigned type still
+    # reads as unsigned, because `common_type` treats a flexible operand as
+    # neutral and the declared `UInt32` is what decides. Without this row a
+    # change that resolved every `None` to signed without asking `common_type`
+    # first would pass all four above.
+    ("both_arch_a_declared_unsigned_operand_is_still_unsigned",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    y: UInt32 = 2\n"
+     "    x = x - 4\n"
+     "    printf(\"%d %d\", 1 if x > y else 0, x)\n"
+     "    return 0\n", 0, "1 3"),
+    # …and the assignment half, which was never wrong and must stay right: it
+    # is what made the defect look like a `print` bug.
+    ("both_arch_a_bound_flexible_negation_was_always_signed",
+     "def main(n):\n"
+     "    v = 0 - 3\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n", 0, "-3"),
 ]
 
 
