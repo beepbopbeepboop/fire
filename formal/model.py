@@ -4870,6 +4870,131 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     return None
 
 
+# The callees whose LAST NAMED argument is the format string, and therefore the
+# only ones whose format can be found from `VARIADIC_LIBC`'s own count of named
+# arguments.  `err`/`errx`/`warn`/`warnx` are deliberately NOT here: the table
+# records ONE named argument for them, and BSD's spelling is
+# `err(int eval, const char *format, ...)` — two — so for those the format is
+# not at `named - 1` and this check must not guess it.  `open` is not a format
+# function at all.  Every name is a member of `VARIADIC_LIBC`, which is what
+# makes `printf_format_arg_index` total.
+PRINTF_FORMAT_CALLEES = frozenset({
+    "printf", "asprintf", "fprintf", "dprintf", "sprintf", "snprintf", "syslog",
+})
+
+
+def printf_format_arg_index(callee: str):
+    """Which argument of `callee` is its format string, or None if not one.
+
+    DERIVED from `VARIADIC_LIBC` rather than written down: the format is the
+    last NAMED argument of every function in `PRINTF_FORMAT_CALLEES`, so the
+    index is `named - 1` and there is no second table to fall out of step.  The
+    two architectures ask this rather than hard-coding `args[0]`, which is what
+    makes `sprintf`'s buffer argument impossible to mistake for a format.
+    """
+    bare = callee.lstrip("_")
+    if bare not in PRINTF_FORMAT_CALLEES:
+        return None
+    named = variadic_named_args(bare)
+    if named is None:                             # pragma: no cover
+        return None
+    return named - 1
+
+
+def printf_missing_operand_refusal(callee: str, fmt_text, nargs: int):
+    """Why a format that asks for more arguments than the call was given.
+
+    `nargs` is the number of operands AFTER the format, which is what
+    `printf_conversion_specifiers` enumerates against.
+
+    **The construct:** in a C variadic call every conversion in the format is a
+    request for one more argument. A format with a conversion and no argument
+    behind it is a program that reads a word nobody wrote, and the C library
+    will faithfully print whatever was in it — which is why the two machines
+    disagree about `printf("50% done")`. `% d` is a conversion specification
+    (the space flag, then `d`), which is the shape that appears in prose and is
+    therefore the one a corpus is most likely to contain:
+
+        arm64:   50 0one          x86-64: 50143074168one
+
+    Both are reading a vararg that was never passed. **Neither backend is
+    lenient and neither is faithful** — the reading was recorded as an arm64
+    leniency and it is not: arm64's unnamed arguments come from the stack area
+    at `[SP]` as it stands at the call (`VARIADIC_LIBC`'s own note), and on this
+    host that word is zero, so `% d` prints the flag and a `0`. A program that
+    put anything else there would print anything else. Measured on this tree, one
+    program, both architectures, and the value changes between two identical
+    calls in the same run on x86-64 (`160347000`, then `73896`) because SysV
+    passes varargs in the caller-saved argument registers, which the previous
+    call left full.
+
+    So the answer is not to pick a backend's behaviour and make the other match
+    it. The whole `printf` surface on this path is "handed through to libc", and
+    a format string that cannot be satisfied is a program whose output is a
+    number the source never wrote. That wants a refusal of its own rather than
+    `gimple_runtime_refusal`'s library text, and it wants the DECISION to be one
+    function in this file asked by both backends, because two backends
+    disagreeing about a format string is precisely the failure this backend
+    exists to prevent.
+
+    **`fmt_text` that does not parse is NOT refused** (`convs is None`), which
+    is `printf_conversion_specifiers`'s own permissive direction: a trailing
+    `%` and a `%` followed by a non-conversion character are both undefined
+    behaviour in C rather than something this model can count, and a new
+    refusal there would be a refusal of a shape nobody has measured. What is
+    refused is the shape whose arithmetic is exact: more conversions than
+    operands.
+
+    `print()` is unaffected by construction and must stay so. `print_literal`
+    doubles every `%` in a literal, so `print("50% done")` reaches `printf` as
+    `50%% done` — zero conversions, zero operands — and this check sees the
+    generated call like any other and answers "nothing wrong". Sweeping the two
+    spellings together would break the one that works.
+    """
+    idx = printf_format_arg_index(callee)
+    if idx is None or not isinstance(fmt_text, str):
+        return None
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None or len(convs) <= nargs:
+        return None
+    missing = len(convs) - nargs
+    return (
+        f"{callee}'s format string {fmt_text!r} has {len(convs)} conversion "
+        f"specification(s) and the call is given {nargs} operand(s) after it, "
+        f"so {missing} of them read a vararg nobody passed. In a C variadic "
+        f"call every conversion is a request for one more argument, and the C "
+        f"library prints whatever word it finds there — this path hands the "
+        f"format straight to it, so the number that appears is a leftover, not "
+        f"anything the source wrote. Measured on BOTH architectures from this "
+        f"same source: arm64 printed `50 0one` and x86-64 printed "
+        f"`50143074168one` for `printf(\"50% done\")` — `% d` is a space flag "
+        f"followed by `d`, so it is a conversion, and the two machines "
+        f"disagree only about what was left in the register or stack slot it "
+        f"reads. Refused rather than emitted, because a missing operand is not "
+        f"a wrong rendering. Escape it (`%%`) if you meant a literal percent "
+        f"sign, or pass the {missing} argument(s) the conversions ask for"
+    )
+
+
+def printf_format_refusal(callee: str, fmt_text, args: list, text_of):
+    """Any reason `callee`'s FORMAT cannot be used, or None if it can.
+
+    **The one entry point both backends ask**, and the reason it exists rather
+    than two: there are now two ways a format string fails here — a `%s` handed
+    something that is not text (`printf_text_conversion_refusal`) and a
+    conversion with no argument behind it (`printf_missing_operand_refusal`) —
+    and two emitters that each had to remember both is exactly how arm64 and
+    x86-64 come to disagree about what a `printf` means. One function, one
+    order, one message table.
+
+    The order is the one that matters if both could fire: a missing operand is
+    the more basic fact about the call, and naming it first is the more useful
+    refusal, since the fix is in the format rather than in the argument.
+    """
+    return (printf_missing_operand_refusal(callee, fmt_text, len(args))
+            or printf_text_conversion_refusal(callee, fmt_text, args, text_of))
+
+
 def _is_zero_literal(e) -> bool:
     """True for the integer literal `0` and for `0 - 0`, and nothing else.
 

@@ -2642,19 +2642,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return False
         return None
 
-    def _refuse_printf_text_conversion(self, name, e) -> None:
-        """Raise when `e` hands a `%s` conversion something that is not text.
+    def _refuse_unusable_printf_format(self, name, e) -> None:
+        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
-        Delegation, and nothing else: the callee set, the conversion scan, the
-        three-way narrowing and the message are all
-        `model.printf_text_conversion_refusal`, so this method cannot come to
-        disagree with arm64's about what a format string means.
+        Delegation, and nothing else: the callee sets, the format-argument
+        index, the conversion scan, the three-way narrowing and the messages are
+        all `model.printf_format_refusal`, so this method cannot come to disagree
+        with arm64's about what a format string means. The DECODED format is
+        what is handed over, because that is what `_intern_string` builds and
+        therefore what the call will see — a `%` can arrive from an escape.
         """
         args = list(e.args or [])
-        fmt = args[0] if args else None
-        reason = M.printf_text_conversion_refusal(
-            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
-            args[1:], self._printf_arg_is_text)
+        idx = M.printf_format_arg_index(name)
+        fmt = args[idx] if idx is not None and idx < len(args) else None
+        reason = M.printf_format_refusal(
+            name, F.decoded_literal(fmt) if isinstance(fmt, F.StringLiteral)
+            else None,
+            args[idx + 1:] if idx is not None else args[1:],
+            self._printf_arg_is_text)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -6249,19 +6254,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
-        # `%s` OF SOMETHING THAT IS NOT TEXT.  Asked here for the same reason
-        # `print` is intercepted two lines above: the format string is the
-        # SOURCE's, and this is the last place both the format and the varargs
-        # are in hand together.  `print` builds its own format and so cannot get
-        # it wrong; `printf` takes one unchecked all the way to C, where `%s`
-        # walks bytes at the address it is handed looking for a NUL.  Measured
-        # with this refusal lifted, on both architectures: `a = 5;
-        # printf("[%s]", a)` builds, runs, prints nothing and dies of SIGSEGV,
-        # exit 139.  The decision and the message are
-        # `model.printf_text_conversion_refusal`, shared with arm64; it gates on
-        # the resolved CALLEE rather than on `is_extern_call`, so
-        # `external_call["printf", Int32](fmt, n)` is asked the same question.
-        self._refuse_printf_text_conversion(name, e)
+        # A FORMAT STRING THIS CALL CANNOT USE — a `%s` conversion handed something
+        # that is not text, or a conversion with no argument behind it.  Asked
+        # here for the same reason `print` is intercepted two lines above: the
+        # format string is the SOURCE's, and this is the last place both the
+        # format and the varargs are in hand together.  `print` builds its own
+        # format and so cannot get it wrong; `printf` takes one unchecked all
+        # the way to C, where `%s` walks bytes at the address it is handed
+        # looking for a NUL and every conversion is a request for one more
+        # argument.  Measured with these refusals lifted, on both architectures:
+        # `a = 5; printf("[%s]", a)` builds, runs, prints nothing and dies of
+        # SIGSEGV, exit 139; and `printf("50% done")` prints `50143074168one`
+        # here and `50 0one` on arm64, because `% d` is a conversion and SysV
+        # passes varargs in the caller-saved argument registers the previous
+        # call left full — so the digits are not even the same twice.  The
+        # decisions and the messages are `model.printf_format_refusal`, shared
+        # with arm64; it gates on the resolved CALLEE rather than on
+        # `is_extern_call`, so `external_call["printf", Int32](fmt, n)` is asked
+        # the same question.
+        self._refuse_unusable_printf_format(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return

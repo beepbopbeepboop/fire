@@ -8404,6 +8404,92 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    printf(\"100%% [%*d] [%s] [%s] %s\", 4, 7, \"a\", \"b\", \"c\")\n"
      "    return 0\n", 0, "100% [   7] [a] [b] c"),
+    # ── A CONVERSION WITH NO ARGUMENT BEHIND IT ─────────────────────────────
+    #
+    # The same family, from the other end: not the wrong argument for a
+    # conversion but NO argument for one.  `% d` — a space flag and `d` — is a
+    # complete conversion specification, which is the shape that occurs in
+    # prose ("50% done") and is therefore the one a corpus is most likely to
+    # contain.  Measured on BOTH architectures from the same source, with the
+    # refusal lifted:
+    #
+    #     arm64    50 0one
+    #     x86-64   50143074168one
+    #
+    # Both read a vararg nobody passed, and NEITHER is the lenient answer the
+    # arm64 output reads as: arm64's unnamed arguments come from the stack area
+    # at `[SP]` as it stands at the call, and on this host that word is zero, so
+    # `% d` prints its flag and a `0`.  x86-64 passes varargs in the
+    # caller-saved argument registers, so it prints what the previous call left
+    # there — the two digits are not even the same twice in one run.  A refusal
+    # is the honest answer for both, and it has to be the SAME one, because a
+    # format string the two machines read differently is the failure this
+    # backend exists to prevent.
+    ("printf_conversion_with_no_operand_is_refused",
+     "def main(n):\n"
+     "    printf(\"50% done\\n\")\n"
+     "    return 0\n",
+     "refuse:read a vararg nobody passed", None),
+    # The same construct reached from an ESCAPE, which is the reason to do this
+    # now rather than later: a string literal's escapes are decoded before the
+    # format is interned, so `\x25` IS a percent sign at the call, and a check
+    # that scanned the literal's raw body would find no `%` in `\x25 done` at
+    # all.  Both backends hand the refusal the DECODED format for exactly this
+    # reason — the same decode-then-transform order `print_literal` gives its
+    # own reason for — and this row is what holds that half of it.
+    ("printf_conversion_that_arrives_from_an_escape_is_refused",
+     "def main(n):\n"
+     "    printf(\"\\x25 done\\n\")\n"
+     "    return 0\n",
+     "refuse:read a vararg nobody passed", None),
+    # A callee whose format is NOT the first argument, so the check has to find
+    # the format rather than assume `args[0]`: `sprintf`'s buffer is argument 0
+    # and its format is argument 1.  Measured with the refusal lifted on both
+    # architectures, `sprintf(b, "%d")` printed a number built out of whatever
+    # was in the unnamed area.  `model.printf_format_arg_index` DERIVES the
+    # index from `VARIADIC_LIBC`'s own count of named arguments rather than
+    # carrying a second table, which is what stops `sprintf` and `snprintf`
+    # (three named) from being read the same way.
+    ("printf_conversion_with_no_operand_is_refused_in_sprintf",
+     "def main(n):\n"
+     "    var b = String()\n"
+     "    sprintf(b, \"%d\")\n"
+     "    return 0\n",
+     "refuse:read a vararg nobody passed", None),
+    # THE CONTROL, and it is what stops the three rows above being satisfied by
+    # a refusal of `printf` itself rather than by the arithmetic: the same
+    # format with its operand builds and runs on both machines and prints what
+    # the source says.  `% d` here really is `%d` with a flag, and the space
+    # flag's output is the point — a `0` here is the flag plus the digit, and
+    # it is the SOURCE's `0`.
+    ("printf_space_flag_with_its_operand_still_prints",
+     "def main(n):\n"
+     "    printf(\"[% d]\\n\", 0)\n"
+     "    return 0\n", 0, "[ 0]"),
+    # The off-by-one guard, and it is the row that says the COUNT is arithmetic
+    # rather than "there is a `%` in it somewhere".  Two conversions, one
+    # operand: the `%d` is satisfied and the `%s` is not, so the string
+    # conversion reads a vararg nobody passed and walks bytes at whatever word
+    # it finds.  A count that stopped at the first conversion would call this
+    # well-formed, and a count that started at the `%s` would be caught by the
+    # neighbouring rule instead of this one — which is why this row's needle is
+    # the missing-operand sentence and not the `%s` one.
+    ("printf_one_short_of_two_conversions_is_refused",
+     "def main(n):\n"
+     "    printf(\"%d %s\\n\", 7)\n"
+     "    return 0\n",
+     "refuse:read a vararg nobody passed", None),
+    # And `print`, which BUILDS its format rather than being handed one, must
+    # keep working: `print_literal` doubles every `%`, so `50% done` reaches
+    # `printf` as `50%% done` — zero conversions, zero operands — and the same
+    # refusal above sees the generated call and finds nothing wrong.  A fix that
+    # swept the two spellings together would break the one that already works,
+    # so this row is here to say so.
+    ("print_doubles_the_percent_and_is_not_refused",
+     "def main(n):\n"
+     "    print(\"50% done\")\n"
+     "    print(\"100%\")\n"
+     "    return 0\n", 0, "50% done\n100%"),
 ]
 
 
