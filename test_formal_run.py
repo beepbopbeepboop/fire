@@ -5143,6 +5143,65 @@ BOTH_ARCH_CASES = [
      "    comptime b = a // 7\n"
      "    comptime c = (b // 2) * 6 + 1\n"
      "    return c\n", 43, None),
+    # `self = other` in a method of a MULTI-FIELD struct, and the expected
+    # answer is the one that looks wrong until you run CPython.
+    #
+    # Assigning to `self` inside a method REBINDS THE LOCAL NAME. It does not
+    # copy anything into the object the caller is holding: Python has no
+    # "assign the receiver" operation at all, so after `self = other` the
+    # method's own `self.<field>` reads and writes go to `other` and the
+    # caller's object is exactly as it was. CPython 3.14 on this source:
+    #
+    #     class R:
+    #         def __init__(self): self.a = 0; self.b = 0
+    #         def copy_from(self, other): self = other
+    #     r = R(); q = R(); r.a = 1; q.a = 2; r.copy_from(q)
+    #     print(r.a, q.a)        ->  1 2
+    #
+    # which is what this path answers on both architectures. It was filed as a
+    # silent wrong answer against a table saying CPython gives `a=2 b=2`
+    # (bugs/FORMAL_receiver_copied_to_another_name_does_not_take_effect.md,
+    # deleted): the multi-field receiver IS an address, and rebinding it is
+    # precisely what Python does with the local name, so the arithmetic in
+    # every later `self.<field>` is right AND the caller's frame is right. The
+    # row is here so the next reader of that subject measures CPython before
+    # filing it.
+    ("both_arch_receiver_copied_from_another_keeps_the_callers_value",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def copy_from(out self, other: Self):\n"
+     "        self = other\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    var q = R()\n"
+     "    r.a = 1\n"
+     "    q.a = 2\n"
+     "    r.copy_from(q)\n"
+     "    printf(\"a=%d b=%d\", r.a, q.a)\n"
+     "    return 0\n", 0, "a=1 b=2"),
+    # The same fact from the other direction, and it is the shape with the
+    # fields ASSIGNED AFTER the rebinding — so a lowering that copied the
+    # fresh object's slots into the caller's would answer 5, 6 here and CPython
+    # answers 0, 0. Both numbers are printed, so a wrong one cannot pass for
+    # the other: `a=0 b=0` and `a=5 b=6` differ in every position.
+    ("both_arch_receiver_assigned_a_construction_keeps_the_callers_value",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def zero(out self):\n"
+     "        self = R()\n"
+     "        self.a = 5\n"
+     "        self.b = 6\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.zero()\n"
+     "    printf(\"a=%d b=%d\", r.a, r.b)\n"
+     "    return 0\n", 0, "a=0 b=0"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -11527,28 +11586,32 @@ EQ_DISPATCH_CASES = [
     # written as "never rebind a receiver" would refuse all of these, and nine
     # real stdlib files with it.
     #
-    # 1. a parameter DECLARED as the receiver's own type is a copy of the same
-    #    address, so it is not a rebinding to a different word. This is the
-    #    case the bug doc singles out: "a rule of the form 'never rebind the
-    #    receiver' would break it for no reason".
+    # 1. `self = self` — an address moved onto itself. No store, no dropped
+    #    write, nothing for a rule to report, and the one spelling of this
+    #    statement that is a genuine no-op. A rule of the form "never assign a
+    #    receiver" breaks it for no reason.
     #
-    #    Deliberately checks only that it BUILDS and runs, and not what it
-    #    computes. The value a copy leaves behind is a separate question with
-    #    its own answer on this tree — see
-    #    bugs/FORMAL_receiver_copied_to_another_name_does_not_take_effect.md
-    #    — and pinning today's number here would make this row a claim about
-    #    that one, so what it asserts is the narrow thing it is a guard for.
-    ("receiver_rebound_to_a_same_type_parameter_still_builds",
+    #    This row was `receiver_rebound_to_a_same_type_parameter_still_builds`
+    #    until 2026-10-02, guarding the OTHER spelling (`self = other` with
+    #    `other: Self`) for the reason the bug doc gave. That doc is deleted: its
+    #    central claim was false, CPython does not copy on `self = other`
+    #    either, and the shape is now pinned with its VALUE by
+    #    `both_arch_receiver_copied_from_another_keeps_the_callers_value` in
+    #    `BOTH_ARCH_CASES`, which is a stronger row than a bare "it builds" and
+    #    would have made this one a second copy of the same program.
+    ("receiver_assigned_itself_still_builds",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
-     "    def copy_from(out self, other: Self):\n"
-     "        self = other\n"
+     "    def noop(out self):\n"
+     "        self = self\n"
      "def main(n):\n"
      "    var r = R()\n"
-     "    r.copy_from(R())\n"
-     "    return r.a\n",
-     0, None),
+     "    r.a = 3\n"
+     "    r.noop()\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n",
+     0, "a=3"),
     # 2. a LOCAL is not a receiver, which is the other half of "the rule reads
     #    the receiver SET": a fix that matched by position rather than by name
     #    would refuse this.

@@ -6,11 +6,13 @@ one, and the answer had been "no, and for one reason: the library" for every one
 of them since. This records what that link line now carries, and — more to the
 point — what it still does not.
 
-**Status: the link line is done and measured; 51 of the word-shaped entry points
-are still refused because the library does not define them, 13 defined names are
-still refused because no header declares them, and 18 of the linked ones need a
-heap handle this path cannot produce. All three are written down below with the
-exact list and the cost of closing each.**
+**Status: the link line is done and measured; 56 of the word-shaped entry points
+are still refused because the library does not define them (51 when this was
+written; `mojo_metal_*` arrived after), 13 defined names are still refused
+because no header declares them, and 32 of the linked ones need a heap handle
+this path cannot produce. All three are written down below with the exact list
+and the cost of closing each, and all three were re-measured on 2026-10-02
+rather than carried forward.**
 
 Round: agent [5] of the five-agent round of 2026-09-28.
 
@@ -23,19 +25,37 @@ author measured on 2026-09-28. What is true now, from
 rather than asserting them — so it cannot rot into a wrong number without
 going red):
 
-| | this doc | 2026-10-01 |
-|---|---|---|
-| word-shaped, on a formal image's link line | 156 | **240** |
-| …needing no heap handle | 138 | **152** |
-| …needing a `void *` handle the path cannot produce | 18 | **32** |
-| word-shaped but NOT linked (ceiling 1) | 51 | 51, same families |
+| | this doc | 2026-10-01 | 2026-10-02 |
+|---|---|---|---|
+| word-shaped, on a formal image's link line | 156 | **240** | **246** |
+| …needing no heap handle | 138 | **152** | **158** |
+| …needing a `void *` handle the path cannot produce | 18 | **32** | **32** |
+| word-shaped but NOT linked (ceiling 1) | 51 | 51 | **56** |
+| exported by the library, declared by no header (ceiling 2) | 13 | 13 | **13**, same names |
 
 So the phase-2 payoff has roughly grown by half again, and ceiling 3 (the heap)
 has grown WITH it rather than being closed — which is expected, since a bigger
 linked surface is a bigger surface to need a handle on. `FORMAL.md` phase 6 (the
 proved slab allocator) is still what closes it, and the ratio has got no better.
 
-**Ceiling 1 is unchanged and is still pinned by a test with a measured note.**
+**Ceiling 1 grew by FIVE, and the five are a family this doc did not have:**
+`mojo_metal_{dispatch_count, failure_count, have_device, init, last_error}`,
+declared in `runtime/fire_metal.h`. They are word-shaped, they are not in
+`runtime_units(arch, None)`, and they are not a library outside libSystem either
+— the Metal runtime is a framework `libSystem` does not carry, so they join the
+other five families below rather than opening a sixth kind of gap. The other 51
+are unchanged, which is the useful half: nothing was closed and nothing new
+opened except Metal. Measured 2026-10-02 on `work/formal8-10`, arm64 and
+x86-64 identical (246 / 190 linked / 158 without a handle / 32 with one, both
+architectures — `test_formal_runtime_link.py::test_link_line_is_the_dylibs_exports`,
+whose own output carries the numbers, so this table is a transcription of a
+report rather than a claim of its own).
+
+The export table grew with them: `runtime dylib: export table: 557 of 558
+runtime entry points advertised (0 misresolved, 1 undefined: py_tokenize)`.
+
+**Ceiling 1 is otherwise unchanged and is still pinned by a test with a
+measured note.**
 `runtime_dylib` still links `runtime_units(arch, None)` — core, coroutine,
 async scheduler — and not the optional units, and
 `test_word_shaped_but_not_exported_links_nothing` asserts the measured fact
@@ -93,7 +113,8 @@ phase-2 payoff is real and invisible to it.
 
 ---
 
-## Ceiling 1 — 51 word-shaped entry points the library does not export
+## Ceiling 1 — 56 word-shaped entry points the library does not export (51 when
+## this was written; the five `mojo_metal_*` names arrived after)
 
 **Is the refusal true? Yes.** These are calls the image genuinely cannot make.
 
@@ -111,11 +132,12 @@ and `mojo_sqlite3_step` is not, and both are word-shaped.
 | `mojo_ssl_*` | 11 | `fire_ssl.c` (`-lssl -lcrypto`) |
 | `mojo_python_*` | 6 | `fire_python.c` — **deliberately never linked** (see below) |
 | `mojo_zlib_*` | 2 | `fire_zlib.c` (`-lz`) |
+| `mojo_metal_*` | 5 | `fire_metal.m` — added after this doc was written (2026-10-02); a framework libSystem does not carry, so it is the same kind of gap as the other four |
 
 **`fire_python.c` is not a gap and must not be closed.** Its whole surface is
 `#if USE_PYTHON 0` stubs, the default; linking it converts a loud link error into
 a silent NULL, and FORMAL.md phase 0's decision is that its header was never
-`#include`d so the failure stays loud. 6 of these 51 are correct refusals and 45
+`#include`d so the failure stays loud. 6 of these 56 are correct refusals and 50
 are a real ceiling.
 
 **What closing it costs.** One change in `build_stdlib_dylib.py`, which is

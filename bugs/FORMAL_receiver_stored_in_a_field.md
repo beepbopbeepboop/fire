@@ -5,6 +5,14 @@ until `fbaed39b` gave the bucket markers for them, and both unowned. They are
 one document because they were measured together and they are the two rows a
 planner would otherwise have to split by hand out of a 183-file bucket.**
 
+**Re-measured 2026-10-02 on `work/formal8-10`, without a sweep, and ROW A's
+24 FILES ARE THE DELEGATING CONSTRUCTOR — 13 of the 14 sites are an
+`__init__` storing its own parameter, and none of them is a local.** §5 below
+has the census, the instrument, its one weakness, and the rule the measurement
+decides. Row B is untouched: its list needs a sweep, because the refusal
+compares call sites inside one image and a parse-and-walk instrument cannot
+answer it.
+
 Named and measured by the `task:formal2-sweep-3` re-sweep of the `formal-batch3`
 tree, arm64 and x86-64, 630 files each (`bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`).
 
@@ -209,4 +217,75 @@ $ python3 tools/memslot.py --gb 8 --label probe -- \
       python3 fire.py build --formal --no-prove .tmp/probe/d4.mojo      # row B
 $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3.txt    # both rows
 $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-b3.txt    # identical counts
+```
+## 5. Row A measured without a sweep: the shape is a DELEGATING CONSTRUCTOR
+
+§3 asks for the 24 to be lifted behind a guard and re-swept. A sweep is a
+30 s timeout per file over 630, and this question does not need one: the
+refusal fires in `_prepare_functions`' holder-use walk, so parse plus one
+method walk answers it — the same instrument
+`bugs/FORMAL_read_before_store_what_is_left.md` used, and for the same reason
+(a file refused for an import never reaches this check).
+
+    `recv.field = <a name that can hold a multi-field frame>`:
+      14 sites in 11 files   (this repository + the stdlib, 667 files)
+        13  the value is a PARAMETER of the method
+         1  the value is neither a parameter nor a local (myinterpreter.py:303)
+
+and **13 of the 14 are an `__init__`**:
+
+    std/builtin/builtin_slice.mojo:203   __init__   self._inner = other
+    std/collections/deque.mojo           __init__   self._deque = _deque
+    std/collections/dict.mojo            __init__   self._dict = _dict
+    std/collections/interval.mojo:392    __init__   self.interval = interval
+    std/collections/linked_list.mojo     __init__   self._list = _list
+    std/collections/list.mojo            __init__   self._list = _list
+    std/collections/span.mojo            __init__   self.src = src
+    std/memory/alloc.mojo:248            __init__   self._layout = _layout
+    std/python/_cpython.mojo             __init__   self.version = version
+    std/benchmark/bencher.mojo           __init__   self.metric = metric
+    (and one more, `std/python/python_object.mojo:76`)
+
+**That decides the question §3 called a lifetime analysis.** The hazard is a
+field outliving the frame it names; here BOTH sides are the CALLER's: the
+owner is the receiver, which arrived as this method's own parameter, and the
+value is another parameter of the same method. Neither frame belongs to the
+method that stores it, so neither dies at its `return`, and the store is sound.
+The rule the measurement selects is therefore decidable and short:
+
+> A field store of a frame address is sound when the field's owner and the
+> stored frame are both frame-bounded in the SAME function — which, for a
+> method, means both are parameters of it.
+
+**NOT FIXED HERE, and the reason is the verification rather than the rule.**
+Lifting the branch needs the holder set (`fn._frame_holders`), which exists
+only for a file that survives everything checked before it, and the payoff has
+to be measured by BUILDING the 11 files on both architectures — a sweep, which
+is the integrator's and not a light worker's. A narrower rule landed without
+those 11 builds would be a change to what the compiler accepts with no
+evidence behind it, which is the trade `FORMAL_read_before_store_what_is_left.md`
+warns about in the other direction.
+
+**The instrument's one weakness, stated because it decides how the 11 is
+read.** A name "holds a frame" here means it is a parameter annotated with a
+multi-field struct of its own file, or is assigned from a construction of one.
+The refusal's own evidence is the holder set, which is derived rather than
+syntactic, so **11 is an upper bound** and the real number is ≤ 11 — the same
+direction as the doc's 24, and for the same reason. A first cut of this census
+used "the name has a method called on it" and reported 52 sites in 19 files,
+of which 28 were a word (`.strip()` on a string is not a frame); that is
+recorded because it is the mistake a syntactic census of this shape invites,
+and the tightened filter is what makes the 13 readable. The instrument is
+`tools/formal_frame_field_census.py`, and both filters are named in its
+docstring so the next reader starts from the tightened one.
+
+Row B is unchanged and unmeasured here: `frame_declared_parameter_refusal`
+compares a parameter's annotation with what the CALL SITES in the same image
+pass, so its list is an image-level fact and no parse-and-walk instrument can
+produce it.
+
+```console
+$ python3 tools/formal_frame_field_census.py     # the census above; 14 sites in
+                                                # 11 files, 13 of them a
+                                                # delegating __init__
 ```

@@ -398,6 +398,16 @@ HOST_MODELLED = frozenset((
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
+    #   `shlex`  — a state machine over a string, the same shape as `re` and
+    #     `fnmatch`, which are written. `split`, `quote` and `join` are pure
+    #     computation over bytes a value already is; the streaming `shlex.shlex`
+    #     reader is a GENERATOR over `readline`, which is the `fnmatch.iglob`
+    #     shape, so it is not in reach by the same argument. It is here because
+    #     it is a standard-library module, and a name in NEITHER tier made
+    #     `unresolvable_import_error` say "not a stdlib or sibling module" —
+    #     a false statement about the target, and the one diagnostic in this
+    #     family that misidentifies what kind of thing the name is.
+    "shlex",
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
     #     over a source larger than its own copy buffer, `copy`/`copy2`'s

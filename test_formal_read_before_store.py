@@ -861,6 +861,92 @@ CASES = [
      "    t = 1\n    if n:\n        del t\n    print(t)\n", "refuse"),
     ("fall_off_the_end_read_of_nothing_stored_still_refused",
      "    if n:\n        pass\n    print(q)\n", "refuse"),
+
+    # ── THE SAME CONDITION, TESTED TWICE ───────────────────────────────────
+    # `bugs/FORMAL_read_before_store_what_is_left.md`'s residual 2, and the
+    # shape a "definitely stored" fixpoint over a CFG cannot see on its own:
+    # the join after the first `if` intersects the arm that stores with the arm
+    # that does not, so the name drops out — and the second `if` is exactly
+    # where it is read. The program is correct: the condition is assigned once
+    # and never reassigned, so every path that reaches the second test passed
+    # the first.
+    #
+    # What makes the read safe is an IMPLICATION rather than a fact about the
+    # name: on every path where the condition held, the first arm stored it.
+    # The false edge of the first `if` contributes nothing to that (it is
+    # vacuous there, not falsifying), which is the one step of the meet that a
+    # narrower reading gets wrong, and every `ok` row below is a step that would
+    # fail without it.
+    ("same_condition_twice_ok",
+     "    is_tuple = n > 3\n    if is_tuple:\n        t = 1\n"
+     "    if is_tuple:\n        print(t)\n", "ok"),
+    # The same with a COMPARISON rather than a name, because the key is the
+    # condition's canonical form and not "a name that was tested".
+    ("same_comparison_twice_ok",
+     "    if n > 3:\n        t = 1\n    if n > 3:\n        print(t)\n", "ok"),
+    # …and with a NEGATION, which is a DIFFERENT key rather than the same fact
+    # with the polarity flipped: `if not c:` twice correlates with itself.
+    ("same_negated_condition_twice_ok",
+     "    if not n:\n        t = 1\n    if not n:\n        print(t)\n", "ok"),
+    # The guard that says what the first row does NOT need: an arm that never
+    # ran. CPython raises at probe(1), and the second test is the only place the
+    # read can happen, so a rule that let the ELSE arm inherit the implication
+    # would wave this through.
+    ("the_else_arm_of_the_first_test_does_not_inherit_refused",
+     "    if n > 3:\n        t = 1\n    else:\n        print(t)\n", "refuse"),
+    # A WRITE to the condition between the two tests kills the implication, and
+    # this one is sharp rather than merely conservative: `n = 9` makes the
+    # second test true for a probe value whose first test was false, so CPython
+    # raises at probe(0) and the analysis has to agree.
+    ("a_write_to_the_condition_kills_the_implication_refused",
+     "    if n > 3:\n        t = 1\n    n = 9\n    if n > 3:\n"
+     "        print(t)\n", "refuse"),
+    # A CALL is not a trackable condition, and this case is where CPython and
+    # the analysis can be made to agree rather than merely to differ: the call
+    # counts, so the second test is true where the first was false and the read
+    # raises. A rule that keyed a fact on `bump()` would license this read and
+    # hand a program a number its source never says.
+    ("a_call_condition_is_not_a_fact_refused",
+     "    hits = [0]\n"
+     "    def bump():\n"
+     "        hits[0] = hits[0] + 1\n"
+     "        return hits[0] == 2\n"
+     "    if bump():\n        t = 1\n"
+     "    if bump():\n        print(t)\n", "refuse"),
+    # A LOOP BODY runs only when the condition held, and the loop's own join
+    # does not: this may run zero times, so the fact does not escape the body.
+    # CPython raises at probe(0).
+    ("a_loop_body_fact_does_not_escape_to_the_join_refused",
+     "    while n > 0:\n        t = 1\n        break\n    print(t)\n", "refuse"),
+    # An `elif` arm knows the first test FAILED, so the implication does not
+    # apply in it. The arm is unreachable in CPython — an `elif` whose condition
+    # repeats the `if`'s never runs — so CPython never raises and the analysis's
+    # refusal is the safe direction rather than a disagreement about a program
+    # that computes something. Stated as a divergence because that is what it
+    # is: this analysis refuses dead code the CFG still has an edge for.
+    ("an_elif_of_the_same_condition_does_not_inherit",
+     "    if n > 3:\n        t = 1\n    elif n > 3:\n        print(t)\n", "refuse",
+     "the elif arm is unreachable in CPython (its condition repeats the if's), "
+     "so CPython raises for no probe value; the analysis refuses it because the "
+     "arm's facts are contradictory and the implication does not apply — the "
+     "safe direction on code that never runs"),
+    # The corpus's own shape, with the store and the read in SEPARATE `if`s
+    # and a LOOP inside the second arm — which is what
+    # `mojo/backend_gimple/emit_loops.py`'s `_gen_for_list` is (lines 1763 and
+    # 1924). The loop is the part that makes the implication survive a CFG
+    # CYCLE, and a rule that only handled straight-line arms would refuse it.
+    #
+    # The loop is inside the second arm on purpose: between the two `if`s it
+    # would be a DIFFERENT and correct refusal, since a loop may run zero times
+    # and so carries no fact out of itself. That is the row below.
+    ("same_condition_twice_with_a_loop_inside_the_second_arm_ok",
+     "    if n > 3:\n        t = 1\n    if n > 3:\n"
+     "        for i in range(3):\n            if i > 1:\n                print(t)\n",
+     "ok"),
+    ("a_loop_between_the_two_tests_carries_no_fact_refused",
+     "    if n > 3:\n        t = 1\n"
+     "    for i in range(3):\n        if i > 1:\n            print(t)\n",
+     "refuse"),
 ]
 
 
@@ -1056,7 +1142,7 @@ def check_try_else_shape() -> list:
     for name, body, want in TRY_ELSE_SHAPES:
         fn = the_function(parse_module("def probe(n):\n" + body,
                                        filename=f"{name}.mojo"))
-        blocks, _entry = M._build_cfg(fn.body)
+        blocks, _entry, _cond_names = M._build_cfg(fn.body)
         head = next(b.index for b in blocks
                     if b.stmts and type(b.stmts[0]).__name__ == "TryStmt")
         block = blocks[want]
@@ -1086,7 +1172,7 @@ def check_entry_shape() -> list:
     for name, body, want in ENTRY_SHAPES:
         fn = the_function(parse_module("def probe(n):\n" + body,
                                        filename=f"{name}.mojo"))
-        blocks, entry = M._build_cfg(fn.body)
+        blocks, entry, _cond_names = M._build_cfg(fn.body)
         got = blocks[entry].succs
         if got != want:
             bad.append(f"{name}: the entry block's successors are {got}, "
@@ -1109,7 +1195,7 @@ def check_finally_shape() -> list:
     for name, body, copies, after, dead in FINALLY_SHAPES:
         fn = the_function(parse_module("def probe(n):\n" + body,
                                        filename=f"{name}.mojo"))
-        blocks, _entry = M._build_cfg(fn.body)
+        blocks, _entry, _cond_names = M._build_cfg(fn.body)
         head = next(b.index for b in blocks
                     if b.stmts and type(b.stmts[0]).__name__ == "TryStmt")
         clause = set(c for c, _p in copies)
