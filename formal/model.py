@@ -21359,6 +21359,37 @@ def construction_frame_in_value_refusal(name: str, field: str, arg,
             f"program with a lifetime this analysis can see")
 
 
+def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
+                           rets=None):
+    """The two refusals a ONE-WORD struct's own value has, or None.
+
+    **One rule for both the POSITIONAL construction and a DECLARED
+    `__init__`'s store, and the second caller is the reason this is a
+    function.** A one-field struct's value IS its field, so an argument stored
+    into that field is the whole value — and whether the argument got there by
+    `S(x)` or by `self.inner = x` inside a constructor is not a fact about the
+    lifetime argument at all: the constructor's store is inlined at the
+    CONSTRUCTION SITE, so the word that lands in the caller's hand is the
+    argument either way. Answering it on one path and not the other is how
+    `struct Box: var inner: Opt` with `def __init__(self, o: Opt)` came to be
+    planned as a plain inlined store while the same struct with no constructor
+    was refused — the same word, the same hazard, two answers.
+
+    ORDER, and it is the order the positional path has always used: the DEAD
+    BLOB check first, because a container callee's address is a more specific
+    fact about the argument than "it is a frame of some struct", and its
+    message is the one a reader can act on.
+    """
+    refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+    if refusal is not None:
+        return refusal
+    src = _frame_source_structs(arg, candidates)
+    if src:
+        return construction_frame_in_value_refusal(
+            name, field, arg, [s.name for s in src])
+    return None
+
+
 InitShape = collections.namedtuple("InitShape",
                                    "method params positional required optional")
 InitShape.__doc__ = (
@@ -23011,6 +23042,21 @@ def struct_construction_plan(struct_def, call, decls: dict,
         stores, refusal = init_body_stores(struct_def, call, shape, decls, rets)
         if refusal is not None:
             return (None, refusal)
+        # A ONE-FIELD struct whose constructor stores into its only field: the
+        # inlined store is the whole value, so the one-word rule applies here for
+        # the reason `one_word_store_refusal`'s docstring gives. Read off
+        # `slots`, the same list the positional path reads, so "which field is
+        # the value" has one answer.
+        if len(slots) == 1 and not struct_is_framed(struct_def):
+            only = slots[0]
+            for store_field, _slot, value in stores:
+                if store_field != only:
+                    continue
+                refusal = one_word_store_refusal(name, only, value,
+                                                 candidates, rets)
+                if refusal is not None:
+                    return (None, refusal)
+                break
         placed = {field: child.name
                   for field, _slot, child in struct_nested_frame_fields(
                       struct_def, decls)}
@@ -23081,14 +23127,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         arg = bound[only]
         if arg is None:
             return ((CONSTRUCTION_DEFAULT,), None)
-        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets,
-                                                     struct_def)
+        refusal = one_word_store_refusal(name, only, arg, candidates, rets)
         if refusal is not None:
             return (None, refusal)
-        src = _frame_source_structs(arg, candidates)
-        if src:
-            return (None, construction_frame_in_value_refusal(
-                name, only, arg, [s.name for s in src]))
         return ((CONSTRUCTION_POSITIONAL, [(only, None)]), None)
     placed = {field: child.name
               for field, _slot, child in struct_nested_frame_fields(
