@@ -7245,14 +7245,26 @@ main()
         print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
-    def _cpython_stdout(src):
+    def _cpython_stdout(src, preamble=''):
         """CPython's stdout for `src`, or None if it does not run.
 
         The oracle for the two tests below, so a change in what Python does
-        cannot turn either into a test that protects a wrong value."""
+        cannot turn either into a test that protects a wrong value.
+
+        `preamble` is written ABOVE `src` in the oracle file and into nothing
+        else: it exists for a fixture whose parameter annotations are Mojo type
+        names (`Float64`, `String`), which CPython cannot resolve — a
+        `def f(x: Float64)` is a NameError at def time, so the oracle arm below
+        would report "CPython does not run the fixture" for a fixture that is
+        perfectly runnable and the test could never pass. Naming the types as
+        their CPython equivalents keeps the oracle CPython's own answer for the
+        same program text: the annotation is erased by the def, so the values
+        and the prints are the program. It is deliberately NOT fed to the
+        compiled path, which has those names built in."""
         with tempfile.TemporaryDirectory() as td:
             entry = os.path.join(td, 'oracle_case.py')
             with open(entry, 'w') as fh:
+                fh.write(preamble)
                 fh.write(src)
             py = subprocess.run([sys.executable, entry], capture_output=True,
                                 text=True, cwd=td, timeout=60)
@@ -7601,7 +7613,9 @@ main()
         the only static evidence about what a slot will hold at this stage
         (`_quick_type` on a parameter answers the erased `int64_t` before any
         function's locals exist), and the unannotated spelling of the same
-        program has no such evidence to offer."""
+        program has no such evidence to offer. That is also why the oracle gets
+        a preamble naming those two types as their CPython equivalents and the
+        compiled program does not — see `_cpython_stdout`."""
         global _PASS, _FAIL
         name = "a_returned_heterogeneous_list_keeps_its_slot_kinds"
         src = '''\
@@ -7615,7 +7629,7 @@ def main():
     print(len(a))
 main()
 '''
-        want = _cpython_stdout(src)
+        want = _cpython_stdout(src, preamble='Float64 = float\nString = str\n')
         if want is None:
             print(f"FAIL  {name}: CPython does not run the fixture")
             _FAIL += 1
