@@ -470,11 +470,36 @@ HOST_MODELLED = frozenset((
     #     The ranking that found them is `tools/formal_sweep_causes.py --host`,
     #     which is what turned "UNTIERED" from a label into a list of six
     #     modules and ten files.
-    #   `html`  — `escape`/`unescape` are five character replacements over a
-    #     string: the `shlex` shape, and `os/_syscalls.mojo`'s `str_replace_all`
-    #     is the primitive. One file wants it (`tools/md2html.py`, `html.escape`
-    #     x1 measured), so the row is one file — which is the honest number and
-    #     not a reason to place it anywhere else.
+    #   `html`  — `formal/hostmods/html.mojo`, `escape` alone, checked by
+    #     `test_formal_html.py` on both backends: 112 corpus answers (28 cases x
+    #     CPython's two `quote` values) and 1020 per-byte answers (every byte
+    #     1..255 x both values), every one compared with CPython's own
+    #     `html.escape`. One file wants it (`tools/md2html.py`, `html.escape`
+    #     x6 measured), so the row is ONE file, which is the honest number.
+    #
+    #     What the corpus is FOR is the ORDER: CPython replaces `&` FIRST, so the
+    #     `&` that the later replacements introduce is never itself replaced
+    #     (`escape("&amp;")` is `"&amp;amp;"`). A version that replaced it last
+    #     agrees with CPython on every string with no `&` in it — which is most
+    #     of the strings this function exists NOT to be called on — and
+    #     disagrees on every string with one. Four of the 28 cases are `&`-bearing
+    #     for that and the other 24 are there so a reorder cannot be the only
+    #     thing being tested.
+    #
+    #     `quote` is REQUIRED and not defaulted: a call from another image does
+    #     not materialize a callee's defaults
+    #     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), and
+    #     CPython's default is `True`, so a caller passes 1.
+    #
+    #     `unescape` is absent and the reason is its SIZE, not its difficulty:
+    #     `html.entities.html5` is 2231 entries (measured), the answer is a table
+    #     lookup per reference, and the longest-match rule means a module carrying
+    #     the commonest twenty names would silently mangle every reference
+    #     outside them. It is a name to add with its table, not to approximate.
+    #     `html.parser`/`HTMLParser` is absent because a configured parser is at
+    #     least three words where a value is one, so `test_md2html.py` still does
+    #     not build; `tools/md2html.py`, which imports `html` for `escape` alone,
+    #     does.
     #   `datetime`  — a CLOCK plus calendar arithmetic, and both halves are
     #     reachable: `formal/hostmods/time.mojo` has every clock `datetime` can
     #     read, and the arithmetic is integer work. What is NOT reachable is its
@@ -492,7 +517,7 @@ HOST_MODELLED = frozenset((
     #     than a new capability. Both files that want it
     #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
     #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
-    "shlex", "html", "datetime", "resource",
+    "shlex", "datetime", "resource",
     #   `posixpath`  — `formal/hostmods/posixpath.mojo`, and it is **A SPELLING,
     #     not a capability**: every one of its thirty functions is a one-line
     #     forward to `formal/hostmods/os/path/__init__.mojo`, which IS

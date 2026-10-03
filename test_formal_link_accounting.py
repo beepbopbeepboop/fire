@@ -407,6 +407,12 @@ PROVIDED_NEVER_A_HOST_MODULE = {
     # AND against `os.path` in the same image, which is the only way to tell a
     # faithful forward from a broken one.
     "posixpath": "test_formal_posixpath.py",
+    # `html` left `HOST_MODELLED` the same way — the 2026-10-03 ranking
+    # classified it and writing the module took it out of every tier, so it never
+    # LEFT a set this file can subtract from either. Its test checks `escape`
+    # against CPython's own `html.escape` over a corpus whose four `&`-bearing
+    # cases exist to pin the ORDER, plus every byte 1..255.
+    "html": "test_formal_html.py",
 }
 
 # The two `os` SUBMODULES, which are provided and are named by the file they are

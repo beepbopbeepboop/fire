@@ -78,6 +78,11 @@ ADMITTED_COUNTS = {
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
     "hashlib": 0,
+    # `escape` is five ordered substring replacements over bytes a string already
+    # is, and every one of the 1132 answers `test_formal_html.py` compares with
+    # CPython is computed rather than looked up. There is no host fact left over
+    # to admit, which is what the zero is measuring.
+    "html": 0,
     "io": 0,
     "json": 0,
     "math": 0,
