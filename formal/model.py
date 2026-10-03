@@ -16430,8 +16430,14 @@ def _construction_arg_spelling(arg) -> str:
     if isinstance(arg, F.MemberExpr):
         return f"argument {_member_chain_text(arg)}"
     if isinstance(arg, F.CallExpr):
-        callee = arg.func.name if isinstance(arg.func, F.IdentExpr) else "?"
-        return f"the call to {callee!r}"
+        # `call_callee_name`, so a specialization is named as the function it
+        # specializes: `mklist[1]()` is the call to `mklist`, and a refusal that
+        # says `?` sends the reader to a callee that is not in their source.
+        # `None` — a dotted name or a computed callee — stays `?`, which is the
+        # honest answer for a callee this path cannot name.
+        callee = call_callee_name(arg.func)
+        return f"the call to {callee!r}" if callee is not None \
+            else "the call to '?'"
     if isinstance(arg, (F.ListExpr, F.DictExpr, F.TupleExpr)):
         return "a container literal"
     if isinstance(arg, (F.IntLiteral, F.BoolLiteral, F.StringLiteral)):
@@ -16478,8 +16484,14 @@ def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
     address, one word, with a lifetime the frame layout governs, and
     `_callee_is_placed_frame` is the one predicate that knows.
     """
-    callee = (arg.func.name
-             if isinstance(arg.func, F.IdentExpr) else "?")
+    # `call_callee_name`, for the reason `_construction_arg_spelling` gives: a
+    # specialization names the same function as its bare twin, and a message
+    # that says `?()` where the source says `mklist[1]()` sends the reader to
+    # look for a callee that is not there.  Measured: with this reading the
+    # refusal fires for `Bag2(mklist[1](), 5)` — which BUILT before
+    # `_construction_arg_is_dead_blob` learned the same name — and the message
+    # names `mklist`.
+    callee = call_callee_name(arg.func) or "?"
     return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
             f"field {field!r} is refused on this path: {callee}() is declared "
             f"to return a container, and a container on this path is a "
@@ -17790,17 +17802,36 @@ def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
     read of the slot.  `construction_dead_blob_refusal` is where that argument
     is spelled out for the reader.
     """
-    if not isinstance(arg, F.CallExpr) \
-            or not isinstance(arg.func, F.IdentExpr):
-        # `arg.func` is a bare name or it is not a call this table can say
-        # anything about: `List[Self.T]()`, `Self.T[…]()`, `a.b()` and
-        # `f()[0]()` all land here, and a subscript callee is not a name in
-        # `rets` — it is a type or an expression whose result this path does
-        # not follow.  Not a blob, because nothing here knows that it is one.
+    if not isinstance(arg, F.CallExpr):
+        # Not a call, so not a value belonging to a callee: a container literal
+        # and a name are answered above.
         return False
-    if _callee_is_placed_frame(arg.func.name):
+    # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
+    # tree's one reader of "which function does this call name", and a
+    # comptime SPECIALIZATION `f[a]` names the same function as its bare twin —
+    # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
+    # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
+    #
+    # Measured here, and it was the permissive direction, which is the expensive
+    # one: `Bag2(mklist(), 5)` is refused by
+    # `constr_refuse_container_returned_by_a_callee` and `Bag2(mklist[1](), 5)`
+    # BUILT, on both architectures. Same callee, same declared `-> List[Int]`,
+    # same reclaimed scratch — the only difference is the brackets, and a word
+    # that is a pointer into reclaimed memory is exactly what premise (B1) is
+    # about.
+    #
+    # `rets` is keyed by the function's NAME, so the specialized spelling is in
+    # it under the bare one; that is why this needs the shared reader rather
+    # than a second subscript test here. `None` — a dotted name, a computed
+    # callee — is the answer this file's other refusals give for the same reason
+    # (`call_callee_name`'s docstring lists both exclusions), and it lands on the
+    # permissive tie-break above, which is where an absent answer belongs.
+    callee = call_callee_name(arg.func)
+    if callee is None:
         return False
-    return return_type_is_blob((rets or {}).get(arg.func.name))
+    if _callee_is_placed_frame(callee):
+        return False
+    return return_type_is_blob((rets or {}).get(callee))
 
 
 # The annotations that name a BUMP-ALLOCATED REGION on this path — the types

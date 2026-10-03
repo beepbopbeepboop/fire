@@ -8126,6 +8126,38 @@ CONSTRUCTION_REFUSALS = [
      "refuse:is declared to return a container, and a container on this path is a "
      "bump-allocated region of the CALLEE's own reserved scratch",
      None),
+    # …and THE SAME CALL SPECIALIZED, which is the row above's twin and the
+    # reason it is here. `mklist[1]()` names the same function as `mklist()` —
+    # `formal/model.py::call_callee_name` is the tree's one reader of exactly
+    # that, and `bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md`
+    # is the general statement of it — so the two spellings of one argument must
+    # get one answer.
+    #
+    # They did not, and they got it in the PERMISSIVE direction, which is the
+    # expensive one: `model._construction_arg_is_dead_blob` read the callee with
+    # its own `isinstance(arg.func, F.IdentExpr)`, a subscript callee fell out,
+    # and `Bag2(mklist[1](), 5)` BUILT on both architectures with a word in the
+    # slot that points into reclaimed scratch. That is premise (B1)'s hazard
+    # reached by a spelling, and the two neighbouring messages said `?()` where
+    # the source says `mklist[1]()`.
+    #
+    # The needle is the CALLEE'S NAME and not the refusal's presence, so a fix
+    # that made the row refuse for some other reason would not pass it.
+    ("constr_refuse_a_container_returned_by_a_specialized_callee",
+     "struct Bag2:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mklist[a: Int]() -> List[Int]:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return xs\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag2(mklist[1](), 5)\n"
+     "    return b.n\n",
+     "refuse:constructing Bag2 with the call to 'mklist' as field 'items' is "
+     "refused on this path: mklist() is declared to return a container",
+     None),
     # The REACHABLE CONSEQUENCE of the hazard the case above refuses, checked
     # separately and for a different reason. `append` through a frame slot is
     # refused on its own terms — the room an append needs has to be known where
