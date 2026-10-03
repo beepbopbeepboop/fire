@@ -272,9 +272,17 @@ class Gen:
     rather than a variable nobody looks at.
     """
 
-    def __init__(self, rng, mix="core"):
+    def __init__(self, rng, mix="core", stmts=(5, 12)):
         self.rng = rng
         self.mix_name = mix
+        # How many statements `main`'s body carries.  The default range is
+        # deliberately small; `--stmts 40 60` is how the SPILL paths get
+        # reached, because x86-64 has 15 usable general registers and a
+        # function with twenty live locals has to put some of them in its
+        # frame — a lowering that reads a spilled slot at the wrong offset is
+        # silent, and a twelve-statement program never has enough live values
+        # to spill one.
+        self.stmt_lo, self.stmt_hi = stmts
         self.weights = dict(MIXES.get(mix, MIXES["core"]))
         self.mix = set(self.weights)
         self.words = []       # masked, 0..0xFFFF
@@ -1014,7 +1022,7 @@ class Gen:
             self.new_small(1)
         for _ in range(self.rng.randint(1, 3)):
             self.new_word(1)
-        for _ in range(self.rng.randint(5, 12)):
+        for _ in range(self.rng.randint(self.stmt_lo, self.stmt_hi)):
             self.stmt(1, 2)
         # A trailing observation of EVERY value, printed a few at a time: a
         # variadic call keeps 8 arguments in registers on arm64 and 6 on
@@ -1035,7 +1043,7 @@ class Gen:
         return "\n".join(lines) + "\n"
 
 
-def make_program(seed, index, mix="core"):
+def make_program(seed, index, mix="core", stmts=(5, 12)):
     """Program `index` of `seed` — a pure function of the two.
 
     Which is what makes a run reproducible, resumable, and order-independent:
@@ -1043,12 +1051,12 @@ def make_program(seed, index, mix="core"):
     and a program reported by index can be regenerated without the file that
     produced it.
     """
-    return Gen(random.Random(f"{seed}:{index}:{mix}"), mix).program()
+    return Gen(random.Random(f"{seed}:{index}:{mix}"), mix, stmts).program()
 
 # ── the run ────────────────────────────────────────────────────────────────
 
 def check_one(index, args, tmpdir, lock=None):
-    text = make_program(args.seed, index, args.mix)
+    text = make_program(args.seed, index, args.mix, args.stmts)
     name = f"p{index}"
     ref, err = cpython_answer(text, tmpdir, name)
     results = {}
@@ -1136,6 +1144,10 @@ def main():
                     help="comma list; both, to check the two images against "
                          "each other as well as against CPython")
     ap.add_argument("--mix", default="core", choices=sorted(MIXES))
+    ap.add_argument("--stmts", nargs=2, type=int, metavar=("LO", "HI"),
+                    default=(5, 12),
+                    help="how many statements main's body carries; a wide "
+                         "range is how the register-spill paths get reached")
     ap.add_argument("--work", default=os.path.join(HERE, ".tmp", "formal_fuzz"))
     ap.add_argument("--save-all", action="store_true",
                     help="write every program to --work, not only findings")
