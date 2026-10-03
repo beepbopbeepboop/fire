@@ -20,6 +20,20 @@ commit `d0796643`:
 
 Base reports `Results: 2 passed, 0 failed`. 35 gcc errors at my tip.
 
+`mojoc` fails with the **identical four lines** — it builds the same self-host
+closure — so this is one defect behind two registered jobs:
+
+    python3 tools/suite.py mojoc
+    # FAIL  mojoc  (220s)  exit 2      0.9 GB peak
+    # the same four "cannot coerce MojoSet * to MojoDict *" lines, then
+    # make: *** [mojoc] Error 1
+
+`bootstrap-stage2-cc` is blocked behind it rather than independently broken:
+its registered dep is `bootstrap-stage1-transitive`, which needs the stage-1
+dumps, which need the self-hosted binary neither of the two can produce. Fixing
+this is a precondition for all three of `mojoc`, `selfhost` and the whole
+`bootstrap` bucket.
+
 ## Root cause, established
 
 `e98ea1f8` / `939843ee` ("One list for the dispatch globals, because four
