@@ -12040,6 +12040,51 @@ def imported_constant(tables: dict, qualifier: str, name: str):
     return table.get(name) if table else None
 
 
+def dylib_module_variables(dylib_exports: list) -> dict:
+    """`{module identity: [name, …]}` for the VARIABLES each library declares.
+
+    A module-level name this module's own functions write through `global` is
+    not a constant, and it is deliberately absent from `dylib_module_constants`
+    even when its module-level statement folded to a literal — the single-writer
+    premise a folded constant rests on is false for it, and publishing both
+    would let an importer materialize the value the module STARTED at. This
+    function is the other half of that decision, and it exists so a consumer can
+    NAME the shape instead of guessing it: `module_attribute_refusal` prints
+    "the module's own function writes it" for a name in here and "no storage
+    for a list, an object or a stream" for one that is not, and those are
+    different facts with different repairs.
+
+    Keyed by the same ABI identity the export and constant tables use, and it
+    takes the FIRST library on the link line for a module identity appearing
+    twice — the precedence `dylib_module_constants` already applies, so the two
+    tables cannot answer differently about one module.
+    """
+    out: dict = {}
+    for lib in (dylib_exports or []):
+        module = lib.get("module") or ""
+        if not module:
+            continue
+        names = lib.get("variables") or []
+        if not names:
+            continue
+        out.setdefault(module, [])
+        for name in names:
+            if name not in out[module]:
+                out[module].append(name)
+    return out
+
+
+def dylib_module_variable_names(dylib_exports: list, qualifier: str) -> set:
+    """The variable names the module `qualifier` names publishes, for one reader.
+
+    `dylib_export_module` is applied to the variable table so a consumer resolves
+    a qualifier exactly as it resolves the export and constant tables — both
+    ABI spellings, `os.path` and `os_path` — rather than matching a bare string
+    and answering differently from its two neighbours."""
+    table = dylib_export_module(dylib_module_variables(dylib_exports), qualifier)
+    return set(table or ())
+
+
 def constant_literal_node(value, line: int = 0, col: int = 0):
     """An AST literal node carrying a constant that crossed a dylib boundary.
 
@@ -20981,7 +21026,7 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
-                             fn_name: str, published) -> str:
+                             fn_name: str, published, variables=()) -> str:
     """The diagnostic for reading `module.leaf` as a VALUE.
 
     A DIFFERENT fact from `module_global_refusal`'s "imported" arm, and the
@@ -21008,6 +21053,18 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     `bugs/FORMAL_module_state_no_storage.md` records that the command line is
     gone before the first statement runs, so there is nothing in it either.
 
+    **`variables` is the half that keeps the sentence true.** "A list, an
+    object or a stream has no representation as a word" is FALSE about a name
+    like `G` in `mylib.G` where `mylib` declares `G = 5` and also writes it
+    through `global` — an `Int` crosses fine, and what stops it is that its
+    value is not the same in both modules. So a leaf the module publishes as a
+    VARIABLE gets its own sentence, naming the reason and the repair: the
+    module's own accessor is the spelling, and that one WORKS (measured both
+    architectures — `mylib.setg(9)` then `mylib.get()` answers 9, where
+    `mylib.G` used to answer the folded 5). A refusal whose stated reason is
+    false about the name it names sends the reader after a capability the name
+    does not need, which is the defect this function was written to remove.
+
     `published` is the list of what the module DOES publish, so a reader can see
     in one line whether the name they wrote is one of the module's own or a
     capability it does not have. That is `dylib_extern_symbol`'s own device,
@@ -21020,6 +21077,21 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
         shown = ("nothing under a name a caller can bind — every name it "
                  "publishes is re-exported, and the modules it re-exports from "
                  "publish none of this one")
+    if leaf in set(variables or ()):
+        return (f"{who}{spelling} reads {leaf!r}, which is a module-level name "
+                f"of `{module}` that `{module}`'s OWN functions write through "
+                f"`global`, so its value is not known when the library was built "
+                f"and cannot be recorded the way a literal constant is. It is a "
+                f"VARIABLE and not a constant even though `{module}` also "
+                f"declares it at module level with a value the build could fold: "
+                f"a folded name's value crosses the boundary only because it has "
+                f"exactly one writer, and this one has a second. What `{module}` "
+                f"publishes: {shown} — give the module an accessor "
+                f"(`def get_{leaf}(): global {leaf}; return {leaf}`) and call "
+                f"that, which reads the same slot and lowers today. "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what it "
+                f"would take to publish the slot itself rather than a function "
+                f"that reads it")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
             f"`{module}`, and a module is not a value this path can place: "
             f"there is no register, frame slot or `__DATA` word for it because "

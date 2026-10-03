@@ -1,5 +1,93 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status (2026-10-03, `work/formal8-7-r2`): §(2)'s "a folded name crosses the
+boundary" is CORRECTED — a name the exporting module's own function WRITES is
+not a constant, and publishing it was a wrong answer, not a refusal. It is now
+refused by name with a message that names the shape and the working repair. The
+nested-container remainder is DONE too (`nested_element` → `computed_element`).**
+What is left is unchanged and is §(4)'s missing source, an EXPORTED SLOT (still
+a project, and it is now the only thing between this row and `sys.path`), and the
+value-model row filed elsewhere. Read "Re-measured 2026-10-03" below, then the
+sweep6 round beneath it, then the history.
+
+**Re-measured 2026-10-03 (`work/formal8-7-r2`), and the one sentence that
+matters is that §(2)'s single-writer premise is FALSE for a slotted name.**
+
+    # mylib.mojo:  G = 5   /  def get(): global G; return G
+    #              /       def setg(v): global G; G = v
+    # prog.mojo:    mylib.setg(9); mylib.get()  ->  9   (the slot — correct)
+    #               mylib.G                   ->  5   (the manifest — WRONG; CPython 9)
+
+    # after:  build: prog.mojo: main: mylib.G reads 'G', which is a module-level
+    #         name of `mylib` that `mylib`'s OWN functions write through `global`
+    #         …  What `mylib` publishes: get, setg — give the module an accessor
+    #         (`def get_G(): global G; return G`) and call that, which reads the
+    #         same slot and lowers today.
+    # byte for byte identical on --backend=x86_64
+
+**A folded name's value crosses a dylib boundary only because it has exactly
+ONE writer** — the module-level sequence — and this document's own §(2) states
+that premise. A `global G` in a function of the exporting module is a second
+writer, so the premise fails, and `formal/build.py::_module_constants` was
+publishing the folded 5 into the manifest without asking. The in-unit
+substitution already asked and already said no (`_module_constant_sites`,
+whose comment records the measured `G=5`-where-CPython-says-`G=7`), so this was
+one question answered two ways and the read across the boundary picked the home
+that never changes — the defect class this backend exists to prevent, in the one
+place its own design says it cannot happen.
+
+Four things changed, and they are four because each is a question the previous
+state answered wrongly rather than not at all:
+
+  * `_module_constants` excludes a name with a `__DATA` slot, reading the
+    PUBLISHED slot table for the reason `_module_constant_sites` gives. The two
+    are now one rule.
+  * the manifest records `variables` — the names the library's own functions
+    write — separately from `constants`, and the two are disjoint by
+    construction. It travels because the importer cannot derive it: it has only
+    the manifest. A namespace library forwards its own set of them
+    (`_namespace_variables`), so `pkg.G` gets the same sentence as `x.G`.
+  * `model.module_attribute_refusal` has a second arm for a name the module
+    publishes as a VARIABLE. The old sentence is false about an `Int` — "a list,
+    an object or a stream has no representation as a word" — and a reader sent
+    after a missing container for a name holding an integer is reading the wrong
+    document. This is the same disease the function was written to cure (a
+    diagnostic false about the name it names), one shape further in.
+  * the re-export check counts a dependency's variables as PROVIDED. It asks
+    "does that module have the name", and asking `constants` alone would have
+    reported a re-export of one as a MISSING DEFINITION — sending the reader to
+    write a function that already exists, in a module that is not at fault.
+
+**The repair the refusal names is not hypothetical.** `mylib.setg(9)` then
+`mylib.get()` answers 9 on both architectures and agrees with CPython, and it
+already did before this change — `test_formal_globals.py`'s `cross_module_counter`
+is that program. So the direct read is refused in favour of a spelling that
+works, not in favour of nothing.
+
+**`nested_element` is gone.** A container literal whose elements are themselves
+containers now has a static initializer: the element IS a word — a pointer to a
+blob — so what was missing was the second level of fixups, and
+`build_data_image` lays one out per nested element. `MOVES` and `EXTRACT` in
+`tools/wave1_move_shared.py` and `tools/wave2_extract_shared.py` are the shapes
+it was written for. What remains in `static_initializer_refusal_reason` is
+`computed_element`: an element computed by a CALL, whose result is not known
+before the program runs.
+
+**Both backends: the change is entirely in `formal/model.py` and
+`formal/build.py`.** Neither emitter's instruction selection moves — `fixups`
+was already a flat list of (word, target) pairs and a nested blob is one more
+entry — which is why "both architectures" is a statement about one code path and
+not about two agreeing by luck.
+
+**Filed, not fixed, and it is the reason this bug survived as long as it did:**
+`bugs/INTERP_module_object_is_a_snapshot_so_a_module_s_own_global_write_is_invisible.md`.
+The interpreter has the SAME wrong answer, because `import mod` binds a
+`SimpleNamespace` COPY of the module's scope taken when the module body finishes,
+so a module's own `global` write never reaches the object another module reads
+through. Both engines said 5, so every test comparing them to each other saw
+agreement. The root cause is one line in `myinterpreter.py::_load_mojo_sibling_module`
+and the exact next step is in that doc; it is not this claim's file.
+
 **Status (2026-10-02, the `sweep6:module-state` round): the MODULE-BODY WRITER
 landed, and §(1)'s row below is CORRECTED — it is no longer "three unrelated
 shapes, all unchanged", and two of the three now lower and print correctly on
@@ -694,9 +782,10 @@ that is worth seeing.
    missing source.
 
 Two smaller remainders, both honest refusals rather than wrong answers, both
-named by `static_initializer_refusal_reason`: a container element that is itself
-a container or a call (`"nested_element"`), and a module global whose name is
-imported from another module (`"imported"`).
+named by `static_initializer_refusal_reason`: a container element computed by a
+CALL (`"computed_element"`, and the nested-container half of the old
+`"nested_element"` landed 2026-10-03 — see the Status at the top), and a
+module global whose name is imported from another module (`"imported"`).
 
 ## What this costs, by name
 

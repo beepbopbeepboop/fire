@@ -7682,12 +7682,39 @@ def _module_constants(symbols: dict) -> dict:
     the folder could not fold — those are real globals, and a dylib has nowhere
     to put one (`bugs/FORMAL_module_state_no_storage.md`).
 
-    A name the folder turned into an `IntLiteral` is a number, including for a
-    `True`, because a formal value has no separate boolean: `fold_literal_expr`
-    already decided that and `_folded_node` already encoded it, and re-deciding
-    it here is how the two would come to disagree about what `X = True` is."""
+    **A name with a `__DATA` SLOT is not here either, and that exclusion is the
+    load-bearing half of what this function is.** The single-writer premise in
+    the paragraph above is FALSE for a slotted name: a function writes it
+    through `global`, so its value changes while the program runs, and
+    publishing the folded initializer across the boundary answers the value the
+    module started at rather than the value it holds. Measured, both
+    architectures:
+
+        # mylib2.mojo:  G = 5   /  def setg(v): global G; G = v
+        # main2.mojo:    mylib2.setg(9); print(mylib2.get())  -> 9   (the slot)
+        #               print(mylib2.G)                      -> 5   (the manifest)
+        # CPython:        9 and 9
+
+    A wrong answer from a green build, in the one class of defect this backend
+    exists to prevent, and it was INCONSISTENT rather than merely wrong: the
+    in-unit substitution asks the same question and already excludes slotted
+    names (`_module_constant_sites`, whose own comment records the measured
+    `G=5`-where-CPython-says-`G=7`), so `G` inside its own module was the slot
+    and `mylib.G` across the boundary was a constant. One name, two homes, and
+    the read picked the one that never changes.
+
+    A bytes literal is deliberately still not here: `MAGIC = b"…"` folds to a
+    `char *` the module never writes, and `_module_constants` publishes `str`
+    and `int` only.
+
+    The reader is `M.module_slots()` — the PUBLISHED table, not a re-derivation
+    — for the reason `_module_constant_sites` gives: two answers about one name
+    is the defect this whole table exists to make impossible."""
+    stored = M.module_slots()
     out = {}
     for name, sym in (symbols or {}).items():
+        if name in stored:
+            continue
         lit = getattr(sym, "literal", None)
         value = getattr(lit, "value", None) if lit is not None else None
         if isinstance(value, bool) or not isinstance(value, (int, str)):
@@ -8510,6 +8537,26 @@ def _module_published_names(module: str, link_line) -> set:
         M.dylib_export_module(forwarded, module))
 
 
+def _module_published_variables(module: str, link_line) -> set:
+    """The module-level names the library built for `module` treats as VARIABLES.
+
+    The same question `_module_published_names` asks, about the other half of what
+    a dylib publishes: a name its own functions write through `global`, whose
+    value therefore changes while the program runs and cannot be recorded as a
+    folded constant. Read through `model.dylib_module_variables` — the manifest
+    table, and not a re-reading of the sources — because the importer has only
+    the manifest, so a fact only the exporting build knows has to travel in it.
+
+    Empty for a module with no library on the line, and that is the honest
+    answer rather than a crash, for the reason `_module_published_names` gives:
+    `imported_module_names` is gated on `import_dylibs`, so an empty table means
+    the caller has not resolved imports and the rooted-chain gate is already
+    closed."""
+    if not link_line:
+        return set()
+    return M.dylib_module_variable_names(dylib_export_lists(link_line), module)
+
+
 def _link_line_publishes(link_line, name: str, aliases: dict = None) -> bool:
     """Does this link line bind a bare callee spelled `name`?
 
@@ -9231,7 +9278,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 leaf = sub.member
                 module_reads[id(root)] = M.module_attribute_refusal(
                     M.member_chain_text(sub), root_name, leaf, fn.name,
-                    _module_published_names(root_name, link_line))
+                    _module_published_names(root_name, link_line),
+                    _module_published_variables(root_name, link_line))
         # A TYPE name in a VALUE position is a compile-time constant whose value
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
@@ -10935,7 +10983,8 @@ def update_dylib_manifest(manifest_path: str, mutate) -> None:
 
 def write_dylib_manifest(dylib_path: str, install_name: str,
                          exports: list, module: str = None,
-                         constants: dict = None, source: str = None) -> str:
+                         constants: dict = None, source: str = None,
+                         variables: list = None) -> str:
     """Record what a formal dylib exports, next to the dylib.
 
     An executable that links this library has to rewrite each call site's
@@ -10977,6 +11026,21 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     keeps `sys.argv` and `os.sep` different answers
     (`bugs/FORMAL_module_state_no_storage.md`).
 
+    `variables` is the module-level names this module's own functions WRITE
+    through `global`, and it is the answer to the question the paragraph above
+    cannot answer for them. The single-writer premise is FALSE for a slotted
+    name, so such a name is never in `constants` even when its module-level
+    statement folded to a literal — measured, both architectures:
+
+        # mylib.mojo:  G = 5   /  def setg(v): global G; G = v
+        # main.mojo:    mylib.setg(9); mylib.get()  -> 9    (the slot, correct)
+        #               mylib.G                     -> 5    (the manifest, WRONG)
+
+    so the two halves of one name disagreed and the read took the one that
+    never changes. Recorded here so a consumer can name the shape in a refusal
+    rather than guess it, and so the re-export check can tell "this module
+    provides the name" from "this module provides no such name".
+
     `source` is the module's own source path, recorded for the same reason and
     read back by `formal/imports.py`'s `external_declarations`: an export entry
     carries an ARITY and a signature, and neither is enough to bind a call whose
@@ -11005,6 +11069,7 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         # client can bind a call without ever reading the module's source.
         "module": module,
         "constants": dict(constants or {}),
+        "variables": sorted(variables or ()),
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "call": e.get("call"),
@@ -11025,7 +11090,8 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     """Read the manifests of the libraries an executable links against.
 
     Each entry is `{"install_name", "source", "map": {bare callee ->
-    exported symbol}, "exports", "module", "reexports", "constants"}`. A
+    exported symbol}, "exports", "module", "reexports", "constants",
+    "variables", "traits"}`. A
     library whose manifest is missing is an error rather than a silently
     ignored dependency: the executable would emit calls to symbols nothing
     defines and produce an image that dies in dyld at launch — which is exactly
@@ -11058,7 +11124,16 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         storage: the importer materializes the same value in its own image,
         which is what a module-level constant substitution already does inside
         one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
-        different answers."""
+        different answers.
+      * `variables` — the module-level names this module's own functions WRITE
+        through `global`, so their value changes while the program runs and the
+        build cannot know it. A name here is deliberately ABSENT from
+        `constants` even when the module-level statement folded to a literal:
+        publishing both would let a consumer materialize the value the module
+        STARTED at, which is a wrong answer rather than an incomplete one.
+        Carried because the importer cannot derive it — it has only this file —
+        and because it is what lets a refusal name the shape instead of guessing
+        it (`model.module_attribute_refusal`)."""
     import json
     out = []
     for dylib in dylib_paths or []:
@@ -11098,6 +11173,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             "module": payload.get("module") or "",
             "reexports": payload.get("reexports") or {},
             "constants": payload.get("constants") or {},
+            "variables": list(payload.get("variables") or []),
             # The trait-only namespace library's own names. Read back for the
             # same reason `module` is: so a reader can tell an empty trie that
             # is BY DESIGN (this library declares traits, which have no
@@ -11109,8 +11185,8 @@ def load_dylib_manifests(dylib_paths: list) -> list:
 
 
 def dylib_export_lists(dylibs: list) -> list:
-    """The `[{"module", "exports", "reexports", "constants"}]` view of a link
-    line.
+    """The `[{"module", "exports", "reexports", "constants", "variables"}]` view
+    of a link line.
 
     What both emitters are constructed with, and one iteration over the link
     line rather than the two it used to be: `_dylib_syms` (the flat bare-name
@@ -11121,12 +11197,16 @@ def dylib_export_lists(dylibs: list) -> list:
     manifests — `model.dylib_module_constants` reads this list — and a
     manifest's constants dropped here would silently answer every imported
     constant read with "no value", which is the refusal this whole mechanism
-    exists to replace.
+    exists to replace. `variables` rides along for the same reason and with the
+    same failure mode: dropped here, every cross-module read of a mutable global
+    would be told it is "a list, an object or a stream" rather than the module
+    writing its own variable (`model.dylib_module_variables`).
     """
     return [{"module": d.get("module") or "",
              "exports": list(d.get("exports") or []),
              "reexports": d.get("reexports") or {},
-             "constants": d.get("constants") or {}}
+             "constants": d.get("constants") or {},
+             "variables": list(d.get("variables") or [])}
             for d in (dylibs or [])]
 
 
@@ -12232,7 +12312,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
                        constants: dict = None, traits: list = None,
-                       source: str = None) -> dict:
+                       source: str = None, variables: list = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
@@ -12313,8 +12393,19 @@ def _namespace_library(output: str, install_name: str, arch: str,
     # values' keys — asking it for the modules instead would make every
     # re-exported constant look missing again, which is the bug.
     dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
-    provided = set(dylib_syms) | {name for table in dep_constants.values()
-                                  for name in table}
+    # A module's VARIABLES count as provided too, and the reason is that a
+    # variable is not in `constants`: a name a function writes through `global`
+    # is deliberately not published as a folded literal, so asking this question
+    # of constants alone would report a re-export of one as a MISSING DEFINITION
+    # — which is false in a way that sends the reader to write a function that
+    # already exists, in a module that is not the one at fault. Whether a caller
+    # can then BIND it is a separate question with its own answer
+    # (`model.module_attribute_refusal`); "the module has the name" is what this
+    # check asks.
+    dep_variables = M.dylib_module_variables(dylib_export_lists(linked))
+    provided = (set(dylib_syms)
+                | {name for table in dep_constants.values() for name in table}
+                | {name for names in dep_variables.values() for name in names})
     # A re-exported name is provided under the name the DEFINING module
     # published it as, which for an ALIAS is not the name this module binds —
     # `from x import f as g` publishes `g` and the symbol is `f`'s. Asking
@@ -12344,7 +12435,8 @@ def _namespace_library(output: str, install_name: str, arch: str,
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
     manifest_path = write_dylib_manifest(output, install_name, [], source=source,
-                                         module=module, constants=constants)
+                                         module=module, constants=constants,
+                                         variables=variables)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
     if linked:
         _record_link_deps(manifest_path, linked)
@@ -12397,6 +12489,34 @@ def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
         for value in _constants_named(tables, defines):
             out[name] = value
             break
+    return out
+
+
+def _namespace_variables(reexports: dict, linked: list) -> list:
+    """The VARIABLES a namespace library re-exports, by its own spelling.
+
+    The companion of `_namespace_constants`, and it exists so a diagnostic about
+    `pkg.G` names the same shape a diagnostic about `x.G` would. A package
+    `__init__` that forwards a mutable global has no VALUE for it — the library
+    has no code, so it cannot be a writer and cannot hold the slot — but it does
+    have the NAME, and a consumer that is refused has to be told "the module you
+    named declares this variable" rather than "a list, an object or a stream has
+    no representation as a word", which is false of an `Int` the defining module
+    writes.
+
+    Lookup by `defining_name` and publication under the alias, for the reason
+    `_namespace_constants` gives: a consumer that writes `pkg.N` is the only
+    spelling that can happen.
+    """
+    tables = M.dylib_module_variables(dylib_export_lists(linked))
+    out = []
+    for name, (_module, kind, defines) in (reexports or {}).items():
+        if kind != "unknown" or name in out:
+            continue
+        for names in tables.values():
+            if defines in names:
+                out.append(name)
+                break
     return out
 
 
@@ -12685,6 +12805,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
             constants=_namespace_constants(reexports, constants, linked),
+            variables=_namespace_variables(reexports, linked),
             traits=traits)
 
     # A DYDLIB cannot export a function that returns a frame, and this is the
@@ -12776,7 +12897,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         source=source_paths[0],
         module=(module_prefixes or {}).get(source_paths[0])
         or _module_prefix(source_paths[0]),
-        constants=constants)
+        constants=constants,
+        variables=sorted(library_slots))
     if linked:
         _record_link_deps(manifest_path, linked)
 
