@@ -1,11 +1,16 @@
 # A blob is TWO conventions, and only one of them is store-safe
 
-**Area:** FORMAL (host modules). **Status: OPEN, measured, not fixed.** Replaces
-`FORMAL_collections_is_a_type_factory_and_four_containers.md`, whose own
-"exact next step" was: say the answer where the reader is (done before this
-file was written), carry the `counts[2] = 5` measurement rather than re-derive
-it (this file), and build nothing module-shaped (`collections` is not a
-`formal/hostmods/collections.mojo`).
+**Area:** FORMAL (host modules). **Status: OPEN, measured, not fixed.**
+
+**`FORMAL_collections_is_a_type_factory_and_four_containers.md` was `git rm`'d
+on 2026-10-03 (was OPEN, measured, not started); this file is where its
+measurement went, and the three steps of its "exact next step" were discharged
+as follows.** Say the answer where the reader is (done before this file was
+written — `HOST_MODULE_ADVICE`); carry the `counts[2] = 5` measurement rather
+than re-derive it (this file, and `test_formal_os.py`'s `blob` group); build
+nothing module-shaped (`collections` is not a
+`formal/hostmods/collections.mojo`, and below is why that is sharper than it
+looked).
 
 **This does not restate
 `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, which owns

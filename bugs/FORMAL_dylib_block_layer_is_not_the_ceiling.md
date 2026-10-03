@@ -3,8 +3,9 @@
 
 **Area:** FORMAL (the dylib contract emitter). **Status: OPEN, measured, not
 started.** Found 2026-10-03 while landing
-`FORMAL_dylib_several_exports_have_no_proved_contract`, whose "also found"
-section scoped the remaining gap as a scheme extension to `Refine.Block`.
+`FORMAL_dylib_several_exports_have_no_proved_contract` (**deleted on
+2026-10-03**), whose "also found" section scoped the remaining gap as a
+scheme extension to `Refine.Block`.
 
 ## What I ran
 

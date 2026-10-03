@@ -3,9 +3,9 @@
 
 **Area:** FORMAL (host modules, the blob representation). **Status: OPEN,
 measured on both backends, NOT fixed.** Found 2026-10-03 while correcting
-`bugs/FORMAL_collections_is_a_type_factory_and_four_containers.md`; the
-companion `bugs/FORMAL_a_blob_is_two_conventions.md` carries the rest of that
-measurement.
+`bugs/FORMAL_collections_is_a_type_factory_and_four_containers.md` (**deleted
+on 2026-10-03**; its measurement now lives in
+`bugs/FORMAL_a_blob_is_two_conventions.md`, which is this file's companion).
 
 ## What I ran
 
