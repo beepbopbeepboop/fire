@@ -9423,6 +9423,28 @@ CONSTRUCTION_REFUSALS = [
      "    var e = DType(1, 2)\n"
      "    return 0\n",
      "refuse:constructing DType has no representation on this path", None),
+    # `bytearray`/`bytes` are the one pair in that list whose refusal is NOT
+    # "cannot be conjured out of one word", and the generic sentence is false
+    # about them: the blob layout is one this path already lays out (`[]` is it),
+    # a bytes LITERAL already builds one, and `len(b"abc")` answers 3. What is
+    # undecided is the ELEMENT WIDTH, so the message has to say that — and
+    # `bytes(3)` with an argument has to keep saying it too, because an
+    # argument does not make the width any more decided.
+    #
+    # Before this, all four spellings reached the bind audit as a dangling
+    # extern named `bytearray`/`bytes` and the build failed with a message about
+    # a SYMBOL, which is a fact about the link line and not about the type the
+    # reader wrote. `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
+    ("constr_refuse_bytearray_by_name",
+     "def main(n: Int) -> Int:\n"
+     "    var b = bytearray()\n"
+     "    return 0\n",
+     "refuse:the element width is the undecided part", None),
+    ("constr_refuse_bytes_with_an_argument_by_name",
+     "def main(n: Int) -> Int:\n"
+     "    var b = bytes(3)\n"
+     "    return 0\n",
+     "refuse:constructing bytes is refused on this path", None),
 ]
 
 

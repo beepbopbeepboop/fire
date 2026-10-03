@@ -7625,15 +7625,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self._emit_empty_blob()
                 return
             raise CodegenError(
-                f"constructing {name} has no representation on this path: this "
-                f"image has no declaration of {name} to construct — it is not a "
-                f"struct in this module or in anything it imports, so there is "
-                f"no field list to bring up, and a formal value is one 64-bit "
-                f"word. A name that IS declared as a struct here is decided by "
-                f"`_emit_struct_constructor` instead, which asks the struct: a "
-                f"one-field struct is a plain word and constructs. (Emitting a "
-                f"call to a symbol named {name!r} that nothing defines is not "
-                f"the alternative — that built and then failed to load.)")
+                M.unrepresentable_type_ctor_refusal(name))
         # A keyword argument names the same single value a positional one does,
         # so it is accepted as the operand — arm64 has always done this and its
         # comment says why: `String(unsafe_from_utf8_ptr=…)` is how

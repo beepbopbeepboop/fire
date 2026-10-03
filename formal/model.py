@@ -14449,10 +14449,80 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # that into the honest refusal this path prefers: a fat pointer (`Span`), a
 # struct (`Error`) or a vector (`SIMD`) cannot be conjured out of one word, and
 # saying so beats emitting a call that cannot be linked.
+#
+# `bytearray` and `bytes` are here for the OTHER half of the same rule — they
+# used to be absent, which did not refuse them, it made them look like ordinary
+# function calls, and `type_constructor_kind`'s documented `None` means exactly
+# that. So `bytearray()` reached the bind audit as a dangling extern named
+# `bytearray` and the build failed with a message about a SYMBOL ("this image
+# would bind 1 symbol(s) that nothing provides") about a fact that is a TYPE's.
+# They are NOT in `BLOB_TYPE_CTORS`, and that is deliberate rather than an
+# oversight: every count and every index on this path is an EIGHT-BYTE slot
+# (`[count:i64][element 0]…`), a byte blob's element is a byte, and admitting
+# them there would make `len(b)` right and `b[i]` wrong by a factor of eight.
+# Which of the two layouts a byte blob gets is a design decision with a
+# measurement attached (`bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`
+# §"The next step"), so until it is made the honest answer is a refusal that
+# says which of the two is undecided.
+BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
+
 UNREPRESENTABLE_TYPE_CTORS = (
     "Span", "Error", "SIMD", "SIMDVector", "List", "Dict", "Set", "Tuple",
     "Optional", "StringRef", "DType", "InlineArray", "Array", "StaticTuple",
-)
+) + BYTE_BLOB_TYPE_CTORS
+
+
+def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
+    """Why a call whose callee is `callee_name` has no representation here.
+
+    **The one wording, in the model, for both backends.** It used to be written
+    out in `formal/arm64_codegen.py` and `formal/x86_64_codegen.py` as two
+    copies of the same six sentences, which is two places for one diagnostic to
+    drift — and a diagnostic a reader matches on is exactly the kind of string
+    that has to be one thing.
+
+    Two texts, and the split is a fact about the name rather than a preference.
+    The generic one is about a type that cannot be conjured out of one word; a
+    BYTE BLOB is a different problem, because the blob itself is already a
+    layout this path lays out (`[count:i64][element 0]…`, the eight bytes
+    `_emit_list` reserves for `[]`, the one `LEN_FROM_BLOB_FIELD` reads) and the
+    bytes LITERAL already builds one — `len(b"abc")` answers 3 today. What is
+    undecided is the ELEMENT WIDTH: a byte is one byte and every slot on this
+    path is eight, so the count word and the index arithmetic cannot both be
+    right until someone decides whether a byte blob is a blob of words or has a
+    layout of its own. Saying THAT is what a reader can act on, and it names the
+    two answers rather than picking one silently.
+    """
+    if callee_name in BYTE_BLOB_TYPE_CTORS:
+        return (
+            f"constructing {callee_name} is refused on this path, and the "
+            f"reason is a fact about the TYPE rather than about a symbol: a "
+            f"{callee_name} is a counted region, and every counted region here "
+            f"is laid out as `[count:i64][element 0]…` in EIGHT-BYTE slots — "
+            f"the same blob `[]` is, and the one `len` reads its answer from. A "
+            f"byte is one byte, so the element width is the undecided part: "
+            f"admit the name as a blob of words and `len(b)` is right while "
+            f"`b[i]` is wrong by a factor of eight, and give it a layout of its "
+            f"own and `b + b` and `struct.pack_into` become reachable. Nothing "
+            f"here guesses between those. What this path CAN already do is the "
+            f"part that needs no width: a bytes LITERAL is a blob of this "
+            f"layout and `len` of it answers 3, so `b\"abc\"` is not what is "
+            f"missing — the CONSTRUCTOR is. (The measurement and the two "
+            f"candidate layouts are in "
+            f"bugs/FORMAL_bytearray_and_bytes_have_no_representation.md; "
+            f"emitting a call to a symbol named {callee_name!r} that nothing "
+            f"defines is not the alternative — that reached the bind audit as "
+            f"a dangling extern and failed with a message about a symbol.)")
+    return (
+        f"constructing {callee_name} has no representation on this path: this "
+        f"image has no declaration of {callee_name} to construct — it is not a "
+        f"struct in this module or in anything it imports, so there is no field "
+        f"list to bring up, and a formal value is one 64-bit word. A name that "
+        f"IS declared as a struct here is decided by `_emit_struct_constructor` "
+        f"instead, which asks the struct: a one-field struct is a plain word and "
+        f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
+        f"nothing defines is not the alternative — that built and then failed "
+        f"to load.)")
 
 
 def type_constructor_kind(callee_name: str):
