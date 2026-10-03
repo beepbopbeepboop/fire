@@ -735,9 +735,11 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     the caller last left in the register."""
     # Where this unit's module-global data segment will be MAPPED, handed to
     # both backends because every slot access is an absolute address computed
-    # before the image exists. None when the module declares no writable
-    # global, so an ordinary program pays nothing and emits no data segment.
-    gbase = globals_base(fmt) if M.module_slots() else None
+    # before the image exists. Always handed over: the data image carries the
+    # backend's two reserved words even when the module declares no writable
+    # global (`model.STACK_FLOOR_BUDGET_BYTES`), so an ordinary program does pay
+    # a data segment — one page — and gets the stack-floor word with it.
+    gbase = globals_base(fmt)
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
@@ -779,11 +781,15 @@ def globals_image(fmt: str = "macho"):
 
     None for a module with no `global NAME` — the ordinary case — so a program
     that does not use this capability gets byte-for-byte the image it got
-    before."""
-    table = M.module_slots()
-    if not table:
-        return None
-    return M.build_data_image(table, globals_base(fmt))
+    before.
+
+    **It no longer returns None.** `build_data_image` always lays out the
+    backend's two reserved words — the initializer flag and the stack floor — so
+    every image carries a `__DATA` whether or not the module declares a global
+    (`model.STACK_FLOOR_BUDGET_BYTES` and the bug doc it belongs to). The
+    reason it matters is that the program that most needs the stack-floor word
+    is the one with no globals: `deep(N)` is three lines and declares none."""
+    return M.build_data_image(M.module_slots(), globals_base(fmt))
 
 
 def globals_base(fmt: str = "macho") -> int:
@@ -1062,7 +1068,12 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # so the image the linker is about to be handed and the layout the code was
     # emitted for are the same fact read twice.
     from formal.macho_linker import extern_entry_offset
-    has_globals = bool(M.module_slots())
+    # ALWAYS true, and not a derived fact any more: the data image carries the
+    # backend's two reserved words even when the module declares no global, so
+    # every image has a `__DATA` (`model.STACK_FLOOR_BUDGET_BYTES`). Read from
+    # the same image the linker is handed rather than recomputed from the slot
+    # table, which is the reason this line used to sit here.
+    has_globals = True
     base_extern = TEXT_BASE + extern_entry_offset(
         [d["install_name"] for d in dylibs], has_globals=has_globals)
     base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
@@ -12668,7 +12679,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # same table. The per-file tables each numbered their slots from zero, so
     # this merge is what makes the library's slots distinct.
     M.publish_global_slots(library_slots)
-    has_globals = bool(library_slots)
+    # Always: see the executable path's `has_globals`, and
+    # `model.STACK_FLOOR_BUDGET_BYTES`. A library with no module globals has the
+    # same two reserved words every other image has.
+    has_globals = True
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
@@ -12726,7 +12740,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                       dep_install, has_globals),
         exports, install_name, arch=arch, external_syms=external_syms,
         deps=dep_install, dep_syms=dep_syms,
-        globals_image=globals_image("macho") if has_globals else None)
+        globals_image=globals_image("macho"))
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)

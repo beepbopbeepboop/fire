@@ -1146,6 +1146,134 @@ def run_refusal(name, source, needle, tmpdir, verbose):
     return True, ""
 
 
+# ── the LAYOUT cases: what the segment holds, read out of the image ────────
+#
+# Every case above asks what the program PRINTS. These two ask what the image
+# CONTAINS, and they are here for the same reason the rest of this file is: the
+# data segment is an agreement between a codegen that computes an address, a
+# linker that maps it, and a loader that slides it, and nothing about a printed
+# number can tell you the segment is there at all.
+#
+# `LAYOUT_CASES` is `(name, source, checker)`, and the checker is handed the
+# bytes of the `__DATA` segment plus the image's own segment table.
+
+LAYOUT_CASES = []
+
+
+def _segments(data):
+    """`[(name, vmaddr, vmsize, fileoff, filesize)]` from a Mach-O load command
+    list, with a reader written here rather than imported.
+
+    `formal/macho_linker.py` writes these images; asking the writer whether it
+    emitted a segment is how a writer's bug becomes invisible. Sixteen bytes of
+    header and the `LC_SEGMENT_64` layout, nothing else."""
+    import struct
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    out, pos = [], 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, pos)
+        if cmd == 0x19:            # LC_SEGMENT_64
+            name = data[pos + 8:pos + 24].split(b"\0")[0].decode("ascii")
+            vmaddr, vmsize, fileoff, filesize = struct.unpack_from(
+                "<QQQQ", data, pos + 24)
+            out.append((name, vmaddr, vmsize, fileoff, filesize))
+        pos += cmdsize
+    return out
+
+
+def _reserved_words_are_there_and_unwritten(tmpdir, name, verbose):
+    """An image with NO module global still has a `__DATA`, and its two
+    reserved words are the ones the model says they are.
+
+    Every other case in this file declares a `global`, so every other case would
+    pass with the segment emitted for the globals alone. The program that
+    motivates the word is three lines with no globals at all:
+
+        def deep(n: Int) -> Int:
+            if n <= 0: return 0
+            return deep(n - 1) + 1
+
+    and `deep(62)` is a SIGSEGV on arm64 today, so the guard that fixes it needs
+    a word in an image exactly like this one — an image with nothing else in its
+    `__DATA`
+    (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+
+    What is asserted, per backend:
+
+      * the image HAS a `__DATA` segment, and it is the one `globals_base`
+        declares — a segment at the wrong address would be a segment the code's
+        ADRP/ADD never reaches;
+      * the image carries BOTH reserved words, at the offsets
+        `GlobalDataImage.init_flag_offset` and `.stack_floor_offset`, computed by
+        the model rather than written here, so this case cannot pin a layout the
+        model has moved;
+      * both read as ZERO, which is the state that says "the globals have not
+        been filled in" and "no floor has been stored yet". A floor word that
+        arrived non-zero would be a lie about a floor nobody computed.
+
+    The last of those is the one a reader should not skip: the guard this word
+    exists for must treat zero as UNKNOWN rather than as a floor, because a zero
+    floor compares as "nothing is below the stack pointer" and so never fires.
+    That is the safe direction — the guard is silent, exactly as it is today —
+    and it is why an unwritten word is not a bug.
+    """
+    from formal import model as M
+    from formal.build import globals_base
+    for backend in BACKENDS:
+        entry, _paths = write_sources(tmpdir, name,
+                                      "def deep(n: Int) -> Int:\n"
+                                      "    if n <= 0:\n"
+                                      "        return 0\n"
+                                      "    return deep(n - 1) + 1\n"
+                                      "\n"
+                                      "def main(n: Int) -> Int:\n"
+                                      "    printf(\"%d\\n\", deep(3))\n"
+                                      "    return 0\n")
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        p = run([sys.executable, FIRE, "build", "--formal", "--no-prove",
+                 f"--backend={backend}", "-o", out, entry])
+        if p.returncode != 0:
+            return False, (f"build failed on {backend}: "
+                           f"{(p.stderr or p.stdout).strip()[-300:]}")
+        with open(out, "rb") as f:
+            data = f.read()
+        segs = dict((s[0], s) for s in _segments(data))
+        if "__DATA" not in segs:
+            return False, (f"{backend}: the image has no __DATA segment at all, "
+                           f"so the word the stack guard needs is not there. "
+                           f"Segments: {sorted(segs)}")
+        _n, vmaddr, _vmsize, fileoff, filesize = segs["__DATA"]
+        if vmaddr != globals_base("macho"):
+            return False, (f"{backend}: __DATA is mapped at {vmaddr:#x} but the "
+                           f"codegen computes slot addresses against "
+                           f"{globals_base('macho'):#x}; the two are the same "
+                           f"constant read twice and they disagree")
+        image = M.build_data_image({}, globals_base("macho"))
+        need = max(image.init_flag_offset,
+                   image.stack_floor_offset) + M.GLOBAL_SLOT_BYTES
+        if filesize < need:
+            return False, (f"{backend}: __DATA is {filesize} bytes and the two "
+                           f"reserved words end at {need}, so the segment is "
+                           f"smaller than the bookkeeping in it")
+        for what, at in (("initializer flag", image.init_flag_offset),
+                         ("stack floor", image.stack_floor_offset)):
+            word = int.from_bytes(data[fileoff + at:fileoff + at + 8], "little")
+            if word != 0:
+                return False, (f"{backend}: the {what} word at __DATA+{at} "
+                               f"reads {word:#x}, not 0 — nothing writes it "
+                               f"yet, and a non-zero word here would be a "
+                               f"claim about state that does not exist")
+        if verbose:
+            print(f"      {backend}: __DATA at {vmaddr:#x}, flag at "
+                  f"+{image.init_flag_offset}, floor at "
+                  f"+{image.stack_floor_offset}, both zero")
+    return True, ""
+
+
+LAYOUT_CASES.append(("reserved_words_exist_in_an_image_with_no_globals",
+                     _reserved_words_are_there_and_unwritten))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -1157,7 +1285,8 @@ def main():
         return 0
 
     everything = ([(c[0], c[1], c[2]) for c in CASES]
-                  + [(c[0], c[1], c[2]) for c in REFUSALS])
+                  + [(c[0], c[1], c[2]) for c in REFUSALS]
+                  + [(c[0], None, c[1]) for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -1165,6 +1294,7 @@ def main():
               file=sys.stderr)
         return 2
     refusal_names = {c[0] for c in REFUSALS}
+    layout_names = {c[0] for c in LAYOUT_CASES}
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1173,6 +1303,8 @@ def main():
                 if name in refusal_names:
                     ok, detail = run_refusal(name, files, want, tmpdir,
                                              args.verbose)
+                elif name in layout_names:
+                    ok, detail = want(tmpdir, name, args.verbose)
                 else:
                     ok, detail = run_case(name, files, want, tmpdir,
                                           args.verbose)

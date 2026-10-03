@@ -20779,9 +20779,56 @@ class GlobalDataImage:
     def __len__(self):
         return len(self.blob)
 
+    @property
+    def stack_floor_offset(self) -> int:
+        """The word AFTER the initializer flag: where this image's stack floor
+        is written, and whether one is.
+
+        A PROPERTY rather than a fifth field, because a field would be a second
+        thing to keep equal to `init_flag_offset + GLOBAL_SLOT_BYTES` and the
+        bug this whole change is about is two answers to one question about an
+        image's layout.
+
+        **Nothing writes it yet.** The word exists, it is in every image, and it
+        reads as zero; `STACK_FLOOR_BUDGET_BYTES` below is the policy the writer
+        will use. It is here, and not later with the writer, because the word has
+        to exist in an image with no module globals at all — which is what
+        `deep(N)`, the reproducer of the frame-size bug, compiles to.
+        """
+        return self.init_flag_offset + GLOBAL_SLOT_BYTES
 
     def __bool__(self):
         return bool(self.blob)
+
+
+# THE STACK-FLOOR BUDGET, and why it is a constant at all.
+#
+# Every function on this path subtracts a FIXED frame from the stack pointer
+# (arm64: `_SCRATCH`, 128 KiB; x86-64: `_BLOB_BYTES` plus the computed locals)
+# and nothing compares the result against a floor, so the reachable recursion
+# depth is the stack size divided by the frame size and crossing it is a
+# SIGSEGV — no output, no message, no status a caller can read. Measured on this
+# tree (2026-10-02, `ulimit -s` 8176 KiB, `RLIMIT_STACK` 8372224), same
+# three-line `deep`: arm64 answers at 61 and dies with exit -11 at 62; x86-64
+# answers at 450 and dies at 500. So the usable stack below the startup stub's SP
+# is between 7.63 and 7.75 MiB, against a limit of 7.98 MiB.
+#
+# A guard compares SP against `SP_at_entry - BUDGET`, and `SP_at_entry` is a
+# run-time fact (which is why the floor is a word and not an address), but
+# BUDGET is a POLICY number: how much of the process's stack this compiler is
+# willing to promise before it refuses instead of dying. It has to be BELOW the
+# real floor to be worth having — a budget above it fires after the kernel has
+# already killed the process — and it costs depth when it is below: at 128 KiB a
+# frame, 256 KiB of margin is two levels of recursion on arm64.
+#
+# 7.5 MiB is that trade made explicitly: under the measured usable floor by
+# 128–256 KiB (one to two arm64 frames), and 480 KiB under the process limit.
+# The failure mode of being wrong is stated here because it is the whole risk:
+# a BUDGET that overestimates the real stack (a thread stack rather than the
+# main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
+# program dies as it does today — no worse than the defect being fixed — while a
+# BUDGET that underestimates costs depth, which is a refusal and never a crash.
+STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
@@ -21657,9 +21704,20 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
 
     Layout, in this order and for a reason: every SLOT first, in `index` order,
     so a backend that computes `GLOBAL_SLOT_BYTES * slot.index` addresses the
-    right word whatever else the module has; then the container blobs the
+    right word whatever else the module has; then the two RESERVED words (the
+    initializer flag and the stack floor, below); then the container blobs the
     address-valued slots point at, each 8-byte aligned so a blob word is a word
     at the address the slot holds.
+
+    **The image is never empty, and that is a change of policy rather than an
+    oversight** (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    The two reserved words are the backend's own bookkeeping rather than any
+    program's storage, so they exist whether or not the module declares a
+    global — which means `has_globals` is true of every image and `__DATA` is
+    emitted unconditionally in both containers. The alternative was a program
+    with no module globals having no `__DATA` at all, which is exactly the
+    reproducer of the stack-floor bug (`deep` has no globals), so the word the
+    fix needs would not exist in the image that needs it.
 
     A slot's own word is `base + offset-of-what-it-points-at`, and the fixup
     records where that word is so the codegen can emit one store. A STRING word
@@ -21667,18 +21725,19 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     other kind: its target is the interned literal in `__TEXT`, which is not in
     this image, so it goes in `string_cells` for the code to fill and its eight
     bytes here are left zero."""
-    if not table:
-        return GlobalDataImage(b"", [], 0, [])
-    count = max(s.index for s in table.values()) + 1
     # The initializer flag occupies the word immediately after the slots, so it
     # is at a fixed offset from the slot table and both backends and the linker
-    # can name it without another table.
+    # can name it without another table. The stack floor is the word after
+    # that (`GlobalDataImage.stack_floor_offset`), and both are emitted even
+    # with no slots at all — hence `flag_offset` is 0 for an empty table rather
+    # than a `None` that every reader would have to test for.
+    count = max(s.index for s in table.values()) + 1 if table else 0
     flag_offset = count * GLOBAL_SLOT_BYTES
-    blob = bytearray(flag_offset + GLOBAL_SLOT_BYTES)
+    blob = bytearray(flag_offset + 2 * GLOBAL_SLOT_BYTES)
     fixups = []
     string_cells = []
-    # The trailing area starts after the flag, so a slot's address never depends
-    # on how many trailing items there are.
+    # The trailing area starts after the reserved words, so a slot's address
+    # never depends on how many trailing items there are.
     tail = bytearray()
     for slot in sorted(table.values(), key=lambda s: s.index):
         kind = slot.init[0]
@@ -21696,7 +21755,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
         elif kind == "blob":
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
-            offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
+            offset = flag_offset + 2 * GLOBAL_SLOT_BYTES + len(tail)
             for j, word in enumerate(slot.init[2]):
                 at_word = offset + GLOBAL_SLOT_BYTES * j
                 if isinstance(word, str):
@@ -21714,7 +21773,12 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             fixups.append((at, offset))
         # `("unknown", …)` writes eight zero bytes, and the read is refused by
         # name before anything can observe the zero.
-    # The flag starts CLEAR: zero means "not yet filled in".
+    # The flag starts CLEAR: zero means "not yet filled in". So does the floor:
+    # it is the backend's own word, nothing writes it yet, and a reader that
+    # finds it clear must treat the floor as UNKNOWN rather than as zero —
+    # which is the safe direction for the guard this word exists for, because a
+    # zero floor compares as "nothing is below the stack pointer" and so never
+    # fires (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
 
