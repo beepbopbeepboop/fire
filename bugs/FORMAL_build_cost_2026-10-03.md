@@ -436,6 +436,16 @@ one level down, which is why it is written down rather than guessed at.
   light worker is to report an area another worker holds rather than edit it.
   The next step is one memo in `_attach_declared_census` keyed the way
   `module_statements` keys itself.
+* **`struct_derived_names` is asked 3 185 more times from
+  `_overridden_comptime_names`** (`formal/build.py:8501`), which
+  `_constant_read_sites` calls once per LOCAL and once per RECEIVER of the
+  function being rewritten — the §4 shape one function deeper, and the reason it
+  is listed here rather than fixed is the number: at 28 µs per whole-module
+  fixed point (24.5 s over 876 575 calls, §4) 3 185 of them is **0.11 s**, so
+  the structural fix — one `{name: frozenset(derived names)}` table derived
+  beside `framed`, which would also answer `struct_is_enum`'s 876 genexpr calls
+  and `_derived_overrides`' 18 — is not worth the surface. Recorded so the next
+  profile of this pipeline does not re-derive it.
 
 ## 7. What this doc supersedes
 
