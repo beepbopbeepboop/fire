@@ -24,7 +24,17 @@ protecting, and they are not the same thing:
    into "other". The samples below are real messages, abbreviated at clause
    boundaries, and each asserts the family it must land in.
 
-3. **A count that reads like a gap and is not one.** The cause table in
+3. **A marker for a message the backend can no longer produce is rot with a
+   sample attached to it.** The family "a module whose API is its top-level
+   statements, imported by another" and its sample were removed on
+   2026-10-03 with `bugs/FORMAL_dylib_module_body_has_no_load_time_entry
+   _point.md`: both object writers emit a load-time initializer, so the refusal
+   that named it no longer exists and a sample of a message nothing produces is
+   a sample that can only rot. A family is removed when its message stops being
+   reachable, and the test that says so is this file's list — the absence of a
+   row is the only record that the message is gone.
+
+4. **A count that reads like a gap and is not one.** The cause table in
    `tools/formal_sweep_causes.py` ranks by what a fix would have to CHANGE, and
    prints `FILES BLOCKED` with an explicit warning that it is an upper bound.
    For a cause whose refusal is about a MODULE's boundary rather than a
@@ -503,9 +513,6 @@ CAUSE_SAMPLES = [
      "constructing ModuleSpecGenerator with arguments is a call to a "
      "user-defined `__init__` whose body this path does not inline: a read of "
      "'self' in the right-hand side"),
-    ("a module whose API is its top-level statements, imported by another",
-     "ab_filelist.py: line 12: this module's API is its top-level statements "
-     "(AssignStmt, IfStmt), and a library has no entry point to run them"),
     ("a local read before its first assignment",
      "load: 'f' is read at line 22 before anything in this function stores "
      "it, and CPython raises UnboundLocalError for that program"),
