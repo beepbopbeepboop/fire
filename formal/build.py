@@ -4827,8 +4827,8 @@ def _replace_nodes(root, replacements: dict) -> None:
             _replace_nodes(child, replacements)
 
 
-def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
-                      hs, one_word=None, call_frame=None) -> object:
+def _eq_dispatch_call(node, op: str, left, right, by_name, hs, one_word=None,
+                      call_frame=None) -> object:
     """The call that answers `left op right`, or None to leave the operator be.
 
     The decision is `model.struct_dunder_dispatch_candidates` and nothing here
@@ -4864,9 +4864,13 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
         return None
     if left.name in hs and right.name in hs:
-        # The frame case, and the one this rewrite was written for.
-        cands = list(by_name.get(left.name) or ()) + list(
-            by_name.get(right.name) or ())
+        # The frame case, and the one this rewrite was written for.  Both sides'
+        # candidate lists are read HERE, from the same table, rather than handed
+        # in by the caller: the call operand path below derives its own from the
+        # same two tables, and a caller-supplied pair is a third thing to keep in
+        # step with them.
+        cands_l = by_name.get(left.name) or ()
+        cands_r = by_name.get(right.name) or ()
     else:
         # At least one operand is not a frame HOLDER.  A struct of ONE field has
         # no frame at all — its construction binds a plain word that IS the
@@ -4886,11 +4890,9 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
         if one_word is None or left.name in hs or right.name in hs \
                 or left.name not in one_word or right.name not in one_word:
             return None
-        cands = list(one_word.get(left.name) or ()) + list(
-            one_word.get(right.name) or ())
         cands_l = one_word.get(left.name) or ()
         cands_r = one_word.get(right.name) or ()
-    return _eq_dispatch_decide(node, op, left, right, cands, cands_l, cands_r)
+    return _eq_dispatch_decide(node, op, left, right, cands_l, cands_r)
 
 
 def _eq_dispatch_on_call_operand(node, op: str, left, right, by_name, hs,
@@ -4937,19 +4939,21 @@ def _eq_dispatch_on_call_operand(node, op: str, left, right, by_name, hs,
     cands_l, cands_r = sides
     if not cands_l or not cands_r:
         return None
-    return _eq_dispatch_decide(node, op, left, right,
-                               cands_l + cands_r, cands_l, cands_r)
+    return _eq_dispatch_decide(node, op, left, right, cands_l, cands_r)
 
 
-def _eq_dispatch_decide(node, op: str, left, right, cands, cands_l, cands_r):
-    """Candidates → the dispatch call, or None. Shared by both operand shapes.
+def _eq_dispatch_decide(node, op: str, left, right, cands_l, cands_r):
+    """Per-side candidates → the dispatch call, or None. Shared by both shapes.
 
     Split out so the disagreement refusal, the "no dunder" answer and the
     `!=`-negation are ONE implementation: the two operand shapes differ only in
     how each side's candidate list is settled, and a copy of this tail per shape
     is a second place for the two to disagree about which struct a comparison
-    belongs to.
+    belongs to.  The union is built here rather than by the caller for the same
+    reason — it is only the MESSAGE that wants it, and it wants it from the same
+    two lists the decision was made from.
     """
+    cands = list(cands_l) + list(cands_r)
     if not cands:
         return None
     owner, dunder, negate, (disagree, rows) = \
@@ -5047,12 +5051,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
         for node in M.iter_nodes(getattr(fn, "body", None)):
             if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
                 call = _eq_dispatch_call(
-                    node, node.op, node.left, node.right,
-                    by_name.get(node.left.name)
-                    if isinstance(node.left, F.IdentExpr) else None or (),
-                    by_name.get(node.right.name)
-                    if isinstance(node.right, F.IdentExpr) else None or (),
-                    by_name, hs, fn_one_word,
+                    node, node.op, node.left, node.right, by_name, hs,
+                    fn_one_word,
                     _call_frame_structs(node, functions_by_name,
                                         structs_by_name))
                 if call is not None:
@@ -5074,12 +5074,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
                     lowered = False
                     break
                 call = _eq_dispatch_call(
-                    node, op, left, right,
-                    by_name.get(left.name) if isinstance(left, F.IdentExpr)
-                    else None or (),
-                    by_name.get(right.name) if isinstance(right, F.IdentExpr)
-                    else None or (),
-                    by_name, hs, fn_one_word, call_frame)
+                    node, op, left, right, by_name, hs, fn_one_word,
+                    call_frame)
                 if call is None:
                     lowered = False
                     break
