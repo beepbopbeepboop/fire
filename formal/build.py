@@ -11793,6 +11793,59 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
     return None
 
 
+def refuse_enum_member_comparisons(functions: list,
+                                   structs_by_name: dict) -> None:
+    """Refuse `==` / `!=` / `is` between two reads of ENUM MEMBERS.
+
+    The sibling of `refuse_none_comparisons`, asked at the same point and for the
+    same reason, and the fold it protects is the other lossy one on this path: a
+    member and its value are ONE 64-bit word (`model.enum_member_accessor`, and
+    a bare `Reg.A` materializes to its value — measured, `printf("%d", Reg.A)`
+    prints 7 for `A = 7`), so two DISTINCT members whose values are equal are one
+    word. Every use that cannot observe the difference is answered from the word;
+    the one construct that can is this.
+
+    **The measured wrong answer**, both architectures:
+
+        class Reg(Enum):
+            A = 1
+            B = 1
+
+        if Reg.A == Reg.B:   →  ‘same’, where CPython says False
+
+    which is why the rule is a refusal and not a widening of the fold: there is
+    nowhere in an untagged word to record WHICH member it holds, so ‘are these
+    the same member’ has no answer here. `Reg.A == Reg.A` answers True for the
+    wrong reason too, and that one is invisible — so the rule refuses the shape
+    rather than trying to tell the two cases apart.
+
+    **Narrow on purpose.** `model.enum_member_read` recognises the bare
+    `Reg.NAME` and nothing else, so the comparisons a reader actually writes are
+    untouched: `x.kind == y.kind` (two slots holding values), `x.kind == Kind.A`
+    (a slot and a member), `Reg.A.value == Reg.B.value` (two values). All three
+    are answered from the words they already are, and each would be a real cost
+    to refuse — `self.kind == Kind.A` is the ordinary enum idiom.
+
+    Before the substitution that materializes a member read, for the reason the
+    sibling gives: afterwards the read is a word and the fact that it was a
+    member is gone.
+    """
+    if not structs_by_name:
+        return
+    for fn in functions:
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.BinaryOp) or node.op not in (
+                    "==", "!=", "is", "is not"):
+                continue
+            left = M.enum_member_read(structs_by_name, node.left)
+            right = M.enum_member_read(structs_by_name, node.right)
+            if not (left and right):
+                continue
+            enum_name = left.partition(".")[0]
+            raise CodegenError(M.enum_member_comparison_refusal(
+                left, right, node.op, enum_name))
+
+
 def refuse_member_reads_through_a_literal_base(functions: list) -> None:
     """Refuse `EXPR.<member>` in a VALUE position when `EXPR` is a literal.
 
@@ -12013,6 +12066,40 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # run beside `check_construction_shapes`, for the reason the comment on
     # that call site gives (a file that imports a host module has a more
     # fundamental fact about it than a codegen gap).
+    # An ENUM MEMBER as a class-level default, materialized to the literal it
+    # holds.  Before `DC.lower_field_defaults` below because that is what
+    # RAISES for a dataclass field (`field_refusal`), and before
+    # `_rewrite_class_constants` because a class-level constant is materialized
+    # where it is READ, so this is the position that answers the default itself.
+    #
+    # **A REWRITE, in place, on the field's own node** — and that is what makes
+    # it one pass rather than an argument threaded through six functions and two
+    # emitters.  `literal_default_word` reads the default node and folds it; a
+    # member read is not a literal, so it needs the STRUCTS TABLE to know that
+    # `TypeOrigin` is an enum at all, and threading that table into
+    # `struct_frame_defaults` → `struct_field_default` → `class_constant_word` →
+    # `literal_default_word` and out to both backends is a change to the hottest
+    # shared path in the tree for a verdict this one line decides.  Materializing
+    # the node leaves every reader — the emitters' per-field defaults, the class
+    # constant census, `field_refusal` — reading a LITERAL, which is what they
+    # already know how to do.
+    #
+    # What it changes is exactly the set of currently-REFUSED defaults, because a
+    # member read is what `literal_default_word` calls opaque and nothing else
+    # materializes one: no working program moves.  And what the reader gets is
+    # the value, not the member — `p.origin` is then the string “python's
+    # `p.origin` is the member and `p.origin.value` is the string”, and the
+    # comparison between two member reads is refused by
+    # `refuse_enum_member_comparisons` for the reason this same value model
+    # gives.  Measured, both architectures: `class TypeOrigin(Enum): DEFAULT =
+    # "default"` with `origin: TypeOrigin = TypeOrigin.DEFAULT` was refused at
+    # the field (`not a value this build can materialize`) and now constructs.
+    for _st in structs:
+        for _f in M.struct_fields(_st):
+            _lit = M.enum_member_literal(structs_by_name,
+                                         getattr(_f, "value", None))
+            if _lit is not None:
+                _f.value = _lit
     dc_classes = DC.dataclass_classes(stmts)
     if dc_classes:
         DC.lower_field_defaults(dc_classes)
@@ -12087,6 +12174,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # …and the OTHER lossy fold on this path, asked at the same point for the
+    # same reason: a member and its value are one word, so two members with equal
+    # values are one word and `Reg.A == Reg.B` answers True where CPython says
+    # False. The comparison that can observe that is refused; the three spellings
+    # a reader actually writes (`x.kind == y.kind`, `x.kind == Kind.A`,
+    # `Reg.A.value == Reg.B.value`) are not this rule's business.
+    refuse_enum_member_comparisons(functions, structs_by_name)
     # The ONE-FIELD MUTATOR write-back, decided once for the whole module
     # because it is a property of the image rather than of one function: the
     # callee half is "return the receiver on every path" and the caller half is

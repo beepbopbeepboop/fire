@@ -1223,6 +1223,54 @@ CASES = [
      "        return 7\n"
      "    return 8\n",
      8, None),
+    # ── WHAT AN ENUM MEMBER IS, on this path ────────────────────────────────────
+    #
+    # The value model answers "is an enum member its `.value`, or is it an
+    # object?" ONCE, and both rows below are consequences of the same answer —
+    # a member IS its value, and the member's IDENTITY is not in the word.  They
+    # cannot be allowed to disagree, so they are written as a pair: the first is
+    # the value model making a program answerable, the second is the value model
+    # refusing the one construct the word cannot express.  The bug doc is
+    # `bugs/FORMAL_an_enum_member_is_not_a_value_any_default_position_can_hold.md`
+    # and it asked for the question to be decided rather than patched.
+    #
+    # THE REFUSAL, and it is a wrong answer this closes.  A member read
+    # materializes to its value (`printf("%d", Reg.A)` prints 7 for `A = 7`), so
+    # two members whose values are equal are ONE word, and comparing them answers
+    # by value where CPython answers by identity.  Measured on both
+    # architectures: with `A = 1` and `B = 1` this printed `same`, and CPython
+    # says False.
+    ("refuse_two_enum_members_compared_to_each_other",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A == Reg.B:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "refuse:are both reads of MEMBERS of the enum `Reg`", None),
+    # THE SAME COMPARISON against itself, which answers True for the wrong
+    # reason and is invisible — which is why the rule refuses the shape instead
+    # of trying to tell the two apart.  Without this row a narrower rule that
+    # compared the two SPELLINGS would pass the row above.
+    ("refuse_a_member_compared_with_itself",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A == Reg.A:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "refuse:are both reads of MEMBERS of the enum `Reg`", None),
     #
     # A string here is a bare `char *`: no header, no length, just bytes to a
     # NUL. That splits the string methods in two (formal/model.py,
@@ -14908,6 +14956,104 @@ COMPTIME_ATTRIBUTE_CASES = [
      "    rank = 9\n"
      "def main():\n"
      "    sys.stdout.write(\"%d %d\" % (Base.rank, Child.rank))"),
+
+    # ── the two halves of ‘what an enum member is’ that must KEEP working ──────────
+    #
+    # The refusal rows above are half of one decision; these are the other half,
+    # and they are the reason the rule is as narrow as it is.  A field of an enum
+    # type is a WORD on this path, so the ordinary enum idiom — a slot compared
+    # with a member — is a comparison of two values and answers itself, and a
+    # comparison of two `.value` reads is two values too.  Refusing either would
+    # cost every reader who writes `self.kind == Kind.A`, which is the shape an
+    # enum exists for.
+    ("a_slot_compared_with_a_member_is_a_comparison_of_two_values",
+     "from enum import Enum\n"
+     "\n"
+     "class Kind(Enum):\n"
+     "    A = 1\n"
+     "    B = 2\n"
+     "\n"
+     "struct Holder:\n"
+     "    var kind: Int\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var h = Holder()\n"
+     "    h.kind = Kind.A\n"
+     "    if h.kind == Kind.A:\n"
+     "        printf(\"A\")\n"
+     "    else:\n"
+     "        printf(\"B\")\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Kind:\n"
+     "    A = 1\n"
+     "    B = 2\n"
+     "class Holder:\n"
+     "    def __init__(self):\n"
+     "        self.kind = 0\n"
+     "def main():\n"
+     "    h = Holder()\n"
+     "    h.kind = Kind.A\n"
+     "    sys.stdout.write(\"A\" if h.kind == Kind.A else \"B\")\n"),
+    # …and the two `.value` reads, where equal values really are equal in
+    # CPython too — the row that says the refusal is about IDENTITY and not
+    # about the values behind the members.
+    ("two_member_values_compare_by_value",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A.value == Reg.B.value:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Reg:\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "def main():\n"
+     "    sys.stdout.write(\"same\" if Reg.A == Reg.B else \"diff\")\n"),
+    # A MEMBER as a field default, which is the position the value model was
+    # refused at: `origin: TypeOrigin = TypeOrigin.DEFAULT` was refused with
+    # ‘not a value this build can materialize’ because a member read is not a
+    # literal.  It is one word now — the member IS its value — so the field
+    # constructs and reads `default`.  A `@dataclass` because that is the corpus
+    # case (three files blocked on it) and because the dataclass path raises the
+    # refusal itself, so this row is the one that says the fix reached it.
+    #
+    # Read through `t.origin` and NOT `t.origin.value`: the member is gone from
+    # the word, so `.value` on it is a method reference on a string and is
+    # refused.  That is the trade this value model makes and the reason the
+    # message of the next line is a different question — see
+    # `bugs/FORMAL_an_enum_member_is_not_a_value_any_default_position_can_hold.md`.
+    ("a_member_as_a_field_default_materializes_to_its_value",
+     "from dataclasses import dataclass\n"
+     "from enum import Enum\n"
+     "\n"
+     "class TypeOrigin(Enum):\n"
+     "    DEFAULT = \"default\"\n"
+     "\n"
+     "@dataclass\n"
+     "class Type:\n"
+     "    origin: TypeOrigin = TypeOrigin.DEFAULT\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var t = Type()\n"
+     "    printf(\"%s\", t.origin)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class TypeOrigin:\n"
+     "    DEFAULT = \"default\"\n"
+     "class Type:\n"
+     "    def __init__(self):\n"
+     "        self.origin = TypeOrigin.DEFAULT\n"
+     "def main():\n"
+     "    t = Type()\n"
+     "    sys.stdout.write(\"%s\" % t.origin)\n"),
 ]
 
 

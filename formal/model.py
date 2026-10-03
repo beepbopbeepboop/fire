@@ -12400,6 +12400,26 @@ def print_format(fragments: list, sep=" ", end="\n") -> str:
 # (`_note_binding` tracks it per function, flow sensitively); ValueKinds is the
 # same question asked of a whole function at once, for the callers that have to
 # decide before any statement is emitted.
+#
+# AN ENUM MEMBER IS ITS VALUE, and its identity is not in the word.  That is a
+# decision about this section and not about the enum machinery, so it is
+# recorded here with the rest of "what a value is": there is no representation
+# for an enum member as a distinct object (it is one 64-bit word, and nothing in
+# it says WHICH member), so every position that materializes a value treats a
+# member read as the value the member holds — `enum_member_literal` for a
+# class-level DEFAULT, and `enum_member_accessor` for a `.value` / `.name` read,
+# which is why `Reg.A` and `Reg.A.value` are the same word and a bare `Reg.A`
+# prints 7 for `A = 7`.
+#
+# The consequence has to be paid for in the same place, and it is the reason the
+# decision was worth writing down rather than leaving to each caller:
+# `enum_member_comparison_refusal`, asked by `build.refuse_enum_member_
+# comparisons`, refuses `==` between two MEMBER READS, because two distinct
+# members with equal values are one word and would compare equal where CPython
+# says False (measured, both architectures, `A = 1` and `B = 1`). Everything else
+# about enums is unaffected and stays answerable: a slot of an enum type is a
+# word, so `x.kind == y.kind` and `x.kind == Kind.A` are comparisons of values
+# and answer themselves.
 
 def list_kind(elem_kind):
     """The kind of a list blob whose elements are all of `elem_kind`."""
@@ -22759,6 +22779,124 @@ def class_constant_word(name: str, default) -> tuple:
     looking wrong number rather than a crash."""
     kind, payload = literal_default_word(default)
     return (kind, name if kind == DEFAULT_OPAQUE else payload)
+
+
+def enum_member_read(struct_defs, expr):
+    """`"S.NAME"` when `expr` reads an ENUM MEMBER, else `None`.
+
+    The one shape `refuse_enum_member_comparisons` asks about, and it is
+    deliberately narrow: `Reg.NAME` and nothing else. A `.value` read
+    (`Reg.NAME.value`) is a read of the VALUE, which is a word this path can
+    compare, and a read through a slot (`t.origin`) is a read of whatever the
+    slot holds — also a word. Only the bare member is the construct with no
+    representation, and widening this to the other two would refuse
+    `x.kind == y.kind`, which is a comparison of two values and answers itself.
+
+    Gated on `struct_is_enum` for the reason `enum_member_accessor` states: on a
+    class that is not an enum, `S.NAME` is a class constant and its value is a
+    word, so there is nothing to refuse. `NAME` must be one of the class's own
+    constants, which is what keeps `Reg.__name__` and a method reference out.
+    """
+    if not isinstance(expr, F.MemberExpr) or not isinstance(expr.obj, F.IdentExpr):
+        return None
+    st = (struct_defs or {}).get(expr.obj.name)
+    if st is None or not struct_is_enum(struct_defs, expr.obj.name):
+        return None
+    if expr.member not in {name for name, _default in struct_class_constants(st)}:
+        return None
+    return f"{expr.obj.name}.{expr.member}"
+
+
+def enum_member_comparison_refusal(left: str, right: str, op: str,
+                                   enum_name: str) -> str:
+    """Why `Reg.A == Reg.B` is refused: two MEMBERS are not two words.
+
+    ARCH-FREE, asked from the shared pass beside `refuse_none_comparisons`
+    (`formal/build.py`), and for the same reason: the fold that makes a member
+    materializable is lossy in exactly one direction — two DISTINCT members with
+    the same value are one word — so the one construct that can observe the
+    difference is refused by name.
+
+    **The measured wrong answer this closes**, both architectures:
+
+        class Reg(Enum):
+            A = 1
+            B = 1
+
+        if Reg.A == Reg.B:  →  prints ‘same’; CPython says False
+
+    `Reg.A == Reg.A` answers True for the wrong reason too, and that one is
+    invisible — which is why the rule refuses the shape rather than trying to
+    distinguish the two cases: there is nowhere in one untagged word to record
+    WHICH member a word holds, so the question "are these the same member" has
+    no answer here and only the reader can say.
+
+    The repairs are named because ‘an absent answer is the answer’ is only
+    useful with a next step: compare the VALUES (`Reg.A.value == Reg.B.value`),
+    which is what the source usually means when it is asking about two members of
+    the same enum, or branch on a value the model can tell apart. The cost of the
+    rule is stated here rather than left to be discovered: a field of an enum
+    type is a WORD on this path, so `x.kind == y.kind` and `x.kind == Kind.A`
+    both still work, and only a comparison of two bare member reads is refused.
+    """
+    return (
+        f"`{left}` and `{right}` are both reads of MEMBERS of the enum "
+        f"`{enum_name}`, and `{op}` between two members asks whether they are the "
+        f"SAME member. This path has no representation for that: a member and "
+        f"its value are one 64-bit word (`model.enum_member_accessor` says so, "
+        f"and a member read materializes to its value), so two distinct members "
+        f"whose values are equal are one word and compare equal — measured, both "
+        f"architectures, `A = 1` and `B = 1` answered `Reg.A == Reg.B` True where "
+        f"CPython says False. Compare the VALUES when that is what you mean "
+        f"(`{left}.value == {right}.value`), or branch on something the model can "
+        f"tell apart. A field of an enum type is a word too, so `x.kind == y.kind` "
+        f"and `x.kind == Kind.A` are both still answered — only two bare member "
+        f"reads are refused."
+    )
+
+
+def enum_member_literal(struct_defs, expr):
+    """The LITERAL an enum member read holds, or `None`.
+
+    `Reg.DEFAULT` → the `StringLiteral` `"default"` that is `Reg`'s constant
+    `DEFAULT`, because on this path a member and its value are one word
+    (`enum_member_accessor` states it and a bare `Reg.A` materializes to its
+    value — measured, `printf("%d", Reg.A)` prints 7 for `A = 7`). A member whose
+    constant does not itself fold to a literal answers `None`, which is the
+    honest refusal rather than a guess: the member is then a word holding
+    something this path cannot name, and every position that materializes a
+    value has to say so.
+
+    **This is the value-model question the enum machinery was asking, answered
+    once here.** The aggregate note at the top of this file (“what a value
+    is”) records the answer — a member IS its value, and the member's IDENTITY
+    is not in the word — and this is the reading of it that the default
+    positions use, while `enum_member_comparison_refusal` is the consequence
+    that follows from the same answer: if a member is its value, two members
+    with equal values are one word, so a comparison between two member reads is
+    refused rather than answered. The two must not be able to disagree, which is
+    why both live here and neither in a caller.
+
+    `struct_is_enum` gates it for the reason `enum_member_accessor` states: on
+    a class that is not an enum, `S.NAME` is a class constant whose value is a
+    word in its own right, and materializing it is `class_constant_word`'s job
+    with no question left to ask.
+    """
+    st = (struct_defs or {}).get(getattr(getattr(expr, "obj", None), "name", "")
+                                 or "") if isinstance(expr, F.MemberExpr) else None
+    if st is None or not struct_is_enum(struct_defs, st.name):
+        return None
+    for name, default in struct_class_constants(st):
+        if name != expr.member:
+            continue
+        folded = fold_literal_expr(default)
+        if isinstance(folded, bool):
+            return F.IntLiteral(value=int(folded))
+        if isinstance(folded, int):
+            return F.IntLiteral(value=folded)
+        if isinstance(folded, str):
+            return F.StringLiteral(value=folded)
+    return None
 
 
 def struct_fits_one_word(struct_def) -> bool:
