@@ -130,31 +130,66 @@ exact Mojo type, read through the elaborator's own unifier
 |---|---|---|
 | `compile_stdlib.py` | 588 / 22 / 0 | **591 / 19 / 0** |
 | `undef_import_census.py` | 96 / 51 / 60 | 96 / 51 / 60 (unchanged — the three were never in it; see above) |
-| `test_module_cache.py` | 131 / 0 | 131 / 0 |
+| `test_module_cache.py` | 131 / 0 | **142 / 0** (`test_in_tu_instantiation`: the boundary predicate on the real stdlib templates, and the three modules' own C defining their instantiation with no `extern` and no bare `__iter__` call) |
 | `test_gimple.py` | 354 / 0 | 354 / 0 |
 | `test_link_mode.py` | 11 / 0 | 11 / 0 |
 
-**What is still open, in the order the next session should take it.**
+**What is still open, in the order the next session should take it.** Measured
+per file: 18 of the 19 remaining failures are the SAME `next(...)` refusal on
+a boxed receiver, and the generics they call are listed here so the next step
+is not a guess.
 
-1. **Bounded associated-type resolution**, for the remaining `std/iter`
-   family: `peekable(list) -> _PeekableIterator[type_of(iterable)
-   .IteratorOwnedType]`, with `List.IteratorOwnedType = _ListIterOwned[Self.T]`
-   (std/collections/list.mojo:361) → `_ListIterOwned[Int64]`. Read the
-   struct's own `comptime Name[...] : Trait = <expr>` from its defining
-   module. Do NOT textually substitute `Self.<comptime member>` — commit
-   ae8f0493 substitutes `Self.<TYPE PARAM>` only, and that scoping is right.
+| file | the generic(s) it needs |
+|---|---|
+| `test/iter/test_peek.mojo` | `peekable` |
+| `test/iter/test_chain.mojo` | `chain` |
+| `test/iter/test_map.mojo`, `test/itertools/test_drop_while.mojo`, `test/itertools/test_take_while.mojo` | `map`, `drop_while`, `take_while` (all via `map`-shaped closures) |
+| `test/iter/test_zip.mojo` | `zip` |
+| `test/iter/test_enumerate.mojo`, `test/collections/test_set.mojo`, `test/collections/string/test_iterators.mojo`, `test/python/test_python_object.mojo` | `enumerate` |
+| `test/itertools/test_take.mojo`, `test/itertools/test_drop.mojo` | `take`, `drop` |
+| `test/itertools/test_cycle.mojo` | `cycle` |
+| `test/itertools/test_product.mojo` | `product` (three arities) |
+| `std/itertools/itertools.mojo`, `std/collections/string/iterators.mojo` | the whole family, module-wide |
+| `test/collections/test_span.mojo` | `enumerate`, `iter` |
+| **`test/itertools/test_count.mojo`** | **neither — see below** |
+| `test/os/path/test_getsize.mojo` | neither — the unrelated `getsize` `gcc -c` failure already documented |
+
+1. **A concrete imported function whose return annotation names a struct in its
+   own module.** `test_count.mojo` is the whole of this and it is NOT a generic
+   problem at all: `def count(start: Int = 0, step: Int = 1) -> _CountIterator`
+   is an ordinary function, `_CountIterator` is an ordinary struct, and the
+   importer writes `from std.itertools import count` — so neither is ever
+   registered. Measured on that file: `_imported_symbols` is empty, `count` is
+   in neither `_imported_generics` nor `imported_symbols`,
+   `struct_field_types` has no `_CountIterator`, and the call's result types as
+   the boxed `int64_t` that `next(it)` then refuses. The honest unblock is to
+   register the struct a concrete imported function returns, which is
+   struct-inlining for a struct with no template — and that carries the SAME
+   real-struct risk the in-TU widening measured above, so it wants the
+   `test/itertools/test_count.mojo` artifact as its acceptance bar (its object
+   must define `_CountIterator___next__`), not a green syntax check.
+2. **Overload selection on a trait bound**, which is the dominant blocker in the
+   table: `peekable`'s `Some[Iterable]` vs `Some[IterableOwned]`, `map`'s and
+   `take_while`'s thin-vs-owned pairs, `product`'s three arities, `zip`'s pair.
+   `Elaborator.elaborate_overload_call` matches on `c_to_mojo`'s scalar reverse
+   table, which cannot answer a conformance question; `check_conformance` and
+   `Some[...]` already exist and the table is what has to learn to ask them.
+3. **Dependent return types**, for the ones that then survive selection:
+   `peekable(list)` → `_PeekableIterator[type_of(iterable).IteratorOwnedType]`,
+   with `List.IteratorOwnedType = _ListIterOwned[Self.T]`
+   (std/collections/list.mojo:361) → `_ListIterOwned[Int64]`. Read the struct's
+   own `comptime Name[...] : Trait = <expr>` from its defining module. Do NOT
+   textually substitute `Self.<comptime member>` — commit ae8f0493 substitutes
+   `Self.<TYPE PARAM>` only, and that scoping is right.
    `_refine_generic_return_type` (mojo/middle/resolve_shared.py:1453) is the
    hook: it re-resolves a return annotation with the struct-aware
    `gen._resolve_type` after substituting mangled type args, but it does NOT
    receive the call's argument types, which this needs.
-2. **Overload selection on a trait bound**, for `peekable`'s two
-   `Some[Iterable]` vs `Some[IterableOwned]` overloads.
-3. **Overload dispatch outside the iteration protocol** — the 11-file table
-   above. Each row is `error: passing argument N of '<Struct>_..._m_hash'`,
-   i.e. a call site still holding the erased view beside a definition with the
-   real one. That is the same one-way information loss as `FormatStruct`'s two
-   `fields`, and it wants the call site's real argument inference, not another
-   naming change.
+4. **Overload dispatch outside the iteration protocol** — the 11-file table
+   above. Each row is `error: passing argument N of '<Struct>_..._m_hash'`, i.e.
+   a call site still holding the erased view beside a definition with the real
+   one. Same one-way information loss as `FormatStruct`'s two `fields`, and it
+   wants the call site's real argument inference, not another naming change.
 
 **0. `monomorphize.mangle` was not injective — LANDED 2026-10-03.** This is the
 "the root cause is `mangle`" claim the reverted experiment below rested on, so
