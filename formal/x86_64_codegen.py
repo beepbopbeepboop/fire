@@ -5458,6 +5458,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         self._emit_expr(bound(start, 0 if ascending else -1))
         self._push_slot(Reg.RAX)
+        fn = self.func_name
+        # The per-SLICE id, allocated before the first label below rather than
+        # after it: every other label this emitter defines carries a per-site
+        # counter (`assert{aid}`, `rok{rid}`, `bnds{bid}`, `sl{sid}`), and the
+        # three clamp labels used to be the exception — `f_s4a`/`_z`/`_c`, named
+        # after the REGISTER alone. `Assembler.label` keeps the LAST address for
+        # a name, so a second slice in the same function rebound the first
+        # slice's `jge` to the second's clamp block, which is a branch into the
+        # middle of another instruction sequence: the first slice's copy loop
+        # then ran with the second's `r8`/`r9`, and `xs[1:3]` followed by
+        # `xs[2:6]` either faulted or answered the wrong number silently
+        # (bugs/FORMAL_x86_64_a_second_slice_in_a_function.md).
+        self._if_counter += 1
+        sid = self._if_counter
         if stop is None and ascending:
             # `xs[3:]` runs to the END of the sequence, so the default stop
             # is the element count — a runtime value, not a literal. Using 0
@@ -5479,7 +5493,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         wrap = ([Reg.RCX] if not ascending and stop is None
                 else [Reg.RCX, Reg.RDX])
         for reg in wrap:
-            tag = f"{self.func_name}_s{reg.value}"
+            tag = f"{fn}_sl{sid}_c{reg.value}"
             self.asm.emit(encode_cmp_r64_imm8(reg, 0))
             self._emit_jcc(COND_GE, f"{tag}a")
             self.asm.emit(encode_add_r64_r64(reg, Reg.R8))
@@ -5496,9 +5510,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # copy loop needs and RCX does not have room for.
         self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RCX))
 
-        fn = self.func_name
-        self._if_counter += 1
-        sid = self._if_counter
         empty_label = f"{fn}_sl{sid}_empty"
         go_label = f"{fn}_sl{sid}_go"
         # count = ceil(|stop - start| / |step|) when the range runs the right

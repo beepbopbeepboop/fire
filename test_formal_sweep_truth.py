@@ -1421,5 +1421,87 @@ class TestScratchDirEstate(unittest.TestCase):
         self.assertFalse(os.path.exists(seen[0]))
 
 
+# ── 9. a label name is unique per emission site, on BOTH assemblers ─────────
+#
+# `Assembler.label` records an address in a dict and `resolve` patches every
+# branch out of it, so a name defined TWICE is not a duplicate — it is a
+# retargeting of every earlier branch to the second block, which assembles, runs,
+# exits 0 and answers with a different number. Nothing downstream can see it.
+#
+# That is not a hypothetical. Every label in `x86_64_codegen.py` carries a
+# per-site counter (`assert{aid}`, `rok{rid}`, `bnds{bid}`, `sl{sid}`) except the
+# three bound-clamp labels of `_emit_slice_parts`, which were named after the
+# REGISTER alone (`f_s4a`/`_z`/`_c`) — so a second slice in one function rebound
+# the first's `jge` and `xs[1:5][1:3]` summed the OUTER slice
+# (`bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`). The five behavioural
+# rows for it are `test_x86_64_containers.py`'s `slice-two-*` / `slice-of-slice`
+# cases; what is here is the mechanism, on both backends, because the defect is
+# in the assembler and arm64's is the same line of code.
+
+class TestLabelUniqueness(unittest.TestCase):
+    BACKENDS = ("formal.x86_64", "formal.arm64")
+
+    @staticmethod
+    def _asm(module: str):
+        """A fresh assembler per backend, with its own relative-branch spelling.
+
+        The two spell the same operation differently (`emit_label_rel` on arm64,
+        `emit_label_rel8` on x86-64), which is the naming convention
+        `formal/x86_64.py`'s own docstring says mirrors arm64's — so the test
+        takes the name from the module rather than hard-coding one."""
+        import importlib
+        mod = importlib.import_module(module)
+        asm = mod.Assembler()
+        asm.org(0x1000)
+        rel = getattr(asm, "emit_label_rel", None) or asm.emit_label_rel8
+        return asm, rel
+
+    def test_a_label_defined_twice_is_refused_on_both_backends(self):
+        """The control in each direction: a distinct name is accepted, and the
+        same name twice is a `CodegenError` naming the label.
+
+        Both halves matter. A guard that fired on every `label()` call would
+        refuse every program; one that stayed silent is the bug.
+        """
+        from formal.model import CodegenError
+        for module in self.BACKENDS:
+            with self.subTest(backend=module):
+                asm, _rel = self._asm(module)
+                asm.label("f_sl1_c4a")
+                asm.emit(b"\x90")
+                asm.label("f_sl2_c4a")          # a distinct name: fine
+                asm.emit(b"\x90")
+                with self.assertRaises(CodegenError) as cm:
+                    asm.label("f_sl1_c4a")      # …and now the same one again
+                msg = str(cm.exception)
+                self.assertIn("f_sl1_c4a", msg,
+                              "the refusal must name the label, or it is a "
+                              "number with no subject")
+                self.assertIn("defined twice", msg)
+
+    def test_an_earlier_branch_is_not_left_pointing_at_the_second_block(self):
+        """Why the second binding has to be an error and not a rebinding.
+
+        A branch recorded to `one`, then a second `one` further along: `resolve`
+        patches every fixup out of the same dict, so without the guard the branch
+        lands in the middle of the second block — which assembles, runs, exits 0
+        and computes a different number. The guard refuses before the image
+        exists, which is the only place this class of bug can be caught.
+        """
+        from formal.model import CodegenError
+        for module in self.BACKENDS:
+            with self.subTest(backend=module):
+                asm, rel = self._asm(module)
+                asm.label("one")
+                rel("one")                      # a branch back to `one`
+                asm.emit(b"\x90\x90\x90\x90")
+                asm.label("two")
+                with self.assertRaises(CodegenError):
+                    asm.label("one")             # the collision the guard names
+                # The recorded fixup is still the one for `one`, so nothing in
+                # the assembler quietly dropped the branch to keep going.
+                self.assertEqual([r[1] for r in asm.relocs], ["one"])
+
+
 if __name__ == "__main__":
     unittest.main()
