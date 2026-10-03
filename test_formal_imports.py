@@ -618,6 +618,124 @@ def test_no_import_needs_no_dylib(tmpdir, _shared):
           "a program with no imports built module dylibs anyway")
 
 
+def test_a_module_dylib_is_published_only_signed(tmpdir, _shared):
+    """The shared path never holds the unsigned library `codesign` replaces.
+
+    `compile_formal_dylib` writes a module library and then runs `codesign -s -`
+    as a SEPARATE PROCESS which rewrites the same file in place to append
+    `LC_CODE_SIGNATURE`. Between the write and the end of that subprocess the
+    path holds a complete but UNSIGNED Mach-O, and the two versions are very
+    different sizes — 49 304 bytes as the linker writes it, 67 680 after
+    `codesign`, on the same library. That path is not private: it is the shared
+    CAS directory every worktree on the machine writes, and an ALREADY-LINKED
+    image loads it at RUN time, taking no lock. So one build republishing a
+    module while another's program started produced, in the wild:
+
+        dyld[2165]: Library not loaded: …/struct.6cd3c815d2e8.arm64.dylib
+          Referenced from: … cs3.bin
+          Reason: tried: '…' (missing code signature in …)
+        child exit -6
+
+    — a program that built, linked and was right, refused by the loader with a
+    message naming a library and saying nothing about a concurrent build. That
+    is the shape of a thousand "flaky" test reports, and it cannot be
+    `expect=`-marked away.
+
+    The fix is `formal/imports.py::_staged_dylib`: the build happens in a
+    subdirectory of the target's own directory, holding the SAME BASENAME (the
+    basename is part of the artifact's identity — `@rpath/<basename>` is baked
+    into `LC_ID_DYLIB` and into the load command of everything that links it),
+    and `os.replace` publishes it whole. Same tree, so the replace is atomic.
+
+    What is asserted, and it is asserted from INSIDE the window rather than by
+    racing it, because a polling observer would pass by luck on an idle machine
+    and that is exactly how this survived:
+
+      * the observation is taken while `_ad_hoc_sign` is running, which is the
+        instant the unsigned bytes exist;
+      * every `.dylib` visible at the published directory at that instant is
+        signed — which is what makes "the published path is not the path being
+        signed" an OBSERVED property rather than a claim about the code;
+      * the published file afterwards is signed, its install name is its own
+        basename (the identity a staging FILE would have broken), its manifest is
+        beside it, and no staging directory is left behind.
+    """
+    import formal.build as FB
+    from formal import imports as FI
+
+    root = os.path.join(tmpdir, "signwin")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": LIB})
+    out_dir = os.path.join(tmpdir, "libs")
+    os.makedirs(out_dir)
+    fresh_cas()
+    FI._BUILT.clear()
+
+    def _published():
+        """The libraries a RUNNING image could load from `out_dir` right now."""
+        return sorted(f for f in os.listdir(out_dir)
+                      if f.endswith(".dylib") or f.endswith(".dylib.lock"))
+
+    def _signed(path):
+        r = subprocess.run(["codesign", "-v", path], capture_output=True)
+        return r.returncode == 0, (r.stderr or b"").decode("utf-8", "replace")
+
+    observations = []
+
+    def _spy_sign(path, *a, **k):
+        # The moment the unsigned bytes exist. `path` is what is about to be
+        # signed; everything already in `out_dir` is what another process's
+        # running image would find there instead.
+        seen = _published()
+        observations.append((path, seen, [_signed(os.path.join(out_dir, f))
+                                          for f in seen if f.endswith(".dylib")]))
+        return real_sign(path, *a, **k)
+
+    real_sign = FB._ad_hoc_sign
+    FB._ad_hoc_sign = _spy_sign
+    try:
+        out = FI.build_module_dylib(
+            "mylib", os.path.join(root, "mylib", "__init__.mojo"),
+            out_dir, "arm64")
+    finally:
+        FB._ad_hoc_sign = real_sign
+
+    check(observations, "the build never signed anything, so nothing was "
+                        "observed: this test needs the window to be open")
+    for path, seen, checks in observations:
+        check(path != os.path.join(out_dir, os.path.basename(path)),
+              f"codesign was handed {path!r}, which IS the published path: the "
+              f"build wrote the library where a running image loads it and is "
+              f"now signing it in place, so every concurrent reader can catch "
+              f"the unsigned half (formal/imports.py's _staged_dylib)")
+        for name, (ok, why) in zip([f for f in seen if f.endswith(".dylib")],
+                                   checks):
+            check(ok, f"while codesign was signing, {name!r} was already at "
+                      f"the published path and is NOT a valid signed image "
+                      f"({why.strip()}): a running image that loaded it there "
+                      f"would die with 'missing code signature'")
+
+    check(os.path.isfile(out), f"the library was not published at {out}")
+    ok, why = _signed(out)
+    check(ok, f"the published library is not signed: {why.strip()}")
+    base = os.path.basename(out)
+    info = subprocess.run(["otool", "-l", out], capture_output=True,
+                          text=True).stdout
+    want = f"@rpath/{base}"
+    check(want in info,
+          f"the published library's load commands do not name it {want!r}, so "
+          f"the staging changed the install name — and a dylib's install name "
+          f"is baked into the load command of everything that links it:\n"
+          f"{info[-400:]}")
+    check(os.path.isfile(out + ".manifest.json"),
+          "the manifest was not published beside the library, so every reader "
+          "(the consumer's own manifest walk, external_declarations) finds a "
+          "library with no exports")
+    leftovers = [f for f in os.listdir(out_dir) if f.startswith(".staging")]
+    check(not leftovers,
+          f"the staging directory was left behind: {leftovers}")
+
+
 # ── the resolution rules ─────────────────────────────────────────────────────
 # The four tests below pin ONE ordering (see formal/imports.py's
 # `resolve_module_path`): Mojo source > host module > repository `.py`
@@ -2738,6 +2856,8 @@ TESTS = [
      test_several_unresolvable_imports_are_all_named),
     ("a program with no imports builds no dylib",
      test_no_import_needs_no_dylib),
+    ("a module dylib is published only signed",
+     test_a_module_dylib_is_published_only_signed),
     ("a struct method is callable across modules",
      test_struct_method_across_modules),
     ("a library may construct its own struct",
