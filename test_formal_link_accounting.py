@@ -239,6 +239,40 @@ def provided_modules():
     return set(I.FRONTEND_PROVIDED_MODULES) & set(PRE_SPLIT_HOST_MODULES)
 
 
+def _hostmod_names_on_disk():
+    """Every module name `formal/hostmods/` has a source for.
+
+    The third pool for `written_modules()`, and the only one that is not a
+    hand-kept list: it walks the directory, so a module lands in it by being
+    written. `os/_syscalls.mojo` becomes `os._syscalls` and
+    `os/path/__init__.mojo` becomes `os.path`, which are the names
+    `resolve_module_path` is asked for.
+
+    This exists because of a real miss, not a hypothetical one: `posixpath` was
+    classified into `HOST_MODELLED` on 2026-10-03 and then written, which took
+    it out of every tier, and a pool built only from tiers could not see it \u2014
+    so `test_host_tiers` reported `sym-diff ['posixpath']` for a module that was
+    sitting on disk with a test beside it.
+    """
+    root = os.path.join(HERE, "formal", "hostmods")
+    out = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        rel = os.path.relpath(dirpath, root)
+        for fn in filenames:
+            if not fn.endswith(".mojo"):
+                continue
+            if rel == ".":
+                out.add(fn[:-len(".mojo")])
+                continue
+            name = os.path.join(rel, fn[:-len(".mojo")])
+            name = name.replace(os.sep, ".")
+            if name.endswith(".__init__"):
+                name = name[:-len(".__init__")]
+            out.add(name)
+    return out
+
+
 def written_modules():
     """Every host-set name this tree can now ANSWER for, whatever became of it.
 
@@ -259,15 +293,37 @@ def written_modules():
     and `ADMITTED_HOST_MODULE_TESTS` below exists because the second kind makes a
     different claim and is kept honest by a different test.
 
-    `HOST_ADMITTED` is walked as well as `PRE_SPLIT_HOST_MODULES` because a
-    module can be in neither: it has no pre-split entry and it is not one of the
-    tiers' own members, so only the union finds it — and a derivation that missed
-    it would let a name go unaccounted, which is exactly the case the account is
-    for.
+    **EVERY TIER IS WALKED, not just `HOST_ADMITTED`.** This pool used to be
+    `PRE_SPLIT_HOST_MODULES | HOST_ADMITTED`, on the reasoning that a module can
+    be in neither and only the union finds it. That missed a THIRD kind, and
+    `posixpath` is the instance that found it:
+
+      * a name in `PRE_SPLIT_HOST_MODULES` \u2014 the historical `HOST_MODULES`
+        list, frozen in this file;
+      * a name in `HOST_ADMITTED` \u2014 a module that answers under a contract;
+      * **a name that was CLASSIFIED INTO a tier and then WRITTEN.** The
+        2026-10-03 ranking put `posixpath` in `HOST_MODELLED` (it was in no tier
+        at all), which is what a module with no source is; writing
+        `formal/hostmods/posixpath.mojo` then took it OUT of that tier, and a
+        name that has left every tier is in neither the pre-split list nor
+        `HOST_ADMITTED` \u2014 so the derivation did not find it and the account
+        reported `sym-diff ['posixpath']` for a module sitting on disk.
+
+    That is the failure the account exists to catch, happening to the account.
+    **So the pool also carries the hostmod DIRECTORY**, which is where the third
+    kind lives: a name that has left every tier is in no tier at all, so no union
+    of tiers finds it, and only the files themselves do. Every name that is in
+    no tier and is NOT in `PRE_SPLIT_HOST_MODULES` is exactly the set that walk
+    adds \u2014 which on this tree is `posixpath` and nothing else, and that is the
+    point: the walk is a derivation, so it finds the next such module by being
+    written rather than by being listed.
     """
     found = set()
-    pool = (set(PRE_SPLIT_HOST_MODULES) | set(getattr(I, "HOST_ADMITTED", ()))
-            | set(HOST_SET_ADDED_THEN_WRITTEN))
+    pool = (set(PRE_SPLIT_HOST_MODULES)
+            | set(getattr(I, "HOST_ADMITTED", ()))
+            | set(getattr(I, "HOST_MODELLED", ()))
+            | set(getattr(I, "HOST_UNREACHABLE", ()))
+            | _hostmod_names_on_disk())
     for name in sorted(pool):
         if I.is_frontend_provided(name):
             found.add(name)
@@ -316,22 +372,24 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "stat": "test_formal_stat.py",
     "math": "test_formal_math.py",
     "shutil": "test_formal_shutil.py",
-    # `tempfile` is the one that answered `gettempdir`/`mkdtemp`/`TMP_MAX`
-    # without ever needing an object the target lacks (a real directory at mode
-    # 448 is a `mkdir(2)`), so it left HOST_UNREACHABLE the way `shutil` did and
-    # for the same half of the reason: the object half was false. What is still
-    # true is the other half — `TemporaryDirectory` needs an `__exit__`, and a
-    # FILE OBJECT is more than one 64-bit word — which is what
-    # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` is.
+    # `tempfile` answered `gettempdir`/`mkdtemp`/`TMP_MAX` without ever needing an
+    # object the target lacks (a real directory at mode 448 is a `mkdir(2)`), so it
+    # left HOST_UNREACHABLE the way `shutil` did and for the same half of the
+    # reason: the object half was false.  It was MISSING from this table for a day,
+    # which is what made the `== written_modules()` check below red with
+    # `sym-diff ['tempfile']` before `textwrap` was added beside it: the check
+    # exists to catch a module written and forgotten, and
+    # `formal/hostmods/tempfile.mojo` has been written since 2026-10-03.  What is
+    # still true is the other half of its reason — `TemporaryDirectory` needs an
+    # `__exit__`, and a FILE OBJECT is more than one 64-bit word.
     "tempfile": "test_formal_tempfile.py",
     # `textwrap` left `HOST_MODELLED` the way `stat` and `math` did, and for the
     # same reason: `dedent` and `indent` are pure string computation over the
-    # `str_len`/`str_lead`/`str_find`/`str_cmp` that
-    # `formal/hostmods/os/_syscalls.mojo` already had, so nothing about them was
-    # out of reach and the tier entry said "the work has not been done". What is
-    # still true, and is at the top of the module, is that `wrap`, `fill` and
-    # `shorten` are absent — a rendering WIDTH is the subject and no file in this
-    # repository asks for one.
+    # `str_len`/`str_put`/`str_prefix` that `formal/hostmods/os/_syscalls.mojo`
+    # already had, so nothing about them was out of reach and the tier entry said
+    # "the work has not been done".  What is still true, and is at the top of the
+    # module, is that `wrap`, `fill` and `shorten` are absent — a rendering WIDTH is
+    # the subject and no file in this repository asks for one.
     "textwrap": "test_formal_textwrap.py",
 }
 
@@ -350,6 +408,35 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
 # needs them. Hence its own table.
 PROVIDED_NEVER_A_HOST_MODULE = {
     "fcntl": "test_formal_fcntl.py",
+    # `posixpath` \u2014 a SPELLING of `os.path`, which is the same situation as
+    # `fcntl` and for the same reason it needed its own table: the 2026-10-03
+    # ranking put it in `HOST_MODELLED` and writing the module took it out of every
+    # tier, so it never LEFT a set this file can subtract from. Its test
+    # (`test_formal_posixpath.py`) checks it against CPython's own `posixpath`
+    # AND against `os.path` in the same image, which is the only way to tell a
+    # faithful forward from a broken one.
+    "posixpath": "test_formal_posixpath.py",
+    # `html` left `HOST_MODELLED` the same way — the 2026-10-03 ranking
+    # classified it and writing the module took it out of every tier, so it never
+    # LEFT a set this file can subtract from either. Its test checks `escape`
+    # against CPython's own `html.escape` over a corpus whose four `&`-bearing
+    # cases exist to pin the ORDER, plus every byte 1..255.
+    "html": "test_formal_html.py",
+}
+
+# The two `os` SUBMODULES, which are provided and are named by the file they are
+# written in rather than by a test of their own.
+#
+# `os._syscalls` and `os.path` are not host modules in CPython's sense at all
+# \u2014 they are parts of `os`, and CPython spells them `os.path` (a real name) and
+# nothing else. Each is checked by `test_formal_os.py` and `test_formal_os_backing.py`,
+# which are the tests that OWN `os`, so this file cannot name them in
+# `IMPLEMENTED_HOST_MODULE_TESTS` without claiming that `os` left the host set
+# twice. They are listed here because `_hostmod_names_on_disk` finds them and
+# `written_modules()` must account for every name it finds.
+SUBMODULE_HOST_MODULE_TESTS = {
+    "os.path": "test_formal_os.py",
+    "os._syscalls": "test_formal_os.py",
 }
 
 # …and the ADMITTED ones, which left the host set by being written under a
@@ -397,32 +484,33 @@ ADMITTED_HOST_MODULE_TESTS = {
 # the FACT each permanent claim rests on -- an entry here is a sentence about the
 # target, so it is written down; the tier assignment is asserted exactly, in both
 # directions, so an addition that nobody justified fails and a stale row fails.
-# Names added to a TIER after the split and since WRITTEN — the third shape, and
-# `posixpath` is the first.  The 2026-10-03 classification put it in
-# `HOST_MODELLED` with the reason written out (`os/path/__init__.mojo` IS
-# CPython's `posixpath`, so only the SPELLING was missing), and
-# `formal/hostmods/posixpath.mojo` re-exported every public name a day later.
-# It is now in neither `PRE_SPLIT_HOST_MODULES` nor any tier, so the account in
-# `test_host_tiers` cannot see it MOVE — and a name that cannot be seen to move is
-# a name whose tier entry can rot, which is how `tempfile` sat in
-# `HOST_UNREACHABLE` with a `mkdir` and an `mkdtemp` behind it for a day.
 #
-# Separate from `IMPLEMENTED_HOST_MODULE_TESTS` because that table is the names
-# that left the PRE-SPLIT list, and this one never was in it; the difference is
-# the same one `PROVIDED_NEVER_A_HOST_MODULE` exists for.
+# There was a THIRD shape once and there is deliberately no table for it any more:
+# a name added to a tier after the split and since WRITTEN, of which `posixpath`
+# was the first (the 2026-10-03 classification put it in `HOST_MODELLED` with the
+# reason written out -- `os/path/__init__.mojo` IS CPython's `posixpath`, so only
+# the SPELLING was missing -- and `formal/hostmods/posixpath.mojo` answered every
+# public name a day later).  Such a name is in neither `PRE_SPLIT_HOST_MODULES` nor
+# any tier, so `test_host_tiers` cannot see it MOVE, and the one-row table that used
+# to exist for that (`HOST_SET_ADDED_THEN_WRITTEN`, widened `ever` by hand) is
+# retired: `_hostmod_names_on_disk()` finds the shape by WALKING
+# `formal/hostmods/`, and `PROVIDED_NEVER_A_HOST_MODULE` names the test for each
+# one found.  The hand-kept row had already gone stale once, which is the whole
+# argument: `tempfile` sat in `HOST_UNREACHABLE` with a `mkdir` and an `mkdtemp`
+# behind it, and missing from `IMPLEMENTED_HOST_MODULE_TESTS`, until the
+# `== written_modules()` check below reported `sym-diff ['tempfile']`.
 #
-# ONE ROW, and the honest reason it is not derived is that there is nothing to
-# derive it from: the tier a name was added to is gone, and the pre-split list
-# never had it.  It grows only when the shape recurs, and each row says which
-# test keeps the module honest.
-HOST_SET_ADDED_THEN_WRITTEN = {
-    # `formal/hostmods/posixpath.mojo` re-exports `os/path/__init__.mojo` under
-    # CPython's own name for it, so a program that spells `import posixpath`
-    # reaches the model instead of a host-module refusal.
-    "posixpath": "test_formal_os.py",
-}
-
-
+# `html` is the second instance of that third shape -- the 2026-10-03 ranking put
+# it in `HOST_MODELLED` as "five character replacements over a string", and
+# `formal/hostmods/html.mojo` (one function, `escape`) answered it the same way
+# `posixpath` did -- so it is NOT a row of the table below, and its absence from
+# it is the check working rather than the check being incomplete.
+#
+# `textwrap` is the first instance of the ORDINARY shape: classified into
+# `HOST_MODELLED` on the same day, and written the same week, so it also left.  It
+# differs only in that `IMPLEMENTED_HOST_MODULE_TESTS` already had a row for it,
+# which is why its departure was caught by that table's own staleness rather than
+# by this one.
 HOST_SET_ADDED_TIERS = {
     # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
     # image is a Mach-O binary with an embedded CPython to compile it and none to
@@ -436,8 +524,6 @@ HOST_SET_ADDED_TIERS = {
     # itself is a generator over `readline`, which is the half that is out of
     # reach.  Reachable in principle, unwritten today: a gap with an owner.
     "shlex": "modelled",
-    # Five character replacements over a string, i.e. the `shlex` shape again.
-    "html": "modelled",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
     # arithmetic.  The answer is a shaped record, which is
     # `bugs/FORMAL_time_struct_shaped_answers.md`'s to design.
@@ -529,44 +615,57 @@ def test_host_tiers():
         # requiring that of one would be requiring a module that was never in
         # `orig` — `subprocess` and its four siblings — to have been there
         # before, which is the opposite of what admitting it did.
-        # Every name that has EVER been a host module: the pre-split list, plus
-        # the ones the 2026-10-03 classification added and then a module
-        # answered.  Without the second set the account below cannot see
-        # `posixpath` leave, and a name that cannot be seen to move is a name
-        # whose tier entry can rot.
-        ever = orig | set(HOST_SET_ADDED_THEN_WRITTEN)
-        left = written_modules() - set(ADMITTED_HOST_MODULE_TESTS)
-        check(left <= (ever - union),
+        # `left` is "of the names that WERE in the host set, the ones no longer
+        # in it", so it is a subset of `orig` BY CONSTRUCTION and is intersected
+        # with it rather than being read straight off `written_modules()`.
+        #
+        # That intersection is not a weakening, it is what the check means, and
+        # it is what the pool widening made necessary: `written_modules()` walks
+        # the hostmod directory as well as the tiers, so it returns `fcntl` and
+        # `posixpath` — names that were NEVER in `HOST_MODULES` and so never
+        # "left" anything.  Before the widening it returned only pre-split names,
+        # which made `left` a subset of `orig` by ACCIDENT (the pool was a subset,
+        # not the check).  A name can only leave a set it was in, so asking the
+        # subtraction about a name that was never there was asking a question with
+        # no answer, and it reported both as `unaccounted`.
+        #
+        # This is also what retires `HOST_SET_ADDED_THEN_WRITTEN`, which was a
+        # hand-kept one-row table saying "`posixpath` was added to a tier and then
+        # written" so that a widened `ever` could see it move.  A name lands in
+        # that shape by being WRITTEN, so the walk finds the next one by being
+        # written rather than by being listed, and the one-row table had already
+        # gone stale once (`tempfile`, above).
+        left = (written_modules() & set(orig)) - set(ADMITTED_HOST_MODULE_TESTS)
+        check(not (written_modules() - set(orig) - set(ADMITTED_HOST_MODULE_TESTS)
+                   - set(PROVIDED_NEVER_A_HOST_MODULE)
+                   - set(SUBMODULE_HOST_MODULE_TESTS)),
+              'every provided module is either in the pre-split host set, an '
+              'admitted one, one that was never in the set, or an `os` '
+              'submodule — a name this file cannot account for is a module '
+              'nobody claims')
+        check(left <= (orig - union),
               'every name that left the host set is one with real source '
               'behind it',
-              f'left without source {sorted((ever - union) - left)}')
-        check(ever - union == left,
+              f'left without source {sorted((orig - union) - left)}')
+        check((orig - union) == left,
               'the account of what left the host set is exact',
-              f'unaccounted {sorted((ever - union) ^ left)}')
+              f'unaccounted {sorted((orig - union) ^ left)}')
         all_written = {**IMPLEMENTED_HOST_MODULE_TESTS,
                        **ADMITTED_HOST_MODULE_TESTS,
-                       **HOST_SET_ADDED_THEN_WRITTEN}
+                       **PROVIDED_NEVER_A_HOST_MODULE,
+                       **SUBMODULE_HOST_MODULE_TESTS}
         check(set(all_written) == written_modules(),
               'every written module names the test that keeps it honest, and '
               'no other name claims one',
               f'sym-diff {sorted(set(all_written) ^ written_modules())}')
+        # ONE loop over the union, not one per table: the three tables are
+        # disjoint and the union above is exactly what `written_modules()` is
+        # required to equal, so three loops were three subsets of one check
+        # written out three times.
         for name, test_file in sorted(all_written.items()):
-            check(os.path.isfile(os.path.join(HERE, test_file)),
-                  f'{name} left the host set on the strength of {test_file}, '
-                  f'and that test exists')
-        for name, test_file in sorted(PROVIDED_NEVER_A_HOST_MODULE.items()):
             check(os.path.isfile(os.path.join(HERE, test_file)),
                   f'{name} is provided on the strength of {test_file}, and '
                   f'that test exists')
-        for name, test_file in sorted(HOST_SET_ADDED_THEN_WRITTEN.items()):
-            check(os.path.isfile(os.path.join(HERE, test_file)),
-                  f'{name} was added to a tier and then written; the claim is '
-                  f'that {test_file} keeps the module honest, and that test '
-                  f'exists')
-            check(not I._is_host_module(name) and I.host_module_tier(name) == '',
-                  f'{name} left every tier by being written, so it is not a '
-                  f'host module: a name this tree answers for does not belong '
-                  f'in a set that says "nothing here can compile it"')
         # The admitted half is checked against the TREE and not only against the
         # table above: a name in `HOST_ADMITTED` with no `formal/hostmods` source
         # would be a claim the table cannot keep true by itself, and a hostmod

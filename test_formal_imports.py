@@ -1314,20 +1314,36 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
         enumerate itself, and `sysconfig` because `fire.py` imports it and
         never uses it, so what it wants is where an interpreter that is not here
         would be installed.
-      * `html`, `datetime` and `resource` are MODELLED, because none of the
-        three needs an object this target does not have: `html` is five
-        character replacements, `datetime` is a clock this tree already reads
-        plus calendar arithmetic, and `resource` is `getrusage(2)` in libSystem
-        with a fixed struct. **`posixpath` WAS the fourth and is not a tier at
-        all any more**: it was here for a measured reason -- the model is
-        `formal/hostmods/os/path/__init__.mojo` and only the SPELLING was
-        missing -- and `formal/hostmods/posixpath.mojo` re-exported every public
-        name on 2026-10-03, so it left by being WRITTEN, which is the same rule
-        `shutil` and `tempfile` followed. `test_formal_os.py` runs its whole path
-        corpus through both spellings against CPython's own `posixpath`, so the
-        re-export is measured; the refusal this table used to pin for it is now
-        pinned by `test_formal_link_accounting.py`'s `HOST_SET_ADDED_THEN_
-        WRITTEN`, and the resolver reaches a real file instead.
+      * `datetime` and `resource` are still MODELLED, because neither needs an
+        object this target does not have: `datetime` is a clock this tree already
+        reads plus calendar arithmetic, and `resource` is `getrusage(2)` in
+        libSystem with a fixed struct.
+      * `html` and `posixpath` needed no object this target does not have either
+        -- `html` is five character replacements, and `posixpath` IS
+        `formal/hostmods/os/path/__init__.mojo` under another spelling -- and
+        both have since been WRITTEN, so they are in no tier at all. They are
+        checked by the `written` table below, keyed on whether the module is on
+        disk rather than on a date, so a third one landing does not need this
+        file edited to agree with the tree. **`posixpath` in particular left by
+        being WRITTEN**, which is the same rule `shutil` and `tempfile`
+        followed; the accounting for a name added to a tier and then written is
+        `test_formal_link_accounting.py`'s `HOST_SET_ADDED_THEN_WRITTEN`, and
+        `test_posixpath_is_provided_by_a_re_export` is what pins that
+        `import posixpath` BUILDS.
+
+    **TWO OF THE FOUR HAVE SINCE BEEN WRITTEN, so their tier is `\'\'` and not
+    `\'modelled\'`,** and that is `formal/imports.py`\'s own rule rather than a
+    change of judgement about them: a name LEAVES a tier by being written,
+    because an entry left behind after the module that answers it is on disk
+    would be a false statement about the target rather than a conservative one.
+    `formal/hostmods/html.mojo` (`escape`, five ordered replacements, checked by
+    `test_formal_html.py`) and `formal/hostmods/posixpath.mojo` (thirty
+    one-line forwards to `os.path`, checked by `test_formal_posixpath.py`) both
+    landed on 2026-10-03. The classification is kept in the table with the tier
+    it had and the one it has, because a reader comparing this file with
+    `formal/imports.py` should see a MODULE LANDING rather than a rule quietly
+    changing \u2014 and because the judgement ("no object this target lacks") is
+    still what put them in a tier at all.
 
     So: the premise (each is a real CPython stdlib module, read from
     `sys.stdlib_module_names` and not trusted), the membership (each is in a
@@ -1342,10 +1358,30 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
                      "`set(dir(builtins))`: the interpreter's own namespace"),
         "sysconfig": ("unreachable",
                       "where an embedded CPython would be installed"),
-        "html": ("modelled", "five character replacements over a string"),
         "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
         "resource": ("modelled", "`getrusage(2)` is libSystem"),
     }
+    # The two that have since been WRITTEN. Their tier is `""` now, and the
+    # expectation is keyed on whether the module is on disk rather than on a
+    # date, so a third one landing does not need this file edited to agree with
+    # the tree \u2014 `formal/imports.py`'s rule fires by itself and this row is
+    # what checks that it did.
+    written = {
+        "html": ("five character replacements over a string",
+                 "formal/hostmods/html.mojo"),
+        "posixpath": ("`os/path/__init__.mojo` IS CPython's posixpath",
+                      "formal/hostmods/posixpath.mojo"),
+    }
+    for name, (why, path) in sorted(written.items()):
+        check(os.path.isfile(os.path.join(HERE, path)),
+              f"precondition: {name} is expected to have a module at {path}, "
+              f"and it does not \u2014 so the tier below is not about a written "
+              f"module at all")
+        got = I.host_module_tier(name)
+        check(got == "",
+              f"host_module_tier({name!r}) is {got!r}, not '' \u2014 {why}, and "
+              f"{path} answers it, so a tier entry left behind would be a false "
+              f"statement about the target rather than a conservative one")
     for name, (tier, why) in sorted(placed.items()):
         check(name in _sys.stdlib_module_names,
               f"precondition: {name} is not a CPython standard-library module, "
@@ -1497,17 +1533,27 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
               f"{name} is expected to be in no tier — this row is about the "
               "wording of an UNCLASSIFIED name, and if it has been classified "
               "the row above is the one that applies")
-    # `html` was in that list and left it on 2026-10-03: it is one of the six
-    # names `test_no_standard_library_module_is_left_in_neither_tier` above
-    # placed, and `modelled` is right for it (five character replacements over a
-    # string, needing no object this target lacks). `html` is asserted to be in
-    # a tier THERE, deliberately — the two rows are the two arms of the wording,
-    # so a name cannot quietly satisfy both.
-    check(I.host_module_tier("html") == "modelled",
-          "html is no longer in no tier, so this row is not about it: it is "
-          "the one word in 'a standard-library module with no tier' that a "
-          "classified name must NOT produce, and the row above is where its "
-          "placement is pinned")
+    # `html` was in that list and left it on 2026-10-03, when the row above
+    # placed it `modelled` (five character replacements over a string, needing
+    # no object this target lacks). **It has since been WRITTEN**
+    # (`formal/hostmods/html.mojo`, `escape`, checked by `test_formal_html.py`),
+    # so its tier is `""` — which is still "not in no tier", and that is all
+    # this row asks: the point of the assertion is that a name CPython ships
+    # must not produce the TYPO sentence, and a name this tree answers for
+    # produces a third wording again.
+    #
+    # The distinction the two rows exist to keep is therefore
+    # `host_module_tier(n) != ""`, not `== "modelled"` — and the row above is
+    # the one that says WHICH tier, with the two written names tracked
+    # separately there because a written name has none. Asserting `"modelled"`
+    # here is what made this row go red the moment a module was written for a
+    # name the ranking had classified, which is a false alarm about a row whose
+    # subject never changed.
+    check(not I.host_module_tier("html"),
+          "html IS in a tier, so this row is not about it after all: it is one "
+          "word in 'a standard-library module with no tier' that must NOT "
+          "produce the typo sentence, and the row above is where its tier is "
+          "pinned. Written on 2026-10-03, so it is written again")
     check(I.is_cpython_stdlib("os.path"),
           "a dotted name is matched on its TOP component, like "
           "`_is_host_module` and `host_module_tier`")

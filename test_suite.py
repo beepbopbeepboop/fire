@@ -3067,6 +3067,24 @@ UNREGISTERED = {
         'the same gap for the eleven suites above.',
     'test_formal_math.py': _FORMAL_SUITE_REASON,
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
+    # The same shape, and here for the same reason. `posixpath` is a SPELLING
+    # of `os.path` — every one of its thirty functions is a one-line forward —
+    # so this file checks it against TWO oracles: `forward` against CPython's
+    # own `posixpath`, and `same` against `os.path` in the SAME image, because
+    # a forward that called the wrong name or dropped an argument would agree
+    # with CPython on most of the corpus and disagree with `os.path` on the
+    # rest, and only the second comparison sees that. Measured 2026-10-03 on
+    # this branch: 5/5 groups pass, 968 CPython answers + 908 in-image element
+    # comparisons + 6 constants, on both backends, ~0.1 GB peak.
+    # The same shape, and here for the same reason. `html.escape` is five
+    # ORDERED substring replacements and the ORDER is the whole function: `&`
+    # is replaced first, so the `&` the later replacements introduce is never
+    # itself replaced. Measured 2026-10-03 on this branch: 4/4 groups pass,
+    # 112 corpus answers (28 cases x CPython's two `quote` values) + 1020
+    # per-byte answers (every byte 1..255 x both values), on both backends,
+    # ~0.1 GB peak.
+    'test_formal_html.py': _FORMAL_SUITE_REASON,
+    'test_formal_posixpath.py': _FORMAL_SUITE_REASON,
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
     'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,

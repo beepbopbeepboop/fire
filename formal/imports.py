@@ -462,6 +462,42 @@ HOST_MODELLED = frozenset((
     #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
     "collections",
     "heapq", "bisect", "csv", "difflib", "base64",
+    #   `textwrap`  — LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`,
+    #     `dedent` and `indent` only.  It is pure string computation over the
+    #     `str_len`/`str_put`/`str_prefix` that
+    #     `formal/hostmods/os/_syscalls.mojo` already has, and the two are the
+    #     two names five files in this repository spell — `dedent` 78 times and
+    #     `indent` twice, with not one keyword argument between them.
+    #
+    #     Checked case for case against CPython's own `textwrap` by
+    #     `test_formal_textwrap.py` on BOTH backends: a 28-case `dedent` corpus
+    #     built so that each case separates one rule from another (a whitespace
+    #     line REPLACED rather than trimmed, a tab against a space at the same
+    #     offset, 0x1C-0x1F which `isspace` is true of and `splitlines` is not)
+    #     and a 24-case `indent` corpus over three prefixes, plus a sweep of all
+    #     127 non-NUL ASCII bytes through both spellings.  Its `corpus` group
+    #     additionally pins the row that DISCRIMINATES CPython's lexicographic
+    #     min/max margin from the minimum-of-run-lengths that looks equivalent
+    #     and is not, so the corpus cannot quietly stop separating them.
+    #
+    #     It is the row that bought 3 files: `test_runtime_diff.py`,
+    #     `test_interp_oracle.py` and `test_comptime_parity.py` each stopped
+    #     on `import textwrap` and on NOTHING ELSE, which is measurable only
+    #     because `formal/hostmods/tempfile.mojo` landed first and unmasked
+    #     them — the b7 sweep's `--host` ranking does not list `textwrap` at
+    #     all, because in that run all three were still stopped by `tempfile`.
+    #
+    #     It is the module that made the OTHER two measurements necessary rather
+    #     than optional: `str.isspace()` and `str.splitlines` are DIFFERENT byte
+    #     sets, and `dedent` splits on `\n` alone while `indent` uses
+    #     `splitlines`, so one shared line-walker would have been a walker with a
+    #     flag. `wrap`/`fill`/`shorten` are absent and the module's own
+    #     docstring says why — `wrap` is a sequence and `fill` is its answer
+    #     joined, and the only transcription of the greedy fill in this tree
+    #     (`formal/hostmods/argparse.mojo`'s `_wrap_into`) is a function of a
+    #     help string at ONE width, so re-exporting it under this name would be
+    #     a second copy of it rather than this module's `fill`.
+    #     Five files import it; what of it is absent is at the top of the module.
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `shlex`  — a state machine over a string, the same shape as `re` and
@@ -482,11 +518,36 @@ HOST_MODELLED = frozenset((
     #     The ranking that found them is `tools/formal_sweep_causes.py --host`,
     #     which is what turned "UNTIERED" from a label into a list of six
     #     modules and ten files.
-    #   `html`  — `escape`/`unescape` are five character replacements over a
-    #     string: the `shlex` shape, and `os/_syscalls.mojo`'s `str_replace_all`
-    #     is the primitive. One file wants it (`tools/md2html.py`, `html.escape`
-    #     x1 measured), so the row is one file — which is the honest number and
-    #     not a reason to place it anywhere else.
+    #   `html`  — `formal/hostmods/html.mojo`, `escape` alone, checked by
+    #     `test_formal_html.py` on both backends: 112 corpus answers (28 cases x
+    #     CPython's two `quote` values) and 1020 per-byte answers (every byte
+    #     1..255 x both values), every one compared with CPython's own
+    #     `html.escape`. One file wants it (`tools/md2html.py`, `html.escape`
+    #     x6 measured), so the row is ONE file, which is the honest number.
+    #
+    #     What the corpus is FOR is the ORDER: CPython replaces `&` FIRST, so the
+    #     `&` that the later replacements introduce is never itself replaced
+    #     (`escape("&amp;")` is `"&amp;amp;"`). A version that replaced it last
+    #     agrees with CPython on every string with no `&` in it — which is most
+    #     of the strings this function exists NOT to be called on — and
+    #     disagrees on every string with one. Four of the 28 cases are `&`-bearing
+    #     for that and the other 24 are there so a reorder cannot be the only
+    #     thing being tested.
+    #
+    #     `quote` is REQUIRED and not defaulted: a call from another image does
+    #     not materialize a callee's defaults
+    #     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), and
+    #     CPython's default is `True`, so a caller passes 1.
+    #
+    #     `unescape` is absent and the reason is its SIZE, not its difficulty:
+    #     `html.entities.html5` is 2231 entries (measured), the answer is a table
+    #     lookup per reference, and the longest-match rule means a module carrying
+    #     the commonest twenty names would silently mangle every reference
+    #     outside them. It is a name to add with its table, not to approximate.
+    #     `html.parser`/`HTMLParser` is absent because a configured parser is at
+    #     least three words where a value is one, so `test_md2html.py` still does
+    #     not build; `tools/md2html.py`, which imports `html` for `escape` alone,
+    #     does.
     #   `datetime`  — a CLOCK plus calendar arithmetic, and both halves are
     #     reachable: `formal/hostmods/time.mojo` has every clock `datetime` can
     #     read, and the arithmetic is integer work. What is NOT reachable is its
@@ -504,30 +565,45 @@ HOST_MODELLED = frozenset((
     #     than a new capability. Both files that want it
     #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
     #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
-    # `posixpath` WAS HERE and left on 2026-10-03, and its entry was the reason
-    # the removal is a spelling rather than a capability: the model was already
-    # written (`formal/hostmods/os/path/__init__.mojo` IS CPython's `posixpath`,
-    # its own header says so, and `test_formal_os.py` compares every answer
-    # against CPython's own), and what a file writing `import posixpath` got
-    # instead was a module-RESOLUTION failure, because the resolver looks for a
-    # source NAMED `posixpath`. `formal/hostmods/posixpath.mojo` is that source:
-    # every public name re-exported, which is what `os/__init__.mojo` already
-    # does for its own five. `test_formal_os.py` runs its whole path corpus
-    # through BOTH spellings and compares both against CPython, so the
-    # re-export is measured rather than asserted.
-    #   `textwrap`  — a state machine over a string, the same shape as `re` and
-    #     `fnmatch`.  LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`:
-    #     `dedent` and `indent` are pure string computation over the
-    #     `str_len`/`str_lead`/`str_find`/`str_cmp` that
-    #     `formal/hostmods/os/_syscalls.mojo` already has, checked case for
-    #     case against CPython's own by `test_formal_textwrap.py` — including
-    #     the row that discriminates CPython's lexicographic min/max margin
-    #     from the minimum-of-run-lengths that looks equivalent and is not.
-    #     `wrap`, `fill` and `shorten` are absent: a rendering WIDTH is the
-    #     subject and no file here asks for one.  Five files in this
-    #     repository import it, spelling `dedent` 78 times and `indent`
-    #     twice; what of it is absent is at the top of the module.
-    "shlex", "html", "datetime", "resource",
+    "shlex", "datetime", "resource",
+    #   `posixpath`  — LEFT on 2026-10-03 for `formal/hostmods/posixpath.mojo`,
+    #     and it is **A SPELLING, not a capability**: every one of its thirty
+    #     functions is a one-line forward to
+    #     `formal/hostmods/os/path/__init__.mojo`, which IS CPython's
+    #     `posixpath` (its own header says so) and which `test_formal_os.py`
+    #     already checks against CPython's own on both backends. What a file
+    #     writing `import posixpath` got before this was a module-RESOLUTION
+    #     failure, because the resolver looks for a source NAMED `posixpath`.
+    #     `os/__init__.mojo` already does the same forwarding for its own five
+    #     names, so this row is the same mechanism applied to a second module.
+    #
+    #     `test_formal_posixpath.py` checks it twice, against two different
+    #     oracles, because a spelling module has two ways to be wrong and CPython
+    #     can only see one of them: `forward` compares every answer with
+    #     CPython's own `posixpath`, and `same` runs `posixpath.f(x)` and
+    #     `os.path.f(x)` in the SAME IMAGE and requires them equal, element for
+    #     element. A forward that called the wrong name or dropped an argument
+    #     would agree with CPython on most of the corpus and disagree with
+    #     `os.path` on the rest; only the second comparison sees that.
+    #     `test_formal_os.py`'s `posixpath` group runs its WHOLE path corpus
+    #     through this spelling as well, against the same CPython answers, so
+    #     the forwarding is measured rather than asserted.
+    #
+    #     The measurement that shaped the file is why it is thirty `def`s and
+    #     not six import lines: `reflect.collect_exports_src` publishes the
+    #     functions a module DEFINES, so a bare `from os.path import dirname`
+    #     re-export builds and then a QUALIFIED call through it has no symbol to
+    #     bind — and that is not specific to this module, it is what CPython's
+    #     own `os` gets for the names it forwards (`os.isfile(...)`). The call
+    #     inside each forward is therefore spelled `os.path.f(...)`: the bare
+    #     spelling shadows the import and recurses to a stack overflow, and an
+    #     ALIASED import binds a symbol the body cannot find at load. Both were
+    #     built and run; the module's docstring has the measurements.
+    #
+    #     One file wants this spelling (`test_formal_os.py`, measured — thirteen
+    #     distinct `posixpath.` names), and that same file spells `os.path`
+    #     everywhere else, so the row is ONE file and is reported as one rather
+    #     than as the capability it is not.
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
     #     over a source larger than its own copy buffer, `copy`/`copy2`'s

@@ -79,6 +79,11 @@ ADMITTED_COUNTS = {
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
     "hashlib": 0,
+    # `escape` is five ordered substring replacements over bytes a string already
+    # is, and every one of the 1132 answers `test_formal_html.py` compares with
+    # CPython is computed rather than looked up. There is no host fact left over
+    # to admit, which is what the zero is measuring.
+    "html": 0,
     "io": 0,
     "json": 0,
     "math": 0,
@@ -86,12 +91,12 @@ ADMITTED_COUNTS = {
     "os._syscalls": 0,
     "os.path": 0,
     "pathlib": 0,
-    # A RE-EXPORT, and its zero is the claim: `formal/hostmods/posixpath.mojo`
-    # publishes `os/path/__init__.mojo`'s names and admits nothing of its own,
-    # because everything it publishes is computed. It is here because a module
-    # with a model that is not in this table is a claim of trust nobody counted,
-    # and this file's rule is that "not in the table" and "in the table with a
-    # zero" must be distinguishable -- only the second is allowed to be wrong.
+    # Every one of its thirty functions is a one-line forward to
+    # `formal/hostmods/os/path/__init__.mojo`, which is CPython's `posixpath`
+    # and admits nothing itself. It is a SPELLING, and a spelling has no host
+    # fact left over to admit — which is what the zero is measuring, and the
+    # reason `formal/hostmods/posixpath.mojo`'s own docstring carries the
+    # measurement about why each name is a `def`.
     "posixpath": 0,
     "platform": 0,
     "re": 0,
@@ -117,6 +122,15 @@ ADMITTED_COUNTS = {
     # `dedent` 78 times and `indent` twice, with no keywords.
     "textwrap": 0,
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
+    "textwrap": 0,                # every name it exports is arithmetic over
+                                  # bytes a string already is: dedent's margin
+                                  # is a lexicographic min/max walk and indent's
+                                  # is a splitlines scan, both compared against
+                                  # CPython's own over a corpus built so each
+                                  # rule is separable. There is no host fact
+                                  # left over to admit, which is what the zero
+                                  # is measuring — the same claim tempfile's
+                                  # zero makes, and for the same reason.
     "time": 0,
     "typing": 0,
 }
