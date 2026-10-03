@@ -92,7 +92,7 @@ because it is not a matter of taste:
     over it, and `getenv`/`putenv`/`unsetenv` stay because they are CPython's
     own functions and they answer the C library's environment rather than the
     view's — a difference CPython draws in the same place, and one
-    `test_formal_os.py` group measures both halves of.
+    `test_formal_os_backing.py`'s `environ_view` case measures both halves of.
 
   * **`os.environ` IS SPELLED `os.environ()`,** for the reason the constants
     above are functions: a module-level name is not published across a dylib
@@ -263,10 +263,12 @@ def putenv(name, value) -> int:
 
     **THIS DOES NOT TOUCH A VIEW**, and that is CPython's own rule rather than
     a limitation here: `os.putenv(k, v)` changes what `os.getenv(k)` returns and
-    leaves `os.environ` holding what it held, and `test_formal_os.py`'s `env`
-    group measures both halves of that disagreement on every run.  A caller that
-    wants both answers to move assigns into the view — `environ_set` below,
-    which is `os.environ[k] = v` and does call `putenv`.
+    leaves `os.environ` holding what it held.  Both halves of that disagreement
+    are measured on every run of `test_formal_os_backing.py`'s `environ_view`
+    case — `late-getenv` is the moved answer and `late-view-has` is the one that
+    did not — against CPython's own.  A caller that wants both answers to move
+    assigns into the view: `environ_set` below, which is `os.environ[k] = v`
+    and does call `putenv`.
     """
     return fs_setenv(name, value, 1)
 
@@ -331,9 +333,9 @@ def environ() -> Pointer[Int64]:
     that does not write to the environment before it reads it — the only way to
     do that here is `putenv`, which changes no view.  So `environ()` gives
     CPython's answer for every program whose first environment question is also
-    its first environment write, and `test_formal_os.py`'s `env` group asks
-    CPython for its side of the comparison rather than naming an expected
-    string.
+    its first environment write, and `test_formal_os_backing.py`'s
+    `environ_view` case asks CPython for its side of the comparison rather
+    than naming an expected string.
 
     `0` when the host will not name the environment at all, which
     `os/_syscalls.mojo`'s `fs_environ_vec` says how it finds it and why it can
