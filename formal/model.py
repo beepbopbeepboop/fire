@@ -20471,6 +20471,130 @@ def construction_keyword_refusal(name: str, keys, why: str,
             f"`{name}()` and assign the fields")
 
 
+def keyword_spread_refusal(subject: str, operand: str) -> str:
+    """Why `S(a=1, **m)` / `f(a=1, **m)` is refused: the KEYS are not knowable.
+
+    `subject` is the phrase the refusal is about, already spelled by its caller
+    in that caller's own terms — `constructing P`, `call f()` — because the two
+    sites that raise it are different constructs and a message that named the
+    wrong one would send the reader to the wrong line, which is the failure mode
+    `bugs/FORMAL_known_limits.md` records.
+
+    ARCH-FREE and asked from the shared plan (`struct_construction_plan`), which
+    is where the false sentence it replaces was produced.
+
+    **The sentence it replaces was false about the program.** `**m` reaches the
+    AST as an entry of `args` wrapped in `UnaryOp('**')`, and the field binding
+    zipped `args` against the FIELD LIST, so the spread was read as a POSITIONAL
+    value: `S(a=1, **{'b': 2})` bound `a` to the whole mapping and then reported
+    that field `a` had "more than one value" — a duplicate the source does not
+    contain — and one keyword fewer would have stored the mapping's own word
+    into `a`'s slot. A literal spread is now un-spread into the keyword list
+    before any of that, so this message is only reached by a spread whose keys
+    cannot be read at the construction site.
+
+    **CPython agrees with the refusal**, which is what makes it a limitation and
+    not a defect: `S(a=1, **{"a": 2})` is a run-time `TypeError` there too, and
+    the only way to know which is which is to know the keys. Answering it the
+    other way — "the explicit keywords win and the spread fills the rest" —
+    would silently accept the program the rule exists to catch.
+
+    The last sentence names the OTHER half of the gap, because a reader who
+    reaches for `**kwargs` hits it immediately and it is the true blocker: a
+    `**`-PARAMETER is not readable on this path at all — a formal value is one
+    64-bit word and a callee has no variadic ABI to find the extra arguments in
+    — so the keys cannot be carried through one either. See
+    `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` for the gimple-side
+    half of the same question.
+    """
+    return (
+        f"{subject} spreads `{operand}` with `**`, and a spread's "
+        f"KEYS are not knowable at the construction site: the mapping is a value "
+        f"this path cannot enumerate, so there is no saying which field each key "
+        f"names, and `S(a=1, **{{'a': 2}})` is a run-time `TypeError` in "
+        f"CPython too — the only way to tell it from `S(a=1, **{{'b': 2}})` is "
+        f"to know the keys. A spread of a dict LITERAL is un-spread and "
+        f"answered like any other keyword (both keys and values are in the "
+        f"source), so write the keywords out, or pass the mapping as an ordinary "
+        f"parameter this path can carry. Note that a `**`-PARAMETER cannot be "
+        f"the operand here either: a formal value is one 64-bit word and this "
+        f"target has no variadic ABI, so a callee cannot read its own "
+        f"`**kwargs` — which is the capability to build before a spread through "
+        f"one is answerable."
+    )
+
+
+def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
+    """`(args, kwargs, refusal)` — `**` spreads folded in, or why one cannot be.
+
+    A `**mapping` is not an argument: it is a set of arguments whose NAMES are in
+    the mapping. `fire_compiler.py`'s `_parse_paren_args` keeps the `**` marker
+    alive by appending `UnaryOp('**', mapping)` to `args`, which is right for an
+    interpreter (it splices at call time) and was wrong here, because the field
+    binding zips `args` against the field list and so read the spread as the
+    next POSITIONAL value.
+
+    **A dict LITERAL is un-spread, with its VALUES**, which is the whole of what
+    makes this an added capability rather than a new refusal: `S(a=1, **{'b':
+    2})` is ordinary Python, both keys and both values are written in the
+    source, and a dict subscript by a literal key already lowers (`d['a']` is
+    1), so the keyword list the rest of the plan sees is exactly the one the
+    source wrote. The duplicate check then applies unchanged, which is what keeps
+    `S(a=1, **{'a': 2})` a refusal — CPython's `TypeError` — rather than
+    something this path invented.
+
+    Any other operand (a name, a computed dict, a call) is refused by name: the
+    keys are not in the source at this point and guessing them is the fabrication
+    `formal/known_limits.md` calls a false PASS. A `*` spread is deliberately NOT
+    touched: it is a POSITIONAL expansion rather than a keyword one, it has its
+    own refusal, and it is not this function's business.
+    """
+    plain, folded, refusal = [], list(kwargs), None
+    for arg in args:
+        if isinstance(arg, F.UnaryOp) and arg.op == "**":
+            items = literal_dict_items(arg.operand)
+            if items is None:
+                refusal = keyword_spread_refusal(name, spelled(arg.operand))
+                break
+            folded.extend(items)
+            continue
+        plain.append(arg)
+    return plain, folded, refusal
+
+
+def literal_dict_items(expr):
+    """`[(key, value)]` for a dict LITERAL with literal keys, else None.
+
+    None for anything whose keys are not written where the mapping is: a name, a
+    call, a comprehension, a dict with a non-literal key. `None` is what the
+    caller turns into a refusal, so the conservative answer has to be the
+    un-answerable one — a key that is computed could be any of the struct's
+    fields, or none of them.
+
+    Both halves are needed, not just the keys: the value is what the field gets
+    stored, and a spread whose keys are known but whose values are computed
+    would have to be evaluated through the mapping, which is the read this path
+    has no representation for. `StringLiteral` and `IntLiteral` keys only, since
+    those are the two a struct field name can be spelled as in a dict display
+    that this parser produces (`{'a': 1}` is a keyword; `{"a": 1}` is a
+    string).
+    """
+    if not isinstance(expr, F.DictExpr):
+        return None
+    out = []
+    for pair in (getattr(expr, "pairs", None) or ()):
+        key = pair[0] if isinstance(pair, (list, tuple)) and pair else None
+        value = pair[1] if isinstance(pair, (list, tuple)) and len(pair) > 1 \
+            else None
+        if isinstance(key, F.StringLiteral):
+            out.append((key.value, value))
+        elif isinstance(key, F.IntLiteral):
+            out.append((str(key.value), value))
+        else:
+            return None
+    return out
+
+
 def construction_nested_slot_refusal(name: str, field: str, arg,
                                     nested_name: str) -> str:
     """A construction argument landing on a field the constructor PLACED.
@@ -20591,6 +20715,17 @@ def struct_construction_plan(struct_def, call, decls: dict,
     candidates = candidates or {}
     args = list(getattr(call, "args", None) or [])
     kwargs = list(getattr(call, "kwargs", None) or [])
+    # A `**` SPREAD is folded into the keyword list before anything reads
+    # `args`, and this is the only place it can be: `args` is zipped against the
+    # field list further down, so a spread left in it would be read as a
+    # POSITIONAL value — which is how `S(a=1, **{'b': 2})` came to say that
+    # field `a` had "more than one value". `_unspread_keyword_mappings`'s own
+    # docstring has the measurement and the reason a literal spread is answered
+    # rather than refused.
+    args, kwargs, spread_refusal = _unspread_keyword_mappings(
+        args, kwargs, f"constructing {name}")
+    if spread_refusal is not None:
+        return (None, spread_refusal)
     slots = struct_frame_slots(struct_def)
     shapes = struct_init_shapes(struct_def)
     summary = struct_field_summary(struct_def)
@@ -26837,6 +26972,16 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         should be told so."""
     shape = function_param_shape(fn)
     positional = shape.positional
+    # A `**` SPREAD is folded in before the arity is counted, for the reason
+    # `_unspread_keyword_mappings` gives: the spread arrives in `args`, so
+    # counting it as a positional both invented an argument (and, with one fewer
+    # keyword, reported `multiple values for argument` about a duplicate the
+    # source does not contain — measured) and put a mapping where a value
+    # belonged.
+    args, kwargs, spread_refusal = _unspread_keyword_mappings(
+        list(args or []), list(kwargs or []), f"call {name}()")
+    if spread_refusal is not None:
+        return None, spread_refusal
     slots: list = list(args or [])
     if len(slots) > len(positional):
         if not shape.variadic:
@@ -26848,13 +26993,13 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         # and have nowhere to go. See the docstring.
         slots = slots[:len(positional)]
     slots.extend([None] * (len(positional) - len(slots)))
-    for k, v in (kwargs or []):
+    for k, v in kwargs:
         idx = shape.index_of(k)
         if idx is None or shape.names[idx] not in positional:
             if shape.kwarg is not None:
                 continue        # **kwargs swallows it; no register to put it in
             return None, f"call {name}(): unexpected keyword argument {k!r}"
-        if idx < len(args or []):
+        if idx < len(args):
             return None, (f"call {name}(): multiple values for argument "
                           f"{k!r}")
         if slots[idx] is not None:

@@ -8823,6 +8823,119 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "refuse:self is assigned o in Box_set()", None),
 ]
 
+# ── a `**` SPREAD ──────────────────────────────────────────────────────
+#
+# `**mapping` reaches the AST as an entry of `args` wrapped in `UnaryOp('**')`,
+# which is right for an interpreter (it splices at call time) and was wrong here:
+# the field binding zipped `args` against the FIELD LIST, so a spread was read as
+# the next POSITIONAL value.  Measured on both architectures: `S(a=1,
+# **{'b': 2})` was refused with ‘gives field a more than one value’ — a duplicate
+# the source does not contain — and one keyword fewer would have stored the
+# mapping's own word into `a`'s slot.  The rows below are the three answers a
+# spread now has, and the middle one is the refusal that must survive them: a
+# literal spread's DUPLICATE is CPython's own `TypeError`, and the check that
+# catches it is the ordinary keyword check, which is the point of un-spreading
+# rather than special-casing.
+SPREAD_CONSTRUCTION_CASES = [
+    # The capability: both keys and both values are written in the source, and a
+    # dict subscript by a literal key already lowers, so this is ordinary
+    # Python with a representation. `12` is `a * 10 + b` = 1, 2 in CPython too.
+    ("a_dict_literal_spread_fills_the_fields_it_names",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **{'b': 2})\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    p = P(a=1, **{'b': 2})\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # The same on an ordinary CALL, which is the other reader of `args` —
+    # `bind_call_arguments`, the one implementation both backends use. It is a
+    # separate row because a fix that only taught the construction path would
+    # leave this one saying "multiple values for argument 'a'", which is the same
+    # fabrication about a different construct.
+    ("a_dict_literal_spread_fills_a_calls_keywords",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\", f(a=1, **{'b': 2}))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+]
+
+SPREAD_REFUSALS = [
+    # THE DUPLICATE, which is CPython's `TypeError: got multiple values for
+    # argument a` and is now reported by the ordinary keyword check — the same
+    # sentence, arrived at honestly. Without this row a fix that dropped the
+    # duplicate check for spreads would pass the two above.
+    ("a_literal_spread_that_duplicates_a_keyword_is_still_a_duplicate",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **{'a': 2})\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:more than one value", None),
+    # A spread whose keys are NOT in the source, at a construction — refused by
+    # name, with the reason and the way out.
+    ("a_spread_through_a_mapping_name_is_refused_by_name",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:constructing P spreads `d` with `**`", None),
+    # …and through a `**`-PARAMETER, which is the corpus case
+    # (`formal/x86_64_decode.py`'s `insn()` helper forwards `**kw`) and the shape
+    # the refusal names as the real blocker: a formal value is one 64-bit word
+    # and this target has no variadic ABI, so the callee cannot read its own
+    # `**kwargs` at all. The row is here so that, when that capability lands,
+    # this is the row that says so.
+    ("a_spread_through_a_kwargs_parameter_is_refused_by_name",
+     "struct Insn:\n"
+     "    var offset: Int\n"
+     "    var length: Int\n"
+     "\n"
+     "def mk(off: Int, ln: Int, **kw) -> Insn:\n"
+     "    return Insn(offset=off, length=ln, **kw)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var i = mk(1, 2)\n"
+     "    printf(\"%d\", i.offset)\n"
+     "    return 0\n",
+     "refuse:constructing Insn spreads `kw` with `**`", None),
+    # The same on a call, so the two readers cannot drift: one message, one
+    # cause, and the subject spelled by the construct it is about.
+    ("a_spread_through_a_mapping_name_is_refused_by_name_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "refuse:call f() spreads `d` with `**`", None),
+]
+
 CONSTRUCTION_REFUSALS = [
     # ── a declared `__init__`, which makes `S(...)` a CALL ──
     #
@@ -16443,6 +16556,7 @@ def main():
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
                   + SOLE_FIELD_CTOR_STORE_CASES
+                  + SPREAD_CONSTRUCTION_CASES + SPREAD_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
@@ -16475,6 +16589,7 @@ def main():
     pair_names = ({c[0] for c in TYPE_APPLICATION_CASES}
                   | {c[0] for c in COMPTIME_ALIAS_PAIR_CASES}
                   | {c[0] for c in COMPTIME_ATTRIBUTE_CASES}
+                  | {c[0] for c in SPREAD_CONSTRUCTION_CASES}
                   | {c[0] for c in OVERLOAD_LAYOUT_CASES}
                   | {c[0] for c in ONE_FIELD_MUTATOR_CASES}
                   | {c[0] for c in SOLE_FIELD_CALLEE_CASES}
@@ -16485,10 +16600,11 @@ def main():
                   | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
+                     + SPREAD_CONSTRUCTION_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
-                    + SOLE_FIELD_CALLEE_CASES
+                     + SOLE_FIELD_CALLEE_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
                      + SET_UNION_CASES + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
