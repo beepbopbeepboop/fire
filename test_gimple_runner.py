@@ -7630,6 +7630,30 @@ def main():
         'fgm_a.py': "from fgm_b import N\n\ndef main():\n    N = 'local'\n    print(N)\nmain()\n",
     }, 'fgm_a.py')
 
+    # A container-of-struct literal in an IMPORTED module. The per-struct
+    # element-repr shims (`_mojo_elem_repr_P`) and the `void *` aliases of
+    # them are declared in the ROOT module's reflection block, which
+    # `gen_module_impl` splices in AFTER the imported modules' code — so this
+    # list's `mojo_list_set_elem_repr(t, _mojo_elem_repr_P)` used to name a
+    # function that was not yet declared. gcc's `__GIMPLE` parser cannot
+    # convert a function designator to `void *` by any means at all (a bare
+    # assignment is "non-trivial conversion in 'function_decl'", a C-style
+    # cast is "invalid operand in unary operation"), so 59 such calls across
+    # the self-host closure took out the functions containing them. Same
+    # family as the from-import rows above, in the same emission area, and
+    # only visible in a multi-module closure — a single-TU program declares
+    # and defines the shim in one block and never sees it.
+    _check_agrees_with_cpython("imported_module_list_of_structs_reprs_them", {
+        'fgn_b.py': "class P:\n"
+                    "    def __init__(self, x):\n"
+                    "        self.x = x\n"
+                    "    def __repr__(self):\n"
+                    "        return 'P<' + self.x + '>'\n"
+                    "def make():\n"
+                    "    return [P('a'), P('b')]\n",
+        'fgn_a.py': "import fgn_b\n\ndef main():\n    print(fgn_b.make())\nmain()\n",
+    }, 'fgn_a.py')
+
     # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
     # and str(container) read the container's raw header bytes as a C
     # string (`_stringify_value` had no container branch at all, unlike

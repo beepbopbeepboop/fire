@@ -679,24 +679,53 @@ def _render_struct_typedef_body(struct_name, fields):
 
 
 
-def _emit_reflection_dispatch(self, parts):
-    """Emit the generic reflection dispatch (getattr/setattr/repr/
-    dataclasses.fields/asdict). Extracted from gen_module_impl so its
-    `sn` struct-name loop variable lives in a fresh function scope: in
-    gen_module_impl's ~6000-line body `sn` was cross-unified to int64_t
-    by unrelated integer uses on the self-hosted backend, so every
-    `f"..._mojo_repr_{sn}"` here concatenated a boxed pointer and
-    crashed in mojo_str_cat/strlen on the shimless --dump-full path."""
-    # Build `reflect_structs` as an explicitly `_as_str`-typed list, NOT
-    # `sorted(setA & setB & setC)`. `self._emitted_structs` /
-    # `self._struct_allocs_needed` carry int64_t-tagged / boxed slots on
-    # the self-hosted backend, so the set intersection and the resulting
-    # `sorted()` loop var typed to int64_t — every `f"..._mojo_repr_{sn}"`
-    # / `f"..._mojo_getattr_{sn}"` f-string below then concatenated a
-    # boxed pointer, crashing in `mojo_str_cat` → `strlen()` on garbage
-    # (crash-report bt: `_platform_strlen` ← `mojo_str_cat` ←
-    # `gen_module_impl`, recursing through `_compile_imported_module` on
-    # a shimless `--dump-full`).
+def _reflect_struct_names(self) -> list:
+    """The structs `_emit_reflection_dispatch` emits helpers for, in content
+    order, as an explicitly `_as_str`-typed list.
+
+    Cached on the gen, and computed ONCE for the whole emission, because two
+    passes now need the identical list: `_emit_reflection_fwd_decls` (which
+    runs BEFORE the imported modules' code is spliced into the preamble,
+    because that code CALLS these helpers) and `_emit_reflection_dispatch`
+    (which emits their definitions). A forward declaration for a struct the
+    definition pass skipped is a `static` function declared and never defined,
+    and C's error for that is "used but never defined" — a different hard
+    failure from today's "implicit declaration", so a disagreement between
+    the two passes would trade one broken program for another. One list, one
+    cache, no possibility of drift.
+
+    NOT `sorted(setA & setB & setC)`. `self._emitted_structs` /
+    `self._struct_allocs_needed` carry int64_t-tagged / boxed slots on
+    the self-hosted backend, so the set intersection and the resulting
+    `sorted()` loop var typed to int64_t — every `f"..._mojo_repr_{sn}"`
+    / `f"..._mojo_getattr_{sn}"` f-string then concatenated a
+    boxed pointer, crashing in `mojo_str_cat` → `strlen()` on garbage
+    (crash-report bt: `_platform_strlen` ← `mojo_str_cat` ←
+    `gen_module_impl`, recursing through `_compile_imported_module` on
+    a shimless `--dump-full`).
+
+    Iterate `struct_field_types`' keys in CONTENT order and filter in
+    place — the result list is already sorted, no trailing `sorted()`.
+
+    `sorted(self.struct_field_types)` (the dict itself, not `.keys()`)
+    lowers to `mojo_dict_sorted_keys` → `mojo_list_sorted_str`, a genuine
+    string-content sort — the container-type dispatch in `_lower_sorted`
+    keys on `MojoDict *`, which `.keys()` would have already unwrapped. An
+    earlier revision built `_rs_names` as a `set()` and did
+    `sorted(_rs_names)` to reach `mojo_set_sorted` instead — but this
+    compiler stores these boxed `char *` names through the set's INT view,
+    so every slot carries `tag == 0` and `mojo_set_sorted` sorted them as
+    raw int64_t ADDRESSES and handed back pointer-ints; the reflection
+    emit loop's `self.struct_field_types.get(sn)` then missed on every one
+    and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
+    (regressed struct_def/class_methods in test_ab_native).
+
+    Ordering here is load-bearing beyond determinism: it drives the struct
+    walk order, hence the `_str_pool` intern order, hence every `_slit_N` in
+    the output."""
+    _cached = getattr(self, '_reflect_structs_cache', None)
+    if _cached is not None:
+        return _cached
     _es_str = set()
     for _esx in self._emitted_structs:
         _es_str.add(_as_str(_esx))
@@ -704,42 +733,119 @@ def _emit_reflection_dispatch(self, parts):
     for _sanx in self._struct_allocs_needed:
         if _ptr_slot_in_range(_sanx):
             _san_str.add(_as_str(_sanx))
-    # Iterate `struct_field_types`' keys in CONTENT order and filter in
-    # place — the result list is already sorted, no trailing `sorted()`.
-    #
-    # `sorted(self.struct_field_types)` (the dict itself, not `.keys()`)
-    # lowers to `mojo_dict_sorted_keys` → `mojo_list_sorted_str`, a genuine
-    # string-content sort — the container-type dispatch in `_lower_sorted`
-    # keys on `MojoDict *`, which `.keys()` would have already unwrapped. An
-    # earlier revision built `_rs_names` as a `set()` and did
-    # `sorted(_rs_names)` to reach `mojo_set_sorted` instead — but this
-    # compiler stores these boxed `char *` names through the set's INT view,
-    # so every slot carries `tag == 0` and `mojo_set_sorted` sorted them as
-    # raw int64_t ADDRESSES and handed back pointer-ints; the reflection
-    # emit loop's `self.struct_field_types.get(sn)` then missed on every one
-    # and silently skipped ALL the `_mojo_repr_*`/`_mojo_getattr_*` helpers
-    # (regressed struct_def/class_methods in test_ab_native).
-    #
-    # Ordering here is load-bearing: it drives the struct walk order, hence
-    # the `_str_pool` intern order, hence every `_slit_N` in the output.
     _rs_names = []
     for _rsk in sorted(self.struct_field_types):
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
             _rs_names.append(_rsk)
-    reflect_structs = _rs_names
+    self._reflect_structs_cache = _rs_names
+    return _rs_names
+
+
+def _reflect_emitted_names(self) -> list:
+    """`_reflect_struct_names` minus the field-less structs — the ones
+    `_emit_reflection_dispatch` actually emits a helper for, and therefore
+    the only ones that may be forward-declared. Every dispatch table in that
+    function is driven from this list rather than re-deriving the same
+    condition, so a table can never reference a helper that was skipped.
+
+    It used to re-test `if self.struct_field_types.get(sn)` inside each
+    join's generator expression; self-hosted, those genexpr `if` clauses
+    did not filter, so the tables listed EVERY reflect struct while this
+    loop correctly skipped the field-less ones — emitting
+    `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
+    that was never generated ("implicit declaration of function
+    '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
+
+    Cached for `_reflect_struct_names`'s reason: the forward-declaration pass
+    and the definition pass must agree exactly."""
+    _cached = getattr(self, '_reflect_emitted_cache', None)
+    if _cached is not None:
+        return _cached
+    _out = []
+    for _rsn in _reflect_struct_names(self):
+        if len(self.struct_field_types.get(_rsn, {})) > 0:
+            _out.append(_rsn)
+    self._reflect_emitted_cache = _out
+    return _out
+
+
+def _emit_reflection_fwd_decls(self, parts):
+    """Every DECLARATION `_emit_reflection_dispatch`'s definitions need,
+    emitted ahead of the imported modules' code.
+
+    C has no two-pass declarations, so in one translation unit a call must be
+    preceded by its declaration. `gen_module_impl` splices every inline-
+    compiled module's whole output — function bodies included — into the
+    preamble, and that code CALLS these helpers by name
+    (`mojo_list_set_elem_repr(t, _mojo_elem_repr_IntLiteral)` from a list
+    literal in an imported module), while the block emitting both the
+    forward declarations and the definitions ran after the splice. Measured
+    on the self-host closure: 59 `'_mojo_elem_repr_<Struct>' undeclared`
+    errors, every one of them an implicit declaration gcc resolves to
+    `int` — so the call compiled, the pointer it returned was truncated to
+    32 bits, and every such container's element repr in the SELF-HOSTED
+    compiler was garbage (bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md,
+    which recorded this family as a by-product of its own).
+
+    Kept as declarations-only and kept in ONE place — this function — rather
+    than duplicated ahead of the splice, so the definition pass emits
+    definitions and nothing else and the two halves cannot drift.
+    """
+    parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
+    parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
+    parts.append("static char * _mojo_dispatch_repr (void *);")
+    parts.append("static char * _mojo_repr_list (MojoList *);")
+    parts.append("static char * _mojo_repr_dict (MojoDict *);")
+    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
+    parts.append("static char * _mojo_repr_pair (MojoList *);")
+    _emitted = _reflect_emitted_names(self)
+    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
+                      for sn in _emitted]
+    if repr_fwd_decls:
+        parts.append("/* Forward decls for generic repr() (mutual struct references) */")
+        parts.append("\n".join(repr_fwd_decls))
+        parts.append('')
+    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
+                           for sn in _emitted]
+    elem_repr_fwd_decls += [f"static void * _mojo_elem_repr_ptr_{sn};"
+                            for sn in _emitted]
+    # The `__repr__` each shim calls, when the struct has one. A declaration
+    # only, so it is safe here for the same reason the rest of this block is;
+    # whether a given struct HAS a `char *`-returning `__repr__` is
+    # `_struct_method_csym` + `func_return_types`, both of which are already
+    # complete at the splice point (every function body in the closure, root
+    # and imported, was emitted above it). Appended BEFORE the join below —
+    # a declaration added to the list after it has been emitted is a
+    # declaration that is not there, which is how this shim's call came out
+    # an implicit declaration while the declaration half looked correct.
+    for _sn in _emitted:
+        _erep = self._struct_method_csym(_sn, '__repr__', '')
+        if self.func_return_types.get(_erep) == 'char *':
+            elem_repr_fwd_decls.append(f'extern char *{_erep} ({_sn} *);')
+    if elem_repr_fwd_decls:
+        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
+                     "(a container of structs) */")
+        parts.append("\n".join(elem_repr_fwd_decls))
+        parts.append('')
+    return elem_repr_fwd_decls
+
+
+def _emit_reflection_dispatch(self, parts):
+    """Emit the generic reflection dispatch (getattr/setattr/repr/
+    dataclasses.fields/asdict). Extracted from gen_module_impl so its
+    `sn` struct-name loop variable lives in a fresh function scope: in
+    gen_module_impl's ~6000-line body `sn` was cross-unified to int64_t
+    by unrelated integer uses on the self-hosted backend, so every
+    `f"..._mojo_repr_{sn}"` here concatenated a boxed pointer and
+    crashed in mojo_str_cat/strlen on the shimless --dump-full path.
+
+    DECLARATIONS live in `_emit_reflection_fwd_decls`, which
+    `gen_module_impl` calls BEFORE the imported modules' code is spliced into
+    the preamble — this function emits definitions only."""
+    reflect_structs = _reflect_struct_names(self)
     refl_parts = []
-    # The structs this loop actually EMITS helpers for. Every dispatch table
-    # below is driven from this list rather than re-deriving the same
-    # condition, so a table can never reference a helper that was skipped.
-    # It used to re-test `if self.struct_field_types.get(sn)` inside each
-    # join's generator expression; self-hosted, those genexpr `if` clauses
-    # did not filter, so the tables listed EVERY reflect struct while this
-    # loop correctly skipped the field-less ones — emitting
-    # `return _mojo_getattr_Layout((Layout *)obj, attr);` against a helper
-    # that was never generated ("implicit declaration of function
-    # '_mojo_getattr_Layout'", the head of fire_compiler.py's error list).
-    reflect_emitted = []
+    reflect_emitted = _reflect_emitted_names(self)
     # Every struct that gets an element-repr shim below. A SET rather than the
     # list, because the field-dump arm above asks "is there a shim for this
     # field's type?" once per field of every reflected struct, and a `sn not in
@@ -750,7 +856,6 @@ def _emit_reflection_dispatch(self, parts):
         fields = self.struct_field_types.get(sn, {})
         if len(fields) == 0:
             continue
-        reflect_emitted.append(sn)
         get_lines = []
         set_lines = []
         name_lits = []
@@ -812,18 +917,10 @@ def _emit_reflection_dispatch(self, parts):
             f"  return _r;\n}}\n"
             + asdict_part
         )
-    repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
-                      for sn in reflect_emitted]
-    # Forward decls for the element-repr shims below, which the list-literal
-    # lowering names by name (`mojo_list_set_elem_repr(t, _mojo_elem_repr_X)`)
-    # and the `__repr__` symbols they call, which are emitted with the function
-    # bodies further down the file.
-    elem_repr_fwd_decls = [f"static char * _mojo_elem_repr_{sn} (int64_t v);"
-                           for sn in reflect_emitted]
     # Same list as the getattr/setattr helpers above: this loop had its own
-    # copy of the "skip field-less structs" condition, and the forward-decl
-    # comprehension above had a third copy inside a comprehension `if` —
-    # which self-hosted does not filter. One list, one decision.
+    # copy of the "skip field-less structs" condition, and
+    # `_emit_reflection_fwd_decls` had a fourth — which self-hosted does not
+    # filter. One list, one decision: `reflect_emitted` above.
     for sn in reflect_emitted:
         fields = self.struct_field_types.get(sn, {})
         boxed = self.struct_boxed_fields.get(sn, set())
@@ -922,8 +1019,6 @@ def _emit_reflection_dispatch(self, parts):
         # `_mojo_dispatch_repr` to dispatch on.
         _erep = self._struct_method_csym(sn, '__repr__', '')
         _erep_ok = self.func_return_types.get(_erep) == 'char *'
-        if _erep_ok:
-            elem_repr_fwd_decls.append(f'extern char *{_erep} ({sn} *);\n')
         elem_repr_names.add(sn)
         refl_parts.append(
             f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
@@ -932,21 +1027,23 @@ def _emit_reflection_dispatch(self, parts):
             + (f"  return {_erep} (o);\n" if _erep_ok
                else f"  return _mojo_repr_{sn} (o);\n")
             + f"}}\n"
+            # The `void *` ALIAS of the shim, and the only spelling a
+            # `__GIMPLE` body may use to name it. Inside a `__GIMPLE`-
+            # tagged function gcc's raw GIMPLE parser cannot convert a
+            # function designator to `void *` by any means: a bare
+            # `_t = _mojo_elem_repr_Foo;` is a "non-trivial conversion in
+            # 'function_decl'" and `_t = (void *)_mojo_elem_repr_Foo;` is
+            # "invalid operand in unary operation" (a C-style cast is not a
+            # legal GIMPLE operand — see `_inc_val`'s docstring), and naming
+            # it directly as a call argument is "invalid argument to gimple
+            # call". So the conversion is done ONCE, here, at file scope,
+            # where the C frontend lowers it itself, and the bodies just
+            # read the alias. Measured: without it, every list/tuple-of-
+            # struct literal in a module imported into a closure fails to
+            # compile, because these shims are defined in the root module's
+            # block and the whole-closure ordering puts them later.
+            f"static void * _mojo_elem_repr_ptr_{sn} = (void *)_mojo_elem_repr_{sn};\n"
         )
-    parts.append("static char * _mojo_dispatch_repr (void *);")
-    parts.append("static char * _mojo_repr_list (MojoList *);")
-    parts.append("static char * _mojo_repr_dict (MojoDict *);")
-    parts.append("static char * _mojo_generic_elem_repr (int64_t);")
-    parts.append("static char * _mojo_repr_pair (MojoList *);")
-    if repr_fwd_decls:
-        parts.append("/* Forward decls for generic repr() (mutual struct references) */")
-        parts.append("\n".join(repr_fwd_decls))
-        parts.append('')
-    if elem_repr_fwd_decls:
-        parts.append("/* Forward decls for the per-struct ELEMENT REPR shims "
-                     "(a container of structs) */")
-        parts.append("\n".join(elem_repr_fwd_decls))
-        parts.append("")
     if True:
         parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
         parts.extend(refl_parts)
@@ -9518,6 +9615,20 @@ def gen_module_impl(self, stmts):
         else:
             _argstr = 'void'
         parts.append(f'extern {_as_str(_eret)} {_ecname} ({_argstr});')
+
+    # Every declaration the reflection block's definitions need, BEFORE the
+    # imported modules' code goes in below. That code CALLS those helpers by
+    # name from its own function bodies, and C has no two-pass declarations,
+    # so a declaration emitted after the splice is an implicit declaration —
+    # gcc resolves it to `int`, the returned `char *` is truncated to 32
+    # bits, and the self-hosted compiler's own container-of-struct element
+    # reprs came out garbage (59 `'_mojo_elem_repr_<Struct>' undeclared`
+    # errors on this closure; see `_emit_reflection_fwd_decls`'s own
+    # docstring). The `struct_field_types` walk at the top of this function
+    # has already run, so `self._emitted_structs` — one of the three inputs
+    # to the reflect-struct set — is complete here.
+    if self.emit_struct_defs:
+        _emit_reflection_fwd_decls(self, parts)
 
     _module_globals_insert_idx = len(parts)
     if imported_code:

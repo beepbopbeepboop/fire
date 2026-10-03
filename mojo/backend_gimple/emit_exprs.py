@@ -5191,11 +5191,20 @@ def _struct_elem_repr_shim(gen, elem_type: str) -> str:
     `reflect_structs` itself filters on, restated rather than queried so this
     needs no new cross-module table.
 
-    Returns the shim's NAME, which the caller hands to the runtime as a
-    function pointer; the runtime calls it with the slot's word. Empty string
-    for every other element type (int, str, bytes, a nested list, a dict), where
-    the runtime's own per-slot reader is already right — that is what makes
-    this a strict improvement and not a new dispatch to get wrong.
+    Returns the `void *` ALIAS of the shim — the only spelling a `__GIMPLE`
+body may use to name a function, since gcc's raw GIMPLE parser cannot convert
+a function designator to `void *` at all: a bare `_t = _mojo_elem_repr_Foo;`
+is a "non-trivial conversion in 'function_decl'", `(void *)_mojo_elem_repr_Foo`
+is "invalid operand in unary operation" (a C-style cast is not a legal GIMPLE
+operand — see `_inc_val`'s docstring), and naming it as a call argument is
+"invalid argument to gimple call". `_emit_reflection_dispatch` therefore does
+that conversion ONCE per shim, at file scope, where the C frontend lowers it
+itself (`static void * _mojo_elem_repr_ptr_Foo = (void *)_mojo_elem_repr_Foo;`),
+and this returns the alias's name.
+
+Empty string for every other element type (int, str, bytes, a nested list, a
+dict), where the runtime's own per-slot reader is already right — that is what
+makes this a strict improvement and not a new dispatch to get wrong.
     """
     if not elem_type or not elem_type.endswith(' *'):
         return ''
@@ -5204,7 +5213,7 @@ def _struct_elem_repr_shim(gen, elem_type: str) -> str:
         return ''
     if not gen.struct_field_types.get(sn):
         return ''
-    return f'_mojo_elem_repr_{sn}'
+    return f'_mojo_elem_repr_ptr_{sn}'
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
