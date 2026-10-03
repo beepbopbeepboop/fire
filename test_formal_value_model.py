@@ -500,6 +500,70 @@ FIXED_CASES = [
      "    printf(\"[%s]\", a)\n"
      "    return 0\n",
      "[]"),
+    # ── a container in a field, put there by the CONSTRUCTOR ──
+    #
+    # The container row of the same question.  A container has no LITERAL
+    # class-level default on this path (`struct_frame_representable` refuses one
+    # by name: "the default is not a literal"), so the CONSTRUCTOR is the only
+    # thing that can give the slot a value, and for a long time that door was
+    # shut: `len(self._data)` was refused with "this slot's DECLARED type is
+    # 'List[Int]' … what is missing is the VALUE", which is TRUE of a struct with
+    # no constructor and FALSE of this one, whose `__init__` is inlined at the
+    # construction site and stores `[1, 2, 3]`.
+    #
+    # `std/collections/binary_heap.mojo` is the shape this was found on, and its
+    # two halves are the two halves of the value: `len(self._data)` through a
+    # `__len__` (the receiver IS the one field), and `len(b)` through a bare
+    # name.  Both are here, and BOTH containers are in ONE image, so a
+    # classification that answered one and not the other would show up as two
+    # numbers that must agree.
+    #
+    # A PINNED expectation rather than the oracle the cases above carry, and
+    # the reason is the one `a_conversion_is_fine_until_something_writes_a_field_
+    # through_it` gives for being in FIXED_CASES: the program uses constructs
+    # CPython cannot parse at all (`struct`, `out self`, `List[Int]()`), so there
+    # is no oracle text to derive.  4 and 0 are what the SOURCE says — four
+    # elements and an empty container — and both architectures were measured to
+    # return them.
+    ("a_one_field_container_struct_measures_its_own_len",
+     "struct Sized:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3, 4]\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "    def __len__(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(n):\n"
+     "    var s = Sized()\n"
+     "    printf(\"m=%d l=%d\", s.size(), len(s))\n"
+     "    return 0\n",
+     "m=4 l=4"),
+    # The EMPTY container, which is the same program with a different blob: a
+    # zero-operand construction rather than a display.  It is here because
+    # `BinaryHeap.__init__` is `self._data = List[Self.T]()` and not a display,
+    # and because the two are lowered by DIFFERENT emitters (`_emit_empty_blob`
+    # and `_emit_list`) — a kind claimed for one says nothing about the other.
+    # 0 rather than 4 is the whole difference between the cases.
+    ("a_one_field_container_struct_built_empty_measures_zero",
+     "struct Sized:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int]()\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(n):\n"
+     "    var s = Sized()\n"
+     "    printf(\"z=%d\", s.size())\n"
+     "    return 0\n",
+     "z=0"),
 ]
 
 # ── what a holder MAY be assigned, which is what the refusal above is about ──
