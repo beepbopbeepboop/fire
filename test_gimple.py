@@ -8530,6 +8530,70 @@ print("%r" % p)
                     f"emits the definition as {_emitted!r} — the forward "
                     f"declaration is emitted once per importing module, so "
                     f"every one of them is a conflicting-types error")
+        # The `**kwargs`-slot rows, which are the same kind of hand-written
+        # claim about the same source and drifted the same way: the index
+        # `MojoFunction___call__` carried was 3, the index for the older
+        # `(self, interpreter, *args, **kwargs)`, and the method is now
+        # `(self, *args, **kwargs)`. Unlike the signature tables above this
+        # one is an ARITHMETIC input rather than a type — every consumer
+        # derives a count from it (`_lower_named_call` keeps `kw_i - 1`
+        # ordinary params, `_lower_struct_method_call` keeps
+        # `kw_i - (2 if has_vararg else 1)`), so a stale index does not
+        # mistype anything: it keeps the wrong number of leading positionals
+        # as "fixed" arguments and emits one argument too many. Measured, two
+        # "too many arguments to function 'myinterpreter_MojoFunction___call__';
+        # expected 3, have 4" in the self-host closure, one per
+        # `BoundMethod.__call__` / `BoundClassMethod.__call__`.
+        #
+        # Derived here by walking `inspect`'s parameters with the SAME rules
+        # gen_module's own registration pass uses (`self` counts, `*args`
+        # counts once however many arguments it collects), so the check is
+        # against the convention rather than against the number that happens
+        # to be right today.
+        def _kwargs_slot_index(fn) -> int:
+            """The index `**kwargs` occupies, or -1 if the def has none.
+
+            Mirrors module_gen's `_kw_i` walk: every ordinary parameter
+            advances the index, the FIRST `*args` advances it once, a second
+            `*args` (there is no second) does not, and `**kwargs` stops it."""
+            idx = 0
+            seen_star = False
+            for _p in inspect.signature(fn).parameters.values():
+                if _p.kind == _p.VAR_KEYWORD:
+                    return idx
+                if _p.kind == _p.VAR_POSITIONAL:
+                    if seen_star:
+                        continue
+                    seen_star = True
+                idx += 1
+            return -1
+
+        kw_subjects = {
+            'MojoFunction___call__': myinterpreter.MojoFunction.__call__,
+        }
+        for bare, fn in kw_subjects.items():
+            if bare not in gimple_codegen._SELFHOST_KWARGS_SLOTS:
+                problems.append(f"{bare}: absent from _SELFHOST_KWARGS_SLOTS")
+                continue
+            want = _kwargs_slot_index(fn)
+            got = gimple_codegen._SELFHOST_KWARGS_SLOTS[bare]
+            if want != got:
+                problems.append(
+                    f"{bare}: _SELFHOST_KWARGS_SLOTS says **kwargs is at "
+                    f"index {got}, the source puts it at {want} "
+                    f"({list(inspect.signature(fn).parameters)}) — every "
+                    f"caller's fixed-argument count is derived from this "
+                    f"number, so a stale one emits a wrong-arity call")
+            want_star = any(p.kind == p.VAR_POSITIONAL
+                            for p in inspect.signature(fn).parameters.values())
+            got_star = gimple_codegen._SELFHOST_KWARGS_HAS_VARARG[bare]
+            if want_star != got_star:
+                problems.append(
+                    f"{bare}: _SELFHOST_KWARGS_HAS_VARARG says {got_star}, "
+                    f"the source's *args presence is {want_star} — the "
+                    f"packing emits one C MojoList* param for *args and only "
+                    f"one MojoDict* without it")
+
         # The header's hand-written compiler entry points, against the same
         # source. Only the ones the compiled path calls on ordinary code are
         # listed; the rest of the file is runtime plumbing, not a mirror of

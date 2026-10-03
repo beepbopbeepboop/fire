@@ -2698,8 +2698,32 @@ def gen_module_impl(self, stmts):
             'Scope_define', 'Scope_get', 'Scope_set', 'Scope___init__',
             '_char_replace_impl',
         ))
-        self._func_kwargs_slot['MojoFunction___call__'] = 3
-        self._func_kwargs_has_vararg['MojoFunction___call__'] = True
+        # The hand-written `**kwargs`-slot rows for self-host callables the
+        # derived registration pass below cannot reach (it is `isinstance(s,
+        # FunctionDef)` at MODULE level, so a struct METHOD never reaches it).
+        # One table, in `gimple_codegen` beside `_SELFHOST_SIGS`, so
+        # `test_gimple.py` checks it against the real `inspect` signature the
+        # way it checks those: it read 3 against an older
+        # `MojoFunction.__call__(self, interpreter, *args, **kwargs)` and the
+        # method is now `(self, *args, **kwargs)`, so `**kwargs` is at index
+        # 2. A stale index is not an imprecision —
+        # `_lower_struct_method_call`'s vararg merge keeps
+        # `kw_i - (2 if has_vararg else 1)` leading positionals as "fixed"
+        # arguments, so 3 made it keep `f(self.interpreter, ...)`'s FIRST
+        # positional and pack only the rest, and the call went out with one
+        # argument too many against a 3-parameter definition:
+        #
+        #     myinterpreter_MojoFunction___call__ (f, _t29, _t30, kwargs);
+        #     too many arguments to function; expected 3, have 4
+        #
+        # Two of those, one per `f(self.interpreter, self.instance, *args,
+        # **kwargs)` call site (`BoundMethod.__call__` and
+        # `BoundClassMethod.__call__`), the `**kwargs` materialisation passed
+        # POSITIONALLY as well as in its own slot.
+        for _kwrow, _kwidx in gimple_codegen._SELFHOST_KWARGS_SLOTS.items():
+            self._func_kwargs_slot[_kwrow] = _kwidx
+            self._func_kwargs_has_vararg[_kwrow] = (
+                gimple_codegen._SELFHOST_KWARGS_HAS_VARARG[_kwrow])
 
         self.struct_field_types['CallExpr'] = {
             'func': 'int64_t',

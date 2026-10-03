@@ -575,6 +575,39 @@ _SELFHOST_PARAM_TYPES = {}
 for _shs_name in _SELFHOST_SIGS:
     _SELFHOST_PARAM_TYPES[_shs_name] = list(_SELFHOST_SIGS[_shs_name][1])
 
+# Where a `**kwargs` parameter sits, for the self-host callable shapes whose
+# `**kwargs` slot gen_module's own registration pass cannot derive: that pass
+# is `isinstance(s, FunctionDef)` at MODULE level, so a struct METHOD never
+# reaches it and its `_func_kwargs_slot` row has to be written by hand. The
+# value is the 0-based index of `**kwargs` in the method's own `params`
+# (`self` is index 0; a `*args` occupies ONE index however many arguments it
+# collects), which is exactly what the derived walk computes for a top-level
+# `def` — same convention, same arithmetic in every consumer:
+# `_lower_named_call`'s free-function packing counts `kw_i - 1` ordinary
+# params, and `_lower_struct_method_call`'s counts `kw_i - 2` (its `arg_pairs`
+# exclude the receiver). A row that does not match the source is not an
+# imprecision: the packing keeps the wrong number of leading positionals as
+# "fixed" arguments and the call gets one argument too many.
+#
+# Module level, not a literal inside `gen_module_impl`, so
+# `test_gimple.py`'s `handwritten_selfhost_signature_tables_match_the_source`
+# can read it and derive the index from `inspect` — the same treatment
+# `_SELFHOST_SIGS` gets. It read `3` against an older
+# `MojoFunction.__call__(self, interpreter, *args, **kwargs)`; the interpreter
+# moved to the `_interp` field and the signature is now
+# `(self, *args, **kwargs)`, so `**kwargs` is at index 2.
+_SELFHOST_KWARGS_SLOTS = {
+    'MojoFunction___call__': 2,
+}
+
+# Whether a real `*args` precedes that `**kwargs` (as opposed to `**kwargs`
+# being the method's only vararg-style parameter, which gets ONE C
+# `MojoDict *` param rather than a `MojoList *` + `MojoDict *` pair). The
+# companion fact to `_SELFHOST_KWARGS_SLOTS`, and populated with it.
+_SELFHOST_KWARGS_HAS_VARARG = {
+    'MojoFunction___call__': True,
+}
+
 
 def _selfhost_syms():
     """`[(qualified C symbol, return ctype, [param ctypes])]` for every
