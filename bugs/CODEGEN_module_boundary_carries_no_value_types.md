@@ -75,9 +75,11 @@ things are missing for `mod.f(...)`:
    that module's functions are EMITTED. An imported module is compiled — and
    its C written — from inside the importer's own pass, so the importer's
    observations cannot reach it by sharing a dict; that is the same reason
-   `_elem_types` is per-function (see
-   `bugs/hard/CODEGEN_cross_function_container_element_type.md`, which is this
-   defect one level in, for container elements instead of `char *`).
+   `_elem_types` is per-function. The doc that covered that half,
+   `bugs/hard/CODEGEN_cross_function_container_element_type.md`, was removed
+   2026-10-02 with its fix — container ELEMENT types now cross a function
+   boundary — so this wall is narrower than it was: the `char *` case above is
+   the one still standing, and the container-element case beside it is not.
 
 The sibling doc `CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md`
 holds the full statement of the contract and the other half of its defect (an
