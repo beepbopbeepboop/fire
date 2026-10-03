@@ -65,7 +65,6 @@ a real encoding.
 
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,6 +77,16 @@ R = X.Reg
 BASE = 0x1000
 """Where samples are placed. Any address works — the model addresses the code
 function absolutely — but a round one makes a failure readable."""
+
+#: Bounds for the two Lean runs this file makes (see `formal/lean.py` for the
+#: policy and the measurements behind it). These are bigger than a proof check
+#: because they are: 151 `native_decide` goals over every emittable encoding in
+#: one file, and then a `decide` per hypothesis for every step lemma. Both used
+#: to be a bare `subprocess.run(..., timeout=3600)` — a WALL bound only, on the
+#: two runs in this tree most likely to spin, since a lemma whose hypotheses
+#: are unsatisfiable reduces forever inside `decide`.
+COVERAGE_WALL_S = 3600.0
+COVERAGE_CPU_S = 3600.0
 
 
 def _reg_pairs():
@@ -643,8 +652,14 @@ def main():
     with open(src, "w") as f:
         f.write(lean_source(samps))
     env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
-    cp = subprocess.run([lean, os.path.basename(src)], cwd=workdir, env=env,
-                        capture_output=True, text=True, timeout=3600)
+    cp = L.run_lean(lean, [os.path.basename(src)], cwd=workdir, env=env,
+                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+    if cp.exceeded:
+        print("FAIL: " + cp.exceeded)
+        print("  coverage is UNMEASURED, not clean: a run that stopped early "
+              "has no encoding after the point it stopped, and reporting those "
+              "as 'the model steps them' is a green that means nothing.")
+        return 1
     text = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
@@ -673,8 +688,15 @@ def main():
     lname = "StepLemmas.lean"
     with open(os.path.join(workdir, lname), "w") as f:
         f.write(ltext)
-    cp = subprocess.run([lean, lname], cwd=workdir, env=env,
-                        capture_output=True, text=True, timeout=3600)
+    cp = L.run_lean(lean, [lname], cwd=workdir, env=env,
+                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+    if cp.exceeded:
+        print("\nFAIL: " + cp.exceeded)
+        print("  lemma applicability is UNMEASURED, not satisfied: a lemma "
+              "whose `decide` never finished is exactly the unsatisfiable-"
+              "hypothesis case this half exists to find, and reporting it as "
+              "'every hypothesis satisfiable' would hide the finding.")
+        return 1
     bad = lemma_check_failures(cp.stdout + cp.stderr, checks, lname)
     print("\nstep-lemma applicability: %d lemma(s) at %d real encoding(s), %d "
           "hypotheses — %s"

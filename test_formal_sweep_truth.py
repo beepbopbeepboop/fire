@@ -651,5 +651,424 @@ class TestInterpreterGuard(unittest.TestCase):
                          "announces a scope it cannot cover")
 
 
+# ── 5. the launcher: a Lean run that will not stop is a loud failure ────────
+#
+# On 2026-10-02 the user killed ten `lean` processes on this machine by hand,
+# some of them hundreds of CPU-hours old. Every launch site that had a bound at
+# all had a WALL bound (`subprocess.run(timeout=1200)`), and
+# `formal/x86_64_endtoend_test.py` had none, and `maxHeartbeats` does not meter
+# the thing that spins: `native_decide` and kernel reduction. So the bound has
+# to be wall AND cpu, it has to kill the tree, and it has to be impossible to
+# read as a pass. That is what these exercise, on a file that really does not
+# terminate, at a cap small enough to keep the test cheap.
+#
+# The file is `partial def` + `native_decide`, which is the cheapest genuine
+# non-terminating elaboration there is: Lean's partial fixpoint compiles to an
+# `implemented_by` that evaluates forever, and `native_decide` runs that
+# outside the heartbeat counter entirely. So it is the same failure class as the
+# processes above, not a simulation of one — measured below at ~4 s of CPU
+# before it is stopped.
+
+#: `loop 0` reduces forever, so `loop 0 = 0` is not decidable by evaluation and
+#: `native_decide` never returns from trying. Nothing here imports: the point is
+#: that a LOOP is bounded, and a test that had to import the 27 MB library to
+#: demonstrate it would cost 90 s to prove a claim about a `def`.
+LOOPING_LEAN = """partial def loop : Nat → Nat
+  | _ => loop 0
+
+theorem loop_is_zero : loop 0 = 0 := by
+  native_decide
+"""
+
+#: The negative control, and it matters that it is a REAL file rather than a
+#: mocked run: a launcher that reported "exceeded" for everything would pass a
+#: test that only ever launched a loop.
+CHECKS_LEAN = """example : (2 : Nat) + 2 = 4 := by decide
+"""
+
+
+class TestLeanLauncher(unittest.TestCase):
+    """`run_lean`'s bounds, on files that really do and really do not stop."""
+
+    def setUp(self):
+        self.lean = _lean()
+        if not self.lean:
+            self.skipTest("lean not installed (see ./lean-toolchain)")
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="lean_bounds_")
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+        self.loop = self._write("Loop.lean", LOOPING_LEAN)
+        self.checks = self._write("Checks.lean", CHECKS_LEAN)
+
+    def _write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_a_finishing_run_is_not_reported_as_exceeded(self):
+        """The control, and the reason the loop below means anything.
+
+        A launcher that reported a breach on every run — a flag whose name
+        matched the wrong argv, a bound of zero — would satisfy every other case
+        in this class.
+        """
+        run = L.run_lean(self.lean, [os.path.basename(self.checks)], cwd=self.dir)
+        self.assertIsNone(run.exceeded, "a file Lean checked said nothing: "
+                                       f"{run.exceeded}")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stdout + run.stderr, "", "and it said no error")
+
+    def test_a_looping_elaboration_is_killed_within_the_wall_bound(self):
+        """The case that cost the user ten processes: a small WALL bound, and a
+        file that would otherwise run until somebody noticed.
+
+        Three things are asserted because each is a way this could be defeated:
+        it is reported as `exceeded` (not as a normal failure, not as success),
+        the message NAMES the bound, and the exit status is not 0 — the last one
+        is the trap, because `procrun.kill_group` reaps the child itself, so
+        `Popen` reports **0** for a process that was killed, and a caller that
+        only tested `returncode == 0` would call this proof checked.
+        """
+        run = L.run_lean(self.lean, [os.path.basename(self.loop)], cwd=self.dir,
+                         wall_s=5, cpu_s=120)
+        self.assertIsNotNone(run.exceeded,
+                             "a non-terminating elaboration returned as a "
+                             "normal run: this is the bug this file exists for")
+        self.assertIn("wall", run.exceeded)
+        self.assertIn("5s", run.exceeded)
+        self.assertNotEqual(run.returncode, 0,
+                            "a killed run must not report success, whatever "
+                            "the reaper left in `returncode`")
+        self.assertLessEqual(run.wall_s, 20,
+                             "and it must not overshoot its own bound by the "
+                             "length of a kill")
+
+    def test_the_cpu_bound_fires_while_the_wall_clock_is_still_fine(self):
+        """The bound that matters on this machine, and the one that was absent.
+
+        `lean` runs a thread pool, so an elaboration that will not terminate can
+        burn CPU while its wall clock looks entirely ordinary — which is why the
+        processes the user killed were measured in CPU-hours. A wall-only bound
+        is satisfied by that run for as long as the machine is quiet.
+        """
+        run = L.run_lean(self.lean, [os.path.basename(self.loop)], cwd=self.dir,
+                         wall_s=600, cpu_s=2)
+        self.assertIsNotNone(run.exceeded,
+                             "2 s of CPU was spent and nothing said so")
+        self.assertIn("CPU", run.exceeded)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertLessEqual(run.wall_s, 30, "…and the cpu bound stopped it, "
+                                             "rather than waiting for 600 s")
+
+    def test_nothing_survives_the_bound(self):
+        """The kill is of the TREE, and this is what says so.
+
+        `kill_group` walks `ps` and kills children before parents; the assertion
+        is that the process group the run was given (`start_new_session`, which
+        is why `LeanRun.pgid` exists) holds nothing once `run_lean` returns. An
+        orphan here is not a slow test, it is one of the hundred-CPU-hour
+        processes this class is about — and it is invisible to `returncode`, to
+        the test that spawned it, and to the suite that ran it.
+        """
+        import time as _time
+        import procrun
+        run = L.run_lean(self.lean, [os.path.basename(self.loop)], cwd=self.dir,
+                         wall_s=4, cpu_s=120)
+        self.assertIsNotNone(run.exceeded)
+        self.assertNotEqual(run.pgid, 0, "no pgid means the run was never given "
+                                         "a group to kill, so the tree claim "
+                                         "below would be vacuous")
+        _time.sleep(0.5)                 # the kill is synchronous; this is slack
+        self.assertEqual(procrun.group_pids(run.pgid), [],
+                         "a process from the killed run is still running in "
+                         "its process group")
+
+    def test_a_breach_reports_no_hole_count(self):
+        """`None`, not `0`, and that is the whole difference.
+
+        A killed elaborator printed a PREFIX of the file's warnings. Reporting
+        the prefix as the count says "N holes", reporting 0 says "measured, no
+        holes", and only `None` says "nothing was measured" — which is the fact,
+        and which `_census_lines` already knows how to print.
+        """
+        ok, detail, n_sorries, exceeded = L._run_lean(
+            self.loop, self.dir, self.lean, 5)
+        self.assertFalse(ok)
+        self.assertIsNotNone(exceeded, "the breach must be its own return, not "
+                                       "something a caller infers from detail")
+        self.assertEqual(n_sorries, None,
+                         "an unmeasured census reported as a count is the "
+                         "failure this module keeps arguing against")
+        self.assertIn("lean exceeded", detail)
+
+    def test_lean_gets_its_own_bounds_too(self):
+        """`-j`, `-M` and `-T` are passed, so a runaway can stop ITSELF.
+
+        `-T` is Lean's own default (200000) rather than something larger, on
+        purpose: every generated proof overrides it with
+        `set_option maxHeartbeats 20000000`, so raising it here would buy
+        nothing and could only let a command that does NOT override it spin
+        longer. It is passed because pinning the value makes it a bound of this
+        repository's policy rather than of whatever the toolchain's default
+        happens to be.
+        """
+        flags = L.lean_flags()
+        self.assertEqual(flags, ["-j", str(L.LEAN_THREADS), "-M",
+                                 str(L.LEAN_MEMORY_MB), "-T",
+                                 str(L.LEAN_HEARTBEATS)])
+        self.assertEqual(L.LEAN_HEARTBEATS, 200000,
+                         "Lean's own default, not a raised one — raising it "
+                         "loosens every command that does not override it")
+        # `-M` is above what the work needs and not far above it. The floor is
+        # measured, not chosen: with `-M 4096` the ProofLib build FAILS ("(kernel)
+        # excessive memory consumption detected", after 43 s and 7.0 GB), so a
+        # 4 GB ceiling is not a tighter policy — it is a red suite. The fact
+        # that the largest module needs 7.8 GB is debt, and it is filed as
+        # `prooflib`'s `memwhy` in tools/suite.py rather than paid for by
+        # refusing to build the library.
+        self.assertGreaterEqual(L.LIBRARY_MEMORY_MB, 8192,
+                                "lib/ProofLib.lean peaks at 7.82 GB; below that "
+                                "the build is killed by Lean's own ceiling")
+        self.assertLess(L.LIBRARY_MEMORY_MB, 16 * 1024,
+                        "…and it is still a ceiling, not a blank cheque")
+        self.assertGreaterEqual(L.LEAN_MEMORY_MB, 6144,
+                                "the largest generated proof measured peaks at "
+                                "3.00 GB, so this is 2x the real need")
+        self.assertLess(L.LEAN_MEMORY_MB, L.LIBRARY_MEMORY_MB,
+                        "two kinds of work with two measured peaks; one number "
+                        "for both would have to be the larger")
+
+    def test_the_library_bound_is_the_only_one_an_environment_may_raise(self):
+        """The escape hatch, and why it is exactly one.
+
+        `FORMAL_LEAN_LIBRARY_*` exists because the library build is the one
+        legitimate step whose cost cannot be bounded in advance. A proof bound
+        the environment can lift is not a bound: the thing that needs lifting
+        during a runaway is precisely the thing somebody would lift it for.
+        """
+        import os as _os
+        old = {k: _os.environ.get(k) for k in
+               ("FORMAL_LEAN_LIBRARY_WALL_S", "FORMAL_LEAN_LIBRARY_CPU_S")}
+        try:
+            _os.environ["FORMAL_LEAN_LIBRARY_WALL_S"] = "4321"
+            self.assertEqual(L.library_bounds()[0], 4321.0)
+            _os.environ["FORMAL_LEAN_LIBRARY_CPU_S"] = "not-a-number"
+            self.assertEqual(L.library_bounds()[1], L.LIBRARY_CPU_S,
+                             "a typo in the one escape hatch must not turn it "
+                             "into an unbounded run")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    _os.environ.pop(k, None)
+                else:
+                    _os.environ[k] = v
+        self.assertEqual(L.library_bounds(), (L.LIBRARY_WALL_S, L.LIBRARY_CPU_S))
+
+    def test_the_bounds_are_above_what_the_real_measurements_needed(self):
+        """The policy is sized from measurement, so this pins the relationship.
+
+        The measurements are in `formal/lean.py`'s docstring, and they are the
+        reason these numbers are what they are: the largest library module build
+        measured is ~118 s and the largest generated proof ~96 s. This asserts
+        only the RATIO, because a number that moves is not what a test should
+        be about — but a bound that dropped below what the work needs would fail
+        every proof in the suite, so the direction is worth pinning.
+        """
+        self.assertGreaterEqual(L.PROOF_WALL_S, 5 * 298,
+                                "the proof bound must stay several times the "
+                                "slowest legitimate proof measured "
+                                "(formal/examples/udivmod.mojo, 297.8 s)")
+        self.assertGreaterEqual(L.LIBRARY_WALL_S, 5 * 112,
+                                "and the library bound above the slowest "
+                                "module build measured (ProofLib, 112.0 s)")
+        self.assertLess(L.PROOF_WALL_S, 45 * 60,
+                        "…and far below tools/control.py guard's 45 min net, "
+                        "which is the net UNDER a launcher that lacks these")
+
+
+# ── 6. the estate: nothing launches Lean outside the launcher ───────────────
+#
+# A bound that a second launch site does not share is not a policy, it is a
+# habit. Three files launched `lean` directly before this: `formal/lean.py`
+# (three sites, wall-only, one of them with no bound at all in an earlier
+# revision), `formal/x86_64_endtoend_test.py` (two sites, NO `timeout=` at all),
+# and the model/coverage scripts (wall-only, 3600 s and 7200 s). The launcher
+# exists so there is exactly one place that knows the bounds; this exists so the
+# next file does not quietly become a second one.
+#
+# The detector reads the AST rather than grepping, and that is the whole design:
+# comments are not in the AST, so a file that explains why it does NOT launch
+# Lean cannot be mistaken for one that does. A grep over the same three files
+# would have to allowlist their comments.
+
+_LAUNCHERS = {"subprocess": ("run", "Popen", "call", "check_output",
+                             "check_call"),
+              "os": ("system", "popen", "spawnl", "spawnv", "spawnvp",
+                     "execl", "execv", "execvp"),
+              "commands": ("getoutput", "getstatusoutput")}
+
+
+def _launch_sites(source: str, path: str = "<snippet>"):
+    """`[(lineno, how)]` for every call in `source` that could start Lean.
+
+    A "could" rather than a "does": the call's own names and string literals are
+    what is matched, so `subprocess.run([lean, "X.lean"])` is a site and
+    `subprocess.run(["arch", "-x86_64", path])` is not. Deliberately blind to
+    whether the argument is a real binary path — the point of the guard is that
+    nobody gets to decide that for themselves.
+    """
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return [(-1, f"does not parse ({e})")]
+    out = []
+
+    def mentions_lean(node):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and "lean" in sub.id.lower():
+                return True
+            if isinstance(sub, ast.Attribute) and "lean" in sub.attr.lower():
+                return True
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                    and "lean" in sub.value.lower():
+                return True
+        return False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and f.attr in _LAUNCHERS.get(f.value.id, ())):
+            continue
+        if mentions_lean(node):
+            out.append((node.lineno, f"{f.value.id}.{f.attr}"))
+    return sorted(out)
+
+
+def _lean_files(root: str, skip=()):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d not in ("build",
+                                                              "__pycache__")]
+        for name in filenames:
+            if name.endswith(".py"):
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                if rel not in skip:
+                    yield rel, os.path.join(dirpath, name)
+
+
+class TestLeanLaunchEstate(unittest.TestCase):
+    def test_the_detector_sees_a_launch_and_ignores_an_explanation(self):
+        """The control, in both directions, because a detector that finds nothing
+        makes the guard below a green light over an unexamined tree."""
+        self.assertEqual(
+            _launch_sites('import subprocess\n'
+                          'subprocess.run([lean, "ModelCheck.lean"])\n'),
+            [(2, "subprocess.run")])
+        self.assertEqual(
+            _launch_sites('import subprocess\n'
+                          'subprocess.run(["arch", "-x86_64", p])\n'
+                          '# and a comment naming lean proves nothing\n'),
+            [], "a comment, and an unrelated launch, are not a launch site")
+
+    def test_nothing_launches_lean_outside_the_launcher(self):
+        found = {}
+        for rel, path in _lean_files(HERE, skip=("formal/lean.py",)):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    source = f.read()
+            except OSError as e:
+                found[rel] = [(0, f"unreadable: {e}")]
+                continue
+            hits = _launch_sites(source, rel)
+            if hits:
+                found[rel] = hits
+        self.assertEqual(found, {},
+                         "every Lean run goes through formal/lean.py's "
+                         "`run_lean`, which is the one place that bounds it: "
+                         + repr(found))
+
+    def test_the_launcher_itself_is_still_a_launch_site(self):
+        """The other half of the non-vacuity, against the real tree.
+
+        `formal/lean.py` is exempt from the guard above, so the guard has to be
+        shown to be looking at it. It is exempt *by path*, and its own
+        `Popen` call takes an `argv` variable rather than a name containing
+        "lean" — which is precisely the shape the AST detector cannot see
+        through, and precisely why the second guard below exists.
+        """
+        import inspect
+        src = inspect.getsource(L.run_lean)
+        self.assertIn("subprocess.Popen", src,
+                      "the launcher must still spawn a process, or "
+                      "formal/lean.py's exemption is not an exemption of "
+                      "anything")
+        self.assertIn("start_new_session=True", src,
+                      "…in its own process group, which is what makes the "
+                      "whole-tree kill reachable")
+
+    def test_a_file_that_resolves_lean_reaches_it_only_through_this_module(self):
+        """The second guard, for the shape the first cannot see.
+
+        A file can resolve the toolchain with `find_lean` and then hand the path
+        somewhere `ast` cannot follow — `os.system("lean " + p)`, `sh -c`, a
+        variable holding an argv the detector has no name for. So the rule is
+        about the RESOLVER rather than the spawn: anything that asks
+        `formal/lean.py` where Lean is must also reach Lean through one of its
+        sanctioned entry points, and `formal/lean.py` is the only module allowed
+        to do either.
+        """
+        sanctioned = ("run_lean", "ensure_library", "library_census",
+                      "lean_version", "check_proof", "check_proof_cached",
+                      "proof_census", "census_report")
+        resolved, missed = [], {}
+        for rel, path in _lean_files(HERE, skip=("formal/lean.py",)):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            if "find_lean" not in source:
+                continue
+            resolved.append(rel)
+            if not any(entry in source for entry in sanctioned):
+                missed[rel] = "calls find_lean and no formal.lean entry point"
+        self.assertEqual(missed, {},
+                         "resolving the toolchain and starting it are the same "
+                         "decision: " + repr(missed))
+        self.assertGreaterEqual(len(resolved), 5,
+                                f"only {len(resolved)} file(s) resolve Lean "
+                                "through formal/lean.py, so this rule is not "
+                                "being exercised: " + repr(resolved))
+
+    def test_no_shell_recipe_runs_a_lean_binary(self):
+        """The shell half, and it is the half a Python guard cannot see.
+
+        `tools/proof.sh`, `Makefile` and any `*.mk` can start a `lean` without
+        going near `ast`, and a bound written in Python does not apply to it. The
+        pattern is a command POSITION only, so `LEAN="$(…)"` (which
+        `tools/proof.sh` has, to check that the toolchain exists) and comments
+        naming Lean are not matches.
+        """
+        import re
+        run = re.compile(r"^\s*(?:\$\{?LEAN\}?|(?:[\w./-]+/)?(?:lean|lake))\s+\S")
+        offenders = []
+        for rel in ["Makefile", "tools/proof.sh"] + [
+                f"tools/{n}" for n in sorted(os.listdir(os.path.join(HERE, "tools")))
+                if n.endswith(".sh") or n.endswith(".mk")]:
+            path = os.path.join(HERE, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f, 1):
+                    if line.lstrip().startswith("#") or "=" in line.split()[0:1]:
+                        continue
+                    if run.match(line):
+                        offenders.append(f"{rel}:{i}: {line.strip()[:70]}")
+        self.assertEqual(offenders, [],
+                         "a shell recipe that starts Lean bypasses every bound "
+                         "in formal/lean.py: " + "; ".join(offenders))
+
+
 if __name__ == "__main__":
     unittest.main()
