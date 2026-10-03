@@ -8188,6 +8188,226 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
+# A dialect SELECT, and the BOOLEAN it is guarded by, as the two ordinary
+# expressions they already are on this path. `MLIR_SELECT_OP` is the ONE
+# operation this pass answers, and the table lives here rather than in
+# `formal/model.py` beside the classification because it is not a
+# classification: it is a lowering, and the classification's job is to say what
+# an operation DENOTES for the ones this pass does not answer.
+#
+# `pop.select` is answered because the computation is written both ways in the
+# same tree and this path already lowers one of them: `a if c else b` is an
+# `F.TernaryExpr`, which arm64 emits as one `CSEL` when all three operands are
+# pure (`_emit_csel_ternary`) and x86-64 as a branch. Rewriting to it — rather
+# than adding an emitter arm per architecture — is what makes the two agree by
+# construction instead of by two matching implementations.
+MLIR_SELECT_OP = "`pop.select`"
+MLIR_BOOL_METHOD = "__mlir_bool__"
+
+
+def _lower_dialect_select(functions: list) -> int:
+    """Rewrite `pop.select` and `__mlir_bool__()` into the expressions they mean.
+
+    Returns the number of sites rewritten.
+
+    A source-to-source rewrite in the SHARED pipeline, for the reason
+    `_fold_target_queries` gives and for the same subject: `pop.select` is a
+    construct both backends would have to be taught separately, and the failure
+    mode this module's whole design exists to prevent is the two architectures
+    answering one question differently. Replacing it with a `TernaryExpr` means
+    everything downstream — both instruction selectors, the comptime folder, the
+    name check — sees a construct it already knows and needs to know nothing
+    about MLIR at all.
+
+    **The guard is the declared type, and that is a correction to the
+    classification's premise.** `MLIR_UNGUARDED_OPS` records `pop.select` as
+    unanswerable because "this path has no BOOL kind distinct from an integer —
+    an unannotated word IS an integer — so a select answered kind-blind would
+    test a `char *` for non-zero". The first clause is true and the second is
+    what does not decide it: the program in question declares the word.
+    `std/utils/_select.mojo:17` is
+    `def _select_register_value[T: TrivialRegisterPassable](condition: Bool,
+    lhs: T, rhs: T) -> T`, so `x != 0` IS the value of a `Bool` here and the
+    fact that makes the lowering safe is IN THE SOURCE. `annotation_is_bool`
+    reads it, and a receiver it cannot place is left alone so the existing
+    `MLIR_BOOL_METHODS` refusal still fires and still names `__mlir_bool__` —
+    which is the right diagnostic, because the un-guardable case is a property
+    of the RECEIVER and not of the select.
+
+    **The select is rewritten only when its first argument is not itself an
+    un-rewritten `__mlir_bool__()`.** Otherwise the rewrite would move the
+    refusal from the operation to its operand, and `MLIR_UNGUARDED_OPS`'s
+    sentence — which names the bool and the missing fact — is the better of the
+    two messages for a program this build cannot answer.
+    """
+    done = 0
+    for fn in functions:
+        body = getattr(fn, "body", None)
+        if not isinstance(body, list):
+            continue
+        bools = _declared_bool_locals(fn)
+        count = [0]
+        _lower_dialect_select_in(body, bools, count)
+        done += count[0]
+    return done
+
+
+def _declared_bool_locals(fn) -> set:
+    """The names `fn` declares as a `Bool`: parameters, annotated locals, and
+    an annotated `self` field is NOT included.
+
+    Read from the AST once per function, beside the rewrite, because the rewrite
+    is the only thing that needs it and a second reader of "what does this
+    function declare" is a second answer to it. A name bound twice with
+    disagreeing annotations is left OUT rather than claimed: the rewrite would
+    test whichever value the register holds, and a program whose `flag` is a
+    `Bool` on one path and a `String` on another has no single lowering.
+    """
+    declared: dict = {}
+    for p in (getattr(fn, "params", None) or []):
+        if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+            declared[p[0]] = p[1] if len(p) > 1 else None
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        ann = getattr(node, "type_ann", None)
+        target = getattr(node, "target", None)
+        if ann is None or not isinstance(target, F.IdentExpr):
+            continue
+        prev = declared.get(target.name, None)
+        if prev is not None and prev != ann:
+            declared[target.name] = None      # disagreement: claim nothing
+            declared.setdefault("__ambiguous__", set()).add(target.name)
+        elif target.name not in declared:
+            declared[target.name] = ann
+    ambiguous = declared.pop("__ambiguous__", set())
+    return {name for name, ann in declared.items()
+            if name not in ambiguous
+            and M.annotation_is_bool(ann, FT.BOOL_TYPE_NAMES)}
+
+
+def _lower_dialect_select_in(node, bools: set, count: list):
+    """The walk, in place. Returns a replacement node for `node`, or None.
+
+    The same two-shaped replacement problem `_fold_target_queries_in` documents:
+    a list element has to be replaced through its parent and a single-attribute
+    child through `setattr`, so one walk serves both and the count comes back
+    through a box.
+    """
+    if isinstance(node, (list, tuple)):
+        out = []
+        changed = isinstance(node, tuple)
+        for i, child in enumerate(node):
+            repl = _lower_dialect_select_in(child, bools, count)
+            if repl is not None:
+                changed = True
+            if isinstance(node, list):
+                if repl is not None:
+                    node[i] = repl
+            else:
+                out.append(child if repl is None else repl)
+        return out if changed else None
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return None
+    repl = _dialect_select_replacement(node, bools)
+    if repl is not None:
+        count[0] += 1
+        # Keep descending into what this node BECAME. The walk is pre-order, so
+        # the select is reached before the `__mlir_bool__()` inside its own
+        # condition — and returning the replacement without walking it left that
+        # call in the tree, which the emitter then refused with the very message
+        # this pass exists to make unnecessary. One line, and the shape is the
+        # same one `_fold_target_queries_in` handles by not descending into a
+        # query it FOLDED (there the subtree is gone; here it is the program).
+        for name in getattr(repl, "__dataclass_fields__", {}):
+            child = getattr(repl, name)
+            if child is None or isinstance(child, (str, int, float, bool)):
+                continue
+            got = _lower_dialect_select_in(child, bools, count)
+            if got is not None:
+                setattr(repl, name, got)
+        return repl
+    for name in getattr(node, "__dataclass_fields__", {}):
+        child = getattr(node, name)
+        if isinstance(child, (list, tuple)):
+            _lower_dialect_select_in(child, bools, count)
+        elif child is not None and not isinstance(child, (str, int, float,
+                                                          bool)):
+            got = _lower_dialect_select_in(child, bools, count)
+            if got is not None:
+                setattr(node, name, got)
+    return None
+
+
+def _dialect_select_replacement(node, bools: set):
+    """The node `node` becomes, or None when this pass does not answer it.
+
+    TWO shapes, and each is gated on something the source states:
+
+      * `x.__mlir_bool__()` — `x != 0`, gated on `x` being a name this function
+        declares a `Bool`. A `Bool` is a word holding 0 or 1 on this path, so
+        the test is its value; anything else is left for `MLIR_BOOL_METHODS`.
+      * `__mlir_op.`pop.select`(c, a, b)` — `a if c else b`, gated on three
+        POSITIONAL arguments, no keyword arguments, no bracket, and `c` not
+        being an un-rewritable `__mlir_bool__()` call.
+
+    The gates are the whole of the safety argument and they are all DECIDABLE
+    from the call: a bracketed `pop.select` would be naming a result type this
+    path cannot read, and an argument-count that differs is a different
+    operation spelled the same way.
+    """
+    if not isinstance(node, F.CallExpr):
+        return None
+    func = node.func
+    if not isinstance(func, F.MemberExpr):
+        return None
+    if func.member == MLIR_BOOL_METHOD:
+        if node.args or node.kwargs:
+            return None
+        obj = func.obj
+        if not isinstance(obj, F.IdentExpr) or obj.name not in bools:
+            return None
+        return F.BinaryOp(op="!=", left=obj,
+                          right=F.IntLiteral(value=0, line=func.line,
+                                             col=func.col),
+                          line=node.line, col=node.col)
+    if func.member != MLIR_SELECT_OP:
+        return None
+    if len(node.args) != 3 or node.kwargs:
+        return None
+    cond, yes, no = node.args
+    # The select is answerable exactly when its CONDITION is, and the question
+    # is asked of the child as it stands rather than of the tree after this
+    # node: the walk is PRE-ORDER (the function's note), so at this point the
+    # `__mlir_bool__()` inside the condition has NOT been rewritten yet. Asking
+    # "is it rewritten?" would therefore refuse every real site and answer none.
+    if not _condition_is_lowerable(cond, bools):
+        return None
+    return F.TernaryExpr(condition=cond, then_val=yes, else_val=no,
+                         line=node.line, col=node.col)
+
+
+def _condition_is_lowerable(cond, bools: set) -> bool:
+    """Can this select's CONDITION be answered on this path?
+
+    An `__mlir_bool__()` call is answerable iff its receiver is a name this
+    function declares a `Bool` — the same question `_dialect_select_replacement`
+    asks of it, asked here so the select and the condition cannot disagree
+    about it. It is asked through the same helper rather than by calling the
+    replacement and testing for None, because "the replacement is None" would
+    also be true for a shape the helper does not know, and a select whose
+    condition is one of those must stay refused for the CONDITION's reason.
+
+    Anything else is answerable: the corpus's other use of `pop.select` spells a
+    name this function's own declarations make a `Bool`, and a select is only
+    ever written where the source has a boolean, so there is no unstated word
+    here to be wrong about.
+    """
+    if isinstance(cond, F.CallExpr) and isinstance(cond.func, F.MemberExpr) \
+            and cond.func.member == MLIR_BOOL_METHOD \
+            and not cond.args and not cond.kwargs:
+        return _dialect_select_replacement(cond, bools) is not None
+    return True
+
+
 def _fold_target_queries(functions: list) -> int:
     """Replace every `#kgen.param.expr<…>` target query in a body with its value.
 
@@ -10508,6 +10728,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `collect_module_symbols`, and this pass only sees the query where the
     # SOURCE wrote one.
     _fold_target_queries(functions)
+    # …and a dialect SELECT, which is the same kind of rewrite for the same
+    # reason and is beside it rather than after it because the two are
+    # INDEPENDENT: `_fold_target_queries` replaces a `#kgen.param.expr<…>` with a
+    # literal and this one replaces `pop.select`/`__mlir_bool__()` with the
+    # ordinary expressions they denote, and neither walks into the other's
+    # output. Both must run before `check_module_symbols`, whose MLIR pre-pass
+    # would otherwise refuse `pop.select` by name — and that pre-pass runs in
+    # `_run_late_checks`, below.
+    _lower_dialect_select(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals

@@ -372,11 +372,16 @@ MLIR_UNGUARDED_OPS = {
                 "say which comparison it is, and that predicate is itself a "
                 "dialect attribute rather than a value"),
     "pop.select": ("its first argument is a BOOL (`condition.__mlir_bool__()`), "
-                   "and this path has no BOOL kind distinct from an integer — "
-                   "an unannotated word IS an integer — so a select answered "
-                   "kind-blind would test a `char *` for non-zero and answer "
-                   "1. The missing piece is a BOOL kind, which "
-                   "`MLIR_BOOL_METHODS` already names"),
+                   "and this path lowers that only when the receiver's "
+                   "DECLARED type says `Bool` — an unannotated word is an "
+                   "integer here, so a select answered kind-blind would test a "
+                   "`char *` for non-zero and answer 1. The missing thing is "
+                   "therefore the declaration and not a kind: "
+                   "`formal.types.BOOL_TYPE_NAMES` names the annotations that "
+                   "carry it and `annotation_is_bool` is the one reader of "
+                   "them. `std/utils/_select.mojo` declares `condition: Bool` "
+                   "and IS lowered, so this row is reached only by a program "
+                   "that does not say what its word holds"),
     "pop.load": ("its width is its POINTEE's, and nothing here states a pointee "
                  "type for this receiver"),
     "pop.offset": ("it is POINTER arithmetic, so its scale is the pointee's "
@@ -5798,7 +5803,8 @@ def _frame_slot_string_refusal(spelled: str, ann) -> str:
         f"which is the same program with a lifetime this analysis can see")
 
 
-def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
+def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
+                       bool_names=()):
     """The kind a DECLARED type annotation gives, or None for one we cannot map.
 
     The one question `struct_field_kind` and its callers ask, and it is
@@ -5811,6 +5817,16 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
     here, for the reason every other shared table in this file takes them from
     the caller: the two backends must not answer this question from two private
     lists, and a name is a string, not a representation.
+
+    `bool_names` is the THIRD vocabulary and it does not produce a kind of its
+    own: a `Bool` on this path is a word holding 0 or 1, so its kind IS
+    `INT_KIND` — which is what `_kind_of_simple` already says about a
+    `BoolLiteral`, and putting `Bool` in `int_names` would say the same thing
+    one line earlier. It is a separate argument because ONE caller needs the
+    narrower fact as well ("this word is 0 or 1, so `x != 0` is its value"),
+    and a kind cannot carry it: every consumer of `INT_KIND` would have to learn
+    to ask, and the ones that must not — a `%s` format, a `len` — would get a
+    second opinion to keep consistent. See `annotation_is_bool` for the reader.
 
     `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
     is what turns one declared type into `FRAME_KIND`: a slot annotated with a
@@ -5834,6 +5850,8 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
         return None
     if base in string_names:
         return STR_KIND
+    if base in bool_names:
+        return INT_KIND
     if base in int_names:
         return INT_KIND
     if decls is not None:
@@ -5843,6 +5861,27 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
     if base in BLOB_TYPE_CTORS:
         return list_kind(None)
     return None
+
+
+def annotation_is_bool(ann, bool_names=()) -> bool:
+    """Does this declared type say the word holds 0 or 1?
+
+    NOT `declared_type_kind(ann) == INT_KIND` and deliberately not: a kind says
+    what a value IS, and both an `Int` and a `Bool` are `INT_KIND` on this path
+    (a Bool is a word holding 0 or 1, and `formal.types.BOOL_TYPE_NAMES`' own
+    comment is the argument). What `pop.select` needs is the narrower fact —
+    "is this 0 or 1" — because that is what makes `x != 0` the right lowering of
+    `x.__mlir_bool__()` rather than a `char *`'s "is this address non-zero", and
+    the two programs differ only in the declaration.
+
+    So the vocabulary is passed in for the reason `declared_type_kind` takes
+    its own from the caller: one reader of "what does this annotation mean",
+    so the two cannot answer differently about `condition: Bool`.
+    """
+    if not isinstance(ann, str) or not bool_names:
+        return False
+    base = annotation_base_name(ann)
+    return base is not None and base in bool_names
 
 
 def struct_field_kind(struct_def, name, int_names=(), string_names=(),
@@ -8078,15 +8117,20 @@ WRITER_METHODS = {
 # is a fifth kind constant threaded through ValueKinds and both backends'
 # kind oracles, where `_unify` would have to decide what a bool-and-an-int is.
 MLIR_BOOL_METHODS = {
-    "__mlir_bool__": "is a real builtin and is implementable as the same test "
-                     "`if` already does (a Bool is a word holding 0 or 1 on "
-                     "this path), but it is refused because it cannot be "
-                     "GUARDED here: the kind model has no bool distinct from "
-                     "int — an unannotated word is an int — so lowering it "
-                     "kind-blind would make it answer `(receiver != 0)` on a "
-                     "char * too, which is a plausible-looking 1 for a "
-                     "pointer. The fix is a BOOL kind, not a lowering of this "
-                     "call",
+    "__mlir_bool__": "is a real builtin and it is lowered as the same test `if` "
+                     "already does — a Bool is a word holding 0 or 1 on this "
+                     "path, so `x != 0` is its value — for every receiver "
+                     "whose DECLARED type says `Bool` (`build."
+                     "_lower_dialect_select`, in the shared pipeline, so both "
+                     "architectures get it by construction). This receiver is "
+                     "not one: the source states nothing about what this word "
+                     "holds, and an unannotated word is an integer here, so "
+                     "`(receiver != 0)` would answer 1 for a `char *` that "
+                     "happens to be non-null. The missing thing is the DECLARED "
+                     "TYPE and not a kind: `formal.types.BOOL_TYPE_NAMES` "
+                     "names the annotations that carry it and "
+                     "`model.annotation_is_bool` is the one reader of them. "
+                     "Annotate the receiver `Bool`",
 }
 
 

@@ -2514,16 +2514,30 @@ RECVKIND_CASES = [
   "    k = w.write_string(\"None\")\n"
   "    return 0\n",
   "refuse:is a method on a Writer", None),
- # `__mlir_bool__` is the one case here that IS implementable — a Bool is a word
- # holding 0 or 1 on this path, so it is the test `if` already does — and is
- # refused only because it cannot be GUARDED. The needle is the guard, not the
- # impossibility: a reader should come away knowing the fix is a BOOL kind.
- ("recvkind_mlir_bool_needs_a_bool_kind",
+ # `__mlir_bool__` IS implemented, for every receiver whose DECLARED type says
+ # `Bool` — `build._lower_dialect_select` rewrites it to `x != 0` in the shared
+ # pipeline, and `test_formal_mlir_precedence.py`'s
+ # `a_dialect_select_lowers_when_the_condition_declares_a_bool` builds and RUNS
+ # `std/utils/_select.mojo` on both architectures.
+ #
+ # So this row is the half that is still refused, and the difference is the
+ # DECLARATION: `c = n > 3` states nothing about what `c` holds, and an
+ # unannotated word is an integer here, so `(c != 0)` would answer 1 for a
+ # `char *`. The needle is the guard and the repair, not the impossibility — a
+ # reader should come away knowing to annotate the receiver, and that the
+ # missing thing is the declared type rather than a new kind.
+ #
+ # (A local bound to a COMPARISON is provably a Bool too, and this pass
+ # deliberately does not claim it: the annotation is what the SOURCE says about
+ # the name, while a comparison is a fact about the value's provenance, and the
+ # two are different questions. Widening it belongs with the rest of the value
+ # model, not here.)
+ ("recvkind_mlir_bool_needs_a_declared_bool",
   "def main(n):\n"
   "    c = n > 3\n"
   "    k = c.__mlir_bool__()\n"
   "    return 0\n",
-  "refuse:is a real builtin and is implementable as the same test", None),
+  "refuse:Annotate the receiver `Bool`", None),
 ]
 
 # ── `write`/`close` are a SYSCALL, and need a real receiver ─────────────────
