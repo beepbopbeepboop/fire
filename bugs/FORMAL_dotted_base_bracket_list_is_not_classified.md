@@ -4,7 +4,16 @@
 reachable — which is the new fact here, measured on this tree (2026-10-02,
 `work/formal8-5`).** The remainder of `FORMAL_type_argument_read_as_a_container.md`
 (deleted in `30e5e2e9`, which closed the half that could be closed). Re-measured
-below, both halves of the claim, so a reader does not re-derive them.
+below, both halves of the claim, so a reader does not re-derive them. The fix
+that precedes it is what makes the boundary visible:
+`model.subscript_index_is_a_comptime_parameter_list` says yes for a BARE NAME it
+can classify and no for everything else, and everything else includes the two
+shapes the corpus writes most.
+
+No stdlib file is measured against this today — the four files map rows 7 and 8
+of the sweep work map tracked all reach a bare-name base (`Pointer`,
+`UnsafePointer`, `_DequeIter`). So this costs 0 files and is here for the reader
+who writes the next one, not as a queue item.
 
 ## What is still wrong
 
@@ -95,11 +104,11 @@ stays refused, which is the safe direction and the one
 
 ## What it costs
 
-Zero swept files, re-confirmed rather than assumed: the four files
-`FORMAL_frame_by_value_ceiling_zero.md` tracks all reach a bare-name base
-(`Pointer`, `UnsafePointer`, `_DequeIter`), and `Self.IteratorType[…]` is a
-single index. This document is written down for the reader who writes the next
-`Foo[A, B]` and finds the backend cannot classify `Foo`.
+Zero swept files, re-confirmed rather than assumed: the four files map rows 7 and
+8 of the sweep work map tracked all reach a bare-name base (`Pointer`,
+`UnsafePointer`, `_DequeIter`), and `Self.IteratorType[…]` is a single index.
+This document is written down for the reader who writes the next `Foo[A, B]` and
+finds the backend cannot classify `Foo`.
 
 ## Pinned, and stays a limit rather than becoming an accident
 

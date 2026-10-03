@@ -176,9 +176,9 @@ transformation and delivers the identity, which is the same shape as a wrong
 absent from `formal/hostmods/math.mojo` for exactly this reason and the
 reasoning is there.
 
-**Recommendation: no module.** The file moves to `dataclasses` (which
-`FORMAL_glob_copy_collections_io_not_attempted.md` §`copy` measured as its real
-next obstacle), and the root cause is the clone capability that doc already names.
+**Recommendation: no module.** The file moves to `dataclasses`, which a stubbed
+`copy` measured as its real next obstacle, and the root cause is the clone
+capability — `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`.
 
 ## `ctypes` — 1 file, permanent
 

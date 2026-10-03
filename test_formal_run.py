@@ -3459,12 +3459,11 @@ BYREF_REFUSALS = [
     # `from … import …` in it binds the name either", and for a builtin both of
     # those are impossible — the name comes from the LANGUAGE — so the sentence
     # sent the reader to look for a missing `def` that cannot exist. `type_of`
-    # is on the list on the measurement in
-    # `bugs/FORMAL_frame_by_value_ceiling_zero.md` (`std/memory/unsafe_pointer`
-    # is refused with this very message and the doc's note is "`type_of` is a
-    # missing builtin, on any receiver"); the two cases below are the two
-    # families the table carries, and the needle is the clause that names what
-    # the callee is rather than what this file lacks.
+    # is on the list because `std/memory/unsafe_pointer.mojo` is refused with
+    # this very message and the honest reading of that sentence is "`type_of` is
+    # a missing builtin, on any receiver"; the two cases below are the two
+    # families `model.UNIMPLEMENTED_BUILTINS` carries, and the needle is the
+    # clause that names what the callee is rather than what this file lacks.
     #
     # The prefix "which is a name with no definition in hand" is asserted by
     # neither needle and is load-bearing anyway: two taxonomies key on that
@@ -5948,6 +5947,56 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
+    # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
+    # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
+    #
+    # A runaway recursion used to be a SIGSEGV on both backends: no output and
+    # no status a caller could read, above 61 frames on arm64 and above ~470 on
+    # x86-64. These three rows are the whole of the fix's observable behaviour,
+    # and each fails if the guard is absent, if it misfires, or if the cycle
+    # detection misses a shape:
+    #
+    #   * `stack_floor_deep_recursion_is_a_status` — the defect. `deep(5000)` is
+    #     far past either backend's ceiling and the answer is the exit status
+    #     `STACK_TRAP_STATUS`. `want_stdout=None` because `printf` is inside
+    #     `main` and the trap fires before it.
+    #   * `stack_floor_shallow_recursion_still_answers` — the other direction,
+    #     and the one a guard that fired unconditionally would fail: 30 deep is
+    #     nowhere near the budget and must still print 30.
+    #   * `stack_floor_mutual_recursion_is_a_status` — the cycle detection, not
+    #     the guard. `ping`/`pong` are only a cycle TOGETHER, so a rule that
+    #     looked for a function calling ITSELF would guard neither and this row
+    #     would be a SIGSEGV again.
+    ("stack_floor_deep_recursion_is_a_status",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return deep(5000)\n", 2, None),
+    ("stack_floor_shallow_recursion_still_answers",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", deep(30))\n"
+     "    return 0\n", 0, "30"),
+    ("stack_floor_mutual_recursion_is_a_status",
+     "def pong(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return ping(n - 1)\n"
+     "\n"
+     "def ping(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return pong(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return ping(5000)\n", 2, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -8700,26 +8749,139 @@ CONSTRUCTION_REFUSALS = [
      "    return x.a\n",
      "refuse:whose body this path does not inline: a local assignment (`t = …`)",
      None),
-    # (5) A READ OF THE RECEIVER, which is the case a bare-parameter check
-    # misses and the one that would be a wrong ANSWER rather than a refusal:
-    # `self.a = a` is fine because `a` is the caller's own expression, and
-    # `self.a = 1 + a` is not, because the arithmetic names a word the calling
-    # function does not have.  The needle is the READ, and the parameter row
-    # below is its twin from the other side.
-    ("constr_refuse_an_init_body_that_reads_the_receiver",
-     "struct A5:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "\n"
-     "    def __init__(out self, a: Int, b: Int):\n"
-     "        self.a = a\n"
-     "        self.b = self.a + b\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var x = A5(1, 2)\n"
-     "    return x.b\n",
-     "refuse:whose body this path does not inline: a read of 'self' in the right-hand side",
-     None),
+     # (5) A READ OF THE RECEIVER.  It used to be one refusal with the needle
+     # "a read of 'self' in the right-hand side", because the block's address
+     # could not be threaded through as a receiver — and it is now TWO lowerings
+     # and a smaller refusal.  A method call is lifted to a real call with the
+     # block's address as its receiver and a one-level field read is a load at
+     # `block + 8·slot`, both of which the emitters answer from the block
+     # `struct_constructor_sites` already reserved for this call
+     # (`CTOR_RECEIVER_CASES` builds and runs the two shapes against CPython).
+     #
+     # What is left is a receiver read with no address to compute from, and the
+     # three cases below are the three ways that happens.  This first one is a
+     # read THROUGH a field: the slot holds a frame ADDRESS and the offset after
+     # it is a different struct's layout, which is the one thing this struct's
+     # own field table cannot answer.
+     ("constr_refuse_an_init_body_that_reads_through_a_nested_field",
+      "struct In5:\n"
+      "    var q: Int\n"
+      "    var r: Int\n"
+      "\n"
+      "struct A5:\n"
+      "    var a: Int\n"
+      "    var inner: In5\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.inner.q\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.inner.q`, "
+      "a read THROUGH a field of A5",
+      None),
+     # (5a) The same family from the other side: a field handed to a CALL.
+     # A slot holds one word and that word is an ADDRESS when the field holds a
+     # nested frame, so whether a callee may be handed one is a question about
+     # the CALLEE's parameter convention — and this is the one place in the
+     # compiler that cannot ask, because the frame-holder analysis reads
+     # function bodies and a call lifted out of an inlined constructor body is in
+     # none of them.
+     ("constr_refuse_an_init_body_that_hands_a_field_to_a_call",
+      "def twice5(v: Int) -> Int:\n"
+      "    return v * 2\n"
+      "\n"
+      "struct A5b:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = twice5(self.a)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5b(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.a` handed "
+      "to `twice5(…)` as an argument",
+      None),
+     # (5b) The receiver read with nothing behind it at all: the object itself,
+     # rather than one of its fields.  A bare `self` has no word to load and no
+     # call to lift, so there is nothing for the block to say.
+     ("constr_refuse_an_init_body_that_reads_the_receiver_barely",
+      "def sink5(v: Int) -> Int:\n"
+      "    return 1\n"
+      "\n"
+      "struct A5c:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = sink5(self)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5c(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a bare read of "
+      "`self`, which is the object under construction and neither one of its "
+      "fields nor a method call on it",
+      None),
+     # (5c) A receiver read on a struct that HAS no block to read.  A struct of
+     # one field is a plain word and its receiver IS that word, so the two
+     # lowerings above — both of which compute something out of an address —
+     # have no address; and the word this construction evaluates to is the LAST
+     # store of the body, so an earlier read has no value to read.  The method
+     # is a `@staticmethod` because an ordinary method of a one-field struct that
+     # returns a value is refused earlier and more specifically, by
+     # `receiver_writeback_name` — which is a real answer about a different
+     # question and not this one.
+     ("constr_refuse_an_init_body_that_reads_a_one_field_receiver",
+      "struct One5:\n"
+      "    var n: Int\n"
+      "\n"
+      "    def __init__(out self, v: Int):\n"
+      "        self.n = self.plus()\n"
+      "\n"
+      "    @staticmethod\n"
+      "    def plus() -> Int:\n"
+      "        return 7\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = One5(1)\n"
+      "    return x.n\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a read of the "
+      "receiver of One5, which is a struct of 1 field(s) and so its receiver IS "
+      "its own word",
+      None),
+     # (5d) The name `self.a + b` used to be refused as a receiver read.  The
+     # receiver half of it lowers now and the refusal is about the OTHER name:
+     # `b` is a parameter read inside an expression, which this path does not
+     # substitute (see `_init_store_value`'s bare-parameter rule, and why the
+     # rule is "alone" and not "anywhere").
+     ("constr_refuse_an_init_body_that_reads_a_parameter_under_a_field_read",
+      "struct A5d:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int, b: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.a + b\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5d(1, 2)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of 'b' in the "
+      "right-hand side",
+      None),
+
     # (6) The same refusal for a PARAMETER, which is the one that is easy to
     # get wrong in the accepting direction: a program that inlined this would
     # read a word out of whatever register the CALLING function left in it, and
@@ -11168,6 +11330,179 @@ CONCAT_CASES = [
 ]
 
 
+# ── an inlined `__init__`'s OWN RECEIVER ─────────────────────────────────────
+#
+# `model.init_receiver_rewrite` resolves a read of the object under construction
+# against the block `struct_constructor_sites` reserved for that construction,
+# in two ways: a METHOD CALL is lifted to the call it is with the block's address
+# as its receiver, and a one-LEVEL FIELD READ is a load at `block + 8·slot`.  It
+# used to be one refusal ("whose body this path does not inline: a read of 'self'
+# in the right-hand side"), and the two files it blocked were this repository's
+# own — `module_spec_gen.py`'s `self.spec_content = self._read_spec()`.  The
+# refusals that remain are in `CONSTRUCTION_REFUSALS` (5), (5a), (5b), (5c).
+#
+# A CPython-pair group rather than four-column constants, because the whole
+# content of the change is an ORDER: the stores run in the body's own order, each
+# receiver read sees what the stores BEFORE it wrote, and the block belongs to the
+# construction SITE.  A hand-written constant would not notice a receiver reading
+# a slot before the store that fills it, and CPython does.
+CTOR_RECEIVER_CASES = [
+    # (1) A METHOD CALL with no arguments, and a field read of what it returned.
+    # The last store is the whole value of the answer, so a receiver that read
+    # the wrong block would return the caller's block's garbage rather than 15.
+    ("ctor_recv_a_method_call_and_a_field_read",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S(5)\n"
+     "    printf(\"%d\\n\", s.c)\n"
+     "    return 0\n",
+     "class S:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    s = S(5)\n"
+     "    print(s.c)\n"),
+    # (2) A method that reads TWO fields, one of them at its CLASS-LEVEL default
+    # and one the body has already stored — so the receiver the method reads
+    # through is the block under construction and the store order is load-bearing.
+    ("ctor_recv_a_method_reads_a_class_default",
+     "struct Box:\n"
+     "    var w: Int = 40\n"
+     "    var h: Int\n"
+     "    var area: Int\n"
+     "    var tag: Int\n"
+     "\n"
+     "    def __init__(out self, h: Int):\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(out self) -> Int:\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(out self, k: Int) -> Int:\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box(2)\n"
+     "    printf(\"%d\\n\", b.area + b.tag)\n"
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self, h):\n"
+     "        self.w = 40\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(self):\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(self, k):\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main():\n"
+     "    b = Box(2)\n"
+     "    print(b.area + b.tag)\n"),
+    # (3) TWO constructions of one struct in one function, which is the case the
+    # receiver has to name its own SITE for: the block is per call site, so a
+     # receiver that resolved to the first construction would read 5 where the
+     # source says 7.
+    ("ctor_recv_two_sites_get_two_blocks",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var p = P(5)\n"
+     "    var q = P(7)\n"
+     "    printf(\"%d\\n\", p.b * 100 + q.b + p.a)\n"
+     "    return 0\n",
+     "class P:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    p = P(5)\n"
+     "    q = P(7)\n"
+     "    print(p.b * 100 + q.b + p.a)\n"),
+    # (4) The shape `module_spec_gen.py` is written in: a constructor whose stores
+    # are the constructor's own ARGUMENT and two calls on the object being built,
+    # with the methods reading fields the earlier stores wrote.  Written out here
+    # with a file-shaped body instead of `open()`/`f.read()` so the case measures
+    # the receiver and nothing else.
+    ("ctor_recv_module_spec_generator_shape",
+     "struct ModuleSpecGenerator:\n"
+     "    var spec_file: String = \"\"\n"
+     "    var spec_len: Int\n"
+     "    var type_count: Int\n"
+     "\n"
+     "    def __init__(out self, spec_file: String):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(out self) -> Int:\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(out self) -> Int:\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var g = ModuleSpecGenerator(\"abcd\")\n"
+     "    printf(\"%d\\n\", g.spec_len * 100 + g.type_count)\n"
+     "    return 0\n",
+     "class ModuleSpecGenerator:\n"
+     "    spec_file = \"\"\n"
+     "    def __init__(self, spec_file):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(self):\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(self):\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main():\n"
+     "    g = ModuleSpecGenerator(\"abcd\")\n"
+     "    print(g.spec_len * 100 + g.type_count)\n"),
+]
+
+
 # `|` on two containers is a SET UNION (`{1,2} | {2,3}` in CPython — a LIST
 # pair is a TypeError there, so the operands below are set literals), and the
 # two backends now DISAGREE
@@ -11715,7 +12050,7 @@ WAVE7_G2_CASES = [
     # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
     # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
     # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
-    # makes (see `bugs/FORMAL_frame_receiver_handoff.md` §14).  A one-field
+    # makes (see `test_formal_frame_len.py`).  A one-field
     # struct is not a frame, `b` below is a plain word, and the `__len__` on it
     # is not reached at all — which is why this case still refuses, for the
     # field-value reason and not for a length reason.
@@ -13330,8 +13665,11 @@ SHIFT_CASES = [
 ]
 
 
-# `origin_of(x)` — the COMPILE-TIME IDENTITY, and the seven stdlib files it
-# un-blocks are measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+# `origin_of(x)` — the COMPILE-TIME IDENTITY. It was one of three false
+# diagnoses counted in map rows 7 and 8 of the sweep work map, all three now
+# fixed (`origin_of` here, a subscript's argument list in
+# `model.subscript_index_is_a_comptime_parameter_list`, and `type_of` in
+# `model.UNIMPLEMENTED_BUILTINS`).
 #
 # `origin_of` is in the corpus almost entirely as a TYPE argument —
 # `Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` —
@@ -13509,8 +13847,7 @@ ORIGIN_OF_REFUSALS = [
 # a frame address" — a sentence about a lifetime the program does not have,
 # which is the false diagnosis that cost the most because it sends the reader
 # to look for an escape that is not there. Four stdlib files drew it
-# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`;
-# measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`).
+# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`).
 #
 # Every row here is a REFUSAL, and that is not a gap in the fix: a type
 # application is a compile-time construct this backend still cannot lower, and
@@ -13758,6 +14095,36 @@ INT_PARSE_REFUSALS = [
 ]
 
 REFUSAL_CASES = [
+    # A FUNCTION NAME in a value position, which is the first thing any
+    # first-class-function work hits and the reason `functools` is not a host
+    # module (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # The refusal used to be the unresolved-NAME one, whose reason clause is
+    # "the register allocator collected no home for it, so the emitter and the
+    # allocation walk disagree about this function's locals" — false in every
+    # clause: both know `dbl` is not a local, which is why neither gave it one,
+    # and what is actually true is that a function is a code address and a value
+    # here is one 64-bit word. The needle is the clause that names the
+    # CONSTRUCT, so a change that went back to blaming the allocator fails.
+    #
+    # Two spellings, because they reach it differently and the second is the one
+    # a `functools.reduce(add2, [1,2,3], 0)` would be: the first stores the name
+    # in a local, the second hands it straight to a callee's parameter.
+    ("a_function_name_read_as_a_value_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = dbl\n"
+     "    return g(5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+    ("a_function_name_passed_as_an_argument_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def call2(f: Int, a: Int) -> Int:\n"
+     "    return f + a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return call2(dbl, 5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+
     # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
     # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
     # used to open with says about them.  What is left of that history is worth
@@ -15186,6 +15553,110 @@ def check_emitter_builtin_agreement():
     return failures
 
 
+# WHICH PROLOGUES CARRY THE STACK-FLOOR GUARD, asked of
+# `model.recursive_function_names` and nothing else — the decision the three
+# `stack_floor_*` rows above can only observe indirectly, and the half of it they
+# cannot see at all.
+#
+# They can see that a cycle is guarded (the trap fires) and that a shallow
+# recursion is not disturbed. They CANNOT see that an acyclic function is left
+# alone, because leaving it alone and guarding it differ only in bytes, and
+# guarding it would cost the per-export contract proof — see
+# `recursive_function_names`'s docstring for why that is a cost and not a
+# detail. So the "not guarded" rows are asked directly, here, which is the level
+# at which the answer is the honest one.
+_STACK_FLOOR_PROBES = [
+    # (name, source, want — the set of guarded function names)
+    ("self_recursion", "def deep(n):\n    return deep(n - 1)\n"
+     "def main(n):\n    return deep(n)\n", {"deep"}),
+    # The shape a "does it call itself" rule gets wrong: neither function is
+    # recursive alone.
+    ("mutual_recursion", "def a(n):\n    return b(n - 1)\n"
+     "def b(n):\n    return a(n - 1)\n"
+     "def main(n):\n    return a(n)\n", {"a", "b"}),
+    # A three-function cycle, and the two functions that merely CALL it: they
+    # are on no cycle, so they are not guarded. The frames that accumulate
+    # while `b` runs are `b`'s to notice.
+    ("three_cycle_and_its_callers",
+     "def c(n):\n    return a(n - 1)\n"
+     "def b(n):\n    return c(n - 1)\n"
+     "def a(n):\n    return b(n - 1)\n"
+     "def caller(n):\n    return a(n)\n"
+     "def main(n):\n    return caller(n)\n", {"a", "b", "c"}),
+    # The shape that must NOT be guarded, twice: no self-call, and a call that
+    # goes out of the image (an unknown name) cannot close a cycle here.
+    ("acyclic_chain", "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n    return leaf(n)\n"
+     "def main(n):\n    return mid(n)\n", set()),
+    ("out_of_image_call", "def f(n):\n    return g(n - 1)\n"
+     "def main(n):\n    return f(n)\n", set()),
+    # A call inside a comprehension and inside an `elif`: the walk has to reach
+    # both, and `iter_nodes` is what reaches them — `iter_nodes`'s own docstring
+    # records a walker that descended every `if` body and stopped at the first
+    # `elif`, losing a third of the conditionals in a module.
+    ("cycle_through_a_comprehension",
+     "def f(n):\n    return [y for y in range(n)] and f(n - 1)\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    ("cycle_through_an_elif",
+     "def f(n):\n"
+     "    if n > 0:\n        return 1\n"
+     "    elif n < 0:\n        return f(n + 1)\n"
+     "    return 0\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    # A METHOD call is the symbol `Struct_method`, not `method`, so a rule that
+    # read the member name would find no edge here and guard neither — and a
+    # struct that ping-pongs through two of its own methods is an ordinary
+    # recursive descent, not a shape invented for this test.
+    ("cycle_through_two_methods",
+     "struct R:\n"
+     "    def ping(self) -> Int:\n        return self.pong()\n"
+     "    def pong(self) -> Int:\n        return self.ping()\n"
+     "def main(n):\n    var r = R()\n    return r.ping()\n",
+     {"R_ping", "R_pong"}),
+]
+
+
+def check_stack_floor_decision(verbose=False):
+    """`model.recursive_function_names` on seven parsed modules.
+
+    Returns `(passed, failures)`; a probe's last element is the guarded set it
+    must answer, read off the source rather than off an image."""
+    build = __import__("formal.build", fromlist=["build"])
+    from formal import model as M
+    passed, failures = 0, []
+    for probe in _STACK_FLOOR_PROBES:
+        name, source, want = probe
+        stmts = build.parse_module(source, "<stack-floor>")
+        # The function list the EMITTER sees: `formal/build.py` lifts every
+        # struct method into the function table as `Struct_method` before
+        # codegen runs, and the guard reads that table — so a probe that passed
+        # only the module's top-level `def`s would ask about a graph the emitter
+        # never builds.
+        structs = {st.name: st for st in stmts
+                   if type(st).__name__ == "StructDef"}
+        # `_struct_methods` (formal/build.py) lifts each method into a COPY
+        # named by `model.method_function_name`, and it is that name a lifted
+        # `self.ping()` call carries — so the probe applies the same rename
+        # through the same function, rather than inventing the spelling. Without
+        # it the graph has `ping` calling `ping` on one side and `R_ping` on the
+        # other and finds no edge.
+        import copy as _copy
+        fns = [st for st in stmts if type(st).__name__ == "FunctionDef"]
+        for st in structs.values():
+            for mth in M.struct_methods(st):
+                lifted = _copy.deepcopy(mth)
+                lifted.name = M.method_function_name(st.name, mth.name)
+                fns.append(lifted)
+        got = M.recursive_function_names(fns, structs)
+        if got != want:
+            failures.append(f"{name}: {sorted(got)} (want {sorted(want)})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: {name}")
+    return passed, failures
+
+
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
 # nothing else, and they are here as well as end to end: the evidence shape,
 # `self.<f> = T()` for a `T` of this unit whose receiver is a frame, is now
@@ -15571,14 +16042,15 @@ def main():
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
-                  | {c[0] for c in SET_UNION_CASES})
+                  | {c[0] for c in SET_UNION_CASES}
+                  | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
-                     + SET_UNION_CASES
+                     + SET_UNION_CASES + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
@@ -15614,6 +16086,13 @@ def main():
           f"FAIL={len(at_failures)}")
     passed += at_passed
     failed += len(at_failures)
+    sf_passed, sf_failures = check_stack_floor_decision(args.verbose)
+    for detail in sf_failures:
+        print(f"  FAIL  stack-floor-decision: {detail}")
+    print(f"formal run: stack-floor-decision PASS={sf_passed} "
+          f"FAIL={len(sf_failures)}")
+    passed += sf_passed
+    failed += len(sf_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")

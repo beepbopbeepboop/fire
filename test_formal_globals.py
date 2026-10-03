@@ -1262,10 +1262,10 @@ def _reserved_words_are_there_and_unwritten(tmpdir, name, verbose):
             if n <= 0: return 0
             return deep(n - 1) + 1
 
-    and `deep(62)` is a SIGSEGV on arm64 today, so the guard that fixes it needs
-    a word in an image exactly like this one — an image with nothing else in its
-    `__DATA`
-    (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    and `deep(62)` used to be a SIGSEGV on arm64, so the guard that fixed it
+    needed a word in an image exactly like this one — an image with nothing
+    else in its `__DATA` (`model.STACK_FLOOR_BUDGET_BYTES`,
+    `model.recursive_function_names`).
 
     What is asserted, per backend:
 

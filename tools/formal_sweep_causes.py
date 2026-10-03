@@ -517,9 +517,13 @@ CAUSES = (
      (("calls F once per instance",),)),
     # A constructor called WITH arguments, whose body is not a bare sequence
     # of `self.<field> = …` assignments. The inlining this path does can
-    # store the assignments at the construction site; a body that READS `self`
-    # (or branches, loops, or calls a method) needs the block's address
-    # threaded through, which has no lowering here. 2 files, in-file.
+    # store the assignments at the construction site; what it can now also do
+    # is resolve a read of the RECEIVER against the block that construction
+    # reserved — a method call is lifted to a real call with that address as
+    # its receiver, and a one-level field read is a load at `block + 8·slot`
+    # (`model.init_receiver_rewrite`). What is still refused here is a body
+    # that BRANCHES or loops, binds a local, or reads the receiver in a shape
+    # with no address to compute from. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
     # A local read before anything in the function stores it. `formal/build.py`
@@ -835,16 +839,326 @@ def rank(log_path):
     return out, sum(blocked.values())
 
 
+# ── the HOST row: `not-answerable/host-import`, ranked by the MODULE ─────────
+#
+# The cause table above is keyed on what a fix would have to CHANGE, and its
+# largest class in the 2026-10-02 sweep was 285 codegen lines against 241
+# host-import ones. It cannot rank the host row at all: a host-import line is
+# not a refusal about a construct, it is a refusal about a MODULE, so the
+# question "what would a person do next" is "which module" and the whole
+# ranking is by module.
+#
+# THE SAME `uses:` DISCIPLINE, and it matters MORE here than there. A host
+# import blocks a file through its import CLOSURE exactly as a dylib with no
+# boundary symbol does (`formal/build.py` builds a dylib for every module in a
+# file's eager closure), so `gimple_codegen.py imports 'zlib'` blocks every
+# file that imports `gimple_codegen` whether or not any of them says `zlib`.
+# `FILES BLOCKED` therefore has the same upper-bound property the cause table's
+# does, and the column beside it is the one that decides whether a row is WORK
+# or WAITING.
+#
+# THE SPELLING IS COUNTED, NOT THE WORD. The codegen column searches for a
+# whole word because the names it looks for are `BinaryHeap` and `slice`; the
+# names here are `copy`, `types`, `signal`, `inspect` and `html`, which are
+# ordinary English words that appear in prose, in comments and in the bodies of
+# functions that have nothing to do with the module. A bare word search would
+# report `copy` as used by five files when it is used by none. So a file counts
+# as USING a host module when it contains `mod.NAME` with `NAME` one the module
+# declares, or a `from mod[.sub] import …` line binding one — which are the two
+# spellings a use can have.
+#
+# THE NAMES COME FROM CPYTHON'S OWN SOURCE, parsed, not from a list here. A
+# list of "the names of `tempfile`" written in this file would be correct for
+# exactly as long as CPython does not change it, and it would be wrong in the
+# worst direction: the count that says "four names to write" would keep saying
+# four while the four had changed. `__all__` wins over the parsed bindings where
+# CPython defines it, because `__all__` is what CPython itself publishes.
+#
+# TIER AND MODEL ARE READ, NEVER COPIED. `formal/imports.py` owns the split
+# between a fact about the target and a gap with an owner, and it publishes it
+# through `host_module_tier`; the model column is `formal/hostmods/` walked for
+# real. A copy of either would be a second list that rots the day a module is
+# written — which is the ordinary way this row gets smaller.
+
+_host_decl_cache: dict = {}
+
+
+def _stdlib_dir():
+    """CPython's own standard library directory, or None."""
+    try:
+        import sysconfig
+        path = sysconfig.get_paths().get("stdlib")
+    except Exception:                                   # noqa: BLE001
+        return None
+    return path if path and os.path.isdir(path) else None
+
+
+def _host_source_path(name: str):
+    """`name`'s source file in CPython's stdlib, or None when it has none.
+
+    None is the honest answer for a module that is not Python source at all —
+    `zlib` and `_socket` are built into the interpreter, `sys` is frozen — and a
+    row whose names cannot be read says so rather than reporting a measured 0.
+    """
+    root = _stdlib_dir()
+    if root is None:
+        return None
+    parts = name.split(".")
+    for cand in (os.path.join(root, *parts) + ".py",
+                 os.path.join(root, *parts, "__init__.py")):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _host_declared_names(name: str):
+    """The names a caller can bind from the host module `name`, or None.
+
+    `__all__` where CPython defines it as a literal list, else every top-level
+    binding the source makes that does not begin with an underscore. None means
+    the names could not be read, which the printed row says is not a count of 0.
+    """
+    if name in _host_decl_cache:
+        return _host_decl_cache[name]
+    out = None
+    path = _host_source_path(name)
+    if path is not None:
+        try:
+            import ast
+            with open(path, encoding="utf-8", errors="replace") as f:
+                tree = ast.parse(f.read(), filename=path)
+            names = set()
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Name):
+                            names.add(tgt.id)
+                elif isinstance(node, ast.AnnAssign):
+                    if isinstance(node.target, ast.Name):
+                        names.add(node.target.id)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for alias in node.names:
+                        names.add(alias.asname or alias.name.split(".")[0])
+            if "__all__" in names:
+                exported = None
+                for node in tree.body:
+                    if isinstance(node, ast.Assign) and any(
+                            isinstance(t, ast.Name) and t.id == "__all__"
+                            for t in node.targets):
+                        try:
+                            exported = list(ast.literal_eval(node.value))
+                        except Exception:               # noqa: BLE001
+                            exported = None
+                if exported and all(isinstance(e, str) for e in exported):
+                    names = set(exported)
+            out = sorted(n for n in names
+                         if n and not n.startswith("_") and n != "__all__")
+        except Exception:                               # noqa: BLE001
+            out = None
+    _host_decl_cache[name] = out
+    return out
+
+
+def _host_model_source(name: str):
+    """The `formal/hostmods` file that answers `name`, or None."""
+    root = os.path.join(REPO, "formal", "hostmods")
+    for cand in (os.path.join(root, *name.split(".")) + ".mojo",
+                 os.path.join(root, *name.split("."), "__init__.mojo")):
+        if os.path.isfile(cand):
+            return os.path.relpath(cand, REPO)
+    return None
+
+
+def _host_tier(name: str):
+    """`formal/imports.py`'s own answer, read through its published accessor."""
+    try:
+        from formal.imports import host_module_tier
+        return host_module_tier(name)
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def _host_use_names(path: str, module: str, declared):
+    """The declared names of `module` this file binds, as a set.
+
+    The two spellings a use has, and nothing else: `mod.NAME`, and a
+    `from mod[.sub] import …` line binding `NAME`. Empty means "not measured"
+    only when `declared` is empty, which the caller reports as such.
+    """
+    src = _source(path)
+    if not src:
+        return set()
+    mod = re.escape(module)
+    hits = set()
+    for n in declared:
+        if re.search(rf"(?<![\w.]){mod}\s*\.\s*{re.escape(n)}\b", src):
+            hits.add(n)
+    for m in re.finditer(rf"^[ \t]*from[ \t]+{mod}(?:\.\w+)*[ \t]+import[ \t]+"
+                         rf"([^\n#]+)", src, re.M):
+        for word in m.group(1).split(","):
+            bound = word.strip().split(" as ")[-1].strip().strip("()")
+            if bound in declared:
+                hits.add(bound)
+    return hits
+
+
+def _host_modules_in(detail: str):
+    """The host module name(s) one `not-answerable/host-import` line is about.
+
+    Read with `formal_sweep.py`'s OWN chain-peeling and import regex, so the
+    module this tool names is the module that tool's classifier named: a second
+    reader of the same message is a second opinion about the same verdict, and
+    two opinions is one too many. The two wordings both carry `imports '…'`, and
+    the SEVERAL-imports shape carries one per name — so it is handled as a list
+    rather than taking the last, for the reason
+    `formal/imports.py::unresolvable_import_errors`'s docstring records.
+    """
+    _hops, term = FS._split_chain(detail)
+    term = FS._terminal_reason(term)
+    multi = FS._MULTI_IMPORT_RE.search(term)
+    if multi:
+        names = FS._IMPORT_RE.findall(multi.group("body"))
+    else:
+        names = FS._IMPORT_RE.findall(term)
+    return names[-1:] if names else []
+
+
+def host_rank(log_path):
+    """`[{module, files, uses, names, tier, model, unclassified}]`, biggest first.
+
+    `files` counts a file once per module it is blocked by, so a file importing
+    two unbuildable host modules is in two rows — which is the truth of the
+    diagnostic, which names both (`formal/imports.py`'s `unresolvable_import_
+    errors`) — and `total_files` beside the table says how many DISTINCT files
+    the rows cover, so the two can be told apart rather than added.
+    """
+    per_module = collections.defaultdict(list)
+    lines = 0
+    files_all = set()
+    with open(log_path, errors="replace") as f:
+        for raw in f:
+            m = LINE_RE.match(raw.rstrip("\n"))
+            if not m or m.group("cls").lower() != FS.CLASS_HOST:
+                continue
+            lines += 1
+            path = m.group("path")
+            files_all.add(path)
+            for mod in _host_modules_in(m.group("detail")):
+                per_module[mod].append(path)
+    out = []
+    for mod, files in per_module.items():
+        declared = _host_declared_names(mod)
+        per_file = collections.defaultdict(set)
+        for f in files:
+            per_file[f] |= _host_use_names(f, mod, declared or ())
+        uses = sum(1 for f, names in per_file.items() if names)
+        names = collections.Counter()
+        for hit in per_file.values():
+            for n in hit:
+                names[n] += 1
+        out.append({
+            "module": mod,
+            "files": len(files),
+            "uses": uses,
+            "names": names.most_common(8),
+            "declared_known": declared is not None,
+            "declared": declared or (),
+            "tier": _host_tier(mod),
+            "model": _host_model_source(mod),
+            # IN NO TIER is only a DEFECT when there is no model: a module that
+            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule
+            # is "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a
+            # name is here iff it has a source"), and its import resolves before
+            # either set is consulted. `os`, `sys` and `re` are in no tier for
+            # that reason and are not mis-diagnosed; `datetime` and `builtins`
+            # are in no tier because nobody classified them, and every file
+            # that wants one is told its import "is not a stdlib or sibling
+            # module, and no such file exists", which is false.
+            "untiered": not _host_tier(mod) and not _host_model_source(mod),
+        })
+    out.sort(key=lambda r: (-r["files"], r["module"]))
+    return out, lines, len(files_all)
+
+
+def print_host_table(table, minimum, lines=0, files_all=0):
+    print(f"{'files':>5} {'uses':>5}  {'tier':<11} {'model':<26} host module")
+    for r in table:
+        if r["files"] < minimum:
+            continue
+        # A module with a source is WRITTEN, which is a third state and not a
+        # missing one: it is in neither tier because `HOST_MODELLED`'s rule is
+        # "a name LEAVES here by being WRITTEN" and `HOST_ADMITTED`'s is "a name
+        # is here iff it has a source", and its import resolves before either
+        # set is consulted. Printing it as UNTIERED would report `os` and `sys`
+        # as mis-diagnosed.
+        tier = r["tier"] or ("written" if r["model"] else "UNTIERED")
+        model = r["model"] or "—"
+        uses = r["uses"] if r["declared_known"] else "?"
+        print(f"{r['files']:>5} {str(uses):>5}  {tier:<11} {model:<26} "
+              f"{r['module']}")
+        if not r["declared_known"]:
+            print(f"        uses:        NOT MEASURED: {r['module']} has no "
+                  f"source in this interpreter's stdlib (it is built in or "
+                  f"frozen), so nothing here can be counted")
+        elif r["uses"] == 0:
+            print(f"        uses:        0 — every blocked file names nothing "
+                  f"{r['module']} declares, so the row is import CLOSURE and "
+                  f"not {r['files']} files of work")
+        elif r["uses"] < r["files"]:
+            print(f"        uses:        {r['uses']} of {r['files']}; the other "
+                  f"{r['files'] - r['uses']} name nothing it declares, so they "
+                  f"are closure")
+        if r["names"]:
+            print(f"        names:       "
+                  + ", ".join(f"{k} x{v}" for k, v in r["names"]))
+        if r["untiered"]:
+            print(f"        UNTIERED:    {r['module']} is in NEITHER "
+                  f"formal/imports.py tier, so its refusal reads "
+                  f"\"not a stdlib or sibling module, and no such file "
+                  f"exists\" — a statement about module RESOLUTION that is "
+                  f"false of a CPython standard-library module")
+    shown = [r for r in table if r["files"] >= minimum]
+    pairs = sum(r["files"] for r in shown)
+    print(f"\n{pairs} blocked file x module pairs over {files_all} files, "
+          f"accounting for {lines} host-import lines, in {len(shown)} "
+          f"module(s) of {len(table)}")
+    print("FILES BLOCKED IS AN UPPER BOUND here too, and for the same reason: "
+          "a file's\nterminal cause is the first refusal its build walk "
+          "reaches, and a host import blocks\nevery importer of its importers. "
+          "The `uses` column is the number that says\nwhether a row is WORK or "
+          "a row waiting on one module.")
+    print("`tier` is read from formal/imports.py::host_module_tier and `model` "
+          "from formal/hostmods/;\nneither is copied here. 'unreachable' is a "
+          "fact about the target, 'modelled' is a gap\nwith an owner, and "
+          "'admitted' is a module that answers under a declared contract.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("log", help="a formal_sweep.py log (stdout+stderr)")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable, one object per cause")
+    ap.add_argument("--host", action="store_true",
+                    help="rank the not-answerable/host-import row by the "
+                         "MODULE named, instead of ranking codegen causes")
     ap.add_argument("--min", type=int, default=DEFAULT_MIN, dest="minimum",
                     help=f"only causes blocking at least N files "
                          f"(default {DEFAULT_MIN})")
     args = ap.parse_args()
+
+    if args.host:
+        table, lines, files_all = host_rank(args.log)
+        if args.json:
+            json.dump({"modules": table, "lines": lines,
+                       "files": files_all}, sys.stdout, indent=1)
+            print()
+        else:
+            print_host_table(table, args.minimum, lines, files_all)
+        return 0
 
     table, total = rank(args.log)
     shown = [r for r in table if r["files"] >= args.minimum]

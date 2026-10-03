@@ -24,6 +24,8 @@ order in one place, not twice.
 """
 
 import collections
+import dataclasses
+from dataclasses import field
 import os
 import re
 
@@ -1451,8 +1453,10 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     two answers in this file that were false about the second kind are what
     cost it: the escape check's container branch in `formal/build.py`, and
     `multi_index_kind` below, which answered "a subscript whose index is a
-    tuple" about a type application. Both are measured before and after in
-    `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+    tuple" about a type application. Both were false diagnoses counted in map
+    rows 7 and 8 of the sweep work map; `formal/build.py`'s container branch
+    and this `multi_index_kind` were two readers of the same wrong question,
+    which is why they are one function now.
 
     THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
     reader of the multi-index question: two functions deciding "is this bracket
@@ -10469,16 +10473,14 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 # PYTHON BUILTINS THIS PATH DOES NOT IMPLEMENT, and why each one has no answer
 # here. The values are the second half of the sentence they appear in.
 #
-# This is the table `bugs/FORMAL_frame_receiver_handoff.md` names as the thing
-# the `getattr`/`setattr` finding was waiting for — "a program that reaches one
+# This is the table the `getattr`/`setattr` finding was waiting for — "a program that reaches one
 # of them is a program with a Python builtin this backend does not implement,
 # which is a fact about the backend's surface rather than about the image, and
-# naming it needs a table of what the backend DOES implement" — and it is also
-# the one remaining wrong diagnosis in
-# `bugs/FORMAL_frame_by_value_ceiling_zero.md`'s landing table, where
-# `std/memory/unsafe_pointer.mojo` is refused with "a Pointer receiver is
-# passed to type_of()" and the doc's own note says what that sentence is worth:
-# "`type_of` is a missing builtin, on any receiver".
+# naming it needs a table of what the backend DOES implement" — which is the
+# table immediately below. `std/memory/unsafe_pointer.mojo` is the file that
+# asked for it: it is refused with "a Pointer receiver is passed to type_of()",
+# and the honest reading of that sentence is "`type_of` is a missing builtin, on
+# any receiver".
 #
 # **Why the existing sentence is wrong for these and only these.** The last arm
 # of `frame_undefined_callee_refusal` says "this module defines no FUNCTION of
@@ -10633,9 +10635,9 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"to give: {UNIMPLEMENTED_BUILTINS[callee]}. That is a fact about "
             f"what this backend does, not about the receiver — so nothing about "
             f"{who}'s layout is at fault, and no declaration of {callee} in "
-            f"this file would change it. `bugs/"
-            f"FORMAL_frame_by_value_ceiling_zero.md` has the measurement that "
-            f"put this name on the list")
+            f"this file would change it. `UNIMPLEMENTED_BUILTINS` is the one "
+            f"table of what this path does not implement, and adding a name to "
+            f"it is all it takes to name the next one")
     if comptime_param_of:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -15459,6 +15461,91 @@ def method_receiver_name(method) -> object:
     return None
 
 
+def method_declares_receiver(method) -> bool:
+    """Whether this method's DECLARATION spells a receiver as its first parameter.
+
+    The question `method_receiver_name` above answers "which name", and this one
+    answers "is it a receiver at all" — which is a different question and the
+    source of an argument-binding defect.
+
+    `method_receiver_name` returns the first parameter's name whatever it is
+    called, which is what makes `def __init__(this)` and `@classmethod def
+    is_float(cls, …)` work: `this` and `cls` are receiver SPELLINGS, and the
+    name is not how the language recognises a receiver, the first parameter's
+    position is. But a first parameter called `x` is not a receiver in any
+    spelling this language has, and treating it as one is not a harmless
+    generality:
+
+    * `formal/build.py`'s `_rewrite_method_calls` prepends the receiver to the
+      call's argument list for every method this returns True for, and
+      `function_param_shape` / `incoming_args` read `fn.params` verbatim. For a
+      method that DECLARED its receiver those agree — `params[0]` is the
+      receiver's slot and the prepended word lands in it. For a method that did
+      not, they do not: the prepended receiver lands on the first DECLARED
+      parameter and every argument after it is off by one, with one argument
+      too many.
+    * The safe direction held only by luck. Measured on this tree,
+      `struct Box: def run(x: Int, r: R)` called `bx.run(0, r)` is refused —
+      first by `check_holder_agreements` ("`r` … every call site hands it
+      something else: passes the literal 0", which is false: it passes `r`),
+      and, for the specialized spelling, by `bind_call_arguments` ("too many
+      positional arguments (3 for 2 parameter(s))"), which is also false. Both
+      are refusals for reasons that are not operating, on a program whose only
+      real problem is spelled in its own source.
+
+    **What the corpus says about the cost of refusing**, measured by walking
+    every `.mojo` file in the tree and asking this of every method that HAS
+    parameters: 118 files, 6 such methods, and all 6 spell the receiver `self`
+    (`bootstrap_test_classes.mojo`, `class_jit.mojo`,
+    `formal/examples/wide_recv.mojo`). A `@staticmethod` is excluded by its
+    decorator rather than by its first parameter, which is the shape
+    `std/python/python.mojo`'s `import_module` is (`FORMAL_staticmethod_is_compiled_
+    as_an_instance_method.md`'s other half). So refusing costs 0 files here.
+
+    The answer is deliberately about the SPELLING rather than about the count,
+    because a count cannot distinguish `def m(self, x)` from `def m(x, y)` and
+    the count is the thing that is already believed twice.
+    """
+    if "staticmethod" in _decorator_names(method):
+        return False
+    params = list(getattr(method, "params", None) or [])
+    if not params or not isinstance(params[0], (tuple, list)) or not params[0]:
+        return False
+    return params[0][0] in RECEIVER_PARAMETER_SPELLINGS
+
+
+def method_without_a_receiver_parameter_refusal(struct_name: str,
+                                                member: str) -> str:
+    """Why a method with parameters and no receiver parameter is not lowered.
+
+    The refusal for the shape `method_declares_receiver` rules out, and it
+    exists because both of the answers this path had for it were wrong in the
+    same direction: bind the receiver as if the method took one and every
+    argument after the first is off by one, or bind it as if the method took
+    none and the caller's receiver is silently dropped. Neither is a question
+    about the program, and a reader sent to either is sent to fix an argument
+    list that is correct.
+
+    The advice is the one that makes the program work, and it is spelled as the
+    source change rather than as a rule: put the receiver back.
+    """
+    return (f"{struct_name}.{member}() is declared with parameters and no "
+            f"receiver: its first parameter is an ordinary argument, so this "
+            f"path cannot tell whether a call passes the receiver before it "
+            f"or not — bind the receiver as an ordinary word would shift every "
+            f"argument after it by one, and ignore it would drop it. A method "
+            f"here takes its receiver as its FIRST parameter, named "
+            f"{'/'.join(sorted(RECEIVER_PARAMETER_SPELLINGS))}, which is the "
+            f"same program with an argument list this path can read")
+
+
+# The spellings a receiver parameter is written with. `struct_receivers`
+# derives the field-reading set from them and `method_declares_receiver` below
+# requires one, so the two cannot come apart; a method that writes it some
+# other name is refused by name rather than half-supported.
+RECEIVER_PARAMETER_SPELLINGS = frozenset({"self", "this", "cls"})
+
+
 def struct_declared_names(struct_def) -> list:
     """The class body's own names, in declaration order, `__slots__` expanded.
 
@@ -16875,7 +16962,8 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         there would be false in its first clause — the operand IS the bare name
         `h` — and it is reachable, measured: `return len(b, b)` on a `Bag`
         frame hits it.  A refusal whose stated reason is entirely false is the
-    worst outcome on this path (`bugs/FORMAL_frame_receiver_handoff.md` §4), so
+    worst outcome on this path (`test_refusal_taxonomy.py` is the standing
+    # check for it), so
     the arm is not there to be right about a case that should have a different
         message.
     """
@@ -19171,7 +19259,8 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
                     f"({struct_field_summary(struct_def)}) this struct does "
                     f"not have"))
             value, refusal = _init_store_value(struct_def, raw, params, got,
-                                              args, rets, framed_names)
+                                              args, rets, framed_names, call,
+                                              decls)
             if refusal is not None:
                 return (None, refusal)
             stores.append((field, slot, value))
@@ -19446,14 +19535,389 @@ def _init_statement_spelling(stmt) -> str:
 _INIT_SINGLETON_NAMES = frozenset({"None", "True", "False"})
 
 
+# ── An inlined `__init__`'s own receiver ───────────────────────────────────
+#
+# An inlined constructor body runs at the CONSTRUCTION SITE, in the CALLING
+# function, where the name `self` does not exist.  Everything else the body does
+# is a store the site can perform — a literal, arithmetic over the caller's own
+# arguments — so those substitute directly and the body needs nothing from its
+# own scope.  A read of the RECEIVER was the one thing it could not do, and it
+# was refused: the refusal's own words were that the block's address has to be
+# "threaded through as a receiver" and that this path had no lowering for it.
+#
+# It has one now, and the block's address is the thing that was missing from the
+# IMPLEMENTATION rather than from the model: `struct_constructor_sites` reserved
+# a block for this exact call in this exact function's prologue, and the store
+# loop below is already writing into it.  So a receiver read is resolved against
+# THAT block, in the only two ways the language's own `self` can be read:
+#
+#   * `self.<m>(…)` — a METHOD CALL, lifted to the call it is
+#     (`Class_m(<block>, …)`, `method_function_name`) with the block's address
+#     as the receiver.  The callee is compiled as a function in its own right
+#     with its receiver bound to its first parameter, so the body that runs is
+#     the source's body: a method that reads fields, calls other methods or
+#     branches lowers exactly as it does anywhere else, which is why this covers
+#     `self.spec_content = self._read_spec()` and not only a method that returns
+#     a constant.
+#   * `self.<f>` — a FIELD, a load at `[block + 8·slot]` with the slot from the
+#     same `struct_frame_slot` table the store above it uses, so a read and a
+#     write of one field cannot disagree about where it lives.  Reading a field
+#     the body has not stored yet yields the class-level default, which is what
+#     the language says the field holds at that point: every slot is brought up
+#     at its default before the body's first store.
+#
+# A receiver read that is neither of those — the object handed to a free
+# function, a `self.<f>` whose value is a NESTED frame that is then read
+# through, a name bound to the object — is still refused, and
+# `init_receiver_rewrite`'s message says which and why.  So is the whole family
+# on a struct of zero or one field, where the receiver IS the field's own word
+# and there is no block to read a slot of.
+
+
+@dataclasses.dataclass
+class CtorReceiver:
+    """The object an inlined `__init__` is constructing, as a receiver.
+
+    NOT an AST node the parser produced: nothing in the source spells it, and
+    it never appears in a tree the parser built.  It is what a `self` in an
+    inlined constructor body becomes once the body's stores are decided to be
+    emitted at the construction site — the one expression in that position which
+    is not the caller's own code, so it has to be said rather than substituted.
+
+    `call` is the CONSTRUCTION this receiver belongs to, and it is what makes
+    the node answerable rather than ambient: the block is per call SITE
+    (`struct_constructor_sites`), so two constructions of the same struct in one
+    function are two blocks and a receiver has to say which one it is.  Both
+    emitters look the site up by `id(call)`, which is the same key
+    `struct_constructor_sites` publishes.
+    """
+
+    call: object = None
+
+
+@dataclasses.dataclass
+class CtorField:
+    """`<field>` of the object an inlined `__init__` is constructing.
+
+    The read half of `CtorReceiver`, and a separate node rather than a field on
+    it because the two are answered by different arithmetic: the receiver is an
+    ADDRESS and this is a LOAD at that address plus an offset.  `slot` is the
+    field's own index in `struct_frame_slots` — the table the store in the same
+    body uses — so the read and the write are the same slot by construction and
+    not by two walks agreeing.  `field` is the NAME, kept beside the slot so a
+    refusal about one of these can quote the source (`self.inner.q`) instead of
+    the node class, which is a name from this file and not from anyone's program.
+    """
+
+    call: object = None
+    slot: int = 0
+    field: str = ""
+
+
+class _CtorReceiverUnlowerable(Exception):
+    """One receiver read an inlined `__init__` cannot resolve against the block.
+
+    A private control-flow signal rather than a refusal string, because the walk
+    that meets it is recursive and seven levels down: `init_receiver_rewrite` is
+    the ONE function that turns the sentence into a diagnostic, so the level that
+    noticed the shape hands back what it saw and the level that knows the
+    message says it.
+    """
+
+
+@dataclasses.dataclass
+class _CtorCtx:
+    """Everything the receiver rewrite needs about ONE construction site.
+
+    A context rather than three more positional parameters on every level of a
+    recursion, and the fields are the three facts that are true of a construction
+    and false of anything else: which STRUCT is being built, which CALL this is
+    — the block is per site, so a receiver has to name its own — and the unit's
+    struct table, which is what answers "does some OTHER struct declare this
+    method too".
+
+    What is NOT here is the constructor's parameters and the caller's arguments,
+    and their absence is a rule rather than a simplification: a bare parameter is
+    substituted where it stands ALONE (`_init_store_value`) and refused
+    everywhere else, and keeping them out of this context is what makes that a
+    property of the BODY's names rather than something a lifted call could
+    quietly widen. Substituting a parameter in an argument position would
+    evaluate the caller's expression once per occurrence, so `S(next())` would
+    call `next()` twice — a different program from the one the source wrote, and
+    the reason the standalone rule is the only one.
+    """
+
+    struct: object = None
+    call: object = None
+    decls: dict = field(default_factory=dict)
+
+    @property
+    def receivers(self) -> set:
+        return struct_receivers(self.struct)
+
+
+def _is_ctor_receiver(node, receivers) -> bool:
+    """Is `node` a bare read of the constructor's receiver?
+
+    A bare NAME and nothing else: `self.f` is a `MemberExpr` whose base this
+    function also answers true for, and the level that owns the parent is what
+    tells a field read from a method call.
+    """
+    return isinstance(node, F.IdentExpr) and node.name in receivers
+
+
+def _ctor_needs_a_block(ctx) -> None:
+    """Refuse a receiver read for a struct that has no block to read.
+
+    A struct of zero or one field is a plain WORD on this path and its receiver
+    IS that word, so there is no block, no slot and no address — both lowerings
+    above are "compute something out of an address", and neither has an address
+    here.  It is a refusal rather than a third lowering because the word a
+    one-field construction evaluates to is the LAST store of the inlined body
+    (`one_word_construction`): a receiver read EARLIER in the body has no value
+    to read yet, so answering it with the field's default would be a different
+    program from the one the source wrote.
+    """
+    if not struct_is_framed(ctx.struct):
+        raise _CtorReceiverUnlowerable(
+            f"a read of the receiver of {ctx.struct.name}, which is a struct of "
+            f"{struct_field_count(ctx.struct)} field(s) and so its receiver IS "
+            f"its own word rather than the address of a block — there is "
+            f"nothing here to read a slot of")
+
+
+def _ctor_method_owners(ctx, member):
+    """The structs of THIS IMAGE that declare a method called `member`.
+
+    `structs_declaring_method` over the unit's struct table, which is the one
+    `init_body_stores` is already handed for the nested-frame question and which
+    already CONTAINS the struct being built whenever it is non-empty.  A length is
+    the whole of the answer, and BOTH of its answers are refusals rather than a
+    pick: this path dispatches a method by NAME alone (`find_method_owner`),
+    because a call site carries the name and the receiver's type is not inferred,
+    so one owner is what makes the dispatch a fact and two owners is a question
+    this compiler cannot answer.
+    """
+    table = list((ctx.decls or {}).values())
+    if not any(st is ctx.struct for st in table):
+        table.append(ctx.struct)
+    return structs_declaring_method(table, member)
+
+
+def _ctor_method_call(ctx, node):
+    """`self.<m>(…)` as the call it is, with the block as its receiver.
+
+    THE shape two files of this repository's own source are written in
+    (`self.spec_content = self._read_spec()`).  Lifted by `method_function_name`
+    rather than left as a `MemberExpr` callee because that is how every other
+    method call in the image is spelled by the time an emitter sees it
+    (`formal/build.py`'s `_rewrite_method_calls`), and the only difference here
+    is that the receiver is a NODE rather than a name — so the argument binder,
+    the callee's frame-holder contract on its first parameter and the argument
+    registers are all the code a method call has always run.
+
+    A method declared with NO receiver (`def m():`, a `@staticmethod`) gets no
+    receiver word, by `method_receiver_name` and for the reason
+    `formal/build.py`'s `_receiverless_methods` gives: there is nothing for an
+    address to be handed to, and a class name is not a value.
+    """
+    member = node.func.member
+    owners = _ctor_method_owners(ctx, member)
+    if not owners:
+        raise _CtorReceiverUnlowerable(
+            f"a call to `{member}(…)`, which no struct this image declares has "
+            f"as a method")
+    if len(owners) > 1:
+        raise _CtorReceiverUnlowerable(
+            f"a call to `{member}(…)`, which {len(owners)} structs of this image "
+            f"declare as a method ({', '.join(st.name for st in owners)}) and "
+            f"this path dispatches a method by NAME alone, so it cannot say "
+            f"which one of them the source means")
+    method = next(m for m in struct_methods(ctx.struct) if m.name == member)
+    args = [_ctor_receiver_rewrite(ctx, a)
+            for a in (getattr(node, "args", None) or [])]
+    kwargs = [(k, _ctor_receiver_rewrite(ctx, v))
+              for k, v in (getattr(node, "kwargs", None) or [])]
+    for a in args:
+        _ctor_field_not_passthrough(ctx, a, member)
+    if method_receiver_name(method) is not None:
+        args = [CtorReceiver(call=ctx.call)] + args
+    return F.CallExpr(func=F.IdentExpr(
+        name=method_function_name(ctx.struct.name, member)),
+        args=args, kwargs=kwargs)
+
+
+def _holds_ctor_field(node) -> bool:
+    return any(isinstance(sub, CtorField) for sub in iter_nodes(node))
+
+
+def _ctor_field_not_passthrough(ctx, node, member):
+    """Refuse a field of the object under construction handed to a CALL.
+
+    The one consumer of a `CtorField` that is not a plain read, and the reason it
+    is a refusal is about what the word in that slot MIGHT be.  A slot holds one
+    word; the word is an integer or a `char *` for most fields and the ADDRESS of
+    a frame for a field another struct's layout placed in it.  Reading it is
+    right either way — a load is a load — but handing it to a callee is a
+    question only the callee's own convention can answer, and this is the one
+    place in the compiler that cannot ask: the frame-holder analysis
+    (`formal/build.py`'s `_frame_receivers`) reads the FUNCTION BODIES, and a
+    call lifted out of an inlined constructor body is not in any of them.  So a
+    parameter whose kind nobody established would be read as a plain word, and
+    `other.q` inside the callee would compute an address out of a number — the
+    silent wrong answer this path exists to prevent, reached by a path the
+    refusal could not otherwise see.
+
+    Refused rather than guessed in either direction, and it is a narrow cost:
+    passing a field to a method of the same struct reads as arithmetic over the
+    object's own state, which is what the corpus writes.
+    """
+    if not _holds_ctor_field(node):
+        return
+    field = next(sub.field for sub in iter_nodes(node)
+                 if isinstance(sub, CtorField))
+    # "as an argument" and NOT "in argument position": that phrase is the marker
+    # of a different cause in `tools/formal_sweep_causes.py` — the frame-escape
+    # family, whose subject is a frame ADDRESS reaching a callee that wanted a
+    # value.  This is a refusal rather than an escape, and a message that shares
+    # the family's marker would file it in the wrong column.
+    raise _CtorReceiverUnlowerable(
+        f"`self.{field}` handed to `{member}(…)` as an argument: a slot's word "
+        f"is an address when the field holds a nested frame, and nothing here "
+        f"can say which way this callee reads its parameter")
+
+
+def _ctor_field_read(ctx, node):
+    """`self.<f>` as the load of one slot of the block, or a refusal.
+
+    One level, and the level is the whole of what makes it answerable: the slot
+    index comes from `struct_frame_slots`, which knows the struct's OWN fields
+    and nothing about frames placed inside them.  So `self.<nested>.<field>` — a
+    load at an offset inside a frame whose ADDRESS the slot holds, laid out by a
+    DIFFERENT struct — is refused by name rather than answered with this struct's
+    slot table, which would be a load of the wrong offset and a program that
+    computes a number nobody wrote.
+    """
+    field = node.member
+    slot = struct_frame_slot(ctx.struct, field)
+    if slot is None:
+        if any(m.name == field for m in struct_methods(ctx.struct)):
+            raise _CtorReceiverUnlowerable(
+                f"`{field}`, which is a METHOD of {ctx.struct.name} and not a "
+                f"field of it: a bound method is not a value, so there is no "
+                f"slot to read it out of")
+        raise _CtorReceiverUnlowerable(
+            f"`{field}`, which is not a field of {ctx.struct.name} "
+            f"({struct_field_summary(ctx.struct)})")
+    return CtorField(call=ctx.call, slot=slot, field=field)
+
+
+def _ctor_receiver_rewrite(ctx, node):
+    """`node`, rebuilt with every read of the receiver resolved against the block.
+
+    A RECURSIVE walk rather than a top-level test, and the difference is a
+    refused program rather than a missed one: `self.b = self.a + b` does not
+    mention the receiver at the top level, so a top-level test would let the
+    `BinOp` through to `_init_free_names`, which would refuse it for naming a
+    name — true, and naming the wrong thing, because that name is one this walk
+    knows how to resolve.
+
+    It dispatches on a node's OWN shape before descending, which is what makes
+    the two lowerings parent-aware without a parent pointer: a `MemberExpr` whose
+    base is the receiver is a FIELD READ, and the same `MemberExpr` as a call's
+    `func` is a METHOD CALL, and only the level that can see the `CallExpr` can
+    tell those apart.
+
+    A node it does not change is returned AS IS rather than rebuilt, so the
+    identity test `new is not old` at the parent is what decides whether a
+    subtree was rebuilt at all — the alternative, rebuilding unconditionally,
+    would allocate a copy of every node of every constructor body in the image
+    to discover there was nothing to change in any of them.
+    """
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr) \
+            and _is_ctor_receiver(node.func.obj, ctx.receivers):
+        _ctor_needs_a_block(ctx)
+        return _ctor_method_call(ctx, node)
+    if isinstance(node, F.MemberExpr) \
+            and _is_ctor_receiver(node.obj, ctx.receivers):
+        _ctor_needs_a_block(ctx)
+        return _ctor_field_read(ctx, node)
+    if _is_ctor_receiver(node, ctx.receivers):
+        raise _CtorReceiverUnlowerable(
+            f"a bare read of `{node.name}`, which is the object under "
+            f"construction and neither one of its fields nor a method call on it")
+    if isinstance(node, (list, tuple)):
+        rebuilt = [_ctor_receiver_rewrite(ctx, x) for x in node]
+        if all(new is old for new, old in zip(rebuilt, node)):
+            return node
+        return tuple(rebuilt) if isinstance(node, tuple) else rebuilt
+    names = _node_field_names(node) if node is not None else None
+    if not names:
+        return node
+    changed = {}
+    for name in names:
+        old = getattr(node, name, None)
+        if old is None or name in ("line", "col"):
+            continue
+        new = _ctor_receiver_rewrite(ctx, old)
+        if new is not old:
+            changed[name] = new
+    rebuilt = node if not changed else dataclasses.replace(node, **changed)
+    # The two consumers of a field read that are not plain reads, checked on the
+    # REBUILT node rather than on the source, because that is the only place a
+    # `CtorField` exists at all: a member access ABOVE one needs the nested
+    # frame's own layout, and an argument POSITION hands the word to a callee
+    # whose parameter convention nothing here can establish.
+    if isinstance(rebuilt, F.MemberExpr) and _holds_ctor_field(rebuilt):
+        through = next(sub for sub in iter_nodes(rebuilt)
+                       if isinstance(sub, CtorField))
+        raise _CtorReceiverUnlowerable(
+            f"`self.{through.field}.{rebuilt.member}`, a read THROUGH a field of "
+            f"{ctx.struct.name}: the slot holds the address of a frame and the "
+            f"offset into it is a layout this struct's own field table does not "
+            f"describe")
+    if isinstance(rebuilt, F.CallExpr):
+        callee = _flat_callee(rebuilt) or spelled(rebuilt.func)
+        for a in (getattr(rebuilt, "args", None) or []):
+            _ctor_field_not_passthrough(ctx, a, callee)
+    return rebuilt
+
+
+def init_receiver_rewrite(struct_def, value, call, decls):
+    """`(value, refusal)` — the receiver's reads in one store's right-hand side.
+
+    `value` comes back UNCHANGED when it does not read the receiver at all, and
+    that is the common case: `self.a = n` is answerable by substituting the
+    caller's argument and the walk has nothing to do with it.  A refusal is the
+    one shape no lowering here covers, and it names the SHAPE rather than the
+    name, because "a read of `self`" was the whole of the old message and the
+    reader's next question — "so what CAN this body say?" — is not answered by
+    it.
+    """
+    receivers = struct_receivers(struct_def)
+    if not any(_is_ctor_receiver(node, receivers) for node in iter_nodes(value)):
+        return (value, None)
+    ctx = _CtorCtx(struct=struct_def, call=call, decls=decls or {})
+    try:
+        return (_ctor_receiver_rewrite(ctx, value), None)
+    except _CtorReceiverUnlowerable as why:
+        return (None, construction_init_body_refusal(
+            struct_def.name,
+            f"a read of the receiver this path cannot resolve against the block "
+            f"being constructed: {why}. A method call and a one-level field "
+            f"read ARE resolved — the block's address is passed as the "
+            f"receiver, and a field is a load at `block + 8·slot` — so "
+            f"what is left is a shape with no address to compute from"))
+
+
 def _init_store_value(struct_def, value, params, got: int, args, rets,
-                      framed_names):
+                      framed_names, call=None, decls=None):
     """`(value_node, refusal)` — what one `self.<f> = …` stores.
 
-    The parameter case, the free-name refusal and the one expression kind the
-    site cannot host are decided here so `init_body_stores` reads as the walk
-    it is; each of the four is a fact about ONE right-hand side and none of
-    them is about the walk.
+    The parameter case, the receiver's own reads, the free-name refusal and
+    the one expression kind the site cannot host are decided here so
+    `init_body_stores` reads as the walk it is; each of the five is a fact
+    about ONE right-hand side and none of them is about the walk.
     """
     if isinstance(value, F.IdentExpr) and value.name in _INIT_SINGLETON_NAMES:
         return (value, None)
@@ -19490,6 +19954,17 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
             f"frame: its block is reserved per call SITE in the prologue of the "
             f"function whose body names the call, and a body inlined into a "
             f"construction elsewhere has no such site"))
+    lifted, receiver_refusal = init_receiver_rewrite(
+        struct_def, value, call, decls or {})
+    if receiver_refusal is not None:
+        return (None, receiver_refusal)
+    # The free-name check is asked of the ORIGINAL right-hand side, not of the
+    # lifted one, and the ordering is the whole of why: the lift's own output
+    # contains names that are not the body's — the callee it named
+    # (`S_scale`) and whatever caller's expressions the parameter substitution
+    # brought in — and asking about THOSE would refuse a construction for naming
+    # a local of the calling function, which is the one function whose scope a
+    # construction site shares with it.
     free = _init_free_names(struct_def, value)
     if free is not None:
         return (None, free)
@@ -19497,7 +19972,7 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
         struct_def.name, "of this `__init__`", value, rets)
     if refusal is not None:
         return (None, refusal)
-    return (value, None)
+    return (lifted, None)
 
 
 def _init_framed_construction(value, framed_names):
@@ -19521,10 +19996,11 @@ def _init_framed_construction(value, framed_names):
 def _init_free_names(struct_def, value):
     """A refusal for a name an inlined `__init__` body cannot bring with it, or None.
 
-    Every name the body reads is either a RECEIVER — `self`, and the object
-    being constructed — or a LOCAL of the body, and at a construction site in
-    the CALLING function neither exists.  The body is inlined, not moved: there
-    is no scope to bring them along in, and reading one would be reading
+    A name the body reads is one of three things, and this answers for the two
+    it cannot substitute: a LOCAL of the body, and a module constant, which is
+    folded elsewhere in this compiler and not re-derived here.  At a construction
+    site in the CALLING function neither exists — the body is inlined, not moved,
+    there is no scope to bring them along in, and reading one would be reading
     whatever register the calling function happened to leave in it.
 
     A PARAMETER is the third case and the one that is easy to miss, because a
@@ -19535,9 +20011,15 @@ def _init_free_names(struct_def, value):
     case has been handled, and it is a walk rather than a top-level test for
     exactly that reason.
 
-    A name that is neither a receiver nor a parameter is the same refusal with
-    a blunter message — a local of the body, or a module constant, which is
-    folded elsewhere in this compiler and not re-derived here.  The three
+    The RECEIVER is not answered here.  `init_receiver_rewrite` runs first, on
+    the same right-hand side, and has already resolved every receiver read it
+    can — a method call and a one-level field read both lower against the block
+    under construction — and named the ones it cannot, so a receiver read
+    reaching this walk is a shape that walk has already refused.  It is
+    therefore SKIPPED rather than refused, and skipping it is also what lets the
+    rewrite's output stay out of this question: a lift is a different tree (a
+    callee name, a node for the receiver, the caller's own expressions where the
+    parameters were) and this walk is about the names the BODY reads.  The three
     singletons are excluded because they are the language's own and both
     backends already materialize them (see `_INIT_SINGLETON_NAMES`).
     """
@@ -19547,15 +20029,7 @@ def _init_free_names(struct_def, value):
         if not isinstance(node, F.IdentExpr) or node.name in _INIT_SINGLETON_NAMES:
             continue
         if node.name in receivers:
-            return construction_init_body_refusal(
-                struct_def.name,
-                f"a read of {node.name!r} in the right-hand side, which is the "
-                f"receiver of the constructor: an inlined body runs at the "
-                f"construction site, in the calling function, where the name "
-                f"{node.name!r} is not bound — a method call on the "
-                f"under-construction object, or a read of another field of it, "
-                f"needs the block's address threaded through as a receiver and "
-                f"this path has no lowering for that")
+            continue
         locals_.append(node.name)
     if not locals_:
         return None
@@ -21769,7 +22243,8 @@ def dylib_frame_return_refusal(module, names) -> str:
     measured one: `formal/build.py`'s `_method_exports` used to filter wide
     receivers out of the export set, the importer's call had nothing to bind
     to, and the symptom was reported as a layout problem (see
-    `bugs/FORMAL_frame_receiver_handoff.md` §1).  Silently changing a module's
+    `byref_cross_module_wide_receiver_reads` in `test_formal_run.py`).
+    # Silently changing a module's
     public API is the same defect with a different spelling."""
     return (f"module {module} exports {' and '.join(names)}, which "
             f"{'return' if len(names) == 1 else 'return'} a frame address, and "
@@ -22160,7 +22635,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
     """`recv.m[T](x)` where two structs in this image declare `m`.
 
     A refusal whose stated reason was **entirely false**, which is the defect
-    class §4 of `bugs/FORMAL_frame_receiver_handoff.md` is three examples of.
+    class `test_refusal_taxonomy.py` exists to hold this path to.
     It was refused as `b.run names 'run', which is a METHOD of Box … a
     value-position method reference is a bound method`, which is a claim about a
     program that has no such reference in it: `b.run[3](4)` is a CALL, the
@@ -22178,7 +22653,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
         that may be the other — a wrong answer with exit 0.
 
     So the reader's next step is in their own source, and this says which of the
-    two things they can do about it.  `bugs/FORMAL_frame_receiver_handoff.md`
+    two things they can do about it.  `formal/model.py`'s own
     §18 measured the shape across the corpus: it is what still refuses
     `std/runtime/_asyncrt.mojo` and `std/utils/index.mojo` of the eight files the
     sweep reported as value-position method references.
@@ -22261,7 +22736,8 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
     at this function and be reported by the second bullet above, which is false
     about it in every clause: it is a call and not a value-position reference,
     and `run` is a method of the receiver's OWN struct, which is the hand-off
-    `bugs/FORMAL_frame_receiver_handoff.md` §1 measures to be sound.  It has its
+    cross-module hand-off measures to be sound (`test_formal_run.py`'s
+    # `byref_cross_module_wide_receiver_writes`).  It has its
     own message, `ambiguous_method_specialization_refusal`, reached from
     `formal/build.py`'s `check_module_symbols` instead — which is where the
     BRACKET is examined, and therefore the only place the ambiguity is knowable
@@ -24020,6 +24496,171 @@ class GlobalDataImage:
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
+# THE STATUS A STACK OVERFLOW LEAVES, beside the one a shift leaves. The
+# argument for a second number and against reusing `SHIFT_TRAP_STATUS` is the
+# argument every status on this path makes: "this program could not be answered"
+# is one answer, and a caller that has to tell a stack overflow from a negative
+# shift amount is being handed a distinction nobody downstream wanted. But they
+# are not the same event, and the diagnostic value of naming which one happened
+# is real: an overflow is a statement about the program RECURING and an operand
+# being a negative amount is a statement about one line. 1 is taken by the
+# divide-by-zero arm of each backend's shift/div emitter (`SHIFT_TRAP_STATUS`),
+# so this is 2, and both backends read the constant rather than the literal —
+# the same reason that one is a constant.
+STACK_TRAP_STATUS = 2
+
+
+def stack_floor_address(base: int, table: dict = None) -> int:
+    """Where this unit's stack-floor WORD is, as an absolute address.
+
+    The one computation of it, for both backends and for every prologue in the
+    image, because the failure this guards against has a second copy of this
+    answer in it: `GlobalDataImage.stack_floor_offset` already refuses to be a
+    second field kept equal to `init_flag_offset + GLOBAL_SLOT_BYTES`, and a
+    backend that added `init_flag_offset + 16` here would be the third answer
+    to one question about an image's layout. The offset is read out of the image
+    the linker is writing, not recomputed from the table, so the code cannot
+    address a word the bytes do not contain.
+
+    `table` defaults to the published slot table; both callers pass
+    `module_slots()` explicitly today, and the default exists so a caller that
+    has not published yet gets the empty-table image (two reserved words) rather
+    than a `None`.
+    """
+    return base + build_data_image(
+        module_slots() if table is None else table, base).stack_floor_offset
+
+
+def recursive_function_names(functions, structs: dict = None) -> set:
+    """The functions of one image a call chain can RE-ENTER, by name.
+
+    This is the set the stack-floor guard is emitted for, and the rule is
+    "on a call-graph cycle" rather than "in the image" for a reason that is
+    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
+    distinct functions has a finite depth, and it is the return to a function
+    already on the stack that makes the depth a function of the PROGRAM rather
+    than of its shape. So a cycle's members are where a runaway recursion is
+    stopped, and a program that recurses cannot get past one.
+
+    **And the narrower set costs nothing anywhere else, which is what makes it
+    the rule rather than a compromise.** The per-export contract proof
+    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
+    export whose body contains ANY conditional branch — `Refine.Block.step` is one
+    function of one state — and every RECURSIVE function contains a branch (a
+    branch-free body that calls itself does not return, so it is not a program
+    this backend can be asked about). So guarding the cycles adds no branch to
+    any export that still had a proved contract, and removes none: the export
+    contracts that exist today are exactly the straight-line, non-recursive
+    ones, and they are byte-identical with this in place. Widening the rule to
+    "every function" would therefore trade proved contracts for nothing.
+
+    What it does leave open, and what is stated rather than hidden: a chain of
+    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
+    depth is finite and knowable, and the budget this guards against
+    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
+    function the chain passes through, which by construction it is not.
+
+    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
+    a missed edge here means a missed cycle and an unguarded recursion:
+    `call_callee_name` answers the two spellings that name a function of this
+    image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
+    EVERY struct in the image that declares an `m` — which is the symbol the
+    method-call rewriting emits, and over-approximating the owner is the safe
+    direction because it can only add an edge. A call out of the image
+    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
+    into it, so it cannot close a cycle here.
+    """
+    names = {f.name for f in functions}
+    method_owners: dict = {}
+    for st in (structs or {}).values():
+        for m in struct_methods(st):
+            method_owners.setdefault(m.name, []).append(st.name)
+    edges: dict = {f.name: set() for f in functions}
+    for f in functions:
+        body = getattr(f, "body", None)
+        if body is None:
+            # A StructDef, or anything else that is not a function. Both
+            # backends pass their `_functions` table, which is FunctionDefs
+            # only, so this is the guard against a caller that hands over the
+            # module's whole statement list — and skipping is the right answer
+            # rather than an error, because a struct has no calls of its own.
+            continue
+        for node in iter_nodes(body):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = call_callee_name(node.func)
+            if callee is not None:
+                edges[f.name].add(callee)
+                continue
+            func = node.func
+            if isinstance(func, F.SubscriptExpr):
+                func = func.obj
+            if not isinstance(func, F.MemberExpr):
+                continue
+            for owner in method_owners.get(func.member, ()):
+                edges[f.name].add(f"{owner}_{func.member}")
+
+    def reaches_self(start: str) -> bool:
+        seen, stack = set(), [start]
+        while stack:
+            cur = stack.pop()
+            for nxt in edges.get(cur, ()):
+                if nxt == start:
+                    return True
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    return {name for name in names if reaches_self(name)}
+
+
+# THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
+#
+# **Which prologues get it** is `recursive_function_names` above, and that is
+# the only decision here that is not the sequence: the sequence is the same in
+# every prologue it appears in, and a prologue it does not appear in is
+# unchanged code.
+#
+# Both prologues subtract a fixed frame and then do this, and the order is
+# load-bearing on both machines:
+#
+#     <floor> = the word at `stack_floor_address(...)`
+#     if <floor> == 0:  <floor> = SP - BUDGET ; store it back
+#     compare SP against <floor> and EXIT(STACK_TRAP_STATUS) if SP is below it
+#
+# Four decisions, each of which had more than one available answer:
+#
+# * **The floor is stored LAZILY, in every prologue, and not from the
+#   executable's entry stub.** A stub would do it once per process for an
+#   executable, and a dylib has no entry stub (`emit_startup=False`), so that
+#   answer is one mechanism for one container kind and a hole in the other —
+#   the shape `initialization_is_lazy` below already refuses for the same
+#   reason. The store is a `cbnz`/`jne` over four instructions and runs once
+#   per process; the alternative saves those four instructions per call and
+#   costs a second code path that a library image cannot take.
+# * **Zero means "not stored yet", and that is SAFE, not a hole.** The compare
+#   is an UNSIGNED lower test, and a stack pointer is never below zero, so an
+#   unset floor cannot fire — the guard is silent rather than wrong, which is
+#   exactly today's behaviour and the state the word starts in. This is why the
+#   floor needs no initialization ORDER relative to the first prologue: the
+#   store and the compare are in the same prologue, store first.
+# * **The budget is subtracted from the SP the frame subtraction LEFT**, not
+#   from the caller's SP. The difference is this function's own frame, which is
+#   charged against the budget rather than added to it, and that is the
+#   conservative direction.
+# * **The compare reads SP into a scratch register first on arm64** rather than
+#   using `CMP SP, Xm`. Both spell the same instruction to the hardware, but
+#   `lib/ProofLib.lean`'s `arm64_reg` answers 0 for index 31, so the
+#   shifted-register `SUBS` that `CMP SP, Xm` decodes to would be proved about
+#   `0 - Xm` — a proof of a different instruction
+#   (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`). `ADD Xd, SP, #0`
+#   is one of the forms the model already reads as `s.sp`, and the `CMP` that
+#   follows then names two ordinary registers. The bug doc for the guard
+#   concluded that the arm64 model gap BLOCKED it; this is the way round that,
+#   and it is why the sequence is written down here rather than left to two
+#   emitters.
+
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
 #
@@ -24900,7 +25541,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     at the address the slot holds.
 
     **The image is never empty, and that is a change of policy rather than an
-    oversight** (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    oversight** (`model.STACK_FLOOR_BUDGET_BYTES`, whose guard reads the word
+    below).
     The two reserved words are the backend's own bookkeeping rather than any
     program's storage, so they exist whether or not the module declares a
     global — which means `has_globals` is true of every image and `__DATA` is
@@ -24968,7 +25610,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # finds it clear must treat the floor as UNKNOWN rather than as zero —
     # which is the safe direction for the guard this word exists for, because a
     # zero floor compares as "nothing is below the stack pointer" and so never
-    # fires (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    # fires (`model.STACK_FLOOR_BUDGET_BYTES`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
 
@@ -25114,6 +25756,41 @@ def unresolved_name_refusal(name: str, fn_name: str, why: str) -> str:
             f"out of whatever register the allocator left behind, which is "
             f"how one program returned 10 on arm64 and 0 on x86-64 where the "
             f"source says 5")
+
+
+def function_value_refusal(name: str, fn_name: str) -> str:
+    """Why a FUNCTION NAME cannot be read as a value, in its own words.
+
+    `def dbl(x): …` followed by `call2(dbl, 5)` — or by `var g = dbl` — reaches
+    the name as an ordinary read, and the read finds no home for it because a
+    function is not a local, a receiver field, or a folded module constant. The
+    refusal that stood there was `unresolved_name_refusal`'s, whose `why` clause
+    is *"the register allocator collected no home for it, so the emitter and the
+    allocation walk disagree about this function's locals"*.
+
+    **Every clause of that is false, and it is false in the direction that costs
+    a reader the most.** The emitter and the allocation walk agree perfectly:
+    both of them know `dbl` is not a local, which is why neither gave it one.
+    What is true is that a first-class function has no representation on this
+    path at all \u2014 one word is a value and a function is a code address, so there
+    is nothing for the word to hold (`pointer_value_model` is what says what a
+    word can and cannot denote). Measured on this tree, both spellings above
+    were refused with the allocator sentence.
+
+    So the message says what the construct is, which is the same repair
+    `UNIMPLEMENTED_BUILTINS` and `FRAME_IDENTITY_CALLS` are: name the thing
+    instead of the machinery that failed to hold it.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a FUNCTION, and a function is not a value on "
+            f"this path: it has no representation here \u2014 a value is one 64-bit "
+            f"word and a function is a code address, so there is nothing for "
+            f"that word to hold, and passing one as an argument, storing one in "
+            f"a container, or returning one is refused rather than answered "
+            f"with a number that means nothing. `formal/hostmods/` has no "
+            f"module that hands back a callable for the same reason "
+            f"(`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"it directly, or move the work into a `def` and pass its results")
 
 
 def member_chain_text(expr) -> str:

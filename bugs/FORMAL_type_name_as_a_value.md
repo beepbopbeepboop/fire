@@ -40,7 +40,7 @@ arm64 and 0 on x86-64 where the source says 5
 Every clause of that sentence is false about this program. `bool` is not a name
 that was left without a register: it is a TYPE, the source says so where it
 stands, and there is no register question about it. This is the outcome
-`bugs/FORMAL_frame_receiver_handoff.md` §4 calls the worst one — **a refusal
+`test_refusal_taxonomy.py` calls the worst one — **a refusal
 whose stated reason is entirely false** — and a reader sent to the allocator for
 `bool` goes and looks at `_load_var` and finds nothing, because the walk is
 asking the wrong question.

@@ -4206,7 +4206,8 @@ def _park_construction_mismatches(functions, framed) -> None:
     "'a' is bound here as a parameter", and for a local bound from a conversion
     that is not what happened: `a` holds the address of an interned `char *`.
     A refusal whose stated reason is entirely false is the worst outcome on this
-    path (`bugs/FORMAL_frame_receiver_handoff.md` §4), and the analysis is the
+    path (the rule `test_refusal_taxonomy.py` exists to hold this path to), and
+    # the analysis is the
     only place that knows the difference, so it is the analysis that has to say
     it.
 
@@ -8346,7 +8347,7 @@ def _class_read_disagreement(fn, structs_by_name: dict) -> dict:
     followed by a remedy (`bind the base from a constructor this module
     declares`) the source has already used. A refusal whose stated reason is
     entirely false is the worst outcome on this path
-    (`bugs/FORMAL_frame_receiver_handoff.md` §4), and this is the one place the
+    (`test_refusal_taxonomy.py`'s standing check), and this is the one place the
     disagreement is actually known.
 
     Only a path whose name is a class-level value of one of the candidates is
@@ -11727,7 +11728,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             _return_the_receiver(fn, writebacks[fn.name])
         _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
                               fn.name,
-                              _this_unit_modules)
+                              _this_unit_modules,
+                              structs_by_name=structs_by_name)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
         # gives. Everything else about it is `_rewrite_class_constants`.
@@ -12047,7 +12049,7 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                           receiverless: set = None, fn_name: str = None,
-                          imported=()) -> None:
+                          imported=(), structs_by_name: dict = None) -> None:
     """`recv.m(a)` -> `Struct_m(recv, a)`, in place, over a statement tree.
 
     Rewriting the CALL rather than special-casing a method call in the
@@ -12112,6 +12114,20 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
                 f"{M.struct_width_cost(st)}")
         lifted = F.IdentExpr(name=M.method_function_name(owner, member))
         if member not in (receiverless or ()):
+            # The receiver is about to become `args[0]`, and every consumer of
+            # that list — `bind_call_arguments`'s arity check,
+            # `_frame_argument_slots`, `check_holder_agreements` — reads the
+            # callee's `fn.params` as the whole parameter list. That is the same
+            # list only when the DECLARATION spells a receiver, so a method
+            # whose first parameter is an ordinary argument is refused here
+            # rather than half-bound: `model.method_declares_receiver` has the
+            # measurement and the reason.
+            _st = (structs_by_name or {}).get(owner)
+            _decl = next((mth for mth in M.struct_methods(_st)
+                          if mth.name == member), None) if _st is not None else None
+            if _decl is not None and not M.method_declares_receiver(_decl):
+                raise CodegenError(
+                    M.method_without_a_receiver_parameter_refusal(owner, member))
             n.args = [receiver] + list(n.args)
         if isinstance(n.func, F.SubscriptExpr):
             # The brackets stay, and stay on the callee: they are the
@@ -12175,8 +12191,8 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
     | `m.make().take(r)` | the LINK AUDIT: "the image would bind 1 symbol(s) that nothing provides: take" — a diagnosis about where the symbol should have come from, for a defect in how the call was written |
     | `m.make().take[r](r)` | the EMITTER: "unsupported call target on the formal arm64 path (got SubscriptExpr)" — a sentence about the compiler's node type, for a call whose only problem is its receiver |
 
-    The second is the same class of defect `bugs/FORMAL_frame_receiver_handoff.md`
-    §4 exists to police, and the first is the failure
+    The second is the same class of defect `formal/build.py::_receiverless_methods`
+    exists to police, and the first is the failure
     `subscript_receiver_method_refusal`'s own docstring calls "worse than a wrong
     number because it is usually silent": the symbol can also COLLIDE with a real
     one and the image then computes a plausible wrong answer with nothing
@@ -14299,8 +14315,9 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # direction that was missing is the one that hurts — a library advertising a
     # symbol nothing defines produces a manifest every consumer's bind audit
     # believes, and a dyld failure at load rather than a refusal here
-    # (`bugs/FORMAL_frame_receiver_handoff.md`, "A dylib advertises exports
-    # without checking the emitter produced them").
+    # (`formal/build.py::_advertised_but_absent`, whose two halves
+    # `test_formal_dylib.py`'s `the manifest offers nothing the image does not
+    # define` pins).
     absent = _advertised_but_absent(output, exports)
     if absent:
         raise FormalBuildError(
