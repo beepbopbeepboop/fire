@@ -180,3 +180,52 @@ unowned work rather than somebody else's. It stays out of the `other refusal`
 row's module-caused count for the reason the original author gave — it is not
 counted twice — which is still true and is why the row belongs to whoever takes
 the function-value question.
+
+## Measured 2026-10-03 (`work/formal13-6`): the refusal stands, its MESSAGE has
+## changed, and the wall after the representation is an INSTRUCTION
+
+Two facts, because both narrow what the next session does and neither is what
+this document recorded.
+
+**The refusal is unchanged in substance and its text is not the text quoted
+above.** Re-measured on both architectures:
+
+```
+build: main: 'plain' is a FUNCTION, and a function is not a value on this path:
+it has no representation here — a value is one 64-bit word and a function is a
+code address, so there is nothing for that word to hold, and passing one as an
+argument, storing one in a container, or returning one is refused rather than
+answered with a number that means nothing. `formal/hostmods/` has no module that
+hands back a callable f…
+```
+
+`model.function_value_refusal`'s message was rewritten after this document
+recorded it — it now names the representation question directly ("a value is one
+64-bit word and a function is a code address") rather than enumerating the four
+callee kinds, and it adds the hostmod sentence. **So a reader grepping for the
+quoted text will not find it**, and the conclusion is the same: the row's first
+construct, "a value for a function", is still refused by name.
+
+**The next wall after the representation is an instruction, and it is another
+claim.** A function value is a code address, so `f(x)` is an indirect call, and
+the two backends have no encoding for one in use and no model step for one:
+
+```
+$ grep -rn 'encode_blr_xn' formal/*.py | grep -v pycache
+formal/arm64.py:129:def encode_blr_xn(xn: int) -> bytes:
+```
+
+`formal/arm64.py:129` DEFINES `BLR Xn` and **nothing calls it** — there is no
+emitter path that reaches it — and `grep -n 'blr' lib/ProofLib.lean
+lib/Refine.lean` is empty, so the model has no step to prove one with. On x86-64
+`formal/x86_64.py:771` is `call [rip + offset]`, an indirect call through
+MEMORY, and there is no call-through-a-register spelling beside it.
+
+That is `bugs/FORMAL_arm64_instruction_coverage.md`'s claim, so the function-value
+lowering cannot be finished here even though its representation half is
+`formal/`'s. **The dependency order for this row is therefore four deep, not
+three:** an indirect-call instruction on both backends, a model step for each, a
+value for a function, an `Optional` of one, and only then the brackets. The
+first of those is somebody else's file and the two middle ones are a
+representation decision this document already argues correctly and cannot
+settle alone.

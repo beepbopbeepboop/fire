@@ -12,7 +12,13 @@ them on both architectures); 56 of the word-shaped entry points are still
 refused because the library does not define them (51 when this was written;
 `mojo_metal_*` arrived after), and 32 of the linked ones need a heap handle this
 path cannot produce. Both remaining ceilings are re-measured on 2026-10-03
-rather than carried forward.**
+rather than carried forward. The `mojo_open`/`mojo_close` TRAP — which this
+revision said "needs a DECISION rather than a declaration" — is DECIDED and
+MEASURED on 2026-10-03 (`work/formal13-6`), the decision turns out to be that
+the doc's stated REASON for the trap was wrong, and the payoff is one name rather
+than two. §0.2 has the measurement and the scoped next step; nothing here is
+edited in `runtime/` because `fire_runtime.h` is on the compiled path's include
+list and that owes a gate this session must not run.**
 
 Round: agent [5] of the five-agent round of 2026-09-28.
 
@@ -95,6 +101,70 @@ Ceiling 3 grew with the payoff, as the table above shows: 32 linked entry points
 need a `void *` handle, and the only things on this path that produce one are
 `void *`-RETURNING entry points, which the word rule refuses. That is FORMAL.md
 phase 6 and it is unchanged by this round.
+
+## 0.2 The trap, decided and measured (2026-10-03, `work/formal13-6`)
+
+§"Ceiling 2" says the trap "needs a DECISION rather than a declaration — read
+the definition the linker resolves, not the one the C file spells". Both halves
+of that are now done, and the first one says the doc's reason was wrong in a way
+that matters:
+
+> **`mojo_open`/`mojo_close` are declared in `fire_runtime.c` as the C library's,
+> while the SYMBOL the dylib exports is the Mojo stdlib's renamed pair behind
+> the same name.**
+
+**The stdlib is not in the link.** A formal image links
+`build_stdlib_dylib.runtime_dylib`, which links `runtime_units(arch, None)` —
+core, coroutine, async scheduler — and `fire_python.c` is deliberately never
+linked (FORMAL.md phase 0: its header was never `#include`d, so the failure
+stays loud). `runtime/fire_runtime.c:26` has `#define USE_PYTHON 0`, so the
+definition behind the symbol is the `#else` arm at `:452` —
+`MojoFileHandle mojo_open(char *filename, char *mode)` — and
+`fire_runtime.h:1616` is `typedef void* MojoFileHandle`. **Both arms of that
+`#if` carry the same C signature**, which is why one declaration serves either
+build, and it is also why the header's own reason for not declaring them
+("to avoid conflicting types") is a *type* conflict with the STDLIB's pair and
+nothing else.
+
+The half that decides whether a declaration is a formality is the export
+mechanism, and this document never said it:
+
+    runtime_export_entries = the HEADERS' entry points
+                             INTERSECTED with the symbols the objects DEFINE
+
+(`build_stdlib_dylib.py:1357`, and its own docstring says the intersection is
+the point and that both halves fail in opposite directions.) **So a name no
+header declares is not exported AT ALL.** That is why today's refusal — "no
+header in runtime/ declares it, so there is no signature here to check" — is a
+statement about the LINK LINE and not only about a signature, and why declaring
+it is not a formality: the declaration is what puts it on the line.
+
+**And the payoff, measured through the model's own word rule** (`_runtime_abi_entry`
+on the two signatures the linker resolves):
+
+| name | signature the linker resolves | word-shaped? | so |
+|---|---|---|---|
+| `mojo_close` | `void mojo_close(void *fh)` | **yes** | ceiling 2 → callable. A `void *` in ARGUMENT position is admitted (`model._ctype_is_word`'s `in_return=False`) |
+| `mojo_open` | `void *mojo_open(char *, char *)` | **no** | ceiling 2 → **ceiling 3**: a `void *` RETURN is the shape `void *`-returning entry points are refused for |
+
+So ceiling 2's remaining **six becomes five**, `mojo_open` moves to ceiling 3
+(so ceiling 3 becomes 33 if the edit lands), and the edit is **one line in
+`runtime/fire_runtime.h`** under the `#ifndef __MOJO_STDLIB_MODE__` guard
+`mojo_write` already uses for exactly this stdlib-conflict reason. The four
+non-`mojo_` names in the six (`MojoParser`, `scan_expr`, `note_list_literal`,
+`compile_to_gimple`) are not in the namespace, so they bind normally and nothing
+refuses them; with the trap gone, ceiling 2 is those four plus nothing.
+
+**Why it is not taken here.** `runtime/fire_runtime.h` is on the COMPILED
+path's include list (`mojo/backend_gimple` emits `#include` of it), so a change
+to it owes `make check` and a `stdlib-dylib` run to confirm the gimple path
+still compiles and the export table still crosses the `nm` check. That is the
+integrator's. The measurement is pinned in `test_formal_runtime_link.py`'s
+`test_the_tagged_box_accessors_are_declared_and_callable` — both that the two
+names are in no header today, and what each one's word verdict would be — so the
+next reader does not have to re-derive it, and a later edit that lands the
+declaration turns the first pair of checks red rather than silently changing the
+ceiling numbers this document quotes.
 
 ## Re-measured 2026-10-01 (`work/formal3-7`): the payoff grew, and the
 ## ceilings below are still the ceilings
