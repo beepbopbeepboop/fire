@@ -371,6 +371,93 @@ def test_an_external_call_template_is_not_refused_as_a_specialization(tmpdir):
               f"value did not reach the program")
 
 
+# ── 5. a function used as a VALUE, which is what the bracket case needs first ──
+
+# The shape `std/algorithm/backend/tile.mojo` is refused for: a callee that is a
+# PARAMETER, so the brackets are a specialization of a function TYPE and the
+# callee itself is a word. Reduced to the part that is about this path rather
+# than about brackets: passing a function as an argument.
+FUNCTION_AS_VALUE = """\
+def plain(v: Int32) -> Int32:
+    return v + 100
+
+def call_it(f, x: Int32) -> Int32:
+    return f(x)
+
+def main() -> Int32:
+    return call_it(plain, 5)
+"""
+
+
+def test_a_function_read_as_a_value_is_refused_by_name(tmpdir):
+    """A function is not a word here, and the refusal has to say THAT.
+
+    Before this the same program was refused by the emitter's placement
+    fallback: `'plain' has no home: the register allocator collected no home
+    for it, so the emitter and the allocation walk disagree about this
+    function's locals` — a true statement about this pass, and a useless one,
+    because it sends the reader to look for a register-allocation bug in a
+    program whose real problem is a construct this path does not have. Same
+    shape as `external_call` used as a value, which `external_call_value_refusal`
+    already names.
+
+    It is also the answer to the question `std/algorithm/backend/tile.mojo`
+    raises. That call is `workgroup_function[tile_size](offset)` where
+    `workgroup_function` is a parameter, so the refusal a reader meets first
+    is about the BRACKETS — and the wall behind it is that the callee is a
+    value at all, which is what this case pins. Pinned on both architectures:
+    the two backends each have their own copy of the placement fallback, and
+    either one losing the check is a different diagnostic for one construct.
+    """
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"fnvalue_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(FUNCTION_AS_VALUE)
+        text = text_of(build(root, expect_ok=False, arch=arch))
+        check("plain" in text,
+              f"[{arch}] the refusal does not name the name the reader wrote: "
+              f"{text.strip()[-300:]}")
+        check("read as a VALUE" in text,
+              f"[{arch}] the refusal is still a placement symptom rather than "
+              f"the construct: {text.strip()[-300:]}")
+        check("no value of a function" in text,
+              f"[{arch}] the refusal does not say what is missing, which is "
+              f"the fact that makes it actionable: {text.strip()[-300:]}")
+        check("has no home" not in text,
+              f"[{arch}] the register-allocator sentence is back: "
+              f"{text.strip()[-300:]}")
+
+
+def test_a_local_shadowing_a_function_is_still_read_as_the_local(tmpdir):
+    """The negative guard: the check must not fire on a name the function binds.
+
+    `placed` in `formal/build.py` deliberately contains every function name of
+    the image, because that is what lets a specialization's root and a bracketed
+    callee through as callees; the function-value pre-pass subtracts those names
+    and asks about the rest. A parameter or a local that SHADOWS a module-level
+    function is the local, and shadowing is ordinary Mojo — so this is the case
+    that would break if the pre-pass asked about the name alone.
+    """
+    src = ("def plain(v: Int32) -> Int32:\n"
+           "    return v + 100\n"
+           "\n"
+           "def main() -> Int32:\n"
+           "    var plain = 7\n"
+           "    return plain + 1\n")
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"shadow_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(src)
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 8,
+              f"[{arch}] a local shadowing a function exited {code} "
+              f"(printed {out.strip()[:80]!r}), so the shadowing local was "
+              f"refused or read as something else")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -386,6 +473,10 @@ TESTS = [
      test_a_local_specialization_runs_and_matches_cpython),
     ("an external_call template is not refused as a specialization",
      test_an_external_call_template_is_not_refused_as_a_specialization),
+    ("a function read as a value is refused by name",
+     test_a_function_read_as_a_value_is_refused_by_name),
+    ("a local shadowing a function is still the local",
+     test_a_local_shadowing_a_function_is_still_read_as_the_local),
 ]
 
 

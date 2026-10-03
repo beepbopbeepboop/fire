@@ -8937,6 +8937,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         placed |= _names_bound_in(fn)
         placed |= _comptime_bound_names(fn)
         placed |= struct_names
+        # The names that resolve to a value in THIS function's own right —
+        # parameters, locals, comptime bindings, struct names — kept as their
+        # own set BEFORE the function names go in below, because the
+        # function-value pre-pass further down has to tell those two apart. A
+        # parameter or local that SHADOWS a module-level function is the local,
+        # and shadowing is ordinary Mojo, so subtracting the function names
+        # afterwards would take the shadowed local with them and refuse a
+        # program whose local is in scope (measured, and pinned by
+        # `test_formal_specialization.py`'s shadowing case).
+        bound_here = set(placed)
         # A name in BRACKETS after a name this unit compiles is a comptime
         # SPECIALISATION, not a read of a value: `_horner_evaluate[coeffs](x)`
         # names the function with the type arguments it is specialised at, and
@@ -8945,7 +8955,12 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # `std/utils/_serialize.mojo:28` are the real sources. Without this the
         # root of the bracket is a bare name with no home and is refused,
         # which is a symptom naming the allocator instead of the construct.
-        placed |= set(_callee_defs(functions))
+        #
+        # That is also why `placed` cannot answer "is this name a function read
+        # as a value": a function of this image is in `placed` whether or not
+        # this function binds it, which is exactly what lets a callee through.
+        func_names = set(_callee_defs(functions))
+        placed |= func_names
         frame_slots = dict(getattr(fn, "_frame_slots", None) or {})
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a
@@ -9538,6 +9553,46 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.SubscriptExpr) and isinstance(sub.obj, F.IdentExpr):
                 subscript_bases.add(id(sub.obj))
+        # A FUNCTION of this image read as a VALUE, and it has to be a PRE-PASS
+        # for the same reason `first_mlir` is: the walk below cannot answer it,
+        # because `placed` above deliberately contains every function name of the
+        # image (`placed |= set(_callee_defs(functions))`, which is what lets a
+        # specialization's root through as a callee). So this question is asked
+        # here, of the walk's own sets, and raised in the walk's order.
+        #
+        # What it replaces, measured on both architectures for
+        # `def call_it(f, x): return f(x)` called `call_it(plain, 5)`:
+        #
+        #     'plain' has no home: the register allocator collected no home for
+        #     it, so the emitter and the allocation walk disagree about this
+        #     function's locals …
+        #
+        # which is a TRUE statement about this pass and a useless one. It names
+        # an internal table, so the reader goes looking for a register-allocation
+        # bug in a program whose real problem is that it asked for a construct
+        # this path does not have — `model.function_value_refusal` says which.
+        #
+        # The exclusions are the walk's own answers rather than a new judgement
+        # about each: a name the function BINDS reads its own (`bound_here` is
+        # `placed` minus the function names, which is what makes a shadowing
+        # local win), a callee is a symbol rather than a read (`callees`), a
+        # SUBSCRIPT base is a type application or a specialization root
+        # (`subscript_bases`), a TYPE position is a type argument
+        # (`type_positions`), a frame slot and a folded module constant are the
+        # two other values a bare name can have here, and
+        # `name_resolves_without_a_local` is the closed list of names that are
+        # values without a home by design.
+        first_function_value = None
+        for sub in M.iter_nodes(fn.body):
+            if not isinstance(sub, F.IdentExpr) or first_function_value:
+                continue
+            if sub.name not in func_names or sub.name in bound_here \
+                    or sub.name in frame_slots or id(sub) in callees \
+                    or id(sub) in subscript_bases or id(sub) in type_positions \
+                    or M.module_constant_literal(sub.name) is not None \
+                    or M.name_resolves_without_a_local(sub.name):
+                continue
+            first_function_value = M.function_value_refusal(sub.name, fn.name)
         # The MLIR refusal is raised BEFORE the name-placement walk below, not
         # inside it, and the order is the point: the walk answers "this name has
         # no home", which is TRUE of a dialect root and useless to a reader
@@ -9551,6 +9606,13 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         if first_mlir is not None:
             raise CodegenError(
                 f"{fn.name}: {first_mlir}" if fn.name else first_mlir)
+        # AFTER the dialect refusal and for the same reason: both name a
+        # CONSTRUCT where the walk would name a symptom, and a dialect root and
+        # a function name are different constructs that cannot collide (one
+        # spells `__mlir_*`), so the order between them is a fixed choice rather
+        # than a precedence that has to be earned.
+        if first_function_value is not None:
+            raise CodegenError(first_function_value)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
                 continue

@@ -21345,6 +21345,51 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"image can bind")
 
 
+def function_value_refusal(name: str, fn_name: str = "") -> str:
+    """The diagnostic for reading a FUNCTION of this unit as a VALUE.
+
+    The same shape as `external_call_value_refusal` one level out, and for the
+    same reason: the name resolves, and it resolves to something that is not a
+    value.  What it used to be reported as is the reason this function exists —
+    `'plain' has no home: the register allocator collected no home for it, so the
+    emitter and the allocation walk disagree about this function's locals` — which
+    is a TRUE statement about this pass and a useless one, because it sends the
+    reader to look for a register-allocation bug in a program whose real problem
+    is that it asked for a construct this path does not have.  Measured on
+    `call_it(plain, 5)` on both architectures: the allocator sentence, naming an
+    internal table, for a program that is ordinary Mojo.
+
+    **A function is not a word on this path, and the refusal is about the
+    CONSTRUCT rather than about a missing representation of it.**  Every callee
+    on this path is a NAME: the emitters resolve `_functions`, a struct's
+    declaration, a dylib export table or a type constructor, and each of those is
+    reached by name at the call.  There is no indirect-call form, so a function
+    that arrives as a word has nothing to call — and the two things that could
+    give it one (a function pointer, and a callee that is a subscript of a
+    parameter) are both refused elsewhere with their own sentences, which is why
+    this one says what to do instead.
+
+    The shape it blocks is `workgroup_function[tile_size](offset)` in
+    `std/algorithm/backend/tile.mojo`: the callee is a PARAMETER whose declared
+    type is `Some[Static1DTileUnitFunc]`, and the brackets are a specialization
+    of a function TYPE.  `specialization_call_refusal` already refuses that call,
+    and it is right to — but it is refused as a question about BRACKETS, and the
+    wall behind it is that the callee is a value at all.  Measured, both
+    architectures: passing a function as an argument is this refusal, before any
+    bracket is reached.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a function of this module read as a VALUE, and "
+            f"there is no value of a function on this path: a formal value is "
+            f"one 64-bit word, and every callee this backend reaches is a NAME "
+            f"— a function of this module, a struct's constructor, a type "
+            f"conversion, or an export on the link line. Nothing here can call "
+            f"through a word, so the call that would use it has no form. Call "
+            f"`{name}(...)` where the name is written out; if the callee has to "
+            f"be chosen at run time, write the choice as a branch over the calls, "
+            f"which is the same program with a callee this path can name")
+
+
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
                              fn_name: str, published) -> str:
     """The diagnostic for reading `module.leaf` as a VALUE.
