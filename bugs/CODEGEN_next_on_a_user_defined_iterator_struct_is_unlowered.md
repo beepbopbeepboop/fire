@@ -22,6 +22,149 @@ per-side `nm -g` evidence, both blockers, and the reusable findings are in
 item 1. `test_count.mojo` therefore REMAINS in `EXPECTED_FAILURES` and the
 sweep is unchanged at **591 / 19 / 0, exit 0**.
 
+### ROUND 4 (2026-10-03): shapes 2 and 3 are mis-diagnosed, one of them is
+fixable, and the acceptance bar in the plan is met by nothing
+
+Three measurements. Two of them contradict the shape analysis below, which is
+why they come first; the third is about the bar itself and it is the reason
+this session landed a census section instead of a fix.
+
+#### (a) Shape 2 is NOT a wrong pointer. All three C types are deliberate.
+
+The claim under test was that "`var it = enumerate(...)` types `it` as
+`MojoList *`: the erasure picked a container for an argument it could not
+resolve". Measured, per type:
+
+| observed | what actually produces it | verdict |
+|---|---|---|
+| `MojoList *` | `emit_calls._lower_call:2188-2190` routes a VALUE-position `enumerate(x)` to `_lower_builtin_enumerate_value` (`emit_calls.py:3751`), which **eagerly materialises** the `(index, element)` pair-lists into a `MojoList` and returns `'MojoList *'`; `mojo/middle/types.py:317` declares the same. The generated C is a real loop appending `mojo_list_new ()` pairs. | INTENDED, and correct for what it covers (`list(enumerate(x))`, `len(it)`, `it[i]` — the docstring records that the earlier identity and comprehension routes were both wrong) |
+| `void *` | `_lower_builtin_zip_n` (`emit_calls.py:3629`) returns `'void *'` ON PURPOSE, with the measurement in its own comment: typing it `MojoList *` broke `funcs_shared.py`'s nested-tuple comprehension target over `zip` and took the whole self-host compile down. | INTENDED. `types.py:321`'s `'zip': 'MojoList *'` is the STALE half of that pair and disagrees with it — a real (small) inconsistency, recorded, not fixed here |
+| `Span *` | `iter(x)` in value position is a bare identity: `emit_calls.py:1914-1915` returns `gen.lower_expr(node.args[0])`. And `emit_stmts._try_bind_list_iter` declines to bind a cursor unless the argument lowers to `MojoList *` (or an int), so `Span *` gets none. | A real gap, but in the CURSOR mechanism, not in "the erasure" |
+
+So the defect underneath shape 2 is one sentence: **these value forms produce
+materialized SEQUENCES, and a caller that stores one in a variable and calls
+`next()` on the variable is correct Mojo with no lowering.** That is fixable,
+and is (b).
+
+#### (b) The fix, measured, and PARKED because 2 of the 3 files cannot link
+
+`it = enumerate(x)` now binds the same resumable cursor `it = iter(<list>)`
+already binds (`emit_stmts._try_bind_list_iter`), so `next(it)` advances a real
+position and `for v in it:` resumes. Measured:
+
+    compile_stdlib.py   591 / 19 / 0  ->  594 / 16 / 0, 0 unexpected, exit 0
+    test/iter/test_enumerate.mojo          COMPILED   (was: refused, `MojoList *`)
+    test/collections/test_set.mojo         COMPILED   (was: refused, `MojoList *`)
+    test/python/test_python_object.mojo     COMPILED   (was: refused, `MojoList *`)
+    test/iter/test_zip.mojo                still refused (`void *`, by design)
+    undef_import_census  96 / 51 / 60 unchanged
+
+Generated C for the minimal case (`var it = enumerate(s); var elem = next(it)`)
+is a pair-materialising loop exactly as before, plus `cur = 0;` and a cursor
+read — the list, its element kind and its per-slot kinds are untouched, so
+`len(it)` and `it[i]` behave identically. The whole 7-site blast radius of
+`= enumerate(` in the stdlib is inside the three files above (measured by
+grep), so no currently-compiling file changes.
+
+**Parked, in `git stash@{0}`, and the reason is the acceptance bar, not
+doubt.** `tools/linkcheck.py`, which subtracts libc:
+
+| file | undefined after runtime + dylib | verdict |
+|---|---|---|
+| `test/iter/test_empty.mojo` (already green since round 2) | 11 — the libc + `std.testing`-stub baseline | the bar, as it is actually applied |
+| `test/iter/test_enumerate.mojo` | **8 — exactly that baseline** | would pass |
+| `test/collections/test_set.mojo` | 16, incl. `_Set` | would not |
+| `test/python/test_python_object.mojo` | 18, incl. `_Python`, `_PythonObject`, `_int64_t_as_unsafe_any_origin` | would not |
+
+The two that would not pass fail for reasons that have nothing to do with this
+change and pre-date it: `_Set` is the census's own generic-struct family (1 of
+its 51 names), `_Python`/`_PythonObject` are imported STRUCT TYPES called as
+functions, and `_int64_t_as_unsafe_any_origin` / `conforms_to` are names this
+codegen synthesises that exist nowhere in the stdlib or the runtime. Those
+files are in `EXPECTED_FAILURES` and must STAY there — and because they now
+PASS `gcc -fsyntax-only`, `compile_stdlib.py`'s stale-marker rule
+(`sys.exit(1)` on any entry whose file passes, `compile_stdlib.py:641`) fires
+and the sweep cannot be 0-unexpected. So the change is correct, is worth
+3 files, and cannot be landed until those symbols are closed. It is in the
+stash with that reasoning as its message; `git stash pop` restores it.
+
+#### (c) The acceptance bar — "LINKS with no undefined symbols" — is met by
+**ZERO** of the 594 currently-green files. This is why (b) is parked and not
+nudged through.
+
+Measured with `tools/linkcheck.py`, same flags, same dylib:
+
+    test/iter/test_empty.mojo          11 undefined   (green since round 2)
+    test/memory/test_maybe_uninit.mojo  13 undefined   (green)
+    test/collections/test_list.mojo     22 undefined   (green)
+
+and `test_maybe_uninit` / `test_list` carry `_conforms_to`, `_type_of`,
+`_PropTest`, `_int64_t_as_imm`, `_size_of_6_target_…_Int` — the same declared-
+stub-called-but-never-defined family the three files above would carry. So the
+bar as written in the plan, applied literally, would return all 594 green
+files to `EXPECTED_FAILURES`. The criterion that IS satisfiable, and the one
+used above, is: *the file's undefined set must not exceed the classes an
+accepted-green file already carries* — libc, the `std.testing`/`test_utils`
+helper stubs `linkcheck.py` documents, and the elaborated-into-a-mangled-symbol
+family. On that criterion `test_enumerate` passes and the other two do not,
+which is exactly the split in (b). Stated as UNVERIFIED: whether the other two
+files' residues would be acceptable is a judgement about the standard, and
+`test_enumerate`'s own `assert_equal`s are STUBBED in that link, so this link
+observes that it links, not that its assertions pass.
+
+#### (d) Shape 3 does not reach either of its two files, and the reason is
+not `Self.` handling
+
+The plan's shape 3 is "`Self.<comptime member>` read from the struct's own
+declaration, and accept an `Origin[...]` type argument as concrete". Measured:
+
+1. **`Self.<param>` substitution already works and is not the blocker.**
+   `monomorphize.monomorphize_source` for `BytesIter` with `{origin: String}`
+   yields `var _iter: _SpanIter[Byte, String]` (verified). ae8f0493's scoping
+   was right.
+2. **The two modules compile their OWN template, un-monomorphized.** Measured
+   in `iterators.mojo`: `gen.struct_field_types['BytesIter'] ==
+   {'origin': 'int64_t', '_iter': 'int64_t'}`. `itertools.mojo` is the same
+   shape with a bare type parameter (`_Product2`'s `var _inner_a:
+   Self.IteratorTypeA`, and nine `next(self._…)` sites over fields typed that
+   way). **Neither module constructs its own generic struct at a concrete type
+   argument anywhere**, so there is no in-TU instantiation for a substitution
+   to feed, and no amount of `Self.` reading or origin awareness gives the
+   template body a receiver type. Reading `Self.<comptime member>` cannot fix a
+   template whose member is unbound.
+3. **The INSTANTIATION half is blocked by two other things, in order.**
+   (a) `monomorphize.instantiate` builds its TU from the EXTRACTED TEMPLATE
+   TEXT ONLY (`monomorphize.py:396-425`), so the fragment carries none of its
+   module's `from … import` lines and cannot see `_SpanIter` at all. Verified
+   by prepending the one needed import by hand: `_SpanIter` then registers in
+   `gen._imported_generic_structs`. (b) even registered, the field stays
+   `int64_t`, because `_materialize_generic_struct_mentions` is never applied
+   to a LOCAL struct's field annotation (only to generic RETURN annotations,
+   via `_refine_generic_return_type`'s hook, and to `_generic_struct_field_types`
+   on the caller side) — and because the elaboration declines regardless:
+   `_SpanIter[Byte, String]` binds `mut = Byte` and leaves `T`, `origin` and
+   `forward` unbound, so `elaborate_generic_struct` returns `None`.
+
+   **The third sub-problem, which the plan does not name: the stdlib spells
+   `_SpanIter` with TWO positional arguments and `_SpanIter`'s own head is
+   `[mut: Bool, //, T: Copyable, origin: Origin[mut=mut], forward: Bool = True]`
+   (`span.mojo:84-90`).** `span.mojo:207` and `:214`, `reversed.mojo:232` and
+   `iterators.mojo:908` all pass `[<element type>, <origin>]`. So `mut` — which
+   `origin`'s own annotation depends on (`Origin[mut=mut]`) — is unbindable
+   from the stdlib's own spelling. That is a stdlib/elaborator interface
+   question and it is upstream of anything in this doc.
+
+#### The next step, stated as one thing
+
+`enumerate(x)`'s cursor binding (b) is finished and correct; it needs `_Set`,
+`_Python`, `_PythonObject` and `int64_t_as_unsafe_any_origin` to exist before it
+can be landed, and those are ordinary census/section-2 items. After it,
+shape 2 is closed and `test/iter/test_zip.mojo` needs a decision about
+`_lower_builtin_zip_n`'s deliberate `void *` (its own comment names the
+self-host shape that forced it). Shapes 1 and 3 are untouched by (b) and still
+need dependent return types plus overload selection — and shape 3 additionally
+needs the `_SpanIter` head question above answered.
+
 ### MEASURED 2026-10-03: where each of the remaining 17 actually refuses
 
 The table above names the GENERIC each file needs. This one names the exact
@@ -54,6 +197,16 @@ snippet in this section's last paragraph.
 `test/itertools/test_count.mojo` is item 1; neither appears here.)
 
 **Three shapes, not one, and only the first is the common case.**
+
+> **Shapes 2 and 3 below are MIS-DIAGNOSED; read the ROUND 4 section above
+> before acting on either.** Shape 2's three C types are all deliberate builtin
+> lowerings (not "the erasure picking a container"), and its fix is BUILT and
+> PARKED. Shape 3's two sub-problems do not include the one this section names:
+> `Self.<param>` substitution already works, the two modules compile their own
+> un-monomorphized template, and the instantiation half is blocked first by the
+> fragment carrying no imports and then by the stdlib's two-positional-argument
+> spelling of `_SpanIter`'s five-parameter head. Round 4 (a)–(d) has the
+> measurements. Shape 1 below is unaffected and still correct.
 
 1. **`int64_t` (11 files) — the receiver is BOXED.** The local was bound from
    a call that returned an un-elaborated generic, so codegen never learned a

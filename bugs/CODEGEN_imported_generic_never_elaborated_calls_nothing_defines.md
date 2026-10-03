@@ -10,6 +10,65 @@ forward declaration for every imported name, called or not. The real figure is
 **96 sites / 51 names / 60 files** (108 before that session's fixes). See "What
 was wrong with the measurement" below — it is the most important section here.
 
+**2026-10-03 (round 4): 96 / 51 / 60 is a LOWER BOUND, and the census now
+measures the total as 1938 / 851 / 381 — 20x larger. `tools/undef_import_census.py`
+has a second section** (see below). It is the same defect, measured the way the
+linker sees it.
+
+### Landed 2026-10-03 (3): census section 2 — the total, not a lower bound
+
+`tools/undef_import_census.py` gained `--section 2` (`check_undefined`), which
+for every file that COMPILES compiles its generated C with
+`gcc -fgimple -D__MOJO_STDLIB_MODE__ -c`, reads `nm -u`, and subtracts every
+symbol the runtime objects, `build/libmojostdlib.arm64.dylib` and the platform's
+own libraries define (the last read out of the SDK's `.tbd` stubs, so libc is
+subtracted by DATA rather than by an allowlist). Measured over the same 610-file
+sweep:
+
+| | section 1 (existing) | section 2 (new) |
+|---|---|---|
+| sites | 96 | **1938** |
+| distinct names | 51 | **851** |
+| files affected | 60 | **381** |
+
+Why section 1 was a lower bound, and it is not a rounding difference.
+`check()`'s own comment says a call to a MANGLED symbol
+(`copysign_Float64_1`, `size_of_6_target_17_…`) is credited, "on the grounds
+that a mangled call names a CAS object the caller links". True for the ones that
+have one; false for the ones that do not; and nothing in that tool can tell,
+because it never links. The concrete hole, measured:
+
+    $ grep -n size_of_6_target_17_CompilationTarget_4_type_3_Int  build/linkcheck/test_collections_test_list.c
+    909:extern int64_t size_of_6_target_17_CompilationTarget_4_type_3_Int (void);
+    1816:  _t9 = size_of_6_target_17_CompilationTarget_4_type_3_Int ();      <- a CALL
+    $ nm -g --defined-only build/libmojostdlib.arm64.dylib | grep -c size_of_6_target_17_CompilationTarget_4_type_3_Int
+    0
+
+`test/collections/test_list.mojo` is a GREEN file. It calls a symbol nothing
+defines, and section 1 does not report it — `size_of` is absent from all 51
+section-1 names, while `Set` (a generic STRUCT, matched by the bare-name rule)
+is present.
+
+Of the 851 names / 1938 sites section 2 finds: **397 names / 500 sites are
+length-prefixed mangled symbols** (the `monomorphize.mangle` encoder's own
+shape, `_\d+_[A-Za-z]`) — i.e. the elaborated-and-still-unlinkable population
+section 1 is structurally blind to; **12 names / 444 sites are test-helper
+stubs** (`std.testing`'s `assert_equal`/`assert_true`/… and `test_utils`'
+`check_write_to`), which `tools/linkcheck.py` documents as deliberately stubbed
+in its link; and **994 sites are residual** — imported non-generic symbols that
+nothing defines. Named examples, all confirmed absent from the runtime objects,
+the dylib and the SDK: `conforms_to` (22), `type_of` (21), `check_bounds` (8),
+`int64_t_unsafe_bitcast` (18), `FormatStruct` (15), `ThinAllocation` (12),
+`Span_as_bytes` (9), `Path` (17), `Bench`/`BenchConfig` (25/24).
+
+**`_mojo_abort` (31 sites) is a RUNTIME gap and the smallest item in this
+document.** `mojo/middle/types.py:1113`'s `_FORCE_RENAME_RESERVED` contains
+`abort`, so every stdlib `abort(...)` lowers to `mojo_abort(...)`; the codegen
+emits a guarded declaration for it (`module_gen.py:8299`) and
+`runtime/fire_runtime.c` defines NO `mojo_abort`. Not landed here: a
+`fire_runtime.c`/`.h` change is compiled into everything and owed a full gate,
+which this session was asked to postpone. `mojo_index` (11) is the same shape.
+
 **2026-10-03: `monomorphize.mangle` is injective AND in-TU instantiation landed
 — the census did not move (96 / 51 / 60), and one family of three went green.**
 
