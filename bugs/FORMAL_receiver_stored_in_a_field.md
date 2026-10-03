@@ -1,20 +1,111 @@
 # FORMAL_receiver_stored_in_a_field: a frame address in a struct field, and a parameter whose declared type no call site agrees with
 
-**Status: row A is CLOSED. The delegating row builds, computes the right
-number, and runs on both architectures; the 24 files were never a count of
-what this blocked (see §0.1 for why they did not move). Row B is unmeasured
-and is a different rule — its list needs a sweep, because the refusal compares
-call sites inside one image and a parse-and-walk instrument cannot answer it.**
+**Status: BOTH rows are closed, and row B's answer is that it is a STDLIB
+declaration bug rather than a compiler gap (§0.2, measured with
+`tools/formal_declared_param_census.py`, whose reader now decides rows instead of
+admitting it cannot). Row A's fix landed in `work/formal13-6` and is in
+`test_formal_run.py`. What is left here is a limit, not a defect, and it belongs
+to `FORMAL_wide_receiver_by_reference.md`: a frame address stored in a field
+whose owner is NOT frame-bounded — `self.f = t` where `t` was BUILT in this
+function — is still refused, correctly, because nothing at the store site can
+say the two lifetimes agree.**
 
 Both constructs were in the "other refusal" bucket until `fbaed39b` gave the
 bucket markers for them, and both were unowned. They are one document because
 they were measured together and they are the two rows a planner would otherwise
 have to split by hand out of a 183-file bucket.
 
-| row | files blocked | in-file | both arches | source |
-|---|---|---|---|---|
-| a receiver stored in a FIELD of a struct that outlives it | **24** | 24 | identical | `formal/build.py:4735` |
-| a parameter's declared type contradicts every call site | **13** | 13 | identical | `formal/model.py:7110` |
+| row | files blocked | in-file | both arches | source | state |
+|---|---|---|---|---|---|
+| a receiver stored in a FIELD of a struct that outlives it | **24** | 24 | identical | `formal/build.py:4735` | **CLOSED** (§0.1) |
+| a parameter's declared type contradicts every call site | **13** | 13 | identical | `formal/model.py:7110` | **CLOSED** (§0.2) — and the construct reaches 0 files |
+
+## 0.2 Row B, measured: the instrument that reads the list, and what it found
+## (`work/formal16-6`)
+
+**§3 below asks for this list twice and answers neither: "for each of the 13,
+check whether CPython raises on the same source" and "Row B is unchanged and
+unmeasured here: … no parse-and-walk instrument can produce it".** Both are now
+answered, and the second one was never true — the instrument is
+`tools/formal_declared_param_census.py`, it landed with row A's fix (`fbaed39c6`),
+and it is this document's own claim that a *sweep* cannot answer it, which is
+true of the sweep and false of the question: the sweep's unit is a FILE, and a
+file's image built on its own IS the file, so "every call site in this image" is
+answerable by parsing that one file.
+
+**What was wrong with it was that it decided nothing.** Its DECIDED section was
+*structurally* empty — 0 rows, every run — and its 14 candidate rows all sat in a
+MAYBE bucket whose text was a confession: "a subscript whose element type this
+instrument does not derive", "a field read whose type this file does not state",
+"a call to an unnamed callee". A census that cannot tell "the call site
+contradicts the declaration" from "this instrument cannot read the call site"
+reports its own blindness as program bugs, which is the one thing a census must
+not do.
+
+**Six readers were missing, and each is a way to invent a bug, so each had to be
+right rather than merely present:**
+
+| reader | what it settles | the corpus row it settles |
+|---|---|---|
+| a subscript's ELEMENT, from the base's declared type (`List[T]` → `T`, `formal/model.py`'s `annotation_type_arg_base`) | `report.runs[i]` | `benchmark.mojo`'s `Batch` |
+| a FIELD's declared type, from the struct's own declaration | `h.kept` | `alloc.mojo`, `bindings.mojo` |
+| a class `comptime` alias, from its INITIALISER (`comptime ready_flag = Self(0)` is a `Self` by its own right) | `ControlOffset.ready_flag` | **all four `_amdgpu.mojo` rows, which were never contradictions** |
+| a CALL's declared return type | `make_other()` | — |
+| a method's RECEIVER, per scope (`M.method_receiver_name` + the owning struct) | `take(self)` | **`python_object.mojo`'s six and four more: the old reader marked `self` a value of every struct in the file because one method writes `self = Self(None)`** |
+| a function's OWN scope, ahead of the file's | `val: SIMD` beside a nested `def wrapper_fn(…)(val: Scalar[…])` | **`simd.mojo`'s `_simd_apply` and `_floor`'s neighbours** |
+
+Three of those six found FALSE POSITIVES the instrument had been reporting as
+candidates (11 rows across 6 files), and one more (`gather`, whose receiver is
+passed IMPLICITLY — `@__allow_legacy_custom_self_type`, and `formal/build.py`'s
+`_receiverless_methods` is the build's half) found a twelfth. The number of
+candidate rows therefore went **down** while the number of DECIDED rows went up,
+which is the direction that matters: 14 candidates / 0 decided became **11 / 2**.
+
+### The two decided rows, and what they are
+
+**Both are stdlib DECLARATION bugs, not backend gaps** — which is the answer
+`FORMAL_declared_parameter_against_its_call_sites.md` §1 gives for its own 13
+("none of the 13 is a wrong program"), and this row is a different 2. Neither is
+fixable from this repository: `../new-modular` is outside every worker worktree,
+so both are recorded here rather than patched.
+
+| file | the disagreement | why it is the stdlib's |
+|---|---|---|
+| `std/utils/index.mojo:93` | `_int_tuple_compare`'s first parameter is declared `a: IndexList` and all **5** call sites hand it `self.data`, whose declared type is `StaticTuple[Self._int_type, Self.size]` (`index.mojo:186`) | **the function's own docstring says `var a: StaticTuple[Int, size]`** — the annotation contradicts the documentation beside it, which is a copy-paste that no type checker in the world would accept |
+| `std/simd.mojo:4290` | `_modf_scalar(x: Scalar)` calls `_floor(x)`, declared `x: SIMD` | a Scalar→SIMD widening, which upstream Mojo may well allow and this backend does not model. Whether the stdlib is wrong here is a question about Mojo's own conversions, so it is filed as an observation and not as a defect |
+
+The nine MAYBE rows that remain are the instrument's own limit and are named, not
+counted, in its output: an unannotated name (`alloc.mojo`, `pointer.mojo`,
+`coord.mojo`), a call to a callee the file does not define
+(`string_span.mojo`, `simd.mojo`'s four). Reaching those needs an element type or
+a return type from another file — a whole-closure fact, which is what §3's
+"sweep" instinct was reaching for and is why the instrument's own docstring calls
+its list an UPPER bound.
+
+**Coverage: this construct reaches 0 files and this row cannot change that.**
+`FORMAL_declared_parameter_against_its_call_sites.md`'s re-measurement stands
+(9 of its 13 are `codegen/dependency` behind `binary_heap.mojo` /
+`_unicode_lookups.mojo`, 4 are `not-answerable/host-import`), and the two rows
+above are in `simd.mojo` and `index.mojo`, neither of which is in its 13. So the
+honest headline for row B is: **the list is now readable, it is two stdlib
+annotation bugs, and neither is reachable from this backend today.**
+
+Pinned by `test_formal_declared_param_census.py` (15 cases, 0.1 s, no Lean and no
+build): each of the six readers, each of the three undecidable shapes, each of
+the three false-positive readers, and both corpus rows read off the real
+`simd.mojo` / `index.mojo` — asserted as shapes and not as a count over the
+corpus, because a count goes stale the moment an unrelated header grows a
+function.
+
+```console
+$ python3 tools/memslot.py --gb 8 --label t -- python3 tools/formal_declared_param_census.py
+scanned 375 .mojo files; 45 (callee, parameter) pairs with a struct-typed parameter called in their own file
+…no call site agrees with the declaration: 11 pairs in 6 files
+…of those, EVERY site is a DECIDED disagreement: 2 pairs in 2 files
+$ python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_declared_param_census.py
+Ran 15 tests in 0.124s
+OK
+```
 
 ## 0.1 What landed, 2026-10-03 (`work/formal13-6`): the PLACEMENT, and the
 ## three-step deadlock it was holding shut
@@ -229,6 +320,12 @@ of it is attempted — see §3.
 
 ## 2. Row B: a parameter's declared type contradicts every call site — 13 files
 
+**MEASURED AND CLOSED: §0.2. The 13 are 0 (they are blocked earlier, by a module
+they import), none of them is a wrong program, and the list this instrument reads
+on its own is two stdlib annotation bugs.** Everything below is the state of the
+tree §0.2 was written on, kept because the reproducer is the load-bearing case
+the fix must not touch.
+
 ### Smallest reproducer (7 lines, both arches)
 
 ```mojo
@@ -284,16 +381,19 @@ agreement compiles a field read into `ldr [word, #8k]`. It is a **different
 rule, so it is a different cause**, and that is why they are two rows in the
 map and two samples in `test_refusal_taxonomy.py`.
 
-**The 13 files are not 13 bugs.** The refusal fires on a *contradiction*
-between a declaration and its call sites, so it needs a program that is
-already inconsistent — in `std/base64/base64.mojo` it is
-`b64encode(input_bytes: ImmSpan[Byte, _], mut result: String)` called as
-`b64encode(input_bytes, result)`, i.e. the annotation and the call disagree
-about what `result` is. Before investing, measure how many of the 13 are a
-contradiction in the source (CPython raises or returns nonsense) versus a
-correct program the walk has mis-classified. **That is the first thing to do,
-and it is cheap:** for each of the 13, the terminal message already names the
-function and the parameter.
+**The 13 files are not 13 bugs, and the base64 sentence here is WRONG** —
+`FORMAL_declared_parameter_against_its_call_sites.md` §8 says so and §3 of this
+document measured it: `b64encode(input_bytes, result)` with `mut result: String`
+is the declared type at every call site; the disagreement is between the WORD
+`String()` produces and the FRAME `String` compiles to, and it is in this
+compiler's model, not in the stdlib. The measurement §3 asked for is in §0.2
+(two stdlib annotation bugs, elsewhere) and in that document's §1 (none of its 13
+is wrong). What is left of the group is a **word-versus-frame representation**
+question that is not this construct's to answer: the CALLER has to materialise a
+frame for an argument whose value is a one-word struct value, a call-site
+coercion in both emitters keyed on the callee's published contract
+(`formal/model.py`'s `resolve_frame_parameter_contract` already reads it for an
+IMPORTED callee).
 
 ## 3. What must be measured before either is fixed
 
@@ -310,13 +410,14 @@ neither row's 24 or 13 is a promise:
   **Still open after §0.1, and still the integrator's measurement:** the fix
   removes the SHAPE's blocker, and how many of the 24 reach it is a sweep delta
   this document does not claim.
-* **Row B, 13 files.** Cheaper and prior to any change: for each of the 13,
-  check whether CPython raises on the same source. A file whose program is
-  already wrong is not blocked by a backend gap, and a row of those is a stdlib
-  bug rather than a compiler one.
+* **Row B, 13 files.** DONE — §0.2, and
+  `bugs/FORMAL_declared_parameter_against_its_call_sites.md` §1: for all 13,
+  CPython does not raise on the same source, so none of them is a stdlib program
+  bug, and the construct reaches 0 files on this tree. The list the census reads
+  on its own is a different 2, and both are stdlib annotation bugs (§0.2).
 
-Both measurements are small sweeps (13 and 24 files) and belong to whoever
-picks up the enqueued claim.
+Row A's 24-file delta remains the integrator's sweep measurement, for the reason
+§0.1 gives: a sweep delta is not this document's to take and was never a promise.
 
 ## 4. Reproducing every number here
 
@@ -391,10 +492,10 @@ and the tightened filter is what makes the 13 readable. The instrument is
 `tools/formal_frame_field_census.py`, and both filters are named in its
 docstring so the next reader starts from the tightened one.
 
-Row B is unchanged and unmeasured here: `frame_declared_parameter_refusal`
-compares a parameter's annotation with what the CALL SITES in the same image
-pass, so its list is an image-level fact and no parse-and-walk instrument can
-produce it.
+Row B is measured in §0.2, above, and this paragraph is the claim §0.2 corrects:
+`frame_declared_parameter_refusal` compares a parameter's annotation with what
+the CALL SITES in the same image pass, so its list is an image-level fact — and a
+file's image built on its own IS the file, so a parse of that file answers it.
 
 ```console
 $ python3 tools/formal_frame_field_census.py     # the census above; 14 sites in
