@@ -22151,6 +22151,51 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"methods use would not be it")
 
 
+def member_base_text(expr) -> str:
+    """The BASE of a `a.b.c` chain, spelled the way the source spells it.
+
+    `member_chain_text` is the sibling that spells the whole PATH, and it
+    renders a base it cannot name as `…` — which is right for a path (`….x` says
+    "a field, somewhere") and useless in a sentence about the reader's own code,
+    because `field_access_refusal`'s whole subject IS the base: it says what
+    this path cannot say about it.
+
+    **`spelled`, not `receiver_shape_text`**, and the two disagreed about the
+    same base in one sentence when this was first written — `g(...).x` is a field
+    access through `g()` — because each has its own partial table for the shapes
+    a chain's root can be. `spelled` is the one that spells an arbitrary
+    expression (it is what the access itself is spelled with), so spelling the
+    base the same way is what makes the two halves of the sentence agree."""
+    node = expr
+    while isinstance(node, F.MemberExpr):
+        node = node.obj
+    return spelled(node)
+
+
+def member_access_refusal(expr, fn_name, frame_holders) -> str:
+    """`field_access_refusal` for a MemberExpr, with the base spelled out.
+
+    **One function for the five sites that raise it**, which is the whole point
+    of this existing: the two backends' member fall-throughs each spelled the
+    chain themselves, in the same three lines, with `chain.split(".", 1)[0]` for
+    the root — so a base that is not a plain name (`a[0].x`, `g().x`, `C.A.x`)
+    printed `…` as BOTH the access and its base, and a reader could not tell
+    which expression the refusal was about. The ACCESS is `spelled(expr)` and the
+    BASE is `member_base_text(expr)`, the two spellings this module already has,
+    and they agree with what the old code produced for every chain rooted at a
+    name — so the messages every existing case pins (`is a field access through
+    'b'`) are unchanged, and a deep chain keeps every hop (`h.f.g`, not `h.g`).
+
+    `frame_holders` is the CALLER's frame-holder set, which is per-emission and
+    is the only thing that decides `holder` in the underlying message: a build
+    that DID recognise the root as a frame receiver and then refused is a
+    disagreement between two analyses, and that is a different sentence from
+    "this path cannot classify it"."""
+    return field_access_refusal(
+        spelled(expr), fn_name or "<module>", member_base_text(expr),
+        member_base_text(expr) in (frame_holders or ()))
+
+
 # ── A member read through a LITERAL base: no storage, so no field ────────────
 #
 # The one member base that needs no classification to rule out, and the two
@@ -22190,7 +22235,7 @@ def is_literal_base(expr) -> bool:
     return isinstance(expr, LITERAL_NODES)
 
 
-def literal_base_member_refusal(base, member, chain, fn_name) -> str:
+def literal_base_member_refusal(base, member, fn_name) -> str:
     """Why `<literal>.<member>` cannot be answered: two sentences, one per kind.
 
     **The two arms are the whole of this function**, because "a literal has no
@@ -22207,8 +22252,14 @@ def literal_base_member_refusal(base, member, chain, fn_name) -> str:
     Shared because both backends read it, and because the alternative is what
     this replaced: x86-64's emitter arm and arm64's said the same thing about
     the same program in different words, and one of them said nothing at all.
-    """
+
+    **The chain is spelled HERE rather than passed in**, because the only base
+    this is ever called for is a literal, and the spelling of a literal is
+    exact: `member_chain_text` renders any base it cannot name as `…`, so the
+    caller's version of this sentence said `….foo` about `7.foo` — a message
+    that names neither the number nor the field it is about."""
     who = f"{fn_name}: " if fn_name else ""
+    chain = f"{spelled(base)}.{member}"
     if isinstance(base, (F.StringLiteral, F.TstringLiteral)):
         return (
             f"{who}{chain} is a METHOD REFERENCE on {spelled(base)} — "

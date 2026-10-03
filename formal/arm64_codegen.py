@@ -1782,13 +1782,11 @@ dylib_exports: list = None, globals_base: int = None,
                     # `field_access_refusal`. Wave 5's rule at its most
                     # literal: a missing branch here is a dropped store, not a
                     # wrong value. The words are the shared model's, so both
-                    # arches print the same line.
-                    self._emit_expr(stmt.target.obj)
-                    chain = M.member_chain_text(stmt.target)
-                    root = chain.split(".", 1)[0]
-                    raise CodegenError(M.field_access_refusal(
-                        chain, self.func_name or "<module>", root,
-                        root in self._frame_holders))
+                    # arches print the same line, and they spell the BASE
+                    # (`a[0]`, not `…`) because that is the expression the
+                    # reader wrote and the one the message is about.
+                    raise CodegenError(M.member_access_refusal(
+                        stmt.target, self.func_name, self._frame_holders))
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name
             else:
@@ -2829,12 +2827,8 @@ dylib_exports: list = None, globals_base: int = None,
             # that says what a literal is rather than what this path cannot
             # classify — so this arm is the second line, for a construct that
             # reached the emitter by a route the build pass does not model.
-            self._emit_expr(expr.obj)
-            chain = M.member_chain_text(expr)
-            root = chain.split(".", 1)[0]
-            raise CodegenError(M.field_access_refusal(
-                chain, self.func_name or "<module>", root,
-                root in self._frame_holders))
+            raise CodegenError(M.member_access_refusal(
+                expr, self.func_name, self._frame_holders))
 
         if isinstance(expr, (F.ListExpr, F.TupleExpr)):
             # TupleExpr and ListExpr have identical `elements` shape and

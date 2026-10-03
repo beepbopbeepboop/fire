@@ -10069,8 +10069,7 @@ def refuse_member_reads_through_a_literal_base(functions: list) -> None:
                 continue
             raise CodegenError(
                 M.literal_base_member_refusal(
-                    node.obj, node.member, M.member_chain_text(node),
-                    fn.name))
+                    node.obj, node.member, fn.name))
     return None
 
 
@@ -10302,12 +10301,6 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
-    # A member read through a LITERAL, refused here for the same reason the
-    # comparison above is: the two answers belong to different machines, and one
-    # of them used to be the word 0. No ordering constraint beyond "before the
-    # rewrites", and there is none to state — nothing below rewrites a literal
-    # base into something classifiable, which is the point.
-    refuse_member_reads_through_a_literal_base(functions)
     # The ONE-FIELD MUTATOR write-back, decided once for the whole module
     # because it is a property of the image rather than of one function: the
     # callee half is "return the receiver on every path" and the caller half is
@@ -10376,6 +10369,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # binds.
         if writebacks:
             _apply_receiver_writeback(fn.body, writebacks)
+    # A member read through a LITERAL, refused here for the same reason
+    # `refuse_none_comparisons` is refused above — one of the two answers to the
+    # same source was the word 0, and 0 is a plausible-looking number that is not
+    # the program's — and AFTER the rewrites above for a reason only they can
+    # answer: `_rewrite_class_constants` MATERIALIZES a class constant where it
+    # is read, so `C.A.value` is a member read through a literal only after it
+    # has run. Asked before them, the pass sees a `MemberExpr` over the class
+    # name, concludes "an unclassified base", and the program gets the generic
+    # wording for a shape it can classify exactly. Nothing above can make a
+    # literal base stop being one, so asking late can only see more.
+    refuse_member_reads_through_a_literal_base(functions)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)

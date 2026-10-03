@@ -9643,6 +9643,77 @@ WAVE6_NAME_CASES = [
      "    o.v = 4242\n"
      "    return raw(o)\n",
      "refuse:is a field access through 'h'", None),
+    # ── the same fall-through through a base that is not a NAME ──
+    # (`bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`)
+    #
+    # A name is only half of what can be a base, and the other half used to
+    # answer 0 on arm64 while x86-64 refused: `(7).foo` and `C.A.value` both
+    # printed `0`, `g().x` printed `0` where the source says the field's value,
+    # and CPython raises `AttributeError` for the first two.  A plausible-looking
+    # number and not the program's — the one direction a read must never take.
+    #
+    # The needle is the LITERAL half of the wording rather than the generic
+    # "is a field access through", because that is what distinguishes the fix
+    # from the generic refusal every other member case in this file pins: a
+    # literal has NO binding at all, so there is nothing to classify and nothing
+    # to guess, and the refusal says so.  Both architectures, because the
+    # refusal is raised in the SHARED build pass — one architecture refusing
+    # what the other answers is the defect, not a difference of opinion.
+    ("field_refuse_a_read_through_an_integer_literal",
+     "def main() -> Int:\n"
+     "    printf(\"%d\\n\", (7).foo)\n"
+     "    return 0\n",
+     "refuse:which is a LITERAL", None),
+    # A CLASS CONSTANT is the same read by another route, and it is here
+    # because the refusal for it is raised at a different depth than the case
+    # above: `C.A` is a MemberExpr over the class name when the pass runs, and
+    # only `_rewrite_class_constants` materializing it is what makes the base a
+    # literal.  A refusal asked before that rewrite classified the base as
+    # "unclassified" and printed the generic message about a shape the build
+    # knows exactly — so this case is also the anti-rot for the ORDERING.
+    ("field_refuse_a_read_through_a_class_constant",
+     "class C2:\n"
+     "    A = 7\n\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\\n\", C2.A.value)\n"
+     "    return 0\n",
+     "refuse:which is a LITERAL", None),
+    # The arm a literal needs that the number arm's sentence cannot cover: on a
+    # STRING the read is not an AttributeError, it is a BOUND METHOD, which is a
+    # real Python value this path has no representation for — there is no slot
+    # to read it out of and nothing to store it in.  It used to build and print
+    # `(null)`, which is a pointer-shaped answer to a question about a method.
+    ("field_refuse_a_bound_method_through_a_string_literal",
+     "def main() -> Int:\n"
+     "    f = \"ab\".upper\n"
+     "    return 0\n",
+     "refuse:is a METHOD REFERENCE on", None),
+    # The STORE half of the shape, on a base no analysis can classify: `a[0].x`
+    # used to evaluate both sides and RETURN, which is a silently discarded
+    # store — the program built, ran, and the write was simply not there.
+    # `main` returns 0 either way, so again the exit status cannot witness it
+    # and the assertion is the refusal.  The needle also pins that the message
+    # SPELLS THE BASE: it used to print `….x` through `…`, which names neither
+    # the expression the reader wrote nor the one the message is about.
+    ("field_refuse_a_store_through_a_subscript_base",
+     "def main() -> Int:\n"
+     "    var a = [1, 2, 3]\n"
+     "    a[0].x = 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'a[0]'", None),
+    # …and the same store through a call result, which is the shape the doc
+    # measured as the silently-dropped one (`g().x = 1`).  Its base is spelled
+    # `g(...)` in both halves of the sentence, so the needle checks the
+    # agreement between them.
+    ("field_refuse_a_store_through_a_call_result",
+     "struct P2:\n"
+     "    var x: Int\n\n"
+     "def g() -> P2:\n"
+     "    return P2()\n\n"
+     "def main() -> Int:\n"
+     "    g().x = 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'g(...)'", None),
     # An MLIR dialect construct the TEMPLATE rules do not cover, so the name
     # check reached it and refused it as "no home" — a symptom of the register
     # fall-through, naming the allocator rather than the construct.  Real

@@ -1622,14 +1622,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # register the next function reads as its first parameter.
                     # Wave 5's rule exactly: on x86-64 a missing branch is a
                     # dropped store, not a wrong value.  The words are the
-                    # shared model's, so both arches print the same line.
-                    self._emit_expr(stmt.target.obj)
-                    key = _member_slot_key(stmt.target)
-                    spelled = key or M.member_chain_text(stmt.target)
-                    root = spelled.split(".", 1)[0] if spelled else "this"
-                    raise CodegenError(M.field_access_refusal(
-                        spelled, self.func_name or "<module>", root,
-                        root in self._frame_holders))
+                    # shared model's, so both arches print the same line — and
+                    # both spell the BASE (`a[0]`, not `…`), because the base is
+                    # what the sentence is about.
+                    raise CodegenError(M.member_access_refusal(
+                        stmt.target, self.func_name, self._frame_holders))
                 raise CodegenError(
                     f"assignment to {type(stmt.target).__name__} is not "
                     f"lowered on the formal x86-64 path; only a plain name "
@@ -4568,11 +4565,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # arm64 exited 1 (right, by accident — `h` is argument 0, so it is
             # X19 and `_load_var`'s fall-through read X19) and x86-64 exited 0
             # (wrong).  Two architectures, one source, two answers.  The words
-            # are the shared model's, so both arches print the same line.
-            root = (key or M.member_chain_text(expr)).split(".", 1)[0]
-            raise CodegenError(M.field_access_refusal(
-                key or M.member_chain_text(expr), self.func_name or "<module>",
-                root, root in self._frame_holders))
+            # are the shared model's, so both arches print the same line — and
+            # both spell the BASE (`a[0]`, not `…`), because the base is what
+            # the sentence is about.
+            raise CodegenError(M.member_access_refusal(
+                expr, self.func_name, self._frame_holders))
 
         raise CodegenError(self._unsupported_expr_message(expr))
 
@@ -5285,13 +5282,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return el.name
         if isinstance(el, F.MemberExpr):
             key = _member_slot_key(el)
-            spelled = key or M.member_chain_text(el)
-            root = spelled.split(".", 1)[0] if spelled else "this"
             if key is None or (key not in self._frame_slots
                                and key not in self._frame_nested_slots):
-                raise CodegenError(M.field_access_refusal(
-                    spelled, self.func_name or "<module>", root,
-                    root in self._frame_holders))
+                raise CodegenError(M.member_access_refusal(
+                    el, self.func_name, self._frame_holders))
             return key
         if isinstance(el, (F.ListExpr, F.TupleExpr)):
             return [self._tuple_target_key(e) for e in el.elements]
