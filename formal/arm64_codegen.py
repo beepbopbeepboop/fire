@@ -7657,6 +7657,20 @@ ctor_field_value=self._ctor_field_value_for(name),
             _emit_add_imm(self.asm, 31, 31, stack_bytes)
         if ext_return is not None:
             self._emit_extern_return(ext_return)
+        elif is_extern:
+            # A BARE call to a C symbol: no `external_call` bracket means no
+            # DECLARED return type, and a declared type is where
+            # `external_call_return_kind` reads the ABI rule from. The rule does
+            # not go away for want of a declaration — it is the C library's
+            # prototype that says how wide the answer is, and
+            # `model.BARE_C_RETURN_KINDS` is that prototype for every C symbol
+            # this tree calls bare. `None` when the callee is a Mojo export some
+            # linked library publishes, which is a word whatever it is spelled;
+            # the decision and the export test are shared, so x86-64 cannot
+            # disagree with this about one call.
+            self._emit_extern_return(M.bare_c_return_kind(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms))
 
     def _emit_extern_return(self, kind) -> None:
         """Put the return register into the shape the DECLARED return type says.
@@ -7674,8 +7688,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         instruction, and `NoneType` returns nothing at all.  The width
         normalization itself is `_emit_extend` — the same one an `Int32(x)`
         conversion uses, so there is one implementation of "make this word
-        this width" per architecture rather than two."""
-        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+        this width" per architecture rather than two.
+
+        `None` is the fourth caller, and it means the same as `WORD`: the
+        callee's return width is not established anywhere, so the register is
+        handed on as it arrived.  `external_call_return_kind` cannot answer
+        `None` (a declared type it does not know is refused, not passed
+        through), so only the BARE-C-call path reaches this line with one."""
+        if kind is None or kind == M.EXTERN_RETURN_VOID \
+                or kind == M.EXTERN_RETURN_WORD:
             return
         width, signed = kind
         self._emit_extend(0, 0, IntType(width, signed))

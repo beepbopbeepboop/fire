@@ -7901,6 +7901,16 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
         if ext_return is not None:
             self._emit_extern_return(ext_return)
+        elif is_extern:
+            # A BARE call to a C symbol, over arm64's reasoning and the same two
+            # shared functions: `model.BARE_C_RETURN_KINDS` is the C prototype
+            # for every symbol this tree calls bare, and SysV's rule for a
+            # narrow integer return is the same one AAPCS states — the low bits
+            # are the answer and the rest is unspecified, so `0xFFFFFFFF` is -1
+            # and not 4294967295 whatever the callee left in the top half.
+            self._emit_extern_return(M.bare_c_return_kind(
+                name, self._dylib_by_name, self._dylib_by_module,
+                self._dylib_forwarded, self._import_aliases, self._dylib_syms))
 
     def _vararg_placement(self, name: str, args: list) -> list:
         """`[(class, register-or-slot index)]` per argument of a call.
@@ -7997,8 +8007,15 @@ ctor_field_value=self._ctor_field_value_for(name),
         extended word and -1 as the signed value the source declared.
         `MOVSXD`/`MOVZX`/`AND` come from `_emit_extend`, the same one an
         `Int32(x)` conversion uses, so "make this word this width" is one
-        implementation per architecture and not two."""
-        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+        implementation per architecture and not two.
+
+        `None` is the fourth caller and means the same as `WORD`: nothing has
+        established the callee's return width, so the register is handed on as
+        it arrived.  Only the BARE-C-call path can pass one, because
+        `external_call_return_kind` refuses a declared type it does not know
+        rather than answering `None`."""
+        if kind is None or kind == M.EXTERN_RETURN_VOID \
+                or kind == M.EXTERN_RETURN_WORD:
             return
         width, signed = kind
         self._emit_extend(Reg.RAX, IntType(width, signed))

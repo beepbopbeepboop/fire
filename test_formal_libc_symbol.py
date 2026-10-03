@@ -578,14 +578,264 @@ def group_stat(tmpdir, arch, verbose):
     return fails
 
 
+# ── 5. `retkind`: what a BARE C call's return register means ────────────────
+#
+# A C function that returns `int` puts the low 32 bits in the return register
+# and leaves the rest UNSPECIFIED (AAPCS64 §6.9, SysV AMD64 §3.2.3), so whether
+# a `-1` arrives as 0xFFFFFFFF_FFFFFFFF or as 0x00000000_FFFFFFFF is a property
+# of the host library's syscall sequence and not of the source. Measured on both
+# architectures before `model.BARE_C_RETURN_KINDS` existed: `mkstemps(b, 0) == -1`
+# answered 0 while `access(p, 2) == -1` — the identical signature — answered 1,
+# and `== 4294967295` answered 1 for the first.
+#
+# So the table is asked three ways here, and the third is the one that keeps it
+# honest:
+#
+#   * the ANSWER is pinned by the `retvalue` group below, which builds and runs;
+#   * the DECISION is pinned here, including the part that could silently
+#     corrupt a program instead — a callee a linked Mojo library publishes is
+#     this project's own function whatever it is spelled, and `read`, `stat`,
+#     `remove` and `walk` all reach this line as either;
+#   * the table is checked for TOTALITY over the host modules, so a new bare C
+#     call cannot arrive unnormalised with nothing saying so.
+
+# The bare callees in `formal/hostmods/` that are NOT C library entry points,
+# and why each is not one. An exact list rather than a filter, so a new one has
+# to be classified here instead of being quietly skipped: the census below is
+# only meaningful if the exceptions are a list somebody maintains on purpose.
+# `str_alloc` and `str_copy` are the pair that makes the export gate in
+# `bare_c_return_kind` load-bearing — both are this project's own, reached by
+# `_syscalls.mojo` and `tempfile.mojo` WITHOUT an import statement, and both
+# spell names a C library has no business exporting.
+HOSTMOD_NON_C_CALLEES = {
+    "admitted": "`@admitted` is a contract decorator "
+                "(formal/admitted.py::ADMITTED_DECORATOR), not a call",
+    "str_alloc": "`os._syscalls`' own allocator, called from tempfile.mojo with "
+                 "no import statement — a Mojo export reached through the link "
+                 "line's flat table, not a C symbol",
+    "str_copy": "`os._syscalls`' own byte copy, called from os/__init__.mojo "
+                "the same way",
+}
+
+
+def hostmod_bare_callees():
+    """`{name: {files}}` for every bare callee in the host modules.
+
+    A bare callee is an `IdentExpr` call target that the file neither defines
+    nor imports, which is `formal/arm64_codegen.py::_emit_call`'s `is_extern`
+    read on one file. Deliberately NOT narrowed by "some other host module
+    defines this name too": `mkdir`, `chdir` and `getcwd` are libc's AND the
+    `os` API's, and the call in `_syscalls.mojo` is the C library's while the
+    call in `os/__init__.mojo`'s callers is this project's. Which one a call
+    site reaches is a whole-image fact the export tables answer, so a file-level
+    census has to report both and let `HOSTMOD_NON_C_CALLEES` say which are not
+    C.
+    """
+    import fire_compiler as F
+    from formal.model import builtin_function, iter_nodes, \
+        type_constructor_kind
+
+    root = os.path.join(HERE, "formal", "hostmods")
+    paths = []
+    for dirpath, _dirs, names in os.walk(root):
+        for n in sorted(names):
+            if n.endswith(".mojo"):
+                paths.append(os.path.join(dirpath, n))
+    out = {}
+    for p in paths:
+        with open(p) as f:
+            tree = F.Parser(F.py_tokenize_named(f.read(), p)) \
+                           .with_filename(p).parse_module()
+        defined, imported = set(), set()
+        for node in iter_nodes(tree):
+            if isinstance(node, (F.FunctionDef, F.StructDef)):
+                defined.add(node.name)
+            elif isinstance(node, F.FromImportStmt):
+                for nm, alias in (node.names or []):
+                    imported.add(alias or nm)
+            elif isinstance(node, F.ImportStmt):
+                imported.add(node.alias or node.module.split(".")[-1])
+        for node in iter_nodes(tree):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr):
+                continue
+            name = node.func.name
+            if name in defined or name in imported:
+                continue
+            if builtin_function(name) or type_constructor_kind(name):
+                continue
+            out.setdefault(name, set()).add(os.path.relpath(p, HERE))
+    return out
+
+
+def group_retkind(verbose):
+    """`bare_c_return_kind`: the prototype, the export exception, totality."""
+    from formal.model import (BARE_C_RETURN_KINDS, EXTERN_RETURN_VOID,
+                              EXTERN_RETURN_WORD, bare_c_return_kind)
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+        elif verbose:
+            print(f"      ok: {msg}")
+
+    def kind_of(name, exports=None, aliases=None):
+        """`bare_c_return_kind` with no Mojo library on the link line."""
+        return bare_c_return_kind(name, exports or {}, {}, {}, aliases or {},
+                                  exports or {})
+
+    # The three widths, one name each, and the reason they are three: a `size_t`
+    # or a `uint64_t` return has bit 31 set in ordinary use, so the `int` row's
+    # conversion applied to it would fabricate a negative number.
+    check(kind_of("mkstemps") == (32, True),
+          f"mkstemps returns C's int: {kind_of('mkstemps')!r}")
+    check(kind_of("mkdtemp") == EXTERN_RETURN_WORD,
+          f"mkdtemp returns char *: a whole register, no conversion")
+    check(kind_of("clock_gettime_nsec_np") == EXTERN_RETURN_WORD,
+          "clock_gettime_nsec_np returns uint64_t — 1.7e18 has bit 31 set, so "
+          "this is the name that says the fix is not sign-extend everything")
+    check(kind_of("free") == EXTERN_RETURN_VOID, "free returns void")
+    check(kind_of("no_such_c_function") is None,
+          "a C symbol with no prototype entry is passed through as it arrived")
+
+    # The EXPORT exception, which is what stops this from corrupting a call into
+    # another host module. `read` is the name that makes it necessary: it is
+    # libc's `read` and this tree's own wrapper for it, and only the export
+    # tables can say which one a given call reached.
+    exports = {"read": {"symbol": "_hostmod_read", "nargs": 3}}
+    check(bare_c_return_kind("read", exports, {}, {}, {}, exports) is None,
+          "a callee a linked library PUBLISHES is a Mojo value whatever it is "
+          "spelled — no conversion, though libc's read is in the table")
+    aliased = {"as_read": {"symbol": "_hostmod_read", "nargs": 3}}
+    check(bare_c_return_kind("as_read", {}, {}, {}, aliased, {}) is None,
+          "…and the same holds through an import alias, which is how "
+          "`from m import f as g` binds")
+    check(kind_of("mkdir") == (32, True),
+          "with no library on the link line, mkdir is libc's and is normalized")
+
+    # TOTALITY, forward: every bare callee the host modules make must be a name
+    # this table has an opinion about, or a call can reach a C library entry
+    # point whose -1 the host returns 0x00000000_FFFFFFFF and nothing says so.
+    census = hostmod_bare_callees()
+    unknown = {n: fs for n, fs in census.items()
+               if n not in BARE_C_RETURN_KINDS
+               and n not in HOSTMOD_NON_C_CALLEES}
+    check(not unknown,
+          f"all {len(census)} bare callees in formal/hostmods are either in "
+          "BARE_C_RETURN_KINDS or in HOSTMOD_NON_C_CALLEES"
+          + ("" if not unknown else "; unclassified: "
+             + ", ".join(f"{n} ({sorted(fs)[0]})"
+                         for n, fs in sorted(unknown.items()))))
+    # …and every name the exceptions claim IS a bare callee, so the exception
+    # list cannot grow a name that was never there to excuse.
+    check(not (set(HOSTMOD_NON_C_CALLEES) - set(census)),
+          "every HOSTMOD_NON_C_CALLEES entry is a name the census found"
+          + ("" if set(HOSTMOD_NON_C_CALLEES) <= set(census) else
+             "; stale: " + ", ".join(sorted(set(HOSTMOD_NON_C_CALLEES)
+                                            - set(census)))))
+
+    # TOTALITY, backward: a table entry is a claim about a real function, so ask
+    # the C library whether it has one. A typo or an invented name would
+    # otherwise be a prototype nothing can be held to.
+    if sys.platform == "darwin":
+        import ctypes
+        lib = ctypes.CDLL(None)
+        absent = []
+        for name in sorted(BARE_C_RETURN_KINDS):
+            try:
+                getattr(lib, name)
+            except AttributeError:
+                absent.append(name)
+        check(not absent,
+              f"all {len(BARE_C_RETURN_KINDS)} prototypes in the table name a "
+              "symbol this host's C library defines"
+              + ("" if not absent else "; not defined here: "
+                 + ", ".join(absent)))
+    elif verbose:
+        print("NOTE: not Darwin, so the prototype table's symbols cannot be "
+              "asked of a C library here")
+    return fails
+
+
+# ── 6. `retvalue`: the same thing, measured on a built image ────────────────
+#
+# What is asserted is the ANSWER, never the instruction: `mkstemps` on a path
+# that does not exist returns -1, and a C `int` return is a sign-extended word,
+# so `== -1` and `< 0` are true and `== 4294967295` is false. `truncate` is the
+# control — the identical prototype, which libSystem happened to arrive
+# sign-extended even before the table — and `clock_gettime_nsec_np` is the one
+# that says the conversion did not become a blanket `sxtw`: its value is
+# 1.7e18, bit 31 long since set, and a blanket sign-extension would make every
+# `time.time_ns()` negative.
+
+RET_PROGRAM = """\
+from os._syscalls import str_dup
+
+def main(n):
+    var b = str_dup("@@DIR@@/nodirXXXX/z")
+    printf("mk_eq_m1=%d@@", mkstemps(b, 0) == -1)
+    printf("mk_lt_0=%d@@", mkstemps(b, 0) < 0)
+    printf("mk_eq_32=%d@@", mkstemps(b, 0) == 4294967295)
+    printf("mk_ne_0=%d@@", mkstemps(b, 0) != 0)
+    printf("tr_eq_m1=%d@@", truncate("@@DIR@@/nodirXXXX/z", 0) == -1)
+    printf("ns_pos=%d@@", clock_gettime_nsec_np(0) > 0)
+    printf("ns_gt_2p31=%d@@", clock_gettime_nsec_np(0) > 2147483648)
+    printf("len_ok=%d@@", strlen("abcd") == 4)
+    return 0
+"""
+
+# label -> what the C library's own answer is, as CPython/ctypes in this
+# process establish it. `mk_eq_m1` and `tr_eq_m1` are the -1 rows; `mk_eq_32`
+# is the one that was true before the fix and must be false after it, which is
+# what makes this a test of the conversion rather than of a comparison.
+RET_EXPECTED = {
+    "mk_eq_m1": "1",
+    "mk_lt_0": "1",
+    "mk_eq_32": "0",
+    "mk_ne_0": "1",
+    "tr_eq_m1": "1",
+    "ns_pos": "1",
+    "ns_gt_2p31": "1",
+    "len_ok": "1",
+}
+
+
+def group_retvalue(tmpdir, arch, verbose):
+    """A C `int` return is a sign-extended word; a `uint64_t` one is not."""
+    d = os.path.join(tmpdir, "retdir")
+    os.makedirs(d, exist_ok=True)
+    src = os.path.join(tmpdir, "ret.mojo")
+    with open(src, "w") as f:
+        f.write(RET_PROGRAM.replace("@@DIR@@", d))
+    out = os.path.join(tmpdir, "ret." + arch)
+    rc, text = build(src, out, arch)
+    if rc != 0:
+        return [f"build failed: {text.strip()[-400:]}"]
+    rc, stdout, stderr = run(out, arch)
+    if rc != 0:
+        return [f"exit {rc}, stderr {stderr.strip()[:200]!r}"]
+    got = records(stdout)
+    if verbose:
+        print(f"      image said: {got}")
+    fails = []
+    for label, want in RET_EXPECTED.items():
+        if got.get(label) != want:
+            fails.append(f"{label}: the image says {got.get(label)!r}, the C "
+                         f"answer is {want!r}")
+    return fails
+
+
 GROUPS = {
     # `table` is a function of the target alone, so it is not per-architecture:
     # it is listed with the others because it is one of the things that can be
     # wrong, and a check that is not run is not a check.
     "table": (lambda tmpdir, arch, verbose: group_table(verbose), False),
+    "retkind": (lambda tmpdir, arch, verbose: group_retkind(verbose), False),
     "binding": (group_binding, True),
     "dirent": (group_dirent, True),
     "stat": (group_stat, True),
+    "retvalue": (group_retvalue, True),
 }
 
 
