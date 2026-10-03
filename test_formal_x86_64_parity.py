@@ -948,6 +948,117 @@ CASES = [
      "    sys.stdout.write(\"%d %d %d %d %d\" % (o.v, o.n.v, o.n.n.v,\n"
      "                                        o.n.n.n.v, o.n.n.n.n.v))\n"
      "    return 0\n"),
+    # ── the lowering paths that exist on arm64's side ALONE ──────────────
+    #
+    # Added by the arm-vs-x86 parity audit (2026-10-03), which enumerated the
+    # `_emit_*` methods that exist in `formal/arm64_codegen.py` and NOT in
+    # `formal/x86_64_codegen.py` and then built and ran each construct on both
+    # machines.  Five of the seven were already correct on both and had NO case
+    # here, which is the coverage hole this file is for: a construct both
+    # machines answer is not evidence they will keep answering it.
+    #
+    # The two that were not correct are the interesting half, and they are in
+    # `test_formal_list_splat.py` (arm64 built `[*a]` as an EMPTY list) and in
+    # bugs/FORMAL_arm64_set_union_result_blob_has_the_wrong_count.md.
+    ("read_slice_of_a_list",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40, 50]\n"
+     "    var b = a[1:4]\n"
+     "    printf(\"%d %d %d\", b[0], b[1], b[2])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [10, 20, 30, 40, 50]\n"
+     "    b = a[1:4]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (b[0], b[1], b[2]))\n"
+     "    return 0\n"),
+    # The step is a RUN-TIME value on this path, so the four Python defaults
+    # that depend on its sign are each a word and the loop picks between them.
+    # `a[::2]` is the shape that needs all of them at once.
+    ("read_slice_with_a_step",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40, 50]\n"
+     "    var b = a[::2]\n"
+     "    printf(\"%d %d %d\", b[0], b[1], b[2])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [10, 20, 30, 40, 50]\n"
+     "    b = a[::2]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (b[0], b[1], b[2]))\n"
+     "    return 0\n"),
+    # An open stop, which is `len(a)` and NOT a literal: the bound comes from
+    # the blob's count field, so a slice that assumed the source's length was
+    # written down would be short by one here.
+    ("read_slice_with_an_open_stop",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40, 50]\n"
+     "    var b = a[2:]\n"
+     "    printf(\"%d %d %d\", b[0], b[1], b[2])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [10, 20, 30, 40, 50]\n"
+     "    b = a[2:]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (b[0], b[1], b[2]))\n"
+     "    return 0\n"),
+    # `del a[1:3]` COMPACTS the survivors, so the elements after the hole have
+    # to MOVE — a different job from a read slice, and the one that reads
+    # `a[2]` back to tell whether it happened.  `del_list_slice` above is the
+    # single-bound form; this is the range.
+    ("del_a_range_of_a_list",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40, 50]\n"
+     "    del a[1:3]\n"
+     "    printf(\"%d %d %d\", a[0], a[1], a[2])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [10, 20, 30, 40, 50]\n"
+     "    del a[1:3]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (a[0], a[1], a[2]))\n"
+     "    return 0\n"),
+    # A tuple target NESTED inside another tuple target.  The outer unpack
+    # only checks top-level arity, so the inner pair is a second emitter with
+    # its own register discipline — and `tuple_target_in_a_constructor_body_
+    # answers_on_both` above is the single-level spelling of this.
+    ("nested_tuple_target_assignment",
+     "def main():\n"
+     "    var t = (1, (2, 3))\n"
+     "    a, (b, c) = t\n"
+     "    printf(\"%d %d %d\", a, b, c)\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    t = (1, (2, 3))\n"
+     "    a, (b, c) = t\n"
+     "    sys.stdout.write(\"%d %d %d\" % (a, b, c))\n"
+     "    return 0\n"),
+    # `x if c else y`, with the UNTAKEN arm made observable.  arm64 has a CSEL
+    # for this, which reads two registers at once and so evaluates both arms;
+    # a branchless lowering of a conditional whose arms have effects answers a
+    # different program, and the difference is in what the program PRINTS, not
+    # in the value it returns.  Measured on this tree: both machines branch, and
+    # `bump()`'s output appears for neither — so the case is pinning that
+    # answer rather than discovering it.
+    ("conditional_expression_does_not_run_the_untaken_arm",
+     "def bump():\n"
+     "    printf(\"arm-ran \")\n"
+     "    return 7\n"
+     "\n"
+     "def main():\n"
+     "    var c = 0\n"
+     "    printf(\"v=%d\", bump() if c else 99)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def bump():\n"
+     "    sys.stdout.write(\"arm-ran \")\n"
+     "    return 7\n"
+     "\n"
+     "def main():\n"
+     "    c = 0\n"
+     "    sys.stdout.write(\"v=%d\" % (bump() if c else 99))\n"
+     "    return 0\n"),
 ]
 
 
