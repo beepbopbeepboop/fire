@@ -8632,6 +8632,187 @@ def _sentence(text) -> str:
     text = (text or "").strip()
     return text if (not text or text[-1] in ".!?:") else text + "."
 
+
+# ── the STORE side of the pointer value model ──────────────────────────────
+#
+# `p.value() = v` is the mirror of `p.value()`, and it is here for the mirror's
+# reason: the store's WIDTH is a property of the program and not of the
+# architecture, so the two backends ask one function, exactly as they ask
+# `dereference_lowering` for the load. A per-backend rule here would be two
+# answers to "what does `p.value() = v` mean", and the two answers would be a
+# `strb` on one machine and a `str x` on the other over the same bytes.
+#
+# WHY IT IS A SEPARATE FUNCTION AND NOT A FLAG ON `dereference_lowering`: the
+# load's answer is "the WORD at the address", and the store's is "the BYTES at
+# the address", and the two differ on the two cases that matter.  A NULLABLE
+# POINTER's `.value()` is the UNWRAP for a load — the receiver already IS the
+# answer, and reading memory there would answer with the FIRST BYTE of the
+# pointee (`model.nullable_pointer_unwrap`, and the SIGSEGV it replaced) — while
+# the STORE through the same spelling writes at the address the word holds, so
+# the unwrap costs nothing and the store is answerable.  And a STRUCT pointee is
+# the IDENTITY for a load, which is refused for a reason that has nothing to do
+# with the address; for a store it is refused for a better one, which is that
+# there is nothing AT the address to store into.  Those are two different
+# refusals, and one flag would have had to invent which reader was asking.
+#
+# THE ONE RULE, and it is the same one `subscript_base_lowering` already applies
+# to `p[i] = v`: **the store is the pointee's width, and it TRUNCATES.**  Both
+# halves of that are established rather than chosen, and the alternative — a
+# refusal whenever the value's width exceeds the pointee's — is not a stricter
+# version of the same rule, it is a different one, and it is the one the
+# SUBSCRIPT spelling would then disagree with:
+#
+#   * `p[i] = v` over a `Pointer[UInt8]` emits `strb` today, on both backends,
+#     and has done since the byte store was added (measured: a full 64-bit store
+#     into a one-byte element overwrote the seven bytes after it, which is a
+#     silent corruption of a `malloc`'d buffer rather than anything that traps).
+#     Refusing `p.value() = v` for the same value on the same pointee would make
+#     the two spellings of one store answer differently, which is the exact
+#     failure `subscript_base_lowering` was written to end.
+#   * Truncation is C's. `*(UInt8 *)p = v` stores the low byte and discards the
+#     rest, and a store NARROWER than its value never invents a bit and never
+#     writes outside the pointee's extent — so it cannot be a wrong answer in
+#     the way an unestablished WIDTH is.  What the load side refuses is a store
+#     at a width nothing established, and the width here is established by the
+#     same declaration the load reads.
+#   * The load and the store must AGREE, and they do by construction: both read
+#     `POINTEE_WIDTHS`, so `p.value() = 65; printf("%d", p.value())` on a
+#     `Pointer[UInt8]` is 65 on both machines, which is the round trip
+#     `test_formal_time.py`'s `structroute` group now asserts.
+#
+# WHAT IS REFUSED is what the LOAD refuses, and for the load's reasons, worded
+# from the same argument so the two do not drift: a receiver with no recorded
+# pointee, a pointee with no established width, a FLOAT / BLOB / wide-SIMD /
+# STRUCT pointee, and an unscaled integer offset on a pointee wider than one byte
+# (`_offset_scale`, the same reader, because the address and the store have to
+# agree about the element size exactly as the address and the load do).
+# `test_returned_frame_layout.py` and the sweep's refusal census keep the two
+# backends on one wording.
+
+
+def pointer_store_receiver(target):
+    """The ADDRESS a store through a dereference writes to, or `None`.
+
+    `p.value() = v` and `p.unsafe_value() = v`, and nothing else.  The same
+    `DEREFERENCE_TRY_NAMES` the LOAD intercepts on, read from the model's own
+    table rather than from a list spelled out here — a store recogniser with its
+    own two names is a third list to keep in step with the other two, and the
+    cost of it being wrong is a program refused for a spelling the load accepts.
+
+    `None` means "this target is not a store through a pointee", which is the
+    common case: every other assignment target is a plain name, a subscript, a
+    slice or a field, and each of those has its own emitter.
+    """
+    if not isinstance(target, F.CallExpr) or target.args or target.kwargs:
+        return None
+    func = getattr(target, "func", None)
+    if isinstance(func, F.MemberExpr) and func.member in DEREFERENCE_TRY_NAMES:
+        return func.obj
+    return None
+
+
+def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
+                           structs_by_name: dict = None):
+    """`("store", width, signed)` | `None` — with a refusal.  The store mirror
+    of `dereference_lowering`, and asked for the same reason.
+
+    The three-tuple shape is the load's shape on purpose, for the reason
+    `dereference_lowering` keeps it: every reader unpacks `shape, width, signed`
+    and the shape is what tells a store from an identity.  `signed` is the
+    POINTEE's declared signedness and is carried for that symmetry only — a
+    store has no result to sign-extend, and the width is what it truncates to.
+    """
+    obj = pointer_store_receiver(target)
+    inner, why = pointer_pointee(fn, obj, decls, functions)
+    if inner is None:
+        return (None, why)
+    if inner in POINTEES_REFUSED:
+        # The table's own words, not a second copy of them.  They are written
+        # for the LOAD — "the load would put float bits in a register" — and
+        # the operative clause is the one before that (this path has no float
+        # kind; a list is a blob), which is why the store quotes it rather than
+        # paraphrasing it: a paraphrase would be a second answer to "why is a
+        # float pointee refused", and the two would drift.
+        return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
+    if inner in POINTEE_WIDTHS:
+        width, signed = POINTEE_WIDTHS[inner]
+        scaled, scale_why = _offset_scale(fn, obj, width)
+        if not scaled:
+            return (None, scale_why)
+        return (("store", width, signed), why)
+    st = (structs_by_name or {}).get(inner)
+    if st is not None:
+        return (None, f"the pointee is {inner}, a STRUCT, and there is nothing "
+                      f"AT the address to store into: a struct's value on this "
+                      f"path is the address of its frame, so the receiver's word "
+                      f"already is the struct rather than a pointer to one. "
+                      f"{_sentence(why)} Build the struct where it lives and "
+                      f"store its FIELDS, which is what the load side's "
+                      f"`_frame_receivers` step is for")
+    return (None, f"the pointee is {inner}, which is not a width this model "
+                  f"establishes, and a store at a width nothing established is "
+                  f"the one instruction this path must not emit — 8 bytes into a "
+                  f"1-byte pointee overwrites seven bytes the program never "
+                  f"wrote, and that is silent corruption rather than a fault. "
+                  f"{_declared_note(why)}")
+
+
+def pointer_store_refusal(method: str, why: str) -> str:
+    """The refusal text for a store `pointer_store_lowering` would not answer.
+
+    `dereference_refusal`'s twin, and worded from the same paragraph: the width
+    is the pointee's, and without a pointee the only width available is 8 bytes,
+    which corrupts a narrow pointee instead of over-reading it.  "Over-reads"
+    becomes "overwrites" because that is what a store does — the difference is
+    the whole of what a store changes and a load does not, so a shared message
+    would have to be wrong about one of them.
+    """
+    return (f"{{dotted}}() on the left of an assignment is a STORE to the "
+            f"address the receiver holds, and the store's width is the "
+            f"pointee's — {_sentence(why)} Refused rather than emitted at the "
+            f"only width this path could choose without one, which is 8 bytes: "
+            f"that overwrites 7 bytes of a 1-byte pointee the program never "
+            f"wrote, and a `malloc`'d buffer is silently corrupted by it rather "
+            f"than trapping. Declaring the pointee — a parameter annotated "
+            f"`Pointer[UInt8]`, a local `var p: Pointer[Int32]`, or a "
+            f"pointer-valued `external_call[\"sym\", Pointer[T]]` — is what "
+            f"makes it answerable")
+
+
+def read_only_text_store_refusal(dotted: str, receiver) -> str | None:
+    """The refusal for a store whose RECEIVER is a string, or `None`.
+
+    The one refusal this section needs that the load side does not, and it is
+    here because the load side already refuses the same receiver for a
+    neighbouring reason: `_emit_expr` skips the dereference intercept when
+    `_expr_str_kind(recv)` is `STR_KIND`, because 527 of the corpus's 528
+    `.value()` sites are an enum, an iterator or a SIMD rather than a pointer.
+    So the store has to ask the same question, and for the same reason — and the
+    answer here is about ADDRESSES rather than about the four questions one name
+    can ask.
+
+    A string literal's bytes are interned in `__TEXT,__text` (see
+    `receiver_shape`), which is a READ-ONLY page in the image this backend
+    builds.  Measured on the neighbouring path: `s[0] += 1` over a string
+    literal died of SIGBUS on the assignment, which is why
+    `_emit_subscript_aug` asks `string_binary_refusal` first.  A plain store
+    through a pointer is new, and introducing it without this check would
+    introduce a new SIGBUS with it — the capability is here so a module can
+    build an argument for a C library function, and handing libc an address in
+    the text section is the one argument it must never be handed.
+    """
+    if receiver is None:
+        return None
+    return (f"{dotted}() on the left of an assignment stores THROUGH the "
+            f"receiver, and this receiver's bytes are the image's own text — a "
+            f"string literal is a `char *` into `__TEXT,__text`, which is a "
+            f"READ-ONLY page (measured, on the neighbouring subscript path: "
+            f"`s[0] += 1` over a string literal died of SIGBUS, exit 138, on "
+            f"the assignment). Copy the bytes somewhere writable first — a "
+            f"`malloc`'d buffer, which is what every C out-parameter on this "
+            f"path needs anyway — and store through that")
+
+
 # An OPTIONAL UNWRAP — the opposite of a dereference. The question is not what
 # is at the address but WHICH OF TWO WORDS was the empty one, and on this path
 # there is no way to tell. `self.step = None` and `self.step = 5` are both
