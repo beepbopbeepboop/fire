@@ -679,10 +679,83 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   missing buffer as `upper`. It belongs in `LENGTH_DEPENDENT_METHODS` with the
   rest of that family rather than in a refusal, and it is a consequence of the
   representation decision above, not a separate bug.
+- **The PROOF MODEL had no value for a string — it had a FABRICATED one. FIXED
+  2026-10-03 (`work/formal16-7`).** This is the item the `len` bullet below
+  was measured against, and it is upstream of it: `formal/arm64_proof_gen.py`'s
+  `_expr_go`, `_expr_go_t` and `_expr_ast` each answered a `StringLiteral`
+  with `"(0 : UInt64)"` / `'MojoExpr.var ""'`, while the machine's value for
+  one is the ADDRESS the emitter gave that text's bytes. The file's own
+  docstring states the rule this broke — *"a stated gap costs a program its
+  proof, and a fabricated model costs it a proof of something FALSE"* — and
+  both were true at once:
+
+  | program | before (both backends) | after |
+  |---|---|---|
+  | `printf("hi\n"); return 5` | **Lean rejects** — `main_pre_arg_0 : run_x0 … = 0`, and x0 holds the format string's address | proved, 0 sorries |
+  | `return "small"` | **Lean rejects** — four `is false` obligations, the model saying 0 and the machine an address | proved, 0 sorries |
+  | `print(42)` (the control) | proved | proved, unchanged |
+
+  **So `NO program that prints a string literal proved on either machine**, and
+  the reason nobody saw it is that `print(42)` — the one calling program in
+  `test_formal_call_proof_gen.py` — passed throughout: an integer argument is a
+  machine word the model does have. That is the same lesson as the `if s:`
+  fabrication above, in the one component where it was not a wrong answer but a
+  **false theorem**.
+
+  The address cannot be recomputed by the generator — the data label is
+  `str_<emission counter>`, so where a text landed is a property of the order
+  the emitter interned in — so both backends publish their own intern map as
+  `info["str_addrs"]` (decoded text → address), and it rides on the `_Scope`
+  every renderer in the shared generator already takes, for `_Scope`'s own
+  stated reason. `_str_addr_term` is the ONE reader, so the semantic model, the
+  AST bridge and the machine-facing argument theorem cannot disagree about what
+  a string is; a literal with no table entry REFUSES rather than defaulting,
+  which is reachable only from a caller with no image to read.
+
+  Two follow-ons landed with it, both of which are the same defect seen from
+  the other side:
+
+  * **`formal/x86_64_proof_gen.py`'s `_returns_string_literal` guard is
+    DELETED.** It suppressed the concrete run tests for any function handing
+    back a string, on the stated ground that *"no numeric model of `return
+    "small"` is that address"* — which is the fabricated `0` above. With the
+    model fixed, `main_runs_n` / `main_terminates_n` are back for n ∈ {0,1,2,5,10}
+    and Lean accepts all of them. Deleted rather than switched off: a flag
+    nobody reads is a second thing to keep in step.
+  * **The extern ARGUMENT theorem now says something true.** `pre_arg` was the
+    `printf` half; where an argument has no modellable value at all (which the
+    intern table makes reachable only for a caller with no image) the theorem is
+    not emitted and a NOTE says why, leaving the reachability and `BL`-step
+    theorems — the same answer the concrete run test already gave, for the same
+    reason.
+
+  `test_formal_call_proof_gen.py` gains `TestStringValueInTheModel`: both
+  programs on both machines, the table's publication and content-interning
+  properties, the model term and the AST term read out of the generated Lean,
+  the refusal guard, and a Lean typecheck (0 sorries on arm64; on x86-64
+  exactly the two trust boundaries `x86_64_proof_gen.py`'s own header declares).
+
+  **What it does not do, and this is the part that stays.** The model can now
+  state a string's value, and that value is a `char *` — it still has no
+  `strlen`, so `len(s) == 5` remains unprovable for the reason the `len` bullet
+  below gives. And the run-time BUFFER is still missing, so `s[i]` above and
+  `upper`/`strip`/`join` below it are unchanged: none of them became easier
+  because the model stopped lying about where a string is.
 - **The proving arm64 build cannot prove `len` or any string method.** Re-measured
-  2026-10-01, and the `len_go` half of the original report is STALE — there is
-  no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown
-  identifier` error. What is there instead is narrower and better located:
+  2026-10-01, and re-measured again 2026-10-03: **the transcript quoted below
+  no longer reproduces, and for a better reason than a fix.** `len(s)` is now
+  refused at GENERATION time (`model: call to 'len' has no model in this image
+  (an extern, or a function this generator emits no '_go' for); refusing rather
+  than inventing its return value`) instead of emitting a theorem that is false,
+  so the build is red rather than green-and-wrong. The bullet's prescribed fix
+  (suppress the post-extern theorem on `_call_boundary`) was therefore not
+  needed for `len` — the `_call_go` refusal upstream of it already says what
+  this model cannot do — and the remaining text below is kept for the case that
+  is still live, an argument the model has no value for.
+
+  What was there, and the `len_go` half of the original report is STALE — there
+  is no `len_go` in `formal/arm64_proof_gen.py` any more and no `Unknown
+  identifier` error. What was there instead is narrower and better located:
 
   ```
   $ python3 fire.py build --formal -o pg1.proof pg1.mojo     # len(s) on a string
