@@ -5202,6 +5202,29 @@ BOTH_ARCH_CASES = [
      "    r.zero()\n"
      "    printf(\"a=%d b=%d\", r.a, r.b)\n"
      "    return 0\n", 0, "a=0 b=0"),
+    # A BYTE out of a string, and the two rows that say the rule that produces it
+    # (`model.subscript_element_kind`) did not take the byte away from the
+    # readers that want a NUMBER.  `s[i]` is the byte on this path, so `%d` of it
+    # and `s[0] == 97` are true and were true before the rule existed; a change
+    # that made the subscript refuse would be a working program traded for a
+    # diagnostic, and these are the rows that notice.  Every expected value is
+    # the ASCII code of the character: `s[0]` is `'a'` = 97, `s[1]` is `'b'` = 98,
+    # `s[2]` is `'c'` = 99, and `97 == 97` is 1.
+    ("both_arch_string_byte_renders_as_a_number",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%d][%d][%d][%d]\", s[0], s[1], s[2], s[0] == 97)\n"
+     "    return 0\n", 0, "[97][98][99][1]"),
+    # …and through `print`, which is the half of the rule that is NOT a refusal:
+    # `_print_call` asks the KIND, and "the source does not say" was a
+    # `print() cannot tell whether SubscriptExpr is a string or a number` about a
+    # value the model can now classify.  The row is here for the same reason as
+    # the one above it — a NEW emission is worth less than a pinned one.
+    ("both_arch_print_of_a_string_byte_renders_the_byte",
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"abc\"\n"
+     "    print(s[0])\n"
+     "    return 0\n", 0, "97"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -8748,6 +8771,40 @@ PRINTF_TEXT_CASES = [
      "    var s = \"abc\"\n"
      "    printf(\"[%s][%s][%s]\", String(s), str(s), String(\"lit\"))\n"
      "    return 0\n", 0, "[abc][abc][lit]"),
+    # A SUBSCRIPT of a string, and the last shape the family had: `s[0]` is a
+    # BYTE on this path — a string is a bare `char *` and both emitters load one
+    # byte out of it (`_emit_subscript_load`'s `LDRB` at width 1) — so the value
+    # kind of `s[i]` is an integer, and the kind table did not say so: `s[0]` is
+    # a `SubscriptExpr`, `kind_of` asked `list_elem_kind` of a `char *`, a string
+    # is not a blob, and the answer was NOTHING.  Nothing is the permissive
+    # direction everywhere it is read, so the row above never fired.  Measured on
+    # BOTH architectures before this case existed, from GREEN builds: nothing
+    # printed and SIGSEGV, exit 139 — `%s` walking bytes at address 97 looking
+    # for a NUL.  `model.subscript_element_kind` is what closes it, by making
+    # the model say what the representation already is.
+    ("printf_s_of_a_string_byte_is_refused",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%s]\", s[0])\n"
+     "    return 0\n",
+     "refuse:conversion in printf's format string reads", None),
+    # THE GUARD, and the reason the byte is a fact rather than a defect to
+    # refuse: a conversion that does not DEREFERENCE renders the word whatever it
+    # is, so `%d` of `s[0]` is 97 — `'a'` — and `s[0] == 97` is true.  If the
+    # subscript rule ever turned a byte into a refusal by the back door, this is
+    # the row that says so.  The two BUILDING rows of this rule are in
+    # `BOTH_ARCH_CASES`, because they have to run on both machines to be an
+    # assertion about the representation rather than about one emitter.
+    # …and `len` of the byte, which is the third reader of the same fact and the
+    # one that goes from "the source does not say" to an honest refusal.  Before
+    # the rule the answer was the permissive one; the needle is the sentence
+    # about an integer, so a reader can tell which of the two messages this is.
+    ("len_of_a_string_byte_is_refused",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%d]\", len(s[0]))\n"
+     "    return 0\n",
+     "refuse:an integer has no length", None),
 ]
 
 

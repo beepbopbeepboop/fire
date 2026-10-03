@@ -11116,6 +11116,34 @@ def list_elem_kind(kind):
     return kind.split(":", 1)[1] if ":" in kind else None
 
 
+def subscript_element_kind(base_kind):
+    """What `base[i]` yields, given what `base` is: a blob's element, or a BYTE.
+
+    The one place that question is answered, because the blob case and the
+    `char *` case are the same subscript with two different answers and the
+    kind table used to answer only the first: `list_elem_kind` asks
+    `is_list_kind`, a string is not a blob, so `s[0]` classified as NOTHING —
+    the permissive direction everywhere it was read — and one refusal built on
+    that nothing never fired.  Measured, BOTH architectures, from a GREEN build:
+    `printf("[%s]", s[0])` printed nothing and died of SIGSEGV, exit 139,
+    because `%s` is the one conversion that dereferences and it walked bytes at
+    address 97 looking for a NUL.  So the value kind of a subscript of a
+    `char *` is an INTEGER, and that is not a guess about the representation: a
+    string on this path IS a bare `char *` and both emitters load one byte
+    (`arm64_codegen._emit_subscript_load`'s `LDRB` at width 1), which is why
+    `printf("%d", s[0])` has always printed 97 and `s[0] == 46` has always been
+    true.  `printf_arg_text_evidence`'s last row now sees the truth and refuses,
+    and `len(s[0])` gets the honest "an integer has no length" instead of "the
+    source does not say".
+
+    NOT the SLICE: `s[1:3]` is a new string, not a byte, and the slice arm of
+    `kind_of` answers it separately (`FORMAL_string_value_model.md`).
+    """
+    if base_kind == STR_KIND:
+        return INT_KIND
+    return list_elem_kind(base_kind)
+
+
 def is_list_kind(kind) -> bool:
     """True when `kind` names a list/tuple/set blob of any element kind."""
     return isinstance(kind, str) and kind.startswith(LIST_PREFIX)
@@ -11900,7 +11928,7 @@ class ValueKinds:
             return INT_KIND
         if isinstance(e, F.SubscriptExpr):
             if not isinstance(e.index, F.SliceExpr):
-                return list_elem_kind(self.kind_of(e.obj))
+                return subscript_element_kind(self.kind_of(e.obj))
         return None
 
     def _string_method_kind(self, call):
