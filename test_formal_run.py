@@ -6058,6 +6058,48 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return ping(5000)\n", 2, None),
+    # `unsafe_load` is Mojo's OWN name for the read this path already lowers:
+    # `UnsafePointer.unsafe_load(i = 0)` is a pointer's `value()` with the index
+    # defaulted, and it was in NEITHER the dereference table nor the refusal
+    # tables — so `p.unsafe_load()` reached `value_method_refusal`'s generic arm
+    # and was reported as a method call on a receiver holding an `int`, on a
+    # parameter the source had annotated `Pointer[UInt8]`. Measured before the
+    # fix, both architectures, with a declared pointee.
+    #
+    # The five widths are the whole assertion. What must hold is not "it builds"
+    # but "`unsafe_load` answers EXACTLY what `value` answers at the same
+    # address", so the row reads one address five ways and each reading has to
+    # come back right on its own terms: 65 / 16961 / 1145258561 / 65 / 5208208757
+    # 389214273 are the little-endian readings of b"ABCDEFGH" at 1, 2, 4, 8-signed
+    # and 8-unsigned bytes — the same constants `deref_four_widths_at_one_address`
+    # states for `value`. The signed 1-byte read is 65 and not a sign-extended
+    # negative because 'A' has its top bit clear, so it cannot tell a
+    # sign-extend from a zero-extend; `deref_i8_signed` is the row that can.
+    ("both_arch_deref_unsafe_load_is_the_same_load_as_value",
+     "def read8(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read2(p: Pointer[UInt16]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read4(p: Pointer[Int32]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read8s(p: Pointer[Int8]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read8u(p: Pointer[UInt64]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    if read8(s) != 65:\n"
+     "        return 10\n"
+     "    if read2(s) != 16961:\n"
+     "        return 11\n"
+     "    if read4(s) != 1145258561:\n"
+     "        return 12\n"
+     "    if read8s(s) != 65:\n"
+     "        return 13\n"
+     "    if read8u(s) != 5208208757389214273:\n"
+     "        return 14\n"
+     "    return 1\n", 1, None),
+
     # ONE NAME, TWO `__init__`s, only ONE of which has a receiver. Both halves of
     # the defect this pins are about that collision, and each one alone leaves a
     # different program refusing, which is why this is one row and not two.
@@ -11144,6 +11186,48 @@ POINTER_DEREF_REFUSALS = [
      "    h = n\n"
      "    return h.unicorn()\n",
      "refuse:is not one of those methods of those receivers", None),
+    # `unsafe_load(i)` is a different CONSTRUCT from `unsafe_load()`: it reads at
+    # an OFFSET, and the address and the load are one decision in
+    # `dereference_lowering` of which only the load half is answered. `p[i]` is
+    # the same program and IS lowered today. What this pins is that the refusal
+    # says that, rather than reporting an argument count — `i = 0` is
+    # `unsafe_load`'s declared DEFAULT, so "takes no arguments" would be a true
+    # sentence sent to a reader who wrote the ordinary spelling and nothing
+    # wrong. Both architectures, identical words.
+    ("deref_refuse_unsafe_load_with_an_offset",
+     "def read_at(p: Pointer[UInt8], i: Int) -> Int:\n"
+     "    return Int(p.unsafe_load(i))\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s, 1)\n",
+     "refuse:reads at an OFFSET from the receiver", None),
+    # …and the bracket, which is refused by a DIFFERENT and pre-existing rule —
+    # the callee is a `SubscriptExpr` rather than a `MemberExpr`, so it never
+    # reaches the dereference arm at all and is named as a specialization this
+    # path cannot name a callee for. Pinned here because the two rules sit next
+    # to each other and a reader who has just seen `unsafe_load` answered will
+    # reasonably expect `unsafe_load[width=4]` to be answered too; what it must
+    # NOT do is reach a load, which is the outcome the bracketed-callee refusal
+    # exists to prevent.
+    ("deref_refuse_unsafe_load_bracketed_width",
+     "def read_at(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.unsafe_load[width=4]())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s)\n",
+     "refuse:Refused rather than emitted with the brackets dropped", None),
+    # A receiver that is NOT a pointer gets the four-questions message and NOT
+    # "is a load from the address the receiver holds" — which is what putting
+    # `unsafe_load` in `DEREFERENCE_METHODS` would have produced, and is false
+    # of a `def read_it(n: Int)`. This row is the reason the entry is in
+    # `IDENTITY_VALUE_METHODS` instead: the receiver is asked FIRST, and the
+    # specific missing fact named is that it is not established to be a pointer.
+    ("deref_refuse_unsafe_load_on_a_non_pointer_receiver",
+     "def read_it(n: Int) -> Int:\n"
+     "    return Int(n.unsafe_load())\n"
+     "def main(n: Int) -> Int:\n"
+     "    return read_it(7)\n",
+     "refuse:The receiver is not established to be a pointer here", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A

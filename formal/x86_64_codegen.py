@@ -3117,10 +3117,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     # through a pointer as a frame holder.  `model.dereference_lowering` says so
     # at length; the next step is one line in the holder fixpoint.
     def _emit_dereference(self, e, method: str) -> None:
-        if e.args or e.kwargs:
-            raise CodegenError(
-                f"{_dotted(e.func)}() takes no arguments on the formal x86-64 "
-                f"path (got {[M.dotted_receiver(a) for a in e.args]})")
+        # `model`'s, and shared with arm64, which is what keeps the two machines
+        # from describing one construct differently — including the arm that
+        # names `unsafe_load(i)` as an OFFSET rather than as a syntax error.
+        operands = M.dereference_operands_refusal(
+            _dotted(e.func), method, e.args)
+        if operands is not None:
+            raise CodegenError(operands)
         obj = e.func.obj
         how, why = M.dereference_lowering(
             self._cur_fn, obj, self._structs, self._functions, self._structs)

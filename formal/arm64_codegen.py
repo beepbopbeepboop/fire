@@ -4908,10 +4908,13 @@ ctor_field_value=self._ctor_field_value_for(name),
     # so the unsigned and signed 1-byte cases are the same instruction with a
     # different mnemonic, and the 2-byte pair likewise.
     def _emit_dereference(self, e: F.CallExpr, method: str) -> None:
-        if e.args or e.kwargs:
-            raise CodegenError(
-                f"{_dotted(e.func)}() takes no arguments on the formal arm64 "
-                f"path (got {[M.dotted_receiver(a) for a in e.args]})")
+        # The operand refusal is `model`'s and shared, so the two machines
+        # cannot describe one construct differently — and so the arm that names
+        # `unsafe_load(i)` as an OFFSET reads the same here as on x86-64.
+        operands = M.dereference_operands_refusal(
+            _dotted(e.func), method, e.args)
+        if operands is not None:
+            raise CodegenError(operands)
         obj = e.func.obj
         how, why = M.dereference_lowering(
             self._cur_fn, obj, self._structs, self._functions, self._structs)
