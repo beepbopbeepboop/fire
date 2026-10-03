@@ -216,8 +216,8 @@ def test_stage5_monomorphization(wd):
     # the cached instantiation links + runs
     cmain = os.path.join(wd, 'um.c')
     open(cmain, 'w').write('#include <stdint.h>\n#include <stdio.h>\n'
-                           'extern int64_t s5_id_Int64(int64_t);\n'
-                           'int main(void){printf("%lld\\n",(long long)s5_id_Int64(7));return 0;}\n')
+                           'extern int64_t s5_id_1_T_5_Int64(int64_t);\n'
+                           'int main(void){printf("%lld\\n",(long long)s5_id_1_T_5_Int64(7));return 0;}\n')
     exe = os.path.join(wd, 'um')
     subprocess.run([GCC, '-o', exe, cmain, o1, os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
     check("stage5: cached instantiation links + runs", _run(exe).stdout.strip() == '7')
@@ -285,9 +285,9 @@ def test_elaboration_generic_call(wd):
     i32 = el.elaborate_generic_call(tmpl_mod, 'box', ['Int32'])
     again = el.elaborate_generic_call(tmpl_mod, 'box', ['Int64'])
     check("elaborate: generic instantiated to a concrete symbol",
-          bool(i64) and i64['symbol'] == 'box_Int64' and i64['ret'] == 'int64_t')
+          bool(i64) and i64['symbol'] == 'box_1_T_5_Int64' and i64['ret'] == 'int64_t')
     check("elaborate: distinct type args → distinct instantiations",
-          i64['object'] != i32['object'] and i32['symbol'] == 'box_Int32')
+          i64['object'] != i32['object'] and i32['symbol'] == 'box_1_T_5_Int32')
     check("elaborate: re-instantiation is a CAS hit (same object)",
           again['object'] == i64['object'])
     # codegen wiring: a generic call site emits an extern + concrete call and
@@ -309,7 +309,7 @@ def test_elaboration_generic_call(wd):
         # Until that is resolved the `.o` route stays, and this assertion is
         # the contract it has to keep.
         check("elaborate: client emits extern + concrete call + records object",
-              'extern int64_t box_Int64' in code and 'box_Int64 (' in code
+              'extern int64_t box_1_T_5_Int64' in code and 'box_1_T_5_Int64 (' in code
               and len(objects) == 1)
     finally:
         os.remove(gl)
@@ -333,7 +333,7 @@ def test_elaboration_inference_and_comptime(wd):
         code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
         check("slice2: inferred generic call elaborates (no explicit [..])",
-              ('box_Int64' in code or 'box_Int' in code) and len(objs) == 1)
+              ('box_1_T_5_Int64' in code or 'box_1_T_3_Int' in code) and len(objs) == 1)
         # slice 3: comptime call to an imported fn resolved at compile time
         src = ("from el_ct import fib\n"
                "fn main():\n"
@@ -356,7 +356,7 @@ def test_elaboration_generic_struct(wd):
            "    fn unbox(self) -> T:\n        return self.value\n")
     info = elaborate.Elaborator().elaborate_generic_struct(mod, 'Box', ['Int64'])
     check("slice5: generic struct instantiated to a concrete type",
-          bool(info) and info['name'] == 'Box_Int64'
+          bool(info) and info['name'] == 'Box_1_T_5_Int64'
           and ('value', 'int64_t') in info['fields'])
     check("slice5: struct methods monomorphized",
           ('unbox', 'int64_t', []) in info['methods'])
@@ -367,7 +367,7 @@ def test_elaboration_generic_struct(wd):
             "from el_boxlib import Box\n"
             "fn main():\n    var b = Box[Int64](42)\n    var y = b.unbox()\n")
         check("slice5: client materializes struct + calls method + records object",
-              'typedef struct Box_Int64' in code and 'Box_Int64_unbox' in code
+              'typedef struct Box_1_T_5_Int64' in code and 'Box_1_T_5_Int64_unbox' in code
               and len(objs) == 1)
     finally:
         os.remove(bl)
@@ -420,7 +420,7 @@ def test_elaboration_failure_is_not_cached(wd):
             check("elaborate: a failed struct elaboration still compiles "
                   "(the template fallback is load-bearing)", True)
             check("elaborate: ... and the fallback is the un-elaborated one",
-                  'Box_Int64' not in code,
+                  'Box_1_T_5_Int64' not in code,
                   "the instantiation went through despite the failure")
         except Exception as e:
             check("elaborate: a failed struct elaboration still compiles "
@@ -482,7 +482,8 @@ def test_elaboration_overload(wd):
     i64 = el.elaborate_overload_call(mod, 'pick', ['int64_t'])
     i32 = el.elaborate_overload_call(mod, 'pick', ['int32_t'])
     check("slice4: overload selected by argument type",
-          i64['symbol'] == 'pick__Int64' and i32['symbol'] == 'pick__Int32'
+          i64['symbol'] == 'pick__1_0_5_Int64'
+          and i32['symbol'] == 'pick__1_0_5_Int32'
           and i64['object'] != i32['object'])
     ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
     open(ol, 'w').write(mod)
@@ -491,7 +492,7 @@ def test_elaboration_overload(wd):
             "from el_ovlib import pick\n"
             "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
         check("slice4: client calls the signature-mangled overload",
-              'pick__Int64' in code and len(objs) == 1)
+              'pick__1_0_5_Int64' in code and len(objs) == 1)
     finally:
         os.remove(ol)
 
@@ -535,9 +536,9 @@ def test_elaboration_trait_conformance(wd):
     fi = el.elaborate_generic_call(mod, 'run', ['Num'])
     si = el.elaborate_generic_struct(mod, 'Box', ['Num'])
     check("slice6: bounded generic fn instantiates for a conforming type",
-          bool(fi) and fi['symbol'] == 'run_Num')
+          bool(fi) and fi['symbol'] == 'run_1_T_3_Num')
     check("slice6: bounded generic struct instantiates for a conforming type",
-          bool(si) and si['name'] == 'Box_Num'
+          bool(si) and si['name'] == 'Box_1_T_3_Num'
           and ('run', 'int64_t', []) in si['methods'])
     # Non-conforming: a clear ConformanceError, for both fn and struct.
     raised_fn = raised_struct = False
@@ -1352,10 +1353,11 @@ def test_review_fixes_monomorphize_overload(wd):
     check("review#3: type-param-as-binding raises (no silent miscompile)", raised)
     check("review#3: a normal generic still instantiates",
           mm.monomorphize_source("fn box[T](x: T) -> T:\n    return x\n",
-                                 {'T': 'Int64'})[0] == 'box_Int64')
+                                 {'T': 'Int64'})[0] == 'box_1_T_5_Int64')
     # #4.2: parametric type args mangle to a valid C identifier (no []/, etc.)
     check("review#4: parametric mangle is a valid C identifier",
-          mm.mangle('box', {'T': 'List[Int]'}) == 'box_List_Int_'
+          mm.mangle('box', {'T': 'List[Int]'})
+          == 'box_1_T_19_List_x005BInt_x005D'
           and '[' not in mm.safe_suffix('List[Int]'))
     # #4.1: no matching overload returns None rather than silently picking the first
     mod = ("fn pick(x: Int64) -> Int64:\n    return x\n"
@@ -1406,8 +1408,8 @@ def test_self_qualified_type_param_substitution(wd):
         "    var _ptr: Pointer[Self.T]\n"
         "    var _other: Self.NotAParam\n",
         {'T': 'int64_t'})
-    check("self#1: mangled name unchanged by the fix",
-          _name == 'Wrap_int64_t')
+    check("self#1: mangled name is the injective spelling of the same key",
+          _name == 'Wrap_1_T_12_int64_x005Ft')
     check("self#2: `Self.T` substitutes to the concrete type, not `Self.int64_t`",
           'var _inner: int64_t' in concrete and 'Self.int64_t' not in concrete)
     check("self#3: a bare `T` still substitutes (unchanged behaviour)",
@@ -1441,7 +1443,7 @@ def test_self_qualified_type_param_substitution(wd):
     check("self#7: `Self.T` still respects a nested shadowing bracket param",
           'def inner[T](y: T) -> T:' in concrete3)
     check("self#8: the outer `Self.T` still substitutes",
-          'fn outer_int64_t(x: int64_t) -> int64_t:' in concrete3)
+          'fn outer_1_T_12_int64_x005Ft(x: int64_t) -> int64_t:' in concrete3)
 
 
 def test_type_param_markers_and_simd_unification(wd):
@@ -1547,26 +1549,34 @@ def test_generic_instantiation_symbol_agreement(wd):
     check("symbols#1: `_Empty[Int]` elaborates", bool(info and info['name']))
     if not info:
         return
+    # The mangled STRUCT name is derived, not spelled out: this test's subject
+    # is that the TU and the caller agree on ONE string, and hardcoding the
+    # spelling here would make every change to `monomorphize.mangle` look like
+    # a change to that agreement. `mangle`'s own spelling is pinned separately,
+    # by `test_mangle_is_injective`.
+    import monomorphize as _mm
+    _m = _mm.mangle('_Empty', {'T': 'Int'})
+    check("symbols#1b: `_Empty[Int]` mangles injectively", _m == '_Empty_1_T_3_Int')
     # `nm` on Mach-O prints the object format's leading underscore; strip
     # exactly one, so a C name that itself starts with one survives.
     names = {s[1:] if s.startswith('_') else s for s in (info.get('symbols') or ())}
     check("symbols#2: the object defines the UNQUALIFIED method name the caller "
           "declares (`_Empty_Int___next__`, not "
           "`_Empty_Int__Empty_Int___next__`)",
-          '_Empty_Int___next__' in names)
+          f'{_m}___next__' in names)
     check("symbols#3: no symbol carries the mangled name as a module prefix",
-          not any(n.startswith('_Empty_Int__Empty_Int') for n in names))
+          not any(n.startswith(_m + _m) for n in names))
     check("symbols#4: an overloaded method is reported under its real suffixed "
           "name and NOT under a bare name — the elaborator's view of two "
           "overloads of `__iter__` is identical, so it cannot invent one, and "
           "`_register_generic_struct` refuses such a struct rather than "
           "declaring a symbol nothing defines",
-          '_Empty_Int___iter___0120be' in names
-          and '_Empty_Int___iter__' not in names)
+          any(n.startswith(f'{_m}___iter___') for n in names)
+          and f'{_m}___iter__' not in names)
     _finfo = el.Elaborator().elaborate_generic_call(iter_src, 'empty', ['Int'])
-    check("symbols#5: `empty[Int]` elaborates to the bare symbol `empty_Int` "
+    check("symbols#5: `empty[Int]` elaborates to the bare symbol `empty_1_T_3_Int` "
           "(the TU's module name does not reach the top-level function)",
-          bool(_finfo) and _finfo['symbol'] == 'empty_Int')
+          bool(_finfo) and _finfo['symbol'] == _mm.mangle('empty', {'T': 'Int'}))
 
     # 2. `_struct_name_of` is not a "is this a struct" predicate; the guard that
     #    needs one must ask the registry.
@@ -1589,6 +1599,118 @@ def test_generic_instantiation_symbol_agreement(wd):
           ggc._struct_ptr_name(_G(), 'Int *') == '')
 
 
+def test_mangle_is_injective(wd):
+    """`monomorphize.mangle` must be a FUNCTION of the instantiation.
+
+    It used to be `'_'.join(safe_suffix(v) for v in sorted(type_args.values()))`:
+    no key names, and a LOSSY escape that mapped every non-alphanumeric
+    character (including `_` itself) to `_`. Two independent collisions, both
+    measured before the fix over the same generated corpus this test builds:
+
+        mangle('Box', {'T': 'A_B'})        == 'Box_A_B'
+        mangle('Box', {'T': 'A', 'o': 'B'}) == 'Box_A_B'   # ambiguous segmentation
+        mangle('Box', {'T': 'List[Int]'})   == 'Box_List_Int_'
+        mangle('Box', {'T': 'List_Int'})    == 'Box_List_Int'  # lossy escape
+        mangle('Box', {'T': '_'}) == mangle('Box', {'T': ' '}) == mangle('Box', {'T': '.'})
+
+    1512 of 1752 pairs collided. A non-injective name is not a naming
+    inconvenience: two genuinely different instantiations shared one C symbol,
+    which is `error: conflicting types for '<name>'` when both are defined in
+    one TU and `ld: duplicate symbol` when they are not.
+
+    The corpus is generated, not hand-listed, so it covers the separator
+    characters the old scheme collapsed on (`_`, space, `.`, `[`, `]`, `,`)
+    plus a digit that a length prefix has to be told apart from."""
+    import itertools as _it
+    _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']
+    _vals = [''.join(p) for n in range(0, 4)
+             for p in _it.product(_alpha, repeat=n)]
+    _targs = []
+    for v in _vals:
+        _targs += [{'T': v}, {'T': 'A', 'o': v}, {'T': v, 'o': 'B'},
+                   {'T': v, 'o': 'C'}, {'x': v, 'y': 'B', 'z': 'C'},
+                   {'T': v, 'ArgC': '3'}]
+    _seen: dict = {}
+    _coll: list = []
+    for t in _targs:
+        for nm in ('Box', '_Empty', 'T', 'A_1'):
+            m = mm.mangle(nm, t)
+            if m in _seen and _seen[m] != (nm, t):
+                _coll.append((_seen[m], (nm, t), m))
+            _seen[m] = (nm, t)
+    check(f"mangle#1: no two distinct (name, type_args) share a symbol "
+          f"({len(_seen)} generated instantiations)", not _coll)
+
+    _ident = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
+    check("mangle#2: every mangled name is a legal C identifier",
+          all(_ident.match(m) for m in _seen))
+    # `mojo/middle/types.py::demangle_overload` recognises `___<6 lowercase
+    # hex>$` as an overload-hash tail. The escapes are UPPERCASE hex for
+    # exactly this reason, so a mangled type argument can never grow one.
+    check("mangle#3: a mangled name cannot be mistaken for an overload-suffixed "
+          "one (no `___` at all)",
+          not any('___' in m for m in _seen))
+
+    # The specific collisions the fix is about, named individually so a
+    # regression reports WHICH one came back.
+    check("mangle#4: {'T':'A_B'} and {'T':'A','o':'B'} are distinct",
+          mm.mangle('Box', {'T': 'A_B'}) != mm.mangle('Box', {'T': 'A', 'o': 'B'}))
+    check("mangle#5: {'T':'List[Int]'} and {'T':'List_Int'} are distinct",
+          mm.mangle('Box', {'T': 'List[Int]'}) != mm.mangle('Box', {'T': 'List_Int'}))
+    check("mangle#6: the escaped chars the old scheme collapsed are distinct",
+          len({mm.mangle('Box', {'T': c}) for c in ('_', ' ', '.', '[', ',')}) == 5)
+    check("mangle#7: the parameter NAME is part of the key (two templates that "
+          "differ only in what they call their parameter do not collide)",
+          mm.mangle('Foo', {'T': 'Int64'}) != mm.mangle('Foo', {'U': 'Int64'}))
+    check("mangle#8: a zero-parameter instantiation keeps the bare name",
+          mm.mangle('empty', {}) == 'empty')
+
+    # `elaborate_overload_call` had the same defect on a different spelling:
+    # `safe_suffix('_'.join(ptypes))` is ambiguous segmentation AND lossy.
+    check("mangle#9: the overload signature mangling is injective too",
+          mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A', 'B'])
+          and mm.mangle_signature('pick', ['A_B']) != mm.mangle_signature('pick', ['A.B'])
+          and mm.mangle_signature('pick', []) != mm.mangle_signature('pick', ['void']))
+
+    # Round-trip: the length-prefixed components are DECODABLE, which is the
+    # direct evidence that the count — not a guess about which `_` is
+    # structural — is what disambiguates. The decoder lives here, not in
+    # monomorphize.py, because nothing in the compiler needs it: injectivity is
+    # the property everything depends on and it is property #1 above.
+    def _unescape(t: str) -> str:
+        out, i = [], 0
+        while i < len(t):
+            if t[i] != '_':
+                out.append(t[i]); i += 1; continue
+            w = 4 if t[i + 1] == 'x' else 8
+            out.append(chr(int(t[i + 2:i + 2 + w], 16))); i += 2 + w
+        return ''.join(out)
+
+    def _decode(suffix: str):
+        pairs, i = [], 0
+        while i < len(suffix):
+            j = suffix.index('_', i)
+            klen = int(suffix[i:j]); k = suffix[j + 1:j + 1 + klen]
+            i = j + 1 + klen + 1
+            j = suffix.index('_', i)
+            vlen = int(suffix[i:j]); v = suffix[j + 1:j + 1 + vlen]
+            pairs.append((_unescape(k), _unescape(v)))
+            i = j + 1 + vlen + 1
+        return pairs
+
+    _rt_bad = []
+    for t in _targs:
+        nm = 'Box'
+        suffix = mm.mangle(nm, t)[len(nm) + 1:]
+        try:
+            if sorted(_decode(suffix)) != sorted((str(k), str(v)) for k, v in t.items()):
+                _rt_bad.append(t)
+        except Exception as e:
+            _rt_bad.append((t, e))
+    check(f"mangle#10: every mangled suffix decodes back to its (key, value) "
+          f"pairs ({len(_targs)} round-trips)", not _rt_bad)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1609,6 +1731,7 @@ def main():
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
+        test_mangle_is_injective(wd)
         test_review_fixes_monomorphize_overload(wd)
         test_self_qualified_type_param_substitution(wd)
         test_type_param_markers_and_simd_unification(wd)

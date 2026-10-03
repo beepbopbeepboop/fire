@@ -4,10 +4,48 @@
 ## Status
 
 OPEN, unchanged in scope: **still 22 files, still all 22 refused.** Nothing was
-removed from `EXPECTED_FAILURES`, because nothing was fixed. What landed is
-three defects found along the way, all of which this document's own analysis
-had assumed away, plus one experiment that WORKED and is documented here
-because the next session should not rebuild it.
+removed from `EXPECTED_FAILURES`, because nothing was fixed for the family. One
+of the two blockers under it did land (2026-10-03): `monomorphize.mangle` was
+not injective and now is, which was the precondition for the in-TU route. The
+22 stay red.
+
+**0. `monomorphize.mangle` was not injective — LANDED 2026-10-03.** This is the
+"the root cause is `mangle`" claim the reverted experiment below rested on, so
+it is worth stating precisely what was and was not true.
+
+`mangle` was `'_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))`
+— the parameter VALUES joined under `_`, with no key names and a LOSSY escape
+(`safe_suffix` mapped every non-alphanumeric char, `_` included, to `_`). Two
+independent collisions, measured over the same 1752-pair corpus:
+
+```
+mangle('Box', {'T': 'A_B'})        == mangle('Box', {'T': 'A', 'o': 'B'}) == 'Box_A_B'
+mangle('Box', {'T': 'List[Int]'})   == mangle('Box', {'T': 'List_Int'})     == 'Box_List_Int_'
+mangle('Box', {'T': '_'})          == mangle('Box', {'T': ' '})            == 'Box__'
+```
+
+1512 of 1752 pairs collided; after the fix, 0 of 19,676. So the "parameter
+NAMES" framing in the reverted-experiment section below was wrong — name
+collisions were not the mechanism — but ambiguous segmentation and a lossy
+escape were, and either is enough for two different instantiations to share a C
+symbol.
+
+`elaborate.Elaborator.elaborate_overload_call` had the same defect on a second
+spelling (`safe_suffix('_'.join(ptypes))`); it now uses the same
+length-prefixed encoder (`monomorphize.mangle_signature`). Everything this
+invalidates is enumerated and measured in
+`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`'s
+"Landed 2026-10-03" section: 21 lines of `std/math/math.mojo`'s generated C
+change, every one a single symbol rename, and renaming those 8 symbols back
+reproduces the old file byte for byte.
+
+**What landing it does NOT establish, stated because it is the obvious next
+inference and it is not verified:** that the five `conflicting types`
+regressions are gone. `conflicting types for '<name>'` is a statement about a
+DEFINITION's real parameter types sitting beside a DECLARATION's erased ones.
+Injectivity removes one way to create that (two templates landing on one name);
+whether it was the cause is settled by landing in-TU and re-running the sweep,
+not by the fact that the name is now unique.
 
 **1. The instantiation TU and its caller named the same function differently —
 so nothing this compiler had ever materialized could link.**
@@ -90,15 +128,21 @@ codegen's real parameter types beside an elaborated EXTERN with the
 elaborator's erased ones (`write_sequence_to_0`, `_affix_matches_0`,
 `param_OldImpl`, …).
 
-The root cause is understood and is a property of `monomorphize.mangle`, not of
-the pre-pass: **it keys only on the sorted bracket-parameter VALUES**, so two
-different templates selected for the same call — the pre-pass and the
-demand-driven route select independently, by arity, and a call with keyword
-arguments has no reliable arity discriminator — mangle two DIFFERENT functions
-to ONE name. Two restrictions were tried and each removed some of the five
-without removing all: refusing an OVERLOADED name (fixed `tuple.mojo`; the
-rest are single-definition) and refusing a name the CALLING module defines
-itself (fixed none of the remaining four). Whatever lands next must make the
+The root cause was assumed to be `monomorphize.mangle`, and that assumption
+was partly wrong. It did not "key only on the sorted bracket-parameter VALUES,
+so two different templates selected for the same call mangle two DIFFERENT
+functions to ONE name" because of parameter NAMES: `{T: Int64, o: MutOrigin}`
+and `{T: MutOrigin, o: Int64}` are one dict, and as distinct pairings they are
+distinct instantiations the old code named differently. What it really did was
+join the values under `_` with a LOSSY escape, so `{'T': 'A_B'}` and
+`{'T': 'A', 'o': 'B'}` — and, with no segmentation involved at all,
+`{'T': 'List[Int]'}` and `{'T': 'List_Int'}` — were one symbol. **That is
+fixed and measured (see Status item 0).** Two restrictions were also tried and
+each removed some of the five without removing all: refusing an OVERLOADED name
+(fixed `tuple.mojo`; the rest are single-definition) and refusing a name the
+CALLING module defines itself (fixed none of the remaining four). Restricting
+the feature is the wrong shape anyway: a case that cannot be lowered must
+REFUSE LOUDLY, not emit a second definition. Whatever lands next must make the
 two routes share ONE template selection, not add a third guess.
 
 ## What it looks like

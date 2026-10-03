@@ -34,18 +34,93 @@ _FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 _HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
+_ALNUM = re.compile(r'[A-Za-z0-9]')
+
+
 def safe_suffix(s: str) -> str:
-    """Encode a type-arg string into a valid C identifier fragment: parametric
-    args like `List[Int]` contain `[`/`]`/`,`/spaces, which are illegal in a C
-    symbol, so map every non-[A-Za-z0-9_] char to `_` (review finding #4)."""
-    return re.sub(r'[^A-Za-z0-9_]', '_', s)
+    """Encode a type-arg string into a valid C identifier fragment, INJECTIVELY.
+
+    Parametric args like `List[Int]` contain `[`/`]`/`,`/spaces, which are
+    illegal in a C symbol, so every non-[A-Za-z0-9] char has to be escaped
+    (review finding #4). The previous implementation mapped each of them to
+    `_`, which is LOSSY and therefore not an encoding at all: `List[Int]`,
+    `List_Int`, `A B`, `A.B` and `A_B` all produced the same fragment, so two
+    different instantiations of one template could be given one C symbol.
+    Measured over 1752 generated (name, type_args) pairs: 1512 collided.
+
+    The escape is `_x` + 4 uppercase hex digits (or `_X` + 8, for a code point
+    outside the BMP). Uppercase hex is deliberate, not cosmetic: it makes an
+    escape impossible to confuse with `mojo/middle/types.py::demangle_overload`'s
+    `___([0-9a-f]{6})$` overload-hash tail, which a lowercase `_x0011` could in
+    principle grow into. The code is injective because `_` is itself escaped and
+    never appears literally, so decoding is a unique left-to-right scan: on `_`,
+    the next char says the width (`x` = 4 digits, `X` = 8) and the digits after
+    it are the code point.
+
+    `_` is escaped too, so a type argument containing one cannot manufacture a
+    separator: every structural character in a mangled name is emitted by
+    `_fields`, never by `safe_suffix`."""
+    out = []
+    for ch in s:
+        if _ALNUM.match(ch):
+            out.append(ch)
+        else:
+            c = ord(ch)
+            out.append(f'_x{c:04X}' if c < 0x10000 else f'_X{c:08X}')
+    return ''.join(out)
+
+
+def _fields(pairs) -> str:
+    """Length-prefixed concatenation of (name, value) pairs — injective on the
+    ordered sequence.
+
+    Each component is `{len(key)}_{key}_{len(value)}_{value}`, so both the
+    key/value boundary and the component/component boundary are fixed by a
+    count rather than by a separator character that a value could itself
+    contain. The old scheme joined the VALUES under `_` with no keys at all,
+    which is what made `mangle('Box', {'T': 'A_B'})` and
+    `mangle('Box', {'T': 'A', 'o': 'B'})` the same string — two different
+    instantiations, one symbol. Keying on the parameter NAME as well as its
+    value also separates two templates that share a base name and differ only
+    in what they call their parameter (`struct Foo[T]` vs `struct Foo[U]`),
+    which a value-only key cannot.
+
+    Decodable left to right, uniquely: the maximal digit run is a count, the
+    next `_` separates, and each count is followed by exactly that many
+    characters."""
+    out = []
+    for k, v in pairs:
+        ks, vs = safe_suffix(str(k)), safe_suffix(str(v))
+        out.append(f'{len(ks)}_{ks}_{len(vs)}_{vs}')
+    return '_'.join(out)
 
 
 def mangle(name: str, type_args: dict) -> str:
-    """Stable monomorphized symbol name, e.g. box_id + {T:Int64} -> box_id_Int64.
-    Suffixes are sanitized to valid C identifiers."""
-    suffix = '_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))
-    return f"{name}_{suffix}" if suffix else name
+    """Stable, INJECTIVE monomorphized symbol name.
+
+    `mangle(box, {T: Int64})` is now `box_1_T_5_Int64`, not `box_Int64`. The
+    bytes change for every existing instantiation, deliberately: the old scheme
+    was not injective, so the name was not a function of the instantiation, and
+    the CAS key (`cas.instantiation_key`) folds in `compiler_fingerprint()`,
+    which hashes this file — every previously cached object is therefore
+    unreachable rather than silently served under the new spelling. See
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+
+    A name with no type arguments is returned unchanged, so a template's
+    zero-parameter instantiation keeps its own name (`empty` -> `empty`)."""
+    if not type_args:
+        return name
+    return f"{name}_{_fields((k, type_args[k]) for k in sorted(type_args))}"
+
+
+def mangle_signature(name: str, parts) -> str:
+    """Injective symbol for an overload of `name` selected by its parameter
+    types (the `elaborate.Elaborator.elaborate_overload_call` route). Same
+    encoding as `mangle`, keyed by positional index, so two overloads whose
+    parameter types differ only in segmentation cannot share a symbol — the
+    same defect `mangle` had."""
+    parts = list(parts)
+    return f"{name}__{_fields(enumerate(parts))}" if parts else f"{name}__void"
 
 
 def _check_no_value_shadow(src: str, type_params) -> None:

@@ -7,8 +7,96 @@ OPEN, and the headline number in this doc was wrong by 4x. Measured and
 corrected 2026-10-01 (second session): `tools/undef_import_census.py` reported
 "424 sites / 157 names / 194 files"; it was counting the codegen's own guarded
 forward declaration for every imported name, called or not. The real figure is
-**96 sites / 51 names / 60 files** (108 before this session's fixes). See "What
+**96 sites / 51 names / 60 files** (108 before that session's fixes). See "What
 was wrong with the measurement" below — it is the most important section here.
+
+**2026-10-03: `monomorphize.mangle` is injective — the blocker the previous
+session named is gone. Nothing else moved, and that is the honest report.**
+
+### Landed 2026-10-03: `mangle` is a FUNCTION of the instantiation
+
+`mangle` was `'_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))`.
+Two independent defects, both measured over the same generated corpus of 1752
+`(name, type_args)` pairs (`test_module_cache.py::test_mangle_is_injective`
+builds a 4,920-pair one; 1512 of the 1752 collided):
+
+| defect | example | why it is a soundness bug |
+|---|---|---|
+| **ambiguous segmentation** — the parameter VALUES joined under `_` with no key names and no escaping | `mangle('Box', {'T':'A_B'}) == mangle('Box', {'T':'A','o':'B'}) == 'Box_A_B'` | two genuinely different instantiations, one C symbol: `conflicting types` in one TU, `duplicate symbol` across two |
+| **a LOSSY escape** — `safe_suffix` mapped every non-`[A-Za-z0-9]` char to `_`, and `_` itself to `_` | `{'T':'List[Int]'}` == `{'T':'List_Int'}` == `{'T':'A B'}` == `{'T':'A.B'}` == `{'T':'A_B'}`; and `{'T':'_'}` == `{'T':' '}` == `{'T':'.'}` | a collision with ONE parameter needs no segmentation at all, so fixing only the join would have left this half of it |
+
+Note the correction the previous session recorded in its own Status section:
+"it keys the mangled name on the sorted bracket-parameter VALUES only, so two
+DIFFERENT instantiations whose parameter sets differ only in their NAMES
+mangle to the SAME symbol" is **wrong as stated** — `{T: Int64, o: MutOrigin}`
+and `{T: MutOrigin, o: Int64}` are the same dict, and
+`{T:Int64,o:MutOrigin}` vs `{T:MutOrigin,o:Int64}` as *name/value* pairings are
+distinct instantiations that the old code in fact named differently. The
+collision is the segmentation and the lossy escape, and the parameter NAME is
+now in the key for a different and real reason (two templates may share a base
+name and differ only in what they call their parameter — `struct Foo[T]` vs
+`struct Foo[U]`, which a value-only key cannot separate).
+
+The encoding: every component is `{len(key)}_{key}_{len(value)}_{value}`,
+length-prefixed, so the key/value and component/component boundaries are fixed
+by a count rather than by a character a value could contain; `safe_suffix` now
+ESCAPES (`_x` + 4 uppercase hex, `_X` + 8 outside the BMP) instead of
+collapsing, and escapes `_` too, so no type argument can manufacture a
+structural character. Uppercase hex is load-bearing:
+`mojo/middle/types.py::demangle_overload` recognises `___<6 lowercase hex>$` as
+an overload-hash tail, and the test suite asserts no mangled name contains
+`___` at all. Measured: **0 collisions over 19,676 generated instantiations**,
+every output a legal C identifier, and all 4,920 suffixes decode back to their
+(key, value) pairs.
+
+The same defect was independently present on a second spelling —
+`elaborate.Elaborator.elaborate_overload_call` did
+`fn_name + '__' + safe_suffix('_'.join(ptypes))`, ambiguous segmentation AND
+lossy. It now uses `monomorphize.mangle_signature`, the same encoder keyed by
+positional index.
+
+**What this invalidates, enumerated and measured.**
+
+- **Every elaborated instantiation's C symbol changes spelling.** `mangle` is
+  used in exactly two places (`monomorphize.monomorphize_source`, which renames
+  the definition, and nothing else), so every mangled name appears in generated
+  C as a struct typedef, a method symbol `{Struct}_{method}{overload_suffix}`,
+  an `extern` declaration, a `func_return_types`/`func_param_types` key, and an
+  elaborated overload symbol. `grep` for `mangle(`/`safe_suffix` finds no other
+  caller.
+- **Measured on `std/math/math.mojo`'s generated C** (a large succeeding case
+  with real instantiations — `abs`, `log`, `ldexp`, `copysign`, `isinf`,
+  `isnan`): 21 lines changed, 21 removed / 21 added, every one of them a single
+  symbol rename with the types and the call shape unchanged
+  (`abs_Int64` -> `abs_1_T_5_Int64`, `log_Float64_1` ->
+  `log_5_dtype_7_Float64_5_width_1_1`). Renaming those 8 symbols back makes the
+  new file **byte-identical** to the old, so nothing else moved.
+  `std/builtin/_format_float.mojo` and `std/collections/dict.mojo` are
+  byte-identical before and after (they elaborate nothing).
+- **The CAS.** `cas.instantiation_key` keys on `(template source, type_args,
+  comptime_args)` and folds in `compiler_fingerprint()`, which hashes
+  `monomorphize.py` by content (`cas.py:_COMPILER_SOURCES`). So every object
+  built under the old spelling is unreachable rather than silently served under
+  the new one. This is stated because the alternative failure — a warm CAS
+  serving an object whose symbols no longer match the declarations — is exactly
+  the class of bug this doc keeps finding. No key was migrated.
+- **Tests pinning the old spelling** were updated: `test_module_cache.py`
+  asserted `box_Int64`, `Box_Int64`, `run_Num`, `Box_Num`, `pick__Int64`,
+  `s5_id_Int64`, `Wrap_int64_t`, `outer_int64_t`, `box_List_Int_`, and
+  `_Empty_Int___next__`. `test_generic_instantiation_symbol_agreement` now
+  DERIVES the struct name from `mm.mangle(...)` (its subject is that the TU
+  and the caller agree on one string, which hardcoding a spelling made it look
+  like it was testing the spelling instead); the spelling itself is pinned by
+  the new `test_mangle_is_injective`.
+
+**Numbers.** `compile_stdlib.py` 588 / 22 / 0 before and after.
+`tools/undef_import_census.py` 96 / 51 / 60 before and after — unchanged, and
+expected: a naming fix creates no instantiations, and the census only counts
+files that COMPILE, so the 22 red ones are not in it either way.
+`test_module_cache.py` 120 passed / 0 failed -> **131 passed / 0 failed**
+(the 11 added checks are the injectivity corpus, its C-identifier and `___`
+properties, five named collisions, the `mangle_signature` counterpart, and the
+round-trip). `test_gimple.py` 354 passed / 0 failed.
 
 **2026-10-02: the census did NOT move (96 / 51 / 60, unchanged), and four
 defects landed that make three of this document's "PROVEN blockers" provable
@@ -45,8 +133,9 @@ POINTEES, load-bearing, and `Foo *` does not name a Mojo type; `global_constant
 Neither is reachable without a new parameter-passing / Ctype→Mojo-type model,
 and inventing either is the `bogus-binding` silent-wrong case.
 
-### In-TU instantiation: MEASURED WORKING, then reverted — the blocker is `monomorphize.mangle`
+### In-TU instantiation: MEASURED WORKING, then reverted — the blocker was `monomorphize.mangle`
 
+**RESOLVED 2026-10-03; see "Landed 2026-10-03" at the top of this file.**
 `mojo/backend_gimple/elab_intu.py` was written in full and made
 `test/iter/test_empty.mojo` compile AND LINK (the module's own object DEFINES
 `empty_Int` and `_Empty_Int___next__`, `nm -g` after a real `gcc -c`). It was
@@ -54,21 +143,31 @@ reverted: it regressed five currently-compiling files with `error: conflicting
 types for '<name>'` — an in-TU DEFINITION with real parameter types beside an
 elaborated EXTERN with erased ones.
 
-**The root cause is `monomorphize.mangle`, and it is a defect in its own
-right.** It keys the mangled name on the sorted bracket-parameter VALUES only:
+The recorded root cause was "**The root cause is `monomorphize.mangle`, and it
+is a defect in its own right** ... so two DIFFERENT instantiations whose
+parameter sets differ only in their NAMES mangle to the SAME symbol", with the
+prescription "key the mangled name on the parameter NAMES as well".
 
-```python
-suffix = '_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))
-```
+**Both halves of that statement were wrong, and the second was wrong in the
+direction that mattered.** Differing only in parameter NAMES does not collide
+under the old code (`{T: Int64, o: MutOrigin}` and `{T: MutOrigin, o: Int64}`
+are one dict; as distinct pairings they are distinct instantiations that the old
+code named differently). The real defect was ambiguous segmentation of the
+joined VALUES together with a LOSSY escape that collapsed `'A B'`, `'A.B'`,
+`'A_B'` and `'List[Int]'`/`'List_Int'` onto one fragment. Keying on the
+parameter NAME was still the right medicine, but as a *completeness* fix (two
+templates may share a base name and differ only in what they call their
+parameter), not as the collision.
 
-so two DIFFERENT instantiations whose parameter sets differ only in their NAMES
-mangle to the SAME symbol. Nothing detects that, and the instantiation route and
-the in-TU route select their template independently (by arity, which a call with
-keyword arguments does not determine). **The fix that makes in-TU landable is to
-key the mangled name on the parameter NAMES as well** — which is also what makes
-an overloaded name unambiguous — rather than to add a third selection heuristic.
-See `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`'s
-Status section for the full experiment and the two restrictions already tried.
+**The other half — that fixing `mangle` makes in-TU land — is NOT verified, and
+should not be assumed.** The five regressions were `conflicting types`: a
+definition with real parameter types beside a declaration with erased ones,
+which is a statement about the *caller's* view of a signature and not about the
+name being unique. Injectivity removes one way to produce it (two different
+templates landing on one name); whether it was THE cause is exactly what the
+next pass must establish by landing in-TU and re-running the sweep, not by
+reasoning. `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`
+carries the experiment's shape and the two restrictions already tried.
 
 ### Landed 2026-10-01
 

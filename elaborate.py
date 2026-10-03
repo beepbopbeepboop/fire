@@ -881,8 +881,11 @@ class Elaborator:
             return None
         src, ptypes, ret = chosen
         # Sanitize the signature suffix to a valid C identifier (parametric param
-        # types like List[Int] contain []/, which are illegal in a C symbol).
-        mangled = fn_name + '__' + (mm.safe_suffix('_'.join(ptypes)) if ptypes else 'void')
+        # types like List[Int] contain []/, which are illegal in a C symbol) —
+        # INJECTIVELY, via the same length-prefixed encoding `mangle` uses. The
+        # previous `safe_suffix('_'.join(ptypes))` was ambiguous segmentation
+        # with a lossy escape, so `['A_B']` and `['A', 'B']` named one symbol.
+        mangled = mm.mangle_signature(fn_name, ptypes)
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         return {'symbol': mangled, 'object': obj,
