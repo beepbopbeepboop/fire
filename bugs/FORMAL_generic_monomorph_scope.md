@@ -170,7 +170,41 @@ Not worth doing for a spelling nothing consumes yet.
 
 ---
 
-## 7. What is NOT here, deliberately
+---
+
+## 7. MEASURED 2026-10-03: what the stdlib's own generic struct templates look
+## like, and why none of them is a one-line widening of this
+
+Four probes, all `fire.py build --formal --no-prove` on a program that APPLIES a
+template from the stdlib, because "it works on a fixture" and "it works on the
+codebase it exists for" are different claims and only the second one is worth
+anything.
+
+| what was tried | what happened |
+|---|---|
+| `from std.collections.binary_heap import BinaryHeap` + `BinaryHeap[Int]()` | `binary_heap.mojo: BinaryHeap.pop() both changes its receiver and returns a value` — `mutating_receiver_return_refusal`, a PREP-time refusal that pre-empts everything else in the file. **This is the FIRST wall and it is not this mechanism's.** It is `formal13-5`'s `receiver_writeback_name` area and `formal15-mutator-return-abi`'s row |
+| `from std.collections import Deque` / `from std.collections.deque import Deque` + `Deque[Int]()` | the same refusal, reached through `deque.mojo:20`'s `from std.collections import Deque`. **Every module in `std/collections` imports the package `__init__`, which re-exports `BinaryHeap`** — which is `FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1's "162 of the 165 name nothing `binary_heap.mojo` declares", restated as an import |
+| `from stat import S_ISREG` + `S_ISREG[Int](1)` | `S_ISREG[…](…) calls a name this unit does not compile`. **Not a gap in this module**: `resolve_module_path` prefers Mojo source over the stdlib loader, so `stat` resolved to `formal/hostmods/stat.mojo`, which declares no templates. The stdlib's `std/stat/stat.mojo` was never reached |
+| `std/complex/complex.mojo`'s `ComplexSIMD[dtype: DType, length: SIMDLength]` | its arguments are written `.float32` — a `F.DottedLiteral` — and `type_arg_text` has no arm for one. Same class as §3: a parameter whose identity is a VALUE, not a type. `std/utils/static_tuple.mojo`'s `StaticTuple[element_type, size]` is worse for a different reason (`__mlir_type[…]` in a `comptime` field) |
+
+So the shape that is actually common in the stdlib is §3 (a comptime-valued
+parameter) and §7's trait bound, and the shape §1–§2 leave alone is the one
+these fixtures exercise. **That is the finding, and it is a statement about
+what to widen rather than an excuse:** widening to `DType`/comptime parameters
+(§3) is worth more stdlib files than anything else in this list, and it is a
+different ABI question because the third component of `doc/ABI.md` §Generics'
+CAS key — `comptime params` — is exactly that case and nothing in the current
+`demands_key` carries it.
+
+Until `binary_heap.mojo`'s `pop()` lowers, no measurement of *file coverage* is
+possible from here at all: the terminal refusal is upstream of every template in
+`std/collections`. Removing the export gate (this branch) and removing that
+refusal (`formal15-mutator-return-abi`) are both necessary and neither is
+sufficient.
+
+---
+
+## 8. What is NOT here, deliberately
 
 * **A generic with a trait bound.** `formal/monomorph.py::instantiate`
   substitutes without checking conformance, where
