@@ -109,6 +109,44 @@ claim. What is missing is a writable per-call-site byte buffer, which is a
 value-model change shared by both backends AND by the Lean proof, and it is a
 project rather than a patch. Left alone deliberately.
 
+## 7. What the integrator has to know about the merge
+
+This branch's base is `c5ab524d`; `master` was at `0b6394ab` when the merge was
+checked, and **both sides edited the same two functions** — `master` replaced
+`_init_store_value`'s `_construction_arg_is_dead_blob` call with
+`construction_arg_dead_blob_refusal` / `CalleeReturnTable`, and this branch
+inserted the `init_receiver_rewrite` call immediately above the free-name check
+in the same function.
+
+Measured by patching this branch's diff onto a `git archive` of `master`:
+**6 of the 7 files apply cleanly and 1 hunk of `formal/model.py` conflicts** —
+that one hunk, and nothing else. The resolved form (what the merged tree runs,
+and what passed below) keeps both sides:
+
+```python
+    lifted, receiver_refusal = init_receiver_rewrite(
+        struct_def, value, call, decls or {})
+    if receiver_refusal is not None:
+        return (None, receiver_refusal)
+    free = _init_free_names(struct_def, value)      # the ORIGINAL right-hand side
+    if free is not None:
+        return (None, free)
+    refusal = construction_arg_dead_blob_refusal(   # master's half
+        struct_def.name, "of this `__init__`", value, rets)
+    if refusal is not None:
+        return (None, refusal)
+    return (lifted, None)
+```
+
+On that merged tree, with no other change: `test_formal_run.py` **769/769**
+(master's cases plus this branch's nine), `test_refusal_taxonomy.py` 185/185,
+`test_formal_method_param_field.py` 26/26, `test_formal_value_model.py` 43/43,
+`test_dataclasses_formal.py` 63/63, `test_formal_specialization.py` 10/10,
+`test_x86_64_decode.py` ok, `test_struct_formal.py` 178/178 (one earlier run of
+it read 176/178 and is the known intermittent `calcsize` hang,
+`bugs/FORMAL_a_calcsize_image_hangs_once_in_several.md` — three later runs all
+178/178).
+
 ## Reproducing any row above
 
 ```sh
