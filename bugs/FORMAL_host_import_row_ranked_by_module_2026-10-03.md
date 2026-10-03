@@ -141,13 +141,25 @@ four files, built by hand** (`python3 fire.py build --formal --no-prove
 | `test_coro_scoreboard.py` | `gimple_codegen.py` → **`zlib`** — the 15-file row |
 
 So **38 files now stop somewhere real instead of on a module that had one**,
-and not one of the four sampled stops on `tempfile` any more. The other 73 are
-stopped by names the module deliberately does not export, and the reasons are
-in the module's own docstring and in
-`bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`:
-`TemporaryDirectory` (64 files — its contract is the removal on the way OUT of a
-`with`, and there is no `__exit__` to hook), `NamedTemporaryFile` (9 — a FILE
-OBJECT is more than one 64-bit word) and `mkstemp` (2 — a two-word tuple).
+and not one of the four sampled stops on `tempfile` any more. The other 73 were
+stopped by names the module deliberately did not export: `TemporaryDirectory`
+(64 files — its contract is the removal on the way OUT of a `with`, and there was
+no `__exit__` to hook), `NamedTemporaryFile` (9 — a FILE OBJECT is more than one
+64-bit word) and `mkstemp` (2 — a two-word tuple).
+
+**Updated 2026-10-03: `TemporaryDirectory` is ANSWERED** — the 64, which is
+three quarters of this row. A `with` now lowers to the context-manager protocol
+(`formal/build.py`'s `_rewrite_with_statements`, with `formal/model.py`'s
+`struct_is_context_manager` for the rule), so `TemporaryDirectory` is a struct
+with `__enter__`/`__exit__` and its removal on the way out is real:
+`formal/hostmods/tempfile.mojo`'s `TemporaryDirectory` and `test_formal_
+tempfile.py`'s `temporary-directory` group, on both architectures. **Measured
+coverage effect: the sweep's verdicts barely move** — of the 241 repository
+files that contain a `with`, 12 pass before and 12 pass after, and exactly one
+file changes class — because those 64 files are mostly stopped by ANOTHER host
+import first (`os`, `subprocess`, `argparse`), and the sweep reports the first
+failing import. The other 11 (`NamedTemporaryFile`, `mkstemp`) are still absent
+for the representation reasons in the module's docstring.
 
 ## 5. What is left to do, in the order the ranking gives
 

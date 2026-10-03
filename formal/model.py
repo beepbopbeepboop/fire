@@ -21066,10 +21066,9 @@ def _is_container_value(value, containers: set) -> str:
             # activation, while a `str` is a `malloc`'d buffer the caller owns
             # and a number is a number. Measured on the case that needed it:
             # `self.name = mkdtemp(p)` inside `TemporaryDirectory.__enter__` was
-            # refused here, which is the same refusal
-            # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`
-            # needed closed before `with tempfile.TemporaryDirectory() as d:`
-            # could mean anything.
+            # refused here, which is the refusal that stood between
+            # `formal/hostmods/tempfile.mojo` and a `TemporaryDirectory` whose
+            # contract is the removal on the way out of a `with`.
             return ""
         return (f"a call to {callee!r}, whose result this path does not place "
                 f"— `List[T]()` and every other container constructor on this "

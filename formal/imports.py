@@ -521,9 +521,12 @@ HOST_MODELLED = frozenset((
     #     what those 51 files get is a refusal naming the argument they did not
     #     pass. What is absent is at the top of that file and it is 64 files'
     #     worth: `TemporaryDirectory`'s contract is the removal on the way OUT
-    #     of a `with`, and `formal/hostmods/contextlib.mojo` measured that
-    #     there is no `__exit__` to hook —
-    #     `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`.
+    #     of a `with`, and there was no `__exit__` to hook — which is why the
+    #     name was absent for most of this file's life and is now a struct with
+    #     `__enter__`/`__exit__` (`formal/hostmods/tempfile.mojo`), since a
+    #     `with` lowers to the protocol. `NamedTemporaryFile` (9 files, a FILE
+    #     OBJECT) and `mkstemp` (2, a two-word tuple) are still absent, for the
+    #     reasons in that module's own docstring.
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same

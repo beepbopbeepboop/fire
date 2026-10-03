@@ -31,7 +31,7 @@ draw. Those 109 files, by the name each one binds:
 | name | files | what this module does about it |
 |---|---|---|
 | `mkdtemp` | 51 | **answered**, as `mkdtemp(prefix)` — see THE SIGNATURE below |
-| `TemporaryDirectory` | 64 | **answered**, with its removal on the way out — see `TemporaryDirectory` below and `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` for what it took |
+| `TemporaryDirectory` | 64 | **answered**, with its removal on the way out — see `TemporaryDirectory` below, and the `with` protocol in `formal/build.py` that made it a contract rather than a half-answer |
 | `NamedTemporaryFile` | 9 | **absent** (a FILE OBJECT) |
 | `mkstemp` | 2 | **absent** (a two-element TUPLE) |
 | nothing | 2 | closure: they import `tempfile` and never use it |
