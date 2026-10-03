@@ -1640,6 +1640,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.ExprStmt):
+            # A dialect EFFECT whose value is discarded lowers here rather than
+            # being refused: there is no result to represent and nothing reads
+            # one, so the only thing left to emit is the effect itself — and
+            # this path's one divergence is what `raise` already emits. Asked
+            # through `model.mlir_effect_diverge_call`, the single reader of
+            # that table, because a per-emitter copy is how the two
+            # architectures come to disagree about what an operation denotes.
+            if M.mlir_effect_diverge_call(stmt.value) is not None:
+                self._emit_diverge()
+                return
             self._emit_expr(stmt.value)
             return
 
@@ -1697,12 +1707,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         if isinstance(stmt, F.RaiseStmt):
             # No EH runtime: evaluate the exception expression for its side
-            # effects (the args of `raise RuntimeError(...)`), then exit(1).
+            # effects (the args of `raise RuntimeError(...)`), then diverge.
             # Handlers stay unreachable — there is no unwinder to route to.
             if stmt.value is not None:
                 self._emit_expr(stmt.value)
-            self._flush_pending_finally()
-            self._emit_call_exit(1)
+            self._emit_diverge()
             return
 
         if isinstance(stmt, F.TryStmt):
@@ -2146,6 +2155,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_mov_imm(Reg.RDI, status)
         self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
         self._emit_extern_call("exit")
+
+    def _emit_diverge(self) -> None:
+        """Leave the machine: run every enclosing finally, then `exit(1)`.
+
+        The ONE way control stops on this path, and both of its callers share
+        it rather than spelling the call each: a `raise`, which has no unwinder
+        to route to, and a dialect trap used as a statement
+        (`model.mlir_effect_diverge_call`), which has no result and so leaves
+        nothing else to emit. The finally flush is the part that is easy to
+        drop — a `raise` inside a `try` must still run the `finally` on its
+        way out — so it lives with the exit rather than at each call site.
+        """
+        self._flush_pending_finally()
+        self._emit_call_exit(1)
 
     def _emit_aug_assign(self, stmt) -> None:
         op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \

@@ -1815,6 +1815,16 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.ExprStmt):
+            # A dialect EFFECT whose value is discarded lowers here rather than
+            # being refused: there is no result to represent and nothing reads
+            # one, so the only thing left to emit is the effect itself — and
+            # this path's one divergence is what `raise` already emits. Asked
+            # through `model.mlir_effect_diverge_call`, the single reader of
+            # that table, because a per-emitter copy is how the two
+            # architectures come to disagree about what an operation denotes.
+            if M.mlir_effect_diverge_call(stmt.value) is not None:
+                self._emit_diverge()
+                return
             self._emit_expr(stmt.value)
             return
 
@@ -1865,16 +1875,12 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(stmt, F.RaiseStmt):
             # No EH runtime: evaluate the exception expression for side
-            # effects (args of `raise RuntimeError(...)` etc.), run every
-            # enclosing finally (same stack as return), then Darwin
-            # exit(1). except handlers stay unreachable — there is no
+            # effects (args of `raise RuntimeError(...)` etc.), then diverge.
+            # except handlers stay unreachable — there is no
             # unwinder to route to; the nonzero status is the signal.
             if stmt.value is not None:
                 self._emit_expr(stmt.value)
-            self._flush_pending_finally()
-            self.asm.emit(encode_movz_xd_imm(0, 1))
-            self.asm.emit(encode_movz_xd_imm(16, 1))
-            self.asm.emit(encode_svc(0x80))
+            self._emit_diverge()
             return
 
         if isinstance(stmt, F.WhileStmt):
@@ -2184,6 +2190,24 @@ dylib_exports: list = None, globals_base: int = None,
             for s in fin:
                 self._emit_stmt(s)
         self.asm.emit(encode_ldp_sp_post(0, 31))
+
+    def _emit_diverge(self) -> None:
+        """Leave the machine: run every enclosing finally, then Darwin
+        `exit(1)`.
+
+        The ONE way control stops on this path, and both of its callers share
+        it rather than spelling the three instructions each: a `raise`, which
+        has no unwinder to route to, and a dialect trap used as a statement
+        (`model.mlir_effect_diverge_call`), which has no result and so leaves
+        nothing else to emit. Two copies of `movz x0, #1; movz x16, #1;
+        svc #0x80` is how two of them come to differ, and the finally flush is
+        the part that is easy to drop — a `raise` inside a `try` must still run
+        the `finally` on its way out.
+        """
+        self._flush_pending_finally()
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
         """try/except/else/finally without an exception runtime.

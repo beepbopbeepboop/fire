@@ -209,13 +209,35 @@ REFUSED = [
 # would still satisfy the needle and is exactly the regression this file exists
 # to catch.
 CLASSIFIED = [
-    # An EFFECT. Real stdlib source spells this exactly: `std/sys/debug.mojo:20`.
-    # The `absent` is the elementwise clause, which would be FALSE of it — a
-    # trap has no operand type to establish and no result to be a vector of.
+    # An EFFECT that is STILL refused, as a statement of its own — which is the
+    # shape `llvm.intr.debugtrap` used to be refused in, and the row that keeps
+    # the class honest now that a trap lowers (see `a_trap_in_a_value_position`
+    # and `EMITTED` below for that half).
+    #
+    # `lit.ownership.mark_destroyed` rather than a trap, and the choice is the
+    # point: this operation is refused for a fact a trap does not have. It
+    # asserts something about a REFERENCE — that the object it names is dead —
+    # and this path tracks no ownership, so emitting the divergence for it would
+    # be a different program wearing the same three instructions. The `absent`
+    # is the elementwise clause, which would be FALSE of any effect: a marker
+    # has no operand type to establish and no result to be a vector of.
     ("an_effect_operation_says_it_denotes_no_value",
-     "def t() -> Int32:\n"
-     "    __mlir_op.`llvm.intr.debugtrap`()\n"
+     "def t(p: Int) -> Int:\n"
+     "    __mlir_op.`lit.ownership.mark_destroyed`(p)\n"
      "    return 0\n",
+     "`lit.ownership.mark_destroyed` is a dialect OPERATION and denotes NO "
+     "VALUE",
+     "applied ELEMENTWISE"),
+    # The boundary of the trap lowering, and the row that says the lowering is a
+    # CAPABILITY rather than a blanket: a trap whose value is READ is a value
+    # position whatever its arguments are, so there is a result to represent and
+    # there is none. This is `std/sys/debug.mojo:20`'s statement with a `return`
+    # in front of it, and it must keep the same message the statement used to
+    # get — a program that asked for the value of a trap is asking for something
+    # no machine has.
+    ("a_trap_in_a_value_position_is_still_refused",
+     "def t() -> Int:\n"
+     "    return __mlir_op.`llvm.intr.debugtrap`()\n",
      "`llvm.intr.debugtrap` is a dialect OPERATION and denotes NO VALUE",
      "applied ELEMENTWISE"),
     # The 45-site class. `lit.ownership.mark_initialized` is an ownership
@@ -361,6 +383,49 @@ GUARDED = [
      "    print(\"os=\", os_name)\n"
      "    return 0\n",
      "os= darwin\n"),
+    # `std/sys/debug.mojo` verbatim, and the case the lowering exists for: a
+    # dialect EFFECT whose value is DISCARDED has no result to represent, so the
+    # refusal's own ground ("no representation in a 64-bit word, because there is
+    # no value to represent") is absent at a statement, and refusing there cost a
+    # whole module — the only IN-FILE refusal the `std/{os,sys}` scope carried.
+    #
+    # `want_stdout` is None rather than "" on purpose: the image DIVERGES, so it
+    # must not be run here. `EMITTED` below is what checks what it emits, and a
+    # case that ran this one could only ever see a nonzero exit.
+    ("a_trap_statement_lowers_on_both_architectures",
+     "def breakpointhook():\n"
+     "    __mlir_op.`llvm.intr.debugtrap`()\n"
+     "\n"
+     "def main() -> Int32:\n"
+     "    return 0\n",
+     None),
+]
+
+# (name, mojo source, control source). Programs that must BUILD and must EMIT
+# this path's divergence — which is a different question from `GUARDED`'s, and
+# the one that would catch a lowering that quietly became a NO-OP.
+#
+# "The image differs from the control" is necessary and not sufficient: a trap
+# lowered to nothing also differs, by nothing at all, and a reader would have no
+# way to tell. So each architecture is asked for the fact it can report, and the
+# split is a fact about the two backends rather than about the test — arm64
+# inlines the syscall sequence (`movz x0,#1; movz x16,#1; svc #0x80`, read back
+# through `formal/arm64.py`'s own encoder so no constant is written twice) and
+# x86-64 binds the C library's `exit`, which the build reports in
+# `info['external_syms']`.
+EMITTED = [
+    ("a_trap_emits_the_divergence_and_not_a_no_op",
+     "def stop() -> Int:\n"
+     "    __mlir_op.`llvm.intr.trap`()\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return stop()\n",
+     "def stop() -> Int:\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    return stop()\n"),
 ]
 
 
@@ -439,6 +504,62 @@ def run_guarded(name, source, want_stdout, tmpdir, verbose):
     if verbose:
         print(f"      built on both architectures"
               + (f" and printed {want_stdout!r}" if want_stdout else ""))
+    return True, ""
+
+
+def run_emitted(name, source, control, tmpdir, verbose):
+    """Both architectures must BUILD both programs and EMIT the divergence.
+
+    `compile_formal` is called directly rather than through `fire.py` because
+    the assertion is about the artifact and the build's own report, and the
+    report (`info['external_syms']`) is not printed by the CLI. The control is
+    the same program with the statement replaced by nothing, so "the image
+    changed" and "the image changed into the divergence" are two separate
+    claims and both are made.
+    """
+    sys.path.insert(0, HERE)
+    import formal.arm64 as A
+    import formal.build as B
+    paths = {}
+    for tag, text in (("trap", source), ("control", control)):
+        p = os.path.join(tmpdir, f"{name}.{tag}.mojo")
+        with open(p, "w") as f:
+            f.write(text)
+        paths[tag] = p
+    for backend in ("arm64", "x86_64"):
+        built = {}
+        for tag in ("trap", "control"):
+            out = os.path.join(tmpdir, f"{name}.{tag}.{backend}")
+            try:
+                built[tag] = B.compile_formal(paths[tag], output=out,
+                                              prove=False, arch=backend)
+            except Exception as e:                     # noqa: BLE001
+                return False, (f"--backend={backend} refused the {tag} program: "
+                               f"{e}")
+        if built["trap"]["code"] == built["control"]["code"]:
+            return False, (f"--backend={backend} emitted the SAME words for the "
+                           f"trap and for the control, so the statement lowered "
+                           f"to nothing at all")
+        if backend == "arm64":
+            svc = A.encode_svc(0x80)
+            got = built["trap"]["code"].count(svc)
+            want = built["control"]["code"].count(svc)
+            if got <= want:
+                return False, (
+                    f"--backend={backend} emitted {got} `svc` and the control "
+                    f"{want}, so the divergence this path's `raise` emits is not "
+                    f"in the image the trap produced")
+        else:
+            syms = built["trap"]["info"].get("external_syms") or []
+            if "exit" not in syms:
+                return False, (
+                    f"--backend={backend} emitted no `exit` call "
+                    f"(external symbols: {sorted(syms)}), so the trap did not "
+                    f"diverge through the sequence `_emit_diverge` shares with "
+                    f"`raise`")
+    if verbose:
+        print(f"      emitted the divergence on arm64 and x86-64, and the "
+              f"control emits none")
     return True, ""
 
 
@@ -525,7 +646,7 @@ def main() -> int:
     args = ap.parse_args()
 
     known = ({c[0] for c in REFUSED} | {c[0] for c in CLASSIFIED}
-             | {c[0] for c in GUARDED})
+             | {c[0] for c in GUARDED} | {c[0] for c in EMITTED})
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -562,6 +683,14 @@ def main() -> int:
                 continue
             try:
                 checks.append((name,) + run_guarded(name, source, want_out,
+                                                    tmpdir, args.verbose))
+            except subprocess.TimeoutExpired:
+                checks.append((name, False, "timed out"))
+        for name, source, control in EMITTED:
+            if args.cases and name not in args.cases:
+                continue
+            try:
+                checks.append((name,) + run_emitted(name, source, control,
                                                     tmpdir, args.verbose))
             except subprocess.TimeoutExpired:
                 checks.append((name, False, "timed out"))
