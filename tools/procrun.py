@@ -186,6 +186,42 @@ def kill_group(proc: subprocess.Popen):
 # rather than twice.
 _MEMCAP_PEAK = re.compile(r'peak (?:observed before the kill: )?([\d.]+) GB')
 _MEMCAP_BREACH = 'memcap: BREACH'
+# memcap's banner: the one line it prints BEFORE it starts anything
+# (tools/memcap.py prints it, then starts the command, then polls). Every
+# outcome it can report starts with one of these words — BREACH, done,
+# interrupted, WATCHDOG FAILED — so a captured output that has the banner and
+# none of them is a wrapper that died before it could account for its run.
+_MEMCAP_BANNER = re.compile(r'^memcap: \S+ -- ceiling [\d.]+ GB across the '
+                            r'process tree', re.M)
+_MEMCAP_OUTCOME = re.compile(r'^memcap: (?:BREACH|done|interrupted|'
+                             r'WATCHDOG FAILED)', re.M)
+
+
+def memcap_accounted(text):
+    """True when memcap printed an OUTCOME for the run it was watching.
+
+    Shared by `memcap_verdict` and `memcap_wrapper_died` so there is one
+    definition of "memcap reported something", not two."""
+    return bool(_MEMCAP_OUTCOME.search(text or ''))
+
+
+def memcap_wrapper_died(text):
+    """True when memcap started a run and never reported how it ended.
+
+    `memcap.py` prints its banner before it starts the command and then always
+    prints exactly one outcome line — `BREACH`, `done`, `interrupted`, or
+    `WATCHDOG FAILED` — so an output carrying the banner and no outcome is a
+    wrapper that was killed mid-run: the workload's own verdict was never
+    observed, and the only text left is memcap's own banner.
+
+    This is NOT the same fact as a breach (`memcap_verdict`, which reads
+    memcap's own words rather than an exit code), and it must not be reported as
+    one: nothing was measured against the ceiling, and the build may well have
+    been fine. It is a fact about the machine the run happened on, which is why
+    the caller files it as no-verdict rather than as a finding.
+    """
+    text = text or ''
+    return bool(_MEMCAP_BANNER.search(text)) and not memcap_accounted(text)
 
 
 def memcap_verdict(text):

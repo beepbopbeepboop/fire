@@ -118,7 +118,15 @@ facts. So every verdict now carries a class:
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
-                                    reached at all
+                                    reached at all. Also the two ways a file
+                                    is killed by THIS TOOL's per-file memory
+                                    ceiling rather than by its source:
+                                    `memory-killed` (memcap reported a breach,
+                                    with the measured peak) and `wrapper-died`
+                                    (memcap itself was killed before it
+                                    reported anything, so the build's own
+                                    verdict was never observed — see
+                                    CAUSE_WRAPPER_DIED)
   unknown                           a message shape this tool does not
                                     recognise. Deliberately its own bucket
                                     rather than a fallback into `codegen`:
@@ -484,6 +492,21 @@ CAUSE_TOOL_ERROR = "tool-error"
 # killed, classified, and the sweep continues — `TestPerFileMemoryCeiling`
 # in `test_formal_sweep.py`.
 CAUSE_MEMORY = "memory-killed"
+# The per-file ceiling's WRAPPER died before it reported an outcome: memcap
+# printed its banner and nothing else, so the build's own verdict was never
+# observed. A machine fact, in `tool` for the same reason a timeout is, and its
+# own label because the two are told apart by evidence rather than by shape: a
+# breach is memcap saying the ceiling fired, this is memcap not saying anything,
+# and a reader who is told "killed at the ceiling" about a build that was never
+# measured against it will go and look for a memory bug that is not there.
+#
+# 2026-10-02: six files per architecture in the b6 sweep carried memcap's
+# banner as their `codegen` "refusal" — the class whose count is a gap in the
+# backend — and were PUBLISHED to the CAS, so a machine fact survived the run
+# that observed it. The files are not memory hogs: `bit/mask.mojo`, one of the
+# six, builds in 0.1 GB and is refused for a real reason in three minutes.
+# bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md.
+CAUSE_WRAPPER_DIED = "wrapper-died"
 # The image BUILDS, but this host cannot check whether its imports resolve.
 # Not a finding about the image and not a fact about the target: it is a gap in
 # the RUN. Its own label because the neighbouring classes give the opposite
@@ -2126,7 +2149,7 @@ Verdict = collections.namedtuple(
 # accounting is read off them in _run_build and not passed on, so nothing
 # downstream can match a `memcap:` line as if the build had printed it.
 BuildRun = collections.namedtuple(
-    "BuildRun", "returncode stdout stderr mem_killed peak_gb")
+    "BuildRun", "returncode stdout stderr mem_killed peak_gb wrapper_died")
 
 
 # ── Per-file memory ceiling ──────────────────────────────────────────────────
@@ -2239,7 +2262,7 @@ def _run_build(path, out, flags, timeout, mem_gb):
         raise subprocess.TimeoutExpired(
             argv, timeout, output=stdout or _as_text(e.output),
             stderr=stderr or _as_text(e.stderr)) from None
-    mem_killed, peak = False, None
+    mem_killed, peak, wrapper_died = False, None, False
     if mem_gb and mem_gb > 0:
         # memcap's own accounting goes to stdout, where it would otherwise be
         # mistaken for the build's message. It is read here, off the CHILD's
@@ -2248,7 +2271,10 @@ def _run_build(path, out, flags, timeout, mem_gb):
         # refusal, and the build's real message is the one it should read.
         mem_killed, peak = procrun.memcap_verdict(
             (stdout or "") + (stderr or ""))
-    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak)
+        wrapper_died = procrun.memcap_wrapper_died(
+            (stdout or "") + (stderr or ""))
+    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak,
+                    wrapper_died)
 
 
 def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
@@ -2398,13 +2424,41 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
+            # …but memcap's own accounting is not the build's message, and the
+            # namedtuple's docstring above promises nothing downstream can
+            # match one. It is separated here rather than only in the branch
+            # below, because a build that printed NOTHING leaves the wrapper's
+            # `done, … child exit -9` line as the last line there, and that is
+            # how "the ceiling wrapper's bookkeeping" becomes a file's alleged
+            # refusal. `build_lines` is empty exactly when the build said
+            # nothing at all.
+            build_lines = [ln for ln in lines
+                           if not ln.startswith("memcap: ")]
+            if proc.wrapper_died and not build_lines:
+                # The wrapper started the build and never reported how it
+                # ended, so there is no verdict about the source to report —
+                # not a refusal, and not a memory kill either, since nothing was
+                # measured against the ceiling. Not published, for the reason a
+                # timeout and a memory kill are not: it is a fact about this
+                # run's machine, and a verdict published under this key would
+                # pin the file here until the key changed.
+                return verdict(
+                    False,
+                    f"the {mem_gb:g} GB per-file wrapper (tools/memcap.py) died "
+                    f"before it reported an outcome — its banner is in the "
+                    f"output and no breach and no completion, so this build's "
+                    f"own verdict was never observed. A fact about this run's "
+                    f"machine, not about the source; not cached, so re-running "
+                    f"re-measures it",
+                    CAUSE_WRAPPER_DIED, False)
             # No message at all still counts as the build's own verdict: with
             # no traceback there is no evidence of a crash, and a silent death
             # is far more often a refusal whose message went to stdout. The
             # fallback is deliberately the finding side (a codegen row: exit 1,
             # printed, in the denominator) — a crash we cannot see must not be
             # able to hide, and a false FAIL only sends someone to look.
-            detail = lines[-1] if lines else f"exit {proc.returncode}"
+            detail = (build_lines[-1] if build_lines
+                      else f"exit {proc.returncode}")
             ok = False
             cause = _crash_cause(err)
             if cause == CAUSE_BACKEND_CRASH:
@@ -2678,6 +2732,12 @@ def _report_partial(arch, files, results) -> None:
         print(f"  of the {counts[CLASS_TOOL]} in `tool`, "
               f"{sum(1 for p in done if results[p].cause == CAUSE_MEMORY)} "
               f"hit this tool's per-file memory ceiling", file=sys.stderr)
+        wrapper_deaths = sum(1 for p in done
+                             if results[p].cause == CAUSE_WRAPPER_DIED)
+        if wrapper_deaths:
+            print(f"  of the {counts[CLASS_TOOL]} in `tool`, {wrapper_deaths} "
+                  f"had this tool's memory wrapper die before it reported an "
+                  f"outcome", file=sys.stderr)
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -2776,7 +2836,11 @@ def main():
                          f"'{CAUSE_MEMORY}' with the measured peak, and the "
                          "sweep CONTINUES — one file's build cannot take the "
                          "run down with it. Not cached: a memory kill is a "
-                         "property of this run's ceiling, not of the source")
+                         "property of this run's ceiling, not of the source. "
+                         "If the wrapper itself is killed, the file is "
+                         f"classified '{CAUSE_WRAPPER_DIED}' — also `tool`, and "
+                         "also not cached, because it too is a fact about this "
+                         "run's machine rather than about the source")
     ap.add_argument("--allow-concurrent", action="store_true",
                     help="sweep even if another sweep of the SAME architecture "
                          "is running. They share the formal module-dylib "
@@ -3137,6 +3201,17 @@ def main():
               f"cannot take the run down; each is a real cost finding about "
               f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
               f"NOT cached, so re-running re-measures it")
+    wrapper_died = sum(1 for p in files
+                       if results[p].cause == CAUSE_WRAPPER_DIED)
+    if wrapper_died:
+        # Its own line because the two machine causes in that bucket are told
+        # apart by EVIDENCE, and lumping them would tell a reader to go looking
+        # for a memory bug in a build that was never measured against the
+        # ceiling.
+        print(f"  of those, {wrapper_died} were killed with this tool's "
+              f"per-file wrapper itself dying before it reported an outcome — "
+              f"no breach was measured, so this is not a memory finding; each "
+              f"is a machine fact, is NOT cached, and re-running re-measures it")
     foreign_arch = sum(1 for p in files
                        if results[p].cause == CAUSE_FOREIGN_ARCH)
     if foreign_arch:
