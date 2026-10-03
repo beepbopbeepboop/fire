@@ -363,6 +363,159 @@ class TestGeneratorSource(unittest.TestCase):
                       "the step lemma rather than the ADRP")
 
 
+# The forms whose `Rn` can be register 31, and how the assembler answers.  The
+# right-hand column is NOT written down: it is what `clang -c` says, which is
+# the only authority for whether an encoding HAS an SP form at all, and the
+# model's answer is checked against it below.
+#
+# The left-hand column is the model's own branch, keyed by the comment that
+# introduces it in `lib/ProofLib.lean`'s `arm64_step` — a comment rather than an
+# opcode so the test fails LOUDLY when a branch is renamed (the key goes
+# missing) instead of silently checking a different branch.
+SP_IN_RN_FORMS = (
+    ("add x0, sp, x16", "= 0x8b000000 then"),
+    ("sub x0, sp, x16", "= 0xcb000000 then"),
+    ("cmp sp, x16", "= 0xeb000000 then"),
+    ("cmp sp, #16", "= 0xf1000000 then"),
+    ("add x0, sp, #16", "= 0x91000000 then"),
+    # …and the five whose 31 is the ZERO register.  They are in the table
+    # because they are the direction a "31 means SP everywhere" change gets
+    # wrong, and a test that only checked the accepting forms would not notice.
+    ("and x0, sp, x1", "= 0x8a000000 then"),
+    ("eor x0, sp, x1", "= 0xca000000 then"),
+    ("mul x0, sp, x1", "= 0x9b007c00 then"),
+    ("neg x0, sp", "= 0xcb0003e0 then"),
+    ("add w0, sp, #16", "= 0x11000000 then"),
+)
+
+
+def _assembler_accepts(form):
+    """Does clang's assembler accept `form`?
+
+    One `clang -c` per form, on a one-instruction file.  The batched version of
+    this read the offending INSTRUCTION off the diagnostic, which is on the
+    line AFTER the `file:line:col: error:` one — so every form looked accepted
+    and the case below passed for the wrong reason.  One process per form costs
+    ~0.15 s and has nothing to parse.
+
+    `--target arm64-apple-macos11` is explicit because this host is arm64 and a
+    bare `clang` assembles for the HOST, which would make `add x0, sp, x16` a
+    syntax error for a reason that has nothing to do with the encoding.
+    """
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "probe.s")
+        with open(src, "w") as fh:
+            fh.write(".text\n.globl _sp_probe\n_sp_probe:\n  "
+                     + form + "\n")
+        p = subprocess.run(
+            ["clang", "-target", "arm64-apple-macos11", "-c", "-o",
+             os.path.join(td, "probe.o"), src],
+            capture_output=True, text=True)
+    return p.returncode == 0
+
+
+def _arm64_step_branch(src, key):
+    """The text of one `arm64_step` branch, from its dispatch condition.
+
+    Keyed by the `= 0x… then` the branch tests, which is unique per branch and
+    survives a reworded comment — and a missing key FAILS the case rather than
+    silently matching a neighbour, which is the failure mode of keying on prose.
+    """
+    i = src.find(key)
+    if i < 0:
+        return None
+    j = src.find("\n  else if", i)
+    k = src.find("\n  -- ", i)
+    ends = [x for x in (j, k) if x >= 0]
+    return src[i:min(ends)] if ends else src[i:]
+
+
+class TestRegister31(unittest.TestCase):
+    """Which arm64 forms read register 31 as SP, and which as the zero register.
+
+    `arm64_reg 31 s = 0` is right for a data-processing form and wrong for
+    `cmp sp, floor` — the comparison a stack-floor guard is built from — so the
+    model's step for `SUBS XZR, X31, X16` used to compute
+    `arm64_subs_flags 0 X16`: a proof about a different instruction than the
+    one emitted, which typechecks and is false.
+
+    The fix reads `Rn` through `arm64_reg_or_sp` in the forms that HAVE an SP
+    encoding.  Deciding which forms those are is architectural, and this test
+    does not take the model's or this file's word for it: it asks the assembler,
+    which is where the answer comes from, and requires the two to agree.  A
+    blanket "31 means SP everywhere" passes the accepting half and fails here.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(HERE, "lib", "ProofLib.lean")) as f:
+            cls.lib = f.read()
+        cls.branches = {}
+        for form, key in SP_IN_RN_FORMS:
+            cls.branches[form] = _arm64_step_branch(cls.lib, key)
+
+    def test_every_form_in_the_table_is_still_in_the_model(self):
+        for form, key in SP_IN_RN_FORMS:
+            with self.subTest(form=form):
+                self.assertIsNotNone(
+                    self.branches[form],
+                    f"{key!r} is not in lib/ProofLib.lean's arm64_step any "
+                    f"more, so this table is checking nothing for {form!r}")
+
+    def test_the_model_reads_rn_as_sp_exactly_where_the_assembler_allows_it(self):
+        accepts = {f: _assembler_accepts(f) for f, _k in SP_IN_RN_FORMS}
+        # Sanity on the oracle itself: a missing clang, or one assembling for
+        # the wrong target, rejects EVERY form and this case would then pass
+        # for the wrong reason — every model answer would "match".  So the
+        # accepting set is asserted to be the one the architecture has.
+        self.assertEqual(
+            sorted(f for f, ok in accepts.items() if ok),
+            sorted(f for f, _k in SP_IN_RN_FORMS
+                   if f not in ("and x0, sp, x1", "eor x0, sp, x1",
+                                "mul x0, sp, x1", "neg x0, sp",
+                                "add w0, sp, #16")),
+            "the assembler accepted a different set of forms than the "
+            "architecture does, so this case is measuring clang rather than "
+            "the model")
+        for form, key in SP_IN_RN_FORMS:
+            with self.subTest(form=form):
+                reads_sp = "arm64_reg_or_sp" in (self.branches[form] or "")
+                self.assertEqual(
+                    reads_sp, accepts[form],
+                    f"{form!r} is "
+                    f"{'accepted' if accepts[form] else 'REFUSED'} by the "
+                    f"assembler with `sp` in `Rn`, and the model's branch for "
+                    f"it ({key!r}) "
+                    f"{'reads' if reads_sp else 'does NOT read'} register 31 "
+                    f"as SP — so one of them is wrong about the architecture")
+
+    def test_the_generator_keeps_its_own_spelling_and_why(self):
+        """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
+        helper, and that is deliberate.
+
+        The step-result lemma is closed by `exact`-ing the library's lemma
+        INSTANTIATED AT THE CONCRETE WORD, so the two right-hand sides only have
+        to be defeq — and they are, because `arm64_reg_or_sp 3 s` and
+        `s.sp`/`arm64_reg 3 s` both reduce on a literal index.  Emitting the
+        helper from the generator instead would make that exact, but the
+        generated text is what every downstream `simp only [..., arm64_reg,
+        arm64_set_reg]` goal consumes, and those lists do not carry the helper:
+        the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
+        break them.  Recorded here because the asymmetry looks like a bug.
+        """
+        import formal.arm64_proof_gen as G
+        self.assertEqual(G._step_rhs(0xeb1003ff, 6),
+                         "some { s with nzcv := arm64_subs_flags "
+                         "(arm64_reg 31 s) (arm64_reg 16 s) }",
+                         "`_step_rhs`'s CMP-register arm changed shape; if it "
+                         "now emits `arm64_reg_or_sp`, the `simp only` lists in "
+                         "this generator need the helper in them too")
+        self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
+                      "`_step_rhs`'s ADD-register arm changed shape")
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
