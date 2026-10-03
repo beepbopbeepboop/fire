@@ -266,15 +266,28 @@ PRELUDE = (
 
 # ── the harness ────────────────────────────────────────────────────────────
 
-def build(src, out, backend, timeout=BUILD_TIMEOUT):
+def build(src, out, backend, timeout=BUILD_TIMEOUT, test_input=None):
     """Compile `src` for `backend`; (rc, diagnostic).
 
     The diagnostic is stderr or stdout, whichever carries text — a refusal is
     printed where the build found it, and the two are not the same stream on
     every failure.
+
+    `test_input` is the formal path's `-n`, and it is `None` here by default so
+    that this corpus keeps measuring the images the CLI builds by default.  It
+    is a parameter because the OTHER caller of this function — the proof-layer
+    fuzzer `tools/formal_proof_fuzz.py` — measures programs whose entry takes an
+    argument, and the input is BAKED INTO THE IMAGE by the startup stub
+    (`formal/build.py`'s `test_input`), so a corpus that could not vary it would
+    be a corpus measuring one input and calling it a program.  Passing it here
+    rather than writing a second build command in that file is what keeps the
+    refusal/crash classification below the single place that decides it.
     """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
-           f"--backend={backend}", "-o", out, src]
+           f"--backend={backend}", "-o", out]
+    if test_input is not None:
+        cmd += ["-n", str(test_input)]
+    cmd.append(src)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=timeout, cwd=HERE)
@@ -335,11 +348,21 @@ PY_DRIVER = (
 )
 
 
-def cpython_answer(text, tmpdir, name):
-    """(exit, stdout) for `text` + `main()`, run by the interpreter here."""
+def cpython_answer(text, tmpdir, name, args=""):
+    """(exit, stdout) for `text` + `main(args)`, run by the interpreter here.
+
+    `args` is the argument list the driver calls `main` with, spliced into the
+    driver verbatim so a caller can pass one value (`"5"`), several (`"5, 7"`)
+    or nothing at all (the default, which is this corpus: every program it
+    generates is `main()`).  It exists for `tools/formal_proof_fuzz.py`, whose
+    programs take the input the image has baked into it — a second CPython
+    driver there would be a second oracle, which is the one thing this tool's
+    docstring refuses to have.
+    """
     py = os.path.join(tmpdir, name + ".ref.py")
+    driver = PY_DRIVER.replace("_rc = main()", "_rc = main(%s)" % args)
     with open(py, "w") as f:
-        f.write(PY_DRIVER.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG))
+        f.write(driver.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG))
     try:
         p = subprocess.run([sys.executable, py], capture_output=True, text=True,
                            timeout=PY_TIMEOUT)
