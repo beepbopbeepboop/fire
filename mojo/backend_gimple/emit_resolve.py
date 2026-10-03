@@ -497,6 +497,21 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
+            # The string pool, for the SAME reason as the funcptr marks above
+            # and for the same failure: `_str_pool_declared` is what stops each
+            # module re-declaring every name interned before it, and an
+            # imported module emits `static char * _slit_N;` for the names it
+            # finds NOT yet declared. A failed subtree's generated text is
+            # discarded here, but its marks were not rolled back, so every name
+            # it interned was left marked declared with nothing declaring it --
+            # and the root's real definition comes near the END of the
+            # translation unit, after the function bodies that reference it.
+            # The result is "_slit_10001 undeclared (first use in this
+            # function)" on hundreds of references, from a subtree that was
+            # never in the output at all. Rolling the mark back keeps the pair
+            # symmetric, and a name interned only by the failed subtree is
+            # simply never declared because nothing references it.
+            strpool_declared_before = set(gen._str_pool_declared)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -985,6 +1000,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
+                for _sp in list(gen._str_pool_declared - strpool_declared_before):
+                    gen._str_pool_declared.discard(_sp)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
