@@ -3605,12 +3605,39 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # is spelled rather than reconstructed because
                 # `self.a.b.c`'s outer field is `b`, not `a`.
                 parts = chain.split(".")
-                outer_field = parts[-2] if len(parts) >= 2 else node.member
+                # EVERY field between the holder and the last one, not just the
+                # last-but-one.  The layout places up to
+                # `model.MAX_NESTED_FRAME_DEPTH` levels of typed-nested frames
+                # (`struct_block_children` recurses), so a read has to be able to
+                # FOLLOW as many as the constructor PLACED: `o.n0.n1.leaf` is
+                # three loads and was computed as two, with `outer_field` read
+                # off the wrong end of the chain.  The symptom was a refusal that
+                # is false about the file — `n1` is not a field of the holder's
+                # struct, which is true, and the sentence said "nothing types it
+                # here", which is false, because `n0`'s declared type types it
+                # one level down.
+                mid = parts[1:-1]
+                outer_field = mid[0] if mid else node.member
                 cands = by_name.get(base) or []
-                nested = _typed_nested_frame(
-                    base, outer_field, cands, structs_by_name, None)
+                # Walk the chain, level by level, keeping the SLOT each hop
+                # reads and the struct it lands in.  Every hop asks the same
+                # question through the same predicate (`_typed_nested_frame`,
+                # and behind it `model.frame_field_type_candidates`), so a
+                # five-level chain cannot decide a level the two-level one
+                # refuses.
+                path, level_cands, nested = [], cands, None
+                fail_field, fail_cands = outer_field, cands
+                for _level, field in enumerate(mid):
+                    nested = _typed_nested_frame(
+                        base, field, level_cands, structs_by_name, None)
+                    fail_field, fail_cands = field, level_cands
+                    if nested is _NOT_TYPED or nested is None:
+                        break
+                    path.append((field, level_cands))
+                    level_cands = [nested]
                 if nested is _NOT_TYPED:
-                    vrows = _type_rows(cands, outer_field, structs_by_name)
+                    outer_field = fail_field
+                    cands = fail_cands
                     raise CodegenError(
                         f"{chain} reads a field of a field through the receiver "
                         f"{base}: a frame slot holds one 64-bit word, and the word "
@@ -3735,8 +3762,26 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         f"{nested.name} frame, and that struct's "
                         f"{M.struct_field_summary(nested)} has no such field"
                     )
-                slots[f"{base}.{outer_field}"] = outer_slot
-                nested_slots[f"{base}.{outer_field}.{node.member}"] = inner
+                slots[f"{base}.{parts[1]}"] = outer_slot
+                # One slot per HOP, and the emitter walks them: a two-field
+                # chain is the two loads this table has always meant, and a
+                # longer one is the same sequence with more steps — which is why
+                # the value is a tuple of slots rather than a single number. The
+                # emitter reads it positionally, so the two halves cannot
+                # disagree about which load is which, and a chain the
+                # constructor placed to the bound is a chain the read can follow.
+                hops = [outer_slot]
+                for hop_field, hop_cands in path[1:]:
+                    hop_slot, (hop_dis, _r) = M.struct_frame_slot_candidates(
+                        hop_cands, hop_field)
+                    if hop_dis or hop_slot is None:
+                        raise CodegenError(M.nested_frame_hop_unplaced(
+                            chain, base, hop_field,
+                            _type_rows(hop_cands, hop_field,
+                                       structs_by_name)))
+                    hops.append(hop_slot)
+                hops.append(inner)
+                nested_slots[chain] = tuple(hops)
                 continue
             if not cands:
                 # bound from a constructor that is not framed: a plain word.

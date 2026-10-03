@@ -16147,10 +16147,23 @@ def struct_frame_block_bytes(struct_def, decls: dict,
     too, and bounded by `MAX_NESTED_FRAME_DEPTH` because the declaration graph
     can be cyclic (`struct A: var b: B` / `struct B: var a: A`) and an
     unbounded block size is an emitter that hangs rather than one that refuses.
+
+    Running out of depth with a typed-nested field STILL under this struct is a
+    REFUSAL and not a truncated block, which is what it used to be: the
+    reservation came back short by exactly the frames the cut dropped, every
+    blob above it landed on one of those frames, and the program took a
+    SIGSEGV with no diagnostic — measured at six nested levels (five hops) on
+    both backends, where the same source built and ran correctly at five. A
+    bound whose whole purpose is "a cyclic graph refuses instead of hanging"
+    cannot be honoured by silently allocating less than the layout walks.
     """
     depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
     total = struct_frame_bytes(struct_def)
     if depth <= 0:
+        past = struct_nested_frame_fields(struct_def, decls, 1)
+        if past:
+            raise CodegenError(
+                struct_frame_depth_exceeded(struct_def, decls, past))
         return total
     for _name, _slot, nested in struct_nested_frame_fields(struct_def, decls,
                                                           depth):
@@ -16158,10 +16171,38 @@ def struct_frame_block_bytes(struct_def, decls: dict,
     return total
 
 
+def struct_frame_depth_exceeded(struct_def, decls: dict, past) -> str:
+    """The chain outran `MAX_NESTED_FRAME_DEPTH`, named in the user's words.
+
+    `past` is what `struct_nested_frame_fields` still found at the level the
+    recursion ran out on, so the sentence names a field the file actually
+    declares rather than a depth counter.  A declaration CYCLE arrives here
+    too and is the case the bound was written for; it gets the same message
+    because the two need the same answer from the user — a chain this path
+    cannot size is a chain this path must not lay out — and because the
+    sentence already says a cycle lands here, so a reader with one is not sent
+    looking for a different error.
+    """
+    name = next((k for k, v in decls.items() if v is struct_def), "this struct")
+    spelled = ", ".join(repr(f) for f, _s, _n in past)
+    return (
+        f"{name} nests a typed struct field past the "
+        f"{MAX_NESTED_FRAME_DEPTH} levels this path lays out ({spelled} is "
+        f"below that cut), so the block this construction needs has no size "
+        f"this path can state. Refused rather than laid out short: a truncated "
+        f"block puts every frame above the cut inside the caller's own "
+        f"expression scratch, which faults with no diagnostic naming the file. "
+        f"A struct that nests itself through a cycle reaches here too, and is "
+        f"the case the bound was written for."
+    )
+
+
 # How deep a chain of typed-nested fields this path will place.  One is the
-# real answer for every struct in this repository and the bound exists only so
-# that a cyclic declaration graph produces a refusal rather than a hang; it is
-# checked in `struct_nested_frame_fields` and the refusal names the cycle.
+# real answer for every struct in this repository and the bound exists so that
+# a chain the layout cannot size — a cyclic declaration graph above all —
+# produces a refusal rather than a hang or a short block; it is enforced in
+# `struct_frame_block_bytes`, which is where the reservation is computed and so
+# the one place a truncation could become a fault.
 MAX_NESTED_FRAME_DEPTH = 4
 
 
@@ -16544,6 +16585,29 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
             continue
         out.append((name, slot, nested))
     return out
+
+
+def nested_frame_hop_unplaced(chain, base, field, rows) -> str:
+    """An INTERMEDIATE hop of a nested read has no slot to load.
+
+    Only reachable for a chain of three or more field accesses, because the
+    first hop is the depth-2 case the two-level refusal already covers. It is
+    its own message and not a reuse of that one because the two say different
+    things: that one says the OUTER field is a plain VALUE, and this says a
+    field the chain has already agreed is a nested FRAME has no index in the
+    layout — which is a disagreement between two tables rather than a missing
+    type, and a reader sent to add an annotation would find one already there.
+    """
+    return (
+        f"{chain} reads through {base}.{field}, and the field is agreed to be "
+        f"a nested FRAME — the hop before it named its struct and every "
+        f"binding of it agrees — but there is no slot to load it from: a slot "
+        f"index is what the read loads, and the layout for the struct that "
+        f"declares {field!r} has none. That is a disagreement between the frame "
+        f"layout and the declaration rather than a missing type, so adding an "
+        f"annotation will not close it. The candidates for the field, for a "
+        f"reader who wants them: {rows}"
+    )
 
 
 def struct_frame_bytes(struct_def) -> int:
@@ -18659,8 +18723,9 @@ def rewrite_tree(node, visit):
 
 def struct_block_children(struct_def, decls: dict, base: int = 0,
                           depth=None) -> list:
-    """`[(field, slot, child_struct, offset)]` — the nested frames in this
-    struct's BLOCK and where each one sits, to EVERY depth the model places.
+    """`[(field, slot, child_struct, offset, parent_offset)]` — the nested frames
+    in this struct's BLOCK and where each one sits, to EVERY depth the model
+    places.
 
     The offset arithmetic `struct_frame_block_bytes` performs, made a function
     rather than an inline loop, because two readers need the answer and the
@@ -18673,7 +18738,10 @@ def struct_block_children(struct_def, decls: dict, base: int = 0,
     `base` is added to every offset, so `base=0` answers "relative to this
     struct's own block" — which is what a caller that hands the block over
     wants, since the block it is building into is not at a compile-time offset
-    in the callee's frame at all.
+    in the callee's frame at all. The FIFTH element is the offset of the block
+    that DECLARES the field, measured the same way, and it is the one that makes
+    the store side of a nested frame correct at a second level: the address of a
+    nested frame lives in its parent's slot array and nowhere else.
 
     The recursion's depth bookkeeping is `struct_frame_block_bytes`'s exactly:
     children come from `struct_nested_frame_fields(st, decls, depth)` and their
@@ -18686,7 +18754,17 @@ def struct_block_children(struct_def, decls: dict, base: int = 0,
     inner = base + struct_frame_bytes(struct_def)
     for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
                                                           depth):
-        out.append((fname, slot, child, inner))
+        # FIVE elements, and the fifth is the OFFSET OF THE PARENT'S OWN BLOCK —
+        # the one that makes the tuple a placement rather than a list. The
+        # constructor brings each nested frame up at `inner` and then stores that
+        # address into `parent + 8*slot`, and without the parent the store went
+        # into the OUTER struct's slot array at the inner struct's index: a
+        # second level overwrote the first level's address in slot 1, so the
+        # first read returned a pointer into the middle of a block. Nothing
+        # measured it, because a second level could not be reached from a read
+        # either (`_frame_nested_slots` was one hop); this is the layout half of
+        # that same wall, and both are fixed together.
+        out.append((fname, slot, child, inner, base))
         out.extend(struct_block_children(child, decls, inner, depth - 1))
         inner += struct_frame_block_bytes(child, decls, depth - 1)
     return out
@@ -18708,10 +18786,11 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
     placement `ProofLib.Frame.frameWrite_read_above_sp` needs and the reason a
     method's write to its receiver cannot reach the caller's window.
 
-    `nested` is `[(field_name, slot, struct, offset)]`: the frames of this
-    struct's typed-nested fields (`struct_nested_frame_fields`), each with its
-    OWN absolute offset into the same scratch, immediately above the object's
-    own frame.  This is the tuple's third element and it is additive: a struct
+    `nested` is `[(field_name, slot, struct, offset, parent_offset)]`: the
+    frames of this struct's typed-nested fields (`struct_nested_frame_fields`),
+    each with its OWN absolute offset into the same scratch, immediately above
+    the object's own frame.  This is the tuple's third element and it is
+    additive: a struct
     with no typed-nested field has an empty list, so every existing unpack of
     two elements is still a struct with no nested frames — but the emitters
     read three, because the whole point of the declared-type check is that the
@@ -18729,8 +18808,8 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         if st is None:
             continue
         nested, block = struct_frame_block_layout(st, structs_by_name)
-        out[id(node)] = (st, offset, [(f, s, c, o + offset)
-                                     for f, s, c, o in nested])
+        out[id(node)] = (st, offset, [(f, s, c, o + offset, pb + offset)
+                                     for f, s, c, o, pb in nested])
         offset += block
     return out
 
@@ -18738,7 +18817,8 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
 def struct_frame_block_layout(struct_def, decls: dict, depth=None):
     """`(nested, total_bytes)` — one BLOCK's internal layout.
 
-    `nested` is `[(field_name, slot, struct, offset_from_block_base)]`: the
+    `nested` is `[(field_name, slot, struct, offset_from_block_base,
+    parent_offset_from_block_base)]`: the
     frames this struct's typed-nested fields get inside the SAME block, each
     with its own offset measured from the block's own base, in declaration
     order, immediately above the object's own slots.  `total_bytes` is the

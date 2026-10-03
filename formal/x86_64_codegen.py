@@ -1201,8 +1201,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # silent zero rather than a wrong register.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
-            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested))
+            # One load per HOP, and the holder is everything before the first
+            # dot: `h.a.b` is the two loads this table has always meant and
+            # `h.a.b.c` is the same sequence with a third step, which is why the
+            # value is a tuple of slots and the walk is a loop. R11 carries the
+            # middle frames' ADDRESSES, so the last hop writes the VALUE into
+            # `dst`. The arm64 twin of this is the same loop over X17.
+            self._load_var(name[:name.index(".")], Reg.R11)
+            for hop in nested[:-1]:
+                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
+            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1416,11 +1424,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the one-load case above, for the same reason.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
+            # The `_load_var` twin, hop by hop, for the same reason and with the
+            # same R11 parking.
             if src == Reg.R11:
                 self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
                 src = Reg.R10
-            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
-            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
+            self._load_var(name[:name.index(".")], Reg.R11)
+            for hop in nested[:-1]:
+                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested[-1], src))
             return
         gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
@@ -7071,9 +7083,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         for off in range(0, block, 8):
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, off))
             self.asm.emit(encode_mov_rm64_r64(Reg.R10, off, Reg.RAX))
-        for _fname, slot, _child, child_off in nested:
+        # The address goes into the slot array of the block that DECLARES the
+        # field, so a second level's field is stored against the FIRST level's
+        # base and not against the outer one — the same fifth element arm64
+        # reads, and the reason is in `model.struct_block_children`.
+        for _fname, slot, _child, child_off, pbase in nested:
             self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.R10, child_off))
-            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 8 * slot, Reg.RAX))
+            self.asm.emit(encode_lea_r64_rm64(Reg.R9, Reg.R10, pbase))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8 * slot, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str, st) -> None:
@@ -7146,7 +7163,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         bottom.  `site[2]` is the PLACEMENT (`model.struct_constructor_sites`),
         so a declared type that was not placed cannot reach this loop.
         """
-        for _fname, _slot, _child, child_off in site[2]:
+        for _fname, _slot, _child, child_off, _pbase in site[2]:
             self._emit_nested_frame_init(_child, child_off + self._blob_base)
 
     def _emit_frame_nested_addresses(self, base: int, site) -> None:
@@ -7157,9 +7174,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         address stored and the frame initialized are the same one by
         construction rather than by two walks agreeing.
         """
-        for _fname, slot, _child, child_off in site[2]:
+        # The address goes into the slot array of the block that DECLARES the
+        # field, which is the fifth element and not the site's own base: a second
+        # level's field belongs to the FIRST level's frame, and storing it
+        # against the outer base overwrote the outer frame's own first-level
+        # address with the inner one. The arm64 twin is the same five elements.
+        for _fname, slot, _child, child_off, pbase in site[2]:
             self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + pbase + 8 * slot,
                                               Reg.RAX))
 
     def _emit_block_store(self, base: int, slot: int, value) -> None:
@@ -7235,8 +7257,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         """
         if depth >= M.MAX_NESTED_FRAME_DEPTH:
             return
-        for _fname, _slot, child, child_off in \
-                M.struct_nested_frame_fields(st, self._structs):
+        for _fname, _slot, child, child_off, _pbase in \
+                M.struct_block_children(st, self._structs,
+                                        base - self._blob_base,
+                                        M.MAX_NESTED_FRAME_DEPTH - depth):
             self._emit_nested_frame_init(child, child_off + self._blob_base,
                                          depth + 1)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):

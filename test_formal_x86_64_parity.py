@@ -662,6 +662,190 @@ CASES = [
      "    v = bump()\n"
      "    sys.stdout.write(\"%d\" % v)\n"
      "    return 0\n"),
+    # A chain of typed-nested FRAMES, which is the shape the block layout is
+    # recursive for, and every level is given a DISTINCT value so a lowering
+    # that put any two frames at the same address cannot pass by printing one
+    # number twice.  The read is the half that used to be one hop deep whatever
+    # the chain's length: `o.n.n.v` was computed as `o.n.v`, so the innermost
+    # read either refused (`'n' is not a field of the holder's struct`, which
+    # is true of the OUTER struct and false of the file) or read the wrong slot.
+    ("nested_frame_chain_three_levels",
+     "struct In:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var v: Int\n"
+     "    var n: In\n"
+     "\n"
+     "struct Out:\n"
+     "    var v: Int\n"
+     "    var n: Mid\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 4\n"
+     "    printf(\"%d %d %d %d\", o.v, o.n.v, o.n.n.v, o.n.n.w)\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = In()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = Mid()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 4\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (o.v, o.n.v, o.n.n.v, o.n.n.w))\n"
+     "    return 0\n"),
+    # The same chain HANDED TO A CALLEE, which is the `_emit_frame_copy` half and
+    # not the `_emit_frame_nested_addresses` half: the copy reserves its own
+    # block and has to lay the nested frames out in it identically, so a fix
+    # that stored each level's address against the OUTER base (as both backends
+    # did) passes the case above — which never copies — and fails this one by
+    # overwriting the outer frame's own first-level address with the inner one.
+    ("nested_frame_chain_three_levels_survives_a_call",
+     "struct In:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var v: Int\n"
+     "    var n: In\n"
+     "\n"
+     "struct Out:\n"
+     "    var v: Int\n"
+     "    var n: Mid\n"
+     "\n"
+     "def take(x: Out) -> Int:\n"
+     "    printf(\"%d %d %d\", x.v, x.n.v, x.n.n.v)\n"
+     "    return x.n.n.w\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 9\n"
+     "    printf(\" %d \", o.n.n.v)\n"
+     "    printf(\"%d\", take(o))\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = In()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = Mid()\n"
+     "\n"
+     "import sys\n\n"
+     "def take(x):\n"
+     "    sys.stdout.write(\"%d %d %d\" % (x.v, x.n.v, x.n.n.v))\n"
+     "    return x.n.n.w\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 9\n"
+     "    sys.stdout.write(\" %d \" % o.n.n.v)\n"
+     "    sys.stdout.write(\"%d\" % take(o))\n"
+     "    return 0\n"),
+    # FIVE nested levels, which is `MAX_NESTED_FRAME_DEPTH` and the deepest
+    # chain the layout sizes.  It is here as the anti-rot for the bound: raise
+    # the constant and this keeps passing while the REFUSAL below stops firing,
+    # which is the pair that says the constant is the whole of the limit.
+    ("nested_frame_chain_at_the_depth_bound",
+     "struct S1:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct S2:\n"
+     "    var v: Int\n"
+     "    var n: S1\n"
+     "\n"
+     "struct S3:\n"
+     "    var v: Int\n"
+     "    var n: S2\n"
+     "\n"
+     "struct S4:\n"
+     "    var v: Int\n"
+     "    var n: S3\n"
+     "\n"
+     "struct S5:\n"
+     "    var v: Int\n"
+     "    var n: S4\n"
+     "\n"
+     "def main():\n"
+     "    var o = S5()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.n.v = 4\n"
+     "    o.n.n.n.n.v = 5\n"
+     "    printf(\"%d %d %d %d %d\", o.v, o.n.v, o.n.n.v, o.n.n.n.v,\n"
+     "           o.n.n.n.n.v)\n"
+     "    return 0\n",
+     "class S1:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class S2:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S1()\n"
+     "\n"
+     "class S3:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S2()\n"
+     "\n"
+     "class S4:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S3()\n"
+     "\n"
+     "class S5:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S4()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = S5()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.n.v = 4\n"
+     "    o.n.n.n.n.v = 5\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (o.v, o.n.v, o.n.n.v,\n"
+     "                                        o.n.n.n.v, o.n.n.n.n.v))\n"
+     "    return 0\n"),
 ]
 
 
@@ -705,6 +889,60 @@ REFUSALS = [
      "    var v: Int\n"
      "    var w: Int\n",
      "+ - * / // % & | ^ << >> **"),
+    # A chain of typed-nested frames ONE LEVEL past what the layout sizes, and a
+    # DECLARATION CYCLE, which is the case `MAX_NESTED_FRAME_DEPTH` is written
+    # for.  Both used to build: the recursion's `depth <= 0` arm returned the
+    # object's own bytes and DROPPED the frames below the cut, so the reserved
+    # block came back short by exactly those frames, the blob cursor started
+    # inside one, and the program took a SIGSEGV with no diagnostic naming the
+    # file.  A bound that hangs is a bug; a bound that faults silently is
+    # worse, and this row is the refusal both must now make instead.
+    ("nested_frame_chain_past_the_depth_bound_refused",
+     "struct S1:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct S2:\n"
+     "    var v: Int\n"
+     "    var n: S1\n"
+     "\n"
+     "struct S3:\n"
+     "    var v: Int\n"
+     "    var n: S2\n"
+     "\n"
+     "struct S4:\n"
+     "    var v: Int\n"
+     "    var n: S3\n"
+     "\n"
+     "struct S5:\n"
+     "    var v: Int\n"
+     "    var n: S4\n"
+     "\n"
+     "struct S6:\n"
+     "    var v: Int\n"
+     "    var n: S5\n"
+     "\n"
+     "def main():\n"
+     "    var o = S6()\n"
+     "    o.v = 1\n"
+     "    printf(\"%d\", o.v)\n"
+     "    return 0\n",
+     "past the 4 levels this path lays out"),
+    ("cyclic_nested_frames_refused",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var b: B\n"
+     "\n"
+     "struct B:\n"
+     "    var y: Int\n"
+     "    var a: A\n"
+     "\n"
+     "def main():\n"
+     "    var o = A()\n"
+     "    o.x = 1\n"
+     "    printf(\"%d\", o.x)\n"
+     "    return 0\n",
+     "past the 4 levels this path lays out"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

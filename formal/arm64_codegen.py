@@ -1197,9 +1197,17 @@ dylib_exports: list = None, globals_base: int = None,
         # than by a refusal.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            outer, _dot, _rest = name.rpartition(".")
+            # One load per HOP, and the holder is everything before the first
+            # dot: `h.a.b` is the two loads this table has always meant and
+            # `h.a.b.c` is the same sequence with a third step, which is why the
+            # value is a tuple of slots and the walk is a loop. The temporary is
+            # X17 throughout because a middle frame's ADDRESS is what the next
+            # hop loads from, so the last hop writes the VALUE into `dst`.
+            outer = name[:name.index(".")]
             self._load_var(outer, 17)
-            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested))
+            for hop in nested[:-1]:
+                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
+            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1436,13 +1444,19 @@ dylib_exports: list = None, globals_base: int = None,
         # X19, and X19 is argument 0.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            outer = name.rsplit(".", 1)[0]
+            # The `_load_var` twin, hop by hop: every step but the last reads a
+            # nested frame's ADDRESS into X17 and the last writes the value into
+            # the parked source register. A chain of any length the constructor
+            # placed to the bound is therefore storable as well as readable.
+            outer = name[:name.index(".")]
             parked = src
             if src == 17:
                 self.asm.emit(encode_mov_zr_xn(16, src))
                 parked = 16
             self._load_var(outer, 17)
-            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested))
+            for hop in nested[:-1]:
+                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
+            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -6159,7 +6173,7 @@ dylib_exports: list = None, globals_base: int = None,
         `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
         declared type that was not placed cannot reach this loop.
         """
-        for _fname, _slot, _child, child_off in site[2]:
+        for _fname, _slot, _child, child_off, _pbase in site[2]:
             self._emit_nested_frame_init(_child, child_off)
 
     def _emit_frame_nested_addresses(self, site) -> None:
@@ -6170,10 +6184,15 @@ dylib_exports: list = None, globals_base: int = None,
         address stored and the frame initialized are the same one by
         construction rather than by two walks agreeing.
         """
-        for _fname, slot, _child, child_off in site[2]:
+        # The address goes into the slot array of the block that DECLARES the
+        # field, which is the fifth element and not the site's own base: a
+        # second level's field belongs to the FIRST level's frame, and storing it
+        # against the outer base overwrote the outer frame's own first-level
+        # address with the inner one.
+        for _fname, slot, _child, child_off, pbase in site[2]:
             self._emit_frame_base(child_off)
             self.asm.emit(encode_mov_zr_xn(0, 9))
-            self._emit_frame_base(site[1])
+            self._emit_frame_base(pbase)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_block_store(self, site, slot: int, value) -> None:
@@ -6282,8 +6301,17 @@ dylib_exports: list = None, globals_base: int = None,
         """
         if depth >= M.MAX_NESTED_FRAME_DEPTH:
             return
-        for _fname, _slot, child, child_off in \
-                M.struct_nested_frame_fields(st, self._structs):
+        # `struct_block_children`, and the reason it is that and not a walk of
+        # `struct_nested_frame_fields` here: the CHILD'S OFFSET is what this
+        # recursion needs and that list does not carry one — it is the 4th
+        # element `struct_block_children` adds, computed from the same
+        # `struct_frame_bytes` arithmetic the reserved block's SIZE comes from.
+        # Unpacking four elements out of a three-element list is what this used
+        # to do, and it raised only for a struct whose OWN typed-nested field
+        # exists — a second level of nesting, which the read side could not
+        # reach either, so nothing measured it.
+        for _fname, _slot, child, child_off, _pbase in M.struct_block_children(
+                st, self._structs, offset, M.MAX_NESTED_FRAME_DEPTH - depth):
             self._emit_nested_frame_init(child, child_off, depth + 1)
         self._emit_frame_base(offset)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
@@ -6335,9 +6363,19 @@ dylib_exports: list = None, globals_base: int = None,
         for off in range(0, block, 8):
             self.asm.emit(encode_ldr_xt_xn_imm(16, 0, off))
             self.asm.emit(encode_str_xt_xn_imm(16, 17, off))
-        for _fname, slot, _child, child_off in nested:
-            _emit_add_imm(self.asm, 16, 17, child_off)
-            self.asm.emit(encode_str_xt_xn_imm(16, 17, 8 * slot))
+        # The address goes into the slot array of the block that DECLARES the
+        # field, so a second level's field is stored against the FIRST level's
+        # base and not against the outer one — the same fifth element arm64
+        # reads, and the reason is in `model.struct_block_children`. Both are
+        # offsets up from X17, the destination block's base, so neither is a
+        # displacement and the copy needs no frame pointer to carry them.
+        for _fname, slot, _child, child_off, pbase in nested:
+            self.asm.emit(encode_mov_zr_xn(15, 17))
+            _emit_add_imm(self.asm, 15, 15, child_off)
+            self.asm.emit(encode_mov_zr_xn(16, 17))
+            _emit_add_imm(self.asm, 16, 16, pbase)
+            self.asm.emit(encode_add_xd_xn_xm(16, 16, 17))
+            self.asm.emit(encode_str_xt_xn_imm(16, 16, 8 * slot))
         self.asm.emit(encode_mov_zr_xn(0, 17))
 
     def _emit_frame_base(self, offset: int) -> None:
