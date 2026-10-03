@@ -63,10 +63,11 @@ RUN_TIMEOUT = 300
 
 REC = "@@"
 
-# The record terminator, for the reason every hostmod test in this tree gives:
-# a Mojo string literal's `\n` is NOT unescaped on this path, so a formal image
-# prints the two characters `\` and `n`. Records therefore go out back to back
-# with a terminator of their own, and `filemode`'s output — ten characters of
+# The record terminator, for the reason every hostmod test in this tree gives
+# (`test_formal_dylib.py` states it): a separator this suite can read back
+# without asking whether the image decoded a literal, `@@` being two bytes a
+# real newline cannot collide with. So records go out back to back with a
+# terminator of their own, and `filemode`'s output — ten characters of
 # `-dlbcp?` and `rwxst` — cannot contain it.
 
 # What CPython's own `stat` exports that this module must mirror, as NAMES.

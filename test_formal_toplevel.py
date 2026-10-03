@@ -841,12 +841,12 @@ def test_a_module_body_construction_with_arguments_runs(tmpdir, verbose):
     is not the same word.
 
     **No escape in the format string, and that is deliberate rather than an
-    oversight**: string literals are stored unescaped on this path, so
-    `printf("%d\\n", …)` writes a literal backslash and an `n` — 3 bytes for
-    the answer `1`, not 2 — which `test_formal_sys.py:510`
-    (`test_string_escapes_are_not_interpreted`) pins as a property of the
-    representation. The expected stdout below is the representation, not a
-    bug in it, and CPython is not the oracle for a file that calls `printf`."""
+    oversight**: the expected stdout below is exactly the bytes the format asks
+    for, `"x=1 y=2"`, with no line ending — so the case states the
+    representation it is checking rather than inheriting one from a decoder.
+    (An escape would be decoded, as CPython decodes it; see
+    `test_formal_sys.py`'s `test_string_escapes_are_interpreted_as_cpython_does`.)
+    CPython is not the oracle for a file that calls `printf`."""
     return case_agrees_with_cpython(
         "body_construction_runs", BODY_CONSTRUCTION_RUNS, tmpdir, verbose,
         expect_stdout="x=1 y=2", expect_exit=0)

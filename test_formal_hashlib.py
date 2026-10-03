@@ -88,10 +88,11 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 600
 RUN_TIMEOUT = 120
 
-# The record terminator. NOT a newline: `\n` inside a Mojo string literal is
-# not unescaped on this path — a formal image prints the two characters `\` and
-# `n` — so every program here emits its records back to back. Same convention,
-# and the same reason, as `test_formal_os.py` and `test_formal_time.py`.
+# The record terminator. NOT a newline, and for a reason that does not expire:
+# a separator this suite can read back WITHOUT asking whether the image decoded
+# a literal. `@@` is two bytes a real newline cannot collide with, so every
+# program here emits its records back to back. Same convention, and the same
+# reason, as `test_formal_os.py` and `test_formal_time.py`.
 REC = "@@"
 
 TEMP = None
