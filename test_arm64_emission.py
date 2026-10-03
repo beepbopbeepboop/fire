@@ -139,6 +139,87 @@ BCOND_CASES = [
 ]
 
 
+# TBZ / TBNZ: `if x & (1 << n):` is ONE instruction, and the two largest
+# genuinely-uncovered entries in `tools/arm64_insn_audit.py`'s 200-binary
+# instruction mix (49,645 TBNZ + 25,037 TBZ).
+#
+# The encoder existed and was byte-exact against `as` throughout, which is
+# exactly why these are HERE and not in `test_arm64_encoders.py`: an encoder
+# nothing calls is a decoder test with extra steps. And the first version of
+# this wiring produced a program that BUILT, RAN and printed `0 0` where the
+# source says `1 0`, because `Assembler.resolve()` had no TBZ/TBNZ arm and kept
+# imm14 = 0 — and then the arm it got preserved the wrong bits and tested bit 0.
+# Both are invisible to a byte comparison, which is the lesson in
+# `bugs/FORMAL_arm64_instruction_coverage.md` §"Comparing instruction bytes is
+# not comparing instructions"; the value assertion below is what caught them
+# and the self-branch assertion is what would have caught the first.
+TBZ_CASES = [
+    # (name, source, expected exit, expected mnemonic, expected bit)
+    #
+    # The plain shape, and the bit number is the whole content of the
+    # instruction: `40 & 8` sets bit 3.
+    ("tbz_bit3_set", "def f(n):\n    x = 40\n    if x & 8:\n        return 1\n"
+     "    return 0\n", 1, "tbz", 3),
+    # The same bit clear, so the BRANCH is taken and the fallthrough is not —
+    # the direction that has to be right for the other answer to be.
+    ("tbz_bit3_clear", "def f(n):\n    x = 32\n    if x & 8:\n        return 1\n"
+     "    return 0\n", 0, "tbz", 3),
+    ("tbz_bit0", "def f(n):\n    x = 7\n    if x & 1:\n        return 1\n"
+     "    return 0\n", 1, "tbz", 0),
+    ("tbz_bit31", "def f(n):\n    x = 2147483648\n    if x & (1 << 31):\n"
+     "        return 1\n    return 0\n", 1, "tbz", 31),
+    # The `not` spelling is the OTHER instruction and not another way to
+    # spell this one: the condition holds when the bit is clear, so the branch
+    # that leaves it is taken when the bit is set. `40 & 8` is set, so `not`
+    # is FALSE and this returns 0 — the answer a TBZ here would invert.
+    ("tbnz_negated_bit_test", "def f(n):\n    x = 40\n    if not (x & 8):\n"
+     "        return 1\n    return 0\n", 0, "tbnz", 3),
+    ("tbnz_negated_bit_test_bit_clear",
+     "def f(n):\n    x = 32\n    if not (x & 8):\n        return 1\n"
+     "    return 0\n", 1, "tbnz", 3),
+    # `&` is commutative in Python and a reader writes both orders.
+    ("tbz_mask_on_the_left", "def f(n):\n    x = 40\n    if 8 & x:\n"
+     "        return 1\n    return 0\n", 1, "tbz", 3),
+    # A LOOP test, which is a different caller and a different block shape, and
+    # it has to run MORE THAN ONCE: the branch is the loop's back edge and a
+    # loop that leaves on its first iteration cannot tell a patched displacement
+    # from an unpatched one at all. 8 is `255` counting down to `248`, which is
+    # the first value with bit 3 clear — `x - 8` would clear the bit itself and
+    # stop after one turn, so the decrement is by ONE on purpose.
+    ("tbz_while_loop",
+     "def f(n):\n    x = 255\n    k = 0\n    while x & 8:\n        x = x - 1\n"
+     "        k = k + 1\n    return k\n", 8, "tbz", 3),
+]
+
+# The four shapes that must NOT become a bit test, each with the reason it is
+# not one. Every case here prints the answer the general path gives, so a
+# recogniser that reached for them would be caught by the VALUE even when the
+# mnemonic check below passes.
+KEEP_THE_MASK = [
+    # NOT a single bit: `x & 255` asks whether ANY of eight bits is set, and a
+    # TBZ would answer for one of them. `40 & 255` is 40, so the answer is 1.
+    ("mask_is_not_a_power_of_two",
+     "def f(n):\n    x = 40\n    if x & 255:\n        return 1\n"
+     "    return 0\n", 1, 0),
+    # Bit 40: the b40 form relocates imm14 and `encode_tbz_xn_bit` REFUSES a
+    # bit >= 32 rather than encode it from memory of the spec. The general
+    # path is a correct AND, which is the point of declining rather than
+    # guessing.
+    ("bit_above_31",
+     "def f(n):\n    x = 40\n    if x & (1 << 40):\n        return 1\n"
+     "    return 0\n", 0, 0),
+    # The operand needs a CALL, so it is not a word this emitter can put in a
+    # register on its own.
+    ("operand_needs_a_call",
+     "def f(n):\n    x = 0\n    if side(8) & x:\n        return 1\n"
+     "    return 0\ndef side(v):\n    return v\n", 0, 0),
+    # The comparison arm is not a comparison: `x == 8` must keep its CMP.
+    ("not_a_bitwise_and",
+     "def f(n):\n    x = 8\n    if x == 8:\n        return 1\n"
+     "    return 0\n", 1, 0),
+]
+
+
 def self_branching(dis):
     """Addresses of branches whose displacement resolves to themselves.
 
@@ -260,11 +341,69 @@ def test_simple_operands_avoid_the_stack(tmpdir, verbose):
         print(f"  ok   csel_nostack (exit {code}, no stack)")
 
 
+def test_tbz_emitted_and_correct(tmpdir, verbose):
+    for name, src, want_exit, want_mn, want_bit in TBZ_CASES:
+        code, dis, _ = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit}")
+        ms = mnemonics(dis)
+        check(any(m == want_mn for m in ms),
+              f"{name}: expected {want_mn} to be emitted, got "
+              f"{sorted(set(ms))} — the encoder is correct but nothing calls "
+              f"it, which is the whole failure this file exists to catch")
+        # The BIT, read out of the disassembly rather than the instruction
+        # count. The first version of this wiring printed `0 0` where the
+        # source says `1 0` because `Assembler.resolve()` preserved the wrong
+        # bits and every test became `tbz w0, #0` — a program that builds, runs
+        # and is wrong, with a TBZ in it.
+        bits = set()
+        for line in dis.splitlines():
+            m = re.search(rf"\b{want_mn}\s+w\d+,\s+#(0x[0-9a-f]+|\d+)", line)
+            if m:
+                bits.add(int(m.group(1), 0))
+        check(bits == {want_bit},
+              f"{name}: the disassembly tests bits {sorted(bits)}, expected "
+              f"{{{want_bit}}} — a {want_mn.upper()} that reads the wrong bit "
+              f"is a wrong answer that still looks like one")
+        # …and the displacement, which is the half no byte comparison sees.
+        bad = self_branching(dis)
+        check(not bad,
+              f"{name}: branch resolves to its own address: {bad}")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, {want_mn} bit {want_bit})")
+
+
+def test_a_mask_that_is_not_one_bit_keeps_the_general_path(tmpdir, verbose):
+    """`want_bit` is 0 for every row here, which means "no TBZ in the image".
+
+    That is the direction that would REFUSE real programs if the recogniser
+    were too eager: `x & 255` is eight bits, bit 40 is a form the encoder
+    declines, and `side(8) & x` has no word to test. All four still have to
+    print the right answer, which is what says the general path is intact
+    rather than merely bypassed.
+    """
+    for name, src, want_exit, want_bit in KEEP_THE_MASK:
+        code, dis, _ = build_and_run(src, tmpdir, name)
+        check(code == want_exit,
+              f"{name}: returned {code}, expected {want_exit} — the general "
+              f"path has to keep answering this shape")
+        ms = mnemonics(dis)
+        check(not any(m.startswith(("tbz", "tbnz")) for m in ms),
+              f"{name}: took the bit-test path for a shape that is not a "
+              f"single-bit test: {sorted(set(ms))}")
+        if verbose:
+            print(f"  ok   {name} (exit {code}, no tbz)")
+
+
 TESTS = [
     ("B.cond is emitted, correct, and its displacement is patched",
      test_bcond_emitted_and_patched),
     ("CSEL is emitted and computes the right value",
      test_csel_emitted_and_correct),
+    ("TBZ is emitted, tests the right bit, and its displacement is patched",
+     test_tbz_emitted_and_correct),
+    ("a mask that is not one bit keeps the general path",
+     test_a_mask_that_is_not_one_bit_keeps_the_general_path),
     ("simple CSEL operands avoid the stack",
      test_simple_operands_avoid_the_stack),
     ("spills use unscaled frame-relative access",

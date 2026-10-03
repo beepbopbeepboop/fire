@@ -332,6 +332,53 @@ PARSERS = [
         cases=[[], ["-j", "2"], ["--opt", "beta"], ["--opt", "gamma"],
                ["--help"], ["a", "b"]],
     ),
+    dict(
+        # THE THREE BYTES A FIELD HAS TO ESCAPE, all in ONE help string, and the
+        # reason this parser exists.
+        #
+        # `bugs/FORMAL_argparse_spec_separators_in_a_help_string.md`: a spec is a
+        # `;`-separated record string with `|`-separated fields, so a help string
+        # containing a `;` ended there and everything after it in the same string
+        # parsed as MORE RECORDS — the observed symptom was two EMPTY
+        # `positional arguments:` entries in the help listing, because the tail
+        # parsed as a record with no name and no metavar. A `|` truncated the help
+        # text at the same place, more quietly, with no extra records.
+        #
+        # It could not be answered in the test corpus before this: every help
+        # string here had to avoid both bytes, so the one construct the bug was
+        # about was the one the wrapping cases were not allowed to use. They are
+        # spelled `\;` and `\|` now, and the module's scan skips a backslash and
+        # the byte after it — `formal/hostmods/argparse.mojo`'s `_esc_end`.
+        #
+        # The BACKSLASH is in the same help string because it is the third byte
+        # the rule has an opinion about and the only one whose bug would be
+        # silent: a `\` that is not an escape would be REMOVED by a reader that
+        # unescapes, so `a\b` would print `ab`. CPython prints the backslash.
+        #
+        # `choices` carries a separator too, because the same reasoning applies
+        # to it and `_quote_choices` is a second reader that has to unescape (an
+        # error message that printed the backslash would be its own bug). The
+        # `--pick gamma` case is the one that reaches it, and `gamma|delta` is
+        # not in the list, so CPython's message is
+        # `invalid choice: 'gamma' (choose from 'alpha|beta', 'x;y')` — with the
+        # bars and semicolons unescaped in the MESSAGE, which is the assertion
+        # that the unescaping happens on the way out and not only in `--help`.
+        name="separators",
+        prog="demo",
+        desc="",
+        args=[
+            (["-j", "--jobs"], dict(type=int, default=8,
+                                    help="workers; more than the core count "
+                                         "is slower | usually | really")),
+            # The literal backslash, in the same position as the separators so a
+            # reader that unescapes them but not this one fails visibly.
+            (["--path-like"], dict(action="store_true",
+                                   help="treat the argument as a\\b")),
+            (["--pick"], dict(choices=["alpha|beta", "x;y"], default="alpha|beta",
+                              help="which one")),
+        ],
+        cases=[["--help"], ["--pick", "gamma"], ["--pick", "alpha|beta"]],
+    ),
 ]
 
 # ── Generating the two programs from one declaration ──────────────────────────
@@ -369,12 +416,43 @@ def default_field(default):
     return str(default)              # store_true and count
 
 
-def record_for(names, kw):
-    """One `add_argument` call as one record of this module's spec."""
+def escape_field(text):
+    """One field's text as this module's spec encodes it.
+
+    `\\`, `;` and `|` are the three bytes that mean something to the reader — the
+    first because it is the escape itself, the other two because they separate
+    fields and records — so a field carries them escaped and the reader's scan
+    skips a backslash and the byte after it
+    (`formal/hostmods/argparse.mojo`'s `_esc_end`). This is the WRITER's half of
+    a rule and not a convention the module applies for you: `add(spec, record)`
+    receives a record the caller has already spelled, and it cannot tell a `|`
+    that separates two fields from one that is help text, so a spec written
+    without this truncates its own help at the first separator.
+
+    Applied to EVERY field rather than to `help` alone, because which fields may
+    contain a separator is a property of the language's `add_argument`, not of
+    this module: `dest`, `metavar`, `default` and `choices` are caller text too.
+    Escaping a field that holds none of the three is the identity, so the cost is
+    zero and the rule has no exception to remember.
+    """
+    return (str(text).replace("\\", "\\\\")
+            .replace(";", "\\;")
+            .replace("|", "\\|"))
+
+
+def record_fields(names, kw):
+    """The TEN fields of one `add_argument` call, unescaped and in order.
+
+    Split out from `record_for` because the encoding test needs the fields
+    themselves and re-deriving them beside `record_for` would be a second
+    implementation of the layout — the ten positions, their order and the
+    `None`-versus-omitted distinction in the default field are all of what the
+    spec is, and two lists of them would drift.
+    """
     ty = ""
     if "type" in kw:
         ty = {int: "int", str: "str", float: "float"}.get(kw["type"], "")
-    return "|".join([
+    return [
         " ".join(names),
         kw.get("action", ""),
         ty,
@@ -385,7 +463,21 @@ def record_for(names, kw):
         kw.get("dest", ""),
         kw.get("metavar", ""),
         kw.get("help") or "",
-    ])
+    ]
+
+
+def record_for(names, kw, escape=True):
+    """One `add_argument` call as one record of this module's spec.
+
+    `escape=False` is the UNENCODED record, and it exists for exactly one caller:
+    the encoding test, which needs the text the source spells so it can ask
+    whether the encoded form reads back as it. `spec_for` never passes it — a
+    spec handed to the module is always encoded.
+    """
+    fields = record_fields(names, kw)
+    if not escape:
+        return "|".join(fields)
+    return "|".join(escape_field(f) for f in fields)
 
 
 def spec_for(parser):
@@ -427,7 +519,15 @@ def dest_for(names, kw):
 
 
 def py_literal(v):
-    """A command-line element as a Python/Mojo string literal."""
+    """A string as a Python/Mojo source literal: backslash and quote escaped.
+
+    Three callers, and they were two until the spec's field encoding needed a
+    third. A command-line element is a value the program compares against, and a
+    `desc` is text the reader sees; the SPEC is neither, it is the module's input
+    and it now carries `\\`, `;` and `|` of its own — so it goes through here like
+    everything else rather than being interpolated raw, which is what silently
+    dropped the backslash from the `a\\b` help string and printed `ab`.
+    """
     return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -538,8 +638,8 @@ def mojo_print_lines(parser):
 def mojo_source(parser):
     """The whole Mojo program for one parser."""
     parts = [HEAD_MOJO]
-    parts.append(f'SPEC = "{spec_for(parser)}"\n')
-    parts.append(f'DESC = "{parser["desc"]}"\n')
+    parts.append(f"SPEC = {py_literal(spec_for(parser))}\n")
+    parts.append(f"DESC = {py_literal(parser['desc'])}\n")
     parts.append(MAIN_MOJO)
     parts.extend(mojo_argv_lines(parser))
     parts.append(POSTLUDE_MOJO)
@@ -1012,6 +1112,100 @@ def test_the_module_is_the_one_the_sweep_resolves(tmp, _shared):
           "tree it is a codegen finding, not a fact about the target")
 
 
+def unescape_field(encoded):
+    """What a reader of the spec must hand back for one encoded field.
+
+    Written here as the ORACLE for `escape_field`, not as a second
+    implementation of the module's `_ftext`: it is the reference the encoding is
+    measured against, and it is a direct transcription of the rule rather than the
+    module's scan, so the two agreeing is evidence and one being derived from the
+    other would not be.
+    """
+    out = []
+    i = 0
+    while i < len(encoded):
+        if encoded[i] == "\\" and i + 1 < len(encoded):
+            out.append(encoded[i + 1])
+            i += 2
+        else:
+            out.append(encoded[i])
+            i += 1
+    return "".join(out)
+
+
+def split_escaped(encoded, sep):
+    """`encoded` split on `sep`, skipping a backslash and the byte after it.
+
+    The ORACLE for the module's `_fld` / `_rend` pair, and it is here for the same
+    reason `unescape_field` is: written from the rule rather than derived from the
+    module's scan, so the two agreeing is evidence. It also has to be this and
+    not `str.split`, because `str.split` on an encoded string splits INSIDE an
+    escape — which is the bug the encoding exists to remove, and a test that
+    reintroduced it would report the corpus as broken.
+    """
+    fields = []
+    cur = []
+    i = 0
+    while i < len(encoded):
+        if encoded[i] == "\\" and i + 1 < len(encoded):
+            cur.append(encoded[i:i + 2])
+            i += 2
+            continue
+        if encoded[i] == sep:
+            fields.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(encoded[i])
+        i += 1
+    fields.append("".join(cur))
+    return fields
+
+
+def test_every_field_of_every_spec_survives_the_escaping(tmp, _shared):
+    """The encoding is TOTAL and REVERSIBLE over the whole corpus, and the only
+    backward-compatibility claim this rule needs is a measured one.
+
+    `bugs/FORMAL_argparse_spec_separators_in_a_help_string.md` picked the
+    escaping scheme on the condition that **no field of an existing spec contains
+    a backslash**, and said that condition has to be "asserted by a test over the
+    corpus rather than asserted here". This is that test, and it is three claims:
+
+      * every field of every record round-trips —
+        `unescape_field(escape_field(s)) == s` — so the encoding loses nothing;
+      * every encoded record splits into exactly the TEN fields the source
+        declared, and the encoded spec into exactly one record per declaration,
+        which is what "the separators still mean separators" means from the other
+        side. Before the rule the second claim failed for the `separators`
+        parser: the `;` in its help text added a record, and that was the
+        reported symptom (two empty `positional arguments:` entries);
+      * so no encoded field holds a bare `;` or `|`, which is the condition the
+        doc's option 1 rests on.
+
+    No build and no image: this is a property of four Python functions over a
+    table, and the differential table above is what says the module's reader
+    agrees with them.
+    """
+    for parser in PARSERS:
+        for names, kw in parser["args"]:
+            want = record_fields(names, kw)
+            got = split_escaped(record_for(names, kw), "|")
+            check(len(got) == len(want),
+                  f"parser {parser['name']!r}: the encoded record has "
+                  f"{len(got)} fields and should have {len(want)} — an "
+                  f"unescaped `|` is still splitting the string")
+            for w, g in zip(want, got):
+                check(unescape_field(g) == w,
+                      f"parser {parser['name']!r}: {w!r} encoded as {g!r} "
+                      f"reads back as {unescape_field(g)!r} — the encoding "
+                      f"must be reversible or the field is not recoverable")
+        check(len(split_escaped(spec_for(parser), ";")) == len(parser["args"]),
+              f"parser {parser['name']!r}: the encoded spec holds "
+              f"{len(split_escaped(spec_for(parser), ';'))} records for "
+              f"{len(parser['args'])} declarations — a `;` inside a field is "
+              f"still a record separator")
+
+
 TESTS = [
     ("`import argparse` resolves to the module source",
      test_argparse_resolves_to_the_module_source),
@@ -1020,6 +1214,8 @@ TESTS = [
      test_the_module_builds_on_its_own),
     ("the parse matches CPython, case for case",
      test_the_parse_matches_cpython),
+    ("every field of every spec survives the escaping",
+     test_every_field_of_every_spec_survives_the_escaping),
     ("an unsupported spec is refused with a reason",
      test_a_refused_spec_is_refused_with_a_reason),
     ("an underscore in an int is refused, not truncated",

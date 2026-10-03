@@ -1,12 +1,20 @@
 # FORMAL_arm64_instruction_coverage: the arm64 encoder survey, and what wiring the new instructions actually bought
 
+**Status: the survey is current as of 2026-10-03 and has been re-measured twice
+on this tree — once for the method and once for the two largest gaps. `TBZ` and
+`TBNZ` are now WIRED (encoder, machine model, proof tables, and a lowering that
+emits them), which moved 74,682 of the 4,026,231 disassembled instructions from
+"excluded by decision" into "covered". The file stays a survey, for the reason
+below.**
+
 Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
 answer is not guessable and the tooling to re-derive it should not be written
 twice. Bugs found *by* this work have their own documents — see
 `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` for the spill-displacement sign
-and the loop-exit bugs, and `FORMAL_arm64_known_proof_gaps.md` for the three
-unproved examples.
+and the loop-exit bugs, `FORMAL_arm64_known_proof_gaps.md` for the three
+unproved examples, and `FORMAL_arm64_bit_test_branch_is_not_provable.md` for the
+one gap the TBZ/TBNZ wiring left behind.
 
 ## Method
 
@@ -25,11 +33,11 @@ Pointer-authentication instructions (`pacibsp` and friends, ~92k) are excluded
 authenticate has no use for them, and hiding that in a filter would be
 dishonest accounting.
 
-| | before | after | after, counting only EMITTED encoders (2026-10-03) |
-|---|---|---|---|
-| encoders | 52 | 69 | 60 of 75 in the table are emitted by a lowering |
-| covered | 86.2% | **92.0%** | **89.1%** |
-| genuinely uncovered | 11.5% | **5.7%** | **5.7%** |
+| | before | after | after, counting only EMITTED encoders (2026-10-03) | …and after TBZ/TBNZ were WIRED (2026-10-03, below) |
+|---|---|---|---|---|
+| encoders | 52 | 69 | 60 of 75 in the table are emitted by a lowering | **62** of 75 |
+| covered | 86.2% | **92.0%** | **89.1%** | **90.9%** |
+| genuinely uncovered | 11.5% | **5.7%** | **5.7%** | **5.7%** |
 
 The third column is the survey asked the question it should have asked from the
 start, and the middle one is what this file reported until 2026-10-03. The
@@ -80,18 +88,91 @@ prints — and `blr` was reported as a gap the backend can close in one line.
 `blr` is in the family table now, and `test_arm64_encoders.py` fails if any
 `encode_*` maps to no declared mnemonic.
 
+### The two largest gaps are now closed: TBZ / TBNZ are WIRED (2026-10-03)
+
+`tbnz` (49,645) and `tbz` (25,037) were the two largest single entries in the gap
+list, 1.85% of every instruction a real compiler emits, and the entry above is
+right about why they were unreached: **encoded, byte-exact, and called by
+nothing**. They are now emitted, and the re-measurement is:
+
+```
+encoders in formal/arm64.py : 75 (58 base mnemonics)
+emitted by a lowering       : 62 (49 base mnemonics)   [was 60 (47)]
+covered by an encoder       : 3660751 (90.9%)           [was 3586069 (89.1%)]
+excluded by decision        : 137791                    [was 212473]
+genuinely uncovered        : 227689 (5.7%)             [unchanged]
+```
+
+The 74,682-instruction move is `25_037 + 49_645` exactly. **"Genuinely uncovered"
+does not move and is not supposed to**: it counts instructions this backend has
+no encoder for, and these two had encoders — they were in the other column, which
+is the whole point the 2026-10-03 method change made.
+
+What landed, and it is four things rather than one because an encoder is not an
+instruction:
+
+1. **The lowering.** `_emit_branch_unless_bit_test`, which is
+   `_emit_branch_unless`'s first arm: `if x & (1 << n):` becomes one `TBZ` and
+   `if not (x & (1 << n)):` one `TBNZ` — different instructions, because the
+   polarity inverts which way the branch leaves. `x & 8` and `8 & x` are the same
+   question, `x & 0xff` is not a bit test at all (eight bits, not one) and falls
+   through to the general path, bit 40 is declined because the encoder refuses
+   the b40 form rather than encoding it from memory of the spec, and an operand
+   that needs a call is declined because the bit test is only cheaper when the
+   operand is already a word.
+2. **`Assembler.resolve()`'s relocation for them.** This is the half that is
+   invisible to a byte comparison, and getting it wrong was the actual
+   development cost: with no arm at all, imm14 stayed 0 and every bit test
+   branched to ITSELF (`if x & 8:` hung the program) with
+   `test_arm64_encoders.py` 424/424 green throughout; with the CBZ family's
+   preserve-mask `0xff00001f`, bits 19..23 — the BIT NUMBER — were cleared and
+   every test became `tbz w0, #0`, which built, ran, and printed `0 0` where the
+   source says `1 0`. The mask is `0xfff8001f`. Both failures are the lesson in
+   §"Comparing instruction bytes is not comparing instructions" happening again,
+   and `test_arm64_emission.py`'s self-branch check and per-case BIT assertion are
+   what caught them.
+3. **The machine model.** `lib/ProofLib.lean`'s `arm64_step` gains the two
+   cases, beside the other pc-only branches and before every data-processing
+   case; `0x36`/`0x37` are the b5 test-bit encodings and every mask above them
+   was checked against them. imm14 and not imm19, sign-extended from bit 13 of
+   its own field. **`lib/ProofLib.lean` typechecks with them** — verified through
+   `formal/lean.py::ensure_library`, which is the only thing in this list that is
+   a measurement rather than a reading.
+4. **The proof tables.** `_STEP_CONDS` entries 52/53 (APPENDED, so no
+   hard-coded index moves), the `_step_rhs` and `_step_rhs_generic` right-hand
+   sides, the block scanner treating them as the `cbz` kind, and `loop_test`
+   answering for them. `_step_facts` decides every other entry's condition PER
+   WORD, so adding two entries adds two `have` lines to every generated lemma and
+   renumbers nothing — which is why this was cheap and the MODEL was not: adding
+   a branch to `arm64_step` required `hne_tbz` / `hne_tbnz` in each of the 18
+   `work_step_*` theorems that negate every branch before their own, and
+   `lib/ProofLib.lean` did not typecheck until all 18 had them.
+
+**What is NOT done, and it is one arm.** An `if` whose condition is a bit test
+**compiles, runs, and answers CPython**, and cannot be *proved*: the generator
+derives a branch's source-level proposition out of the cset that wrote the tested
+register, and TBZ/TBNZ write no register and set no flags. The generator refuses
+rather than emitting an `hcond` about the wrong thing, which is the correct
+failure. `bugs/FORMAL_arm64_bit_test_branch_is_not_provable.md` has the
+measurement, the site, and the next step — and it is why
+`formal/examples/bittest.mojo` is not committed with this: the example fails
+today and a failing example with no `EXPECTED_FAILURES` entry is the wrong shape.
+
 **The six encoders of 2026-10-02 are still six.** The genuinely-uncovered list
 is still dominated by NEON, FP and the cryptographic extensions, none of which
 this backend has a use for on a target that is int-only (`formal/types.py` is the
 authority on that). **Not a bug and no bug doc: this file is the survey, and it
 stays because the answer is not guessable** — more so now, since the answer has
-moved once already.
+moved twice already (the 2026-10-03 method change, and the TBZ/TBNZ wiring).
 
 ## What was added, in the order the audit said it mattered
 
-Read this list as what was ENCODED; the two entries marked † are encoded and
+Read this list as what was ENCODED; the entries marked † are encoded and
 **not emitted**, which the 2026-10-03 measurement above is how we know, and
-which is the one thing in this file that was wrong before.
+which is the one thing in this file that was wrong before. The `TBZ`/`TBNZ` entry
+was one of them until 2026-10-03 and no longer is; `CSEL`'s three neighbours
+(`csinc`, `csinv`, `csneg`) are the remaining half of that, and `csinc` is still
+3,014 occurrences of gap.
 
 - **`B.cond`, all 14 conditions** — by far the biggest single gap (~154k
   occurrences). `if a < b` was `cmp` + `cset` + `cbz` + a branch: three
@@ -108,10 +189,11 @@ which is the one thing in this file that was wrong before.
 - **`TBZ` / `TBNZ`** (~75k) — `if x & (1 << n):` was a mask, a compare and a
   branch. **Bits 0-31 only**: the architectural b40 form relocates imm14, and
   encoding that from memory of the spec is how you get a branch to the wrong
-  address, so bits >= 32 raise instead. **† Neither is emitted**: a bit test is
-  still `and`/`cmp` + a branch, so the mask the doc describes as removed is
-  still there. The two are the largest entries in the real gap list
-  (49,645 + 25,037), which is the honest way to size the work.
+  address, so bits >= 32 raise instead. **BOTH EMITTED as of 2026-10-03** — the
+  † is gone, and "§The two largest gaps are now closed" above is what replaced
+  it: the lowering, the relocation, the machine model and the proof tables. A bit
+  test is one instruction now, and the mask this entry describes as removed is
+  gone with it.
 - **`LDUR` / `STUR`** (~45k) — unscaled access, which in practice means the
   NEGATIVE displacement a scaled-offset load cannot express. This is the
   instruction whose emission carried a real bug; the sign writeup is in the

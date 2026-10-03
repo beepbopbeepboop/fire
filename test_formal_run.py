@@ -5146,6 +5146,145 @@ DECLARED_TYPE_REFUSALS = [
      "    var p = P()\n"
      "    return p.go()\n",
      "refuse:is a method call on a value", None),
+
+    # ── THE ONE CLAUSE OF THE AMBIGUOUS-NAME LIFT THAT IS NOT OPTIONAL ───────
+    #
+    # `BOTH_ARCH_CASES`'s `both_arch_ambiguous_method_name_settled_by_the_receiver`
+    # lifts `o.get()` because `o`'s agreed binding names a struct of this unit
+    # that DECLARES `get`. That condition is right, and it has exactly one
+    # exception: a struct that DERIVES from the binding's struct and declares
+    # the same member too. `b` is bound to `Base`, and `Base_emit` is compiled
+    # against `Base`'s two-field layout, so a value of `Derived` read through it
+    # is the BASE's view of a child — which builds, runs, and prints digits no
+    # source wrote. Python dispatches on the value; this path can only see the
+    # DECLARATION, which names the base.
+    #
+    # So this row is a REFUSAL and not a demonstration, and the reason is worth
+    # stating rather than leaving to be found: this path cannot construct the
+    # `Derived` value that would make the lift visibly wrong, so there is no
+    # program whose ANSWER the lift gets wrong for a case to compare against
+    # CPython. What the row pins is the refusal, which is the only end state
+    # reachable from here that is not a lie — and `BOTH_ARCH_CASES` is the wrong
+    # list for it for the same reason, since that runner requires a build.
+    #
+    # MEASURED, so this is not a row asserting a guard that is not there: with
+    # `formal/build.py`'s `_derived_overrides` clause deleted from the bare-
+    # receiver arm of `_lift_one_word_field_method`, this program BUILDS on
+    # arm64 and prints 5 — `Base_emit` called on a `Base`, which happens to be
+    # right for the only receiver this path can build here and would be wrong
+    # for every receiver it cannot. `Base` is TWO fields, so `one_word` does not
+    # carry it and the lift this row is about is the one that reads the
+    # constructor binding instead.
+    #
+    # The same guard on the FIELD-receiver arm is pinned by
+    # `test_formal_specialized_method_call.py`'s
+    # `refuse_a_field_receiver_whose_declared_type_has_a_derived_override`: two
+    # arms of one rule, so two rows.
+    ("ambiguous_name_a_derived_struct_also_declares_is_still_refused",
+     "struct Base:\n"
+     "    var start: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct Derived(Base):\n"
+     "    var extra: Int\n"
+     "\n"
+     "    def emit(self) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Base()\n"
+     "    b.start = 5\n"
+     "    b.pad = 1\n"
+     "    printf(\"%d\\n\", b.emit())\n"
+     "    return 0\n",
+     "refuse:b.emit() is a method call on a value", None),
+
+    # ── THE TWO ACCESSORS `.value` DOES NOT ANSWER THROUGH A PARAMETER ───────
+    #
+    # `BOTH_ARCH_CASES`' `both_arch_enum_typed_parameter_value_is_the_word_it_
+    # holds` is the half of this that works. These two are the half that does not,
+    # and they are two refusals because the two facts are two — a single sentence
+    # would have to be false about one of them, and a refusal that is false about
+    # the construct is worse than none because it sends a reader to change a
+    # correct program.
+    #
+    # `.name` is a member's SPELLING: the constant's own name in the class body,
+    # which the word travelling in the parameter does not carry. The
+    # class-constant spelling `Reg.RBP.name` answers, so this is not "the enum
+    # machinery is absent" — it is that a parameter has lost which member it is.
+    # (CPython's asymmetry is the same one: `Reg.<computed>.value` fails and
+    # `Reg.<computed>.name` still answers.)
+    ("refuse_an_enum_members_name_through_a_parameter",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "\n"
+     "def name_of(base: Reg) -> String:\n"
+     "    return base.name\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%s\\n\", name_of(Reg.RBP))\n"
+     "    return 0\n",
+     "refuse:base.name` is a member's SPELLING", None),
+
+    # `.value` where the enum has a member this path cannot materialize. The gate
+    # is EVERY member and not this read's member, and the reason is that a
+    # parameter's value is a word that arrived from a call site: nothing in it
+    # says which member it is, so one computed member makes the identity
+    # `base.value is base` false for all of them and answering it for the others
+    # would be a wrong number rather than a refusal.
+    #
+    # The call site passes `0` and CPython would raise `TypeError` there — an enum
+    # member is not an int. That is deliberate and is what makes this a LIMIT row
+    # rather than a differential: the reachable programs on this side of the gate
+    # are the ones with no reference answer, so what is pinned is that the build
+    # says so INSTEAD of answering. Naming `Reg.NEXT` in the needle is the other
+    # half — a message that said only "some member is computed" would send a
+    # reader looking through the class body for which one.
+    ("refuse_an_enum_value_when_any_member_is_computed",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    NEXT = RAX + 1\n"
+     "\n"
+     "def pick(base: Reg) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(0))\n"
+     "    return 0\n",
+     "refuse:`Reg.NEXT` is written as a COMPUTATION", None),
+
+    # THE DIRECTION THAT MATTERS MOST, because it is the one that would refuse
+    # real programs: the census is gated on `model.struct_is_enum`, so a
+    # parameter whose declared type is an ORDINARY struct still reads `.value`
+    # as a field — through the generic `field_access_refusal`, whose wording
+    # ("this path has no way to say what 'base' holds") is still TRUE here,
+    # because a two-field struct's receiver is a frame address and nothing in
+    # `base`'s declaration as used by THIS read settles which. `P` declares a
+    # METHOD named `value`, so the program is also one whose answer is a number:
+    # a census that stopped at the annotation and dropped the enum gate would
+    # rewrite `base.value` to `base` and print a frame address.
+    ("refuse_a_non_enum_parameters_value_is_still_a_field_read",
+     "struct P:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def value(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def pick(base: P) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(P()))\n"
+     "    return 0\n",
+     "refuse:'base.value' is a field access through 'base'", None),
 ]
 
 # ── the SECOND evidence source for a field's type: what __init__ ASSIGNS ─────
@@ -5620,6 +5759,61 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+
+    # ── AN ENUM-TYPED PARAMETER, AND `.value` OFF IT ─────────────────────────
+    #
+    # `Reg.RBP.value` — a CLASS-level member read — lowers, and has since
+    # `_enum_member_sites` / `_apply_constant_sites` (that fix is what stopped
+    # `Reg.R15.value` answering `0` where CPython answers `15`). The PARAMETER
+    # spelling did not, and the difference was one word in the site key: the
+    # census was keyed on the literal path `Reg.RBP.value`, and a parameter's path
+    # is `base.value`. Measured on both architectures before the rewrite:
+    #
+    #   build: 'base.value' is a field access through 'base', and this path has
+    #   no way to say what 'base' holds …
+    #
+    # and the refusal was FALSE. Its own rule is that "a field is lowered three
+    # ways and which one applies is decided by the BINDING of the base, not by a
+    # type" — and `base` is bound by its DECLARATION, which says `Reg`. `base`
+    # is not a frame and not a field: it holds an enum member, which on this path
+    # is a plain 64-bit word, and **the word an enum member IS, on this path, IS
+    # its value** — which is exactly why the class-constant rewrite substitutes
+    # the literal for `Reg.RBP.value`. So `base.value` is `base`.
+    #
+    # In `BOTH_ARCH_CASES` rather than as a `refuse:` row because the rewrite is
+    # in the shared build pass and the ANSWER is what has to agree: `formal/
+    # x86_64.py` reads these values in its register-number arithmetic, so a
+    # backend that got the word wrong would compute wrong machine code, print it,
+    # and exit 0.
+    #
+    # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
+    # 0 — under 256 because the exit status is a byte, and a weighted sum wide
+    # enough to overflow it would compare against `expected & 0xFF` and invent a
+    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
+    # expected value must fit in a byte" records, having been learned there).
+    # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
+    # has to put the bare name where an operand goes, and a row that only
+    # returned `base.value` would pass on a substitution that happened to be
+    # right for the wrong reason.
+    ("both_arch_enum_typed_parameter_value_is_the_word_it_holds",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "    RSP = 12\n"
+     "\n"
+     "def is_bp(base: Reg) -> Int:\n"
+     "    if base.value == 5:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def scaled(base: Reg, k: Int) -> Int:\n"
+     "    return base.value * k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return scaled(Reg.RSP, 3) + is_bp(Reg.RBP) * 10 + is_bp(Reg.RAX) * 100\n",
+     46, None),
     # ── A ONE-FIELD STRUCT WHOSE SOLE FIELD IS A FRAME ────────────────────────
     #
     # `Box` declares ONE field, `inner`, whose declared type is the framed
@@ -12465,6 +12659,72 @@ SET_UNION_CASES = [
      "    for v in a | b:\n"
      "        s += v\n"
      "    print(\"%d\" % s)\n"),
+
+    # ── THE SAME UNION, READ AS A VALUE — the row above structurally cannot
+    # fail on this, and that is why it is a separate row rather than a comment.
+    #
+    # The row above walks the result.  A walk reads elements until it hits
+    # something else, so it gets the right three even when the count word is
+    # wrong — the failure `_emit_set_union` had was a count of `nL + nR`
+    # written over a result holding `nL` elements, which made the dedup loop
+    # append `3` at index 4 and settle on 5 over the words [1, 2, 3] and two
+    # unwritten ones.  Iterating that reads five slots, sums 6, and agrees with
+    # CPython on the sum while disagreeing on everything else.
+    #
+    # `len` reads the count word itself, and so does a walk's own trip count, so
+    # both are asked here and CPython is asked both.  Measured on arm64 before
+    # the fix: `3 5 6` where CPython says `3 3 6`; and the subscript spelling
+    # `c[0], c[1], c[2]` answered `1, 2, 0` where CPython has no subscript for
+    # a set at all, which is why this row asks `len` and the trip count rather
+    # than reproducing that.  (It is not lost: `c[3]` on a three-element union
+    # now exits 1 through the blob bounds check, which is the other half of the
+    # same answer.)
+    ("set_union_count_read_as_a_value_through_locals",
+     "def main() -> Int:\n"
+     "    var a = {1, 2}\n"
+     "    var b = {2, 3}\n"
+     "    var c = a | b\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = {1, 2}\n"
+     "    b = {2, 3}\n"
+     "    c = a | b\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
+
+    # THE SAME THROUGH LITERALS, which is a different path and not a
+    # variation on the row above: `_blob_est` answers a set literal with its
+    # element count and an `IdentExpr` with 64, so the two spellings reserve a
+    # different number of words for the result.  A fix that only got the
+    # reservation right would pass one of these two rows and fail the other.
+    ("set_union_count_read_as_a_value_through_literals",
+     "def main() -> Int:\n"
+     "    var c = {1, 2} | {2, 3}\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    c = {1, 2} | {2, 3}\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
 ]
 
 

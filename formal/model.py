@@ -28654,6 +28654,23 @@ def expr_spelling(node) -> str:
         inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
         return (f"[{inner}]" if isinstance(node, F.ListExpr)
                 else f"({inner})")
+    if isinstance(node, F.SetExpr):
+        # `{1, 2}` and not `SetExpr`.  An arm the build pass's older copy carried
+        # and this one did not, so it is spelled here rather than kept as a second
+        # implementation of the function — a set literal in a refusal about a
+        # stored or assigned value is a set literal the reader can find in their
+        # own file.
+        return f"{{{', '.join(expr_spelling(e) for e in (node.elements or []))}}}"
+    if isinstance(node, F.BinaryOp):
+        # `a + b` and not `BinaryOp`, for the reason the build pass's copy spelled
+        # out before it was deleted: a message that read `G is read in bump() at
+        # BinaryOp` is a true statement, a placeholder, and useless, because the
+        # reader's question is WHICH read.  Every refusal that quotes a value goes
+        # through this one function, so the fix belongs here rather than in each
+        # caller — and here is also the only place it can live now that there is
+        # one function.
+        return (f"{expr_spelling(node.left)} {node.op} "
+                f"{expr_spelling(node.right)}")
     if isinstance(node, F.StringLiteral) and isinstance(node.value, str):
         # QUOTED, and that is the whole of this arm: the `("value", "name")`
         # loop below prints `str("a")`, which is `a` — a bare name the file does

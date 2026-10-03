@@ -6042,6 +6042,113 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldr_xt_xn_imm(
                 _reg_num(reg), _reg_num(reg), 0))
 
+    def _static_bit_mask(self, e):
+        """The bit number `e` selects, or None when `e` is not a single bit.
+
+        A mask is written two ways and both are ordinary: `x & 8` and
+        `x & (1 << 3)` are the same question. `_static_int` answers only the
+        first on purpose — its callers want a LITERAL (a `range` bound, a slice
+        index), and folding arithmetic into it would change what they accept —
+        so the shift is folded HERE, where the question is "is this a power of
+        two" and a second reader is not a second implementation of the same one.
+
+        None for zero, for a negative mask, and for anything that is not exactly
+        one bit: `x & 255` asks about eight bits and `x & -1` is a Python
+        identity this path does not need to recognise.
+        """
+        value = self._static_int(e)
+        if value is None and isinstance(e, F.BinaryOp) and e.op == "<<":
+            base = self._static_int(e.left)
+            shift = self._static_int(e.right)
+            if base is not None and shift is not None and 0 <= shift <= 63:
+                value = base << shift
+        if value is None or value <= 0 or (value & (value - 1)):
+            return None
+        return value.bit_length() - 1
+
+    def _bit_test_mask(self, cond):
+        """`(operand, bit, negated)` for a TEST OF ONE BIT, else None.
+
+        `x & 8`, `x & (1 << 3)` and `8 & x` are the same question and the
+        ARCHITECTURE has one instruction for it: TBZ/TBNZ reads a single bit of
+        a register and branches, so the mask never has to be built, the `cmp`
+        never runs, and the three instructions this used to spend become one.
+        That is 49,645 TBNZ and 25,037 TBZ in the 200-binary instruction mix
+        `tools/arm64_insn_audit.py` disassembles — the two largest genuinely
+        uncovered entries, and they were unreached because the encoder had no
+        caller. Between them they are 1.85% of every instruction a real
+        compiler emits.
+
+        `negated` is the `not` spelling, and it is a different INSTRUCTION and
+        not a different way of spelling the same one: `if not (x & 8):` holds
+        when the bit is CLEAR, so the branch that leaves it is taken when the bit
+        is SET, which is TBNZ. Emitting TBZ there would be a program that builds,
+        runs and answers the other way round.
+
+        Three shapes, and refusing the fourth is the point:
+
+          * the mask is a single bit, by either spelling above. `x & 0xff` is
+            not a bit test — it asks whether any of eight bits is set — and
+            answering it with a TBZ would be a wrong answer, so it falls through
+            to the general path and stays right;
+          * the mask may be written either way round, because `&` is commutative
+            in Python and a reader writes both;
+          * the base must be a LOAD this backend can put in a register on its
+            own. Anything that needs a conversion, a call or a frame address is
+            declined, because the bit test is only cheaper when the operand is
+            already a word and a frame address has no bits to read.
+
+        The bit is capped at 31 and the reason is in the ENCODER: the b40 form
+        (bits 32-63) relocates imm14, and encoding that from memory of the spec
+        is how you get a branch to the wrong address. `encode_tbz_xn_bit` raises
+        rather than guess, and this declines before reaching it so a bit >= 32
+        is a correct AND/CMP rather than an exception out of the middle of a
+        branch.
+        """
+        negated = False
+        if isinstance(cond, F.UnaryOp) and cond.op == "not":
+            negated = True
+            cond = cond.operand
+        if not (isinstance(cond, F.BinaryOp) and cond.op == "&"):
+            return None
+        left, right = cond.left, cond.right
+        for operand, mask in ((left, right), (right, left)):
+            bit = self._static_bit_mask(mask)
+            if bit is None:
+                continue
+            if bit > 31 or not self._is_pure_expr(operand):
+                return None                 # see the docstring for both
+            return operand, bit, negated
+        return None
+
+    def _emit_branch_unless_bit_test(self, cond, false_label: str) -> bool:
+        """`if x & (1 << n):` as ONE instruction. True if it emitted.
+
+        `_emit_branch_unless`'s first arm, and it comes before the comparison
+        arm because a bit test is not a comparison: there are no flags to read
+        and no boolean to round-trip through a register, which is the same
+        argument the B.cond wiring makes and the same reason this one records a
+        `cond_branch` — the proof generator filters `if` tests by the PC the
+        codegen named, and a branch it was not told about would be attributed
+        some other block's source condition.
+
+        Which of the two, from the polarity rather than from the shape: this
+        function branches on the FALSE case, so `if x & 8:` is TBZ (false is the
+        bit clear) and `if not (x & 8):` is TBNZ. Both are recorded, and both
+        are two-way with `pc + 4` on the fallthrough, which is why the proof
+        generator's block scanner treats them as the `cbz` kind.
+        """
+        found = self._bit_test_mask(cond)
+        if found is None:
+            return False
+        operand, bit, negated = found
+        self._emit_expr(operand)            # X0 = the word
+        self._record_cond_branch()
+        self.asm.emit(encode_tbnz_xn_bit(bit, 0, 0) if negated
+                      else encode_tbz_xn_bit(bit, 0, 0))
+        self.asm.emit_label_rel(false_label, here_offset=-4)
+        return True
+
     def _emit_branch_unless(self, cond, false_label: str) -> bool:
         """Branch to `false_label` unless `cond` holds. True if it emitted.
 
@@ -6055,6 +6162,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         block structure the rest of the backend (and the proof generator's
         `_cond_branches` filter) already expects is unchanged.
         """
+        if self._emit_branch_unless_bit_test(cond, false_label):
+            return True
         if not (isinstance(cond, F.BinaryOp) and cond.op in self._cmp_conds()):
             return False
         # A comparison in a CONDITION does not go through `_emit_binop` — the
@@ -9080,7 +9189,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
-        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n (upper bound)
+        # THE COUNT IS nL, NOT nL + nR, and the two are indistinguishable in
+        # every shape that only ITERATES the result — which is why the wrong one
+        # was here so long.  The result starts out holding the nL left-hand
+        # elements and NOTHING else, so the count that describes it is nL; the
+        # dedup loop below grows it by one per element it actually appends.
+        #
+        # With nL + nR written here, `len` and a subscript both read a number no
+        # store produced: `{1,2} | {2,3}` had count 4 over the three words
+        # [1, 2, 3] and two unwritten ones, then appended `3` at index 4 and
+        # made the count 5.  Measured, `printf("len=%d", len({1,2}|{2,3}))`:
+        # arm64 5, CPython 3; `c[0], c[1], c[2]` was 1, 2, 0.  Iterating the
+        # same blob read all five slots and summed 6, which is the right answer
+        # from the right three elements and two zeros — so a case that walks the
+        # union cannot see this, and the existing one could not either.
+        #
+        # `est` above stays the sum, because it is a RESERVATION: nL + nR is how
+        # many words the result can need, and the reservation is what keeps the
+        # append loop's `result[count]` store inside the blob.
+        self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy all of left into result[0..nL)

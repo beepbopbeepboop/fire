@@ -804,6 +804,27 @@ class Assembler:
                 # ITSELF, so `if a > b:` with a false condition hung the
                 # program in a one-instruction loop.
                 insn = (insn & 0xff00000f) | ((offset & 0x7ffff) << 5)
+            elif (insn & 0xff000000) in (0x36000000, 0x37000000):
+                # TBZ / TBNZ — imm14 at bits 5..18, and the PRESERVE mask is
+                # 0xfff8001f, NOT the CBZ family's 0xff00001f: bits 19..23 hold
+                # the BIT NUMBER (b5) and clearing them made every bit test
+                # `tbz w0, #0`, which is a branch on bit 0 of the same word —
+                # a wrong answer that builds, runs, and prints. The top byte
+                # identifies the pair, and 0x36/0x37 differ only in bit 24, so
+                # one `in` test covers both.
+                #
+                # THE MISSING CASE IS NOT SUBTLE, and this comment exists so it
+                # is not reintroduced: with no branch here the instruction fell
+                # through every arm above, kept imm14 = 0, and branched to
+                # ITSELF — `if x & 8:` hung the program in a one-instruction
+                # loop, and `test_arm64_encoders.py` was 424/424 green
+                # throughout because it compares the encoder's four bytes and
+                # says nothing about a relocation. That is the lesson in
+                # `bugs/FORMAL_arm64_instruction_coverage.md` §"Comparing
+                # instruction bytes is not comparing instructions", and
+                # `test_arm64_emission.py`'s self-branch check is what caught it
+                # here.
+                insn = (insn & 0xfff8001f) | ((offset & 0x3fff) << 5)
 
             struct.pack_into('<I', self.sections["text"], idx, insn)
         self.relocs.clear()

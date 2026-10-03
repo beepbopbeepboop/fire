@@ -2606,45 +2606,15 @@ def _check_declared_parameter(functions, callee, position, pname, want,
 # here as well; `model.py` needs them for its own refusals and a model function
 # must not reach up into the build pass for a string, so the model owns the one
 # implementation and this file calls it.
+#
+# This file's OWN copy was the older of the two and its `def` shadowed this alias
+# three lines below it, so the comment above described a state the file was not
+# in and every build refusal that quoted a value whose callee was not a bare
+# name printed `CallExpr` where the source wrote `c.f[0]()`.  It is deleted; the
+# two arms it alone carried — `BinaryOp` and the set half of the display — live
+# in `model.expr_spelling` now, so the model is the whole of the spelling rather
+# than the newer half of it.  See `formal/model.py::expr_spelling`.
 _expr_spelling = M.expr_spelling
-
-
-def _expr_spelling(node) -> str:
-    """The source's own spelling of an expression, as far as a name needs one.
-
-    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
-    reader to the AST to find the call, which is the opposite of what a
-    diagnostic quoting a call site is for.  A shape with no short spelling is
-    named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it.
-
-    The OPERATOR arms came later than the rest and the reason is a message that
-    read `G is read in bump() at BinaryOp` — a true statement, a placeholder,
-    and useless, because the reader's question is which read.  Every refusal that
-    quotes a value goes through this one function, so the fix belongs here rather
-    than in each caller."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
-    if isinstance(node, F.MemberExpr):
-        return _member_chain(node)
-    if isinstance(node, F.BinaryOp):
-        return (f"{_expr_spelling(node.left)} {node.op} "
-                f"{_expr_spelling(node.right)}")
-    if isinstance(node, F.UnaryOp):
-        return f"{node.op}{_expr_spelling(node.operand)}"
-    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return (f"{'(' if isinstance(node, F.TupleExpr) else ''}"
-                f"{', '.join(_expr_spelling(e) for e in node.elements)}"
-                f"{')' if isinstance(node, F.TupleExpr) else ''}")
-    if isinstance(node, F.SubscriptExpr):
-        return f"{_expr_spelling(node.obj)}[{_expr_spelling(node.index)}]"
-    for attr in ("value", "name"):
-        v = getattr(node, attr, None)
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)
-    return type(node).__name__
 
 
 def _call_spelling(call, arg, position, pname) -> str:
@@ -9037,11 +9007,42 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
     # values: the base is the value the call site or the declaration says it is,
     # and nothing about `x.A` is a field read when `A` is the class's own value.
     locals_ = dict(_constant_constructor_bindings(fn, structs_by_name)[0])
-    for local, st in M.parameter_declared_structs(
-            fn, structs_by_name, owner).items():
+    declared = M.parameter_declared_structs(fn, structs_by_name, owner)
+    for local, st in declared.items():
         locals_.setdefault(local, st)
     for local, st in locals_.items():
         publish(local, st, comptime_only=False)
+    # …and the ENUM accessor's PARAMETER spelling, which is a different fact
+    # again: `base.value` is not a read of a class-level value at all, it is a
+    # read of the WORD `base` already holds, because on this path an enum member
+    # is not an object — the member and its value are one word, which is exactly
+    # why `_enum_member_sites` substitutes the literal for `S.NAME.value`.
+    #
+    # Keyed the same way (`"<parameter>.value"`), so it lands in this table and
+    # is rewritten by this function's own arm: a second walk of the body for one
+    # spelling would be the quadratic thing `_constant_read_sites`' own docstring
+    # is about, and two tables of access paths would be a second `_constant_site`
+    # shape for every consumer to destructure.
+    #
+    # Gated on the body spelling `value` at all, which is the same superset filter
+    # the loops above use and the same direction that cannot lose a site: the
+    # only thing that can look one of these up is a `MemberExpr` over an
+    # `IdentExpr` in THIS body.
+    #
+    # `path not in sites` because `publish` may already have registered the same
+    # spelling: an enum with a MEMBER named `value` or `name` gives the
+    # class-constant loop above a `base.value` of its own, and that one is the
+    # more specific evidence — a declared member is a value this table can
+    # materialize, whatever the accessor shape says about the same two letters.
+    if "value" in members or "name" in members:
+        for pname, st in declared.items():
+            if not M.struct_is_enum(structs_by_name, st.name):
+                continue
+            for accessor in ENUM_PARAMETER_ACCESSORS:
+                path = f"{pname}.{accessor}"
+                if accessor in members and path not in sites:
+                    sites[path] = _constant_site(
+                        st, _enum_parameter_kind(st, accessor))
     # The RECEIVER, and `Self` beside it. Only a `comptime` binding is readable
     # through these; see the docstring for why the assignment case is not.
     if owner is not None:
@@ -9377,6 +9378,101 @@ def _enum_member_refusal(struct_def, name: str, accessor: str, default):
             f"compiler can see), which is the same program with a "
             f"representation. The member's `.name` is answerable either way: it "
             f"is the constant's spelling, not its value.")
+
+
+# The two accessors of an ENUM member, spelled off a PARAMETER rather than off
+# the class: `base.value` and `base.name` for a `base: Reg` parameter. Written
+# out rather than ranged over, because the two answer from DIFFERENT evidence and
+# that asymmetry is the whole design: `.value` is the word the parameter already
+# holds, and `.name` is the member's spelling, which is a fact about the
+# declaration site and is not recoverable from any word this path can read.
+ENUM_PARAMETER_ACCESSORS = ("value", "name")
+
+# `{id(struct_def): (struct_def, {accessor: kind})}` — the per-struct half of the
+# gate, which is a property of the DECLARATION and not of the function asking.
+# `_constant_read_sites` is called once per function and the question is once per
+# struct, so without this every function in a module re-derives it: 177 methods in
+# `formal/arm64_codegen.py` times every member of every enum in the image.
+#
+# The `struct_def` is kept IN THE VALUE, and that is not tidiness: keying a cache
+# on `id()` is only sound while the id cannot be recycled, and a sweep process
+# builds many images in one interpreter, so a struct def from file 1 can be freed
+# and file 2's can land on its id. Holding the object is what makes the key
+# unique for the lifetime of the entry, and the entry is one small dict per enum
+# class per image.
+_ENUM_PARAMETER_KINDS: dict = {}
+
+
+def _enum_parameter_kind(struct_def, accessor: str) -> str:
+    """The site kind for `<parameter>.<accessor>` where the parameter is an enum.
+
+    `"enum-value"` for `.value` when the whole enum can be represented as words,
+    `"enum-computed"` when it cannot, and `"enum-name"` for `.name` in both
+    cases — which is the asymmetry stated above, and it is CPython's too:
+    `Reg.RBP.value` fails for a computed member and `Reg.RBP.name` still answers.
+
+    The gate on `.value` is EVERY member, not the one at this read site, and the
+    reason is that a parameter's value is a word that arrived from a call site
+    this image may not have: the same word is `Reg.RAX`'s and `Reg.RBP`'s, and
+    nothing in it says which. A computed member's value is not the word that
+    travels (it is the result of a computation the class body runs), so one
+    computed member makes the identity false for every member — and answering
+    `base.value` for the others anyway is a wrong number rather than a refusal,
+    which is the worse of the two failures here.
+    """
+    entry = _ENUM_PARAMETER_KINDS.get(id(struct_def))
+    if entry is None or entry[0] is not struct_def:
+        kinds = {"name": "enum-name", "value": "enum-value"}
+        for member, _default in M.struct_class_constants(struct_def):
+            literal, _ = _constant_literal(struct_def, member)
+            if literal is None or not isinstance(literal, F.IntLiteral):
+                kinds["value"] = "enum-computed"
+                break
+        entry = (struct_def, kinds)
+        _ENUM_PARAMETER_KINDS[id(struct_def)] = entry
+    return entry[1][accessor]
+
+
+def _enum_parameter_refusal(struct_def, pname: str, kind: str):
+    """The two refusals for `<parameter>.value` / `<parameter>.name` on an enum.
+
+    They are two messages and not one because the two facts are two: a computed
+    member has a value this path cannot materialize, while a member's `name` is
+    not a value at all — it is the constant's SPELLING, and the word travelling
+    in the parameter does not carry it. A single sentence would have to be false
+    about one of them, and a refusal that is false about the construct is worse
+    than no refusal because it sends a reader to change a correct program.
+
+    Both name the parameter rather than the enum, because the reader is looking
+    at a line that says `base.value`, and the enum's declaration is what they
+    would have to go and read to know which of its members this word is.
+    """
+    if kind == "enum-computed":
+        computed = [member for member, _default
+                    in M.struct_class_constants(struct_def)
+                    if (_constant_literal(struct_def, member)[0] is None
+                        or not isinstance(_constant_literal(
+                            struct_def, member)[0], F.IntLiteral))]
+        spelled = ", ".join(f"`{struct_def.name}.{c}`" for c in computed)
+        return (f"`{pname}.value` is the value of an `enum` member, and a formal "
+                f"value is one 64-bit word — which on this path is the member "
+                f"ITSELF, so the read is the word `{pname}` already holds. But "
+                f"{spelled} {'is' if len(computed) == 1 else 'are'} written as a "
+                f"COMPUTATION in the class body rather than as a literal, and "
+                f"this path has no comptime evaluator to run one, so it cannot "
+                f"say which member a word is and therefore cannot answer this "
+                f"read for any member of `{struct_def.name}`. Write the value as "
+                f"a literal at the declaration, or pass the value in rather than "
+                f"the member")
+    return (f"`{pname}.name` is a member's SPELLING — the constant's own name in "
+            f"the class body of `{struct_def.name}` — and the word this path "
+            f"receives for `{pname}` is the member's VALUE, which does not carry "
+            f"it: on this target an `enum` member is not an object, it is one "
+            f"64-bit word, and `Reg.RBP` and `Reg.RAX` are the same word "
+            f"wherever they are written. So this read is answerable for a member "
+            f"named at the use site (`Reg.RBP.name`, which lowers) and not "
+            f"through a parameter. Pass the name as a string, or pass the value "
+            f"and compare it, which is the same program with a representation")
 
 
 def _fold_a_class_level_default(struct_def, default, count: list) -> bool:
@@ -12469,6 +12565,28 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None,
         got = sites.get(f"{node.obj.name}.{node.member}")
         if got is not None:
             st, kind, _member = got
+            if kind in ("enum-value", "enum-computed", "enum-name"):
+                # `<parameter>.value` / `<parameter>.name` where the parameter is
+                # declared with an ENUM of this unit. The rewrite is the IDENTITY
+                # on `.value` — the bare name — and that is the whole answer
+                # rather than a stand-in for one: `_enum_member_sites` already
+                # substitutes the literal for `Reg.RBP.value` because the word an
+                # enum member is ON THIS PATH IS its value, and the parameter holds
+                # that word. Before this, `base.value` reached the emitter as a
+                # field read through a base nothing classified and was refused with
+                # `field_access_refusal` — whose own rule ("a field is lowered
+                # three ways and which one applies is decided by the BINDING of the
+                # base, not by a type") is satisfied by the DECLARATION here, and
+                # whose sentence about nothing being able to say what `base` holds
+                # was false.
+                #
+                # Measured, on both architectures, before the rewrite:
+                # `def pick(base: Reg) -> Int: return 1 if base.value == 5 else 0`
+                # called with `Reg.RBP` refused; CPython answers 1.
+                if kind == "enum-value":
+                    return node.obj
+                raise CodegenError(_enum_parameter_refusal(
+                    st, node.obj.name, kind))
             if kind == "overridden":
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
