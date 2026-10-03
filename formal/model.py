@@ -2947,6 +2947,10 @@ def _build_cfg(body) -> tuple:
     # — `[]` for a body ending in a `return`, and the last statement's block for
     # a body that ends on a loop or a branch — so adding it made
     # `entry -> LAST block`, a path no source takes.
+    #
+    # A block that falls out of the FUNCTION needs no successor for the fixpoint
+    # either: it is the last block, and `_definitely_stored` reads IN sets, not
+    # exits.
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:

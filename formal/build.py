@@ -6802,6 +6802,8 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
         if st is None or not any(m.name == func.member
                                  for m in M.struct_methods(st)):
             return False
+        if _derived_overrides(st, func.member, structs_by_name):
+            return False
         call.func = F.IdentExpr(name=M.method_function_name(st.name,
                                                             func.member))
         if func.member not in (receiverless or ()):
@@ -6831,10 +6833,48 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     if inner is None or not any(m.name == func.member
                                 for m in M.struct_methods(inner)):
         return False
+    if _derived_overrides(inner, func.member, structs_by_name):
+        return False
     call.func = F.IdentExpr(name=M.method_function_name(inner.name, func.member))
     if func.member not in (receiverless or ()):
         call.args = [obj] + list(call.args)
     return True
+
+
+def _derived_overrides(st, member: str, structs_by_name: dict) -> bool:
+    """Whether a struct of THIS UNIT derives from `st` and declares `member` too.
+
+    The one condition under which a lift by DECLARED TYPE is a wrong answer
+    rather than a better one, and it is a silent wrong answer: the lifted callee
+    is the BASE's method compiled against the base's layout, so a value of the
+    derived struct is read through it and the program builds, runs, and prints
+    digits no source wrote.  Python dispatches on the value; this path can only
+    see the DECLARATION, which names the base.
+
+        struct Slice:        var start: Int
+                            def emit_slice(self, w) -> Int: return self.start
+        struct FancySlice(Slice):
+                            def emit_slice(self, w) -> Int: return 1000
+        struct Box:          var _inner: Slice
+                            def go(self, w) -> Int: return self._inner.emit_slice(w)
+
+    `self._inner` may hold either, so there is no single callee and the honest
+    answer is the pre-existing refusal rather than the base's method.  Note the
+    asymmetry with the AMBIGUOUS-NAME case, which this is not: there, two
+    unrelated structs share a spelling and the receiver's type settles it; here
+    one struct IS the other, and the type settles only the layout.
+
+    Transitive, because `struct_derived_names` is: a grandchild overriding the
+    method is the same hazard as a child overriding it.
+    """
+    declared = {m.name for m in M.struct_methods(st)}
+    for name in M.struct_derived_names(list((structs_by_name or {}).values()),
+                                        st.name):
+        derived = structs_by_name.get(name)
+        if derived is not None and declared & {m.name for m in
+                                               M.struct_methods(derived)}:
+            return True
+    return False
 
 
 def _chain_declared_struct(st, fields, structs_by_name: dict):
@@ -10263,11 +10303,13 @@ def _method_call_target(call, owners: dict):
 
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
-    has no owner to lift to.  A receiver that is not a bare NAME is `None` for
-    the same reason there is nothing here to dispatch it by, and the lift for
-    the one-word-field case (`recv.f.m(x)`, where `recv.f` and `recv` are the
-    same word) is `_lift_one_word_field_method`, which asks the field's DECLARED
-    type instead of the name and so can lift an ambiguous `m` as well.
+    has no owner to lift to.  A receiver that is not a bare NAME is `None` too,
+    and that is a limit of the RECOGNITION rather than of the construct: the one
+    receiver whose declared type settles an ambiguous name is a one-word field,
+    and `_lift_one_word_field_method` is where that case is answered — it runs
+    immediately after this one, on the same `one_word` table, and it can lift an
+    ambiguous `m` where this cannot because it reads the field's DECLARED TYPE
+    instead of the spelling.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
