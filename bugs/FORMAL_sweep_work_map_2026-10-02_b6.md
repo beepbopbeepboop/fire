@@ -217,23 +217,34 @@ is in the `-5` log's `tool` rows too** (10 of 10 at the time of writing, by
 `comm` over the two logs' path lists). This is a **timeout artefact, not a
 finding**, and it is the one number a reader must not quote.
 
-**What one of them actually costs**, measured here on the same file with a
-private `GMOJO_HOME` (so nothing of the sweep's is involved) and no `-t` at all:
+**What one of them actually costs, and what it turns out to be**, measured here
+on the same file with a private `GMOJO_HOME` (so nothing of the sweep's is
+involved) and no `-t` at all:
 
 ```
 $ python3 tools/memcap.py --limit-gb 4 --label dict.mojo -- \
     /usr/bin/time -p python3 fire.py build --formal --no-prove --backend=arm64 \
     -o .tmp/exp-dict.bin ../new-modular/Mojo/stdlib/std/collections/dict.mojo
-  PID  ELAPSED      TIME  RSS
-78570   13:27   3:11.73  72160          # still running at 13m27s
+real 1914.14        # 31.9 minutes of wall
+user 455.35         # 7.6 minutes of CPU
+memcap: done, peak 0.1 GB across up to 3 procs (ceiling 4.0 GB), child exit 1
+build: dict.mojo imports 'std.builtin.rebind', which cannot be built either:
+  builtin_slice.mojo: StridedSlice___init__ returns a frame address, so it
+  cannot be compiled into a dylib: …
 ```
 
-**13½ minutes of wall for 3 minutes of CPU, in 72 MB.** That ratio is the whole
-story of this sweep on this box (§5.2), and it says what `-t` buys: at 4.2x,
-`-t 600` is about 2.4 minutes of CPU, and this file needs more than that. The
-`-5` map's advice applies unchanged — re-sweep the `tool` rows at a larger `-t`
-before quoting a denominator — and it is cheap to do, because the CAS means only
-the unanswered files are rebuilt.
+Three things in one measurement:
+
+* **the wall/CPU ratio is 4.2x**, which is §5.2 and the reason `-t` has to be
+  sized against this box rather than against the file;
+* `-t 600` buys about 143 s of CPU here and this file needs **455 s**, so it is
+  unanswerable at `-t 600` on this machine and would answer at about `-t 1900`;
+* **it is not a pass.** Its verdict is `codegen/dependency`, behind
+  `builtin_slice.mojo`'s returned-frame refusal — i.e. one of the 21 `tool`
+  files belongs to §3's second row, and the `tool` class is not merely "files
+  that would pass". Anyone quoting a coverage rate off this run must re-sweep
+  these first, or state the rate over the files that were answered and stop
+  there.
 
 ## 5. Two defects in the instrument, found by reading its own output
 
