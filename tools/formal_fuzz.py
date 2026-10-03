@@ -244,9 +244,10 @@ MIXES = {
     # slot` is the same construct) and it is the only way this generator can
     # reach the frame-receiver machinery: a receiver that is a frame ADDRESS
     # rather than a value, whose fields live in the callee's own slots.
-    "classes": (("obj_new", 3), ("field_read", 3), ("field_write", 3),
-                ("method_call", 5), ("method_call_in_arg", 3),
-                ("assign", 2), ("if", 3), ("while", 1), ("augassign", 2)),
+    "classes": (("obj_new", 3), ("field_read", 3), ("field_cmp", 3),
+                ("field_write", 3), ("method_call", 5),
+                ("method_call_in_arg", 3), ("assign", 2), ("if", 3),
+                ("while", 1), ("augassign", 2)),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is
@@ -464,8 +465,8 @@ class Gen:
             "while", "for", "div", "pow", "break", "cond_expr", "call",
             "nested_call", "recursion", "arg_expr", "str_assign", "str_print",
             "str_len", "str_cmp", "list_build", "list_read", "list_write",
-            "list_len", "list_in_loop", "obj_new", "field_read", "field_write",
-            "method_call", "method_call_in_arg")
+            "list_len", "list_in_loop", "obj_new", "field_read", "field_cmp",
+            "field_write", "method_call", "method_call_in_arg")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop"):
@@ -527,8 +528,8 @@ class Gen:
             self.arg_expr_stmt(indent)
         elif kind in ("str_assign", "str_print", "str_len", "str_cmp"):
             self.string_stmt(indent, kind)
-        elif kind in ("obj_new", "field_read", "field_write", "method_call",
-                      "method_call_in_arg"):
+        elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
+                      "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
         else:
             self.list_stmt(indent, kind)
@@ -902,7 +903,12 @@ class Gen:
                                  f"{self.rng.choice(['+', '-'])} "
                                  f"{self.rng.randint(1, 9)}) & 0xFFFF")
                 else:
-                    body.emit(0, f"print(self.{field})")
+                    # Through a declared local, for the same reason main's
+                    # `field_read` does it: `print(self.f)` is the refused
+                    # spelling on both backends.
+                    tmp = body.declare(body.fresh("w"), "0")
+                    body.emit(0, f"{tmp} = (self.{field}) & 0xFFFF")
+                    body.emit(0, f"print({tmp})")
             if params:
                 body.emit(0, f"return (self.{self.rng.choice(fields)} "
                              f"{self.rng.choice(['+', '-'])} "
@@ -934,14 +940,42 @@ class Gen:
             return
         var, _cname, fields, methods = self.rng.choice(self.objs)
         if kind == "field_read":
-            self.emit(indent, f"print({var}.{self.rng.choice(fields)})")
+            # Through a WORD, never straight into `print`.  `print(obj.field)`
+            # is refused on both architectures with "print() cannot tell
+            # whether MemberExpr is a string or a number" — 284 of 300
+            # generated class programs were that one refusal — and a refusal
+            # is not a finding, so a family that is 95% refused is a family
+            # that finds nothing.  Reading the field into a typed word and
+            # printing that is the same read through the path the model can
+            # answer.
+            field = self.rng.choice(fields)
+            tmp = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{tmp} = ({var}.{field}) & 0xFFFF")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
+            return
+        if kind == "field_cmp":
+            # A field in a CONDITION, which is the other way a field is read:
+            # no `print` kind question, and the compare is decided against the
+            # field's own type.
+            field = self.rng.choice(fields)
+            self.emit(indent, f"if {var}.{field} == "
+                              f"{self.int_expr(1)}:")
+            self.emit(indent + 1, f"print({self.rng.randint(0, 9)})")
+            if self.rng.random() < 0.5:
+                self.emit(indent, "else:")
+                self.emit(indent + 1, f"print({self.rng.randint(0, 9)})")
             return
         if kind == "field_write":
             self.emit(indent, f"{var}.{self.rng.choice(fields)} = "
                               f"({self.word_expr(1)}) & 0xFFFF")
             return
         if not methods:
-            self.emit(indent, f"print({var}.{self.rng.choice(fields)})")
+            tmp = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{tmp} = ({var}.{self.rng.choice(fields)}) "
+                              f"& 0xFFFF")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
             return
         mname, params = self.rng.choice(methods)
         if kind == "method_call_in_arg" and params and self.objs:
