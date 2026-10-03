@@ -1207,16 +1207,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # silent zero rather than a wrong register.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            # One load per HOP, and the holder is everything before the first
-            # dot: `h.a.b` is the two loads this table has always meant and
-            # `h.a.b.c` is the same sequence with a third step, which is why the
-            # value is a tuple of slots and the walk is a loop. R11 carries the
-            # middle frames' ADDRESSES, so the last hop writes the VALUE into
-            # `dst`. The arm64 twin of this is the same loop over X17.
-            self._load_var(name[:name.index(".")], Reg.R11)
-            for hop in nested[:-1]:
-                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
-            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested[-1]))
+            # One entry per LEVEL, not one entry per chain:
+            # `formal/build.py`'s `_fill_chain_levels` publishes `h.a`, `h.a.b`,
+            # `h.a.b.c` … and the recursion below is what turns a read of the
+            # last of those into the sequence of loads the others describe. R11
+            # carries the middle frame's ADDRESS, so the last step reads the
+            # VALUE into `dst`. The arm64 twin of this is the same two steps
+            # over X17.
+            outer, _dot, _rest = name.rpartition(".")
+            self._load_var(outer, Reg.R11)
+            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1430,15 +1430,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the one-load case above, for the same reason.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            # The `_load_var` twin, hop by hop, for the same reason and with the
-            # same R11 parking.
+            # The `_load_var` twin: the OUTER load is itself a lookup in the same
+            # table, and the R11 parking is the same dance as the one-load case
+            # above, for the same reason.
             if src == Reg.R11:
                 self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
                 src = Reg.R10
-            self._load_var(name[:name.index(".")], Reg.R11)
-            for hop in nested[:-1]:
-                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
-            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested[-1], src))
+            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
             return
         gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:

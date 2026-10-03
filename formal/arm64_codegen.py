@@ -1220,17 +1220,18 @@ dylib_exports: list = None, globals_base: int = None,
         # than by a refusal.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            # One load per HOP, and the holder is everything before the first
-            # dot: `h.a.b` is the two loads this table has always meant and
-            # `h.a.b.c` is the same sequence with a third step, which is why the
-            # value is a tuple of slots and the walk is a loop. The temporary is
-            # X17 throughout because a middle frame's ADDRESS is what the next
-            # hop loads from, so the last hop writes the VALUE into `dst`.
-            outer = name[:name.index(".")]
+            # One entry per LEVEL, not one entry per chain: `formal/build.py`'s
+            # `_fill_chain_levels` publishes `h.a`, `h.a.b`, `h.a.b.c` … and the
+            # recursion below is what turns a read of the last of those into the
+            # sequence of loads the others describe. `h.a.b` is the two loads
+            # this table has always meant and `h.a.b.c` is the same sequence
+            # with a third step, reached by asking about its own prefix rather
+            # than by walking a list of slots: the temporary is X17 throughout
+            # because a middle frame's ADDRESS is what the next step loads from,
+            # so the last one reads the VALUE into `dst`.
+            outer, _dot, _rest = name.rpartition(".")
             self._load_var(outer, 17)
-            for hop in nested[:-1]:
-                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
-            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested[-1]))
+            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1467,19 +1468,16 @@ dylib_exports: list = None, globals_base: int = None,
         # X19, and X19 is argument 0.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            # The `_load_var` twin, hop by hop: every step but the last reads a
-            # nested frame's ADDRESS into X17 and the last writes the value into
-            # the parked source register. A chain of any length the constructor
-            # placed to the bound is therefore storable as well as readable.
-            outer = name[:name.index(".")]
+            # The `_load_var` twin: the OUTER load is itself a lookup in the same
+            # table, so a chain of any length the constructor placed to the
+            # bound is storable as well as readable without a second mechanism.
+            outer = name.rsplit(".", 1)[0]
             parked = src
             if src == 17:
                 self.asm.emit(encode_mov_zr_xn(16, src))
                 parked = 16
             self._load_var(outer, 17)
-            for hop in nested[:-1]:
-                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
-            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested[-1]))
+            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
