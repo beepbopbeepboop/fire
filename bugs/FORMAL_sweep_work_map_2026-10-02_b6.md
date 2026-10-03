@@ -16,18 +16,21 @@ restarted by the controller after stalling 26 minutes with no CPU. Everything it
 had reached this branch as commit `66d47489` ("WIP snapshot by controller"), and
 that commit is **two log files and nothing else** — no source change — so its
 tree content is identical to `master` (`4384e756`) and its partial logs are
-measurements of this tree. Its 143-line `bugs/sweeps/sweep-{arm,x86}-6.txt` (an
-earlier `-j 6 -t 120` attempt) are in that commit's history; this run's logs
-overwrite those two paths, which is what the task asks for.
+measurements of this tree. Those two files are the output of its **`-j 10 -t
+600`** run, cut off at 134 classified lines (arm64) and 133 (x86-64) when the
+controller snapshotted them; this run's logs overwrite those two paths, which is
+what the task asks for, and §2.2 lists every run's classified count so nothing is
+lost but the snapshot itself.
 
 It also left **two live sweeps of its own, one hour in, 20 build processes
 between them, and nothing reading them**:
 
 ```
 $ ps -o pid,ppid,lstart,command -p 49952,49955,49956
-49952 ... Fri Oct  2 16:35:30 2026  01:00:44 bash .tmp/run_sweep6.sh
-49955 ... Fri Oct  2 16:35:30 2026  01:00:44 python3 tools/formal_sweep.py -j 10 -t 600
-49956 ... Fri Oct  2 16:35:30 2026  01:00:44 python3 tools/formal_sweep.py -j 10 -t 600 --arch x86_64
+  PID  PPID STARTED             ELAPSED COMMAND
+49952     1 Fri Oct  2 16:35:30 2026  01:00:44 bash .tmp/run_sweep6.sh
+49955 49952 Fri Oct  2 16:35:30 2026  01:00:44 python3 tools/formal_sweep.py -j 10 -t 600
+49956 49952 Fri Oct  2 16:35:30 2026  01:00:44 python3 tools/formal_sweep.py -j 10 -t 600 --arch x86_64
 ```
 
 Load average was **86-90 on 18 cores** while they ran. Their completed verdicts
@@ -104,19 +107,25 @@ statement about how many more files got an answer, not about the backend.
 
 ### 2.2 What the `-6` runs are over
 
-Two interrupted runs on this tree, both classified a large part of the scope and
-neither reached all of it:
+Two interrupted runs on this tree before this one, both classified a large part
+of the scope and neither reached all of it:
 
-| run | flag | classified (arm64 / x86_64) | log |
-|---|---|---|---|
-| predecessor, `-j 6 -t 120` | 16 min | 29 / 22 non-pass lines | commit `66d47489`'s `bugs/sweeps/sweep-*-6.txt` |
-| predecessor, `-j 10 -t 600` | 66 min | 148 / 149 non-pass lines | this worktree's `.tmp/predecessor-partial-{arm,x86}.txt`, cited below as "the interrupted run" |
-| **this run, `-j 8 -t 600`** | see §2.3 | see §2.3 | `bugs/sweeps/sweep-arm-6.txt`, `sweep-x86-6.txt` |
+| run | flags | classified | of which `tool` | where its output is |
+|---|---|---|---|---|
+| predecessor, first attempt | `-j 2 -t 120` | 12 | 4 | `.tmp/sweep-arm-6-j2-partial.txt` in its tree |
+| predecessor, second | `-j 6 -t 120` | 43 arm / 36 x86 | 29 / 30 | `.tmp/arm6-j6-partial.txt`, `.tmp/x86-6-j6-partial.txt` in its tree |
+| predecessor, third — **the one the snapshot commit holds** | `-j 10 -t 600` | 148 arm / 149 x86 | 21 / 20 | `bugs/sweeps/sweep-*-6.txt` at `66d47489` (a snapshot of it at 134/133 classified) |
+| **this run** | `-j 8 -t 600` | §2.3 | §2.3 | `bugs/sweeps/sweep-{arm,x86}-6.txt` |
+
+The `-j 6 -t 120` row is where the predecessor's own measurement in §1.2 comes
+from — **29 of its 43 classified arm64 files were timeouts** — and it is why the
+`-j 10 -t 600` run existed. All three of the predecessor's runs, and this one,
+are on the same tree, and their `tool` rows are all the same files (§4).
 
 A run that is SIGKILLed prints no summary, so for the predecessor's runs the
-**pass count is not recoverable** — the tool prints one line per NON-pass file
-and nothing else, and the ledger is published only at the end. Its counts below
-are therefore over the classified *failures* only, which is the conservative
+**pass count is not recoverable**: the tool prints one line per NON-pass file and
+nothing else, and the ledger is published only at the end. Its counts are
+therefore over the classified *failures* only, which is the conservative
 direction for every `codegen` row and useless for the coverage rate.
 
 ### 2.3 This run
@@ -200,12 +209,28 @@ collections/string/string_span.mojo  format/_utils.mojo      itertools/itertools
 ```
 
 They are the largest modules in the stdlib, and they were the same files the
-`-5` sweep timed out at `-t 30`. This is a **timeout artefact, not a finding**,
-and it is the one number a reader must not quote: on this box a build gets about
-a fifth of a core, so `-t 600` is ~120 s of CPU, and these files need more.
-The `-5` map's advice applies unchanged — re-sweep the `tool` rows at a larger
-`-t` before quoting a denominator — and it is cheap to do, because the CAS means
-only the unanswered files are rebuilt.
+`-5` sweep timed out at `-t 30`: **every `tool` row this run has produced so far
+is in the `-5` log's `tool` rows too** (10 of 10 at the time of writing, by
+`comm` over the two logs' path lists). This is a **timeout artefact, not a
+finding**, and it is the one number a reader must not quote.
+
+**What one of them actually costs**, measured here on the same file with a
+private `GMOJO_HOME` (so nothing of the sweep's is involved) and no `-t` at all:
+
+```
+$ python3 tools/memcap.py --limit-gb 4 --label dict.mojo -- \
+    /usr/bin/time -p python3 fire.py build --formal --no-prove --backend=arm64 \
+    -o .tmp/exp-dict.bin ../new-modular/Mojo/stdlib/std/collections/dict.mojo
+  PID  ELAPSED      TIME  RSS
+78570   13:27   3:11.73  72160          # still running at 13m27s
+```
+
+**13½ minutes of wall for 3 minutes of CPU, in 72 MB.** That ratio is the whole
+story of this sweep on this box (§5.2), and it says what `-t` buys: at 4.2x,
+`-t 600` is about 2.4 minutes of CPU, and this file needs more than that. The
+`-5` map's advice applies unchanged — re-sweep the `tool` rows at a larger `-t`
+before quoting a denominator — and it is cheap to do, because the CAS means only
+the unanswered files are rebuilt.
 
 ## 5. Two defects in the instrument, found by reading its own output
 
