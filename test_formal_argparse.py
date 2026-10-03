@@ -269,6 +269,19 @@ PARSERS = [
                                "some is one run of characters")),
             (["--opt"], dict(choices=["alpha", "beta"], default="alpha",
                              help="short")),
+            # A TAB in the help text. It becomes ONE space, because
+            # `HelpFormatter._split_lines` substitutes whitespace before
+            # `textwrap` runs — so `expandtabs` never sees it, and the fold lands
+            # where a space's would.
+            (["-t"], dict(action="store_true",
+                          help="a tab\there and the help goes on for long "
+                               "enough to need folding at the column")),
+            # `strip()`: `_split_lines` strips, so a padded help string prints
+            # without its padding.
+            (["-a"], dict(action="store_true", help="  padded  ")),
+            # `action.help.strip()`: a help text of nothing but spaces takes the
+            # NO-HELP branch, so the entry is the invocation and nothing else.
+            (["-b"], dict(action="store_true", help="   ")),
         ],
         cases=[["--help"]],
     ),

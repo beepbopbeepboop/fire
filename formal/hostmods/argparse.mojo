@@ -1567,7 +1567,11 @@ def _with_prog(prog, parts):
 # is not removed at all: it is simply not written over, because the newline goes
 # at the offset before it.
 
-TAB_STOP = 8         # `TextWrapper.tabsize`
+# `TextWrapper.tabsize`, kept because it is a property of the wrapping rather
+# than of this target: the formatter squashes whitespace BEFORE `textwrap` runs
+# (see `_squashed`), so on this path nothing expands a tab — and if a caller ever
+# wraps without squashing first, the tab stop is the number that decides where.
+TAB_STOP = 8
 
 MIN_WRAP_WIDTH = 11  # CPython's `max(self._width - help_position, 11)`
 
@@ -1750,6 +1754,52 @@ def _nl_at(buf, at):
     return at + 1
 
 
+def _squashed(text):
+    """`text` with every whitespace byte a single space, then stripped.
+
+    **`HelpFormatter._split_lines` and `_fill_text` do this before `textwrap`
+    ever sees the text**, and the order is the whole content of this function:
+
+        text = self._whitespace_matcher.sub(' ', text).strip()
+
+    So a TAB in a help string is a SPACE here — `textwrap`'s own `expandtabs`
+    never runs, because by the time its `wrap` is called there is no tab left in
+    the string, and a help string is therefore expanded to one space and not to a
+    tab stop. Both call sites go through the same two lines in CPython, which is
+    why this is one function rather than one per caller, and why the folding a tab
+    produces is the folding a space produces.
+
+    The `strip` is the other half and is just as observable: `_format_action`
+    tests `action.help.strip()` and `_format_text` strips before filling, so a
+    help text with a leading or trailing space does not carry it into the column.
+    """
+    n = str_len(text)
+    if n == 0:
+        return str_alloc(2)
+    ws = _ws_set()
+    d = str_alloc(n + 2)
+    u = 0
+    i = 0
+    while i < n:
+        if strspn(text + i, ws) > 0:
+            u = str_put(d, u, " ", 1)
+        else:
+            u = str_put(d, u, text + i, 1)
+        i = i + 1
+    # `str.strip()`: drop the whitespace runs at both ends, keeping the spaces
+    # between two non-whitespace bytes exactly one for one.
+    start = 0
+    while start < u and strspn(d + start, ws) > 0:
+        start = start + 1
+    end = u
+    while end > start and strspn(d + end - 1, ws) > 0:
+        end = end - 1
+    tail = str_alloc(u - start + 2)
+    v = str_put(tail, 0, d + start, end - start)
+    memset(tail + v, 0, 1)
+    return tail
+
+
 def _wrap_into(buf, u, text, width, ind0, indn, wsub):
     """`text` wrapped to `width` at `buf[u:]`, one line each. The new `u`.
 
@@ -1789,12 +1839,12 @@ def _wrap_into(buf, u, text, width, ind0, indn, wsub):
         dropped, and a line with nothing else on it is not a line at all — the
         last rule is why a paragraph of nothing but spaces produces no output.
 
-    Tabs are expanded first (`_munge_whitespace`'s `expandtabs`), which is why a
-    help string containing one does not print one.
+    The text is `_squashed` first, which is what CPython's formatter does first.
     """
-    n = str_len(text)
-    if n == 0:
+    if str_len(text) == 0:
         return u
+    text = _squashed(text)
+    n = str_len(text)
     ws = _ws_set()
     lt = _letter_set()
     wd = _word_set()
@@ -2037,12 +2087,17 @@ def _entry(err, u, inv, h, helppos):
     the invocation and nothing else.
 
     **And the help text is WRAPPED**, which is the part that used to be missing
-    (`bugs/FORMAL_argparse_help_wrapping_not_implemented.md`). The help column
-    is `help_width = max(self._width - help_position, 11)` — the indent counts
-    against the width, and 11 is CPython's floor for it — and the first line
-    starts where the header left it while every line after it is indented to the
-    help column. So the two cases differ only in the indent the first line gets,
-    and `_wrap_help` is that one difference.
+    (`bugs/FORMAL_argparse_help_wrapping_not_implemented.md`). The help column is
+    `help_width = max(self._width - help_position, 11)` — the floor is CPython's
+    — the first line starts where the header left it, and every line after it is
+    indented to the help column.
+
+    **TWO conditions, not one**, which is the detail that made this wrong once:
+    `if not action.help:` decides whether the invocation is PADDED, and
+    `if action.help and action.help.strip():` decides whether the help is
+    PRINTED. A help text of nothing but spaces is therefore padded like a real
+    one and then prints nothing — and CPython emits the padded spaces, so the
+    difference is visible at the end of the line.
     """
     if str_len(h) == 0:
         u = _putlit(err, u, "  ")
@@ -2057,10 +2112,16 @@ def _entry(err, u, inv, h, helppos):
         u = str_put(err, u, inv, str_len(inv))
         u = _pad(err, u, width - str_len(inv))
         u = _putlit(err, u, "  ")
-        return _wrap_help(err, u, h, hw, helppos, 0)
+        if _has_nonspace(h) == 1:
+            return _wrap_help(err, u, h, hw, helppos, 0)
+        # `elif not action_header.endswith('\n'): parts.append('\n')` — the
+        # header of this case does not end in one, so the newline is added here.
+        return _nl(err, u)
     u = _putlit(err, u, "  ")
     u = str_put(err, u, inv, str_len(inv))
     u = _nl(err, u)
+    if _has_nonspace(h) == 0:
+        return u
     return _wrap_help(err, u, h, hw, helppos, helppos)
 
 
