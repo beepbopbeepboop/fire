@@ -5253,6 +5253,13 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     # Decided from the key's lowered type BEFORE the conversion chain below,
     # because two of those arms re-type `kt` and one of them is this one.
     _bytes_key = kt == 'MojoBytes *'
+    # Did the key conversion chain below hand out a `_char_to_cstr`
+    # placeholder for `_apply_kw_keys` to resolve? Only the CONTAINER arm
+    # does, so this is what tells the three setter arms whether they must go
+    # through `_emit_call`. Declared here, before the chain, because every
+    # other arm leaves it False — including the two that `continue` out of the
+    # chain early.
+    _kw_key = False
     # Load global string literals into temps before passing to dict functions
     #
     # EVERY branch below that produces a `char *` key must re-type `kt` with
@@ -5310,18 +5317,54 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # strdup()s it — mojo_str_from_int's own heap-allocated
         # buffer is the already-proven-safe, unchanged behavior for
         # by far the most common dict-key type.
-        kv = gen._repr_value(kt, kv)
-        kt = 'char *'
+        #
+        # A CONTAINER key is NOT one of those, and rendering it here
+        # with `_repr_value` gave this one site a SECOND spelling of a
+        # content key: `_repr_value` writes the tuple's own TEXT
+        # (`mojo_repr_list_ints` -> "(9, 9)"), while every other
+        # dict-key site in this backend — the subscript get/set, `in`,
+        # `pop`, `setdefault`, a comprehension's key — hands the raw
+        # WORD to `_char_to_cstr(word_ok=True)`, whose `_kw` twin
+        # renders it through the runtime's `mojo_dict_key_for`, a
+        # length-delimited `T1<len><elem>...` form. Two renderings are
+        # two keys, so the literal's entry was unreachable from every
+        # other spelling: `lit = {(9, 9): "L"}; print(lit[(9, 9)])`
+        # printed `None` and `lit[(9, 9)] = "M"` grew the dict to two
+        # entries, where both halves of this file's own
+        # `gimple_tuple_dict_key_is_content_keyed` say one.
+        #
+        # So the container case goes through `_char_to_cstr` too, and
+        # the three setters below go through `_emit_call` when it did —
+        # which is the whole reason the container key is a placeholder
+        # rather than a rendered string: `_apply_kw_keys` is what swaps
+        # in the `_kw` twin, and the runtime has one for each of the
+        # three (`mojo_dict_set_{int,double,str}_kw`). The non-container
+        # arms keep their raw `_emit`, unchanged, because they have no
+        # placeholder to resolve.
+        if kt in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+            kt, kv = gen._char_to_cstr(kt, kv, True, True)
+            _kw_key = True
+        else:
+            kv = gen._repr_value(kt, kv)
+            kt = 'char *'
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
     if vt in gimple_ctypes._FLOAT_TYPES:
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
+        if _kw_key:
+            gen._emit_call('void', '', 'mojo_dict_set_double',
+                           [('MojoDict *', t), ('char *', kv), ('double', vv)])
+        else:
+            gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
     elif vt == 'char *':
         if vv.startswith('_slit_'):
             vv_tmp = gen._new_val('char *', f"{vv}")
             vv = vv_tmp
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
+        if _kw_key:
+            gen._emit_call('void', '', 'mojo_dict_set_str',
+                           [('MojoDict *', t), ('char *', kv), ('char *', vv)])
+        else:
+            gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
         # A bool stored as a dict value is indistinguishable from a genuine
         # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
