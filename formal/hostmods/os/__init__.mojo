@@ -384,8 +384,20 @@ def chmod(path, mode) -> int:
 # not either, because the subscript would be asking the blob-walk question
 # about a pointer. `listdir_len` and `listdir_get` ask them of the blob, which
 # IS the shape those operations are about.
+#
+# `-> Pointer[Int64]`, and the annotation is not decoration — it is what puts
+# `int64_t *` in this module's manifest signature, and an `int` said `int64_t`,
+# which is a LIE about a value that is an address.  Measured, both
+# architectures: with `-> int` an unannotated `var names = listdir(dir)` is an
+# INTEGER, so `names[0]` read the local's own storage and answered 704698368 —
+# a heap address — where `listdir_len` says 2.  So the trap was not "a pointer
+# needs an annotation" but "this declaration claimed the value was not one", and
+# the two are fixed by different things: the declaration is now true, and an
+# unannotated binding of a cross-image POINTER is REFUSED by name rather than
+# silently computing `[word + 8i]` (see
+# `bugs/FORMAL_a_blob_is_two_conventions.md`).
 
-def listdir(path) -> int:
+def listdir(path) -> Pointer[Int64]:
     """The entries of the directory `path`, or 0 when there is no such
     directory.
 
@@ -541,7 +553,7 @@ def listdir_free(names: Pointer[Int64]) -> int:
 # as an index over the blob because a list of a run-time length is what this
 # whole arrangement exists to avoid.
 
-def walk(root, maxdepth) -> int:
+def walk(root, maxdepth) -> Pointer[Int64]:
     """Every directory at or below `root`, down to `maxdepth` levels, or 0 when
     `root` is not a directory.
 

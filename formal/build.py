@@ -1939,6 +1939,19 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # which is why it is the one check with a new argument rather than one of
     # the five that only need this unit's own tables.
     check_imported_frame_handoffs(functions, link_line or [])
+    # The OTHER published contract, read the same way and refused for the same
+    # reason: an importer cannot classify a value another image allocated, so
+    # the exporting module publishes what its words are. It is here rather than
+    # in the emitters because a store into a module-owned blob is a defect of
+    # the SOURCE — the store is emitted happily by both backends and the abort
+    # happens later, inside the module's own `free`.
+    check_imported_blob_stores(functions, link_line or [])
+    # The SAME manifest signature, asked a different question: not "whose words
+    # are these" but "what does an UNTYPED local bound from this call hold". A
+    # pointer result with no kind behind it is a word, and a subscript through a
+    # word reads the local's own storage — a silent wrong answer, which is the
+    # outcome this tree treats as worse than a refusal.
+    check_subscript_through_an_unclassified_import(functions, link_line or [])
     # A `@dataclass` option this backend cannot lower is a fact about the FILE
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
@@ -2699,6 +2712,14 @@ def _call_receivers(fn):
 # call); the bound is a backstop that raises rather than the alternative, which is
 # a hang in the compiler on a program whose rewrite is not monotone.
 _HOLDER_FIXPOINT_ROUNDS = 4
+
+# How many times `check_imported_blob_stores` may hand a module-owned blob to a
+# parameter of a function in the same image before it stops. A backstop and not
+# a budget, for the reason `_HOLDER_FIXPOINT_ROUNDS` is: the relation only grows
+# by adding a parameter some call site already passes a blob to, so it saturates
+# in one round per link of the helper chain and the bound only says what happens
+# if that is ever false.
+_BLOB_PROPAGATION_ROUNDS = 8
 
 
 def _fn_key(fn):
@@ -6481,6 +6502,296 @@ def check_imported_frame_handoffs(functions, link_line) -> None:
                 spelling, callee)
             if not follow:
                 raise CodegenError(refusal)
+
+
+def check_imported_blob_stores(functions, link_line) -> None:
+    """Refuse a subscript STORE into a blob another module's export owns.
+
+    The second consumer of a published contract, and the same shape as
+    `check_imported_frame_handoffs` for the reason that one is where it is: a
+    value that came out of ANOTHER image is not something this image can
+    classify, so the exporting module has to say what its words are. What it
+    says is in the manifest (`owned_blob`, from `formal.imports`'s
+    `HOST_OWNED_BLOBS`), and this is where the two halves meet: a local bound
+    from a call whose export returns such a blob is one of those blobs, and a
+    subscript store through it is the defect
+    `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`
+    measured — a silent build, then SIGABRT inside the module's own `free`,
+    with the count word still saying how many entries there were.
+
+    **THREE PHASES, and the order is load-bearing.** Which names hold a blob is
+    answered for the WHOLE image before any store is looked at, because the
+    third way a name comes to hold one — being a parameter a CALL SITE handed a
+    blob to — is evidence in a function this one may already have been walked
+    past. Measured, that is not a theoretical ordering concern: a program that
+    writes its store in a helper (`def poke(names): names[i] = v`) built silently
+    and died in `free` until the helper's parameter was seeded from the caller's
+    call site.
+
+      * seed — per function, two arms: a local BOUND from a call whose export
+        returns a blob (`var names = listdir(dir)`), and a local PASSED as the
+        argument an export declares a blob PARAMETER for (`listdir_free(names)`,
+        `listdir_len(names)`, `listdir_get(names, i)` — all parameter 0). The
+        second is not provenance and does not pretend to be: it is the module
+        saying "this argument is one of mine", which is enough to refuse a store
+        and is the only statement available across the boundary. A function that
+        RETURNS the blob is the same evidence as the binding, read off the one
+        other shape a call result leaves a function through.
+      * propagate — repeatedly hand a blob to a parameter of a function in this
+        image, because the helper may itself call a helper. Saturated rather than
+        run once, and the bound (`_BLOB_PROPAGATION_ROUNDS`) is a backstop
+        rather than a budget: the relation only grows by adding a parameter some
+        call site already passes a blob to, so it saturates in one round per link
+        of the chain.
+      * refuse — per function, the first store through a name the first two
+        phases agreed on. One finding, which is the rule every other check in
+        this family follows: a reader who has fixed it will find the next.
+
+    **Over-approximating blob-ness is the safe direction and is a choice, not an
+    accident.** A function reached with a blob at one call site and a
+    caller-owned buffer at another is a function whose store is wrong on one of
+    those paths, and the reader is the only one who can say which — so it is
+    refused, and the message says what the blob is.
+
+    **A store through a blob this image built is not this check.** A caller that
+    pre-sizes with `str_alloc` gets a buffer with no header and no owner but
+    itself, `p[0] = 65` is the supported route into one, and
+    `test_formal_os.py`'s `blob` group pins it on both architectures. The
+    refusal is therefore keyed on the CONTRACT and never on "this is a pointer":
+    a pointer with no module-owned convention behind it is a word this path
+    stores through every day.
+    """
+    by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    fns = list(functions or ())
+    # Keyed by NAME throughout: a FunctionDef is a dataclass and therefore
+    # unhashable, and a name is what a call site resolves a callee through
+    # anyway — which is the only resolution this check is entitled to.
+    fns_by_name = {getattr(f, "name", None): f for f in fns}
+    blobs = {getattr(f, "name", None): {} for f in fns}
+    param_names = {getattr(f, "name", None): set() for f in fns}
+
+    def blob_contract(call):
+        """`(callee, module, contract)` for a call into ANOTHER image."""
+        callee = M.call_callee_name(call.func) or ""
+        if not callee:
+            return None
+        entry = M.dylib_export_lookup(by_name, by_module, callee, forwarded)
+        contract = M.exported_owned_blob(entry)
+        if not contract:
+            return None
+        module = (entry or {}).get("module") or callee.rsplit(".", 1)[0]
+        return (callee, module, contract)
+
+    # ONE FIXPOINT rather than a seed pass and a propagation pass, and the four
+    # things it closes are the four ways a name in this image comes to hold a
+    # module-owned blob. They feed each other — a helper that receives a blob can
+    # return it, a call to that helper binds a blob, and a name bound from that
+    # call can be handed to a third helper — so separate passes would each be a
+    # round behind the others.
+    #
+    #   (1) BINDING: `var names = listdir(dir)` from an export that RETURNS one.
+    #   (2) ARGUMENT: `listdir_free(names)` — a local PASSED as the argument an
+    #       export declares a blob PARAMETER for (`listdir_len`, `listdir_get`,
+    #       `walk_free`: all parameter 0). Not provenance, and it does not
+    #       pretend to be: it is the module saying "this argument is one of
+    #       mine", which is enough to refuse a store and is the only statement
+    #       available across the boundary.
+    #   (3) ALIAS and PASS-THROUGH: `var x = names` is the same word, and a
+    #       function that RETURNS a blob hands the next caller the same words —
+    #       which is `def grab(path): return listdir(path)`, the shape a caller
+    #       writes to keep `os` out of its own helpers.
+    #   (4) PARAMETER: handing a blob to a parameter of a function in this image,
+    #       which is what makes a store inside such a helper answerable at all.
+    #       Measured, not theoretical: a program that writes its store in a
+    #       helper (`def poke(names): names[i] = v`) built silently and died in
+    #       the module's `free` until (4) existed.
+    #
+    # `returns_blob` is `{}` for every function that does not return one, which
+    # is nearly every function; it is a table rather than a flag on the
+    # FunctionDef because a FunctionDef is this pipeline's shared mutable
+    # carrier and a fact only this check has no business leaving on it.
+    returns_blob = {}
+    for _round in range(_BLOB_PROPAGATION_ROUNDS):
+        grew = False
+        for fn in fns:
+            me = getattr(fn, "name", None)
+            for node in M.iter_nodes(getattr(fn, "body", None) or []):
+                if isinstance(node, F.VarDecl):
+                    target, value = node.name, node.value
+                elif isinstance(node, F.AssignStmt):
+                    target = (node.target.name
+                              if isinstance(node.target, F.IdentExpr) else None)
+                    value = node.value
+                elif isinstance(node, F.ReturnStmt):
+                    target, value = None, getattr(node, "value", None)
+                else:
+                    target, value = None, None
+
+                # (1)/(3) — what a call result or a name became.
+                if isinstance(value, F.CallExpr):
+                    got = blob_contract(value)
+                    if not got:
+                        got = returns_blob.get(
+                            M.call_callee_name(value.func) or "")
+                    if got and got[2].get("returns") and target \
+                            and target not in blobs[me]:
+                        blobs[me][target] = got
+                        grew = True
+                elif isinstance(value, F.IdentExpr):
+                    got = blobs[me].get(value.name)
+                    if not got:
+                        continue
+                    if target:
+                        if target not in blobs[me]:
+                            blobs[me][target] = got
+                            grew = True
+                    elif returns_blob.get(me) is not got:
+                        returns_blob[me] = got
+                        grew = True
+
+                if not isinstance(node, F.CallExpr):
+                    continue
+                callee = M.call_callee_name(node.func) or ""
+
+                # (2) — this argument is one the callee module says is its blob.
+                got = blob_contract(node)
+                position = got[2].get("param") if got else None
+                args = list(getattr(node, "args", None) or ())
+                if isinstance(position, int) and position < len(args):
+                    arg = args[position]
+                    if isinstance(arg, F.IdentExpr) \
+                            and arg.name not in blobs[me]:
+                        blobs[me][arg.name] = got
+                        grew = True
+
+                # (4) — and this argument is a blob going into THIS image.
+                target_fn = param_names.get(callee)
+                if target_fn is None or callee in returns_blob:
+                    continue
+                # The callee's OWN declared parameter list, in ABI order, so the
+                # argument index here and the parameter it lands on are read
+                # from the one place they are declared. `M.incoming_args` rather
+                # than `.params` because a comptime parameter travels in the same
+                # word and would shift every runtime index after it.
+                params = [p[0] for p in M.incoming_args(fns_by_name[callee])]
+                for index, arg in enumerate(args):
+                    got = blobs[me].get(arg.name) \
+                        if isinstance(arg, F.IdentExpr) else None
+                    if not got or index >= len(params) or not params[index]:
+                        continue
+                    if params[index] in target_fn:
+                        continue
+                    target_fn.add(params[index])
+                    blobs[callee].setdefault(params[index], got)
+                    grew = True
+        if not grew:
+            break
+
+    # ── the stores, one finding each function.
+    for fn in fns:
+        mine = blobs.get(getattr(fn, "name", None)) or {}
+        if not mine:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            target = getattr(node, "target", None)
+            if not isinstance(target, F.SubscriptExpr) \
+                    or not isinstance(target.obj, F.IdentExpr):
+                continue
+            got = mine.get(target.obj.name)
+            if not got:
+                continue
+            callee, module, contract = got
+            raise CodegenError(M.owned_blob_store_refusal(
+                M.spelled(target), target.obj.name, callee, module, contract))
+
+
+def check_subscript_through_an_unclassified_import(functions, link_line) -> None:
+    """Refuse a subscript through an UNTYPED binding of a cross-image POINTER.
+
+    The third consumer of a published contract, and the one that needs no
+    contract of its own: the callee module's own DECLARATION is already in the
+    manifest signature, and this is the question "what does an untyped local
+    bound from this call hold?" asked of it. The answer is a word with no layout
+    unless the signature says `char *`, and a subscript through such a word
+    computes `[word + 8i]` from the local's OWN storage.
+
+    **Measured, both architectures, and the reason it is a refusal and not a
+    limitation.** `re.escape` is declared `-> Pointer[UInt8]`, so:
+
+      * `var r = escape("AB"); printf("%s", r)` prints `AB` — the word IS the
+        pointer — while `r[0]` is 0 where the buffer holds 65. One program, one
+        answer that looks right and one that does not, and the wrong one is the
+        subscript.
+      * `r[0] = 90` builds, runs and exits 0, writing to a slot nothing reads. A
+        program that fills a caller-owned buffer through an untyped binding
+        appears to work and computes nothing.
+      * `hashlib.sigma_table()[0]` prints 185207048, a number assembled out of
+        whatever the slot held.
+
+    The repair is one line and the message names it, which is the same answer as
+    for an unclassified PARAMETER (`M.pointee`'s refusals): an absent answer is
+    the answer, and this path has no inference that reads a pointee out of
+    another image's signature — it has no allocation model, so a width it
+    inferred would be a guess about the callee's own locals.
+
+    **What is deliberately NOT refused**, and each is a measurement rather than a
+    preference: a `char *` result (`os._syscalls.str_alloc`, and every one of
+    this tree's 66 string-returning host-module exports), whose subscript is a
+    byte of the string and which `test_formal_os.py`'s `blob` group pins on both
+    architectures; an ANNOTATED binding, which is the repair and must therefore
+    work (`var r: Pointer[UInt8] = escape("AB")` reads 65, 66); and a subscript
+    through a name that is not bound from a cross-image call at all, which is the
+    ordinary local this path has always answered.
+    """
+    by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    for fn in functions or ():
+        # `{name: (callee, module, pointee)}` for the UNTYPED bindings only —
+        # an annotated binding is the reader having said what the name holds, and
+        # asking again would refuse the repair this message recommends.
+        untyped = {}
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            if isinstance(node, F.VarDecl):
+                target, value, ann = node.name, node.value, node.type_ann
+            elif isinstance(node, F.AssignStmt):
+                target = (node.target.name
+                          if isinstance(node.target, F.IdentExpr) else None)
+                value, ann = node.value, None
+            else:
+                continue
+            if not target or ann or not isinstance(value, F.CallExpr):
+                continue
+            callee = M.call_callee_name(value.func) or ""
+            if not callee:
+                continue
+            entry = M.dylib_export_lookup(by_name, by_module, callee, forwarded)
+            pointee = M.dylib_export_pointer_pointee(entry)
+            if pointee:
+                untyped[target] = (callee, (entry or {}).get("module") or callee,
+                                   pointee)
+        if not untyped:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            # A STORE is a subscript too, and it is the worse half: it writes
+            # through the same word arithmetic into the local's own slot. Both
+            # are spelled as the subscript itself rather than as the statement
+            # that contains them — `AssignStmt` names the parser's node, and the
+            # reader is looking at `r[0] = 90`.
+            if isinstance(node, F.SubscriptExpr):
+                sub = node
+            elif isinstance(node, F.AssignStmt) \
+                    and isinstance(getattr(node.target, "obj", None),
+                                   F.IdentExpr):
+                sub = node.target
+            else:
+                continue
+            got = untyped.get(sub.obj.name)
+            if not got:
+                continue
+            callee, module, pointee = got
+            raise CodegenError(M.unclassified_import_pointer_refusal(
+                M.spelled(sub), sub.obj.name, callee, module, pointee))
 
 
 def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
@@ -12478,7 +12789,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "call": e.get("call"),
                      "signature": e.get("signature", ""),
                      "kind": e.get("kind"),
-                     "frame_params": e.get("frame_params") or []}
+                     "frame_params": e.get("frame_params") or [],
+                     "owned_blob": e.get("owned_blob") or None}
                     for e in exports],
     }
     # Atomic, like every other manifest write: this one truncates a file other
@@ -13637,6 +13949,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 "signature": signature,
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
+                "owned_blob": _export_owned_blob(module, fn.name),
             })
             continue
         if fn.name not in exported:
@@ -13653,8 +13966,29 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "signature": entry.get("signature", ""),
             "kind": entry.get("kind"),
             "frame_params": _export_frame_contract(fn),
+            "owned_blob": _export_owned_blob(prefix, fn.name),
         })
     return out
+
+
+def _export_owned_blob(module: str, name: str) -> dict:
+    """The MODULE-OWNED BLOB contract this export publishes, or `{}`.
+
+    Read from `formal.imports.HOST_OWNED_BLOBS`, the one place the convention
+    is declared, and published beside `frame_params` for the same reason and
+    with the same consequence: an importer compiled a DIFFERENT image of this
+    module and cannot re-derive what its words mean, so the exporting
+    compilation has to leave the answer behind.
+
+    The module name is the one this export is published UNDER, not the file it
+    came from — `os` for `formal/hostmods/os/__init__.mojo`, which is what a
+    call site spells and therefore what the table has to be keyed by. A module
+    with no such convention publishes `{}`, which is every other export in the
+    tree: the key is absent, `model.exported_owned_blob` answers `{}`, and a
+    store into a caller-owned pointer is untouched.
+    """
+    from formal.imports import host_owned_blob
+    return host_owned_blob(f"{module}.{name}") if module else {}
 
 
 def _export_frame_contract(fn) -> list:

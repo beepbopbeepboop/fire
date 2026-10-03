@@ -340,9 +340,19 @@ def main(n):
 """
 
 
-def build(src, out, cwd=None):
+def build(src, out, cwd=None, backend=None):
+    """Build `src` for the host's architecture, or for `backend` when given.
+
+    The parameter exists for the REFUSAL rows, which are asserted on both
+    architectures: a refusal raised by a shared build pass is one message for
+    both, and the group that asserts it should be saying so rather than letting
+    a one-sided check stand in for it. Answered rows still build for the host
+    alone, because running a second image per row is not what this file is for.
+    """
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove", "-o", out,
            src]
+    if backend:
+        cmd.append(f"--backend={backend}")
     p = subprocess.run(cmd, capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT, cwd=cwd or HERE)
     return p.returncode, (p.stderr or p.stdout or "")
@@ -716,24 +726,33 @@ from os import listdir, listdir_len, listdir_get, listdir_free
 # Three things this group pins, each of which was measured and each of which is
 # a place a reader gets it wrong:
 #
-#   1. THE LOCAL MUST BE ANNOTATED.  `os._syscalls.str_alloc` is declared
+#   1. THE LOCAL MUST BE ANNOTATED, and an unannotated one is now REFUSED
+#      rather than quietly wrong.  `os._syscalls.str_alloc` is declared
 #      `-> str`, so `var p = str_alloc(8)` is a string and its subscript
-#      indexes the buffer.  `re.escape` is declared `-> Pointer[UInt8]`, and an
-#      unannotated `var r = escape("AB")` is an INTEGER, so `r[0]` addresses the
-#      wrong thing -- measured 0/0 while `printf("%s", r)` printed `AB`.  With
-#      `var r: Pointer[UInt8] = escape("AB")` it is 65/66.  So the route works
-#      and the annotation is not optional.
+#      indexes the buffer with no annotation at all.  `re.escape` is declared
+#      `-> Pointer[UInt8]`, whose manifest signature is `uint8_t *` — not a
+#      kind this path carries into an unannotated local — so `r[0]` used to
+#      address the LOCAL's own storage: measured 0/0 where the buffer holds
+#      65/66, while `printf("%s", r)` in the same program printed `AB`
+#      correctly, and `r[0] = 90` built, ran and exited 0 writing to a slot
+#      nothing reads.  A subscript through such a name is refused by name now
+#      (BLOB_UNTYPED_PROGRAM below); the annotated spelling is the answer and is
+#      still here, answering 65/66.
 #   2. THERE ARE TWO CONVENTIONS, not one.  `str_alloc` is RAW: byte 0 is byte
 #      0.  `listdir` is HEADERED: byte 0 is the entry COUNT and byte `1 + i` is
 #      entry `i`'s `malloc`'d pointer.  A container keyed on 0 collides with the
 #      header, and the collision is silent.
-#   3. THE HEADERED ONE IS NOT STORE-SAFE.  `listdir_free` frees `names[1 + i]`
-#      as a pointer, so writing an integer into an entry word leaves the module
-#      freeing a small integer: measured SIGABRT.  That is
-#      `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`,
-#      and this group deliberately does NOT do it -- it asserts the layout
-#      through the module's own accessors, which is the only safe way to read
-#      it.
+#   3. THE HEADERED ONE IS NOT STORE-SAFE, and that is now REFUSED rather than
+#      discovered at run time.  `listdir_free` frees `names[1 + i]` as a
+#      pointer, so writing an integer into an entry word left the module freeing
+#      a small integer: the build was silent and the program died in `free` with
+#      SIGABRT, exit 134, on both architectures.  The `os` module now PUBLISHES
+#      the convention (the `owned_blob` contract in its dylib manifest, declared
+#      once in `formal/imports.py`'s `HOST_OWNED_BLOBS`) and an importer that
+#      stores into such a blob is refused BY NAME, at the store, naming which
+#      word is the count and which are the pointers.  BLOB_STORE_PROGRAM below is
+#      that program, and this group asserts the refusal on both architectures as
+#      well as the answers above.
 def main(n):
     # -- the raw convention ------------------------------------------------
     var p = str_alloc(64)
@@ -749,11 +768,9 @@ def main(n):
     printf("put=%d@@", str_put(p, 0, "ZZ", 2))
 
     # -- the annotation the pointer convention needs -----------------------
-    # `escape` is declared `-> Pointer[UInt8]`, so the local must say so.  Both
-    # halves are asked, because the unannotated one is the trap: it prints
-    # zeros and looks like an empty string.
-    var unannotated = escape("AB")
-    printf("unannotated=%d,%d@@", unannotated[0], unannotated[1])
+    # `escape` is declared `-> Pointer[UInt8]`, so the local must say so, and the
+    # unannotated spelling is a REFUSAL now rather than a silent 0/0 (see
+    # BLOB_UNTYPED_PROGRAM, which is that program).
     var annotated: Pointer[UInt8] = escape("AB")
     printf("annotated=%d,%d@@", annotated[0], annotated[1])
 
@@ -772,6 +789,91 @@ def main(n):
 """
 
 
+BLOB_STORE_PROGRAM = """\
+from os import listdir, listdir_len, listdir_free
+
+# The defect `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`
+# measured: the build was silent on both architectures and the program died in the
+# module's own `free` with SIGABRT, because word 1 of a `listdir` blob is entry
+# 0's POINTER and `listdir_free` calls `free` on whatever word it finds there.
+def main() -> Int:
+    var names = listdir("{dirpath}")
+    printf("before=%d", listdir_len(names))
+    names[1] = 5
+    printf("after=%d", listdir_len(names))
+    listdir_free(names)
+    printf("freed")
+    return 0
+"""
+
+
+# The store inside a HELPER, which is the shape a `Counter`-shaped consumer is
+# written as and the one that says the refusal is not a statement about the
+# variable it names: `poke` never mentions `os`, and the evidence that its
+# parameter is a module-owned blob is the CALL SITE in `main`.  Also the
+# pass-through, for the same reason one hop further out: `grab` returns the blob
+# and binds nothing else.
+BLOB_STORE_HELPER_PROGRAM = """\
+from os import listdir, listdir_free
+
+def grab(path) -> Int:
+    var names = listdir(path)
+    return names
+
+def poke(names) -> Int:
+    names[0] = 1
+    return 0
+
+def main() -> Int:
+    var names = grab("{dirpath}")
+    poke(names)
+    listdir_free(names)
+    return 0
+"""
+
+
+# An UNTYPED binding of a cross-image POINTER, which used to be a silent wrong
+# answer and is a refusal by name now.  Both halves of the pair, because they
+# were different failures: the READ gave 0 where the buffer holds 65 while
+# `printf("%s", r)` in the same program printed `AB`, and the STORE built, ran and
+# exited 0 writing to a slot nothing reads.
+BLOB_UNTYPED_PROGRAM = """\
+from re import escape
+
+def main() -> Int:
+    var r = escape("AB")
+    printf("%s", r)
+    printf("%d,%d", r[0], r[1])
+    r[1] = 90
+    return 0
+"""
+
+# …and the same trap through `os`, whose `listdir` used to be declared `-> int`
+# — a declaration that was false about a value that is an address, and the reason
+# an unannotated `names[0]` answered 704698368 (a heap address) where
+# `listdir_len` says 2.  The declaration is `Pointer[Int64]` now, so the manifest
+# says `int64_t *` and this is refused for the same reason and with the same
+# repair.
+BLOB_UNTYPED_LISTDIR_PROGRAM = """\
+from os import listdir, listdir_free
+
+def main() -> Int:
+    var names = listdir("{dirpath}")
+    printf("%d", names[0])
+    listdir_free(names)
+    return 0
+"""
+
+# What each refusal has to NAME, and the facts a reader cannot get from the type:
+# the subscript as the source spells it, and the module whose declaration says the
+# value is a pointer.
+BLOB_STORE_REFUSAL = "`names[1]` writes into a blob os OWNS"
+BLOB_UNTYPED_REFUSAL = ("subscripts `r`, whose value came from `escape` in re "
+                        "— and that export's own declaration is a POINTER")
+BLOB_UNTYPED_LISTDIR_REFUSAL = (
+    "subscripts `names`, whose value came from `listdir` in os")
+
+
 def build_blob_program(tmpdir):
     """`BLOB_PROGRAM` with a fixture directory holding exactly two files.
 
@@ -782,18 +884,31 @@ def build_blob_program(tmpdir):
     a SET, because `listdir`'s own docstring says the order is the C library's
     and CPython's is not.
     """
+    d = blob_fixture_dir(tmpdir)
+    return BLOB_PROGRAM.replace("{dirpath}", mojo_string(d)), sorted(
+        os.listdir(d))
+
+
+def blob_fixture_dir(tmpdir):
+    """The two-entry directory every blob program is pointed at.
+
+    Split out of `build_blob_program` because the store programs are pointed at
+    the same directory and must see the same two entries — `listdir_len`'s
+    answer is the fixture's, and a store case that ran against a different
+    directory would be measuring something else.
+    """
     d = os.path.join(tmpdir, "blobdir")
     os.makedirs(d, exist_ok=True)
     for name in ("a.txt", "b.txt"):
         with open(os.path.join(d, name), "w") as f:
             f.write("x")
-    return BLOB_PROGRAM.replace("{dirpath}", mojo_string(d)), sorted(
-        os.listdir(d))
+    return d
 
 
 def group_blob(tmpdir, verbose):
     src = os.path.join(tmpdir, "os_blob.mojo")
     program, entries = build_blob_program(tmpdir)
+    d = blob_fixture_dir(tmpdir)
     with open(src, "w") as f:
         f.write(program)
     out = os.path.join(tmpdir, "os_blob")
@@ -808,9 +923,8 @@ def group_blob(tmpdir, verbose):
     for k, v in {"b0": "65", "b1": "66", "reread": "66", "untouched": "0",
                  "put": "2", "entries": str(len(entries)),
                  "oob": "", "neg": "",
-                 # `re.escape("AB")` is `AB`, so 65/66 -- and the
-                 # unannotated local is the trap the comment names.
-                 "unannotated": "0,0",
+                 # `re.escape("AB")` is `AB`, so 65/66 -- through the
+                 # ANNOTATED local, which is the spelling that works.
                  "annotated": "65,66"}.items():
         if got.get(k) != v:
             bad.append(f"{k}: module says {got.get(k)!r}, the case says {v!r}")
@@ -821,9 +935,38 @@ def group_blob(tmpdir, verbose):
     if bad:
         return False, ("%d disagreements:\n      %s"
                        % (len(bad), "\n      ".join(bad)))
+    # The store, which must be REFUSED rather than run: a build that accepts it
+    # produces an image that aborts inside the module's own `free`, and the
+    # assertion is the refusal's WORDS as well as its existence, because a
+    # refusal that named the variable but not the owner would leave the reader
+    # with `names` to stare at rather than with the convention.
+    for label, program, needle in (
+            ("os_blob_store", BLOB_STORE_PROGRAM, BLOB_STORE_REFUSAL),
+            ("os_blob_store_helper", BLOB_STORE_HELPER_PROGRAM,
+             "`names[0]` writes into a blob os OWNS"),
+            ("os_blob_untyped", BLOB_UNTYPED_PROGRAM, BLOB_UNTYPED_REFUSAL),
+            ("os_blob_untyped_listdir", BLOB_UNTYPED_LISTDIR_PROGRAM,
+             BLOB_UNTYPED_LISTDIR_REFUSAL),
+    ):
+        store_src = os.path.join(tmpdir, label + ".mojo")
+        with open(store_src, "w") as f:
+            f.write(program.replace("{dirpath}", mojo_string(d)))
+        for backend in ("arm64", "x86_64"):
+            rc, text = build(store_src, os.path.join(tmpdir, label), None,
+                             backend)
+            if rc == 0:
+                return False, (f"{label} [{backend}]: built a store into a blob "
+                               f"`os` owns; the image aborts in listdir_free "
+                               f"with SIGABRT, so a build here is the wrong "
+                               f"answer, not a passing one")
+            if needle not in text:
+                return False, (f"{label} [{backend}]: refused, but not naming "
+                               f"the store and its owner ({needle!r}): "
+                               f"{text.strip()[-300:]}")
     if verbose:
-        print(f"      10 blob facts; {len(entries)} directory entries, compared "
-              f"as a set because listdir's order is the C library's")
+        print(f"      9 blob facts; {len(entries)} directory entries, compared "
+              f"as a set because listdir's order is the C library's; 2 stores "
+              f"and 2 untyped subscripts refused by name on both architectures")
     return True, ""
 
 

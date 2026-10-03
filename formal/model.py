@@ -11205,6 +11205,161 @@ def resolve_frame_parameter_contract(candidates, position, argument_structs,
         argument_structs, argument_spelling))
 
 
+def exported_owned_blob(entry) -> dict:
+    """The MODULE-OWNED BLOB contract one manifest export entry publishes.
+
+    `{}` for an entry that publishes none, which is every export of every
+    module that has no such convention — and that is the answer that has to be
+    cheap and total, because this is asked about every call in the image.
+
+    The second per-parameter contract a manifest can carry, beside
+    `frame_params`: where that one says "parameter *i* is the ADDRESS of a frame
+    of this struct", this one says "the value on this side of the boundary is a
+    block whose words the EXPORTING module owns", and it names the layout (which
+    word is the count, which is the first pointer) because the layout is what a
+    refusal has to tell the reader and what makes the store unsafe.
+
+    The declaration itself lives in `formal/imports.py`'s `HOST_OWNED_BLOBS`,
+    and the reason it is declared rather than derived is that table's own
+    comment: `str_alloc` returns a `malloc`'d block too, and the caller owns
+    every word of THAT one.  What separates the two is who frees the words, and
+    a callee's own body does not say — `listdir` fills its block in a helper
+    and the release that walks it is a different export.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    contract = entry.get("owned_blob")
+    return contract if isinstance(contract, dict) else {}
+
+
+def owned_blob_store_refusal(spelling: str, name: str, callee: str,
+                             owner: str, contract: dict) -> str:
+    """Why writing into a word of a module-owned blob is refused.
+
+    ARCH-FREE, asked from the shared pass (`formal/build.py`'s
+    `check_imported_blob_stores`) because both backends lower the same store and
+    a store one architecture refuses and the other performs is the outcome the
+    contract mechanism exists to prevent.
+
+    **The refusal is at the STORE and not at the release**, and the measured
+    reason is the order the program runs in: `names[1] = 5` then
+    `listdir_free(names)`.  Built silently on both architectures, and the abort
+    is in the module's own `free` — exit 134, SIGABRT, with `before=2` printed
+    and `freed` never printed.  So the store is accepted, the program runs, and
+    the damage is done by a function the caller believes it is calling correctly.
+
+    **The type cannot carry this**, which is why the contract exists at all: the
+    blob's type is `Pointer[Int64]`, and a pointer permits any store.  That is
+    also why the message does not stop at "read-only": it says WHICH word is the
+    header and which are the pointers, names the release that walks them, and
+    gives the two routes that do work — the module's accessors for reading, and
+    `os._syscalls.str_alloc` for a buffer the caller does own.  A refusal that
+    only said "that is not yours" sends the reader to the module's source, and
+    the one fact they need is in a comment there.
+    """
+    count = contract.get("count_word", 0)
+    base = contract.get("entry_base", 1)
+    release = contract.get("release") or callee
+    return (
+        f"`{spelling}` writes into a blob {owner} OWNS rather than one you do: "
+        f"word {count} of this blob is its entry COUNT and word `{base} + i` is "
+        f"entry `i`'s `malloc`'d name, which `{release}` releases by "
+        f"calling `free` on each of them. Overwriting one leaves that release "
+        f"freeing a small integer — measured on both architectures, the build "
+        f"is silent, the program prints its own answers and then dies in `free` "
+        f"with SIGABRT (exit 134), after the release has already been handed a "
+        f"blob whose count word still says how many entries there were. The type "
+        f"cannot say any of this: the blob is a `Pointer[Int64]`, which permits "
+        f"any store. Read it through the module's own accessors — "
+        f"`{owner}.listdir_len` for the count, `{owner}.listdir_get` for entry "
+        f"`i` — and if you need a buffer you can WRITE, that is a different "
+        f"call: `os._syscalls.str_alloc(n)` returns raw `malloc`'d memory "
+        f"with no header and no owner but you, which is the route to pre-size "
+        f"and fill."
+    )
+
+
+def dylib_export_pointer_pointee(entry) -> str:
+    """The pointee type a manifest export's `T *` result declares, or `''`.
+
+    `''` for a result that is not a pointer, and `''` for the one pointer
+    result this path ALREADY classifies from the signature — `char *`, whose
+    subscript is a byte of the string it names. That exclusion is
+    `dylib_export_return_kind` asked directly, rather than a second copy of its
+    rule, so the two cannot answer differently about one export; it is what makes
+    `os._syscalls.str_alloc`'s unannotated `var p = str_alloc(64)` subscriptable
+    while `re.escape`'s is not.
+
+    A `MojoList *` result is NOT excluded, and the reason is worth stating
+    because it looks like an oversight: a container blob is classified from an
+    ANNOTATION (`List[T]` and friends, `BLOB_TYPE_CTORS`), so an unannotated
+    binding of one has no container kind either, and a subscript through a word
+    with no kind is the case this refusal is about. No host module in this tree
+    declares one today, so the answer is a choice made from the model rather than
+    from a measurement — the conservative one, and the one a reader can undo with
+    an annotation.
+
+    `uint8_t *` is the case that reaches it, and it is reached because
+    `re.escape` is declared `-> Pointer[UInt8]`, `re.sub` likewise, and
+    `hashlib.sigma_table` returns a byte table. Nothing was reading that: a
+    subscript through the unannotated binding of one read the LOCAL's own
+    storage and printed 0 where the buffer held 65 (`re.escape`), and
+    `hashlib.sigma_table()[0]` printed 185207048 — a number assembled out of
+    whatever the slot held. See `unclassified_import_pointer_refusal`.
+    """
+    if not entry or dylib_export_return_kind(entry) is not None:
+        return ""
+    ret = signature_return_type(entry.get("signature") or "")
+    base = ret.replace("const", "").strip()
+    return base[:-1].strip() if base.endswith("*") else ""
+
+
+def unclassified_import_pointer_refusal(spelling: str, name: str, callee: str,
+                                         module: str, pointee: str) -> str:
+    """Why a subscript through an untyped cross-image pointer is refused.
+
+    ARCH-FREE, asked from the shared pass (`formal/build.py`'s
+    `check_subscript_through_an_unclassified_import`) beside
+    `owned_blob_store_refusal` and for the same reason: both backends lower the
+    same subscript, and a value one architecture refuses and the other computes
+    is the outcome this tree treats as worse than either answer.
+
+    **A number that looks plausible and is not the program's is the outcome
+    this exists to prevent**, and the measurement is what makes it a refusal
+    rather than a limitation: `re.escape` is declared `-> Pointer[UInt8]`, so its
+    manifest signature says `uint8_t *`, and with an unannotated local
+    `r[0]` read the LOCAL's own storage — 0 where the buffer holds 65, while
+    `printf("%s", r)` printed `AB` correctly in the same program, so the reader
+    has one answer that looks right and one that does not. `r[0] = 90` was worse
+    still: it built, ran, exited 0, and wrote to a slot nothing reads, so a
+    program that fills a caller-owned buffer through an untyped binding appears
+    to work and computes nothing. `hashlib.sigma_table()[0]` printed 185207048.
+
+    The repair is named and it is one line: say what the name holds. That is the
+    same answer as for an unclassified parameter, and for the same reason — an
+    absent answer IS the answer, and this path has no inference that reads a
+    pointee out of another image's signature (it has no allocation model, so a
+    width it guessed would be a guess about the callee's own locals).
+    """
+    hint = f"Pointer[{pointee}]" if pointee else "Pointer[Int64]"
+    return (
+        f"{spelling} subscripts `{name}`, whose value came from `{callee}` in "
+        f"{module} \u2014 and that export\u0027s own declaration is a POINTER "
+        f"(`{pointee} *`), which this path does not carry into an unannotated "
+        f"local. A cross-image result is classified from its manifest signature "
+        f"only when that says `char *` (a string, whose subscript is a byte of "
+        f"it) or a container blob; every other pointer arrives as a plain WORD "
+        f"with no layout, and a subscript through a plain word computes "
+        f"`[word + 8i]` from the local\u0027s own storage \u2014 measured, both "
+        f"architectures: `re.escape(\"AB\")` bound without a type gave `r[0]` = "
+        f"0 where the buffer holds 65, `r[0] = 90` wrote to a slot nothing reads, "
+        f"and `hashlib.sigma_table()[0]` printed 185207048. Say what the name "
+        f"holds \u2014 `var {name}: {hint} = ...` \u2014 which is the same program "
+        f"with an answer: a subscript through an annotated `Pointer` reads the "
+        f"buffer, and one through a word cannot."
+    )
+
+
 def frame_declared_parameter_refusal(callee, position, param, struct_name,
                                     shape, sites) -> str:
     """A parameter classified from its DECLARED type, reached with the wrong
