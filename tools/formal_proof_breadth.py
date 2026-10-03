@@ -403,6 +403,10 @@ def _eligible(fn, defs, lines):
         if arg.annotation is not None and _ann_text(arg.annotation) != "int":
             return None, (f"parameter {arg.arg} is annotated "
                           f"{_ann_text(arg.annotation)}")
+    fabricated = _integer_unusable_in(fn)
+    if fabricated:
+        return None, ("parameter " + fabricated + " is used as a container, so "
+                      "the stub's integer is not the value the source passes")
     if fn.returns is not None and _ann_text(fn.returns) != "int":
         return None, f"return annotation {_ann_text(fn.returns)}"
     if not 2 <= len(fn.body) <= MAX_STMTS:
@@ -476,6 +480,74 @@ def _eligible(fn, defs, lines):
     if len(body.splitlines()) > MAX_EMITTED_LINES:
         return None, "closure too large to be a small function"
     return body, sorted(needed)
+
+
+# The builtins that CONSUME a sequence, so a call naming one is the source
+# saying "this parameter is iterable".  `len` is separate because it is the case
+# the census's own §3 counted by mistake, and it is spelled in the refusal.
+SEQUENCE_CALLS = frozenset({
+    "iter", "next", "list", "tuple", "reversed", "sorted", "enumerate", "zip",
+    "sum", "min", "max", "any", "all", "set", "dict", "map", "filter",
+})
+
+
+def _integer_unusable_in(fn):
+    """The first parameter this function uses as a SEQUENCE, or None.
+
+    **The rule the eligibility test above is missing, and it is the one that
+    made three of this census's sixty items statements about the harness.**
+    `_entry_call` fills every parameter with the startup stub's integer, which is
+    the right value for an arithmetic parameter and the wrong one for a
+    container: `mojo/middle/exprtypes.py`'s `_trailing_default_at(dflts, …)`
+    takes a list of `(name, default_ast)` pairs and `test_ast_formal.py`'s
+    `read_records(vals, …)` takes a list of tokens, so the emitted `main` handed
+    each an integer and the build refused with "len() of a value classified as
+    'int'" — which §3 of the census then counted as a family of code-generator
+    refusals, three times over. The docstring's own stated reason for excluding a
+    non-int ANNOTATION is the reason here too ("a mismatch there would make the
+    census report a CALL-SITE refusal as if it were a statement about the
+    function"), and an unannotated parameter reaches the same place with less
+    evidence — so this asks the question the annotation would have answered, and
+    only where the answer is decidable from the source alone.
+
+    Four shapes, all of them a way an INT cannot be read, and none of them
+    decidable in the other direction:
+      * `len(p)` — the refusal this rule was written for;
+      * `p[...]` — a subscript is a byte offset into a `char *` or a dict scan,
+        and an integer is neither;
+      * iteration over `p` — `for … in p`, a comprehension's iterable, `iter(p)`;
+      * a METHOD call on `p` — `'strip' is not one of those methods of those
+        receivers`, which is what a string or a list argument earns.
+    An arithmetic use, a comparison, a call that passes it on: none of those
+    constrains what the value IS, so they are left eligible — the rule can only
+    REMOVE candidates, and a census whose workload is 21 items smaller is still a
+    census of the same thing.
+    """
+    params = {a.arg for a in list(fn.args.posonlyargs) + list(fn.args.args)
+              + list(fn.args.kwonlyargs)}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id == "len" and node.args and isinstance(
+                        node.args[0], ast.Name) and node.args[0].id in params:
+                    return node.args[0].id
+                if func.id in SEQUENCE_CALLS and node.args and isinstance(
+                        node.args[0], ast.Name) and node.args[0].id in params:
+                    return node.args[0].id
+            elif isinstance(func, ast.Attribute) and isinstance(
+                    func.value, ast.Name) and func.value.id in params:
+                return func.value.id
+        elif isinstance(node, ast.Subscript) and isinstance(
+                node.value, ast.Name) and node.value.id in params:
+            return node.value.id
+        elif isinstance(node, ast.For) and isinstance(
+                node.iter, ast.Name) and node.iter.id in params:
+            return node.iter.id
+        elif isinstance(node, ast.comprehension) and isinstance(
+                node.iter, ast.Name) and node.iter.id in params:
+            return node.iter.id
+    return None
 
 
 def _ann_text(node):

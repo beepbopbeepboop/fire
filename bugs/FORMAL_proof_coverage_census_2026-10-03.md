@@ -1,5 +1,18 @@
 # FORMAL_proof_coverage_census_2026-10-03: 60 functions from THIS repository, both backends, with proofs on
 
+**Status: §0 is new and it CORRECTS this census. Twenty-eight of its 39
+`codegen-refused` items emitted a program the source does not have — the synthesised `main`
+hands every parameter the startup stub's integer, so a function that uses a
+parameter as a container got a program the source does not have, and the census
+reported what that fabricated program did as a limit of this compiler. The
+eligibility filter now excludes those candidates (`tools/formal_proof_breadth.py`'s
+`_integer_unusable_in`, pinned by `test_formal_proof_breadth.py`), the arm64 half
+is re-measured in §0.2 with the new sample, and the Lean half is NOT re-measured
+because it is not re-measurable on this tree — see §0.3, which is a finding about
+master rather than about this census. Everything below §0 is the state of the
+tree the first run was taken on, kept because §0's numbers are only readable
+against it, and §3's family table is superseded by §0.2's.**
+
 **What this measures, and the one number nobody had.** `tools/formal_sweep.py`
 covers the *code generator's* language coverage and deliberately builds
 `--no-prove`, and says so in its own docstring:
@@ -37,6 +50,118 @@ verdicts, because every Lean verdict is content-addressed
 first attempt at `-j 2` with two *heavy* proofs at once BREACHED the 8 GB
 reservation (`memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%), 3 procs`) and the
 published run is `-j 1`.
+
+## 0.1 The harness was eleven of the 39, and the rule that says so
+## (`work/formal16-6`)
+
+**The eligibility test already said why this was a hazard.** §1: *"Parameters
+annotated with anything but `int` are excluded, because the synthesised `main`
+calls the function with the startup stub's integer and a mismatch there would
+make the census report a CALL-SITE refusal as if it were a statement about the
+function."* That is exactly right, and it is implemented — for ANNOTATIONS. An
+**unannotated** parameter reaches the same place with less evidence, and nothing
+asked.
+
+**Twenty-eight of the 39 emitted a program the source does not have**, measured
+by asking the new predicate of each of the 39 from the committed ledger (the
+ident, the function, `_integer_unusable_in(function)` — a `Counter` over a file in
+the tree, not a re-run):
+
+| | n | of which the refusal is about the fabricated value |
+|---|---|---|
+| items whose parameter the stub's integer cannot serve | **28** | 16 — the string-method, string-subscript and `len()` families |
+| items that survive the filter | **11** | — |
+
+The 28, by the shape the parameter is used in: `len(p)` 3, a subscript `p[k]` 2,
+a method call on `p` 16, iteration over `p` 7. The clearest of them is the one
+whose own refusal names the problem — `test_formal_call_proof_gen.py`'s
+`_arm64_step_branch`: **"src.find() is a method on a string, and its receiver is
+classified as 'int' rather than a string"**. `src` is an unannotated parameter of
+a function about the ARM64 branch encoder; the string is the reader's
+assumption and the int is the harness's. A census that prints that as a
+code-generator limit is reporting itself.
+
+The 11 that survive, and their refusals are about the backend:
+
+| n | family |
+|---|---|
+| 5 | an arithmetic operator on a string (`%` ×3, `<=` ×1 — and one more the family counts separately) |
+| 3 | `print(flush=…)` must be a string literal |
+| 1 | `+` on two strings |
+| 1 | `c == 's'` compares a NUMBER with a string literal |
+| 1 | a module global with storage but no initializer (`_SELFHOST_SIGS`) |
+| 1 | a field access through a value (`body_fd._mojo_coro_body`) |
+
+**The rule is `_integer_unusable_in`, and it is decidable from the source.** A
+parameter the harness fills with an integer is unusable in exactly five shapes:
+`len(p)`, `p[…]`, iteration over `p` (`for … in p`, a comprehension's iterable,
+`iter`/`sorted`/`next`/…), and a method call on `p`. Everything else — arithmetic,
+comparison, being passed on — constrains nothing about what the value IS, so it
+stays eligible. **The rule can only REMOVE candidates**, which is the direction a
+refusal-shaped filter has to go in.
+
+**What it costs, and it is a number a reader should have.** The repo half is 45
+functions over **41** files, not 45 over 45: the filter removed the last eligible
+candidate from four files, so the round-robin takes a second and third function
+from files it has already reached. `test_formal_proof_breadth.py`'s
+`test_the_repo_half_spreads_over_files` is a floor (90 % of the slots) rather
+than the exact 45 it was, and says why in its own docstring — what it protects is
+SPREAD, and the exact composition is reproducible from the tool, which the first
+test already pins.
+
+## 0.2 The arm64 half, re-measured with the new sample, phase A only
+
+```console
+$ python3 tools/memslot.py --gb 8 --label proofbreadth -- \
+      python3 tools/formal_proof_breadth.py --arch arm64 -j 2 -t 1 \
+      --ledger bugs/sweeps/proof_breadth_2026-10-04-harness-filter-phaseA.jsonl
+60/60 verdicts in 6s
+```
+
+| class | before (60 items, both arches) | after, arm64, new sample |
+|---|---|---|
+| `codegen-refused` | 39 | **32** |
+| `proof-refused` | 6 | **13** |
+| `proof-crash` | 0 | **1** — `sum_range.mojo`, and it is NOT this change's (§0.3) |
+| reached Lean at all | 21 of 60 | 25 of 60 (13 refused + 1 crashed + 3 pass + 3 rejected + 8 hit the 1 s bound) |
+
+**The movement is the point, and it is the movement the fix predicts.** Seven
+items left the `codegen-refused` class and thirteen entered the proof layer,
+because the items that were being stopped by a fabricated call site are exactly
+the items that reach a proof. A census whose denominator moves because its
+HARNESS stopped lying is a better measurement of the same thing.
+
+The 32 refusals, by family (arm64, read off the committed ledger):
+
+| n | family |
+|---|---|
+| 9 | `print(flush=…)` must be a string literal |
+| 5 | an arithmetic operator on a string (`%` ×4, `<=` ×1) |
+| 4 | `+` on two strings |
+| 3 | a NUMBER compared with a string literal |
+| 4 | a field access through a value (`node.kids`, `body_fd._mojo_coro_body`, `args.posonlyargs`, `args.min_kind`) |
+| 2 | a module global with storage but no initializer |
+| 5 | one each: a method call on a value, a shorter string (`ln.strip()`), `len()` of an int (`items` is a LOCAL, so this one is real), a repetition `[None] * rows`, a symbol the image binds and nothing provides |
+
+## 0.3 Why the Lean half is not re-measured here, which is a finding about master
+
+**Two things this census counted as green are not green on this tree, and neither
+is this session's work.** Both measured with the guard change of
+`bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` REVERTED, so they are
+not caused by anything in this branch:
+
+| item | the census's ledger | this tree, arm64 |
+|---|---|---|
+| `formal/examples/either.mojo` | `pass`, 0 holes | **`(kernel) excessive memory consumption detected`** at `either_proof.lean:5517` — with and without the guard widening |
+| `formal/examples/sum_range.mojo` | `admitted`, 2 holes | **`ValueError: unsupported cbz taken continuation to 0x100000330`** out of the proof generator — with and without it |
+
+So a full re-run of this census is not a light worker's measurement on this tree:
+Lean's own memory ceiling is now the binding constraint on the proof half, and one
+example raises instead of refusing. The re-measurement above is therefore
+phase A — `codegen-refused`, `proof-refused` and `proof-crash` are all decided
+before Lean runs — plus whatever Lean verdicts the content-addressed CAS already
+held, which is where the `pass`/`lean-rejected`/`bound-exceeded` rows come from.
+**That is a weaker claim than §2's table and is labelled as one.**
 
 ## 1. The workload, and why it is 60 functions and not 60 files
 

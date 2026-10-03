@@ -61,7 +61,7 @@ class TestWorkload(unittest.TestCase):
         self.assertEqual(origins.count("example"), B.EXAMPLE_STRIDE_TARGET)
         self.assertEqual(origins.count("repo"), B.REPO_FUNCTION_TARGET)
 
-    def test_the_repo_half_is_one_function_per_file(self):
+    def test_the_repo_half_spreads_over_files(self):
         """Breadth is measured in FILES, and it is worth saying in which
         DIRECTORIES the sample lands, because it does not spread evenly: the
         round-robin walks files in sorted path order, so the alphabetically
@@ -69,15 +69,69 @@ class TestWorkload(unittest.TestCase):
         their share of the tree. That is a bias in the sample, stated here
         rather than left for a reader to infer from the identifier list — and it
         is not fixed by changing the rule, because a census's sample must stay
-        the same sample across runs for two runs to be comparable."""
+        the same sample across runs for two runs to be comparable.
+
+        **A floor rather than the exact 45 this used to assert**, because the
+        eligibility filter now excludes a candidate whose container parameter the
+        synthesised `main` cannot supply (see `_integer_unusable_in`), and that
+        removed the last eligible candidate from four files: the round-robin
+        then takes a second and third function from files it has already
+        reached, and the sample is 45 functions over 41 files. What this
+        protects is SPREAD — a census that collapsed onto a handful of files
+        would be a census of those files — and the exact composition is
+        reproducible from the tool, which the first test already pins.
+        """
         files = {w.ident.split(":")[0] for w in B.build_workload()
                  if w.origin == "repo"}
-        self.assertEqual(len(files), B.REPO_FUNCTION_TARGET,
-                         "the repo half must be one function per file, or the "
-                         "sample is a census of whichever file sorts first")
+        floor = (B.REPO_FUNCTION_TARGET * 9) // 10
+        self.assertGreaterEqual(
+            len(files), floor,
+            f"the repo half must spread over at least {floor} files, or the "
+            f"sample is a census of whichever file sorts first: {len(files)}")
         dirs = {os.path.dirname(f) for f in files}
         self.assertGreaterEqual(len(dirs), 4,
                                 f"the repo half reached {sorted(dirs)}")
+
+    def test_a_container_parameter_the_stub_cannot_supply_is_not_a_candidate(self):
+        """The eligibility rule that keeps the harness out of the verdicts.
+
+        `_entry_call` fills every parameter with the startup stub's integer, so
+        a function that USES a parameter as a container gets a program the
+        source does not have — and the census then counted the refusal that
+        follows as a family of code-generator limits. `mojo/middle/exprtypes.py`'s
+        `_trailing_default_at(dflts, …)` is the measured case: `len(dflts)` on an
+        integer is "len() of a value classified as 'int'", and §3 of the census
+        reported three of those as a fact about this backend.
+
+        Each shape is a refusal the tool itself would have reported, so the test
+        asks the WORKLOAD question rather than the verdict one: ineligible.
+        """
+        ineligible = [
+            ("len", "def f(vals):\n    return len(vals) + 1\n"),
+            ("subscript", "def f(vals):\n    return vals[0]\n"),
+            ("iteration", "def f(vals):\n    t = 0\n"
+             "    for v in vals:\n        t = t + v\n    return t\n"),
+            ("a method call", "def f(text):\n    return text.strip()\n"),
+            ("a sequence builtin", "def f(vals):\n    return sorted(vals)[0]\n"),
+        ]
+        for what, source in ineligible:
+            stmts = ast.parse(source)
+            fn = stmts.body[0]
+            self.assertIsNotNone(
+                B._integer_unusable_in(fn),
+                f"a parameter used as {what} must be reported, or the census "
+                f"fabricates its own call site and calls the result a verdict "
+                f"about the backend")
+        # …and the two directions, because a rule that removed every candidate
+        # would measure nothing. An ARITHMETIC parameter is untouched: the
+        # stub's integer is the value the source passes.
+        for what, source in (
+                ("arithmetic", "def f(n):\n    return n * 3 + 1\n"),
+                ("passed on", "def f(n, g):\n    return g(n) + 1\n"),
+                ("a local", "def f(n):\n    m = n + 1\n    return m * 2\n")):
+            stmts = ast.parse(source)
+            self.assertIsNone(B._integer_unusable_in(stmts.body[0]),
+                              f"a parameter used as {what} must stay eligible")
 
     def test_every_emitted_program_is_closed_and_parses(self):
         """The property that keeps the census about the proof layer.
