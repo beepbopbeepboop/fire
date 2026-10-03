@@ -314,6 +314,14 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "stat": "test_formal_stat.py",
     "math": "test_formal_math.py",
     "shutil": "test_formal_shutil.py",
+    # `tempfile` is the one that answered `gettempdir`/`mkdtemp`/`TMP_MAX`
+    # without ever needing an object the target lacks (a real directory at mode
+    # 448 is a `mkdir(2)`), so it left HOST_UNREACHABLE the way `shutil` did and
+    # for the same half of the reason: the object half was false. What is still
+    # true is the other half — `TemporaryDirectory` needs an `__exit__`, and a
+    # FILE OBJECT is more than one 64-bit word — which is what
+    # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` is.
+    "tempfile": "test_formal_tempfile.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot
@@ -349,19 +357,60 @@ ADMITTED_HOST_MODULE_TESTS = {
 }
 
 
-# Names added to the host set rather than leaving it, each with the wrongness it
-# corrects.  Kept as a table rather than folded into the subset check so that
-# adding one is a deliberate edit somebody has to justify here.
-# EMPTY, and it was not always: `fcntl` was here from 2026-10-02, added to the
-# host set under `HOST_ADMITTED` on the strength of an ADMITTED `flock` — it was
-# in NEITHER tier before, so every file importing it was classified
-# `not-answerable/unresolved-import` ("not a stdlib or sibling module"), which is
-# false of a CPython standard-library module.  The real `flock(2)` then landed
-# (`formal/hostmods/fcntl.mojo`, measured by `test_formal_fcntl.py` on both
-# backends) and `fcntl` LEFT the host set instead, which is the first kind of
-# provided module and `PROVIDED_NEVER_A_HOST_MODULE` above.  A lock this tree can
-# take and release is not a fact it has to admit to.
-HOST_SET_ADDED_WITH_SOURCE = {
+# Names ADDED to the host set after the split, and the tier each one landed in.
+#
+# This table replaced `HOST_SET_ADDED_WITH_SOURCE`, which was an allow-list of
+# additions that had to be accompanied by a `formal/hostmods/<name>.mojo`, and
+# which `shlex` failed on 2026-10-03 (see
+# `bugs/FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source.md`,
+# filed and then fixed here).  It was the wrong SHAPE as well as the wrong
+# rule: an allow-list is satisfiable by adding a source-less name to it, so the
+# check could only ever fail on a name somebody had not thought about.  What it
+# needed was the rule, and the rule is in `formal/imports.py` at the head of
+# the three tiers:
+#
+#     A NAME ENTERS THE HOST SET BECAUSE IT IS A CPYTHON STANDARD-LIBRARY MODULE
+#     WITH NO MOJO SOURCE HERE.  WHICH TIER IT LANDS IN SAYS ONLY WHAT THIS TREE
+#     CAN DO ABOUT IT: `unreachable` says the object is missing from the target,
+#     `modelled` says nothing is missing and the work has not been done, and
+#     `admitted` -- the only one whose membership rule is "has a source" -- says
+#     this tree ANSWERS.
+#
+# So a standard-library name with no source is in one of the two CLAIM tiers and
+# needs no source to justify being there, and that is the whole answer the
+# document asked for.  `fcntl` was the first name to answer the other way (a real
+# `formal/hostmods/fcntl.mojo`, so it LEFT the set instead);
+# `builtins` and `sysconfig` are the first two instances of the `unreachable`
+# answer, `shlex` / `html` / `datetime` / `resource` / `posixpath` the first of
+# the `modelled` one.  What a table cannot derive, and therefore still carries, is
+# the FACT each permanent claim rests on -- an entry here is a sentence about the
+# target, so it is written down; the tier assignment is asserted exactly, in both
+# directions, so an addition that nobody justified fails and a stale row fails.
+HOST_SET_ADDED_TIERS = {
+    # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
+    # image is a Mach-O binary with an embedded CPython to compile it and none to
+    # run in, so the object is missing and permanently so.
+    "builtins": "unreachable",
+    # Where an EMBEDDED CPython would be installed -- the same missing object,
+    # named from the other side.  `fire.py` imports `sysconfig` and never uses
+    # it, so nothing this tree can write would move a file.
+    "sysconfig": "unreachable",
+    # A state machine over a string (`split`/`quote`/`join`); `shlex.shlex`
+    # itself is a generator over `readline`, which is the half that is out of
+    # reach.  Reachable in principle, unwritten today: a gap with an owner.
+    "shlex": "modelled",
+    # Five character replacements over a string, i.e. the `shlex` shape again.
+    "html": "modelled",
+    # A clock `formal/hostmods/time.mojo` already reads, plus calendar
+    # arithmetic.  The answer is a shaped record, which is
+    # `bugs/FORMAL_time_struct_shaped_answers.md`'s to design.
+    "datetime": "modelled",
+    # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
+    "resource": "modelled",
+    # THE MODEL IS ALREADY WRITTEN: `formal/hostmods/os/path/__init__.mojo` is
+    # CPython's `posixpath`.  What was missing was the SPELLING, and that is a
+    # re-export rather than a module.
+    "posixpath": "modelled",
 }
 
 
@@ -403,32 +452,45 @@ def test_host_tiers():
         # correction of a wrong class, not work dodged: nothing about `fcntl`
         # became easier.
         #
-        # **AND A `HOST_MODELLED` ADDITION NEEDS NO SOURCE, which is what
-        # `shlex` exposed on 2026-10-03 and what the measured shape of the tier
-        # settles.**  The requirement above reads as though every name in the
-        # host set is one this tree has written, and for the two PERMANENT tiers
-        # that is nearly so — but all 31 `HOST_MODELLED` names have no
-        # `formal/hostmods/` source, and its own comment says why: "reachable in
-        # principle, not implemented today, and therefore a gap with an owner".
-        # "Modelled" IS the claim that a name is reachable, so requiring a source
-        # of it would be requiring the work the tier exists to schedule.  The
-        # requirement is therefore asserted where it means something — an
-        # addition to `HOST_UNREACHABLE` (a permanent fact about the target) or
-        # to `HOST_ADMITTED` (a name that ANSWERS, under declared contracts) —
-        # and a `HOST_MODELLED` addition is held to nothing but the rule this
-        # check already states: it was being MISCLASSIFIED, which the message it
-        # replaces is the evidence for.
+        # **AND A NAME WITH NO SOURCE IS IN ONE OF THE TWO CLAIM TIERS, which is
+        # the rule `shlex` exposed on 2026-10-03 and which the measured shape of
+        # the tiers settles.**  The requirement above reads as though every name
+        # in the host set is one this tree has written, and for the two PERMANENT
+        # tiers that is nearly so — but every `HOST_MODELLED` and every
+        # `HOST_UNREACHABLE` name has no `formal/hostmods/` source, and each
+        # tier's own comment says why: "reachable in principle, not implemented
+        # today, and therefore a gap with an owner", and "this needs an object a
+        # freestanding image does not have".  Both are CLAIMS, and a claim needs
+        # no code behind it: "Modelled" says the work is doable and undone, so
+        # requiring a source of it would be requiring the work the tier exists to
+        # schedule, and "unreachable" says the object is missing, so no source
+        # could exist for it even in principle.  The only tier that answers is
+        # `HOST_ADMITTED`, and its membership rule IS the source --
+        # `_admitted_tier_conflicts` below asserts that in both directions,
+        # against the filesystem rather than against a list.
+        #
+        # So this is asserted as the RULE and in both directions: a name added to
+        # the host set is named in the table above with the tier it was put in
+        # (an addition nobody justified fails), and every row of that table is
+        # still in the tier it names (a stale row fails).  Nothing here can be
+        # satisfied by putting a source-less name on a list, which is the
+        # anti-rot weakness the old allow-list had: it failed on a NAME, so
+        # re-adding that name to the list with no file passed.
         added = sorted(union - orig)
-        needs_source = [n for n in added if n not in set(I.HOST_MODELLED)]
-        check(set(needs_source) <= set(HOST_SET_ADDED_WITH_SOURCE),
-              'nothing has been ADDED to the host set beyond the names that '
-              'were being MISCLASSIFIED, and each of those has real source',
-              f'added {needs_source}')
-        for name in sorted(HOST_SET_ADDED_WITH_SOURCE):
-            check(os.path.isfile(os.path.join(
-                      HERE, "formal", "hostmods", f"{name}.mojo")),
-                  f'{name} was added to the host set; the claim is that it was '
-                  f'being misclassified as unresolved, and that needs a source')
+        check(set(added) == set(HOST_SET_ADDED_TIERS),
+              'every name added to the host set since the split is named above '
+              'with the tier it was put in: a name in no tier at all is the one '
+              'thing this account has no answer for, and it is what '
+              '"imports a module that is not a stdlib or sibling module" was',
+              f'added {added}, table {sorted(HOST_SET_ADDED_TIERS)}')
+        for name, tier in sorted(HOST_SET_ADDED_TIERS.items()):
+            check(I.host_module_tier(name) == tier,
+                  f'{name} was added to the host set as {tier!r} and is still '
+                  f'there; a name that has been written leaves both claim tiers',
+                  f'now {I.host_module_tier(name)!r}')
+            check(bool(tier in ('modelled', 'unreachable', 'admitted')),
+                  f'{name} names a real tier, so the row above is a claim and '
+                  f'not a free-text excuse', f'tier {tier!r}')
         # Everything provided that is not an admitted name left the set, so the
         # ORIGINAL list must contain it; an ADMITTED name did not leave, so
         # requiring that of one would be requiring a module that was never in
@@ -464,6 +526,23 @@ def test_host_tiers():
         check(not I._admitted_tier_conflicts(),
               'HOST_ADMITTED and formal/hostmods agree, in both directions',
               '; '.join(I._admitted_tier_conflicts()))
+        # …and the OTHER direction of the same rule, which is the one that had
+        # nothing checking it: a name in a CLAIM tier (`unreachable` says the
+        # object is missing, `modelled` says the work is undone) that HAS a
+        # `formal/hostmods/` source.  Such a name is the interesting one to get
+        # wrong, because the source is real and the tier is the sentence a
+        # reader gets instead: `shutil` sat in `HOST_UNREACHABLE` with a `mkdir`,
+        # a `makedirs` and a `chmod` behind it, and `tempfile` sat there for a
+        # day with `gettempdir` and `mkdtemp` behind it.  Both were caught here
+        # only by a roster someone remembered to shorten.
+        claim_with_source = sorted(
+            (set(I.HOST_UNREACHABLE) | set(I.HOST_MODELLED))
+            & I.hostmod_source_modules())
+        check(not claim_with_source,
+              'a name in a CLAIM tier has no formal/hostmods source, because a '
+              'source means this tree answers for the module and that is '
+              'HOST_ADMITTED — writing one is half of leaving the tier',
+              f'claims with real source behind them {claim_with_source}')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
@@ -535,7 +614,17 @@ def test_host_tiers():
     # false. What is left of the sentence is the TERMINAL, and
     # `formal/hostmods/shutil.mojo`'s `get_terminal_size` is absent for exactly
     # that reason.
-    # A name
+    #
+    # `tempfile` left it on 2026-10-03, and it is the second half of the same
+    # kind of correction rather than a re-decision: `formal/hostmods/tempfile.mojo`
+    # computes `gettempdir`, `gettempprefix`, `TMP_MAX` and `mkdtemp(prefix)` —
+    # a real directory at mode 448 with eight characters of CPython's own
+    # alphabet from `arc4random_buf` — and `mkdir(2)` is not an object this
+    # target lacks, so the entry was a claim about a filesystem the image
+    # already had. What survives of it is the half that is still true
+    # (`TemporaryDirectory` needs an `__exit__`, `NamedTemporaryFile` is a FILE
+    # OBJECT), and both are in the module's own docstring and in
+    # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`. A name
     # reaches this list by being written and leaves it by being named, so
     # adding one here is a separate edit from adding the module — and the
     # account above fails if only one of the two is done. Neither gets a
@@ -543,7 +632,7 @@ def test_host_tiers():
     # over `IMPLEMENTED_HOST_MODULE_TESTS` above already says about every
     # written name, and a second copy of it would be the duplicate the pair
     # above exists to prevent.
-    for m in ('asyncio', 'socket', 'tempfile', 'zlib', 'traceback',
+    for m in ('asyncio', 'socket', 'zlib', 'traceback',
               'getpass', 'webbrowser', 'logging', 'unittest'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')

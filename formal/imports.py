@@ -103,6 +103,23 @@ _HOSTMODS_ROOT = os.path.join(_REPO_ROOT, "formal", "hostmods")
 # rule and by nothing else — never because it happens to be unimplemented, and
 # never because it is unimplemented *on this backend specifically*.
 #
+# **AND THE RULE FOR A NAME THAT HAS NO SOURCE, which is the one thing the three
+# tiers do not say between themselves and which two names arrived here to force
+# (2026-10-03):** a CPython standard-library name this tree cannot compile goes
+# in the host set because that is what it is, and WHICH TIER it lands in says
+# only what this tree can do about it — `HOST_UNREACHABLE` says the object is
+# missing from the target, `HOST_MODELLED` says nothing is missing and the work
+# is undone, and `HOST_ADMITTED` (the third tier, below) is the only one whose
+# membership rule is "there is a `formal/hostmods/` source", i.e. the only one
+# that ANSWERS. So the two first tiers are CLAIMS and a claim needs no code
+# behind it: requiring a source of a `modelled` name would be requiring the work
+# the tier exists to schedule, and requiring one of an `unreachable` name would
+# be requiring a `mkdir(2)` a freestanding image already has. The seven names
+# added since the split — `builtins`, `sysconfig`, `shlex`, `html`, `datetime`,
+# `resource`, `posixpath` — are the first instances, and both directions of it
+# are asserted against the filesystem by `test_formal_link_accounting.py`, via
+# `hostmod_source_modules()` below.
+#
 # `_is_host_module` consults the UNION, so this is a CLASSIFICATION change and
 # not a behaviour change: every one of these refuses the build exactly as
 # before, and the union is asserted to equal what the single list used to hold.
@@ -590,17 +607,29 @@ HOST_ADMITTED = frozenset((
     # opposite of Linux.
 ))
 
-# A name in HOST_ADMITTED whose `formal/hostmods/` source has gone, and a hostmod
-# that declares a contract without its module being in the tier.  Both are
-# reported rather than corrected: the first would be a claim this table cannot
-# keep true by itself, and the second would be a proof resting on a contract the
-# tier does not admit to.  `test_formal_admitted.py` asserts this is empty.
-def _admitted_tier_conflicts() -> list:
+# Every module name this tree has a `formal/hostmods/` SOURCE for, derived from
+# the filesystem and not from a list, because the list would be one more thing to
+# keep in step with the modules.  A package is its `__init__.mojo` under its own
+# name (`os/path/__init__.mojo` is `os.path`), which is the same rule the
+# resolver applies and the same one `resolve_module_path` is checked against.
+#
+# This is the ONE walk of that tree, and the two callers below are its two
+# claims: `HOST_ADMITTED`'s membership rule is "has a source", so an admitted
+# name missing from this set is a claim that cannot be kept true.  The other
+# direction is equally a rule and was missing until 2026-10-03: a name in
+# `HOST_UNREACHABLE` or `HOST_MODELLED` here is a CLAIM (`this needs an object a
+# freestanding image does not have` / `reachable in principle, not implemented
+# today`) with real code behind it, and whichever of the two is wrong, the code
+# is the more interesting of the pair -- a source that landed without moving the
+# name out of a permanent tier is how `shutil` sat in `HOST_UNREACHABLE` with a
+# `mkdir` and a `chmod` behind it, and how `tempfile` sat there for a day.
+# `test_formal_link_accounting.py` asserts that direction, so writing the next
+# module updates the tiers by being written.
+def hostmod_source_modules() -> set:
     import os
     root = _HOSTMODS_ROOT
     if not os.path.isdir(root):
-        return ["formal/hostmods/ does not exist"]
-    bad = []
+        return set()
     have = set()
     for dirpath, dirs, files in os.walk(root):
         dirs.sort()
@@ -612,8 +641,22 @@ def _admitted_tier_conflicts() -> list:
             if parts[-1] == "__init__.mojo":
                 parts = parts[:-1]
             else:
-                parts[-1] = parts[-1][:-len(".mojo")]
+                parts[-1] = parts[-1][: -len(".mojo")]
             have.add(".".join(parts))
+    return have
+
+
+# A name in HOST_ADMITTED whose `formal/hostmods/` source has gone, and a hostmod
+# that declares a contract without its module being in the tier.  Both are
+# reported rather than corrected: the first would be a claim this table cannot
+# keep true by itself, and the second would be a proof resting on a contract the
+# tier does not admit to.  `test_formal_admitted.py` asserts this is empty.
+def _admitted_tier_conflicts() -> list:
+    import os
+    if not os.path.isdir(_HOSTMODS_ROOT):
+        return ["formal/hostmods/ does not exist"]
+    bad = []
+    have = hostmod_source_modules()
     for n in sorted(HOST_ADMITTED):
         if n not in have:
             bad.append(f"{n} is in HOST_ADMITTED but has no formal/hostmods source")
