@@ -1,8 +1,69 @@
 # FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address: `mk(1) == mk(2)` answers "same object" where the source's `__eq__` answers True
 
-**Status: OPEN, measured on both architectures, and it is a SILENT WRONG ANSWER
+**Status 2026-10-03 (`work/formal13-4`): the SILENT WRONG ANSWER is FIXED on both
+architectures — edits 1 and 2 of "The exact next step" landed, with a test on each
+— and edit 3 did NOT, for a reason this section measures.**
+
+| program | CPython | arm64 | x86-64 | |
+|---|---|---|---|---|
+| `b` | `True` | **1** | **1** | was `0`: builds, runs, exit 0, nothing on stderr |
+| `c` | `True True` | REFUSED | REFUSED | unchanged; the reason is below and it is not the one this document guessed |
+
+Pinned by `test_formal_run.py`'s `both_arch_eq_dispatch_through_two_call_operands`
+(the plain-`struct` spelling, built and RUN on both backends, `eq=1`) and by
+`test_dataclasses_formal.py`'s `a_user_declared_eq_reaches_the_method_through_two_call_operands`
+(the `@dataclass` spelling, against CPython). Both were measured red before the
+change and green after it.
+
+**What landed, in `formal/build.py`:**
+
+1. **The guard.** `_rewrite_eq_on_frame_receivers`'s `if not hs and not
+   fn_one_word: continue` now also consults `_call_frame_structs` — as
+   `_fn_comparison_call_frame(fn, …)`, one walk per FUNCTION rather than per node,
+   because the guard needs the answer before the loop and the loop needs the same
+   one, and two walks of "which call operands settle" is the pair that agrees
+   until the day one of them is edited.
+2. **The audit's fourth shape.** `_own_eq_class_touching` now recognises a
+   `CallExpr` that `model.call_result_frame_struct` settles to one of the `own`
+   structs, from the same table `_eq_dispatch_call` decides from. That turned a
+   second silent wrong answer into a refusal: `printf("%d", mk(1) == 5)` printed
+   `0` where CPython prints `1`, and the audit said nothing because a call to a
+   function is not a construction, a frame candidate or a one-word candidate. It
+   is now refused by name, and `_own_eq_gap` was taught not to blame the `mk(1)`
+   — "a call the dispatch CAN resolve is not a gap", since the first version of
+   that refusal said "mk(...) is a construction", which is false in every clause
+   and sends the reader to edit the wrong operand. Pinned by
+   `a_user_declared_eq_against_a_word_names_the_word_not_the_call`, whose fourth
+   column forbids that sentence.
+
+**Why edit 3 did not land, and what it actually is.** The document's guess was
+"the recognition does not reach the OTHER argument position". It does — the
+position is not the problem, and `_frame_valued_calls` is position-blind by
+construction as this document says. The measurement is that `_frame_valued_calls`
+records NOTHING for the `mk(1)`/`mk(2)` call sites at all, in either program:
+
+    $ python3 .tmp/dbg.py build --formal --no-prove -o .tmp/ow/dbg .tmp/ow/c.mojo
+    FRAME_CALLS main [(4468538096, (['Always'], 'a Always frame built here'))]
+      CALL 4472356944 Always(...)          ← the only one: the construction
+      CALL 4472357264 mk(...)              ← absent
+      CALL 4472341776 mk(...)              ← absent
+
+and the reason is one clause upstream of this document's whole subject:
+`formal/build.py::_frame_return_status` recognises a frame-valued `return` in
+exactly TWO ways — a bare name holding a frame, and a call to a function already
+known to return one — and `mk` is `def mk(v: int) -> Always: return Always(v,
+v + 1)`, whose return value is a CONSTRUCTION. So `mk` is classified
+`_RETURN_WORD`, every caller reserves no block for its result, and nothing about
+the call can be recognised as a frame anywhere. Filed, with the measurement and
+the blocker, as `bugs/FORMAL_a_function_whose_return_value_is_a_construction_is_not_frame_returning.md`.
+
+`c` is therefore unchanged and still refused by name, which is the safe direction,
+and `b` — the silent wrong answer this document is about — is fixed.
+
+**Status (original, 2026-10-03, `work/merge-formal8`): OPEN, measured on both
+architectures, and it is a SILENT WRONG ANSWER
 rather than a refusal. Found while merging `work/formal8-5`, `work/formal8-1`
-and `work/formal8-4` into `work/merge-formal8` (2026-10-03), on the tree that
+and `work/formal8-4` into `work/merge-formal8`, on the tree that
 carries all three. It predates the merge: the two sites named below are
 `work/formal8-5`'s, unchanged by any of the three merges.**
 

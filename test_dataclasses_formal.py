@@ -562,6 +562,62 @@ def main(n):
     return 0
 """
 
+# …and the CALL-OPERAND half, which is the one that EXECUTES.  Two calls to a
+# function whose declared return type names the class, compared with each other
+# in a function that binds NOTHING: no holder name, no construction, and
+# therefore nothing the old `if not hs and not fn_one_word: continue` guard could
+# see.  `__eq__` returns True for everything, so the two answers are 1 (the
+# method ran) and 0 (the operator stayed a compare of two addresses, and two
+# calls are two objects) — and nothing said anything when it printed 0, on
+# either architecture.
+# (`bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.)
+OWN_EQ_TWO_CALL_OPERANDS = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def mk(v: int) -> Always:
+    return Always(v, v + 1)
+
+def main(n):
+    printf("%d", mk(1) == mk(2))
+    return 0
+"""
+
+# The same comparison with a CALL on the left and a WORD on the right, which is
+# the pair the audit above has to tell apart from a construction: `mk(1)` is a
+# call the dispatch CAN lower (its callee's declared return type names the
+# class), so it is not the gap, and the refusal has to name the `5`.  Before the
+# audit learned the fourth shape this built and printed 0 where CPython prints 1,
+# and when it was first taught to see the call it blamed `mk(...)` for being "a
+# construction", which is false in every clause — the reader is sent to edit the
+# wrong operand.  So this row pins BOTH halves: the needle is the right operand's
+# clause, and the forbidden substring is the wrong one.
+OWN_EQ_CALL_OPERAND_AGAINST_A_WORD = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def mk(v: int) -> Always:
+    return Always(v, v + 1)
+
+def main(n):
+    printf("%d", mk(1) == 5)
+    return 0
+"""
+
 PARTIAL_CONSTRUCTION = """
 from dataclasses import dataclass, field
 
@@ -605,6 +661,12 @@ EXEC_CASES = [
     ("a_user_declared_eq_reaches_the_method", OWN_EQ),
     ("a_user_declared_eq_reaches_the_method_on_a_one_field_class",
      OWN_EQ_ONE_FIELD),
+    # …and the shape where the two operands are CALLS, which is the only one of
+    # the four that the dispatch used to leave as an address compare SILENTLY:
+    # the other three are all refused by the audit below, which is the safe
+    # direction, and this one was a wrong answer with nothing on stderr.
+    ("a_user_declared_eq_reaches_the_method_through_two_call_operands",
+     OWN_EQ_TWO_CALL_OPERANDS),
 ]
 
 
@@ -821,6 +883,15 @@ REFUSE_CASES = [
     ("a_user_declared_eq_between_two_constructions_is_refused_by_the_shape",
      OWN_EQ_CONSTRUCTION_OPERAND,
      ["__eq__", "ADDRESSES"]),
+    # A call operand the dispatch CAN resolve, so the gap is the other operand.
+    # The forbidden half is the point: naming `mk(...)` as "a construction" is
+    # false (it is a function) and sends the reader to the wrong line, and a
+    # needles-only check cannot see it because the wrong message also contains
+    # the right clause. Hence the optional fourth column below.
+    ("a_user_declared_eq_against_a_word_names_the_word_not_the_call",
+     OWN_EQ_CALL_OPERAND_AGAINST_A_WORD,
+     ["__eq__", "5 is not a plain name"],
+     ["mk(...) is a construction"]),
     ("reflection_is_refused_by_name", REFLECTION_CALL,
      ["is_dataclass", "no type tag attached"]),
     ("the_fields_attribute_is_refused_by_name", REFLECTION_ATTRIBUTE,
@@ -831,7 +902,15 @@ REFUSE_CASES = [
 
 
 def run_refuse_cases(tmpdir, only=None):
-    for name, source, needles in REFUSE_CASES:
+    for row in REFUSE_CASES:
+        name, source, needles = row[0], row[1], row[2]
+        # An optional FOURTH column is a list of substrings the refusal must NOT
+        # contain, and it exists because "it says the right thing" and "it does
+        # not ALSO say a wrong thing" are different assertions: a refusal can
+        # name both operands, one of which is fine, and then the reader is sent
+        # to edit a line that needs no edit.  Three-column rows assert only the
+        # first, which is right for every other row here.
+        forbidden = row[3] if len(row) > 3 else []
         if only and name not in only:
             continue
         try:
@@ -841,6 +920,11 @@ def run_refuse_cases(tmpdir, only=None):
             check(all(nd in msg for nd in needles), name,
                   "the refusal does not say what it should: missing "
                   + ", ".join(repr(nd) for nd in needles if nd not in msg)
+                  + f" — got: {msg[-400:]}")
+            said = [f for f in forbidden if f in msg]
+            check(not said, name,
+                  "the refusal blames an operand it can lower: "
+                  + ", ".join(repr(f) for f in said)
                   + f" — got: {msg[-400:]}")
             continue
         except subprocess.TimeoutExpired:
