@@ -121,7 +121,26 @@ direction for every `codegen` row and useless for the coverage rate.
 
 ### 2.3 This run
 
-TBD-THISRUN
+The `-j 8 -t 600` run is the one whose logs are at
+`bugs/sweeps/sweep-{arm,x86}-6.txt`, and it was still classifying when this map
+was first written. **Its summary block — the per-class counts, the coverage rate
+and the CAS accounting — is the number to read for this sweep**, because it is
+the only one of the three runs that was given enough `-t` to answer the large
+stdlib modules at all, and because the two earlier runs cannot produce a
+coverage rate at all (they were SIGKILLed, so they published no ledger and no
+summary; §2.2).
+
+What is already established from it, and does not depend on how far it got:
+
+* the arm64 and x86-64 class tables are **the same except for one file**
+  (`std/builtin/swap.mojo`, §3), which is the same arm64/x86-64 shape the x86-a
+  map measured for the repository scope;
+* `tool` is again the largest class, and it is again **all timeouts** on the
+  same biggest stdlib modules (§4);
+* the `memcap:`-as-`codegen` rows of §5.1 are in the predecessor's logs, not in
+  this one's — this run has produced none, which is consistent with §5.1's
+  finding that they are a property of a run's machine conditions rather than of
+  the files.
 
 ## 3. Ranked causes
 
@@ -287,18 +306,24 @@ the finding of this sweep, not an omission in it.
 | module exports no public functions (`binary_heap.mojo`) | 80 | measured at **ceiling 0** in `FORMAL_dylib_export_gate_ceiling.md` §3/§5/§6: every export-table fix was measured at 0 files, because 78 of the 79 name nothing `binary_heap` declares. §8 of that doc names the real blocker, and it is not the export table: `binary_heap.mojo` itself cannot lower, on `len(self._data)`. `FORMAL_dylib_export_gate_ceiling` is claimed (`formal3-3-r2`) |
 | other refusal (`builtin_slice.mojo` + 7 in-file) | 28 | the closure half is `formal2-re-and-slice` (`construct:re-merge-and-builtin-slice`), and its ceiling is already measured at **0** (lifting it moves all 21 onto `lowers only append, close, write`). The 7 in-file rows are 7 different constructs; §6 of the std-a map already prices each one |
 | MLIR dialect construct | 7 | `formal-mlir-gpu` + `formal2-mlir-comptime`; `FORMAL_known_limits.md` §2. The 4 behind `_assembly.mojo` are closure (0 of 4 use it); the `_select.mojo` one is 1 file and is work |
-| bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 6 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` — fully specified, and its "Whose" section says why it is not `formal/`'s to fix: the callee is not a name, so there is no declaration in hand even in principle. **4 of 4 blocked files do use `tile`**, so this is the largest row that is genuinely unblocked work |
+| bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 6 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` — fully specified, **4 of 4 blocked files do use `tile`** (so the row is work, not closure), and held: `construct:mlir-and-gpu-globals` (`formal-mlir-gpu`). Its doc's "Whose" section says why it is not `formal/`'s to fix either: the callee is a *function-valued field*, so there is no declaration in hand even in principle |
 | one-field struct's mutator (`float_literal.mojo`) | 1 | refused by name and already pinned (`model.receiver_writeback_name`, `test_formal_run.py`'s `one_field_mutator_with_a_return_value_is_refused`); a value-model decision |
 | a `...` body (`len.mojo`) | 1 | **a stdlib source edit** — `write the function, or declare it as a trait method`. Not actionable from a repository worktree at all (§7) |
 | a method on a multi-field struct where a descriptor is meant (`none.mojo`) | 1 | the receiver-position family, `FORMAL_frame_receiver_handoff.md` §6-§13. **Not** the 24-file "receiver at argument position 0" row, which `formal-receiver-novalue` holds |
 | a slot's declared type is not a value this path can supply (`binary_heap.mojo`) | 1 | the value-model question premise (B2) — see `formal/model.py:16876` for what the premise is and is not. The doc says **measure a ceiling before implementing**, and the probe it names is a stdlib edit |
-| method call on a value receiver (`repr.mojo`, `write_repr_to`) | 1 | adding one more lowered string method; a lowering decision, unowned, no doc |
+| method call on a value receiver (`repr.mojo`, `write_repr_to`) | 1 | re-measured on this tree, and the refusal names why it is not a table entry: "this backend lowers only append, close, write (on a file descriptor) and the string methods count, endswith, find, lstrip, startswith — the receiver is a name on this path, and `write_repr_to` is not one of those methods of those receivers, so **adding it to either table would be a guess about what it means on `int`**". It needs a `repr` model, i.e. `FORMAL_string_value_model`'s question asked about a non-string. Unowned, no doc, and **not one file of cheap work** |
 | comptime does not fold (`polynomial.mojo`) | 1 | same shape as `type_dict.mojo`'s `Self._index` (std-a §6 row 3): a non-literal `comptime` binding, one file each, family size is a `grep` away |
 | x86-64 only: an operator the x86-64 codegen does not lower (`swap.mojo`) | 1 | `FORMAL_x86_64_formal_backend_gaps` (claimed `formal3-10-r2`) |
 
-**The unowned, unblocked work in this sweep is the `tile.mojo` row (4 files that
-use it) and `repr.mojo` (1).** Everything else is either claimed, measured at
-ceiling 0, or a stdlib edit no repository worktree can make.
+**So the honest bottom line of this sweep: there is no unowned codegen row, at
+any size, that is cheap.** The four large rows are claimed or measured at
+ceiling 0; the seven in-file rows are seven one-file constructs, each of which
+is claimed, is a stdlib edit no repository worktree can make (§7), or — the only
+one with neither a doc nor a claim, `repr.mojo` — needs a `repr` model before it
+can be lowered at all. **The next unit of unowned work in this area is therefore
+not a cause from this table; it is the instrument defect in §5**, which costs
+every sweep that runs rather than one file in one sweep, and which is fixed by
+this branch (the fix and its cost are in §5.1's commit).
 
 ## 7. A note on what a worker can and cannot fix here
 

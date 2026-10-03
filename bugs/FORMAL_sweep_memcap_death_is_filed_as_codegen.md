@@ -31,6 +31,31 @@ CODEGEN: ../new-modular/Mojo/stdlib/std/builtin/anytype.mojo      (memcap: anyty
 (`-j 10 -t 600` and `-j 6 -t 120`), and `std/benchmark/memory.mojo` in the
 x86-64 `-j 6` run, so it is not one unlucky invocation.
 
+**The same files get real verdicts in the other architecture's run**, which is
+what makes this a fact about the machine rather than about the files. Diffing
+the two arms' classified lines (paths and classes, messages stripped) gives 10
+file/architecture pairs where exactly one arm produced a `memcap:` row:
+
+```
+only in the arm64 log                      only in the x86-64 log
+  bit/bit.mojo            (memcap)            benchmark/bencher.mojo     (memcap)
+  bit/mask.mojo           (memcap)            benchmark/benchmark.mojo   (memcap)
+  builtin/_format_float.mojo (memcap)         benchmark/compiler.mojo   (memcap)
+  builtin/_startup.mojo   (memcap)            benchmark/memory.mojo     (memcap)
+  builtin/anytype.mojo    (memcap)            benchmark/quick_bench.mojo (memcap)
+  benchmark/bencher.mojo  (real verdict)      bit/mask.mojo             (real verdict)
+  benchmark/compiler.mojo (real verdict)      builtin/_format_float.mojo (real verdict)
+  benchmark/memory.mojo   (real verdict)      builtin/_startup.mojo     (real verdict)
+  benchmark/benchmark.mojo (timeout)          builtin/anytype.mojo      (real verdict)
+  benchmark/quick_bench.mojo (timeout)        bit/bit.mojo              (timeout)
+```
+
+`bit/mask.mojo` is a `memcap` row on arm64 and a real `codegen/dependency`
+verdict on x86-64 **in the same run, minutes apart**, and the whole
+`benchmark/` cluster is the mirror image. A file does not use 4 GB on one
+architecture and 0.1 GB on the other; a machine under pressure does whatever it
+does to whichever build is running when it happens.
+
 The captured detail is `tools/memcap.py`'s **banner** — `memcap: <label> --
 ceiling 4.0 GB across the process tree` — which is the first thing it prints and
 normally never the last. A build memcap kills for memory prints two more lines
