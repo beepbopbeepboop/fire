@@ -379,7 +379,14 @@ class Gen:
         rng = self.rng
         i = self.fresh()
         lo = rng.randint(-3, 3)
-        hi = lo + rng.randint(0, 6)
+        # Never an EMPTY range. CPython binds a `for` target only when the
+        # iteration produces a value, so an empty range leaves the name
+        # unbound and reading it raises NameError — the oracle would be
+        # CPython's own traceback and the seed would measure the generator. The
+        # backend does bind it (it stores `start` before it tests), which is a
+        # real difference and is NOT what this is about: it is about the
+        # generator not asking a question with no answer on both sides.
+        hi = lo + rng.randint(1, 6)
         args = (f"{lo}, {hi}" if rng.random() < 0.8
                 else f"{lo}, {hi}, {rng.choice((2, 3))}")
         inner = list(scope) + [i]

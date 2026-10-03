@@ -2423,28 +2423,73 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
         """while or for-range loop with optional else clause.
 
-        Layout:
+        A `while` is the obvious layout:
+
             start:  <condition>  --falsy--> false:
                     <body>
-            step:   [<for: i += step>]  B start
+            step:   B start
             false:  [<else_body>]
             end:
-        `break` → end (skips else); `continue` → step (for-loops still
-        advance the counter)."""
+
+        A `for … in range(…)` is NOT the same shape, and the whole difference is
+        one rule: **CPython binds the loop variable to each value the iteration
+        produces, so after the loop it holds the LAST one** — while this layout
+        tests the counter before it is advanced, so its exit path arrives one
+        past. Measured, both architectures, on a five-line program:
+        `for i in range(0, 3): …` then `print(i)` is 2 under CPython and was 3.
+
+            start:  <test>  --holds--> body:   <body>
+                    B false                   (an empty range leaves the
+            step:   i += step                 counter at its initial value,
+                    <test> --holds--> body     which is what CPython does —
+                    i -= step                 it never binds the name at all,
+                    B false                   and what it does when the name
+            false:  [<else_body>]             already held one)
+            end:
+
+        The counter is tested BEFORE the increment, so the loop-exit path
+        arrives with the counter one past the last value the body saw, and the
+        `i -= step` puts it back. Restoring on the exit path rather than testing
+        differently is what makes `break` right too: `break` leaves the counter
+        at the value the body last had, which is the last value CPython bound,
+        and it jumps past the restore.
+
+        The alternative — subtracting on every exit including the empty range —
+        is one instruction shorter and is WRONG, and the case that shows it is
+        `i = 0` before an `for i in range(0, 0)`: CPython prints 0 and a
+        blanket `i -= step` prints `-step`. Hence the first test being emitted
+        separately from the loop-back test.
+
+        `continue` → step (for-loops still advance the counter)."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
         end_label = f"{fn}_loop{wid}_end"
 
         is_for = for_info is not None
+        for_conds = None
         if is_for:
             target, rargs = for_info
             start_val, end_val, step_val = self._range_info(rargs)
             self._emit_expr(start_val)
             self._store_var(target, 0)
+            # The comparison has to follow the step's direction, or a descending
+            # range exits immediately (and an ascending one would run away). A
+            # step whose sign is only known at runtime is refused rather than
+            # silently mis-compiled: the counter advances correctly but the loop
+            # bound would be the wrong way round, which is a wrong answer, not a
+            # slow one.
+            _down = self._for_step_sign(step_val)
+            if _down is None:
+                raise CodegenError(
+                    f"for-range step must be a literal or a negated "
+                    f"literal, so the loop bound can be chosen at compile "
+                    f"time (got {step_val!r})")
+            for_conds = ("hi", "gt") if _down else ("cc", "lt")
 
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
@@ -2456,21 +2501,10 @@ dylib_exports: list = None, globals_base: int = None,
                 # on the CSET it left behind: `for i in range(a, b)` computed
                 # a boolean, dropped it, and looped forever. Compare and branch
                 # on the flags directly.
-                # The comparison has to follow the step's direction, or a
-                # descending range exits immediately (and an ascending one
-                # would run away). A step whose sign is only known at runtime
-                # is refused rather than silently mis-compiled: the counter
-                # advances correctly but the loop bound would be the wrong way
-                # round, which is a wrong answer, not a slow one.
-                _down = self._for_step_sign(step_val)
-                if _down is None:
-                    raise CodegenError(
-                        f"for-range step must be a literal or a negated "
-                        f"literal, so the loop bound can be chosen at compile "
-                        f"time (got {step_val!r})")
-                _u, _sg = ("hi", "gt") if _down else ("cc", "lt")
-                self._emit_branch_unless_cmp(F.IdentExpr(target), end_val,
-                                              _u, _sg, false_label)
+                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
+                                         for_conds[0], for_conds[1],
+                                         body_label)
+                self._emit_b_to(false_label)
             elif not self._emit_branch_unless(cond, false_label):
                 self._emit_truthy_word(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
@@ -2478,14 +2512,21 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit(encode_cbz_xn(0, 0))
                 self.asm.emit_label_rel(false_label, here_offset=-4)
 
+            self.asm.label(body_label)
             for s in body:
                 self._emit_stmt(s)
 
             self.asm.label(step_label)
             if is_for:
                 self._emit_for_inc(target, step_val)
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(start_label, here_offset=-4)
+                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
+                                         for_conds[0], for_conds[1],
+                                         body_label)
+                self._emit_for_restore(target, step_val)
+                self._emit_b_to(false_label)
+            else:
+                self.asm.emit(encode_b(0))
+                self.asm.emit_label_rel(start_label, here_offset=-4)
 
             self.asm.label(false_label)
             for s in (else_body or []):
@@ -2781,53 +2822,84 @@ dylib_exports: list = None, globals_base: int = None,
         `range(a, b, -1)` lowers — the parser keeps `-1` as
         `UnaryOp('-', IntLiteral(1))`, not a negative literal). Negative
         steps use SUB (ARM64 ADD imm12 is unsigned)."""
+        self._emit_for_step(target, step, subtract=False)
+
+    def _emit_for_restore(self, target: str, step) -> None:
+        """Walk the for-range counter BACK by `step`, on the loop-exit path.
+
+        The same arithmetic as `_emit_for_inc` with the direction flipped, and
+        it shares that method's body rather than repeating it: the two must
+        accept the same step spellings, because a step the advance can lower and
+        the restore cannot would leave the loop's exit value undefined for
+        exactly the spellings a program is most likely to use. See
+        the loop's exit value is defined for exactly the spellings a program is
+        most likely to use."""
+        self._emit_for_step(target, step, subtract=True)
+
+    def _emit_for_step(self, target: str, step, subtract: bool) -> None:
         # RMW on the counter: register home edits in place; spill home
         # loads to X11, operates, stores back (X12 holds a spilled step
         # operand when one is needed).
         if target in self._var_regs:
-            self._for_inc_in(target, step)
+            self._for_inc_in(target, step, subtract)
             return
         self._load_var(target, 11)
-        self._for_inc_scratch(step, 11)
+        self._for_inc_scratch(step, 11, subtract)
         self._store_var(target, 11)
 
-    def _for_inc_in(self, target: str, step) -> None:
+    def _for_inc_in(self, target: str, step, subtract: bool = False) -> None:
         ireg = self._var_regs[target]
-        self._for_inc_body(ireg, step)
+        self._for_inc_body(ireg, step, subtract)
 
-    def _for_inc_body(self, ireg: int, step) -> None:
+    def _for_inc_body(self, ireg: int, step, subtract: bool = False) -> None:
+        # `subtract` flips which instruction each spelling reaches for, and the
+        # pairing is by SIGN: advancing by a negative literal is SUB, so
+        # restoring by one is ADD, and an ADD of the negated immediate is the
+        # only spelling of that arm64 offers (its ADD imm12 is unsigned).
+        def op_for(value: int):
+            """(immediate encoder, immediate) for `+= value`."""
+            add, sub = encode_add_xd_xn_imm, encode_sub_xd_xn_imm
+            if subtract:
+                return (sub, value) if value >= 0 else (add, -value)
+            return (add, value) if value >= 0 else (sub, -value)
+
         if (isinstance(step, F.UnaryOp) and step.op == "-"
                 and isinstance(step.operand, F.IntLiteral)):
-            self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, step.operand.value))
+            enc, imm = op_for(-step.operand.value)
+            self.asm.emit(enc(ireg, ireg, imm))
             return
         if isinstance(step, F.IntLiteral):
-            if step.value < 0:
-                self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, -step.value))
-            else:
-                self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, step.value))
+            enc, imm = op_for(step.value)
+            self.asm.emit(enc(ireg, ireg, imm))
             return
         if isinstance(step, F.UnaryOp) and step.op == "-" \
                 and isinstance(step.operand, F.IdentExpr):
             sreg = self._var_reg_or_scratch(step.operand.name, 12)
-            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg))
+            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg) if subtract
+                          else encode_add_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.IdentExpr):
             sreg = self._var_reg_or_scratch(step.name, 12)
-            self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
+            self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg) if subtract
+                          else encode_add_xd_xn_xm(ireg, ireg, sreg))
             return
         if isinstance(step, F.BinaryOp) and step.op == "+" \
                 and isinstance(step.left, F.IdentExpr):
             k = step.right
             if isinstance(k, F.IntLiteral) and k.value >= 0:
                 sreg = self._var_reg_or_scratch(step.left.name, 12)
+                if subtract:
+                    self.asm.emit(encode_sub_xd_xn_xm(ireg, ireg, sreg))
+                    self.asm.emit(encode_sub_xd_xn_imm(ireg, ireg, k.value))
+                    return
                 self.asm.emit(encode_add_xd_xn_xm(ireg, ireg, sreg))
                 self.asm.emit(encode_add_xd_xn_imm(ireg, ireg, k.value))
                 return
         raise CodegenError("for-loop step must be a literal or a variable")
 
-    def _for_inc_scratch(self, step, dst: int) -> None:
+    def _for_inc_scratch(self, step, dst: int, subtract: bool = False) -> None:
         """Same as _for_inc_body but counter lives in `dst` (already loaded)."""
-        self._for_inc_body(dst, step)
+        self._for_inc_body(dst, step, subtract)
 
     # ── Expressions (result in X0) ─────────────────────────────────
 
@@ -6048,21 +6120,35 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_branch_unless_cmp(cond.left, cond.right, u, s, false_label)
         return True
 
-    def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
-                                signed_cond: str, false_label: str) -> None:
-        """CMP + B.cond on two already-separated operands, no CSET.
+    def _emit_branch_if_cmp(self, l, r, unsigned_cond: str,
+                            signed_cond: str, label: str) -> None:
+        """CMP + B.cond to `label` when the comparison HOLDS, no CSET.
 
-        The operand-level half of `_emit_branch_unless`, for the one caller
-        that has a comparison's operands without the enclosing BinaryOp: the
-        `for i in range(...)` test, which is built from the loop target and
-        the range's end bound rather than parsed from source.
+        The positive form, because a construct needs both polarities from one
+        comparison and two independent copies of this is how they come to
+        disagree: `_emit_loop`'s for-range test branches one way at the loop head
+        and the other way at the bottom, and they must be the same comparison.
         """
         self._emit_cmp_flags(l, r, unsigned_cond, signed_cond)
         chosen = signed_cond if self._signed else unsigned_cond
         self._record_cond_branch()
-        self.asm.emit(encode_b_cond(invert_cond(chosen), 0))
-        self.asm.emit_label_rel(false_label, here_offset=-4)
+        self.asm.emit(encode_b_cond(chosen, 0))
+        self.asm.emit_label_rel(label, here_offset=-4)
         return True
+
+    def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
+                                signed_cond: str, false_label: str) -> None:
+        """CMP + B.cond on two already-separated operands, no CSET.
+
+        The operand-level half of `_emit_branch_unless`, for the callers that
+        have a comparison's operands without the enclosing BinaryOp: the
+        `for i in range(...)` test, which is built from the loop target and the
+        range's end bound rather than parsed from source. `_emit_branch_if_cmp`
+        with both condition codes inverted, so there is one comparison and one
+        branch emission rather than two of each.
+        """
+        return self._emit_branch_if_cmp(l, r, invert_cond(unsigned_cond),
+                                       invert_cond(signed_cond), false_label)
 
     def _cmp_conds(self) -> dict:
         """Operator -> (unsigned condition, signed condition).

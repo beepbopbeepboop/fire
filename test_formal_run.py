@@ -10396,6 +10396,106 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", 5 and 9, 0 or 9)\n"
      "    return 0\n", 0, "9 9"),
+
+    # ── WHAT A `for … in range(…)` LEAVES IN ITS COUNTER ────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 1 reduces to the first row
+    # below), and it was a SILENT wrong answer on both architectures: the loop
+    # tests the counter before it advances it, so the exit path arrives one past
+    # the last value the body saw, and `for i in range(0, 3)` left `i == 3`
+    # where CPython leaves 2. Nothing else in this file read a range counter
+    # after its loop, which is why ~700 hand-written cases never saw it.
+    #
+    # Every row's expected value is CPython's, and the arithmetic is in the row
+    # rather than taken on trust. The counter after a loop is CPython's LAST
+    # BOUND value, which for a step of 2 is not one less than the exit value.
+    #
+    # The one case still wrong, and it is a bug doc rather than a row here:
+    # pinning "prints 0" where CPython prints 7 would make the defect the
+    # expectation. `for i in range(0, 0)` over a counter that already held a
+    # value stores `start` before it tests, and CPython's `for` binds the target
+    # only when the iteration produces one —
+    # `bugs/FORMAL_for_range_over_an_empty_range_overwrites_a_preassigned_counter.md`.
+    ("both_arch_for_range_leaves_the_counter_at_the_last_value_it_bound",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    ("both_arch_for_range_step_leaves_the_counter_one_step_back",
+     "def main(n):\n"
+     "    for i in range(0, 5, 2):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    ("both_arch_for_range_descending_leaves_the_counter_at_the_last_value",
+     "def main(n):\n"
+     "    for i in range(3, 0, -1):\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=1"),
+    # `break` leaves the counter where the body last had it, which is the last
+    # value CPython bound — so the restore on the exit path must NOT run for a
+    # break, or this row would print 1.
+    ("both_arch_for_range_break_leaves_the_counter_where_break_ran",
+     "def main(n):\n"
+     "    for i in range(0, 9):\n"
+     "        if i == 2:\n"
+     "            break\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=2"),
+    # `continue` re-enters through the counter advance, so the value after the
+    # loop is the last one the TEST rejected — here 4, since `range(0, 5)` last
+    # yielded 3 and the skipped `continue` on 4 still advanced and tested.
+    ("both_arch_for_range_continue_advances_before_it_tests_again",
+     "def main(n):\n"
+     "    for i in range(0, 5):\n"
+     "        if i == 4:\n"
+     "            continue\n"
+     "        x = 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=4"),
+    # …and the `else` arm runs on exhaustion, with the counter already restored,
+    # so the two are asserted together rather than one at a time.
+    ("both_arch_for_range_else_runs_with_the_counter_already_restored",
+     "def main(n):\n"
+     "    for i in range(0, 3):\n"
+     "        x = 1\n"
+     "    else:\n"
+     "        printf(\"else i=%d\", i)\n"
+     "    return 0\n", 0, "else i=2"),
+    # The loop in a FUNCTION, which is where the counter is a spill slot rather
+    # than a register: the restore has to go through the same load/operate/store
+    # path the advance does, and a fix that only handled the register home would
+    # pass every row above and fail this one.
+    ("both_arch_for_range_restores_a_spilled_counter_too",
+     "def last(k):\n"
+     "    s = 0\n"
+     "    for i in range(0, k):\n"
+     "        s = s + i\n"
+     "    return i\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"i=%d\", last(4))\n"
+     "    return 0\n", 0, "i=3"),
+    # NESTED: the inner loop's restore must not disturb the outer counter, which
+    # is the value the outer loop keeps testing. Both were one past before.
+    ("both_arch_nested_for_range_restores_only_its_own_counter",
+     "def main(n):\n"
+     "    for i in range(0, 2):\n"
+     "        for j in range(0, 3):\n"
+     "            x = j\n"
+     "    printf(\"i=%d j=%d\", i, j)\n"
+     "    return 0\n", 0, "i=1 j=2"),
+    # A `while` is untouched by the fix and says so: its counter is the user's
+    # own increment, so there is nothing to restore and this row must not move.
+    ("both_arch_while_counter_is_unchanged_by_the_for_range_fix",
+     "def main(n):\n"
+     "    i = 0\n"
+     "    while i < 3:\n"
+     "        i = i + 1\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=3"),
 ]
 
 
