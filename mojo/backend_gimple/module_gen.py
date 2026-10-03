@@ -50,7 +50,7 @@ import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.methods_shared import _is_selfhost_source_file
-from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
+from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -2720,10 +2720,21 @@ def gen_module_impl(self, stmts):
         # **kwargs)` call site (`BoundMethod.__call__` and
         # `BoundClassMethod.__call__`), the `**kwargs` materialisation passed
         # POSITIONALLY as well as in its own slot.
-        for _kwrow, _kwidx in gimple_codegen._SELFHOST_KWARGS_SLOTS.items():
+        # BARE names from the module-level `from gimple_codegen import`
+        # above, NOT `gimple_codegen._SELFHOST_KWARGS_SLOTS`. A qualified
+        # module-attribute read of a module-level CONSTANT does not survive
+        # the self-hosted compiled path: `_lower_MemberExpr` deliberately
+        # lowers `gimple_ctypes.X` as a bare `X` ("the qualifier is a
+        # Python-import artifact"), so the read lands on a name this module
+        # never declares. Every other `gimple_codegen.` read in this file is
+        # a FUNCTION call (`_selfhost_syms()`), which lowers by name and so
+        # was never affected; a bare `from`-import is the spelling this
+        # file's other gimple_codegen constants already use (`_EXPR_DISPATCH`,
+        # `_TYPE_MAP`, `_SELFHOST_DIR`).
+        for _kwrow, _kwidx in _SELFHOST_KWARGS_SLOTS.items():
             self._func_kwargs_slot[_kwrow] = _kwidx
             self._func_kwargs_has_vararg[_kwrow] = (
-                gimple_codegen._SELFHOST_KWARGS_HAS_VARARG[_kwrow])
+                _SELFHOST_KWARGS_HAS_VARARG[_kwrow])
 
         self.struct_field_types['CallExpr'] = {
             'func': 'int64_t',

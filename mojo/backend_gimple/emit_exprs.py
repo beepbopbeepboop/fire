@@ -5273,20 +5273,81 @@ def _list_literal_slot_kind(gen, el, et) -> str:
     return gimple_ctypes.TypeLattice.slot_kind_byte(et)
 
 
+def _dict_literal_spread_operand(key_expr):
+    """The mapping a `**expr` pair spreads, or None if this pair is not one.
+
+    PEP 448 mapping unpacking is spelled by the parser as a PAIR whose KEY is
+    a `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the `NoneType`
+    sentinel — `fire_compiler.py`'s `_parse_dict_entry`, and
+    `myinterpreter.py`'s `eval_DictLiteral` (whose docstring states the
+    convention) is the reference reading of it. `value is None` is the
+    discriminator, not the key's type, because a `{**d}` pair and a real
+    `{k: v}` pair both have an expression in the key slot."""
+    if isinstance(key_expr, gimple_ctypes.UnaryOp) and key_expr.op == '**':
+        return key_expr.operand
+    return None
+
+
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     t = gen._new_temp('MojoDict *')
     gen._emit_container_new(t, 'MojoDict *')
-    # Infer value type from first pair (for subscript / iteration dispatch)
-    if node.pairs:
-        vt_sample = gen._quick_type(node.pairs[0][1])
+    # Infer value type from first pair (for subscript / iteration dispatch).
+    # The FIRST pair with a value, not `pairs[0]`: a `**spread` pair's value
+    # slot is the NoneType sentinel, so `{'a': 1, **d}`'s leading pair is not
+    # a value sample and `_quick_type(None)` says nothing about the dict.
+    for _k0, _v0 in node.pairs:
+        if _dict_literal_spread_operand(_k0) is not None:
+            continue
+        vt_sample = gen._quick_type(_v0)
         if vt_sample in gimple_ctypes._FLOAT_TYPES:
             gen._dict_val_types[t] = 'double'
         elif vt_sample == 'char *':
             gen._dict_val_types[t] = 'char *'
         else:
             gen._dict_val_types[t] = 'int64_t'
+        break
     for key_expr, val_expr in node.pairs:
-        _emit_dict_pair_store(gen, t, key_expr, val_expr)
+        # A `**expr` pair MERGES; it is not a store. Treated as a store it put
+        # the spread's own dict into the KEY slot and the None sentinel into
+        # the value slot, which at run time is `mojo_dict_key_for` refusing a
+        # dict as a key: `TypeError: unhashable type: 'dict'`, an unhandled
+        # exception and a non-zero exit on `{'a': 1, **{'x': 2}}`. The dict
+        # was also silently missing every key it should have contributed.
+        #
+        # Measured consequence beyond a test program: this compiler's own
+        # `mojo/backend_gimple/emit_infra.py::_reset_func` seeds
+        # `gen._dict_val_types` with `**{k: v for k, v in
+        # gen._global_dict_val_types.items() ...}`, so the SELF-HOSTED binary
+        # raised this on every input including an empty file and wrote a
+        # 0-byte `.ci` at exit 0 — `test_selfhost.py`'s
+        # `run_produced_binary` red with no gcc error anywhere.
+        _spread = _dict_literal_spread_operand(key_expr)
+        if _spread is None:
+            _emit_dict_pair_store(gen, t, key_expr, val_expr)
+            continue
+        # `mojo_dict_update` re-inserts each live pair under its own
+        # keykind/kind, which is what keeps a spread's contents addressable by
+        # the same reads a literal store would have made them (the same
+        # helper and the same reason `_lower_comprehension`'s multi-clause
+        # dict arm uses it).
+        #
+        # The operand is coerced through `_coerce_to_type`, NOT only when its
+        # static type is a pointer: an UNANNOTATED parameter holding a dict
+        # lowers to `int64_t` (the box), and passing that straight to a
+        # `MojoDict *` parameter is `passing argument 2 of 'mojo_dict_update'
+        # makes pointer from integer without a cast` — one of those in this
+        # compiler's own `mojo/middle/coro.py`, measured. `_coerce_to_type` is
+        # the sibling `d.update(x)` lowering already uses for exactly this
+        # operand (`emit_methods.py`, the set-vs-dict dispatch above its
+        # `mojo_dict_update`), and a no-op when the types already agree.
+        _st, _sv_raw = gen.lower_expr(_spread)
+        _sv = gen._coerce_to_type(_as_str(_st), 'MojoDict *', _sv_raw)
+        gen._emit_call('void', '', 'mojo_dict_update',
+                       [('MojoDict *', t), ('MojoDict *', _sv)])
+        # A spread contributes the dict's own value type, so a subscript on
+        # the literal reads it with the right accessor.
+        if _sv_raw in gen._dict_val_types:
+            gen._dict_val_types[t] = gen._dict_val_types[_sv_raw]
     gen._note_fresh_result(t)
     return 'MojoDict *', t
 

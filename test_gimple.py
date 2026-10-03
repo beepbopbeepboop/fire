@@ -9485,6 +9485,125 @@ print({'p': 1} | {'q': 2})
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_dict_literal_star_star_pair_merges_instead_of_storing():
+        """A `**expr` pair in a dict display must MERGE, not be stored.
+
+        PEP 448 mapping unpacking is spelled by the parser as a pair whose
+        KEY is `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the
+        NoneType sentinel (`fire_compiler.py`'s `_parse_dict_entry`;
+        `myinterpreter.py`'s `eval_DictLiteral` docstring states the
+        convention and is the reference reading). `_lower_dict_literal`
+        walked `node.pairs` as ordinary key/value stores, so the spread's own
+        dict went into the KEY slot and the sentinel into the value slot:
+
+            mojo_dict_set_int_kw (_t1, _t8, _t10);   /* _t8 = the dict */
+
+        which at run time is the runtime's own `mojo_dict_key_for` refusing a
+        dict as a key — `TypeError: unhashable type: 'dict'`, an unhandled
+        exception at exit 1, on `{'a': 1, **{'x': 2}}`. Every key the spread
+        should have contributed was also silently missing.
+
+        Measured well past a test program: this compiler's own
+        `mojo/backend_gimple/emit_infra.py::_reset_func` seeds
+        `gen._dict_val_types` with `**{k: v for k, v in
+        gen._global_dict_val_types.items() ...}`, so the SELF-HOSTED binary
+        raised this on every input including an empty file and wrote a
+        0-byte `.ci` at exit 0 — a silent wrong answer with no gcc error
+        anywhere in the closure, which is exactly what
+        `test_selfhost.py`'s `run_produced_binary` exists to catch.
+
+        Asserted on CPython's stdout for the same text, in BOTH pipeline
+        modes: the shapes cover a spread after a literal pair, a spread
+        before one, two spreads with a literal between them (source order is
+        what decides a key collision, so a merge that reorders is a wrong
+        answer), a spread whose operand is a dict COMPREHENSION (the shape
+        `_reset_func` uses), and a spread that overwrites a literal key.
+        Returns are inline for the same reason as the test above, and the
+        one literal value is `7` rather than `0` because a ZERO integer read
+        back out of a dict prints `None` on this backend — a separate,
+        pre-existing defect with no spread anywhere in it (verified against
+        `HEAD~4`), filed as
+        bugs/CODEGEN_dict_int_value_zero_reads_back_as_none.md, and pinning it
+        here would make this test red for the wrong reason."""
+        global _PASS, _FAIL
+        name = "dict_literal_star_star_pair_merges_instead_of_storing"
+        src = '''\
+def a(x: dict) -> dict:
+    return {'a': 1, **x}
+
+def b(x: dict) -> dict:
+    return {**x, 'b': 2}
+
+def c(x: dict, y: dict) -> dict:
+    return {**x, 'mid': 7, **y}
+
+def d(x: dict) -> dict:
+    return {**{k: v for k, v in x.items() if k != 'skip'}}
+
+def e(x: dict) -> dict:
+    return {'k': 0, **x}
+
+print(sorted(a({'z': 9}).items()))
+print(sorted(b({'y': 8}).items()))
+print(sorted(c({'p': 1}, {'q': 2}).items()))
+print(sorted(d({'keep': 1, 'skip': 2}).items()))
+print(sorted(e({'k': 1}).items()))
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'dict_spread.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'dsp_{mode}.c')
+                exe = os.path.join(td, f'dsp_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout, run.stderr))
+            bad = [m for m, out, _e in results if out != want]
+            if bad:
+                _m, out, err = [(m, o, e) for m, o, e in results
+                                if m == bad[0]][0]
+                print(f"FAIL  {name}: {', '.join(bad)} printed {out!r}, "
+                      f"CPython printed {want!r} (stderr {err.strip()[:200]!r})")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_next_inside_for_over_same_iterator_is_one_ahead():
         """`next(it)` inside `for x in it:` must read the element AFTER the
         one the loop just yielded.
@@ -9749,6 +9868,7 @@ print(run('x/y.txt'))
     test_scalar_arity_min_max_params_are_not_containers()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
+    test_dict_literal_star_star_pair_merges_instead_of_storing()
     test_next_inside_for_over_same_iterator_is_one_ahead()
     test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()
