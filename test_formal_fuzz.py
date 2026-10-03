@@ -208,10 +208,14 @@ def check_run(arch, count, jobs, verbose):
                 f"{n} program(s) CPython will not run: that is the oracle's "
                 f"own traceback and measures the generator, not the backend",
                 verbose)
-        elif label.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH")):
+        elif label.startswith(("MISMATCH", "ARM64-DIVERGES", "CODEGEN-CRASH",
+                               "REFUSAL-DIVERGES")):
             failures += _fail(f"run_{arch}_reported_{label}",
                               f"{n} unexplained — every disagreement in the "
-                              f"known table must have reduced to it", verbose)
+                              f"known table must have reduced to it, and one "
+                              f"architecture declining what another lowered "
+                              f"is a finding whatever the known table says",
+                              verbose)
     if not counts.get("match"):
         failures += _fail(f"run_{arch}_agreed_on_nothing",
                           f"a corpus of {count} programs where nothing agreed "

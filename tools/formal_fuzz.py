@@ -99,9 +99,19 @@ tool rather than on the backend.
 EXIT STATUS
 -----------
 0 when there is nothing unexplained: no `MISMATCH-*`, no `ARM64-DIVERGES`, no
-`codegen-crash` and no generator error.  1 when at least one is unexplained.
-A tool that returned 0 while a program computed the wrong number would be worse
-than no tool.
+`REFUSAL-DIVERGES-*`, no `codegen-crash` and no generator error.  1 when at
+least one is unexplained.  A tool that returned 0 while a program computed the
+wrong number would be worse than no tool.
+
+A `REFUSAL-DIVERGES-*` counts, and it is the newest member of that list.  A
+refusal on its own is not a finding — a construct with no representation is
+CORRECTLY refused, and counting those would spend the whole budget on
+`bugs/FORMAL_known_limits.md`.  A refusal on ONE architecture while ANOTHER
+answers the same program is a different thing: the construct is representable,
+one machine says so by running the program, and this one declines it.  That is
+the divergence `test_formal_x86_64_parity.py` exists to keep closed, and while
+this tool reported it as a plain `refusal` it was invisible — the corpus kept
+generating the program, kept saving it, and counted the run as clean.
 
 THE VALUE DISCIPLINE, and the one place it is deliberately broken
 -----------------------------------------------------------------
