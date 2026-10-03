@@ -590,16 +590,25 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   **Next step, and it is smaller than the bullet above made it look:** the
   iterable's element kind is already computed — `_iterable_own_shape` answers
   `list_kind(_kind_of_elements(...))` for a list literal — so the arm is a bind,
-  not a derivation. The one thing to settle first is SCOPE, because it is the
-  difference between a fix and a new wrong answer: a comprehension has its own
-  scope in Python 3, so binding its target in the FUNCTION's map would let
-  `var x = 5` followed by `[x for x in ["a", "b"]]` move `x`'s kind, and the
-  conflict rule's answer to that is "undecidable", which is a word and not the
-  integer the outer `x` holds. A per-target overlay read only by the sites inside
-  the comprehension — rather than a `_bind` into `locals` — is the shape that
-  cannot leak. That is also why it was not done in the same commit as the
-  parameter fix: it is a second change to a second hook, and its blast radius is
-  every comprehension in the corpus rather than every annotated call.
+  not a derivation.
+
+  **The thing to get right is SCOPE, and master now has the reader for it.**
+  A comprehension has its own scope in Python 3, so binding its target into
+  `ValueKinds.locals` — the FUNCTION's map — would let `var x = 5` beside
+  `[x for x in ["a", "b"]]` move `x`'s kind, and the conflict rule's answer to
+  that is "undecidable", which is a word and not the integer the outer `x`
+  holds. `formal/build.py`'s `_comprehension_scoped_names(fn)` (landed on master
+  in `92175ec0`, "a comprehension is its own scope") is exactly the predicate
+  that question needs — "bound by a comprehension target and NOTHING else" — and
+  the two facts it distinguishes are the two facts a kind bind needs here: a name
+  only a comprehension binds may take the comprehension's element kind, and a
+  name an ordinary statement also binds may not.
+
+  So the shape is: an overlay consulted only by the sites inside a comprehension,
+  keyed by the comprehension node, rather than a `_bind` into `locals`. It was not
+  done in the same commit as the parameter fix because it is a second change to a
+  second hook and its blast radius is every comprehension in the corpus rather
+  than every annotated call.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String
