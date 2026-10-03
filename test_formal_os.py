@@ -700,11 +700,138 @@ def parse_kv(text):
     return got
 
 
+BLOB_PROGRAM = """\
+from os._syscalls import str_alloc, str_put
+from re import escape
+from os import listdir, listdir_len, listdir_get, listdir_free
+
+# A CALLER-SUBSCRIPTABLE BLOB, and the two conventions a "blob" actually is.
+#
+# This is the capability a `collections.Counter` would be built on: `str_alloc`
+# mallocs inside the dylib and hands back a POINTER, and this file writes
+# through it with `p[i] = ...` and reads it back with `p[i]`.  Neither is a call
+# into the module and neither is refused.
+#
+# Three things this group pins, each of which was measured and each of which is
+# a place a reader gets it wrong:
+#
+#   1. THE LOCAL MUST BE ANNOTATED.  `os._syscalls.str_alloc` is declared
+#      `-> str`, so `var p = str_alloc(8)` is a string and its subscript
+#      indexes the buffer.  `re.escape` is declared `-> Pointer[UInt8]`, and an
+#      unannotated `var r = escape("AB")` is an INTEGER, so `r[0]` addresses the
+#      wrong thing -- measured 0/0 while `printf("%s", r)` printed `AB`.  With
+#      `var r: Pointer[UInt8] = escape("AB")` it is 65/66.  So the route works
+#      and the annotation is not optional.
+#   2. THERE ARE TWO CONVENTIONS, not one.  `str_alloc` is RAW: byte 0 is byte
+#      0.  `listdir` is HEADERED: byte 0 is the entry COUNT and byte `1 + i` is
+#      entry `i`'s `malloc`'d pointer.  A container keyed on 0 collides with the
+#      header, and the collision is silent.
+#   3. THE HEADERED ONE IS NOT STORE-SAFE.  `listdir_free` frees `names[1 + i]`
+#      as a pointer, so writing an integer into an entry word leaves the module
+#      freeing a small integer: measured SIGABRT.  That is
+#      `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`,
+#      and this group deliberately does NOT do it -- it asserts the layout
+#      through the module's own accessors, which is the only safe way to read
+#      it.
+def main(n):
+    # -- the raw convention ------------------------------------------------
+    var p = str_alloc(64)
+    p[0] = 65
+    p[1] = 66
+    p[2] = 0
+    printf("b0=%d@@", p[0])
+    printf("b1=%d@@", p[1])
+    printf("reread=%d@@", p[1])
+    printf("untouched=%d@@", p[40])
+    # The module's own writer agrees with what the caller wrote by subscript,
+    # which is what makes this one buffer and not two private ones.
+    printf("put=%d@@", str_put(p, 0, "ZZ", 2))
+
+    # -- the annotation the pointer convention needs -----------------------
+    # `escape` is declared `-> Pointer[UInt8]`, so the local must say so.  Both
+    # halves are asked, because the unannotated one is the trap: it prints
+    # zeros and looks like an empty string.
+    var unannotated = escape("AB")
+    printf("unannotated=%d,%d@@", unannotated[0], unannotated[1])
+    var annotated: Pointer[UInt8] = escape("AB")
+    printf("annotated=%d,%d@@", annotated[0], annotated[1])
+
+    # -- the headered convention, read the way it is safe to read ----------
+    var names = listdir({dirpath})
+    var n_entries = listdir_len(names)
+    printf("entries=%d@@", n_entries)
+    printf("entry0=%s@@", listdir_get(names, 0))
+    printf("entry1=%s@@", listdir_get(names, 1))
+    # Out of range in both directions, because `listdir_get` defines both and a
+    # blob has no bounds of its own for a caller to trip over.
+    printf("oob=%s@@", listdir_get(names, n_entries))
+    printf("neg=%s@@", listdir_get(names, -1))
+    listdir_free(names)
+    return 0
+"""
+
+
+def build_blob_program(tmpdir):
+    """`BLOB_PROGRAM` with a fixture directory holding exactly two files.
+
+    `listdir`'s answer is the real filesystem's, so the group asks the same
+    question this file has asked everywhere else: build and RUN, and compare
+    with what CPython says about the same directory.  A module that returned a
+    plausible count rather than doing the listing could not pass.  Compared as
+    a SET, because `listdir`'s own docstring says the order is the C library's
+    and CPython's is not.
+    """
+    d = os.path.join(tmpdir, "blobdir")
+    os.makedirs(d, exist_ok=True)
+    for name in ("a.txt", "b.txt"):
+        with open(os.path.join(d, name), "w") as f:
+            f.write("x")
+    return BLOB_PROGRAM.replace("{dirpath}", mojo_string(d)), sorted(
+        os.listdir(d))
+
+
+def group_blob(tmpdir, verbose):
+    src = os.path.join(tmpdir, "os_blob.mojo")
+    program, entries = build_blob_program(tmpdir)
+    with open(src, "w") as f:
+        f.write(program)
+    out = os.path.join(tmpdir, "os_blob")
+    rc, text = build(src, out)
+    if rc != 0:
+        return False, f"build failed: {text.strip()[-400:]}"
+    rc, stdout, stderr = run(out)
+    if rc != 0:
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
+    got = parse_kv(stdout)
+    bad = []
+    for k, v in {"b0": "65", "b1": "66", "reread": "66", "untouched": "0",
+                 "put": "2", "entries": str(len(entries)),
+                 "oob": "", "neg": "",
+                 # `re.escape("AB")` is `AB`, so 65/66 -- and the
+                 # unannotated local is the trap the comment names.
+                 "unannotated": "0,0",
+                 "annotated": "65,66"}.items():
+        if got.get(k) != v:
+            bad.append(f"{k}: module says {got.get(k)!r}, the case says {v!r}")
+    for k, i in (("entry0", 0), ("entry1", 1)):
+        if got.get(k) not in entries:
+            bad.append(f"{k}: module says {got.get(k)!r}, which is not one of "
+                       f"the directory's entries {entries}")
+    if bad:
+        return False, ("%d disagreements:\n      %s"
+                       % (len(bad), "\n      ".join(bad)))
+    if verbose:
+        print(f"      10 blob facts; {len(entries)} directory entries, compared "
+              f"as a set because listdir's order is the C library's")
+    return True, ""
+
+
 GROUPS = {
     "strings": group_strings,
     "fs": group_fs,
     "env": group_env,
     "dirs": group_dirs,
+    "blob": group_blob,
 }
 
 
