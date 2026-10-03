@@ -182,6 +182,21 @@ def check_classifier(verbose):
         if got != want:
             failures += _fail(f"classify_{cls}_{holes}_{behaviour}_at_{below}",
                               f"got {got!r}, expected {want!r}", verbose)
+    # A Lean memory ceiling is NOT a rejection: the file was never finished
+    # with, so calling it `lean-rejected` would report a fact about the machine
+    # as a fact about the generator.
+    if not P._lean_memory_detail(
+            "libc++abi: terminating due to uncaught exception of type "
+            "lean::memory_exception: excessive memory consumption detected"):
+        failures += _fail("lean_memory_detail_misses_leans_own_ceiling",
+                          "the census measured this as the binding constraint "
+                          "on the arm64 half, so it must be its own class",
+                          verbose)
+    if P._lean_memory_detail("error: unsolved goals"):
+        failures += _fail("lean_memory_detail_is_too_broad",
+                          "a genuine rejection would be reported as a resource "
+                          "outcome, which is the inference this tool must not "
+                          "make", verbose)
     # The per-architecture floor, because the x86-64 half of the claim depends
     # on it being 2 and the arm64 half on it being 0.
     if P.HOLES_FLOOR.get("x86_64") != 2 or P.HOLES_FLOOR.get("arm64") != 0:
