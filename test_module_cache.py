@@ -23,7 +23,8 @@ import monomorphize as mm
 import comptime
 import build_stdlib_dylib as bsd
 from gimple_codegen import compile_to_gimple_linked
-from exec_budget import RUN_TIMEOUT_S
+from exec_budget import (COMPILE_TIMEOUT_S, RUN_TIMEOUT_S,
+                           SWEEP_TIMEOUT_S)
 
 GCC = find_gcc()
 _PASS = 0
@@ -43,6 +44,14 @@ def check(name, cond, detail=""):
 # Was 20 s, which failed this suite in a full gate at -j18 -- as an UNCAUGHT
 # TimeoutExpired, so every check before it was lost and every check after it never
 # ran. See exec_budget.py for the shared value and the layering rationale.
+#
+# …and the nine OTHER budgets in this file were still literals when this was
+# written: `timeout=20` five times, `timeout=120` three times and `timeout=180`
+# once, all of them the same defect on the same kinds of child (a produced
+# executable, a `fire.py build`, a `--dump-full` of the closure). Converting one
+# call site in a file is not converting the file, which is why `test_suite.py`'s
+# "no stale per-child budget is left as a literal" now reads the tree instead of
+# trusting a comment that says the work was done.
 EXE_TIMEOUT_S = RUN_TIMEOUT_S
 _TIMED_OUT_PREFIX = '<<timed out'
 
@@ -1050,7 +1059,8 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
     check("SB-1 (fire.py build CLI): build succeeds and produces an executable",
           r.returncode == 0 and os.path.exists(exe), r.stdout + r.stderr)
     if os.path.exists(exe):
-        run = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+        run = subprocess.run([exe], capture_output=True, text=True,
+                             timeout=EXE_TIMEOUT_S)
         check("SB-1 (fire.py build CLI): each wrapper's call gets its own "
               "sibling module's distinct, correct result (112 / 223, not "
               "112 / 112)",
@@ -1109,14 +1119,14 @@ def test_sb1_per_scope_import_distinct_modules(wd):
     exe = os.path.join(proj, 'main')
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=120)
+        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check("SB-1 per-scope-import: fire.py build succeeds (per-lexical-scope "
           "tracking now resolves each function's own local import), doesn't "
           "silently pick one module for both call sites",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     check("SB-1 per-scope-import: an executable is produced",
           os.path.exists(exe), 'no executable produced')
-    rr = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+    rr = subprocess.run([exe], capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
     check("SB-1 per-scope-import: the compiled binary gets BOTH distinct, "
           "correct values (call_alpha -> alpha_module's f, call_beta -> "
           "beta_module's f) — the shape that used to silently miscompile",
@@ -1125,7 +1135,7 @@ def test_sb1_per_scope_import_distinct_modules(wd):
     # implementation; it must agree on the same two distinct, correct values.
     ri = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=20)
+        cwd=proj, capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
     check("SB-1 per-scope-import: the INTERPRETER path (separate "
           "implementation) agrees, getting both distinct, correct values",
           ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
@@ -1200,19 +1210,19 @@ def test_module_attr_class_alias_constructs_that_class(wd):
     exe = os.path.join(proj, 'main')
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=120)
+        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check("class alias: fire.py build succeeds (`Alias = h.Thing` then "
           "`Alias(value=...)` must build h.Thing, not the same-named "
           "helper_module.Alias — which also shadowed the local and made "
           "gcc reject the function)",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     if r.returncode == 0:
-        rr = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+        rr = subprocess.run([exe], capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
         check("class alias: the compiled binary constructs h.Thing -> 7",
               rr.stdout.strip().splitlines() == ['7'], repr(rr.stdout))
     ri = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'run', 'main.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=20)
+        cwd=proj, capture_output=True, text=True, timeout=EXE_TIMEOUT_S)
     check("class alias: the INTERPRETER path (separate implementation) "
           "agrees -> 7",
           ri.stdout.strip().splitlines() == ['7'], repr(ri.stdout))
@@ -1248,7 +1258,7 @@ def test_root_module_circular_import_symbol(wd):
     exe = os.path.join(proj, 'root')
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), 'build', 'root.mojo'],
-        cwd=proj, capture_output=True, text=True, timeout=120)
+        cwd=proj, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     check("root-circular-import: fire.py build succeeds", r.returncode == 0,
           f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     check("root-circular-import: executable produced", os.path.exists(exe))
@@ -1333,7 +1343,7 @@ def test_underscore_prefixed_sibling_import_symbol(wd):
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'fire.py'), '--dump-full',
          'main.py'],
-        cwd=proj, capture_output=True, text=True, timeout=180)
+        cwd=proj, capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S)
     check("underscore-sibling: --dump-full of the closure succeeds",
           r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
     ci = os.path.join(proj, 'main.ci')

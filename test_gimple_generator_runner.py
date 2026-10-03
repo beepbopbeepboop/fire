@@ -61,6 +61,17 @@ from exec_budget import (COMPILE_TIMEOUT_S as SHARED_COMPILE_TIMEOUT_S,
 # which the runner enforces by killing the job and reporting it as a FAILURE
 # tagged [TIMEOUT], ~6x the slowest healthy test measured. These budgets only
 # have to sit far inside that, which they now do.
+#
+# …AND THE REPLACEMENT WAS INCOMPLETE, which is why this file failed the gate
+# AGAIN on 2026-10-03 with the same message: 7 cases "timed out after 10
+# seconds" plus one TIMEOUT, out of 190. Naming the shared constants at the top
+# of a file changes nothing; every CALL SITE has to read them, and four of this
+# file's still spelled `timeout=10`/`30`/`60` as literals -- including
+# `test_generator_matches_cpython`'s run, which is what six of those seven
+# failures went through, and `_test_foreign_a3_generator_handle`'s, which is
+# what the TIMEOUT went through. They are literals now, and the assertion is
+# `test_suite.py`'s `test_no_stale_per_child_budget_is_left_as_a_literal`, which
+# reads this file's call sites off the AST rather than trusting this comment.
 COMPILE_TIMEOUT_S = SHARED_COMPILE_TIMEOUT_S
 LINK_TIMEOUT_S = SHARED_LINK_TIMEOUT_S
 RUN_TIMEOUT_S = SHARED_RUN_TIMEOUT_S
@@ -220,8 +231,10 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
     entry = os.path.join(cwd, 'fpp', entry_rel)
     with open(entry, 'w') as f:
         f.write(entry_src)
+    # CPython's answer for the same package: a RUN, so RUN_TIMEOUT_S.
     cp = subprocess.run([sys.executable, '-m', 'fpp.' + entry_rel[:-3]],
-                        cwd=cwd, capture_output=True, text=True, timeout=60)
+                        cwd=cwd, capture_output=True, text=True,
+                        timeout=RUN_TIMEOUT_S)
     cpython_stdout = cp.stdout
     c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
         entry_src, do_imports=True, filename=entry)
@@ -231,7 +244,8 @@ def _build_foreign_package_run(entry_rel, entry_src, cwd):
             "generator should NOT be A3-eligible (the kwonly parameter is "
             "what forces it down the cpp path)")
     exe = _build_generator_program_from_code(c_code, cpp_code)
-    out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+    out = subprocess.run([exe], capture_output=True,
+                         timeout=RUN_TIMEOUT_S).stdout.decode()
     return out, cpython_stdout
 
 
@@ -393,7 +407,8 @@ def _cpython_stdout(py_src: str) -> str:
     p = os.path.join(wd, 'ref.py')
     with open(p, 'w') as f:
         f.write(py_src)
-    r = subprocess.run(['python3', p], capture_output=True, text=True, timeout=30)
+    r = subprocess.run(['python3', p], capture_output=True, text=True,
+                       timeout=RUN_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"the CPython reference program itself failed: {r.stderr}")
     return r.stdout
@@ -414,7 +429,8 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
     try:
         want = _cpython_stdout(cpython_src)
         exe = _build_generator_program(mojo_src)
-        got = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+        got = subprocess.run([exe], capture_output=True,
+                             timeout=RUN_TIMEOUT_S).stdout.decode()
         if got == want:
             print(f"PASS  {name}")
             _PASS += 1

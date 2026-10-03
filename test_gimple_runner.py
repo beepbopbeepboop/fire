@@ -2,6 +2,16 @@
 
 Uses gcc (gcc-15 if available, else fallback) with -fgimple to compile and execute
 GIMPLE-annotated C code. This tests the GIMPLE backend which is used for the gimple codegen tests.
+
+Per-child budgets come from `exec_budget.py` and every one of them used to be a
+literal here — ten of them, from `timeout=10` to `timeout=90`. That is how the
+2026-10-03 gate failed this job with `300 passed, 1 failed, 8 timed out`: eight
+programs that execute in milliseconds were reported as compiler bugs because
+their parent's wall clock ran out under `-j18`. `exec_budget.py` exists to
+replace exactly that class of literal and this file had been missed by it (only
+five files imported it). The numbers and the measurement behind them are there,
+not here; what belongs here is WHICH budget each child is, which is what the
+comment at each site now says.
 """
 import os
 import sys
@@ -10,6 +20,7 @@ import subprocess
 import tempfile
 from io import StringIO
 from build_config import find_gcc
+from exec_budget import COMPILE_TIMEOUT_S, LINK_TIMEOUT_S, RUN_TIMEOUT_S
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -59,7 +70,9 @@ def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
              '-o', exe_file, *sources],
             capture_output=True,
             text=True,
-            timeout=30
+            # A `gcc -fgimple` over one module, and the slowest thing here by
+            # an order of magnitude: COMPILE_TIMEOUT_S, never a literal.
+            timeout=COMPILE_TIMEOUT_S
         )
         if result.returncode != 0:
             raise RuntimeError(f"gcc -fgimple compilation failed: {result.stderr}")
@@ -76,7 +89,8 @@ def run_executable(exe_path: str) -> int:
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=10
+        # RUNNING a compiled snippet that executes in milliseconds.
+        timeout=RUN_TIMEOUT_S
     )
     return result.returncode
 
@@ -92,7 +106,7 @@ def run_executable_stdout(exe_path: str) -> str:
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=10,
+        timeout=RUN_TIMEOUT_S,
         env=_SCRIBBLE_ENV
     )
     return result.stdout.decode('utf-8', errors='replace')
@@ -160,7 +174,7 @@ def test_gimple_stdout_repeated(name: str, mojo_src: str, expected_stdout: str,
         for _ in range(runs):
             try:
                 r = subprocess.run([exe_path], capture_output=True, text=True,
-                                   timeout=30)
+                                   timeout=RUN_TIMEOUT_S)
                 key = f"exit {r.returncode}: {r.stdout!r}"
             except subprocess.TimeoutExpired:
                 key = "TIMEOUT"
@@ -253,7 +267,7 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
             entry = f.name
         try:
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                timeout=30)
+                                timeout=RUN_TIMEOUT_S)
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -266,8 +280,8 @@ def test_gimple_matches_cpython(name: str, mojo_src: str):
         finally:
             os.unlink(entry)
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
-        got = subprocess.run([exe_path], capture_output=True, timeout=30,
-                             env=_SCRIBBLE_ENV)
+        got = subprocess.run([exe_path], capture_output=True,
+                             timeout=RUN_TIMEOUT_S, env=_SCRIBBLE_ENV)
         if got.stdout == want_out and got.returncode == want_rc:
             print(f"PASS  {name}")
             _PASS += 1
@@ -309,7 +323,8 @@ def test_gimple_diagnostic(name: str, mojo_src: str, expected_stderr: str,
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
-        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        result = subprocess.run([exe_path], capture_output=True,
+                                timeout=RUN_TIMEOUT_S)
         err = result.stderr.decode('utf-8', errors='replace')
         out = result.stdout.decode('utf-8', errors='replace')
         if (expected_stderr in err and result.returncode == expected_return
@@ -350,16 +365,23 @@ def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, l
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        # TWO children, so the outer budget must exceed the inner one or the
+        # outer kills the wrapper and the inner's own budget never gets to
+        # speak. The inner is a compiled run (RUN_TIMEOUT_S); the outer is that
+        # plus a fixed allowance for CPython startup and for the child's teardown
+        # after it is killed.
         probe = (
             "import resource, subprocess, sys\n"
             "import os\n"
-            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60,\n"
+            f"r = subprocess.run([sys.argv[1]], capture_output=True, "
+            f"timeout={RUN_TIMEOUT_S},\n"
             "                   env=dict(os.environ, MallocScribble='1'))\n"
             "sys.stdout.buffer.write(r.stdout)\n"
             "sys.stderr.write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))\n"
         )
         r = subprocess.run([sys.executable, "-c", probe, exe_path],
-                           capture_output=True, timeout=90)
+                           capture_output=True,
+                           timeout=RUN_TIMEOUT_S + 120)
         out = r.stdout.decode('utf-8', errors='replace')
         maxrss = int(r.stderr.decode().strip().splitlines()[-1])
         rss_mb = maxrss / (1024 * 1024) if sys.platform == 'darwin' else maxrss / 1024
@@ -396,7 +418,8 @@ def test_gimple_runtime_error(name: str, mojo_src: str, expected_substr: str):
     exe_path = None
     try:
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
-        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        result = subprocess.run([exe_path], capture_output=True,
+                                timeout=RUN_TIMEOUT_S)
         err = result.stderr.decode('utf-8', errors='replace')
         if result.returncode != 0 and expected_substr in err:
             print(f"PASS  {name}")
@@ -6819,11 +6842,16 @@ def main():
     # even COMPILE before the fix (`_xmod_ctor_field_hints`, mirroring the
     # existing `_xmod_gen_param_hints` cross-module pattern).
     def _compile_two_files_do_imports_and_run(defn_filename, defn_src,
-                                               use_filename, use_src, timeout=30):
+                                               use_filename, use_src,
+                                               timeout=COMPILE_TIMEOUT_S):
         """Write two sibling .py files, compile the SECOND with
         do_imports=True (single-TU inline path), build with gcc -fgimple,
         run, and return captured stdout. Raises on any failure, with the
-        stage that failed in the message (compile / gcc / run)."""
+        stage that failed in the message (compile / gcc / run).
+
+        `timeout` covers the `gcc -fgimple` (the run below has its own, from
+        `run_executable_stdout`), so the default is the COMPILE budget rather
+        than a number picked before anyone measured a loaded machine."""
         with tempfile.TemporaryDirectory() as wd:
             open(os.path.join(wd, defn_filename), 'w').write(defn_src)
             entry = os.path.join(wd, use_filename)
@@ -6854,14 +6882,21 @@ def main():
                 except Exception:
                     pass
 
-    def _compile_package_and_run(pkg_name, files, entry_relpath, timeout=60):
+    def _compile_package_and_run(pkg_name, files, entry_relpath,
+                                 timeout=COMPILE_TIMEOUT_S):
         """Write `files` ({relpath: src}) into a temp PACKAGE directory,
         compile `entry_relpath` with do_imports=True (single-TU inline
         path), build with gcc -fgimple, run, and return captured stdout.
         Returns (compiled_stdout, cpython_stdout) so the caller can compare
         the compiled program against the interpreter on the SAME source —
         the comparison this file's other helpers skip because their fixtures
-        have no imports to run twice."""
+        have no imports to run twice.
+
+        `timeout` is the COMPILE budget, and it is spent twice over: on the
+        CPython reference run here and on the `gcc -fgimple` below. A package
+        fixture that compiles several modules is the slowest `gcc -fgimple`
+        this job does, which is why the old `60` was the literal that made a
+        healthy case a compiler bug."""
         with tempfile.TemporaryDirectory() as wd:
             for rel, src in files.items():
                 path = os.path.join(wd, pkg_name, rel)
@@ -7240,7 +7275,8 @@ def main():
     # the result, AND run the same source under CPython, and require the two
     # stdouts to agree — so every assertion here is anchored to what Python
     # actually answers, never to a value this compiler happens to produce.
-    def _compile_n_files_and_run(files: dict, entry: str, timeout=60,
+    def _compile_n_files_and_run(files: dict, entry: str,
+                                 timeout=COMPILE_TIMEOUT_S,
                                  extra_runtime=()):
         """Write `files` ({name: source}), compile `entry` with
         do_imports=True (the single-TU inline path), build with gcc -fgimple,
@@ -7290,7 +7326,8 @@ def main():
                 except OSError:
                     pass
 
-    def _check_agrees_with_cpython(name, files, entry, timeout=60):
+    def _check_agrees_with_cpython(name, files, entry,
+                                   timeout=COMPILE_TIMEOUT_S):
         """Run `files` both ways; PASS only if compiled == CPython."""
         global _PASS, _FAIL, _TIMEOUT
         try:
@@ -7429,7 +7466,8 @@ def main():
     # program emitted 13 names' worth of duplicate declarations).
     _RUNTIME_DIR = os.path.join(HERE, 'runtime')
 
-    def _check_string_pool_declared_once(name, files, entry, timeout=60):
+    def _check_string_pool_declared_once(name, files, entry,
+                                         timeout=COMPILE_TIMEOUT_S):
         global _PASS, _FAIL, _TIMEOUT
         # The fixture's sibling is a generator, so the image needs the
         # coroutine runtime; `test_gimple_generator_runner.py` names the set
