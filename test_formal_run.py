@@ -4936,6 +4936,33 @@ BOTH_ARCH_CASES = [
      "    comptime b = a // 7\n"
      "    comptime c = (b // 2) * 6 + 1\n"
      "    return c\n", 43, None),
+    # A `while` BODY's store read after the loop, where the condition is
+    # decidable on entry because the preheader states it.  This is the shape
+    # `bugs/FORMAL_while_body_store_refused_though_the_loop_runs.md` is about,
+    # and the reason the row is here and not only in
+    # `test_formal_read_before_store.py` is that the analysis answering `ok` and
+    # the EMITTED image printing 1 are two different claims: the analysis runs
+    # no code at all, and the register the read comes from is a caller-supplied
+    # word, so "the analysis stopped refusing" would be satisfied by a build
+    # that answers 8432255232.
+    #
+    # `t` is stored ONLY in the loop body, which is the whole point: before
+    # `model._preheader_literals` this program's build was REFUSED, because the
+    # body's first iteration depended on a condition the graph could not decide.
+    # The values distinguish the iteration counts — `t` takes `i + 1` on each
+    # pass, so it ends at 3 for `i = 2` and `i` at 3 — so a build that ran the
+    # body zero times, or once, or twice, prints a different pair, and a build
+    # that left the slot at the caller's word does not print this at all.
+    ("both_arch_while_body_store_read_after_the_loop",
+     "def f(n):\n"
+     "    var i = 0\n"
+     "    while i < 3:\n"
+     "        t = i + 1\n"
+     "        i = i + 1\n"
+     "    printf(\"t=%d i=%d\", t, i)\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(0)\n", 0, "t=3 i=3"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -11702,6 +11729,26 @@ REFUSAL_CASES = [
      "    printf(\"total=%d\", total)\n"
      "    return 0\n",
      "refuse:is read at line 2 before anything in this function stores it",
+     None),
+    # A `while` BODY's store read after the loop, with the counter coming from a
+    # PARAMETER. This is the limit `model._preheader_literals` leaves in place
+    # and it is pinned here rather than only in
+    # `test_formal_read_before_store.py`, because a refusal that holds on one
+    # machine and not the other is the divergence this pair of backends is not
+    # allowed to have, and `run_case` checks the needle on BOTH for a
+    # `refuse:` row without needing the `BOTH_ARCH_CASES` group. CPython raises
+    # `UnboundLocalError` for `n == 0`, where the body never runs.
+    ("while_body_store_from_a_parameter_refused",
+     "def f(n):\n"
+     "    var i = n\n"
+     "    while i < 3:\n"
+     "        t = 1\n"
+     "        i = i + 1\n"
+     "    printf(\"t=%d\", t)\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(0)\n",
+     "refuse:is read at line 6 before anything in this function stores it",
      None),
     # THE CONTROLS, and they are the reason the three above are believable:
     # each is a name that IS stored before it is read, in a shape close

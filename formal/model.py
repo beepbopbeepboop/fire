@@ -2748,35 +2748,61 @@ _CMP_OPS = {
 }
 
 
-def _literal_truth(e) -> object:
+def _cfg_int_value(e, consts=None) -> object:
+    """The `int` an operand stands for, reading `consts` for a NAME.
+
+    `_cfg_int_literal` answers "is this node a literal"; this answers "what
+    integer is this operand", which is the same question plus one source of
+    evidence. `consts` is `_preheader_literals`'s `{name: int}`, and a name it
+    does not have is still None — the conservative answer, and the one that
+    keeps the edge."""
+    v = _cfg_int_literal(e)
+    if v is None and consts and isinstance(e, F.IdentExpr):
+        v = consts.get(e.name)
+    return v
+
+
+def _literal_truth(e, consts=None) -> object:
     """True/False when `e`'s value is decidable here, None when it is not.
 
-    Only INTEGER LITERALS, and that restriction is the point: an answer
-    computed from a literal is a fact about the program, while an answer
-    computed from a name would be an assumption about what the name holds,
-    and the whole analysis is careful to make no such assumption. Anything
-    unrecognised — a name, a call, a chained comparison with a name in it, a
-    float — is None, and None is the answer that keeps the edge.
+    Only INTEGER LITERALS and the NAMES `consts` has decided, and that
+    restriction is the point: an answer computed from a literal is a fact about
+    the program, while an answer computed from a name would be an assumption
+    about what the name holds — unless the name's every binding on the path is
+    itself a literal, which is what `consts` carries and
+    `_preheader_literals` establishes. Anything unrecognised — an undecided
+    name, a call, a chained comparison with an undecided operand, a float — is
+    None, and None is the answer that keeps the edge.
 
     A single `a < b` is a `BinaryOp` in this AST and only a CHAIN of two or
     more comparisons is a `CompareChain`, so both are here: reading only the
     chain is how `while 1 < 2:` — the shape a generated bound is written in —
     came out undecidable.
+
+    `consts` is optional and its absence is exactly the old behaviour, so the
+    caller that has no evidence (every caller but `_loop_body_always_runs`)
+    reads the same function rather than a second copy of it.
     """
     if isinstance(e, F.BoolLiteral):
         return bool(e.value)
+    if isinstance(e, F.IdentExpr) and consts and e.name in consts:
+        # A name that is DECIDED is a value, and a value is either truthy or
+        # not: `while i:` with `i = 0` is a loop that never runs, and answering
+        # anything else would be inventing an edge.
+        return bool(consts[e.name])
     if isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "not":
         inner = _literal_truth(getattr(e, "operand", None) or
-                               getattr(e, "expr", None))
+                               getattr(e, "expr", None), consts)
         return None if inner is None else (not inner)
     if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
-        left = _cfg_int_literal(getattr(e, "left", None))
-        right = _cfg_int_literal(getattr(e, "right", None))
+        left = _cfg_int_value(getattr(e, "left", None), consts)
+        right = _cfg_int_value(getattr(e, "right", None), consts)
         if left is None or right is None:
             return None
         return bool(_CMP_OPS[e.op](int(left), int(right)))
     if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
-        vals = [_cfg_int_literal(o) for o in (getattr(e, "operands", None) or [])]
+        vals = [_cfg_int_value(o, consts)
+                for o in (getattr(e, "operands", None) or [])]
         if any(v is None for v in vals):
             return None
         for op, a, b in zip(e.ops, vals, vals[1:]):
@@ -2787,7 +2813,142 @@ def _literal_truth(e) -> object:
     return None
 
 
-def _loop_body_always_runs(s) -> bool:
+def _cfg_literal_effects(stmts, consts: dict) -> dict:
+    """`consts` after a straight-line run, with each statement's own effect.
+
+    The same statement vocabulary as `_cfg_block_defs` and the same rule about
+    what a block holds — a control-flow statement is always ALONE in its block
+    and its arms are separate blocks, so it has no effect here either, and the
+    join intersects.
+
+    **A binding to anything but an integer literal REMOVES the name**, and that
+    is the direction that matters. `i = 0` then `i = f()` leaves `i` undecided,
+    so a later `while i < 3` keeps its zero-iteration edge; the alternative —
+    keeping the older literal — would answer `True` for a program whose loop may
+    not run at all, which is the wrong-answer direction this whole analysis is
+    built to refuse.
+    """
+    out = dict(consts)
+    for s in (stmts or []):
+        kind = type(s).__name__
+        if kind in ("AssignStmt", "VarDecl"):
+            target = getattr(s, "target", None)
+            name = getattr(s, "name", None)
+            value = _cfg_int_literal(getattr(s, "value", None))
+            if value is not None:
+                if kind == "AssignStmt":
+                    for n in _store_names(target):
+                        out[n] = int(value)
+                elif isinstance(name, str):
+                    out[name] = int(value)
+                continue
+            names = _store_names(target) if kind == "AssignStmt" else (
+                {name} if isinstance(name, str) else set())
+        elif kind in ("AugAssignStmt", "MultiAssignStmt", "DelStmt",
+                      "ComptimeVarStmt", "ForStmt", "ComptimeForStmt"):
+            if kind in ("MultiAssignStmt", "DelStmt"):
+                names = set()
+                for t in (getattr(s, "targets", None) or []):
+                    names |= _store_names(t)
+            else:
+                names = _store_names(getattr(s, "target", None))
+        elif kind == "WithStmt":
+            names = {getattr(it, "alias", None)
+                     for it in (getattr(s, "items", None) or [])}
+        elif kind == "TryStmt":
+            names = {getattr(h, "name", None)
+                     for h in (getattr(s, "handlers", None) or [])}
+        elif kind == "MatchStmt":
+            # A `match` head binds no name of its own, and its arms'
+            # CAPTURES are `None`-valued on every path, so nothing here can
+            # keep a name decided that the head did not.
+            names = set()
+        else:
+            continue
+        for n in names:
+            if isinstance(n, str):
+                out.pop(n, None)
+    return out
+
+
+def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
+    """`{name: int}` bound to an integer literal on EVERY path into `head_index`.
+
+    **The second source of evidence `_loop_body_always_runs` reads.** "Did the
+    body run at least once" is a question about the condition ON ENTRY, and the
+    graph says nothing about values: `i = 0` then `while i < 3:` is a fact the
+    preheader states and the edges cannot. So this walks the same CFG a third
+    time — `head_index`'s predecessors, and everything that reaches them,
+    which is every block on some path to the header and no block after it — and
+    carries a "definitely this integer" table along each edge.
+
+    The lattice is a partial map, and the two directions are both deliberate:
+
+    * a name enters a block's IN set only when EVERY predecessor's OUT set has
+      it at the same value, and a predecessor with no entry for it (a path that
+      does not bind it at all, or binds it from a parameter) removes it. This is
+      the same intersection `_definitely_stored` does over NAMES rather than
+      values, and it is why `i = 0` before one arm and `i = 5` before the other
+      decides nothing;
+    * it starts EMPTY and iterates up, not top-initialised, because the answer
+      being computed is "is this name decided here" and an undecided name must
+      not be assumed. `_definitely_stored` top-initialises because it answers
+      the opposite question.
+
+    A block's SEEDED names are dropped (`seed` is what a `match` capture puts
+    there): a capture binds the subject, whose value is not a literal, and a
+    seed is per-arm anyway.
+    """
+    region = set()
+    stack = [p for p in blocks[head_index].preds] if blocks else []
+    while stack:
+        i = stack.pop()
+        if i in region or not (0 <= i < len(blocks)) or i == head_index:
+            continue
+        region.add(i)
+        stack.extend(blocks[i].preds)
+    if not region:
+        return {}
+    order = sorted(region)
+    out: dict = {i: {} for i in order}
+    changed = True
+    rounds = 0
+    while changed:
+        changed = False
+        rounds += 1
+        nxt: dict = {}
+        for i in order:
+            b = blocks[i]
+            merged = None
+            for p in b.preds:
+                if p == head_index or p not in region:
+                    continue
+                p_out = _cfg_literal_effects(blocks[p].stmts, out[p])
+                merged = dict(p_out) if merged is None else {
+                    n: v for n, v in merged.items()
+                    if n in p_out and p_out[n] == v}
+            if merged is None:
+                merged = {}
+            for n in b.seed:
+                merged.pop(n, None)
+            nxt[i] = _cfg_literal_effects(b.stmts, merged)
+        for i in order:
+            if nxt[i] != out[i]:
+                out[i] = nxt[i]
+                changed = True
+        if rounds > len(order) + 2:
+            break
+    merged = None
+    for p in blocks[head_index].preds:
+        if p not in region:
+            continue
+        p_out = _cfg_literal_effects(blocks[p].stmts, out[p])
+        merged = dict(p_out) if merged is None else {
+            n: v for n, v in merged.items() if n in p_out and p_out[n] == v}
+    return merged or {}
+
+
+def _loop_body_always_runs(s, consts=None) -> bool:
     """Whether this loop's body is guaranteed to execute at least once.
 
     **The one question a CFG cannot answer, and the two cases where it can.**
@@ -2803,17 +2964,27 @@ def _loop_body_always_runs(s) -> bool:
     a refusal, and only when the body provably ran, so this cannot introduce a
     wrong answer. Keeping it when the answer is merely unknown refuses a
     program that works — `while i < 3: t = 1; i = i + 1` then `print(t)` is
-    such a program, and the cost of answering that one exactly is a constant
-    propagation the model does not do. It is the one limit this analysis has
-    that can break working code, it is recorded in
-    `test_formal_read_before_store.py`, and it is the reason the rule is here
-    at all: without it, every `while True:` in the corpus would have its body's
-    stores treated as non-dominating, which is a false refusal of a shape the
-    language writes constantly.
+    exactly such a program, and `consts` is what now answers it: the preheader
+    says `i = 0` and the condition says `i < 3`, so the body provably ran. The
+    residual limit is a binding the preheader cannot state as a literal (`i =
+    f()`, or `i` a parameter), and that one is recorded in
+    `test_formal_read_before_store.py`; it is the reason the rule is here at
+    all, since without it every `while True:` in the corpus would have its
+    body's stores treated as non-dominating, which is a false refusal of a shape
+    the language writes constantly.
     """
     kind = type(s).__name__
     if kind == "WhileStmt":
-        return _literal_truth(getattr(s, "condition", None)) is True
+        cond = getattr(s, "condition", None)
+        # Two sources of evidence, in one order and through one reader: the
+        # condition's OWN literals first, which is `_literal_truth` unchanged,
+        # and the preheader's constants second. The order is not cosmetic — a
+        # condition the preheader makes False is still False, and answering
+        # `True` from the condition's own literals alone would drop an edge the
+        # program really has.
+        if _literal_truth(cond) is True:
+            return True
+        return _literal_truth(cond, consts) is True
     if kind in ("ForStmt", "ComptimeForStmt"):
         it = getattr(s, "iterable", None)
         if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
@@ -2870,6 +3041,24 @@ def _build_cfg(body) -> tuple:
         blocks.append(b)
         return b
 
+    def edge(src, dst) -> None:
+        """Record `src -> dst` on BOTH lists, and it is one function because
+        they have to be added together.
+
+        `preds` used to be filled in a single pass at the end of the build, out
+        of `succs`. That cannot serve `_preheader_literals`, which is called
+        from INSIDE the build (a loop header's condition has to be decided
+        while its own block is being emitted) and reads `preds` to find the
+        blocks that reach it. Two lists maintained in two places is also how one
+        of them ends up describing a different graph from the other.
+        """
+        if src is None or dst is None:
+            return
+        if not (0 <= src < len(blocks) and 0 <= dst < len(blocks)):
+            return
+        blocks[src].succs.append(dst)
+        blocks[dst].preds.append(src)
+
     def open_block(stmts, pending: list, seed=None) -> _Block:
         """Open a block for `stmts` and make every `pending` exit reach it.
 
@@ -2886,8 +3075,7 @@ def _build_cfg(body) -> tuple:
         if seed:
             b.seed |= set(seed)
         for p in pending:
-            if p is not None and 0 <= p < len(blocks):
-                blocks[p].succs.append(b.index)
+            edge(p, b.index)
         return b
 
     def run(stmts, loops: list, pending: list, seed=None) -> list:
@@ -2974,18 +3162,19 @@ def _build_cfg(body) -> tuple:
                 # every loop, `while True:` included.
                 latch = new([])
                 for be in body_exits:
-                    blocks[be].succs.append(latch.index)
+                    edge(be, latch.index)
                 for c in frame["continues"]:
-                    blocks[c].succs.append(latch.index)
+                    edge(c, latch.index)
                 if frame["first"] is not None:
-                    blocks[latch.index].succs.append(frame["first"])
+                    edge(latch.index, frame["first"])
                 # The loop's `else` clause runs when the loop finished without
                 # a `break`, which is the same two paths — so it hangs off the
                 # latch AND, when the body may never run, off the header.
                 # Emitted with this loop POPPED, so a `break` inside it is the
                 # enclosing loop's rather than this one's.
                 exit_from = [latch.index]
-                if not _loop_body_always_runs(s):
+                if not _loop_body_always_runs(
+                        s, _preheader_literals(blocks, head.index, entry)):
                     exit_from.append(head.index)
                 else_body = getattr(s, "else_body", None)
                 if else_body:
@@ -3423,10 +3612,6 @@ def _build_cfg(body) -> tuple:
     # exits.
     entry = new([])
     run(body, [], [entry.index])
-    for b in blocks:
-        for d in b.succs:
-            if d is not None and 0 <= d < len(blocks):
-                blocks[d].preds.append(b.index)
     return blocks, entry.index
 
 

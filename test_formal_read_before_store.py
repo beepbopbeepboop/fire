@@ -211,18 +211,70 @@ CASES = [
      "    for i in []:\n        t = i\n    return t\n", "refuse"),
     ("empty_range_body_store_refused",
      "    for i in range(0, 5, -1):\n        t = i\n    return t\n", "refuse"),
-    # THE OTHER LIMIT THAT CAN REFUSE A PROGRAM THAT WORKS, and it is pinned
-    # rather than hidden: the body's first iteration depends on the condition
-    # being true on ENTRY, which for `i < 3` with `i = 0` is a constant-
-    # propagation question the CFG does not ask. CPython runs this; the
-    # analysis refuses it. `while True:` and a `while` over literal bounds —
-    # the shapes where the answer is decidable — are NOT refused, which is
-    # what `_loop_body_always_runs` is for.
-    ("while_body_store_refused",
+    # THE SECOND SOURCE OF EVIDENCE for `_loop_body_always_runs`, and the row that
+    # used to pin its absence. "Did the body run at least once" is a question
+    # about the condition ON ENTRY; the graph says nothing about values, and the
+    # first source — the condition's own literals — is not enough for `i = 0`
+    # then `while i < 3:`, which is ordinary code and which CPython runs. So
+    # `_preheader_literals` carries a "definitely this integer" table along
+    # every edge that reaches the header, and this row is the shape it answers.
+    ("while_body_store_ok",
      "    i = 0\n    while i < 3:\n        t = 1\n        i = i + 1\n"
+     "    return t\n", "ok"),
+    # ── …and the four ways it still refuses, which are the rows that matter ──
+    #
+    # The preheader has to STATE the value. `i = n` binds it from a parameter,
+    # so no path says which integer it holds and the zero-iteration edge stays:
+    # CPython raises `UnboundLocalError` for `n == 0`, where the loop never runs.
+    ("while_body_store_from_a_parameter_refused",
+     "    i = n\n    while i < 3:\n        t = 1\n        i = i + 1\n"
      "    return t\n", "refuse",
-     "the condition is not decidable on entry, so the body's first iteration "
-     "is not known to happen"),
+     "the preheader does not state `i`, so the condition is undecided on entry"),
+    # A CALL is the other spelling of the same gap, and it is worth its own row
+    # because it is the one the corpus writes: `i = next(counter)`,
+    # `i = len(xs)` — an expression the constant propagation cannot fold, and the
+    # right answer for `i = 0` is still a guess.
+    ("while_body_store_from_a_call_refused",
+     "    i = sink()\n    while i < 3:\n        t = 1\n        i = i + 1\n"
+     "    return t\n", "refuse",
+     "a call's result is not a literal the preheader states"),
+    # THE DISAGREEMENT, and it is the direction a constant propagation is most
+    # likely to get wrong: the table is an INTERSECTION over the paths that
+    # reach the header, so `i` bound to 0 on one arm and 5 on the other decides
+    # nothing, however small both literals are. Reading either arm's value here
+    # would answer for a program whose loop may or may not run.
+    ("while_body_store_after_two_disagreeing_literals_refused",
+     "    if n > 2:\n        i = 5\n    else:\n        i = 0\n"
+     "    while i < 3:\n        t = 1\n        i = i + 1\n"
+     "    return t\n", "refuse",
+     "the two arms bind `i` to different literals, so nothing is decided"),
+    # …and the same disagreement reached through a binding that is not a
+    # statement at all: an augmented assignment reads the name, so it removes it
+    # even though the arithmetic is only ever applied to a decided literal.
+    ("while_body_store_after_an_augmented_binding_refused",
+     "    i = 0\n    i += n\n    while i < 3:\n        t = 1\n        i = i + 1\n"
+     "    return t\n", "refuse",
+     "`i += n` reads `i`, so the table drops it"),
+    # AND THE OPPOSITE DIRECTION, which is the one that could turn a refusal
+    # into a wrong answer: a condition that is decidably FALSE on entry means
+    # the body provably did NOT run, so the zero-iteration edge is the only
+    # edge and the read is still unstored. This row is what a second source of
+    # evidence has to get right in BOTH senses — answering `True` from the
+    # preheader without asking `_literal_truth`'s False case would accept a
+    # program that reads a register nobody wrote.
+    ("while_body_store_when_the_condition_is_false_on_entry_refused",
+     "    i = 0\n    while i > 3:\n        t = 1\n        i = i + 1\n"
+     "    return t\n", "refuse",
+     "`i > 3` with `i = 0` is false on entry, so the body never runs"),
+    # The zero-iteration edge is also what a `break` on the first iteration
+    # relies on being about the CONDITION rather than about the preheader:
+    # here the body provably runs, but `break` on its first pass is a path to
+    # the join that never reaches the store.
+    ("while_body_store_with_a_break_on_the_first_pass_refused",
+     "    i = 0\n    while i < 3:\n        if n > 2:\n            break\n"
+     "        t = 1\n        i = i + 1\n"
+     "    return t\n", "refuse",
+     "the body runs, but a `break` before the store reaches the join"),
     ("while_true_body_store_ok",
      "    while True:\n        t = 1\n        break\n    return t\n", "ok"),
     ("while_literal_true_body_store_ok",
