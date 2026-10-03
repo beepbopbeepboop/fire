@@ -1,7 +1,91 @@
 # FORMAL_libc_call_whose_name_starts_with_an_underscore: two places eat the first character of a C identifier that legitimately begins with `_`
 
-**Status: OPEN, latent, pre-existing, NOT FIXED — and deliberately not fixed
-here, for a reason that is in §3 and is not "it was hard".** Found 2026-10-02
+**Status 2026-10-03 (`work/formal13-4`): BOTH FIXES LANDED, and the blocker §3 names
+is GONE — there was a second, harmless C function to verify them against.**
+
+§3 filed this rather than fixing it because the only C function on this target
+that reaches either site is `_NSGetExecutablePath`, and it faults inside libSystem
+(four ways, including from CPython), so "landing a change to
+`formal/macho_linker.py` on the strength of a call that crashes would be exactly
+the 'a verification whose verifier never ran' failure". The escape from that is
+that the population is not one function: **`_exit` is also there**, it is in
+libSystem, and it is harmless — so the two one-line fixes could be measured
+end to end on both architectures, with an observable that is not a crash.
+
+## What `_exit` measures, and why it is the right instrument
+
+`_exit(3)` and `exit(3)` differ in exactly one observable: POSIX `_exit`
+terminates **without flushing open streams**. stdout is a pipe under the test
+harness, so it is block-buffered and the flush is the only thing that can put
+buffered text out. That is a differential against the C library itself, on a
+function that cannot fault:
+
+```python
+def bail(status: Int) -> Int:
+    _ = external_call["_exit", Int32](Int32(status))
+    return 0
+
+def main(n: Int) -> Int:
+    printf("flushed")
+    return bail(3)
+```
+
+| | exit status | stdout |
+|---|---|---|
+| before, arm64 and x86-64 | 3 | `flushed` — **`exit` ran** |
+| after, arm64 and x86-64 | 3 | *(nothing)* — **`_exit` ran** |
+
+Before the fix both ends of the pipeline ate the underscore, and the two mistakes
+composed into a false pass: `formal/model.py::libc_source_name` asked `dlsym`
+about `exit`, which libSystem has, so the audit was satisfied; and
+`formal/macho_linker.py::_bind_info` dropped one leading underscore before
+writing the name dyld looks up, so the loader bound `exit` too. A program that
+asked to die without flushing flushed. Pinned by
+`test_formal_external_call.py`'s `c_identifier_beginning_with_an_underscore_binds_that_function`,
+whose expectation is the empty stdout, and by four new rows in
+`test_formal_link_accounting.py::test_libsystem_provider` — including the
+anti-rot one, that `NSGetExecutablePath` (no leading underscore) is still NOT in
+libSystem, so the fix is not a blanket accept.
+
+**`_is_libsystem('_printf')` is now False, and that assertion moved.** The old row
+said "the Mach-O spelling (leading underscore) is handled", which was true of the
+defect: a Mach-O spelling is not what reaches this function. It is the inverse of
+`model.target_libc_symbol`, so it is asked what the SOURCE spelled, and `_printf`
+as a source spelling is a C function libSystem does not export. A Mach-O spelling
+that really does arrive — a linked module's export — is accounted for earlier, by
+`_audit_bound_symbols`' `provided` set against the manifest, which
+`test_bind_audit`'s `_pkg_helper` row already pinned. Measured, so this is not a
+hypothesis: a program calling `os.path.join` binds
+`['os_path_join_2dbb98', 'printf']`, neither of them underscore-prefixed.
+
+**`test_formal_libc_symbol.py`'s table asserted the defect in three of its seven
+rows** (`_readdir` → `readdir`, `_printf` → `printf`,
+`_os_syscalls_readdir_9f63a2` → `os_syscalls_readdir_9f63a2`) and now asserts the
+corrected answers, with the `$INODE64` rows — the only case the strip exists for —
+unchanged.
+
+**§4's checks, run:** `test_formal_link_accounting.py` 235/235,
+`test_formal_libc_symbol.py` 7/7 (`binding` and the table green on both
+architectures; `dirent`/`stat` on arm64 are killed with SIGKILL about half the time
+and are equally flaky with both fixes reverted — three baseline runs gave 5/7, 6/7,
+5/7, so it is this machine's memory pressure and not this change),
+`test_formal_runtime_link.py` 133/133 (it reads the bind stream),
+`test_formal_external_call.py` 46/46, `test_formal_dylib.py` 19/19,
+`test_formal_os.py` 5/5, `test_re_formal.py` 1188/1188, `test_formal_stat.py` 4/4,
+`test_formal_hashlib.py`, `test_formal_fcntl.py`, `test_formal_small_hosts.py` — all
+green.
+
+**§3's population count is corrected by the same measurement:** of the candidates
+probed by `dlsym` against `/usr/lib/libSystem.B.dylib` on this host, six are
+present — `_exit`, `_setjmp`, `_longjmp`, `__error`, `_NSGetExecutablePath`,
+`__sysctlbyname` — and `_exit` is the first of them that is both harmless to call
+and expressible in this value model (one `Int` in, no result used).
+`_NSGetExecutablePath` remains unusable end to end, and that no longer matters:
+it is no longer the only instrument.
+
+**Status (original, 2026-10-02): OPEN, latent, pre-existing, NOT FIXED — and
+deliberately not fixed here, for a reason that is in §3 and is not "it was
+hard".** Found 2026-10-02
 while answering `platform()` (`bugs/FORMAL_platform_one_call_from_answered.md`,
 now fixed), whose `_NSGetExecutablePath` call is the one function on this target
 that would have reached either of these.
@@ -82,8 +166,10 @@ cannot catch this.
 
 ## 2. The two fixes, as measurements
 
-Neither is landed here; both are one line, and both are stated as text so
-whoever takes this can apply them without re-deriving anything.
+Neither was landed when this was written; both were one line, and both are stated
+as text so whoever takes this can apply them without re-deriving anything. Both
+landed on 2026-10-03 — the second with `libc_source_name` rather than a literal
+strip, which is the same decision asked in the model's own terms.
 
 **`formal/model.py::libc_source_name`** — strip the assembler's underscore only
 when there is a `$INODE64` to remove after it, which is the only case the strip
@@ -117,7 +203,8 @@ but it is unreachable for this: a leading-underscore name in an export map is a
 (`test_formal_platform.py`'s `exports` group asserts it for all seventeen host
 modules).
 
-## 3. Why this is filed rather than fixed, which is a real answer
+## 3. Why this was filed rather than fixed, which is a real answer (superseded —
+## the blocker was one function, and there was a second)
 
 **The one C function on this target that a formal program could reach this way
 faults inside libSystem**, so neither fix can be verified end to end here:

@@ -61,6 +61,7 @@ sys.path.insert(0, REPO)
 
 import formal.build as B
 import formal.imports as I
+import formal.model as M
 
 RESULTS = []
 
@@ -682,8 +683,47 @@ def test_libsystem_provider():
     for s in ('SSL_new', 'deflate', 'sqlite3_open', 'mojo_list_len',
               'no_such_symbol_at_all'):
         check(not B._is_libsystem(s), f'libSystem does NOT provide {s}')
-    check(B._is_libsystem('_printf'),
-          'the Mach-O spelling (leading underscore) is handled')
+    # The Mach-O spelling used to be asserted HERE and is now asserted in
+    # `test_bind_audit`, and the move is the point rather than bookkeeping:
+    # `_is_libsystem` asks `dlsym` about the name the SOURCE spells (it is the
+    # inverse of `model.target_libc_symbol`, which is where this pipeline adds
+    # an underscore), so `_printf` as a source spelling means the C function
+    # `_printf`, which libSystem does not export, and the honest answer is False.
+    # A Mach-O spelling that really does arrive — a linked module's export —
+    # never reaches this function: `_audit_bound_symbols`' `provided` set
+    # accounts for it against the manifest, on both sides, which is what
+    # `test_bind_audit`'s `_pkg_helper` row pins. Measured: the externs an image
+    # actually binds are source spellings (`['os_path_join_2dbb98', 'printf']`
+    # for a program that calls `os.path.join`).
+    # A C IDENTIFIER MAY BEGIN WITH AN UNDERSCORE, and both ends of this
+    # pipeline used to eat it: `libc_source_name` asked `dlsym` about a
+    # DIFFERENT function (`_NSGetExecutablePath` → `NSGetExecutablePath`, which
+    # libSystem does not export), and `_bind_info` dropped one before writing the
+    # name dyld looks up. The hazard is not the wrong answer but that `dlsym`
+    # and dyld DISAGREE about these names — the shared cache answers
+    # `dlsym('_NSGetExecutablePath')` and the loader never looks that name up —
+    # so an audit that asks dlsym about a name the loader would reject cannot
+    # catch the linker half at all. Three rows, and the middle one is the
+    # anti-rot direction: a fix that made the audit accept everything would pass
+    # the first and fail this.
+    for s in ('_NSGetExecutablePath', '_exit'):
+        check(B._is_libsystem(s),
+              f'libSystem provides {s} — the leading underscore is part of '
+              f'the NAME, not the assembler\'s')
+    check(not B._is_libsystem('NSGetExecutablePath'),
+          "libSystem does NOT provide NSGetExecutablePath, so the audit is "
+          "asking about the name the source spells rather than accepting every "
+          "spelling of a symbol it does provide")
+    # The `$INODE64` suffix is the only case the strip exists for, in both
+    # spellings: `target_libc_symbol` appends it and the Mach-O spelling adds an
+    # underscore in front.
+    for spelled, want in (('readdir$INODE64', 'readdir'),
+                         ('_readdir$INODE64', 'readdir'),
+                         ('_NSGetExecutablePath', '_NSGetExecutablePath'),
+                         ('printf', 'printf')):
+        check(M.libc_source_name(spelled) == want,
+              f'libc_source_name({spelled!r}) is {want!r}',
+              f'got {M.libc_source_name(spelled)!r}')
     # Memoisation must not change an answer, including a False one.
     check(B._is_libsystem('sqlite3_open') is False,
           'a memoised negative answer is still correct')

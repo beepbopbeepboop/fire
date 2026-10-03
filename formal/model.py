@@ -12016,8 +12016,40 @@ def libc_source_name(symbol: str) -> str:
     answer is "nothing provides this", which is false about the machine the
     image will run on. So the audit strips the suffix and asks about the name
     the source used, which every macOS host does provide under one spelling or
-    the other."""
-    bare = symbol.lstrip("_")
+    the other.
+
+    **A C IDENTIFIER MAY BEGIN WITH AN UNDERSCORE, and this function used to
+    strip it unconditionally** (`symbol.lstrip("_")`), which is the wrong
+    inverse in both directions at once. It asks `dlsym` about a DIFFERENT
+    function than the image will call — libSystem's running-image-path function
+    is `_NSGetExecutablePath`, and the leading underscore is part of the NAME,
+    so the audit asked about `NSGetExecutablePath` and answered "nothing
+    provides this" for a symbol libSystem exports:
+
+        >>> import formal.build as B
+        >>> B._is_libsystem('_NSGetExecutablePath')       # was False
+        True
+
+    The hazard is not the wrong answer but WHERE the wrong answer is safe:
+    `dlsym` and dyld disagree about these names. The shared cache answers
+    `dlsym('_NSGetExecutablePath')`, and the loader does not look that name up
+    at all — the bind stream carries the bare C name and dyld prepends the
+    Mach-O underscore, so an audit that asks `dlsym` about a name the loader
+    would reject is exactly the check that cannot catch this.
+
+    So the underscore is stripped only when there is an `$INODE64` to remove
+    after it, which is the only case the strip exists for (`_readdir$INODE64` →
+    `readdir`): a Mach-O-spelled symbol reaches this function only together with
+    the suffix `target_libc_symbol` added.
+
+        readdir$INODE64        → readdir
+        _readdir$INODE64       → readdir
+        _NSGetExecutablePath   → itself
+        _exit                  → itself
+    """
+    bare = symbol
+    if bare.startswith("_") and bare.endswith(INODE64_SUFFIX):
+        bare = bare[1:]
     if bare.endswith(INODE64_SUFFIX):
         return bare[:-len(INODE64_SUFFIX)]
     return bare

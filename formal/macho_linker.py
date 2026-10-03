@@ -507,13 +507,27 @@ def _bind_info(external_syms: list[str], dylib_of: dict = None,
         # what made dyld (and `codesign`, which runs the same validator) reject
         # the image outright.
         out += bytes((BIND_SYMBOL_FLAGS_FUNCTION,))
-        # The stream carries the bare C name; dyld prepends the Mach-O
-        # underscore when it forms the symbol it looks up. Both spellings were
-        # measured against a real dyld: "printf" binds and calls through, while
-        # "_printf" gets "Symbol not found: __printf" — the underscore in the
-        # message is dyld's own, on top of ours. The codegen hands us the name
-        # as the source spelled it, so normalise to the C spelling here.
-        out += (sym[1:] if sym.startswith("_") else sym).encode()
+        # The stream carries the name the SOURCE spelled; dyld prepends the
+        # Mach-O underscore when it forms the symbol it looks up. Both spellings
+        # were measured against a real dyld: "printf" binds and calls through,
+        # while "_printf" gets "Symbol not found: __printf" — the underscore in
+        # the message is dyld's own, on top of ours. The codegen hands us the
+        # name as the source spelled it, so it is written out unchanged.
+        #
+        # **It used to drop one leading underscore here**, on the reading that
+        # the name arriving is the assembler's spelling — and that is false of
+        # every name this link line produces, which are source spellings
+        # (measured: a program calling a hostmod function binds
+        # `['os_path_join_2dbb98', 'printf']`, and neither begins with `_`). So
+        # for a C function that legitimately begins with one the stream carried
+        # a DIFFERENT function's name: `external_call["_exit", Int32](3)` bound
+        # `exit`, which flushes stdio, where `_exit` does not (C99 7.20.4.4 /
+        # POSIX — `_exit` terminates without flushing open streams). Measured on
+        # both architectures, before this line changed: the image printed what
+        # `exit` flushes and one that calls the real `_exit` prints nothing.
+        # The paragraph above this one recorded the same reasoning error and is
+        # why the line is worth reading twice.
+        out += sym.encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))
         out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | got_segment,))
