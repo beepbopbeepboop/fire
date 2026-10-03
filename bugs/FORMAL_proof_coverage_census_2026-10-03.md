@@ -255,13 +255,14 @@ every image answered CPython, and every proof Lean accepted was therefore a proo
 about a model that computes those programs correctly. Only 38 of the 64 had a
 proof Lean accepted at all (30 x86-64 `admitted` + 8 arm64 `pass`); the other 26
 are the honest half of the measurement — 16 of them Lean could not hold in
-memory, and 12 it rejected — and a verdict nobody read is not a verdict. It is NOT a statement that
-the model is right: it is bounded by the corpus (one function, `int` only,
-no loop, no call, no container — the shape the model can state at all, §0.4's
-own limit and `bugs/FORMAL_known_limits.md`'s) and by the typed model being
-absent (CPython has no `Int8`, so every typed program would need a hand-written
-wrap-around oracle, and an oracle built from the same reading of the language as
-the model under test cannot catch that model). §6's `~x` row is outside this
+memory, and 12 it rejected — and a verdict nobody read is not a verdict.
+
+It is NOT a statement that the model is right. It is bounded by the corpus (one
+function, `int` only, no loop, no call, no container — the shape the model can
+state at all, and `bugs/FORMAL_known_limits.md` owns the rest) and by the typed
+model being absent (CPython has no `Int8`, so every typed program would need a
+hand-written wrap-around oracle, and an oracle built from the same reading of
+the language as the model under test cannot catch that model). §6's `~x` row is outside this
 corpus by construction: it is in `formal/macho_linker.py`, not in a program.
 
 **The `pass` rows are the ones worth having** — 8 of them on arm64, against 14
