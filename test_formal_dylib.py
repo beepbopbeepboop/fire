@@ -28,6 +28,7 @@ Invoked via `make check-formal-dylib` or directly:
 """
 import argparse
 import ctypes
+import itertools
 import json
 import os
 import platform
@@ -408,10 +409,41 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     check(text["initprot"] == VM_PROT_READ | VM_PROT_EXECUTE,
           f"__TEXT initprot {text['initprot']:#x} is not r-x")
     check(text["vmaddr"] % 0x1000 == 0, "__TEXT vmaddr is not page aligned")
-    check(linkedit["vmaddr"] == text["vmaddr"] + text["vmsize"],
-          "__LINKEDIT does not start where __TEXT ends")
     check(linkedit["vmaddr"] % 0x1000 == 0,
           "__LINKEDIT vmaddr is not page aligned")
+    # No two segments may OVERLAP, in memory or in the file, and the link edit
+    # must sit above the code.
+    #
+    # This replaced "⟨LINKEDIT starts where __TEXT ends⟩", which was not an
+    # invariant but a coincidence: it held for as long as an image had no data
+    # segment, and it stopped holding the moment every image got one
+    # (`formal/model.py`'s `STACK_FLOOR_BUDGET_BYTES`). The data segment is
+    # mapped at a FIXED address well above the image's slide — `__DATA` is
+    # `GLOBALS_VM`, not "the next page" — so the three segments are neither
+    # contiguous nor in file order, and a contiguity assertion would be
+    # asserting the coincidence again on the next change. What the loader
+    # actually requires is disjoint ranges, and that is what is checked: two
+    # segments sharing an address is memory corruption, which is the failure
+    # this whole file's segment checks exist to catch.
+    segs = info["segments"]
+    for a, b in itertools.combinations(sorted(segs), 2):
+        sa, sb = segs[a], segs[b]
+        vm_overlap = (sa["vmaddr"] < sb["vmaddr"] + sb["vmsize"]
+                      and sb["vmaddr"] < sa["vmaddr"] + sa["vmsize"])
+        check(not vm_overlap,
+              f"segments {a} [{sa['vmaddr']:#x}, "
+              f"{sa['vmaddr'] + sa['vmsize']:#x}) and {b} "
+              f"[{sb['vmaddr']:#x}, {sb['vmaddr'] + sb['vmsize']:#x}) overlap "
+              f"in memory, so the loader maps them over each other")
+        f_overlap = (sa["fileoff"] < sb["fileoff"] + sb["filesize"]
+                     and sb["fileoff"] < sa["fileoff"] + sa["filesize"])
+        check(not f_overlap,
+              f"segments {a} and {b} overlap in the FILE "
+              f"({a} [{sa['fileoff']}, {sa['fileoff'] + sa['filesize']}) vs "
+              f"{b} [{sb['fileoff']}, {sb['fileoff'] + sb['filesize']})")
+    check(linkedit["vmaddr"] >= text["vmaddr"] + text["vmsize"],
+          f"__LINKEDIT at {linkedit['vmaddr']:#x} is not above __TEXT, which "
+          f"ends at {text['vmaddr'] + text['vmsize']:#x}")
 
     dataoff, datasize = info["commands"]["LC_DYLD_EXPORTS_TRIE"]
     check(linkedit["fileoff"] <= dataoff
