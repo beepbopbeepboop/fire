@@ -5029,6 +5029,90 @@ DECLARED_TYPE_REFUSALS = [
      "    printf(\"%d\\n\", b.emit())\n"
      "    return 0\n",
      "refuse:b.emit() is a method call on a value", None),
+
+    # ── THE TWO ACCESSORS `.value` DOES NOT ANSWER THROUGH A PARAMETER ───────
+    #
+    # `BOTH_ARCH_CASES`' `both_arch_enum_typed_parameter_value_is_the_word_it_
+    # holds` is the half of this that works. These two are the half that does not,
+    # and they are two refusals because the two facts are two — a single sentence
+    # would have to be false about one of them, and a refusal that is false about
+    # the construct is worse than none because it sends a reader to change a
+    # correct program.
+    #
+    # `.name` is a member's SPELLING: the constant's own name in the class body,
+    # which the word travelling in the parameter does not carry. The
+    # class-constant spelling `Reg.RBP.name` answers, so this is not "the enum
+    # machinery is absent" — it is that a parameter has lost which member it is.
+    # (CPython's asymmetry is the same one: `Reg.<computed>.value` fails and
+    # `Reg.<computed>.name` still answers.)
+    ("refuse_an_enum_members_name_through_a_parameter",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "\n"
+     "def name_of(base: Reg) -> String:\n"
+     "    return base.name\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%s\\n\", name_of(Reg.RBP))\n"
+     "    return 0\n",
+     "refuse:base.name` is a member's SPELLING", None),
+
+    # `.value` where the enum has a member this path cannot materialize. The gate
+    # is EVERY member and not this read's member, and the reason is that a
+    # parameter's value is a word that arrived from a call site: nothing in it
+    # says which member it is, so one computed member makes the identity
+    # `base.value is base` false for all of them and answering it for the others
+    # would be a wrong number rather than a refusal.
+    #
+    # The call site passes `0` and CPython would raise `TypeError` there — an enum
+    # member is not an int. That is deliberate and is what makes this a LIMIT row
+    # rather than a differential: the reachable programs on this side of the gate
+    # are the ones with no reference answer, so what is pinned is that the build
+    # says so INSTEAD of answering. Naming `Reg.NEXT` in the needle is the other
+    # half — a message that said only "some member is computed" would send a
+    # reader looking through the class body for which one.
+    ("refuse_an_enum_value_when_any_member_is_computed",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    NEXT = RAX + 1\n"
+     "\n"
+     "def pick(base: Reg) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(0))\n"
+     "    return 0\n",
+     "refuse:`Reg.NEXT` is written as a COMPUTATION", None),
+
+    # THE DIRECTION THAT MATTERS MOST, because it is the one that would refuse
+    # real programs: the census is gated on `model.struct_is_enum`, so a
+    # parameter whose declared type is an ORDINARY struct still reads `.value`
+    # as a field — through the generic `field_access_refusal`, whose wording
+    # ("this path has no way to say what 'base' holds") is still TRUE here,
+    # because a two-field struct's receiver is a frame address and nothing in
+    # `base`'s declaration as used by THIS read settles which. `P` declares a
+    # METHOD named `value`, so the program is also one whose answer is a number:
+    # a census that stopped at the annotation and dropped the enum gate would
+    # rewrite `base.value` to `base` and print a frame address.
+    ("refuse_a_non_enum_parameters_value_is_still_a_field_read",
+     "struct P:\n"
+     "    var v: Int\n"
+     "\n"
+     "    def value(self) -> Int:\n"
+     "        return self.v\n"
+     "\n"
+     "def pick(base: P) -> Int:\n"
+     "    return base.value\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", pick(P()))\n"
+     "    return 0\n",
+     "refuse:'base.value' is a field access through 'base'", None),
 ]
 
 # ── the SECOND evidence source for a field's type: what __init__ ASSIGNS ─────
@@ -5462,6 +5546,61 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+
+    # ── AN ENUM-TYPED PARAMETER, AND `.value` OFF IT ─────────────────────────
+    #
+    # `Reg.RBP.value` — a CLASS-level member read — lowers, and has since
+    # `_enum_member_sites` / `_apply_constant_sites` (that fix is what stopped
+    # `Reg.R15.value` answering `0` where CPython answers `15`). The PARAMETER
+    # spelling did not, and the difference was one word in the site key: the
+    # census was keyed on the literal path `Reg.RBP.value`, and a parameter's path
+    # is `base.value`. Measured on both architectures before the rewrite:
+    #
+    #   build: 'base.value' is a field access through 'base', and this path has
+    #   no way to say what 'base' holds …
+    #
+    # and the refusal was FALSE. Its own rule is that "a field is lowered three
+    # ways and which one applies is decided by the BINDING of the base, not by a
+    # type" — and `base` is bound by its DECLARATION, which says `Reg`. `base`
+    # is not a frame and not a field: it holds an enum member, which on this path
+    # is a plain 64-bit word, and **the word an enum member IS, on this path, IS
+    # its value** — which is exactly why the class-constant rewrite substitutes
+    # the literal for `Reg.RBP.value`. So `base.value` is `base`.
+    #
+    # In `BOTH_ARCH_CASES` rather than as a `refuse:` row because the rewrite is
+    # in the shared build pass and the ANSWER is what has to agree: `formal/
+    # x86_64.py` reads these values in its register-number arithmetic, so a
+    # backend that got the word wrong would compute wrong machine code, print it,
+    # and exit 0.
+    #
+    # 46 = `scaled(Reg.RSP, 3)`'s 36, `is_bp(Reg.RBP)`'s 10, `is_bp(Reg.RAX)`'s
+    # 0 — under 256 because the exit status is a byte, and a weighted sum wide
+    # enough to overflow it would compare against `expected & 0xFF` and invent a
+    # mismatch (the lesson `bugs/FORMAL_arm64_instruction_coverage.md` §"Every
+    # expected value must fit in a byte" records, having been learned there).
+    # `is_bp` is a COMPARISON and `scaled` is arithmetic on purpose: the rewrite
+    # has to put the bare name where an operand goes, and a row that only
+    # returned `base.value` would pass on a substitution that happened to be
+    # right for the wrong reason.
+    ("both_arch_enum_typed_parameter_value_is_the_word_it_holds",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    RBP = 5\n"
+     "    RSP = 12\n"
+     "\n"
+     "def is_bp(base: Reg) -> Int:\n"
+     "    if base.value == 5:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def scaled(base: Reg, k: Int) -> Int:\n"
+     "    return base.value * k\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return scaled(Reg.RSP, 3) + is_bp(Reg.RBP) * 10 + is_bp(Reg.RAX) * 100\n",
+     46, None),
     # ── A ONE-FIELD STRUCT WHOSE SOLE FIELD IS A FRAME ────────────────────────
     #
     # `Box` declares ONE field, `inner`, whose declared type is the framed
