@@ -678,6 +678,38 @@ CASES = [
     # honest about the other half: it IS only ever read, so it is a constant,
     # and this tree measures one field where the pre-rule tree measured two
     # and refused.
+    # A class-level constant whose VALUE is another class's constant — the enum
+    # idiom (`origin: TypeOrigin = TypeOrigin.DEFAULT`), and this repository's
+    # `type_system.py`. The rewrite already answers a read of `Origin.B` from a
+    # function body (the `pyclass_constant_table_only` rows above), so the gap
+    # was narrower than it looked: the OUTER site consumes the whole node, so
+    # the inner reference was never reached, and the value was reported as "not
+    # a literal". Both halves of the resolution are here — the read at the top
+    # level and a constant whose own value is a THIRD class's constant, so a
+    # recogniser that resolved one hop would fail this row.
+    #
+    # The recogniser is `S.NAME` and nothing else, and the boundary is the
+    # BARE name: `C = B` in a class body is also how a module-level name is
+    # read, and this path has no scope at an initializer that could tell the
+    # two apart. That spelling is still refused, with the value quoted, which
+    # is the refusal a reader can act on.
+    ("pyclass_constant_whose_value_is_another_constant",
+     "class Inner:\n"
+     "    B = 2\n"
+     "\n"
+     "class Origin:\n"
+     "    C = Inner.B\n"
+     "\n"
+     "struct Holder:\n"
+     "    v: Int = Origin.C\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return Origin.C\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    printf(\"%d %d\\n\", get(), h.v)\n"
+     "    return 0\n", 0, "2 2"),
     ("pyclass_name_read_bare_and_written",
      "class Cell:\n"
      "    N = 7\n"
@@ -916,6 +948,21 @@ CASES = [
     # The `refuse:` sibling above with the needle this tree raises: it quotes the
     # VALUE, which is what sends a reader to the class body rather than to the
     # read, where the generic "is a class-level constant of Table" did not.
+    # The BOUNDARY of the reference resolution, and it is what keeps the
+    # resolution from being "resolve anything": `Missing` is not a class this
+    # image declares, so there is no declaration to read the value out of and
+    # the read is refused with the value quoted — the same sentence, and the
+    # same clause of it, as the container value two rows below.
+    ("class_constant_naming_a_class_this_image_does_not_declare_is_refused",
+     "struct Holder:\n"
+     "    v: Int = Missing.WHAT\n"
+     "\n"
+     "def main(n):\n"
+     "    var h = Holder()\n"
+     "    printf(\"%d\\n\", h.v)\n"
+     "    return 0\n",
+     "refuse:reads a class-level constant of Holder, whose value is "
+     "`Missing.WHAT`", None),
     ("class_constant_with_a_container_value_quotes_the_value",
      "struct Table:\n"
      "    NAMES = ['a', 'b']\n\n"

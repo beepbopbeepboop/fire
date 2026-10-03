@@ -18285,7 +18285,8 @@ def struct_frame_bytes(struct_def) -> int:
     return n + (-n % 16)
 
 
-def struct_field_default(struct_def, name) -> tuple:
+def struct_field_default(struct_def, name,
+                         structs_by_name: dict = None) -> tuple:
     """`(kind, payload)` — the word slot `name` holds in a FRESH instance.
 
     The per-field reading of the same rule `struct_default_word` states for a
@@ -18298,27 +18299,42 @@ def struct_field_default(struct_def, name) -> tuple:
 
     A field with no class-level initializer at all (`x: Int`, or a field only
     ever assigned in `__init__`) is `(DEFAULT_NONE, None)`: a fresh word of
-    zeros, which is what the constructor has always emitted for one."""
+    zeros, which is what the constructor has always emitted for one.
+
+    `structs_by_name` is what adds ONE shape to "a literal", and it is a shape
+    rather than a second rule: a default that NAMES another class's constant
+    (`origin: TypeOrigin = TypeOrigin.DEFAULT` — the enum idiom, and this
+    repository's `type_system.py`) is that constant's value, and
+    `class_constant_word_in` is the same resolution `formal/build.py` performs
+    when the READ is substituted. It is a parameter rather than a global
+    because a declaration is not a fact about itself: answering it needs the
+    image's other declarations, and the three readers below that have no table
+    get exactly the literal-only answer they got before."""
     for field in struct_fields(struct_def):
         if struct_field_name(field) == name:
-            return class_constant_word(name, getattr(field, "value", None))
+            value = getattr(field, "value", None)
+            if structs_by_name is None:
+                return class_constant_word(name, value)
+            kind, payload = class_constant_word_in(structs_by_name, value)
+            return (kind, name if kind == DEFAULT_OPAQUE else payload)
     return (DEFAULT_NONE, None)
 
 
-def struct_frame_defaults(struct_def) -> list:
+def struct_frame_defaults(struct_def, structs_by_name: dict = None) -> list:
     """`[(kind, payload)]` per slot, in slot order — what `S()` must store."""
-    return [struct_field_default(struct_def, name)
+    return [struct_field_default(struct_def, name, structs_by_name)
             for name in struct_frame_slots(struct_def)]
 
 
-def struct_frame_representable(struct_def):
+def struct_frame_representable(struct_def, structs_by_name: dict = None):
     """`(ok, reason)` — can `S()` bring every one of this struct's fields up?
 
     `ok` is False exactly when some field's declared default is a real value
     this path cannot evaluate at a call site.  The reason names the field,
     because a refusal that does not is a refusal the reader has to re-derive."""
-    for name, (kind, payload) in zip(struct_frame_slots(struct_def),
-                                     struct_frame_defaults(struct_def)):
+    for name, (kind, payload) in zip(
+            struct_frame_slots(struct_def),
+            struct_frame_defaults(struct_def, structs_by_name)):
         if kind == DEFAULT_OPAQUE:
             return (False, name)
     return (True, None)
@@ -21545,6 +21561,80 @@ def class_constant_word(name: str, default) -> tuple:
     looking wrong number rather than a crash."""
     kind, payload = literal_default_word(default)
     return (kind, name if kind == DEFAULT_OPAQUE else payload)
+
+
+def class_constant_reference(node) -> tuple | None:
+    """`(struct name, constant name)` when `node` is `S.NAME`, else None.
+
+    The narrowest possible recogniser, and deliberately so: the two-node path
+    with a BARE name for the base, which is the spelling a class body uses for
+    another class's constant (`origin: TypeOrigin = TypeOrigin.DEFAULT`,
+    `KIND = Flags.DEBUG`). A dotted base (`mod.Klass.NAME`) would be a
+    cross-module read with a dylib boundary in it, and a base this image binds
+    to something else is not the class it is spelled like — so both stay out
+    rather than being resolved by a guess.
+
+    It exists because the class-constant rewrite already knows how to answer a
+    read of `S.NAME` (it substitutes the literal the constant holds, measured
+    on both architectures: `return Origin.B` in a method builds, runs and
+    prints 2), and what it could not do was answer one from INSIDE another
+    constant's initializer — the outer site consumes the whole node, so the
+    inner reference was never reached. That is this repository's
+    `type_system.py`, whose `Type.origin` defaults to `TypeOrigin.DEFAULT`
+    (an enum member, which is the ordinary way to write this) and which is the
+    sweep's `codegen` row for "a class-level default that is not a value this
+    build can materialize".
+    """
+    import fire_compiler as F
+    if not isinstance(node, F.MemberExpr) or node.member in ("value", "name"):
+        return None
+    base = node.obj
+    if not isinstance(base, F.IdentExpr) or not isinstance(base.name, str):
+        return None
+    return (base.name, node.member)
+
+
+def class_constant_word_in(structs_by_name: dict, node,
+                           seen=frozenset()) -> tuple:
+    """`(kind, payload)` for a class-body initializer that may NAME a constant.
+
+    `class_constant_word` first — a literal answers there and the reference
+    machinery is never reached. Past that, the one shape this adds is a
+    reference to another class-level constant of a struct THIS IMAGE DECLARES
+    (`class_constant_reference`), resolved through that constant's own
+    initializer and no further: a chain is followed because each link is a
+    declaration this build can read, and it stops at the first initializer that
+    is not.
+
+    `seen` is the set of `(struct, constant)` pairs already being resolved on
+    this path, and it is what makes `A.X = B.Y` / `B.Y = A.X` answer
+    `(DEFAULT_OPAQUE, ...)` instead of recursing until Python's stack gives up:
+    a cyclic definition has no value, and the honest answer for it is the same
+    refusal a call gets.
+
+    The payload for a cycle or an unresolvable initializer is the SPELLING of
+    the constant the read started at, not `None`, so a caller that refuses can
+    name the thing a reader would have to change — `class_constant_word`'s own
+    convention, which `_constant_literal` carries through to its message.
+    """
+    kind, payload = literal_default_word(node)
+    if kind != DEFAULT_OPAQUE or not isinstance(structs_by_name, dict):
+        return (kind, payload)
+    ref = class_constant_reference(node)
+    if ref is None:
+        return (kind, payload)
+    owner, const_name = ref
+    if (owner, const_name) in seen:
+        return (DEFAULT_OPAQUE, f"{owner}.{const_name}")
+    st = structs_by_name.get(owner)
+    if st is None:
+        return (kind, payload)
+    for name, default in struct_class_constants(st):
+        if name != const_name:
+            continue
+        return class_constant_word_in(structs_by_name, default,
+                                      seen | {(owner, const_name)})
+    return (kind, payload)
 
 
 def struct_fits_one_word(struct_def) -> bool:

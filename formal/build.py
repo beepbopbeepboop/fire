@@ -8427,7 +8427,7 @@ def _fold_a_class_level_default(struct_def, default, count: list) -> bool:
     return False
 
 
-def _constant_literal(struct_def, name: str):
+def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     """`(literal node or None, the initializer)` for a read of the constant `name`.
 
     The initializer comes back with the `None` because that is the half a
@@ -8440,11 +8440,23 @@ def _constant_literal(struct_def, name: str):
     None for the first half when the value is not a literal this path can
     materialize exactly — a dict, a list, a call, a name. The caller refuses
     there; see `_rewrite_class_constants` for why substituting a zero is not an
-    option."""
+    option.
+
+    `structs_by_name` is what makes a constant whose value is ANOTHER constant
+    answerable, and it is a parameter rather than a global because this
+    function has three callers and only the read path has the table:
+    `model.class_constant_word_in` resolves `TypeOrigin.DEFAULT` through
+    `TypeOrigin`'s own declaration, which is a fact about this image and not
+    about the constant alone. Without the table every caller below it is
+    exactly where it was, because a reference to a class this unit does not
+    declare has no answer here either way."""
     for const_name, default in M.struct_class_constants(struct_def):
         if const_name != name:
             continue
-        kind, payload = M.class_constant_word(const_name, default)
+        if structs_by_name is None:
+            kind, payload = M.class_constant_word(const_name, default)
+        else:
+            kind, payload = M.class_constant_word_in(structs_by_name, default)
         if kind == M.DEFAULT_INT:
             return F.IntLiteral(value=int(payload)), default
         if kind == M.DEFAULT_STRING:
@@ -8494,7 +8506,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
     _apply_constant_sites(
         fn.body,
         _constant_read_sites(fn, structs_by_name, owner, receiver_structs),
-        _class_read_disagreement(fn, structs_by_name))
+        _class_read_disagreement(fn, structs_by_name),
+        structs_by_name)
 
 
 # ── A module-level NAME, and where its value lives ─────────────────────────
@@ -10954,7 +10967,8 @@ def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
     return sites
 
 
-def _apply_constant_sites(node, sites: dict, disputed: dict = None):
+def _apply_constant_sites(node, sites: dict, disputed: dict = None,
+                         structs_by_name: dict = None):
     """The substitution itself, over a statement tree, in place.
 
     Split from `_rewrite_class_constants` so the sites can be computed once per
@@ -10990,7 +11004,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
     literal)."""
 
     if isinstance(node, (list, tuple)):
-        items = [_apply_constant_sites(x, sites, disputed) for x in node]
+        items = [_apply_constant_sites(x, sites, disputed, structs_by_name)
+                 for x in node]
         if isinstance(node, tuple):
             return tuple(items)
         node[:] = items
@@ -11012,7 +11027,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 # fact about the DECLARATION SITE and not about its value, so it
                 # is answerable even where the value is not (see below).
                 return F.StringLiteral(value=node.obj.member)
-            literal, default = _constant_literal(st, node.obj.member)
+            literal, default = _constant_literal(st, node.obj.member,
+                                                structs_by_name)
             if literal is not None:
                 return literal
             raise CodegenError(_enum_member_refusal(
@@ -11027,7 +11043,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
             if kind == "overridden":
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
-            literal, default = _constant_literal(st, node.member)
+            literal, default = _constant_literal(st, node.member,
+                                                structs_by_name)
             if literal is None and default is not None:
                 # A target QUERY in the class-level initializer, asked of the
                 # evaluator before the value is called unrepresentable. The fold
@@ -11055,7 +11072,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 # got depended on where in the source they wrote the query.
                 folded = [0]
                 if _fold_a_class_level_default(st, default, folded):
-                    literal, default = _constant_literal(st, node.member)
+                    literal, default = _constant_literal(st, node.member,
+                                                        structs_by_name)
             if literal is None:
                 spelling = f"{node.obj.name}.{node.member}"
                 declared = (f"a `comptime` class attribute" if kind == "comptime"
@@ -11096,7 +11114,8 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
         if name in _TYPE_POSITION_FIELDS:
             continue
         setattr(node, name,
-                _apply_constant_sites(getattr(node, name), sites, disputed))
+                _apply_constant_sites(getattr(node, name), sites, disputed,
+                                       structs_by_name))
     return node
 
 
@@ -11420,9 +11439,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # run beside `check_construction_shapes`, for the reason the comment on
     # that call site gives (a file that imports a host module has a more
     # fundamental fact about it than a codegen gap).
+    #
+    # `structs_by_name` goes with it for the one default that is not a literal
+    # and is still known: `origin: TypeOrigin = TypeOrigin.DEFAULT`, an enum
+    # member, which is how this repository's `type_system.py` spells it and is
+    # the sweep's `codegen` row for "a class-level default that is not a value
+    # this build can materialize". It is the SAME module's own declarations
+    # (`structs_by_name` above, not the wider `structs`) for the reason the
+    # paragraph above gives: an imported class is lowered when THAT module is
+    # compiled, and its defaults are resolved against its own table then.
     dc_classes = DC.dataclass_classes(stmts)
     if dc_classes:
-        DC.lower_field_defaults(dc_classes)
+        DC.lower_field_defaults(dc_classes, structs_by_name)
     # The `==` rewrite's table is WIDER — this module's dataclasses PLUS the
     # ones it imports — because a comparison between two values of an IMPORTED
     # dataclass is as much this module's problem as a comparison between two of

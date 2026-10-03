@@ -7721,7 +7721,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if shape == M.CONSTRUCTION_POSITIONAL:
             self._emit_frame_positional(e, name, st, base, site, plan[1])
             return
-        ok, bad = M.struct_frame_representable(st)
+        ok, bad = M.struct_frame_representable(st, self._structs)
         if not ok:
             raise CodegenError(
                 f"constructing {name} cannot bring its field {bad!r} up at "
@@ -7735,7 +7735,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # layout and the list of children both come from the shared model, so
         # the bytes reserved and the defaults stored cannot disagree.
         self._emit_frame_nested(site)
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+        for slot, (kind, payload) in enumerate(
+                M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
                 value = F.StringLiteral(value=payload)
             else:
@@ -7779,7 +7780,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_frame_defaults(self, st, base: int) -> None:
         """One frame's own slots, at their class-level defaults."""
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+        for slot, (kind, payload) in enumerate(
+                M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
                 self._emit_expr(F.StringLiteral(value=payload))
             else:

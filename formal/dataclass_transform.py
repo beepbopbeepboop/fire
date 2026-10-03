@@ -412,7 +412,7 @@ def reflection_member_refusal(name: str) -> str:
 # not, and it was WRONG on the first program it met: `x: Optional[int] = None`
 # parses to `IdentExpr('None')` on this parser, not to a `NoneLiteral`, so a
 # node-type list would have called it a call.
-def _folds(value) -> bool:
+def _folds(value, structs_by_name: dict = None) -> bool:
     """Whether the build can KNOW this class-level default's value.
 
     `model.fold_literal_expr` is the whole test, called rather than
@@ -420,12 +420,28 @@ def _folds(value) -> bool:
     right authority: its docstring says its job is "can the build KNOW this
     value", and a class-level constant is materialized WHERE IT IS READ
     (`formal/build.py`'s `_rewrite_class_constants`), so a default it cannot
-    fold is materialized as a call and refused by `module_global_refusal`."""
+    fold is materialized as a call and refused by `module_global_refusal`.
+
+    `structs_by_name` adds ONE shape to that, and it is a shape rather than a
+    second rule: a default that NAMES another class's constant
+    (`origin: TypeOrigin = TypeOrigin.DEFAULT`, which is this repository's
+    `type_system.py` and the ordinary way to write an enum-valued default).
+    `model.class_constant_word_in` resolves it through that constant's own
+    declaration, and it is the SAME resolution `formal/build.py` performs when
+    the read is substituted — so this test asks the build's question rather
+    than a second one that agrees today. Without the table the test is
+    unchanged, which is what the two other callers of this function get.
+    """
     if value is None:
         return True          # no default: the field is uninitialized, which is
                              # what `x: T` already means
     M = _model()
-    return M.fold_literal_expr(value) is not None
+    if M.fold_literal_expr(value) is not None:
+        return True
+    if isinstance(structs_by_name, dict):
+        return M.class_constant_word_in(
+            structs_by_name, value)[0] != M.DEFAULT_OPAQUE
+    return False
 
 
 def lower_field(node):
@@ -499,7 +515,8 @@ def lower_field(node):
     return opts["default"], ""
 
 
-def field_refusal(name: str, default, declared_type) -> str:
+def field_refusal(name: str, default, declared_type,
+                  structs_by_name: dict = None) -> str:
     """The refusal for a field whose default this path cannot hold.
 
     Only reached for a default `model.fold_literal_expr` cannot fold, which is
@@ -534,7 +551,7 @@ def field_refusal(name: str, default, declared_type) -> str:
     True, so the two must not be conflated — which is what
     `refuse_none_comparisons` is for, and why this function can now say
     nothing at all about `None` and still be correct."""
-    if _folds(default):
+    if _folds(default, structs_by_name):
         return ""
     return (f"the default for field {name!r} is not a value this build can "
             f"materialize, and a class-level default on this path has to be "
@@ -781,7 +798,7 @@ def check_dataclass_classes(classes: dict) -> None:
                 raise CodegenError(init_var_refusal(name, _field_name(f)))
 
 
-def lower_field_defaults(classes: dict) -> None:
+def lower_field_defaults(classes: dict, structs_by_name: dict = None) -> None:
     """`field(default=LITERAL)` → the literal. A REWRITE, not a check.
 
     It has to run before anything reads the field defaults, and before
@@ -803,7 +820,8 @@ def lower_field_defaults(classes: dict) -> None:
             if new_value is not None:
                 f.value = new_value
             bad = field_refusal(fname, getattr(f, "value", None),
-                               getattr(f, "type_ann", None))
+                               getattr(f, "type_ann", None),
+                               structs_by_name)
             if bad:
                 raise_from_field(f"{name}.{fname}: {bad}")
 

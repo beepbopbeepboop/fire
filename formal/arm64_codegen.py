@@ -6290,7 +6290,7 @@ dylib_exports: list = None, globals_base: int = None,
         if shape == M.CONSTRUCTION_POSITIONAL:
             self._emit_frame_positional(e, name, st, site, plan[1])
             return
-        ok, bad = M.struct_frame_representable(st)
+        ok, bad = M.struct_frame_representable(st, self._structs)
         if not ok:
             raise CodegenError(
                 f"constructing {name} cannot bring its field {bad!r} up at "
@@ -6304,7 +6304,8 @@ dylib_exports: list = None, globals_base: int = None,
         # `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
         # declared type that was not placed cannot reach this loop.
         self._emit_frame_nested(site)
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+        for slot, (kind, payload) in enumerate(
+                M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
                 value = F.StringLiteral(value=payload)
             else:
@@ -6347,7 +6348,8 @@ dylib_exports: list = None, globals_base: int = None,
 
     def _emit_frame_defaults(self, st, offset: int) -> None:
         """One frame's own slots, at their class-level defaults."""
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+        for slot, (kind, payload) in enumerate(
+                M.struct_frame_defaults(st, self._structs)):
             if kind == M.DEFAULT_STRING:
                 self._emit_expr(F.StringLiteral(value=payload))
             else:
