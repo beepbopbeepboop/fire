@@ -11535,6 +11535,72 @@ SET_UNION_CASES = [
      "    for v in a | b:\n"
      "        s += v\n"
      "    print(\"%d\" % s)\n"),
+
+    # ── THE SAME UNION, READ AS A VALUE — the row above structurally cannot
+    # fail on this, and that is why it is a separate row rather than a comment.
+    #
+    # The row above walks the result.  A walk reads elements until it hits
+    # something else, so it gets the right three even when the count word is
+    # wrong — the failure `_emit_set_union` had was a count of `nL + nR`
+    # written over a result holding `nL` elements, which made the dedup loop
+    # append `3` at index 4 and settle on 5 over the words [1, 2, 3] and two
+    # unwritten ones.  Iterating that reads five slots, sums 6, and agrees with
+    # CPython on the sum while disagreeing on everything else.
+    #
+    # `len` reads the count word itself, and so does a walk's own trip count, so
+    # both are asked here and CPython is asked both.  Measured on arm64 before
+    # the fix: `3 5 6` where CPython says `3 3 6`; and the subscript spelling
+    # `c[0], c[1], c[2]` answered `1, 2, 0` where CPython has no subscript for
+    # a set at all, which is why this row asks `len` and the trip count rather
+    # than reproducing that.  (It is not lost: `c[3]` on a three-element union
+    # now exits 1 through the blob bounds check, which is the other half of the
+    # same answer.)
+    ("set_union_count_read_as_a_value_through_locals",
+     "def main() -> Int:\n"
+     "    var a = {1, 2}\n"
+     "    var b = {2, 3}\n"
+     "    var c = a | b\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = {1, 2}\n"
+     "    b = {2, 3}\n"
+     "    c = a | b\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
+
+    # THE SAME THROUGH LITERALS, which is a different path and not a
+    # variation on the row above: `_blob_est` answers a set literal with its
+    # element count and an `IdentExpr` with 64, so the two spellings reserve a
+    # different number of words for the result.  A fix that only got the
+    # reservation right would pass one of these two rows and fail the other.
+    ("set_union_count_read_as_a_value_through_literals",
+     "def main() -> Int:\n"
+     "    var c = {1, 2} | {2, 3}\n"
+     "    var s = 0\n"
+     "    var k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    printf(\"%d %d %d\\n\", len(c), k, s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    c = {1, 2} | {2, 3}\n"
+     "    s = 0\n"
+     "    k = 0\n"
+     "    for v in c:\n"
+     "        s += v\n"
+     "        k += 1\n"
+     "    print(\"%d %d %d\" % (len(c), k, s))\n"),
 ]
 
 

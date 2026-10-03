@@ -8835,7 +8835,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))    # nL
         self.asm.emit(encode_ldr_xt_xn_imm(3, 8, 0))    # nR
-        self.asm.emit(encode_add_xd_xn_xm(4, 2, 3))     # n (upper bound)
+        # THE COUNT IS nL, NOT nL + nR, and the two are indistinguishable in
+        # every shape that only ITERATES the result — which is why the wrong one
+        # was here so long.  The result starts out holding the nL left-hand
+        # elements and NOTHING else, so the count that describes it is nL; the
+        # dedup loop below grows it by one per element it actually appends.
+        #
+        # With nL + nR written here, `len` and a subscript both read a number no
+        # store produced: `{1,2} | {2,3}` had count 4 over the three words
+        # [1, 2, 3] and two unwritten ones, then appended `3` at index 4 and
+        # made the count 5.  Measured, `printf("len=%d", len({1,2}|{2,3}))`:
+        # arm64 5, CPython 3; `c[0], c[1], c[2]` was 1, 2, 0.  Iterating the
+        # same blob read all five slots and summed 6, which is the right answer
+        # from the right three elements and two zeros — so a case that walks the
+        # union cannot see this, and the existing one could not either.
+        #
+        # `est` above stays the sum, because it is a RESERVATION: nL + nR is how
+        # many words the result can need, and the reservation is what keeps the
+        # append loop's `result[count]` store inside the blob.
+        self.asm.emit(encode_mov_zr_xn(4, 2))            # n = nL (elements present)
         self._emit_list_base(offset)
         self.asm.emit(encode_str_xt_xn_imm(4, 9, 0))
         # copy all of left into result[0..nL)
