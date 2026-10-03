@@ -1606,6 +1606,84 @@ def test_a_private_name_aliased_public_stays_unpublished(tmpdir, _shared):
           f"{text.strip()[-300:]}")
 
 
+def test_a_relative_import_keeps_private_declarations_out_of_the_trie(
+        tmpdir, _shared):
+    """`doc/ABI.md`'s privacy rule holds at the RELATIVE boundary too.
+
+    The claim this pins down was that a relative import's dylib mangles a
+    private name into its export table with the underscores intact, so the
+    image binds a symbol the library exports and a private function of one
+    module is callable from another. The underscorING is real — it is dyld's,
+    applied to every C symbol — and the rule is applied: a module reached
+    through `from ._helper import twice` exports `twice` and exports neither
+    `_hidden` nor `__secret`, which is the same answer a top-level module gets
+    for the same pair. So the leak is not there.
+
+    What is checked is the TRIE and not the manifest, and separately, because
+    the manifest is what the build believes it published and the trie is what
+    dyld will actually resolve: a name in the manifest and not in the trie is
+    an unbound bind, and a name in the trie and not in the manifest is the
+    leak. Reading it with `parse_macho` rather than with the writer's own
+    reader is `test_a_package_dylib_exports_nothing`'s reason: asking the
+    writer to read its own output is how a writer's bug becomes invisible.
+
+    The last check is the invariant the export table is read against, and it
+    is what makes "the name has an underscore in it" meaningless on its own:
+    a Mach-O export is `"_"` + the C symbol, every one, so the trie name is
+    never evidence about privacy and the bind name is the C symbol without
+    dyld's one underscore."""
+    root = os.path.join(tmpdir, "relprivacy")
+    os.makedirs(root)
+    write_tree(root, {
+        "relpkg/_helper.mojo": (
+            "def twice(a: Int) -> Int:\n  return a + a\n\n"
+            "def _hidden(a: Int) -> Int:\n  return a\n\n"
+            "def __secret(a: Int) -> Int:\n  return a - a\n"),
+        "relpkg/__init__.mojo": (
+            "from ._helper import twice\n\n"
+            "def main(n: Int) -> Int:\n  return twice(21)\n"),
+    })
+    fresh_cas()
+    # The package's `__init__.mojo` is the program, so the build names it
+    # directly — `build()` derives the source from the output's file name, and
+    # the entry point here is `relpkg/__init__.mojo`.
+    out = os.path.join(root, "prog.aout")
+    result = run_fire(["build", "--formal", "--no-prove", "-o", out,
+                       os.path.join(root, "relpkg", "__init__.mojo")],
+                      cwd=root)
+    check(result.returncode == 0,
+          f"the relative import did not build: "
+          f"{(result.stderr or result.stdout).strip()[-400:]}")
+    code, err = run(out)
+    check(code == 42,
+          f"the relative import did not run (returned {code}): {err}")
+    sub = module_dylib("relpkg__helper")
+    if not os.path.isfile(sub):
+        found = sorted(os.listdir(cas_imports()))
+        check(False, f"no library for the relative module at {sub}; the "
+                     f"directory holds {found}")
+        return
+    with open(sub, "rb") as f:
+        info = parse_macho(f.read())
+    trie = info["exports"]
+    published = [e["name"] for e in manifest(sub)["exports"]]
+    check("twice" in published,
+          f"the public function is not published: {published}")
+    for private in ("_hidden", "__secret"):
+        check(private not in published,
+              f"{private} is in the module's published exports: {published}")
+        check(not any(private in n for n in trie),
+              f"{private} reached the export trie as one of {sorted(trie)}")
+    for e in manifest(sub)["exports"]:
+        check("_" + e["symbol"] in trie,
+              f"the trie does not carry the C symbol {e['symbol']!r} for "
+              f"export {e['name']!r}, so the caller's bind has nothing to "
+              f"resolve to")
+        check(not e["symbol"].startswith("_"),
+              f"the published C symbol {e['symbol']!r} starts with an "
+              f"underscore, which doc/ABI.md's export rule excludes")
+
+
 def test_a_name_the_module_defines_wins_over_its_own_import(tmpdir, _shared):
     """`from leaf import base as g` beside a local `def g` calls the LOCAL one.
 
@@ -2284,6 +2362,8 @@ TESTS = [
      test_aliased_reexport_runs_on_both_architectures),
     ("a private name aliased public stays unpublished",
      test_a_private_name_aliased_public_stays_unpublished),
+    ("a relative import keeps private declarations out of the trie",
+     test_a_relative_import_keeps_private_declarations_out_of_the_trie),
     ("a name the module defines wins over its own import",
      test_a_name_the_module_defines_wins_over_its_own_import),
     ("a module dylib matches the program's arch, both arches",
