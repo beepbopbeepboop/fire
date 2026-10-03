@@ -2777,6 +2777,120 @@ def _by_name_holder(name_defs: dict, holders: dict, hstruct: dict, name):
     return (holders.get(key), hstruct.get(key))
 
 
+def _by_name_one_word(name_defs: dict, one_word: dict, name):
+    """`{name: [structs]}` for a NAME, only when its definitions agree.
+
+    The one-word counterpart of `_by_name_holder`, and it has the same shape for
+    the same reason: a call site carries a NAME and nothing else, so "is the
+    parameter at position 0 the value of a one-field struct, and whose" is
+    answerable only when every definition of the name gives the same answer.
+    Several definitions is `(None, None)`, which every caller reads as "do not
+    take this edge" — so an overloaded callee's parameter is simply not claimed,
+    rather than being claimed on behalf of whichever definition sorted first.
+    That is the same refusal `_by_name_holder` makes and for the same defect:
+    attributing one definition's layout to a body the call may not have selected.
+
+    The returned dict is the callee's OWN table, not a copy, because the edge
+    writes into it — the same way `_by_name_holder` hands back the live holder
+    set.
+    """
+    defs = name_defs.get(name) or ()
+    if len(defs) != 1:
+        return None
+    return one_word.get(_fn_key(defs[0]))
+
+
+def _seed_one_word_call_edges(fn, one_word, holders, params_of,
+                              name_defs) -> bool:
+    """Follow `fn`'s call sites into their callees' ONE-WORD parameters.
+
+    True when the table moved, so a caller can iterate.  The one-word twin of
+    the holder fixpoint's call edge, and it exists because a struct of ONE field
+    is invisible to every frame table: `struct_is_framed` is False for it, so the
+    holder edge cannot carry a callee's parameter, and a one-word struct handed
+    to a function arrived as a plain word with nothing recorded about it.
+
+    **The measurement that makes this an answer rather than a coverage note** —
+    a one-field class whose `__eq__` returns True, compared THROUGH a function
+    boundary, both architectures:
+
+        class Tag:
+            v: Int
+            def __eq__(self, other: Self) -> Bool:  return True
+        def eq(a, b):  return 1 if a == b else 0
+        a = Tag(5); b = Tag(6)
+        printf("%d %d", eq(a, b), eq(a, a))    # CPython 1 1 · this path 0 1
+
+    and the second column is why the first is a bug rather than a coincidence:
+    `eq(a, a)` answers 1 by the ADDRESS compare, which is CPython's INHERITED
+    `__eq__`, so a program printing `0 1` for a class whose method says True
+    reads as "it worked".  With the comparison moved one line up into `main` it
+    dispatched correctly on both machines, which is the whole of the diagnosis:
+    the rewrite fires when the operands are names THIS function bound from a
+    one-word construction and not when they arrived as parameters.
+    (`bugs/FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary.md`.)
+
+    Three rules, and each of them is a refusal rather than a guess:
+
+      * the callee is resolved BY NAME through `_by_name_one_word`, so a name with
+        several definitions is not claimed — the same reason the frame edge does
+        not claim one, and the `reversed` overload is the measurement behind it;
+      * an argument that is not a BARE NAME (`f(h.inner)`, `f(g())`) carries no
+        one-word fact to follow, so it is left alone;
+      * a callee parameter the holder analysis already classified keeps THAT
+        classification — a name in both tables has two layouts and one word, and
+        the frame tables know more about such a name than this one does.
+
+    **The agreement rule is stricter than the frame edge's, and that is the point
+    of having a separate edge.**  Two call sites handing one parameter two
+    DIFFERENT one-word structs is the tombstone rule `ValueKinds._ctor_calls`
+    already states: the parameter would be dispatched to whichever struct sorted
+    last, and `==` would call the wrong `__eq__` — a wrong answer with a METHOD
+    CALL in it, which is the shape this whole analysis exists to prevent.  So a
+    disagreement writes an EMPTY candidate list, which every reader of this table
+    already treats as "no candidates" (`_eq_dispatch_decide` refuses an empty
+    side), and the name stays out for good.  The frame edge can overwrite because
+    a frame address is a frame address whichever struct reserved it; WHICH STRUCT
+    a one-word value is read through is exactly the question that differs.
+    """
+    key = _fn_key(fn)
+    moved = False
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr):
+            continue
+        target_fn = M.call_callee_name(node.func)
+        if target_fn is None:
+            continue
+        callee_ow = _by_name_one_word(name_defs, one_word, target_fn)
+        if callee_ow is None:
+            continue
+        callee_holders = _by_name_holder(name_defs, holders, {}, target_fn)[0]
+        defs = name_defs.get(target_fn) or ()
+        plist = params_of.get(_fn_key(defs[0])) if defs else None
+        if not plist:
+            continue
+        for pos, pname, _kw in _frame_argument_slots(node, plist):
+            if pos >= len(plist):
+                continue
+            r = _root_ident(pname)
+            if not (r and r[1] == 0):
+                continue
+            src = one_word[key].get(r[0])
+            if not src:
+                continue
+            callee = plist[pos]
+            if not callee or (callee_holders and callee in callee_holders):
+                continue
+            prev = callee_ow.get(callee)
+            if prev is None:
+                callee_ow[callee] = list(src)
+                moved = True
+            elif list(prev) != list(src) and prev:
+                callee_ow[callee] = []
+                moved = True
+    return moved
+
+
 def _returns_frame_by_name(name_defs: dict, returns_frame: dict) -> tuple:
     """`({name: struct}, {name: rows})` — what a CALL to `name` hands back.
 
@@ -2951,8 +3065,43 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
                                     holders, one_word)
-        _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
-                                       one_word, structs_by_name)
+        # …and the CALL-SITE edges, iterated here rather than left to the main
+        # path's fixpoint, because this early return IS the whole analysis for a
+        # module with no framed struct — and a module whose structs are all one
+        # field is the case the one-word table exists for, so it is the case that
+        # lands here most often.  Measured before this loop: a one-field class
+        # whose `__eq__` returns True, compared through `def eq(a, b)`, answered
+        # `eq=0 1` on both architectures where CPython says `1 1`
+        # (`_seed_one_word_call_edges`'s own docstring has the program).
+        #
+        # The bound is the same one the holder fixpoint uses and for the same
+        # reason — the table only ever grows, so it settles, and a loop that did
+        # not would be a compiler bug rather than a program error.  The rewrite
+        # is INSIDE the loop, not after it, because it can introduce the frames
+        # the next pass reads; that is the main fixpoint's shape.
+        params_of = {}
+        name_defs = {}
+        for fn in functions:
+            params_of[_fn_key(fn)] = list(
+                M.function_param_shape(fn).names)
+            name_defs.setdefault(fn.name, []).append(fn)
+        for _round in range(_HOLDER_FIXPOINT_ROUNDS):
+            grew = False
+            for fn in functions:
+                if _seed_one_word_call_edges(fn, one_word, holders, params_of,
+                                             name_defs):
+                    grew = True
+            moved = _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
+                                                    one_word, structs_by_name)
+            if not (grew or moved):
+                break
+        else:
+            raise CodegenError(
+                f"the one-word parameter analysis did not settle in "
+                f"{_HOLDER_FIXPOINT_ROUNDS} rounds: a comparison rewrite is "
+                f"still introducing candidates at each one, which means the "
+                f"rewrite is not monotone. That is a compiler bug, not a "
+                f"program error")
         for fn in functions:
             fn._frame_holders = set()
             fn._frame_candidates = {}
@@ -3318,6 +3467,49 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         callee_hstruct[callee] = \
                             list(hstruct[_fn_key(fn)][r[0]])
                         changed = grew = True
+                    # …and the ONE-WORD twin of that edge, which is the same
+                    # question with a plain word instead of a frame address, and
+                    # it is here because a struct of ONE field is invisible to
+                    # every table above: `struct_is_framed` is False for it, so
+                    # the holder fixpoint has nothing to say about the parameter
+                    # a caller hands it.
+                    #
+                    # The measurement that makes this an answer rather than a
+                    # coverage note — a one-field class whose `__eq__` returns
+                    # True, compared THROUGH a function boundary, both
+                    # architectures:
+                    #
+                    #     def eq(a, b):  return 1 if a == b else 0
+                    #     a = Tag(5); b = Tag(6)
+                    #     printf(eq(a, b), eq(a, a))    # CPython: 1 1
+                    #                                                 # here: 0 1
+                    #
+                    # and the second column is why the first is a bug rather
+                    # than a coincidence: `eq(a, a)` answers 1 by the ADDRESS
+                    # compare, which is CPython's INHERITED `__eq__`, so a
+                    # program printing `0 1` for a class whose method says True
+                    # reads as "it worked". With the comparison moved one line up
+                    # into `main` it dispatched correctly on both machines,
+                    # which is the whole of the diagnosis: the rewrite fired when
+                    # the operands were names THIS function bound from a
+                    # one-word construction and not when they arrived as
+                    # parameters.
+                    #
+                    # **The agreement rule is stricter than the frame edge's,
+                    # deliberately.** Two call sites handing the same parameter
+                    # two DIFFERENT one-word structs is the tombstone rule
+                    # `ValueKinds._ctor_calls` already states for the same
+                    # reason: the parameter would be dispatched to whichever
+                    # struct sorted last, and `==` would call the wrong `__eq__`
+                    # — a wrong answer with a method call in it. So a
+                    # disagreement writes an EMPTY candidate list, which every
+                    # reader of this table already treats as "no candidates"
+                    # (`_eq_dispatch_decide` refuses an empty side), and the
+                    # name stays out. The frame edge above can overwrite because
+                    # a frame address is a frame address; which STRUCT's layout
+                    # it is read through is the question that differs here.
+                    _seed_one_word_call_edges(fn, one_word, holders,
+                                              params_of, _name_defs)
             # The OTHER half of the same fixpoint: which functions RETURN a frame.
             # It has to be here and not after the loop because the edge above reads
             # it — `q = make()` is a holder only if `make` is known to return a

@@ -13097,6 +13097,61 @@ EQ_DISPATCH_CASES = [
      "    var b = One(3)\n"
      "    printf(\"%d\\n\", 1 if a == b else 0)\n"
      "    return 0\n", 0, "1"),
+    # The same one-field struct compared through a CALL BOUNDARY, with the
+    # helper's parameters UNTYPED — which is the shape the two cases above cannot
+    # reach, and the one a reader writes when the comparison lives in a helper.
+    # Before the call-site edge the one-word table was seeded from constructions
+    # in the function's OWN body, so a parameter was in it only if some call site
+    # in the image handed it a one-word construction, and nothing did that
+    # seeding: `eq(a, b)` answered 0 where CPython answers 1, on both machines.
+    #
+    # The `id` column is why that is a bug and not a coincidence. It compares
+    # `a` with ITSELF and answers 1 — by the ADDRESS compare, which is CPython's
+    # INHERITED `__eq__` — so the pre-change image printed `eq=0 id=1` for a class
+    # whose own method returns True, which reads as "it worked".
+    ("eq_operator_reaches_a_one_field_eq_across_a_call",
+     "class Tag:\n"
+     "    v: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def eq(a, b):\n"
+     "    if a == b:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    var a = Tag(5)\n"
+     "    var b = Tag(6)\n"
+     "    printf(\"eq=%d id=%d\\n\", eq(a, b), eq(a, a))\n"
+     "    return 0\n", 0, "eq=1 id=1"),
+    # …and TWO boundaries, plus the parameter handed to a SECOND function — the
+    # three things a one-shot "read the call sites" fix gets wrong, so they are
+    # pinned here rather than discovered one at a time. `eq3` passes `a` twice,
+    # which is the same name in two positions, and the edge has to place a
+    # candidate at BOTH.
+    #
+    # The edge is a FIXPOINT (`_seed_one_word_call_edges` is asked again while it
+    # moves anything), which is what makes the two-hop column work: `eq2`'s
+    # parameters are plain words until `eq2`'s own call sites are read, and `eq`'s
+    # parameters are plain words until `eq2`'s are.
+    ("eq_operator_reaches_a_one_field_eq_two_hops_and_a_repeated_argument",
+     "class Tag:\n"
+     "    v: int\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def eq(a, b):\n"
+     "    if a == b:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def eq2(a, b):\n"
+     "    return eq(a, b)\n"
+     "def eq3(a):\n"
+     "    return eq(a, a)\n"
+     "def main(n):\n"
+     "    var a = Tag(5)\n"
+     "    var b = Tag(6)\n"
+     "    printf(\"eq=%d %d eq2=%d eq3=%d\\n\", eq(a, b), eq(a, a),\n"
+     "           eq2(a, b), eq3(b))\n"
+     "    return 0\n", 0, "eq=1 1 eq2=1 eq3=1"),
     # ── a CALL as one of the two operands ──────────────────────────────────
     #
     # The frame case's safety argument is about two words that are both frame
