@@ -9,6 +9,58 @@ deleted with its fix — the lemmas it asked for are in `lib/X86.lean` and wired
 `formal/x86_64_endtoend_test.py`). Re-opened and rewritten 2026-10-02 on
 `work/formal8-14`.
 
+## Status (2026-10-03 — the remaining holes are COUNTED AND NAMED, so the boundary is visible)
+
+The separation itself is unchanged and still open; what landed is the ability to
+**see it**. This doc says, twice and in its own words, that "the number the
+reader will want is not the number the report gives" — and the reason was that
+the verdict line was computed from Lean's `declaration 'terminates' uses 'sorry'`
+lines, of which Lean emits **one per declaration**. So a chain with four admitted
+`hpop`s and an admitted closing `hrip` read as `proved, 1 sorry`, and the number
+of holes that the remaining work consists of was not on the screen anywhere.
+
+`admitted_facts` counts the emitter's own admissions off the generated text, by
+the name the emitter gave each one, and reports them **in two classes** because
+they are two facts (B21's whole subject):
+
+| | what it is | measured on `wide_recv` |
+|---|---|---|
+| `admitted` | a fact whose whole proof is `all_goals sorry` — nothing was attempted | **5**: `hpop39`, `hpop67`, `hpop84`, `hpop103`, `hrip` |
+| `guarded` | a side condition written `(by try … <;> all_goals sorry)` — the tactic runs FIRST and the `sorry` is reached only if it does not close the goal | **112** |
+
+    wide_recv   terminates: proved, 5 admitted (hpop103, hpop39, hpop67, hpop84,
+                hrip), 112 guarded
+    bitops      terminates: proved, 1 admitted (hrip), 44 guarded
+    const2      terminates: proved, 1 admitted (hrip), 9 guarded
+
+Five is the number the remaining work consists of, and it is the four
+returned-tos plus the closing read — exactly the two things the section below
+says are left. Before this the same files said `1 sorry`.
+
+**The split is not cosmetic, and both directions were measured.** Counting every
+`sorry` in the text gives **118** on `wide_recv`, because each of the 112 guarded
+side conditions carries one whether or not it fires; counting only the own-line
+ones undercounts. The two numbers answer different questions and the report now
+prints both, and `test_formal_sweep_truth.py` asserts the split in both
+directions plus the two ways it went wrong while being written:
+
+* a `--` filter but no `/- … -/` filter charged the **theorem's own docstring** as
+  an admission — it reads "No `sorry`: the path tree is walked once per branch
+  outcome", and that docstring claimed to describe a file with five holes in it.
+  That claim is now gone rather than made true (the emitter cannot make it true;
+  closing the five is the work below), and both comment forms are stripped.
+* a `have <name> … := by` pattern missed the `have hstep7 : … :=` spelling —
+  every step lemma is emitted **without** a `by` — so `cur` stayed on the
+  previous fact and charged all 112 guarded conditions to `hs`/`hstep` names.
+
+Pinned by four new Lean-free cases in
+`test_formal_sweep_truth.py::TestX86EndToEndEmitter` (the file is 92 tests, was
+88). Nothing here changes what is proved: same verdicts, same `failing: 0`.
+
+**What is still open is unchanged and is exactly what the sections below name**:
+the `hpop` proof, which needs the per-step separation over a chain of writes at
+addresses the emitter cannot currently make literal.
+
 **The short version: this is not a prover limit, and none of the three next steps
 below can work, because the theorem this program emits is FALSE.** The 24-argument
 call builds, runs and answers correctly on both architectures

@@ -1980,6 +1980,83 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                       "…and it keeps the expensive closing block, which is what "
                       "those 32 sorries-free proofs go through")
 
+    # ── what the REPORT says about those holes ──────────────────────────────
+    #
+    # The verdict line used to be computed from Lean's
+    # `declaration 'terminates' uses 'sorry'` lines, which Lean emits ONCE per
+    # declaration. So this chain's FOUR admitted `hpop`s and its admitted
+    # closing `hrip` all read as `proved, 1 sorry` — and the doc that describes
+    # this machinery says twice that "the number the reader will want is not the
+    # number the report gives". `admitted_facts` counts the emitter's own holes
+    # by the name it gave them; these are the tests that it counts them at all.
+
+    def test_every_admission_is_counted_by_name_and_not_collapsed_to_one(self):
+        import formal.x86_64_endtoend_test as E
+        facts = E.admitted_facts(self._emitted())
+        admitted = sorted({n for n, _l, k in facts if k == "admitted"})
+        # One per returned-to, plus the closing read. Asserted as a SET and not
+        # as a count, because the count is the thing that was wrong.
+        self.assertEqual(
+            [n for n in admitted if n.startswith("hpop")],
+            ["hpop%d" % k for k in sorted(
+                int(n[4:]) for n in admitted if n.startswith("hpop"))])
+        self.assertIn("hrip", admitted,
+                      "the closing read is admitted on a crossed chain, and it "
+                      "is a hole of its own — reporting only the `hpop`s would "
+                      "undercount by one")
+        self.assertGreaterEqual(len(admitted), 2,
+                                "the point of the check: several distinct "
+                                "admissions must not read as one")
+
+    def test_a_guarded_side_condition_is_not_counted_as_an_admission(self):
+        """The other direction, and the one that needs its own test.
+
+        A side condition is emitted `(by try (…) <;> all_goals sorry)`: the
+        tactic runs FIRST and the `sorry` is reached only if it does not close
+        the goal. Counting that as an admission over-counts — measured, 118
+        "holes" on `wide_recv` where there are 5 — and not counting it
+        under-counts. They are two numbers, and this asserts the split.
+        """
+        import formal.x86_64_endtoend_test as E
+        facts = E.admitted_facts(self._emitted())
+        kinds = {k for _n, _l, k in facts}
+        self.assertIn("guarded", kinds,
+                      "the emitted side conditions must be counted as guarded; "
+                      "a chain has several per step and they are the majority")
+        guarded = [n for n, _l, k in facts if k == "guarded"]
+        admitted = [n for n, _l, k in facts if k == "admitted"]
+        self.assertGreater(len(guarded), len(admitted),
+                           "the guarded count is expected to dominate; if it "
+                           "has collapsed to the admitted count the guard is no "
+                           "longer being recognised")
+
+    def test_a_sorry_in_a_comment_is_not_an_admission(self):
+        """Both comment forms, and the theorem's OWN docstring is the case.
+
+        `/- … -/` used to be charged as an admission and reported under `_body`,
+        which is the "a check that cannot fail is green" shape from the other
+        end: the report invented a hole that was not there.
+        """
+        import formal.x86_64_endtoend_test as E
+        self.assertEqual(
+            E.admitted_facts("theorem t : True := by\n"
+                             "  -- a line comment naming sorry\n"
+                             "  /- a block comment naming sorry -/\n"
+                             "  exact trivial\n"),
+            [])
+
+    def test_the_hpop_docstring_makes_no_claim_about_sorries(self):
+        """The generated theorem's docstring asserted `No sorry`, and the chain
+        it heads carries five admissions. A docstring that contradicts the file
+        it heads is worse than none, so the claim is gone rather than made
+        true — the emitter cannot make it true, because closing those five is
+        the memory-separation work the bug doc names as remaining.
+        """
+        text = self._emitted()
+        self.assertNotIn("No `sorry`", text,
+                         "the theorem's docstring must not claim no sorries "
+                         "while the file below it admits five")
+
 
 # ── 8. the other half of the launch estate: WHERE the generated file goes ─────
 #

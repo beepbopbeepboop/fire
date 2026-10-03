@@ -1624,8 +1624,15 @@ def emit_terminates(path):
     # arms of a fork are counted, which over-counts; the option is a limit, so
     # over-counting only ever costs headroom nobody uses.
     out = _header(code, insns, base, _nodes(root))
+    # NOT "No `sorry`", which this claimed until `admitted_facts` existed to
+    # contradict it: the path tree IS walked once per branch outcome, so the
+    # chain is walked, and `wide_recv` then emits four admitted `hpop`s and an
+    # admitted closing `hrip` — five holes a reader cannot see from the verdict
+    # line, which said "proved, 1 sorry" for all five.  The count is printed
+    # beside the verdict now, and it is the number to watch.
     out.append("/-- For EVERY input, the model runs this image to the exit pc.\n"
-               "    No `sorry`: the path tree is walked once per branch outcome. -/")
+               "    The path tree is walked once per branch outcome; the holes this\n"
+               "    leaves are named and counted in the report below. -/")
     out.append("theorem terminates (n : UInt64) :")
     out.append("    (x86_exec_exit (X86State.init n %d) rc 0).isSome = true := by"
                % entry)
@@ -1927,8 +1934,101 @@ def _has_loop(path):
 _ERR = re.compile(r"^\S*\.lean:\d+:\d+: ")
 
 
+#: A NAMED fact whose proof this emitter ADMITTED rather than closed:
+#: `have <name> … := by`, followed — inside its body — by a `sorry`.
+#: `have <name> … :=` — with or WITHOUT a `by`.  Both spellings open a proof, and
+#: the one without matters: every step lemma is emitted as
+#:     have hstep7 : x86_step s6 rc = some { … } :=
+#:       x86_step_leave s6 rc … (by try (…) <;> all_goals sorry) …
+#: so requiring `by` left `cur` on the PREVIOUS fact and charged every guarded
+#: side condition to it — 118 named holes on `wide_recv` where there are 9, every
+#: `hs` and `hstep` in the chain wrongly named as an admission.
+_HAVE_BY = re.compile(r"^\s*have\s+([A-Za-z_][A-Za-z_0-9']*)\b.*:=")
+#: A `sorry` as a tactic.  Matching the bare word would also count the word in
+#: a comment, and the generated text carries comments.
+_SORRY = re.compile(r"\b(?:all_goals\s+)?sorry\b")
+#: …and one on a line of its OWN, which is the shape the emitter writes when it
+#: has given up on a fact:
+#:     have hpop3 : … := by
+#:       simp only [hs3]
+#:       all_goals sorry
+#: The inline form — `(by try (…) <;> all_goals sorry)` — is a GUARD, and is a
+#: different fact entirely: the tactic is attempted first and the `sorry` is
+#: reached only if it does not close the goal. Whether it fired is known only to
+#: Lean, and Lean does not say, so counting the inline form as a hole
+#: OVER-counts (measured: 118 "admissions" on `wide_recv` where there are 5) and
+#: not counting it UNDER-counts. They are reported as two numbers because they
+#: are two facts, which is B21's whole subject.
+_SORRY_ALONE = re.compile(r"^\s*(?:all_goals\s+)?sorry\s*$")
+#: A `/- … -/` block comment, replaced by blank lines so the line numbers the
+#: check reports still point at the source.
+_BLOCK_COMMENT = re.compile(r"/-.*?-/", re.S)
+#: The guard's own shape, so a guarded side condition is counted rather than
+#: lumped in with an admission.
+_GUARD = re.compile(r"\(\s*by\s+try\b")
+
+
+def admitted_facts(text):
+    """`[(name, line, kind)]` for every way this file's proof is short of closed.
+
+    `kind` is `"admitted"` or `"guarded"`, and the two are counted separately by
+    every caller because they answer different questions:
+
+      `admitted`  the emitter WROTE `all_goals sorry` as a fact's whole proof.
+                  A hole, always. Nothing was attempted.
+
+      `guarded`   a side condition written `(by try … <;> all_goals sorry)`. The
+                  tactic runs first; the `sorry` is reached only if it does not
+                  close the goal. So this is a fact about the EMISSION, not
+                  about the proof: the fact may be fully proved and Lean says
+                  nothing either way, because it reports "declaration 'terminates'
+                  uses 'sorry'" once per DECLARATION and
+                  `formal/lean.py::_census_from_output` de-duplicates by name.
+                  A chain with four admitted `hpop`s and one with a single gap
+                  read identically — `bugs/FORMAL_x86_64_end_to_end_proof.md`
+                  reaches the same conclusion about `augassign` from the other
+                  end, and this is a statement about the CENSUS rather than the
+                  proof.
+
+    Counted off the generated TEXT rather than kept in a counter beside it, for
+    the reason the rest of this file's numbers are: a tally maintained next to
+    the emitter is a second source of truth for what was emitted, and the first
+    thing to go wrong when one changes is the tally. A `sorry` reached before
+    any `have` is reported under `_body`, so it cannot go missing.
+    """
+    out = []
+    cur = None
+    # Comments first, and BOTH forms: the generated file carries `/- … -/`
+    # docstrings whose prose names the thing being counted ("No `sorry`: …"), and
+    # a `--`-only filter charged the theorem's own docstring as an admission —
+    # reported as `_body`, which is precisely the "a check that cannot fail is
+    # green" shape this is meant to remove.
+    body = _BLOCK_COMMENT.sub("", text)
+    for n, line in enumerate(body.split("\n"), start=1):
+        if line.lstrip().startswith("--"):
+            continue
+        m = _HAVE_BY.match(line)
+        if m:
+            cur = (m.group(1), n)
+        if _SORRY_ALONE.match(line):
+            out.append((cur if cur is not None else ("_body", n), "admitted"))
+        elif _SORRY.search(line):
+            kind = "guarded" if _GUARD.search(line) else "admitted"
+            out.append((cur if cur is not None else ("_body", n), kind))
+    return [(nm, ln, kind) for (nm, ln), kind in out]
+
+
 def _run_lean(text):
-    """`(ok, n_sorries, first_error)` for one generated Lean file."""
+    """`(ok, n_sorries, first_error)` for one generated Lean file.
+
+    `n_sorries` is `admitted_facts`' count — the holes THIS emitter opened —
+    and not Lean's `declaration uses 'sorry'` line count. Both are called a
+    "sorry" and they are not the same number; see `admitted_facts` for why the
+    one Lean reports cannot be used here. Lean's is kept as a cross-check that
+    the two do not DISAGREE, because they must: a `sorry` this emitter did not
+    write would mean a library hole had leaked into a generated file, and a
+    count of zero with Lean's non-zero is that.
+    """
     with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as f:
         f.write(text)
         tmp = f.name
@@ -1947,7 +2047,17 @@ def _run_lean(text):
         # Drop the temp path and the line:col, which would otherwise eat the
         # whole message under the `[:60]` slice below and print as a filename.
         errs = [_ERR.sub("", l) for l in out.splitlines() if ": error" in l]
-        sorries = sum(1 for l in out.splitlines() if "declaration uses" in l)
+        sorries = sum(1 for _n, _l, k in admitted_facts(text)
+                      if k == "admitted")
+        if not errs:
+            lean_sorries = sum(1 for l in out.splitlines()
+                               if "declaration uses" in l)
+            if lean_sorries and not sorries:
+                errs.append(
+                    "Lean reports %d declaration(s) using `sorry` and this "
+                    "emitter admitted no fact of its own: a library hole has "
+                    "leaked into a generated file, and counting only ours "
+                    "would have reported it as clean" % lean_sorries)
         return (not errs), sorries, (errs[0] if errs else "")
     finally:
         os.unlink(tmp)
@@ -1991,7 +2101,8 @@ def main(argv):
         print("lean not found (see ./lean-toolchain)")
         return 1
     val_ok = val_gap = term_ok = term_gap = 0
-    fails = notree = noform = nocall = 0
+    val_holes = []
+    fails = notree = noform = nocall = hole_total = guard_total = 0
     for t in targets:
         name = os.path.basename(t)[:-5]
         try:
@@ -2013,6 +2124,8 @@ def main(argv):
             uncovered = None
             try:
                 good, val_sorries, msg = _check(t, expected)
+                val_holes = sorted({n for n, _l, k in admitted_facts(
+                    emit(t, expected)) if k == "admitted"})
             except ValueError as exc:
                 # No step lemma for some form: the theorem cannot even be
                 # ATTEMPTED, which is missing coverage rather than a proof that
@@ -2031,8 +2144,8 @@ def main(argv):
                 # failed proof are different facts and conflating them is how
                 # this suite once read as 36 failing when 2 were.
                 val_gap += 1
-                vs = "  value:     rax = %d, every input, %d sorry" % (
-                    expected, val_sorries)
+                vs = "  value:     rax = %d, every input, %d admitted (%s)" % (
+                    expected, val_sorries, ", ".join(val_holes) or "none")
             elif uncovered is not None:
                 vs = "  value:     -  (%s)" % (
                     uncovered if uncovered.startswith(BRANCHING)
@@ -2051,7 +2164,14 @@ def main(argv):
 
         # --- the termination theorem ---
         try:
-            ok, sorries, err = _run_lean(emit_terminates(t))
+            text = emit_terminates(t)
+            ok, sorries, err = _run_lean(text)
+            # The NAMES, not just the number, because the number alone cannot be
+            # acted on: `admitted_facts`' docstring has the measurement that Lean
+            # reports one line per DECLARATION, so four `hpop`s read as one gap.
+            facts = admitted_facts(text)
+            holes = sorted({n for n, _l, k in facts if k == "admitted"})
+            guarded = sum(1 for _n, _l, k in facts if k == "guarded")
         except ValueError as exc:
             # Three reasons a path cannot be built, kept apart for B21's reason,
             # plus the fourth kind the `_NoTree` docstring is about.  `_has_loop`
@@ -2080,7 +2200,10 @@ def main(argv):
                 ts = "  terminates: PROVED"
             elif ok:
                 term_gap += 1
-                ts = "  terminates: proved, %d sorry" % sorries
+                hole_total += sorries
+                guard_total += guarded
+                ts = "  terminates: proved, %d admitted (%s), %d guarded" % (
+                    sorries, ", ".join(holes) or "unattributed", guarded)
             else:
                 fails += 1
                 ts = "  terminates: FAIL %s" % err.strip()[:60]
@@ -2090,6 +2213,12 @@ def main(argv):
           % (val_ok, val_gap))
     print("  terminates : %d proved with no sorry, %d proved with a sorry"
           % (term_ok, term_gap))
+    # What the sorry COUNT is, since it is not Lean's and the two disagree: these
+    # are the holes THIS emitter opened, counted off the generated text by the
+    # name the emitter gave them. `admitted_facts` has why Lean cannot supply it.
+    print("               %d admitted fact(s) and %d guarded side condition(s) "
+          "in the proved-with-a-sorry files, counted by name from the generated "
+          "text" % (hole_total, guard_total))
     print("               %d no finite tree (%d loop, %d uncovered form, "
           "%d returns into a caller)" % (notree + noform + nocall, notree,
                                           noform, nocall))
