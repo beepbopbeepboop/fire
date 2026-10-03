@@ -3181,7 +3181,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `build_data_image` rather than a rule in this analysis: the holder
         # tables answer "is this word an address", and the answer is only safe if
         # something guarantees the address outlives every reader.
-        for name, st in M.module_frame_slot_holders(fn, structs_by_name).items():
+        for name, st in M.module_frame_slot_holders(
+                fn, structs_by_name).items():
             if name in holders[_fn_key(fn)]:
                 continue
             holders[_fn_key(fn)].add(name)
@@ -12236,12 +12237,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # "what does this annotation mean" is one architecture answering `len()` and
     # the other refusing it.
     #
-    # …and the module-level STRUCT values the IMAGE holds, decided just above and
-    # handed over rather than derived here. It is a separate call and not an
-    # argument `collect_global_slots` computes because it EDITS the module body:
-    # `_module_loader = ModuleLoader()` must stop being a store of the body's own
-    # block address, and `collect_global_slots` reads `module_body_store_sites` a
-    # few lines into its own body, so the edit has to be finished before it runs.
+    # …and the module-level STRUCT values the IMAGE holds, decided just above
+    # and handed over rather than derived here. It is a separate call and not
+    # an argument `collect_global_slots` computes because it EDITS the module
+    # body: `_module_loader = ModuleLoader()` must stop being a store of the
+    # body's own block address, and `collect_global_slots` reads
+    # `module_body_store_sites` a few lines into its own body, so the edit has
+    # to be finished before it runs.
     frame_slots = M.prepare_module_frame_slots(stmts, functions,
                                                structs_by_name)
     slots = M.collect_global_slots(stmts, functions,

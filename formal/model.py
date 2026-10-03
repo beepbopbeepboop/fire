@@ -25609,9 +25609,8 @@ class GlobalSlot:
     at a slide: measured on this tree, the same string label is linked at
     0x100000398 and runs at 0x104da4398. `build_data_image` returns the fixup
     list beside the bytes so each linker emits a relocation for exactly the
-    address words and not for the integers beside them. `is_address` is the one
-    place that list is decided, so both containers cannot disagree about which
-    words need one.
+    address words and not for the integers beside them; `is_address` is the
+    classification of which words those are.
 
     `filled_by_body` is the third source of a slot's value, and the one this
     capability had no word for: the MODULE BODY stores the name
@@ -26631,8 +26630,9 @@ def module_frame_slot_initializer(value, structs_by_name: dict):
     if not isinstance(value, F.CallExpr):
         return None
     callee = call_callee_name(value.func)
-    if callee is None or getattr(value, "args", None) \
-            or getattr(value, "keywords", None) or getattr(value, "kwargs", None):
+    # `args` and `kwargs` are `CallExpr`'s two argument lists, and a
+    # zero-argument construction is the only one whose frame this can write.
+    if callee is None or value.args or value.kwargs:
         return None
     struct = (structs_by_name or {}).get(callee)
     if struct is None or not struct_is_framed(struct):
@@ -27325,21 +27325,23 @@ def module_frame_slot_holders(fn, structs_by_name: dict) -> dict:
     does not use is still read by `_frame_return_status` and by the rebind
     checks, which ask what the function DOES with its names.
 
-    The read test is the bare-name walk `function_touches_globals` uses, and it
-    is that function's answer for the same reason: one recognition of "does this
-    body mention a module global", because two would be free to differ on the
-    spelling one of them had not seen.
+    The read test is the bare-name walk `function_touches_globals` uses, and the
+    struct is read with `module_slot_frame_struct` rather than by a second
+    `init[0] == "frame"` here: both questions are "does this body mention a
+    module global" and "does that slot hold a frame", and two answers to either
+    would be free to differ from the ones the rest of this section already
+    gives.
     """
     table = module_slots()
     if not table:
         return {}
     out = {}
     for node in iter_nodes(getattr(fn, "body", None) or []):
-        if isinstance(node, F.IdentExpr):
-            struct = table.get(node.name)
-            if struct is not None and struct.init[0] == "frame" \
-                    and struct.init[1] in (structs_by_name or {}):
-                out[node.name] = structs_by_name[struct.init[1]]
+        if not isinstance(node, F.IdentExpr) or node.name not in table:
+            continue
+        name = module_slot_frame_struct(node.name)
+        if name is not None and name in (structs_by_name or {}):
+            out[node.name] = structs_by_name[name]
     return out
 
 
