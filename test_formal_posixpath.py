@@ -145,7 +145,7 @@ def records(text):
     The value is bracketed when it is a string and bare when it is an integer,
     and the parser tells the two apart: `1` is the integer one and `[1]` is the
     string "1", and a path can be either. The distinction is load-bearing rather
-    than cosmetic \u2014 `printf("%s")` on a word prints a POINTER, so a predicate's
+    than cosmetic — `printf("%s")` on a word prints a POINTER, so a predicate's
     answer has to be printed with `%d` or the test would be comparing addresses
     (`test_formal_os.py` says the same).
 
@@ -220,7 +220,7 @@ PAIRS = [
 # Excluded rather than dropped: the group prints the count and the doc on a
 # verbose run and carries the doc in its own summary, so the exclusion is
 # visible rather than being a corpus that quietly lacks a case. `same` does NOT
-# skip them \u2014 the two spellings agree there, and the divergence belongs to
+# skip them — the two spellings agree there, and the divergence belongs to
 # `os.path` rather than to a module that forwards to it.
 # bugs/FORMAL_os_path_realpath_keeps_a_double_slash_root.md
 EXCLUDED = {("realpath", "//a"), ("realpath", "//a/b")}
@@ -361,7 +361,7 @@ def _emit(lines, k, call, kind, nparts):
 
     `%lld` and not `%d` for the case NUMBER because a `%d` conversion is 32 bits
     wide on this path (`bugs/FORMAL_string_value_model.md` §2) and the corpus
-    runs to 484 cases \u2014 which is worth saying because the first version of
+    runs to 484 cases — which is worth saying because the first version of
     this file printed it with `%d`.
 
     The RETURN VALUE is the number of records emitted, and the caller advances
@@ -369,7 +369,7 @@ def _emit(lines, k, call, kind, nparts):
     records and the first version advanced once, so both records carried the
     same case number and the checker compared element 0 against element 1's
     expectation. It reported 197 of 972 answers as differing from CPython when
-    the module was right \u2014 a plausible-looking number that points at the module
+    the module was right — a plausible-looking number that points at the module
     instead of at the harness, and the only reason it was caught is that a
     mismatch that large should not happen on a module that forwards.
     """
@@ -425,9 +425,9 @@ def _same_cases():
 
     `os_path_has_it` is False for exactly one name, `splitroot_root`, and it has
     to be a FIELD rather than an assumption. `splitroot_root` is `posixpath`'s
-    alone \u2014 `os.path` does not have it, because `os/path/__init__.mojo` is
+    alone — `os.path` does not have it, because `os/path/__init__.mojo` is
     `posixpath` MINUS the root/drive split, which is a tuple on this path (the
-    module's own `splitroot` entry says why) \u2014 so a builder that asked
+    module's own `splitroot` entry says why) — so a builder that asked
     `os.path.splitroot_root` gets a build refusal that names the WRONG module
     and says nothing about the case that was meant:
 
@@ -440,7 +440,7 @@ def _same_cases():
 
     Nothing about a case is written into the FORMAT STRING, and that is not
     tidiness: a path is data, and a data character in a format string is a
-    conversion or a flag \u2014 `'a/-'` in a format makes printf read `'-'` as
+    conversion or a flag — `'a/-'` in a format makes printf read `'-'` as
     flags. The index carries the identity instead.
     """
     cases = []
@@ -469,7 +469,7 @@ def deviation_program(backend=None):
     A separate program and not part of the corpus, because the oracle cannot be
     CPython's answer for them: CPython has none. `relpath` is the only name in
     this module with no exception to raise, so this is the only group where the
-    expectation is a documented claim rather than a measurement \u2014 and it says
+    expectation is a documented claim rather than a measurement — and it says
     so in the assertion's own message.
     """
     lines = ["import posixpath", "", "def main():"]
@@ -492,12 +492,12 @@ def same_program(backend):
 
     Two SEPARATE calls per case rather than one call and one comparison inside
     the image, and BOTH printed, so a difference names which spelling was wrong
-    \u2014 a program that compared them itself could only say that they differ.
+    — a program that compared them itself could only say that they differ.
 
     The record INDEX is the case, as everywhere else in this tree, and
     `same_pairs` turns an index back into (case, spelling). Nothing about a case
     goes in the FORMAT STRING, and that is not tidiness: a path is data, and a
-    data character in a format string is a conversion or a flag \u2014 `'a/-'` in a
+    data character in a format string is a conversion or a flag — `'a/-'` in a
     format makes printf read `'-'` as flags, and the refusal that produces says
     nothing about which case was meant.
     """
@@ -536,8 +536,8 @@ def same_program(backend):
 def same_record_layout():
     """One entry per RECORD `same_program` emits, in order.
 
-    A comparable case contributes TWO entries \u2014 the same `(case, element)`
-    twice, once per spelling \u2014 because those two records are what the checker
+    A comparable case contributes TWO entries — the same `(case, element)`
+    twice, once per spelling — because those two records are what the checker
     compares. A case `os.path` has no name for contributes ONE `None`, because
     the program emits one record for it and a pair slot would make the checker
     compare it against the NEXT case's first record.
@@ -611,7 +611,7 @@ def group_forward(tmpdir, verbose):
           + detail)
 
     # And the pairs CPython refuses, which are compared against the module's
-    # documented claim rather than against CPython \u2014 with the raise asserted,
+    # documented claim rather than against CPython — with the raise asserted,
     # so the reason this is a separate block is visible.
     dev = deviation_program()
     check(len(dev) == len(REL_PATH_RAISES),
@@ -658,8 +658,8 @@ def group_same(tmpdir, verbose):
 
     The assertion CPython cannot make about itself. A forward that calls the
     wrong name, drops an argument, or reads a stale string would still agree
-    with CPython on the cases that do not distinguish them \u2014 which is most of
-    them \u2014 and this group is over the same corpus with the comparison done by
+    with CPython on the cases that do not distinguish them — which is most of
+    them — and this group is over the same corpus with the comparison done by
     the image, in the same process, on both backends.
 
     The comparison is per element rather than per record, so a difference names
@@ -674,7 +674,7 @@ def group_same(tmpdir, verbose):
     for backend in backends():
         got = same_program(backend)
         # One record per answer, and TWO answers per case only where `os.path`
-        # has the name \u2014 so the expected count is computed from `cases`, not
+        # has the name — so the expected count is computed from `cases`, not
         # from 2 x len(cases). Getting that wrong is a one-line arithmetic slip
         # that reports a mismatch of 25 and sends a reader looking for a bug in
         # the module.

@@ -12,7 +12,7 @@ WHAT IS HERE, AND WHY THESE TWO
 -------------------------------
 CPython's `textwrap` is eleven names. Two of them are pure computation over
 strings a value already is, and they are the two this repository actually
-calls \u2014 measured, not read:
+calls — measured, not read:
 
     textwrap.dedent   x78 call sites, over 5 files
     textwrap.indent   x2  call sites, both `textwrap.indent(body, "    ")`
@@ -25,11 +25,11 @@ host-import row bought by a module with no dependency on anything.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
-  * `wrap` \u2014 a SEQUENCE. It answers a list of strings, and a list on this path
+  * `wrap` — a SEQUENCE. It answers a list of strings, and a list on this path
     lives in the frame of the function that made it and cannot cross a dylib
     boundary (`bugs/FORMAL_listdir_no_run_time_sequence.md`). This is the same
     reason `fnmatch.filter` is absent from `fnmatch.mojo`.
-  * `fill` \u2014 the same shape one step later: `fill` is `wrap`'s answer joined
+  * `fill` — the same shape one step later: `fill` is `wrap`'s answer joined
     by newlines, so it is answerable, and it is absent because NOTHING on this
     path calls it. `formal/hostmods/argparse.mojo` has its own transcription of
     `textwrap`'s greedy fill (`_wrap_into`, with `_chunk_end`,
@@ -40,7 +40,7 @@ WHAT IS NOT HERE, AND WHY
     transcription `test_formal_argparse.py` already checks case for case.
     Naming that here is the honest reason, and it is the reasoning
     `fnmatch.mojo` gives for `translate`.
-  * `shorten` \u2014 `TextWrapper(width, max_lines=1)` plus a `' '.join(split())`.
+  * `shorten` — `TextWrapper(width, max_lines=1)` plus a `' '.join(split())`.
     It is `fill` plus a word count, so it inherits `fill`'s absence; and
     `TextWrapper` is an object with nine pieces of mutable configuration, which
     is at least nine words where a value on this path is one
@@ -49,7 +49,7 @@ WHAT IS NOT HERE, AND WHY
     blocker too). Note the consequence honestly: `wrap`/`fill` being ABSENT
     means the absent `TextWrapper` costs nothing extra, because nothing that
     wanted the object was going to get the function either.
-  * `TextWrapper`, `HTMLWrapper`, `BackslashWrapper` \u2014 CLASSES, per above.
+  * `TextWrapper`, `HTMLWrapper`, `BackslashWrapper` — CLASSES, per above.
   * `dedent`'s cousin `inspect.cleandoc` is NOT re-exported here and must not
     be: it is a different function (it expands tabs and strips leading and
     trailing blank lines), it lives in `inspect`, and this tree reads
@@ -63,7 +63,7 @@ boundary. So `indent("a\\rb", ">")` is `">a\\r>b"` where a `\\n`-only walk gives
 `">a\\rb"`, and `dedent("  \\r\\n  a\\n")` puts the `\\r` INSIDE the first line
 so it is deleted with the margin where `indent` would prefix before it. One
 shared "walk the lines" helper would have to carry that as a flag, and a
-walker with a flag is two walkers \u2014 which is the shape
+walker with a flag is two walkers — which is the shape
 `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` and
 `contextlib.mojo`'s `closing` both refuse to ship.
 
@@ -141,7 +141,7 @@ def _splitlines_set() -> str:
         [10, 11, 12, 13, 28, 29, 30]
 
     So it is `\\n`, `\\v`, `\\f`, `\\r` and the three C separators, and **not**
-    0x1F \u2014 which is in `isspace()` (above) and not in `splitlines`. A set
+    0x1F — which is in `isspace()` (above) and not in `splitlines`. A set
     copied from the `isspace` one would therefore split `indent` on a 0x1F
     where CPython does not, and the test's corpus carries a 0x1F case so the two
     cannot be the same set by accident.
@@ -219,7 +219,7 @@ def dedent(text) -> str:
     non-blank line rather than of the first one: walking `l1` alone stops at the
     first line whose content differs and under-counts, walking `l2` alone
     over-counts. The loop's `margin` is the index at which it BREAKS, which is
-    why `margin` is 0 for an empty input and for one with no non-blank line \u2014
+    why `margin` is 0 for an empty input and for one with no non-blank line —
     `enumerate` never runs and the initialiser is the answer.
 
     `l2[margin]` is indexed with `margin` rather than walked separately, so `l2`
@@ -237,12 +237,12 @@ def dedent(text) -> str:
         rather than trimming it, so the blank line's own bytes are dropped too.
 
       * **Tabs and spaces are not equal, so the margin stops mid-run.**
-        `dedent("  \\ta\\n \\tb\\n")` is `" \\ta\\n\\tb\\n"` \u2014 margin 1, because
+        `dedent("  \\ta\\n \\tb\\n")` is `" \\ta\\n\\tb\\n"` — margin 1, because
         at offset 1 the two lines hold `\\t` and ` `. CPython's own docstring
         says so, and the min/max pair is what gets it without a special case.
 
       * **A non-blank line shorter than the margin is emptied too**, because
-        `l[margin:]` of it is the empty string \u2014 which is why "is it
+        `l[margin:]` of it is the empty string — which is why "is it
         whitespace" and "is it at least `margin` long" are different tests and
         both are here.
 
@@ -344,7 +344,7 @@ def indent(text, prefix) -> str:
         other direction.
 
     The blank test is `str.isspace()` and not a truth test, because
-    `splitlines` does not produce the empty string \u2014 CPython says so in a
+    `splitlines` does not produce the empty string — CPython says so in a
     comment of its own, and `indent("  \\n", ">")` is `"  \\n"`: a whitespace
     line keeps its bytes and gets no prefix.
 

@@ -12,7 +12,7 @@ WHY THIS FILE IS MOSTLY ABOUT ORDER
 it is that the ORDER is load-bearing: `&` is replaced FIRST, so the `&` that the
 later replacements introduce is never itself replaced. An implementation that
 replaced `&` last agrees with CPython on every string containing no `&` and
-disagrees on every string containing one \u2014 and this function exists FOR strings
+disagrees on every string containing one — and this function exists FOR strings
 containing `<`, `>`, `&` and quotes, so "agrees on the easy strings" is not a
 property that means anything here.
 
@@ -25,7 +25,7 @@ those four and fail the rest.
 `bytes` is the other half and it exists because the module indexes its expansion
 table BY BYTE. A multi-byte UTF-8 sequence must be copied through untouched
 (CPython's `str.replace` operates on code points and no code point here is one of
-the five), so the corpus carries UTF-8 and the byte sweep covers 0x80..0xFF \u2014
+the five), so the corpus carries UTF-8 and the byte sweep covers 0x80..0xFF —
 which is the range where a module that expanded "any byte above 0x7F" would go
 wrong on real text.
 
@@ -33,14 +33,14 @@ A corpus byte cannot be spelled directly (a string literal's escapes are not
 decoded on this path, `bugs/FORMAL_string_literal_escape_is_not_decoded.md`),
 so the MASK below is the corpus's own alphabet and `unmask` is the Mojo half.
 Every case is ASCII or a UTF-8 sequence of ASCII-printable-plus-high-bytes, and
-the mask is stated rather than assumed \u2014 it is the same idea as
+the mask is stated rather than assumed — it is the same idea as
 `test_formal_json.py`'s and `test_formal_textwrap.py`'s.
 
 THE ORACLE IS CPython'S OWN `html.escape`, CALLED, NEVER TYPED
 --------------------------------------------------------------
 Nothing in this file records what `escape` answers. Every case is computed twice
-\u2014 once by this process's `html` and once by an image built through the formal
-backend and executed \u2014 and the two have to agree. A table of answers for a
+— once by this process's `html` and once by an image built through the formal
+backend and executed — and the two have to agree. A table of answers for a
 function that is five substitutions is a table that is wrong the moment someone
 transposes a character, which is the one mistake a byte-oriented module cannot be
 allowed to make.
@@ -123,7 +123,7 @@ def records(text):
     Bracketed value and a two-byte separator, for the reasons
     `test_formal_textwrap.py` gives: the mask escapes every `@` in the corpus as
     `~a`, so a masked case cannot contain `@@`, and the bracket makes an EMPTY
-    answer visible \u2014 which matters here because `escape("")` is `""` and a bare
+    answer visible — which matters here because `escape("")` is `""` and a bare
     record could not be told from a missing one.
     """
     got = []
@@ -281,7 +281,7 @@ def program(backend):
     Both values for every case rather than a subset, because `quote` is the
     parameter a cross-dylib default cannot supply
     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`) and a module
-    that ignored it would agree with CPython on every `quote=1` case \u2014 which is
+    that ignored it would agree with CPython on every `quote=1` case — which is
     the value CPython defaults to, and therefore the value most callers use.
 
     One build for the corpus: the module is compiled once, so 32 cases x 2
@@ -303,7 +303,7 @@ def mask_literal(raw: bytes) -> str:
     """A Mojo string literal for the already-masked `raw`.
 
     `"` and `\\` are the only two the mask can have left, and it escapes both, so
-    this is belt and braces \u2014 and it is a function rather than an inline f-string
+    this is belt and braces — and it is a function rather than an inline f-string
     because the masked text is what goes in and the escaping must not happen
     twice.
     """
@@ -321,7 +321,7 @@ def bytes_program(backend):
     here at 0x80.
 
     Read as latin-1, because that is the only way to get byte `b` into a Python
-    `str` without an encoding choice of its own \u2014 and CPython's `escape` then
+    `str` without an encoding choice of its own — and CPython's `escape` then
     operates on those code points, which is the comparison the module's byte
     table is making.
     """
@@ -346,7 +346,7 @@ def group_resolve(tmpdir, verbose):
     And the diagnostic that used to be wrong about it is gone with the entry:
     `html` was in NEITHER tier on 2026-10-03, which made
     `unresolvable_import_error` say "not a stdlib or sibling module, and no
-    such file exists" to `tools/md2html.py` \u2014 a false statement about a name
+    such file exists" to `tools/md2html.py` — a false statement about a name
     CPython ships. That is the sentence
     `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md` §3 measured, and
     the classification it led to is what this module now answers.
@@ -366,7 +366,7 @@ def group_resolve(tmpdir, verbose):
           f"the hostmods root moved to {I._HOSTMODS_ROOT!r}")
     check(not os.path.isfile(os.path.join(HERE, "html.mojo")),
           "html.mojo is at the repository root, which four independent "
-          "resolvers search \u2014 see _HOSTMODS_ROOT")
+          "resolvers search — see _HOSTMODS_ROOT")
     if verbose:
         print(f"    import html -> {os.path.relpath(got, HERE)}, "
               f"host_module_tier={tier!r}")
@@ -465,7 +465,7 @@ def group_absent(tmpdir, verbose):
     """The names this module does NOT have, refused with a reason.
 
     Pinned because an absent name and a wrong answer look the same to a caller
-    only if nothing checks \u2014 and `unescape` is the one a reader expects to find,
+    only if nothing checks — and `unescape` is the one a reader expects to find,
     because `escape` without `unescape` looks like half a module. Each is refused
     NAMING ITSELF, so a caller that wants one is told which one and why rather
     than getting a link error.

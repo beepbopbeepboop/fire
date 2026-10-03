@@ -14,7 +14,7 @@ margin is NOT "the smallest indentation in the text": CPython takes the
 lexicographic MINIMUM and MAXIMUM of the non-blank lines and walks the two in
 step, which is a different number whenever the lines' CONTENT differs after
 their indent. A hand-written `min(len(indent) for ...)` agrees with CPython on
-every uniformly-indented block \u2014 which is every block anybody writes \u2014 and
+every uniformly-indented block — which is every block anybody writes — and
 disagrees on exactly the mixed ones.
 
 So every case here is computed twice: once by this process's own `textwrap`
@@ -25,11 +25,11 @@ this file is a recorded constant. The corpus carries, on purpose:
     exercised and the "smallest indent" reading is caught;
   * a TAB against a SPACE at the same offset, which is where the margin stops
     mid-run (CPython's docstring: tabs and spaces "are not equal");
-  * 0x1C/0x1D/0x1E/0x1F, which `str.isspace()` is true of \u2014 0x1F surprises,
+  * 0x1C/0x1D/0x1E/0x1F, which `str.isspace()` is true of — 0x1F surprises,
     and `str.splitlines` is NOT, so a module that used one byte set for both
     questions fails here;
   * `\\r`, `\\r\\n` and `\\v`, which `dedent` does not treat as boundaries and
-    `indent` does \u2014 the asymmetry the module's docstring is about;
+    `indent` does — the asymmetry the module's docstring is about;
   * the empty string, a lone newline, a trailing newline, a leading blank line
     and an all-whitespace input, because `dedent` REPLACES a whitespace line
     with the empty string rather than trimming it.
@@ -46,7 +46,7 @@ THE RECORD FORMAT
 -----------------
 `%lld:<value>` per case, one line per case. `%lld` and not `%d` because a `%d`
 conversion is 32 bits wide on this path
-(`bugs/FORMAL_string_value_model.md` \u00a72) \u2014 and every value here is a
+(`bugs/FORMAL_string_value_model.md` §2) — and every value here is a
 STRING, so the point is the `\\n` in the value rather than the width, but the
 width is the same trap `test_formal_small_hosts.py` records for
 `io.DEFAULT_BUFFER_SIZE`. The value is bracketed `[...]` so an empty answer is
@@ -55,7 +55,7 @@ records.
 
 A corpus byte cannot be spelled directly, so the MASK below is the corpus's own
 alphabet and `unmask` is the Mojo half. It is the same idea as
-`test_formal_json.py`'s and the two must agree \u2014 which is why the mask is
+`test_formal_json.py`'s and the two must agree — which is why the mask is
 defined once, here, and used by both halves.
 """
 
@@ -335,7 +335,7 @@ def backends():
 
     A host with no x86-64 support at all is the one case that cannot run half of
     this, and it is SKIPPED with the reason printed rather than passed over
-    silently \u2014 `test_formal_os_backing.py` and `test_formal_json.py` do the
+    silently — `test_formal_os_backing.py` and `test_formal_json.py` do the
     same, and the reason is a fact about the machine rather than about the
     module.
     """

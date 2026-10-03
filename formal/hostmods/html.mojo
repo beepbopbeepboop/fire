@@ -137,7 +137,7 @@ def escape(s, quote) -> str:
         elif quote == 1 and c == 39:      # `'` -> `&#x27;`
             used = str_put(out, used, "&#x27;", 6)
         else:
-            # EVERY OTHER BYTE, copied through \u2014 which is what makes a
+            # EVERY OTHER BYTE, copied through — which is what makes a
             # multi-byte UTF-8 sequence survive intact, since none of its bytes
             # is one of the five.
             used = str_put(out, used, s + i, 1)
