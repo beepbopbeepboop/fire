@@ -1,4 +1,4 @@
-# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed; three measured ceilings are open
+# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed; two measured ceilings are open and one is closed
 
 FORMAL.md phase 2 made a `mojo_*` call *decidable* — `model.gimple_runtime_callable`
 answers, from the runtime header's own types, whether a formal image could make
@@ -6,15 +6,95 @@ one, and the answer had been "no, and for one reason: the library" for every one
 of them since. This records what that link line now carries, and — more to the
 point — what it still does not.
 
-**Status: the link line is done and measured; 56 of the word-shaped entry points
-are still refused because the library does not define them (51 when this was
-written; `mojo_metal_*` arrived after), 13 defined names are still refused
-because no header declares them, and 32 of the linked ones need a heap handle
-this path cannot produce. All three are written down below with the exact list
-and the cost of closing each, and all three were re-measured on 2026-10-02
+**Status: the link line is done and measured; CEILING 2 IS CLOSED (13 → 6, the
+five word-shaped tagged-box accessors are now callable and one program calls
+them on both architectures); 56 of the word-shaped entry points are still
+refused because the library does not define them (51 when this was written;
+`mojo_metal_*` arrived after), and 32 of the linked ones need a heap handle this
+path cannot produce. Both remaining ceilings are re-measured on 2026-10-03
 rather than carried forward.**
 
 Round: agent [5] of the five-agent round of 2026-09-28.
+
+## 0. What landed, 2026-10-03 (`work/formal10-4`): ceiling 2, the header gap
+
+Ceiling 2 was "13 names the library exports and no header declares", and the doc
+below says of the `mojo_tagged_*` family that it "is not a capability limit at
+all". It is now closed for the six that matter, by declarations in
+`runtime/fire_coro.h` beside the coroutine ABI they belong to:
+
+```c
+enum { MOJO_TAG_INT = 0, MOJO_TAG_STR = 1, MOJO_TAG_DOUBLE = 2,
+       MOJO_TAG_LIST = 3, MOJO_TAG_NONE = 4 };
+int64_t  mojo_tagged_int(int64_t box, int64_t p);
+int64_t  mojo_tagged_word_dyn(int64_t box, int64_t p);
+int64_t  mojo_tagged_tag_dyn(int64_t box, int64_t p);
+char    *mojo_tagged_str(int64_t box, int64_t p);
+int64_t  mojo_tagged_list(int64_t box, int64_t p);
+double   mojo_tagged_double(int64_t box, int64_t p);
+int64_t  mojo_double_bits(double d);
+```
+
+Three things about it, and each is a decision rather than a transcription:
+
+* **`runtime/fire_coro.h`, not `fire_coro_ctx.h` as this doc suggested.** These
+  are the generator's box accessors, `fire_coro_gen.c` includes `fire_coro.h`
+  already, and `__mojo_coro_yield_tagged` — the producer of the box they read —
+  is declared there. `fire_coro_ctx.h` is the fcontext context-switch primitive,
+  which is a different seam.
+* **The tag VALUES moved with them.** They were `#define`s in
+  `fire_coro_gen.c`, so the only place that said what `mojo_tagged_tag_dyn`'s
+  answer means was a `.c` file nothing includes. They are now an enum in the
+  header and the `#define`s are gone: one vocabulary, beside the accessors that
+  hand one back.
+* **THE TRAP IS LEFT ALONE.** `mojo_open` / `mojo_close` are still undeclared,
+  for the reason this doc gives: the symbol the dylib exports is the Mojo
+  stdlib's renamed pair and the C file's declaration is a different function
+  behind the same name. `test_formal_runtime_link.py`'s
+  `test_the_tagged_box_accessors_are_declared_and_callable` pins that they are
+  not declared with the C signature, so "close the ceiling" cannot become
+  "declare whatever the export table lists".
+
+Measured, both architectures, by a program that CALLS the accessors:
+
+```
+printf("tag=%d word=%d int=%d", mojo_tagged_tag_dyn(0, 0),
+       mojo_tagged_word_dyn(0, 0), mojo_tagged_int(0, 0))
+   ->  tag=4 word=0 int=0        # 4 == MOJO_TAG_NONE
+```
+
+`box = 0` is the one argument a formal program can produce (ceiling 3 is why),
+and the accessors are total on it: an empty box has no element 0, so the tag
+reads out of range and the typed readers read 0. **`MOJO_TAG_NONE` is 4 and not
+0**, which is what makes the number evidence — a stubbed or mis-bound call would
+also answer 0.
+
+`mojo_tagged_double` and `mojo_double_bits` are declared too and are **still
+correctly refused**: they cross the boundary as a `double`, which is one machine
+word but not one value on this path (`_WORD_SCALARS`). The test asserts both
+halves, because a header gap and a capability limit look identical from the
+outside and only one of them was closed.
+
+## 0.1 Re-measured 2026-10-03
+
+| | this doc | 2026-10-01 | 2026-10-02 | 2026-10-03 |
+|---|---|---|---|---|
+| word-shaped, on a formal image's link line | 156 | 240 | 246 | **251** |
+| …needing no heap handle | 138 | 152 | 158 | **163** |
+| …needing a `void *` handle the path cannot produce | 18 | 32 | 32 | **32** |
+| word-shaped but NOT linked (ceiling 1) | 51 | 51 | 56 | **56**, same families |
+| exported by the library, declared by no header (ceiling 2) | 13 | 13 | 13 | **6**, same names less the six tagged ones |
+
+Ceiling 1's six families are unchanged and re-measured as
+`ncurses 16, sqlite3 16, ssl 11, python 6, metal 5, zlib 2` on both
+architectures; ceiling 2's remaining six are `MojoParser`, `scan_expr`,
+`note_list_literal`, `compile_to_gimple` (not in the `mojo_*` namespace, so they
+bind normally and nothing refuses them) and the `mojo_open` / `mojo_close` trap.
+
+Ceiling 3 grew with the payoff, as the table above shows: 32 linked entry points
+need a `void *` handle, and the only things on this path that produce one are
+`void *`-RETURNING entry points, which the word rule refuses. That is FORMAL.md
+phase 6 and it is unchanged by this round.
 
 ## Re-measured 2026-10-01 (`work/formal3-7`): the payoff grew, and the
 ## ceilings below are still the ceilings
@@ -157,7 +237,8 @@ per unit set in the CAS. Half a day, and it is not purely mechanical:
 
 **INTERFACE REQUEST filed** — see `INTERFACE-REQUESTS-agent5.md`.
 
-## Ceiling 2 — 13 names the library exports and no header declares
+## Ceiling 2 — was 13 names the library exports and no header declares; SIX of
+## them are declared now (§0), and this is what the rest of it was
 
 **Is the refusal true? Yes, and the message says so** ("no header in runtime/
 declares it, so there is no signature here to check"). It is a header gap, and
@@ -208,10 +289,13 @@ behind the symbol, which is the exact class of mismatch
 that the export-csym rule was fixed for. Whoever closes this has to read the
 definition the linker actually resolves, not the one the C file spells.
 
-**What closing it costs.** Declarations in `runtime/fire_coro_ctx.h` for the six,
-which is `runtime/`'s and unowned this round. Half a day for the five that are
-genuinely word-shaped, and the `mojo_open`/`mojo_close` case needs a decision
-rather than a declaration.
+**What closing it cost: §0, 2026-10-03.** The six are declared, in
+`runtime/fire_coro.h` rather than the `fire_coro_ctx.h` this section suggested,
+with the tag values moved out of the `.c` and the `mojo_open`/`mojo_close` trap
+left alone deliberately. What is left of this ceiling is the trap, which needs a
+DECISION rather than a declaration — read the definition the linker resolves,
+not the one the C file spells — and the four non-`mojo_` names, which nothing
+refuses.
 
 ## Ceiling 3 — 18 linked entry points need a handle the path cannot produce
 
