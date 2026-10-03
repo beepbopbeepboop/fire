@@ -24190,6 +24190,52 @@ def iter_nodes(node):
         yield from iter_nodes(getattr(node, name))
 
 
+def iter_nodes_with_parent(node, parent=None):
+    """`iter_nodes`, with each node's PARENT beside it.
+
+    `iter_nodes` hands the visitor a node and no parent, so a visitor that has
+    to know a node's POSITION — is this `MemberExpr` the callee of a call, or a
+    value read? — cannot answer, and has to over-approximate.  That is fine for
+    most of its callers and not fine for `formal/build.py`'s
+    `check_value_position_method_reads`, whose docstring called the
+    over-approximation harmless on the grounds that "a call cannot store into
+    the name either": true of the NAME, but the question the check asks is
+    whether `recv.name` is a FIELD READ, and in callee position there is no
+    read at all.  `self._data.clear()` on a one-field `Wrap` becomes
+    `self.clear()` when the one-word rewrite collapses `_data` into the
+    receiver, and `clear` is one of `Wrap`'s own METHODS, so the check refused a
+    method call as though the source had read a field.
+
+    One walk and not a second traversal of the tree, for the reason `iter_nodes`
+    exists at all: three private copies of this loop are three chances for one
+    of them to see a node the others do not.
+
+    `parent` is the node the yielded node was reached FROM, and a list or tuple
+    is TRANSPARENT: the elements of `IfStmt.elifs` — which is a list of TUPLES,
+    the one place the tree is not a list — are yielded with the `IfStmt` as
+    their parent, not the tuple.
+    """
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            yield from iter_nodes_with_parent(x, parent)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    yield node, parent
+    for name in _node_field_names(node):
+        yield from iter_nodes_with_parent(getattr(node, name), node)
+
+
+def is_call_callee(node, parent) -> bool:
+    """Is `node` the CALLEE of a call — `parent.func is node`?
+
+    The one reader of the parent `iter_nodes_with_parent` supplies, because
+    "callee position" is a spelling (`CallExpr.func`) and a second spelling of it
+    is a second answer to the same question.
+    """
+    return (isinstance(parent, F.CallExpr) and parent.func is node)
+
+
 # The tree shapes a walk has to know about, and the reason they are NAMED here
 # rather than spelled out in each walk: **`IfStmt.elifs` is a list of TUPLES**,
 # `(condition, body)`, which is the only place in the tree where a container is

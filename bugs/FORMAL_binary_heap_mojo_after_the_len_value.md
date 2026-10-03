@@ -136,6 +136,83 @@ the file's reported verdict and it is a decision about the ABI (does a one-field
 mutator get a second return word, or does the method split?), not an emitter
 exercise.
 
+## 3a. Row 0a's CAUSE is fixed, and what it makes visible is row 1 (2026-10-03)
+
+Row 0a's table entry offered two repairs: "either give the walk a parent (a
+second traversal of its own) or do not rewrite a field whose own struct has a
+method of that name".  **The first is done**, and the second is not needed:
+`formal/model.py::iter_nodes_with_parent` is the walk with the parent beside
+each node, `model.is_call_callee` is the one reader of "is this a call's
+`func`", and `check_value_position_method_reads` now skips a `MemberExpr` that
+is a callee.  Its own docstring had called the blindness "a limitation, not a
+choice" and argued it harmless because "a call cannot store into the name
+either" — true of the NAME, but the check does not ask whether the name is a
+field, it asks whether `recv.name` is a field READ, and in callee position
+there is no read at all.
+
+Minimal reproduction, which does **not** depend on row 0 and so is measurable
+on `master` today:
+
+```
+struct Wrap:
+    var _data: List[Int]
+    def __init__(out self):
+        self._data = List[Int]()
+    def clear(mut self):
+        self._data.clear()
+def main(n: Int) -> Int:
+    var w = Wrap()
+    w.clear()
+    return 0
+```
+
+`master`, both architectures:
+
+```
+build: Wrap_clear: self.clear is not a field of Wrap — clear is one of its
+METHODS, and nothing in Wrap stores into an attribute of that name … Call it
+(`self.clear(...)`), which is a receiver and a call and lowers
+```
+
+— a METHOD CALL reported as a field read, with a message telling the reader to
+add a call the source already has.  With the fix:
+
+```
+build: self.clear() is a method call on a value, and this backend lowers only
+append, close, write … and the string methods … 'clear' is not one of those
+methods of those receivers
+```
+
+**which is row 1**, and that is the whole of what this buys: the file's verdict
+moves from a mis-diagnosis to the real gap, one row down.  It does NOT build,
+and it is worth saying why, because the table's row 1 ("`List.clear` is
+`count = 0` — one store.  Trivial to lower and honest") is wrong about the
+receiver it would have to lower: by the time the emitter sees `self.clear()`
+the one-word rewrite has collapsed `_data` into the receiver, so the receiver is
+a NAME whose type this path does not infer, and the refusal says exactly that
+("the receiver is a name on this path").  Adding `clear` to the method table
+would emit a store against the wrong word.
+
+So row 1 is **not** the one-store change the table says it is: either
+`_rewrite_one_word_field_method_calls` has to lift `self._data.clear()` to a
+call on `_data` before the collapse (the same lift `SOLE_FIELD_CALLEE_CASES`'s
+transitive row already gets, because the chain `self._data.clear` is not a
+prefix of the map's `_data`), or the one-word rewrite has to decline to collapse
+a field whose own struct declares a method of the chain's name.  The first is
+the same shape as a fix that has already landed and is named in
+`bugs/FORMAL_ast_bridge_...`-adjacent work; the second is the option this file
+listed and is now the only one left.  **Neither is in this claim's reach**: both
+are the one-word rewrite, and the row is not reachable on this tree anyway
+because row 0 (`pop`) still stands — `build --formal` on this file still
+reports `mutating_receiver_return_refusal`, which is being fixed on
+`work/formal15-mutator-return-abi`.
+
+Test: `test_formal_run.py`'s
+`a_method_callee_through_a_collapsed_field_is_not_a_field_read`, in the group
+that already pins the three `sole_field_call_refusal` spellings — and it is a
+`refuse:` expectation whose words are the METHOD TABLE's, so the old message
+fails it, which is the point.
+
 ## 4. Reproducing
 
 ```sh

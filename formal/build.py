@@ -5102,14 +5102,26 @@ def check_value_position_method_reads(functions, structs) -> None:
     a method here, which is exactly the set `struct_method_receiver_reads` demoted, so
     the two cannot disagree about which names are which.
 
-    **The walk is `iter_nodes` and that is a limitation, not a choice.** A
-    `MemberExpr` in a method's body cannot be told apart from one that is the
-    CALLEE of a call without a parent, so this check is asked of every demoted
-    read — and the only demoted names are ones the struct never stores into,
-    which a call cannot store into either. So the over-approximation cannot
-    refuse a program whose `self.helper` is a genuine field access: if it were,
-    something would have to store into it, and the demotion is exactly the
-    absence of that.
+    **Callee position is not a value read, and the walk now knows that.** The
+    first version of this check had no parent and so could not tell
+    `self.clear()` from `x = self.clear`, and refused the first — which is the
+    one-word rewrite's output for `self._data.clear()` on a one-field `Wrap`:
+    `_data` IS the receiver, so `self._data.clear()` collapses to
+    `self.clear()`, `clear` is one of `Wrap`'s own METHODS and nothing stores
+    into an attribute of that name, and a METHOD CALL was reported as a field
+    read of a method. `iter_nodes_with_parent` and `model.is_call_callee` are
+    the two ends of that, and the walk skips a `MemberExpr` that is a call's
+    `func`.
+
+    Narrowing the check is sound, and the argument is the demotion itself: a
+    name is demoted only when NO method of the struct stores into it, so it is a
+    method and not a field, and `self.helper(5)` through a one-field receiver is
+    a call of a method — which is what the source says. If such a name really
+    held a callable word, something would have to store into it, and the
+    demotion is exactly the absence of that; a field holding a non-callable
+    word and then being called is refused downstream by the emitters, as
+    `refuse_member_reads_through_a_literal_base` and the call-through-a-value
+    refusals are for.
     """
     owners = M.method_owner_names(list(structs or ()))
     # Keyed by `id(owner)` and NOT by the struct: `StructDef` is a plain
@@ -5133,7 +5145,9 @@ def check_value_position_method_reads(functions, structs) -> None:
             demoted_by_owner[id(owner)] = demoted
         if not demoted:
             continue
-        for node in M.iter_nodes(getattr(fn, "body", None)):
+        for node, parent in M.iter_nodes_with_parent(getattr(fn, "body", None)):
+            if M.is_call_callee(node, parent):
+                continue          # `self.clear(...)`: a call, not a read
             if not isinstance(node, F.MemberExpr) \
                     or not isinstance(node.obj, F.IdentExpr) \
                     or node.obj.name not in receivers \

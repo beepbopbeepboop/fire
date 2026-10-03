@@ -17091,6 +17091,37 @@ SOLE_FIELD_CALLEE_REFUSALS = [
      "    return 0\n",
      "refuse:`c.f` is a call of a VALUE rather than of a function of this "
      "unit", None),
+    # A METHOD CALLEE whose name the receiver's own struct declares as a method.
+    # `check_value_position_method_reads` walks the body's member expressions and
+    # cannot tell a callee from a value read, so `self.clear` in
+    # `self._data.clear()` -- `_data` collapsed into the receiver by
+    # `_rewrite_self_fields`, because a one-field struct's receiver IS its field
+    # -- was reported as a field READ of a method, with the message "Call it
+    # (`self.clear(...)`), which is a receiver and a call and lowers" about an
+    # expression that IS already a call.  This is the construct
+    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
+    # it is the file's reported verdict.
+    #
+    # The expectation is the METHOD-TABLE refusal, not a build: with `_data`
+    # collapsed into `self`, the emitter is asked for `clear` on a receiver it
+    # cannot type, and `List.clear` is not in its table (row 1 of the same
+    # table).  So this row pins that the diagnosis names the REAL remaining gap
+    # -- and `refuse:` is a substring match, so the old message would fail it.
+    ("a_method_callee_through_a_collapsed_field_is_not_a_field_read",
+     "struct Wrap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int]()\n"
+     "\n"
+     "    def clear(mut self):\n"
+     "        self._data.clear()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = Wrap()\n"
+     "    w.clear()\n"
+     "    return 0\n",
+     "refuse:'clear' is not one of those methods of those receivers", None),
 ]
 
 # The two spellings that must keep BUILDING, as the CPython-pair shape, because
