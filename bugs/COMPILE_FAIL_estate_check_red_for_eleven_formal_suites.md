@@ -1,4 +1,4 @@
-# COMPILE_FAIL_estate_check_red_for_eleven_formal_suites: `test_suite.py`'s estate check was red for eleven files, and is fifteen now
+# COMPILE_FAIL_estate_check_red_for_eleven_formal_suites: `test_suite.py`'s estate check was red for eleven files, and is twenty now
 
 Not a compiler bug and not a codegen gap: a **registration** gap, and the
 mechanism for closing it is already in the file. Recorded because
@@ -8,13 +8,25 @@ expensive kind of red to read.
 
 ## Status, after the merge
 
-**The fifteen are now declared; the gap is closed by an excuse, not by a
-registration.** `test_suite.py`'s `UNREGISTERED` gained fifteen entries, one per
+**The twenty are now declared; the gap is closed by an excuse, not by a
+registration.** `test_suite.py`'s `UNREGISTERED` gained twenty entries, one per
 file, all sharing `_FORMAL_SUITE_REASON` — so `python3 test_suite.py` is
-`273 passed, 0 failed` on the merged tree where it was `200 passed, 1 failed`.
+`299 passed, 0 failed` where it was `200 passed, 1 failed`.
 
-The count grew from eleven to fifteen while the doc sat, because four more
-per-construct suites landed from other branches (`test_formal_cross_module.py`,
+**Five more arrived on 2026-10-02 and are now declared too**, which is the
+obligation this document describes landing again:
+`test_formal_admitted.py`, `test_formal_fcntl.py`, `test_formal_math.py`,
+`test_formal_shutil.py` and `test_formal_stat.py` — five host-module suites, each
+from a different landing, none of which added its entry. Measured, each run
+directly rather than assumed: `admitted` PASS=11 FAIL=0 SKIP=0, `fcntl` 5/5
+groups, `math` 8/8 groups, `shutil` 9/9 groups, `stat` 4/4 groups — every one
+green, so what the estate check was reporting was unaccounted-for files and not a
+red suite. `python3 test_suite.py` was `298 passed, 1 failed` on the tree with
+those five missing and is `299 passed, 0 failed` with them listed.
+
+The count grew from eleven to fifteen while the doc sat, and from fifteen to
+twenty after it, because per-construct and host-module suites land from other
+branches (`test_formal_cross_module.py`,
 `test_formal_eval_eq_mojo_bridge.py`, `test_formal_platform.py`,
 `test_formal_specialized_method_call.py`, `test_formal_trait_module.py`,
 `test_formal_type_application.py`, `test_formal_recursion_contract.py` among
