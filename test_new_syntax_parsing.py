@@ -403,7 +403,61 @@ def test_multi_statement_result():
           repr(body))
 
 
-# ── 11. The middle tier sees the free names in all of it ──────────────────
+# ── 11. A struct's comptime BOUNDS are not instance storage ───────────────
+def test_struct_param_trait_bounds():
+    # `struct S[T: A]` means `T` is a comptime type parameter bounded by the
+    # trait `A`, and it is NOT per-instance storage.  `_parse_struct_params_as_
+    # fields` knows that and does not put such a parameter in
+    # `StructDef.fields` — the rule the comment above `_known_traits` gives for
+    # `@fieldwise_init`'s synthesized constructor arity.
+    #
+    # It recognised the bound only when the annotation was a SINGLE bare trait
+    # NAME, because the test compared the whole annotation string against a set
+    # of names.  So `T: Copyable & Comparable & Deinitable` — a conjunction,
+    # which is how fourteen structs in the new-modular stdlib spell a bound —
+    # became a real `VarDecl` field.  Two things then went wrong downstream, and
+    # both are silent: the struct measured one field more than it has, so
+    # `formal/model.py`'s `struct_is_one_field` said no and a one-word value's
+    # receiver became a FRAME ADDRESS; and `@fieldwise_init`'s constructor grew a
+    # phantom parameter.  `std/collections/binary_heap.mojo`'s `BinaryHeap` has
+    # exactly one field and measured two, which is what put `len(self._data)`
+    # on the frame-slot path and produced the refusal
+    # "this slot's DECLARED type is 'List[Self.T]' … what is missing is the
+    # VALUE".
+
+    # The positive case, spelled the stdlib's way.
+    conj = _parse('struct Heap[T: Copyable & Comparable & Deinitable]:\n'
+                  '    var _data: List[Self.T]\n')[0]
+    check("conjunction_bound_is_not_a_field",
+          [f.name for f in conj.fields] == ['_data'],
+          repr([(f.name, getattr(f, 'type_ann', None))
+                for f in conj.fields]))
+
+    # The single bare name is unchanged — this arm is not what regressed.
+    bare = _parse('struct E[T: Movable]:\n    var _v: Int\n')[0]
+    check("single_trait_bound_is_not_a_field",
+          [f.name for f in bare.fields] == ['_v'],
+          repr([f.name for f in bare.fields]))
+
+    # …and the NEGATIVE half of the pair: a parameter that is not a bound is
+    # still storage, or a comptime value parameter.  `Level` is an enum, not a
+    # trait this unit knows, so the conservativeness the rule always had is
+    # preserved — and `&` inside a SUBSCRIPT belongs to whatever that subscript
+    # spells, so it does not turn a data type into a bound either.
+    val = _parse('struct L[level: Int = 3]:\n    var _fd: Int\n')[0]
+    check("value_parameter_is_still_a_field",
+          [f.name for f in val.fields] == ['level', '_fd'],
+          repr([f.name for f in val.fields]))
+    enum = _parse('struct S[origin: Origin]:\n    var _it: Int\n')[0]
+    check("unknown_single_name_is_still_a_field",
+          [f.name for f in enum.fields] == ['origin', '_it'],
+          repr([f.name for f in enum.fields]))
+
+    # A conjunction of VALUE parameters is not a thing this grammar spells, so
+    # there is no negative case to invent for it.
+
+
+# ── 12. The middle tier sees the free names in all of it ──────────────────
 def test_used_idents_covers_new_syntax():
     # `mojo/middle/types._used_idents_node` is the fallback that
     # `discover_closures` turns into a nested def's capture list
@@ -508,6 +562,7 @@ def run_tests():
                test_imm_convention, test_struct_where,
                test_multi_target_comptime, test_fn_type_in_subscript,
                test_decorated_import, test_multi_statement_result,
+               test_struct_param_trait_bounds,
                test_used_idents_covers_new_syntax):
         print(f"\n--- {fn.__name__}")
         fn()
