@@ -3,7 +3,7 @@
 **Status: OPEN, measured, not started — and no longer blocking anything, which
 is worth more than the fix would have been. The stack-floor guard LANDED on
 2026-10-03 (`formal/model.py`: `STACK_TRAP_STATUS`,
-`STACK_FLOOR_BUDGET_BYTES`, `recursive_function_names`) WITHOUT this change,
+`STACK_FLOOR_BUDGET_BYTES`, `stack_floor_guarded_names`) WITHOUT this change,
 because the guard reads SP into a scratch register with `ADD Xd, SP, #imm` —
 one of the handful of forms whose `Rn = 31` case the model already spells as
 `s.sp` — and the `CMP` after it names two ordinary registers. Measured through

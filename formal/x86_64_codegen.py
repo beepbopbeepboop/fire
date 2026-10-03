@@ -637,10 +637,10 @@ class X86_64Codegen:
         self._cond_branch_pcs = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
-        # `model.recursive_function_names`. The x86-64 twin of arm64's, from the
+        # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
         # same shared function, so the two machines cannot disagree about which
         # prologues are guarded.
-        self._recursive_names: set = set()
+        self._guarded_names: set = set()
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # The x86-64 twin of arm64's, over the SAME shared layout
         # (`formal/model.py`'s `struct_constructor_sites` / `struct_frame_bytes`),
@@ -785,7 +785,7 @@ class X86_64Codegen:
         # whole image before any function is emitted (the guard is decided per
         # function, so it cannot be answered while a prologue is being written).
         # The x86-64 twin of arm64's, from the same shared function.
-        self._recursive_names = M.recursive_function_names(
+        self._guarded_names = M.stack_floor_guarded_names(
             self._functions.values(), self._structs)
 
         # A NAME is not an ADDRESS, and this is arm64's rule read from the same
@@ -1085,8 +1085,9 @@ class X86_64Codegen:
         self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
         # The stack-floor guard, immediately after the subtraction it guards, and
         # only in a function a call chain can re-enter: see
-        # `model.recursive_function_names` for why the cycle is the set.
-        if self.func_name in self._recursive_names:
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches.
+        if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
         # The module-global initializer, LAZILY — the x86-64 twin of arm64's,
         # emitted at the same point in the prologue for the same reason. See

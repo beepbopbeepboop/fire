@@ -24706,46 +24706,29 @@ def stack_floor_address(base: int, table: dict = None) -> int:
         module_slots() if table is None else table, base).stack_floor_offset
 
 
-def recursive_function_names(functions, structs: dict = None) -> set:
-    """The functions of one image a call chain can RE-ENTER, by name.
+def call_graph_edges(functions, structs: dict = None) -> dict:
+    """`{caller: {callee, …}}` for one image's functions, as the emitter sees them.
 
-    This is the set the stack-floor guard is emitted for, and the rule is
-    "on a call-graph cycle" rather than "in the image" for a reason that is
-    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
-    distinct functions has a finite depth, and it is the return to a function
-    already on the stack that makes the depth a function of the PROGRAM rather
-    than of its shape. So a cycle's members are where a runaway recursion is
-    stopped, and a program that recurses cannot get past one.
+    The one place an edge is added, so the stack-floor guard's rule
+    (`stack_floor_guarded_names`) and the depth census that measures whether that
+    rule leaves a hole (`tools/formal_call_depth_census.py`) cannot come apart on
+    what a call is — the same reason `call_callee_name` is one function rather
+    than one copy per backend.
 
-    **And the narrower set costs nothing anywhere else, which is what makes it
-    the rule rather than a compromise.** The per-export contract proof
-    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
-    export whose body contains ANY conditional branch — `Refine.Block.step` is one
-    function of one state — and every RECURSIVE function contains a branch (a
-    branch-free body that calls itself does not return, so it is not a program
-    this backend can be asked about). So guarding the cycles adds no branch to
-    any export that still had a proved contract, and removes none: the export
-    contracts that exist today are exactly the straight-line, non-recursive
-    ones, and they are byte-identical with this in place. Widening the rule to
-    "every function" would therefore trade proved contracts for nothing.
-
-    What it does leave open, and what is stated rather than hidden: a chain of
-    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
-    depth is finite and knowable, and the budget this guards against
-    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
-    function the chain passes through, which by construction it is not.
-
-    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
-    a missed edge here means a missed cycle and an unguarded recursion:
+    **The edges are a SUPERSET of the calls the emitter makes, deliberately,
+    since a missed edge means a missed cycle and an unguarded recursion.**
     `call_callee_name` answers the two spellings that name a function of this
     image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
     EVERY struct in the image that declares an `m` — which is the symbol the
     method-call rewriting emits, and over-approximating the owner is the safe
-    direction because it can only add an edge. A call out of the image
-    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
-    into it, so it cannot close a cycle here.
+    direction because it can only add an edge. A call out of the image (a dylib
+    symbol, an extern) is not an edge: nothing in this image calls back into it,
+    so it cannot close a cycle here.
+
+    Callees that are not functions of this image are absent from the values
+    rather than present-and-empty, which is what lets the census distinguish "no
+    edge" from "an edge out of the image".
     """
-    names = {f.name for f in functions}
     method_owners: dict = {}
     for st in (structs or {}).values():
         for m in struct_methods(st):
@@ -24774,6 +24757,221 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                 continue
             for owner in method_owners.get(func.member, ()):
                 edges[f.name].add(f"{owner}_{func.member}")
+    return edges
+
+
+def call_graph_depth(edges: dict) -> int:
+    """An UPPER BOUND on the number of distinct functions a call chain can have
+    live at once, in `edges`.
+
+    The question `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+    asks and the guard does not answer: unbounded depth needs a CYCLE, so the
+    guard is emitted on the cycles only, but "finite" is not "small" and a DAG
+    sixty levels deep spends the same stack as a recursion sixty deep. Every
+    formal frame is at least 128 KiB, so the depth that matters is
+    `STACK_FLOOR_BUDGET_BYTES // 128 KiB` — 59 on arm64, measured, not estimated.
+
+    **An upper bound, and the same direction as the sweep's `FILES BLOCKED`.**
+    The exact figure is the longest SIMPLE path, which is NP-hard in general, so
+    this takes the bound a linear-time decomposition gives: collapse each
+    strongly-connected component to a node weighted by its SIZE, and take the
+    longest weighted path in the condensation. A simple path enters a component
+    once (the condensation is acyclic, so it cannot leave and come back) and
+    visits at most `size` distinct members inside it, so that sum bounds it —
+    and it is reached only when a component is a clique-like blob, which the
+    measured images are not.
+
+    Two iterative DFS passes (Kosaraju) rather than one recursive Tarjan: a
+    45-file closure has call chains deeper than Python's own recursion limit,
+    and a measurement that raises `RecursionError` on the graph it exists to
+    measure is not a measurement.
+    """
+    nodes = set(edges) | {n for callees in edges.values() for n in callees}
+    if not nodes:
+        return 0
+    # Kosaraju pass 1: finish order, on the forward graph.
+    order: list = []
+    seen: set = set()
+    for root in sorted(nodes):
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(sorted(edges.get(root, ()))))]
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nxt in it:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append((nxt, iter(sorted(edges.get(nxt, ())))))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+    # Pass 2: components, on the reverse graph, in decreasing finish order.
+    rev: dict = {}
+    for caller, callees in edges.items():
+        for callee in callees:
+            rev.setdefault(callee, set()).add(caller)
+    comp_of: dict = {}
+    comps: list = []
+    for root in reversed(order):
+        if root in comp_of:
+            continue
+        cid = len(comps)
+        members = []
+        stack = [root]
+        comp_of[root] = cid
+        while stack:
+            node = stack.pop()
+            members.append(node)
+            for prev in sorted(rev.get(node, ())):
+                if prev not in comp_of:
+                    comp_of[prev] = cid
+                    stack.append(prev)
+        comps.append(members)
+    # The condensation, and the longest weighted path over it.  A component
+    # containing a cycle is where the guard already fires, so it is counted at
+    # its SIZE and no further: the bound is about the acyclic tail.  Kosaraju's
+    # second pass emits the components in TOPOLOGICAL order of the
+    # condensation, so walking the list backwards is a valid relaxation order
+    # and the DP needs no recursion of its own — which matters, because a deep
+    # chain is exactly the shape this is measured on.
+    succ: dict = {}
+    for caller, callees in edges.items():
+        src = comp_of[caller]
+        for callee in callees:
+            dst = comp_of.get(callee)
+            if dst is not None and dst != src:
+                succ.setdefault(src, set()).add(dst)
+    best = [1] * len(comps)
+    depth = 1
+    for cid in range(len(comps) - 1, -1, -1):
+        own = len(comps[cid])
+        m = own
+        for nxt in succ.get(cid, ()):
+            m = max(m, own + best[nxt])
+        best[cid] = m
+        depth = max(depth, m)
+    return depth
+
+
+def body_has_conditional_branch(fn) -> bool:
+    """Does this body's SOURCE contain a construct that ALWAYS lowers to a
+    conditional branch?
+
+    **The predicate exists for one argument and the argument is a DIRECTION.**
+    `stack_floor_guarded_names` widens the stack-floor guard from the call-graph
+    cycles to every function whose body already branches, and the price is the
+    per-export contract proof: `arm64_proof_gen._dylib_contract_proof` returns
+    `""` — no contract — for an export whose body contains ANY conditional
+    branch, so the guard's own `cbnz`/`b.hs` costs a contract only in a body that
+    had one to lose. For that to be an argument rather than a hope, this
+    predicate must never answer True for a body the EMITTER lays out
+    straight-line — over-counting would take a contract away from an export that
+    has one. So:
+
+      * counted: `if`, `while`, `for`, `assert`, `try`, `match`, and a
+        comprehension with a condition. Each of these lowers to a compare and a
+        branch on BOTH backends with no purity gate in front of it —
+        `_emit_if` and `_emit_loop` always emit one, and `_emit_compr_gen`'s
+        condition arm always emits a `cbz`;
+      * NOT counted: a ternary (`a if c else b`) and a short-circuit chain
+        (`a and b`). Both backends have a BRANCHLESS lowering chosen by a
+        purity predicate, so a body whose only branch is one of them can still be
+        straight-line in the image;
+      * NOT descended: a nested `def`. Its branches are in ITS prologue, not this
+        one's — the same rule `ValueKinds._scan` follows for the same reason.
+
+    Under-counting is the safe direction and is where the residual lives:
+    `tools/formal_call_depth_census.py`'s `no-brch` column is what this
+    predicate's complement leaves unguarded, measured over the corpus.
+    """
+    body = getattr(fn, "body", None)
+    if body is None:
+        return False
+    return _has_branch_node(body)
+
+
+def _has_branch_node(node) -> bool:
+    """`_has_branch_node` over a statement list, without a nested `def`'s body.
+
+    An explicit walk rather than `iter_nodes` for the one reason the docstring
+    above gives: `iter_nodes` descends a nested `FunctionDef` because a nested
+    def is just another dataclass node in the tree, and its branches are not in
+    this function's emitted code.
+    """
+    if isinstance(node, (list, tuple)):
+        return any(_has_branch_node(x) for x in node)
+    if isinstance(node, F.FunctionDef):
+        return False
+    if isinstance(node, (F.IfStmt, F.WhileStmt, F.ForStmt, F.AssertStmt,
+                         F.TryStmt, F.MatchStmt)):
+        return True
+    if isinstance(node, F.Comprehension):
+        for gen in (getattr(node, "generators", None) or []):
+            if getattr(gen, "conditions", None):
+                return True
+    if not hasattr(node, "__dataclass_fields__"):
+        return False
+    return any(_has_branch_node(getattr(node, name))
+               for name in _node_field_names(node))
+
+
+def stack_floor_guarded_names(functions, structs: dict = None) -> set:
+    """The functions of one image whose prologue carries the stack-floor guard.
+
+    Two rules, and the SECOND is what the measurement forced:
+
+      * **on a call-graph CYCLE.** Unbounded call depth is a cycle: a chain of
+        distinct functions has a finite depth, and it is the return to a function
+        already on the stack that makes the depth a function of the PROGRAM
+        rather than of its shape. So a cycle's members are where a runaway
+        recursion is stopped, and a program that recurses cannot get past one.
+
+      * **or the body already contains a conditional branch**
+        (`body_has_conditional_branch`). This was NOT in the rule that landed
+        with the guard, and it is the measured answer to the question
+        `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its
+        life asking. Every formal prologue subtracts a fixed 128 KiB frame on
+        arm64 (16 KiB on x86-64), so the depth at which the stack runs out is a
+        constant — 60 frames against `STACK_FLOOR_BUDGET_BYTES` on arm64 — and
+        the cycle rule left a DAG of DISTINCT functions free to walk straight
+        past it. Measured over this repository and the stdlib with
+        `tools/formal_call_depth_census.py`: the deepest single image is **76
+        frames** (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`),
+        which is 1.3x what the arm64 budget affords. So this is not a stated
+        limit with no work behind it; it is one the corpus is already inside.
+
+    **And the second rule costs nothing the first one was careful not to.** The
+    per-export contract proof (`arm64_proof_gen._dylib_contract_proof`) declines
+    to emit a contract for an export whose body contains ANY conditional branch —
+    `Refine.Block.step` is one function of one state, and a conditional branch
+    does not have one. So a body that already branches has no contract to lose,
+    and a body that does not is left exactly as it was. "Every function" would
+    trade proved contracts for nothing; "every function that already has a
+    branch" does not, and `body_has_conditional_branch` is written to that
+    direction.
+
+    **What the widening does not reach**, measured rather than argued: a chain
+    of bodies that have no branch at all. The census's `unguard` column is that
+    chain's depth, and its maximum over the same corpus is **7 frames** — a
+    median of 3, against the 60 the arm64 budget affords (59 measured, one frame
+    spent by the caller). So the residual is a bounded 7 rather than an
+    unbounded "finite", and it is bounded by a module's size rather than by the
+    guard. 600 straight-line functions in a chain still walk off the end of the
+    stack; that is what `test_formal_run.py`'s
+    `guard_a_straight_line_chain_is_left_alone` row says out loud, and closing
+    it is `lib/Refine.lean` — a `Block` per arm with a join — not an emitter.
+
+    The edges are `call_graph_edges`, and its docstring carries why they are a
+    superset and why a call out of the image is not an edge. `call_graph_depth`
+    is what measured the two numbers above, on the same edges, so the
+    measurement and the rule cannot come apart.
+    """
+    edges = call_graph_edges(functions, structs)
+    by_name = {f.name: f for f in functions}
 
     def reaches_self(start: str) -> bool:
         seen, stack = set(), [start]
@@ -24787,12 +24985,14 @@ def recursive_function_names(functions, structs: dict = None) -> set:
                     stack.append(nxt)
         return False
 
-    return {name for name in names if reaches_self(name)}
+    return {name for name in by_name
+            if reaches_self(name) or body_has_conditional_branch(by_name[name])}
+
 
 
 # THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
 #
-# **Which prologues get it** is `recursive_function_names` above, and that is
+# **Which prologues get it** is `stack_floor_guarded_names` above, and that is
 # the only decision here that is not the sequence: the sequence is the same in
 # every prologue it appears in, and a prologue it does not appear in is
 # unchanged code.

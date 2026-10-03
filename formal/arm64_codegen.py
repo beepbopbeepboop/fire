@@ -599,10 +599,10 @@ dylib_exports: list = None, globals_base: int = None,
         self._cond_branch_pcs = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
-        # `model.recursive_function_names`. `compile()` is the only construction
+        # `model.stack_floor_guarded_names`. `compile()` is the only construction
         # path (`formal/build.py` is the only caller), so it always overwrites
         # this before a prologue is emitted.
-        self._recursive_names: set = set()
+        self._guarded_names: set = set()
         self._blob_cap = _SCRATCH
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # `_frame_sites` is this function's `{id(call): (struct, offset)}` from
@@ -812,7 +812,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `values(self._functions.values())`, not `functions`: the guard reads
         # the same set of FunctionDefs either way, and this is the table the
         # emitters dispatch on.
-        self._recursive_names = M.recursive_function_names(
+        self._guarded_names = M.stack_floor_guarded_names(
             self._functions.values(), self._structs)
 
         # A NAME is not an ADDRESS, and this is where that stops being true by
@@ -1255,9 +1255,10 @@ dylib_exports: list = None, globals_base: int = None,
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
         # The stack-floor guard, immediately after the subtraction it guards,
         # and only in a function a call chain can re-enter: see
-        # `model.recursive_function_names` for why the cycle is the set, and
-        # `model.stack_floor_address` for the sequence itself.
-        if self.func_name in self._recursive_names:
+        # `model.stack_floor_guarded_names` for why the set is a cycle PLUS every
+        # body that already branches, and `model.stack_floor_address` for the
+        # sequence itself.
+        if self.func_name in self._guarded_names:
             self._emit_stack_floor_guard()
 
         for stmt in f.body:

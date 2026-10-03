@@ -5947,7 +5947,7 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
-    # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
+    # ── the STACK FLOOR (`formal/model.py`: `stack_floor_guarded_names`,
     # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
     #
     # A runaway recursion used to be a SIGSEGV on both backends: no output and
@@ -5997,6 +5997,63 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return ping(5000)\n", 2, None),
+    # ── THE ACYCLIC CHAIN, ON BOTH ARCHITECTURES ───────────────────────────
+    #
+    # A recursion is what the guard was written for and the three rows above are
+    # that. This row is the other half: SIX HUNDRED DISTINCT functions, each
+    # calling the next, with no call back into anything already on the stack.
+    # Unbounded depth needs a cycle, so a chain like this walked straight past
+    # the floor — and the corpus is already inside it, which is what
+    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
+    # measuring: `tools/formal_call_depth_census.py` puts the deepest single
+    # image in this repository at 76 frames against the 60 an arm64 budget
+    # affords (`formal/arm64_codegen.py`, and 69 for `x86_64_codegen.py`).
+    #
+    # 600 rather than 61 because x86-64's frame is 16 KiB to arm64's 128 KiB, so
+    # its budget affords 480 frames and a 61-deep chain is correctly INSIDE it.
+    # A single depth cannot therefore show the defect on both machines, and a
+    # case that only fires on one is a case whose subject is the FRAME SIZE
+    # rather than the guard. 600 crosses both: 600 x 128 KiB = 75 MiB against
+    # arm64's 7.5 MiB, and 600 x 16 KiB = 9.4 MiB against x86-64's 7.5 MiB.
+    #
+    # GENERATED, and that is the point rather than a convenience: no hand-written
+    # function in this file is 600 calls deep, so only a generator reaches the
+    # shape at all — the same reason `spills_2001_statements` exists.
+    #
+    # `if n > 1000000: return n` in every body is what makes this a case about
+    # the SECOND rule rather than the first: a body with no conditional branch
+    # is not guarded off the cycle, and 600 of those is the measured residual
+    # `stack_floor_guarded_names`'s docstring states (12 frames over the whole
+    # corpus, a median of 3).
+    #
+    # Measured before the widening, on both architectures: exit 139 (SIGSEGV,
+    # no output, no status). After: `STACK_TRAP_STATUS`, exit 2.
+    ("both_arch_an_acyclic_chain_past_the_floor_is_a_status",
+     "".join(
+         "def d%d(n: Int) -> Int:\n"
+         "    if n > 1000000:\n"
+         "        return n\n"
+         "    %s\n" % (i, "return n + 1" if i == 599 else "return d%d(n)" % (i + 1))
+         for i in range(600))
+     + "def main(n: Int) -> Int:\n"
+       "    if n > 1000000:\n"
+       "        return n\n"
+       "    return d0(n)\n", 2, None),
+    # GUARD for the row above, and it is the row that says the widening is not
+    # "guard everything": a chain of STRAIGHT-LINE bodies is left exactly as it
+    # was, because a body the emitter lays out without a branch is a body whose
+    # per-export contract the guard's own branch would cost. 61 is where arm64
+    # would cross its budget, so a program that stopped here is a program the
+    # rule is not reaching — and 11 is `main`'s own answer for the argument the
+    # entry stub passes, which is what makes it an assertion about the DEPTH
+    # rather than about the guard being present.
+    ("guard_a_straight_line_chain_is_left_alone",
+     "".join(
+         "def d%d(n: Int) -> Int:\n"
+         "    %s\n" % (i, "return n + 1" if i == 60 else "return d%d(n)" % (i + 1))
+         for i in range(61))
+     + "def main(n: Int) -> Int:\n"
+       "    return d0(n)\n", 11, None),
     # ── A LOOP VARIABLE'S KIND, ON BOTH ARCHITECTURES ──────────────────────
     #
     # Every other row of this change is in PRINTF_TEXT_CASES and runs on the
@@ -15718,17 +15775,18 @@ def check_emitter_builtin_agreement():
 
 
 # WHICH PROLOGUES CARRY THE STACK-FLOOR GUARD, asked of
-# `model.recursive_function_names` and nothing else — the decision the three
+# `model.stack_floor_guarded_names` and nothing else — the decision the three
 # `stack_floor_*` rows above can only observe indirectly, and the half of it they
 # cannot see at all.
 #
 # They can see that a cycle is guarded (the trap fires) and that a shallow
-# recursion is not disturbed. They CANNOT see that an acyclic function is left
-# alone, because leaving it alone and guarding it differ only in bytes, and
-# guarding it would cost the per-export contract proof — see
-# `recursive_function_names`'s docstring for why that is a cost and not a
-# detail. So the "not guarded" rows are asked directly, here, which is the level
-# at which the answer is the honest one.
+# recursion is not disturbed. They CANNOT see that a straight-line function is
+# left alone, because leaving it alone and guarding it differ only in bytes, and
+# guarding a straight-line body would cost the per-export contract proof — see
+# `stack_floor_guarded_names`'s docstring for why that is a cost and not a
+# detail, and why adding the guard to a body that ALREADY has a branch is not.
+# So the "not guarded" rows are asked directly, here, which is the level at which
+# the answer is the honest one.
 _STACK_FLOOR_PROBES = [
     # (name, source, want — the set of guarded function names)
     ("self_recursion", "def deep(n):\n    return deep(n - 1)\n"
@@ -15777,11 +15835,83 @@ _STACK_FLOOR_PROBES = [
      "    def pong(self) -> Int:\n        return self.ping()\n"
      "def main(n):\n    var r = R()\n    return r.ping()\n",
      {"R_ping", "R_pong"}),
+    # ── THE SECOND RULE: a body that ALREADY branches, with no cycle ──────
+    #
+    # The cycle rule alone left a DAG of distinct functions free to walk past
+    # the floor, and the measured cost of that is in
+    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
+    # single image in this corpus is 76 frames against the 60 an arm64 budget
+    # affords. So a body that already contains a conditional branch is guarded
+    # whether or not anything calls back into it.
+    ("a_branching_body_is_guarded_off_the_cycle",
+     "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n"
+     "    if n > 0:\n"
+     "        return leaf(n)\n"
+     "    return 0\n"
+     "def main(n):\n    return mid(n)\n", {"mid"}),
+    # A LOOP is a branch — `_emit_loop` always emits a compare and a branch, on
+    # both backends — and a loop is the shape that actually recurses through a
+    # call chain in this corpus's own lowering code.
+    ("a_looping_body_is_guarded_off_the_cycle",
+     "def total(n):\n"
+     "    var c = 0\n"
+     "    for i in range(n):\n"
+     "        c = c + i\n"
+     "    return c\n"
+     "def main(n):\n    return total(n)\n", {"total"}),
+    # A COMPREHENSION GUARD is a branch too, and it is the third site the truthy
+    # conversion routes through, so it is the one a reader of `if s:` would
+    # forget.
+    ("a_comprehension_guard_is_a_branch",
+     "def keep(n):\n    return [y for y in [1, 2, 3] if y]\n"
+     "def main(n):\n    return len(keep(n))\n", {"keep"}),
+    ("an_assert_is_a_branch",
+     "def need(n):\n    assert n > 0\n    return n\n"
+     "def main(n):\n    return need(n)\n", {"need"}),
+    # ── THE THREE ROWS THAT PIN THE PREDICATE'S DIRECTION ────────────────
+    #
+    # The argument that widening costs nothing is that a body that already has
+    # a branch had no per-export contract to lose. That argument inverts into a
+    # requirement: the predicate must answer True ONLY for a body the emitter
+    # lays out with a branch in it, or a straight-line export loses the contract
+    # it has. These three are the shapes where a careless predicate over-counts,
+    # and each is a REFUSAL of the widening rather than of the guard.
+    #
+    # A TERNARY: both backends have a branchless CSEL form behind a purity
+    # predicate, so `1 if n else 2` can be straight-line in the image.
+    ("a_ternary_is_not_a_branch",
+     "def pick(n):\n    return 1 if n else 2\n"
+     "def main(n):\n    return pick(n)\n", set()),
+    # A SHORT-CIRCUIT chain, for the same reason and the same measurement: the
+    # branchless form is gated on the left operand needing no conversion.
+    ("a_short_circuit_is_not_a_branch",
+     "def pick(n):\n    return n and 1\n"
+     "def main(n):\n    return pick(n)\n", set()),
+    # A NESTED `def`'s branch is in the NESTED function's prologue, so a
+    # predicate that walked the whole tree — `iter_nodes` does, a nested def
+    # being just another dataclass node — would guard the enclosing function and
+    # cost it a contract it still has.
+    #
+    # Asked on `main` itself, and that is not a contrivance: `formal/build.py`'s
+    # `_flatten_closures` LIFTS every nested def to top level (renamed
+    # `ci.<name>`) before the function table exists, so the lifted child's
+    # branch is a separate function's and `main`'s body is left with a call.
+    # The pruning is what keeps that true when the table is built from an
+    # unlifted tree, and `iter_nodes` would not keep it.
+    ("a_nested_defs_branch_is_not_the_enclosing_functions",
+     "def main(n):\n"
+     "    def inner(m):\n"
+     "        if m > 0:\n"
+     "            return 1\n"
+     "        return 0\n"
+     "    return inner(n)\n", set()),
 ]
 
 
 def check_stack_floor_decision(verbose=False):
-    """`model.recursive_function_names` on seven parsed modules.
+    """`model.stack_floor_guarded_names` on the parsed probes, and
+    `model.call_graph_depth` on the graphs that decide the widening's cost.
 
     Returns `(passed, failures)`; a probe's last element is the guarded set it
     must answer, read off the source rather than off an image."""
@@ -15811,14 +15941,64 @@ def check_stack_floor_decision(verbose=False):
                 lifted = _copy.deepcopy(mth)
                 lifted.name = M.method_function_name(st.name, mth.name)
                 fns.append(lifted)
-        got = M.recursive_function_names(fns, structs)
+        got = M.stack_floor_guarded_names(fns, structs)
         if got != want:
             failures.append(f"{name}: {sorted(got)} (want {sorted(want)})")
             continue
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: {name}")
+    passed, failures = passed, list(failures)
+    for name, edges, want in _STACK_FLOOR_DEPTH_PROBES:
+        got = M.call_graph_depth(edges)
+        if got != want:
+            failures.append(f"depth/{name}: {got} (want {want})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: depth/{name}")
     return passed, failures
+
+
+# HOW DEEP A CHAIN GETS, asked of `model.call_graph_depth` — the half of the
+# residual the guard cannot reach, and the number that decided
+# `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
+#
+# These are GRAPHS, not modules, because the question is about the function and
+# not about the parse: a module the corpus already holds would make a test that
+# goes red the moment an unrelated function is added, which is a test of the
+# corpus rather than of the rule. The corpus figure is
+# `tools/formal_call_depth_census.py`'s (deepest image 76 frames against the 60
+# an arm64 budget affords; deepest branch-free chain 12), and it is a
+# MEASUREMENT rather than an assertion — pinning it here would pin today's
+# corpus.
+_STACK_FLOOR_DEPTH_PROBES = [
+    # A straight chain of n: the answer is n, and the point of the row is that
+    # 76 of them is a real number the cycle rule cannot see.
+    ("chain_of_one", {"f0": set()}, 1),
+    ("chain_of_two", {"f0": {"f1"}, "f1": set()}, 2),
+    ("chain_of_twenty", {f"f{i}": {f"f{i + 1}"} for i in range(19)}
+     | {"f19": set()}, 20),
+    # A chain LONGER than the budget, which is the whole reason the rule was
+    # widened: 60 frames is what `STACK_FLOOR_BUDGET_BYTES` affords on arm64 and
+    # this is three times it, with no cycle anywhere.
+    ("chain_past_the_arm64_budget",
+     {f"f{i}": {f"f{i + 1}"} for i in range(179)} | {"f179": set()}, 180),
+    # A cycle and the tail behind it: the cycle's two members count ONCE each
+    # (a simple path cannot visit one twice) and the two after it once each, so
+    # the bound is 4 and not unbounded. This is the "the guard already covers
+    # that half" row.
+    ("cycle_then_a_tail", {"a": {"b"}, "b": {"a", "c"}, "c": {"d"},
+                           "d": set()}, 4),
+    # A diamond: two routes to one function, one frame live at a time. 3, and
+    # not 4 — a walk that counted EDGES rather than the stack would.
+    ("diamond", {"a": {"b", "c"}, "b": {"d"}, "c": {"d"}, "d": set()}, 3),
+    # No edges at all: two exports side by side is a depth of 1, and the empty
+    # graph is 0. Both are rows because a function that reports 1 for an empty
+    # module has an off-by-one that reads as correct on everything else.
+    ("two_functions_no_edge", {"a": set(), "b": set()}, 1),
+    ("empty_graph", {}, 0),
+]
 
 
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
