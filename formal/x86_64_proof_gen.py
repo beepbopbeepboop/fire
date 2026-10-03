@@ -204,7 +204,7 @@ def _first_sentence(e) -> str:
     return (head if head.endswith(".") else head + ".")[:400]
 
 
-def _ast_value(fn, func_name: str, admitted: dict = None) -> str:
+def _ast_value(fn, func_name: str, admitted: dict = None, scope=None) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
 
     Raises whatever the shared emitter raises for a construct the untyped
@@ -231,7 +231,7 @@ def _ast_value(fn, func_name: str, admitted: dict = None) -> str:
     gaps = AP._ast_bridge_gaps(fn, resolvable)
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
-    body = "[" + ", ".join(AP._stmts_ast(fn.body)) + "]"
+    body = "[" + ", ".join(AP._stmts_ast(fn.body, scope)) + "]"
     # `AP._param_list_lean` and not a local spelling of the parameter list:
     # `MojoFunc.mk` carries the source's parameter NAMES and this backend's
     # `eval_eq_mojo` is the statement that the AST model and the source model
@@ -241,7 +241,8 @@ def _ast_value(fn, func_name: str, admitted: dict = None) -> str:
 
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
-                          go_lemmas: list = None, admitted: dict = None) -> str:
+                          go_lemmas: list = None, admitted: dict = None,
+                          scope=None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -254,7 +255,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _ast_value(fn, func_name, admitted)   # probe: may raise
+    _ast_value(fn, func_name, admitted, scope)   # probe: may raise
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -619,7 +620,18 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # The decision is `types.uses_typed_model`, shared with arm64's generator
     # and carrying the reasoning for it.
     typed = uses_typed_model(fn, call_types)
-    tc = {"typed": typed, "vtypes": vtypes, "call_types": call_types}
+    # `str_addrs` is this image's INTERN TABLE, read off the emitter's own map
+    # (see `formal/x86_64_codegen.py`).  It is in `tc` for `_scope_of`'s reason:
+    # a string literal's value is the ADDRESS of its bytes, which is a fact
+    # about the image and not about the source, and `_scope_of` is the one
+    # context every value renderer in the shared generator already takes.  The
+    # model, the AST bridge and the machine's registers therefore all read the
+    # same table, on this backend and on arm64's.
+    tc = {"typed": typed, "vtypes": vtypes, "call_types": call_types,
+          "str_addrs": dict(info.get("str_addrs") or {})}
+    from formal import arm64_proof_gen as _AP
+    _vscope = _AP._Scope()
+    _vscope.str_addrs = tc["str_addrs"]
 
     parts = [_PREAMBLE, _TRUST_HEADER]
 
@@ -714,7 +726,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
     else:
         try:
             section = _eval_eq_mojo_section(func_name, fn, typed,
-                                            go_lemma_names, admitted=_admitted)
+                                            go_lemma_names, admitted=_admitted,
+                                            scope=_vscope)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
@@ -729,7 +742,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # described a behaviour the code did not have. Quoting the message
         # means a new gap is described by the gap's own words.
         try:
-            _ast_value(fn, func_name, _admitted)
+            _ast_value(fn, func_name, _admitted, _vscope)
             reason = ("this function's shape (recursive/looping): the bridge "
                       "is not closed yet")
         except Exception as e:                      # noqa: BLE001
@@ -742,7 +755,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # body has no AST form reached this unguarded call and raised out of
         # the build instead of omitting the AST.
         try:
-            ast_value = _ast_value(fn, func_name, _admitted)
+            ast_value = _ast_value(fn, func_name, _admitted, _vscope)
         except Exception as e:                      # noqa: BLE001
             section = (f"/- AST omitted: {_first_sentence(e)} -/\n")
         else:

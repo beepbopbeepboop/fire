@@ -872,6 +872,15 @@ class X86_64Codegen:
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
+            # The INTERN TABLE, keyed by DECODED text — the same map, from the
+            # same `_intern_string`, for the same reason as on arm64: a string
+            # literal's value is the address of its bytes, and the label
+            # spelling (`str_<emission counter>`) is not derivable from the
+            # text, so the address has to be published rather than recomputed.
+            "str_addrs": {
+                text: self.asm.labels[label]
+                for text, label in self._str_intern.items()
+                if label in self.asm.labels},
         }
         return code, info
 
