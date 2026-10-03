@@ -117,11 +117,27 @@ sys.path.insert(0, ROOT)
 
 import formal.build as B          # noqa: E402
 import formal.x86_64_decode as D  # noqa: E402
+import formal.lean as L           # noqa: E402
 
 #: Where Lean's library and the `X86.olean` this test needs live.
-LEAN_BIN = os.environ.get("LEAN_BIN") or os.path.expanduser(
-    "~/.elan/toolchains/leanprover--lean4---v4.32.2/bin/lean")
+#:
+#: This was a hand-rolled `LEAN_BIN` with a hard-coded elan path beside it, and
+#: that is the thing `formal/lean.py::find_lean` exists to avoid — a bare
+#: `command -v lean` on an elan machine is a shim that resolves a toolchain
+#: from the CURRENT DIRECTORY, so a path spelled here is silently the wrong
+#: toolchain (or a download) the moment `lean-toolchain` moves. `$LEAN_BIN` is
+#: still honoured, because `find_lean` reads it.
+LEAN_BIN = L.find_lean(ROOT)
 LIB = os.path.join(ROOT, "lib")
+
+#: Bounds for the per-example Lean runs below. Each is ONE generated theorem
+#: over one example, so the policy's proof bounds apply; the numbers are passed
+#: explicitly because this file makes dozens of Lean runs and its own two call
+#: sites previously had NO timeout whatsoever (`subprocess.run` with no
+#: `timeout=`), which is the worst of the three shapes in this tree: a spinning
+#: `native_decide` here is not slowed down, it is invisible.
+PROOF_WALL_S = L.PROOF_WALL_S
+PROOF_CPU_S = L.PROOF_CPU_S
 
 #: form -> (step lemma, how to build its trailing side-condition arguments).
 #:
@@ -1519,8 +1535,11 @@ def _probe_input_independent(path):
         tmp = f.name
     try:
         env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
-        p = subprocess.run([LEAN_BIN, tmp], capture_output=True, text=True,
-                           env=env)
+        p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
+                       cpu_s=PROOF_CPU_S)
+        if p.exceeded:
+            print("  BOUND: " + p.exceeded)
+            return False
         return ": error" not in p.stdout + p.stderr
     finally:
         os.unlink(tmp)
@@ -1570,8 +1589,15 @@ def _run_lean(text):
         tmp = f.name
     try:
         env = dict(os.environ, LEAN_PATH="%s:%s" % (ROOT, LIB))
-        p = subprocess.run([LEAN_BIN, tmp], capture_output=True, text=True,
-                           env=env)
+        p = L.run_lean(LEAN_BIN, [tmp], env=env, wall_s=PROOF_WALL_S,
+                       cpu_s=PROOF_CPU_S)
+        if p.exceeded:
+            # NOT `(False, 0, "…")`: a killed elaboration is not a refutation,
+            # it is an absence of one, and this file's caller prints the third
+            # element as the reason a theorem did not hold. Returning it there
+            # would put "we stopped watching" in the output where a reader is
+            # looking for "the model disagrees".
+            return (False, 0, p.exceeded)
         out = p.stdout + p.stderr
         # Drop the temp path and the line:col, which would otherwise eat the
         # whole message under the `[:60]` slice below and print as a filename.
@@ -1612,6 +1638,13 @@ def main(argv):
         d = os.path.join(HERE, "examples")
         targets = [os.path.join(d, f) for f in sorted(os.listdir(d))
                    if f.endswith(".mojo")]
+    if not LEAN_BIN:
+        # Said here rather than as a traceback per example: this file now gets
+        # its Lean path from `formal/lean.py::find_lean`, which returns None
+        # when the pinned toolchain is not installed, and 43 examples × two
+        # theorems is 86 identical failures instead of one line.
+        print("lean not found (see ./lean-toolchain)")
+        return 1
     val_ok = val_gap = term_ok = term_gap = 0
     fails = notree = noform = 0
     for t in targets:

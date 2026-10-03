@@ -1,10 +1,96 @@
+"""Everything this repository knows about running Lean 4.
+
+Two halves that used to be one file's business and are now clearly two:
+`run_lean` below is the ONE launcher (bounds, flags, the kill, the verdict),
+and everything after it is what this repository does with a Lean run — the
+`.olean` build and its currency rules, the hole census, the verdict cache.
+
+## The bounds, and where the numbers come from
+
+**Every `lean` in this tree is launched by `run_lean`, and every run has an
+upper bound on wall time, on total CPU across the whole process tree, and in
+Lean's own `maxHeartbeats`.** This is not tidiness. On 2026-10-02 there were
+ten `lean` processes on this machine that had run for HUNDREDS of CPU-hours and
+the user killed them by hand; a valid inductive proof here checks in seconds to
+minutes, so those were non-terminating elaborations, and every launch site that
+had a bound at all had a WALL bound only (`subprocess.run(timeout=1200)`, and
+`x86_64_endtoend_test.py` had none). `maxHeartbeats` does not catch them either:
+it meters the elaborator's allocations, while the work that spins in these
+proofs is `native_decide` and kernel reduction, which is exactly what it does
+not meter.
+
+The three bounds, and what each one is for:
+
+| bound | how | catches |
+|---|---|---|
+| wall | the launcher's own clock | a loop that sleeps, and a load-induced slowdown that never ends |
+| CPU (whole tree) | `RLIMIT_CPU` via `preexec_fn` (SIGXCPU), and the `ps` walk in `procrun.tree_usage` for the descendants | a loop that spins: Lean's threads are many, so a proof can burn every core while its wall clock looks ordinary |
+| heartbeats | `-T`, passed explicitly | a loop that is deterministic in allocation count, reported as a Lean ERROR with the declaration named, which is the only one of the three that says *where* |
+
+**Sizes, measured on this tree (2026-10-02, arm64 M-series, the pinned
+`leanprover/lean4:v4.32.2`, `-j 4`, an otherwise idle box; `FORMAL_LEAN_TRACE=1`
+makes `run_lean` print the same three figures for every run it makes, so
+re-measuring is one env var and not a re-derivation):**
+
+| what | wall | CPU | peak RSS |
+|---|---|---|---|
+| `lib/ProofLib.olean` build — 27.0 MB | 112.0 s | 83.1 s | 7.82 GB |
+| `lib/X86.olean` build — 6.6 MB | 6.0 s | 12.4 s | 1.36 GB |
+| `lib/work.olean`, `lib/Refine.olean`, `lib/Contracts.olean` | 1.2–1.4 s | 0.5–1.3 s | ~1.2 GB |
+| generated proof of `formal/examples/const2.mojo` — 139 KB | 8.6 s | 10.3 s | 1.54 GB |
+| generated proof of `formal/examples/count.mojo` — 384 KB | 79.7 s | 80.3 s | 2.71 GB |
+| generated proof of `formal/examples/wide_recv.mojo` — 703 KB | 93.4 s | 97.4 s | 3.00 GB |
+| generated proof of `formal/examples/fib.mojo` (a known gap: rc=1) | 99.7 s | 100.2 s | 2.86 GB |
+
+So `PROOF_WALL_S = 600` / `PROOF_CPU_S = 600` is **6x the slowest legitimate
+proof measured**, and `LIBRARY_WALL_S = 1800` / `LIBRARY_CPU_S = 1800` is **16x
+the slowest module build** — both far below `tools/control.py guard`'s 45 min
+wall / 90 min CPU net, which exists to catch a launcher that was never taught
+these bounds, not to be the bound. (6x rather than the 5-10x band on the low
+end because the measurements are one machine's: the largest of them, `count`,
+spent 80 s of CPU while `x86_64_endtoend_test.py`'s per-example checks run
+concurrently on a loaded box in the same suite.)
+
+Two of those rows are the reason a wall-only bound was never enough, and they
+are in the measurements rather than in an argument: `X86` burned **12.4 s of
+CPU in 6.0 s of wall** and every generated proof burned CPU *greater* than its
+own wall clock. Lean's elaborator is a thread pool, so "how long has it been
+running" and "how much has it cost" are different numbers and only one of them
+was being measured.
+
+**The escape hatch is the library build and nothing else.**
+`FORMAL_LEAN_LIBRARY_WALL_S` / `FORMAL_LEAN_LIBRARY_CPU_S` raise the bound for
+`ensure_library` and `library_census`, because that is the one legitimate step
+whose cost this project cannot bound in advance (it is a function of how big
+`lib/*.lean` has grown). A proof bound that any environment could raise is not a
+bound: a runaway elaboration setting `FORMAL_LEAN_WALL_S=999999` would be
+indistinguishable from a proof that genuinely needs the time. Both knobs exist
+because "make the number bigger" is what an operator does at 2am, and it should
+be possible to do it in one env var rather than by editing a policy constant.
+
+**A breach is a verdict of its own, not a failure and not a pass.** `run_lean`
+returns it in `LeanRun.exceeded` and every caller turns it into a message that
+names the bound it broke; it is NOT published to the verdict cache, because a
+breach is a fact about this machine at this moment (how loaded it was, how many
+proofs ran at once) rather than a property of the proof's bytes — caching it is
+how a red becomes permanent (`bugs/FORMAL_OPUS_dylib_termination_handoff.md`).
+And it is never silently `0` holes: a killed elaboration measured nothing, so
+the hole census reports UNMEASURED for it.
+
+The one thing this does NOT fix is a proof that needs more than the bound: it
+converts an unbounded hang into a loud, reproducible, one-line failure that says
+which bound was broken. What spins is a separate question, tracked in
+`bugs/FORMAL_lean_elaboration_does_not_terminate.md`.
+"""
 import collections
 import hashlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 # Dependency order: X86 needs ProofLib, and work.lean re-exports it so the
@@ -60,7 +146,11 @@ def elan_toolchain_binary(spec: str) -> str | None:
 def find_lean(repo_root: str | None = None) -> str | None:
     root = repo_root or _default_root()
     spec = pinned_toolchain(root)
-    candidates = [os.environ.get("LEAN"),
+    # `LEAN_BIN` is beside `LEAN` and is what `formal/x86_64_endtoend_test.py`
+    # read, so both spellings resolve here rather than one of them keeping a
+    # hard-coded elan path beside the resolver that exists to avoid exactly
+    # that.
+    candidates = [os.environ.get("LEAN"), os.environ.get("LEAN_BIN"),
                   os.path.join(root, ".pixi", "envs", "default", "bin", "lean")]
     if spec:
         pinned = elan_toolchain_binary(spec)
@@ -71,6 +161,283 @@ def find_lean(repo_root: str | None = None) -> str | None:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+# ── The launcher: the ONE way this tree runs Lean ──────────────────────────
+#
+# The numbers and the measurements behind them are in this module's docstring;
+# what is here is the mechanism. Three bounds, because they catch three
+# different failures and none of them catches all three:
+#
+#   * WALL (`time.monotonic` around the child) — catches a loop that does not
+#     saturate the machine and a load-induced slowdown that never ends.  Cheap
+#     to check, so it is checked four times a second.
+#   * CPU (whole tree) — catches a loop that DOES saturate the machine, which is
+#     what these proofs actually do: `lean` runs a thread pool, so an
+#     elaboration that will not terminate can burn every core of the box while
+#     its wall clock looks unremarkable.  Enforced twice, on purpose:
+#     `RLIMIT_CPU` in the child (SIGXCPU, the kernel's own meter, which fires
+#     whatever the parent is doing) and the `ps` walk over the tree (which is
+#     the only thing that can see a DESCENDANT's CPU — `RLIMIT_CPU` is
+#     inherited per process, so `native_decide`'s out-of-process compiler gets
+#     its own fresh limit and N of them add up to N times the bound).
+#   * HEARTBEATS (`-T`) — catches a loop that is deterministic in allocation
+#     count, and it is the only one of the three that reports WHERE: a Lean
+#     error naming the declaration, in the file's own diagnostics, in the
+#     output every caller already parses.
+#
+# The kill is always the whole TREE (`procrun.kill_group` walks `ps` and kills
+# children before parents, then the group), plus a group sweep after the fact
+# for the one path the launcher does not control — see `_kill_leftovers`.
+#
+# `preexec_fn` rather than a shell wrapper or a `sitecustomize`: it is the only
+# one of the three that can set an rlimit in the child without putting a shell
+# between us and `lean` (so Lean's own exit code, and its diagnostics on the
+# streams we captured, stay intact).  It is safe here because this module's
+# callers are single-threaded while a run is in flight — which is the same
+# condition `subprocess`'s own documentation states for it.
+
+_ROOT = _default_root()
+if _ROOT not in sys.path:
+    sys.path.append(_ROOT)
+from tools import procrun  # noqa: E402 — the tree walk and the kill, shared
+
+# Wall/CPU bounds for ONE generated proof, and for ONE library `.olean` build.
+# Sized from the measurements in the module docstring: ~6x the slowest
+# legitimate proof, and ~15x the slowest module build.  Both are far tighter
+# than `tools/control.py guard`'s 45 min / 90 min net, which is the net UNDER
+# every launcher that never got here.
+PROOF_WALL_S = 600.0
+PROOF_CPU_S = 600.0
+LIBRARY_WALL_S = 1800.0
+LIBRARY_CPU_S = 1800.0
+# Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
+# project's 4 GB line: that line is a DEBT standard for what a job should cost
+# (`bugs/PERF_memory_over_4gb_is_a_bug.md`), and enforcing it by capping Lean is
+# not paying the debt, it is breaking the build — measured, not assumed: with
+# `-M 4096` the `lib/ProofLib.lean` build fails at line 3808 with "(kernel)
+# excessive memory consumption detected" and peaks at 7.8 GB, so a 4 GB ceiling
+# is not a tighter policy, it is a red suite.  What it must be is ABOVE what the
+# real work needs, so a runaway is stopped and a legitimate build is not; the
+# over-4 GB fact is `prooflib`'s own `memwhy` in tools/suite.py and is filed
+# there.
+#
+# Two ceilings because there are two kinds of work: a generated proof checks a
+# ~700 KB file of `native_decide` goals and needs a small fraction of what
+# building the 27 MB `.olean` library does, and one number for both would have to
+# be the larger.
+LEAN_THREADS = 4
+LEAN_MEMORY_MB = 6144          # one generated proof
+LIBRARY_MEMORY_MB = 12288      # one lib/*.olean build
+LEAN_HEARTBEATS = 200000
+# How often each bound is checked. The wall clock is free, so it is read often;
+# the CPU walk costs one `ps` (~50-100 ms on this platform), so it is not.
+_WALL_POLL_S = 0.25
+_CPU_POLL_S = 2.0
+# RLIMIT_CPU's HARD limit, this far past its soft one: a process that somehow
+# handles SIGXCPU gets SIGKILLed rather than left spinning.
+_CPU_HARD_GRACE_S = 30.0
+
+
+#: One bounded run. `exceeded` is the verdict; `pgid` is the process group the
+#: run was given, which is the handle a caller needs to check (or reap) that
+#: nothing outlived it — `procrun.kill_group` has already done that by the time
+#: this is returned, so it is here to be ASSERTED, not to be used.
+LeanRun = collections.namedtuple(
+    "LeanRun", "returncode stdout stderr exceeded wall_s cpu_s peak_rss pgid")
+
+
+def lean_flags(mem_mb: int | None = None, heartbeats: int | None = None,
+               threads: int | None = None) -> list:
+    """Lean's OWN bounds, as argv, in the order `lean` documents them."""
+    return ["-j", str(LEAN_THREADS if threads is None else threads),
+            "-M", str(LEAN_MEMORY_MB if mem_mb is None else mem_mb),
+            "-T", str(LEAN_HEARTBEATS if heartbeats is None else heartbeats)]
+
+
+def library_bounds() -> tuple:
+    """`(wall_s, cpu_s)` for a library `.olean` build or a census run.
+
+    The ONE place the policy can be raised, and by environment variable only,
+    because the library build is the one legitimate step whose cost cannot be
+    bounded in advance — it is a function of how large `lib/*.lean` has grown,
+    and it is already the slowest thing here by an order of magnitude.
+
+    A PROOF bound is deliberately not env-raisable: a bound the environment can
+    lift is not a bound, and the thing that needs lifting during a runaway is
+    exactly the thing an operator would lift it for.
+    """
+    def env_seconds(name, default):
+        raw = (os.environ.get(name) or "").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        return value if value > 0 else default
+    return (env_seconds("FORMAL_LEAN_LIBRARY_WALL_S", LIBRARY_WALL_S),
+            env_seconds("FORMAL_LEAN_LIBRARY_CPU_S", LIBRARY_CPU_S))
+
+
+def _cpu_rlimit(cpu_s: float):
+    """A `preexec_fn` that puts `RLIMIT_CPU` on the child.
+
+    The kernel meters the process's total CPU across every thread and sends
+    SIGXCPU at the soft limit, which is why this is the enforcement path and the
+    `ps` walk is the reporting one: the poll can miss a spike between two
+    samples, the rlimit cannot.
+
+    Clamped to whatever hard limit we inherited, because raising one is a
+    privilege this process does not have and `setrlimit` fails outright rather
+    than clamping — which would lose the bound entirely on a machine that
+    started `lean` under a tight `ulimit -t`.
+    """
+    def install():
+        import resource
+        try:
+            soft_now, hard_now = resource.getrlimit(resource.RLIMIT_CPU)
+            soft = int(cpu_s)
+            hard = soft + int(_CPU_HARD_GRACE_S)
+            if hard_now != resource.RLIM_INFINITY:
+                hard = min(hard, hard_now)
+                soft = min(soft, hard)
+            resource.setrlimit(resource.RLIMIT_CPU, (soft, hard))
+        except (OSError, ValueError, ImportError):
+            # A platform without RLIMIT_CPU keeps the wall bound and the tree
+            # walk, which is a weaker bound rather than no bound.  Silently,
+            # because a launcher that refuses to run is worse.
+            pass
+    return install
+
+
+def _kill_leftovers(pgid: int) -> int:
+    """SIGKILL anything still alive in a finished run's process group.
+
+    The one hole in `kill_group`, and it is a real one: `RLIMIT_CPU` fires
+    INSIDE the child, so the launcher never chose that moment and the child's
+    descendants are already reparented to init by the time the poll notices —
+    which is exactly when a `ps` walk by ppid finds nothing.  A process group
+    is inherited by every descendant and outlives the process that created it,
+    so this is the handle that still works.  Returns how many it killed, which
+    is worth counting: a non-zero count on a run that was never killed is a
+    process that outlived its bound, and that is the bug this whole module is
+    about.
+    """
+    killed = 0
+    for pid in procrun.group_pids(pgid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    return killed
+
+
+def run_lean(lean: str, args, cwd: str | None = None, env: dict | None = None,
+             wall_s: float | None = None, cpu_s: float | None = None,
+             mem_mb: int | None = None, heartbeats: int | None = None,
+             threads: int | None = None) -> LeanRun:
+    """Run `lean` under every bound, and say which one it hit.
+
+    `wall_s`/`cpu_s` default to the PROOF bounds; a library build passes
+    `library_bounds()`.  Output is captured through temp files rather than
+    pipes for the same reason `tools/procrun.py` does it that way: this polls
+    the child instead of blocking in `communicate`, and a pipe nobody is
+    draining is a deadlock the moment a proof prints more than a buffer.
+
+    **`exceeded` is the field every caller must read.**  It is `None` for a run
+    that finished — whatever its exit code — and a sentence naming the bound it
+    broke otherwise.  `ok` alone cannot express it: Lean's own exit code for a
+    killed elaboration is `-SIGXCPU` or `-SIGKILL`, which a caller that only
+    compares against 0 reports as "lean failed", and one that compares against
+    `None` reports as success.
+    """
+    wall_s = PROOF_WALL_S if wall_s is None else float(wall_s)
+    cpu_s = PROOF_CPU_S if cpu_s is None else float(cpu_s)
+    if not lean:
+        # `find_lean` returning None is what every caller tests for, but a
+        # caller that passes one straight through used to get a TypeError from
+        # `Popen` — a traceback about `subprocess`, not about the missing
+        # toolchain. Said in the verdict's own language instead.
+        return LeanRun(None, "", "", "lean not found (see ./lean-toolchain)",
+                       0.0, 0.0, 0, 0)
+    argv = [lean] + lean_flags(mem_mb, heartbeats, threads) + [str(a) for a in args]
+    with tempfile.TemporaryFile(mode="w+b") as out, \
+            tempfile.TemporaryFile(mode="w+b") as err:
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env,
+                                    stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=err, start_new_session=True,
+                                    preexec_fn=_cpu_rlimit(cpu_s))
+        except OSError as e:
+            return LeanRun(None, "", "", f"lean could not be started: {e}",
+                           0.0, 0.0, 0, 0)
+        started = time.monotonic()
+        deadline, cpu_at = started + wall_s, started
+        exceeded, cpu, peak = None, 0.0, 0
+        while True:
+            rc = proc.poll()
+            now = time.monotonic()
+            if rc is not None:
+                break
+            if now >= deadline:
+                exceeded = (f"lean exceeded {now - started:.0f}s wall "
+                            f"(limit {wall_s:g}s) — killed, and this is NOT a "
+                            f"verdict on the proof")
+                break
+            if now >= cpu_at:
+                tables = procrun.ps_snapshot()
+                spent, rss, _n = procrun.tree_usage(proc.pid, tables[0],
+                                                     tables[1], tables[2])
+                cpu, peak = max(cpu, spent), max(peak, rss)
+                cpu_at = now + _CPU_POLL_S
+                if spent > cpu_s:
+                    exceeded = (f"lean exceeded {spent:.0f}s CPU across its "
+                                f"process tree (limit {cpu_s:g}s) — killed, "
+                                f"and this is NOT a verdict on the proof")
+                    break
+            time.sleep(_WALL_POLL_S)
+        wall = time.monotonic() - started
+        if exceeded is not None:
+            procrun.kill_group(proc)
+            # `kill_group` reaps the child itself (`kill_tree` waitpid()s it),
+            # and `Popen` on a pid somebody else reaped reports **0** — which is
+            # how a killed elaboration comes back looking like a proof that
+            # checked. The status is forced here rather than left to whichever
+            # `Popen` version is installed, because "no caller can read a bound
+            # breach as a pass" is the whole point of this function.
+            rc = -signal.SIGKILL
+        else:
+            rc = proc.returncode
+            # The rlimit fires INSIDE the child, so the poll loop can see a
+            # clean exit carrying a signal status and no breach to report. That
+            # IS the breach, and a caller that only tests `returncode != 0`
+            # would call it an ordinary elaboration failure.
+            if rc is not None and rc < 0 and -rc == signal.SIGXCPU:
+                exceeded = (f"lean exceeded {cpu_s:g}s CPU (limit {cpu_s:g}s, "
+                            f"enforced by RLIMIT_CPU inside lean) — killed, "
+                            f"and this is NOT a verdict on the proof")
+            if rc is None:
+                rc = proc.wait()
+        if exceeded is None:
+            _kill_leftovers(proc.pid)
+        out.seek(0)
+        err.seek(0)
+        res = LeanRun(rc,
+                      out.read().decode("utf-8", "replace"),
+                      err.read().decode("utf-8", "replace"),
+                      exceeded, wall, cpu, peak, proc.pid)
+        if (os.environ.get("FORMAL_LEAN_TRACE") or "").strip():
+            # One line per run, off by default because sixteen parallel proof
+            # jobs do not need a commentary and the figures are what sized the
+            # bounds in this module's docstring — so the way to re-measure them
+            # is one env var, not a re-derivation from a bug doc.
+            print(f"  [lean run: {os.path.basename(str(args[-1])) if args else lean}"
+                  f" rc={res.returncode} wall={res.wall_s:.1f}s"
+                  f" cpu={res.cpu_s:.1f}s peak={res.peak_rss / (1 << 30):.2f}GB"
+                  f" bounds={wall_s:g}/{cpu_s:g}s"
+                  + (f" EXCEEDED: {res.exceeded}" if res.exceeded else "")
+                  + "]", file=sys.stderr)
+        return res
 
 
 def _sha256_file(path: str) -> str:
@@ -555,9 +922,16 @@ def _census_publish(key: str, census: tuple) -> None:
         pass          # a census that cannot be stored must not fail a build
 
 
-def library_census(lean: str, lib_dir: str, timeout: int = 1200,
-                   measure: bool = True) -> dict:
+def library_census(lean: str, lib_dir: str, timeout: int | None = None,
+                   measure: bool = True, cpu_s: float | None = None) -> dict:
     """stem -> (n_sorries, (names...)) for every library module MEASURED.
+
+    `timeout` is the launcher's WALL bound (default `library_bounds()[0]`, which
+    is also the only bound an environment may raise) and, unchanged, how long
+    this waits for a peer's build lock. Those are two different facts sharing
+    one argument; they were one argument before this module had a policy, and
+    keeping them together is cheaper than changing a signature four callers in
+    two other workers' files depend on. Both mean "how long may this take".
 
     The hole census of a generated proof is not the whole story, and the gap
     was silent: a proof file is elaborated by `lean`, and Lean warns about
@@ -604,6 +978,10 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
     report says which of the two it is printing.
     """
     out, missing = {}, []
+    if timeout is None:
+        timeout, lib_cpu = library_bounds()
+    else:
+        lib_cpu = cpu_s if cpu_s is not None else library_bounds()[1]
     for stem in LIBRARY_MODULES:
         source = os.path.join(lib_dir, stem + ".lean")
         if not os.path.isfile(source):
@@ -627,7 +1005,6 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
             out[stem] = got
     if not missing or not measure:
         return out
-    import tempfile
     olean = os.path.join(lib_dir, missing[0] + ".olean")
     fd = _acquire_build_lock(olean, timeout)
     try:
@@ -669,7 +1046,7 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
                 if not os.path.isfile(src):
                     continue
                 got = _measure_one(lean, src, td, env, timeout,
-                                   _read_lines(src))
+                                   _read_lines(src), lib_cpu)
                 if got is None:
                     continue               # unmeasured, and said as such
                 _LIB_CENSUS[stem] = got
@@ -686,7 +1063,7 @@ def library_census(lean: str, lib_dir: str, timeout: int = 1200,
 
 
 def _measure_one(lean: str, source: str, workdir: str, env: dict,
-                 timeout: int, source_lines=None):
+                 timeout: int, source_lines=None, cpu_s: float | None = None):
     """The hole census of one module, or None if it could not be measured.
 
     None and `(0, ())` are kept apart all the way to the report. Lean exits
@@ -694,6 +1071,12 @@ def _measure_one(lean: str, source: str, workdir: str, env: dict,
     trustworthy census, so a non-zero exit is unmeasured rather than a count —
     the only thing a failed elaboration can honestly report about holes is
     nothing.
+
+    A run that broke one of the launcher's bounds is unmeasured for the same
+    reason, and says so: the elaborator was killed part-way through the file, so
+    whatever warnings it had already printed are a prefix of the answer, not the
+    answer.  The partial output goes to stderr anyway, because a run that hit a
+    bound is a thing a reader has to be able to find in a log.
     """
     # The `.olean` is LEFT in place. It is the artifact a later module in the
     # same run imports, and deleting it after each measurement (the first
@@ -702,10 +1085,11 @@ def _measure_one(lean: str, source: str, workdir: str, env: dict,
     # measurement stands on nothing but the sources", and silently so. The
     # caller's TemporaryDirectory removes the whole set.
     out = os.path.join(workdir, os.path.basename(source)[:-5] + ".olean")
-    try:
-        res = subprocess.run([lean, "-o", out, source], capture_output=True,
-                             text=True, timeout=timeout, env=env, cwd=workdir)
-    except (OSError, subprocess.SubprocessError):
+    res = run_lean(lean, ["-o", out, source], cwd=workdir, env=env,
+                   wall_s=timeout, cpu_s=cpu_s, mem_mb=LIBRARY_MEMORY_MB)
+    if res.exceeded:
+        print(f"  [lean census: {os.path.basename(source)}: {res.exceeded}]",
+              file=sys.stderr)
         return None
     if res.returncode != 0:
         return None
@@ -727,8 +1111,16 @@ def _read_lines(path: str):
         return None
 
 
-def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
+def ensure_library(lean: str, lib_dir: str, timeout: int | None = None,
+                   cpu_s: float | None = None) -> None:
     """Make every library .olean current, building at most ONE of each.
+
+    `timeout`/`cpu_s` are the launcher's bounds for the build itself and default
+    to `library_bounds()` — the one bound in this module an environment may
+    raise, because this is the one step whose cost cannot be bounded in advance
+    (it is a function of how large `lib/*.lean` has grown, and it is already an
+    order of magnitude slower than any proof). `timeout` is also, unchanged, how
+    long this waits for a peer's build lock.
 
     The check-build step is a check-then-act on a shared filesystem, and the
     proof suite runs ~16 of these concurrently, so without the lock below
@@ -755,6 +1147,10 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
     the other 15 find the stamp valid and return immediately.
     """
     import cas
+    if timeout is None:
+        timeout, build_cpu = library_bounds()
+    else:
+        build_cpu = cpu_s if cpu_s is not None else library_bounds()[1]
     env = os.environ.copy()
     env["LEAN_PATH"] = lib_dir
     for stem in LIBRARY_MODULES:
@@ -788,11 +1184,15 @@ def ensure_library(lean: str, lib_dir: str, timeout: int = 1200) -> None:
             else:
                 tmp = f"{olean}.tmp.{os.getpid()}"
                 try:
-                    result = subprocess.run(
-                        [lean, "-o", tmp, source],
-                        capture_output=True, text=True, timeout=timeout,
-                        env=env,
-                    )
+                    result = run_lean(lean, ["-o", tmp, source], env=env,
+                                      wall_s=timeout, cpu_s=build_cpu,
+                                      mem_mb=LIBRARY_MEMORY_MB)
+                    if result.exceeded:
+                        # Raised, not returned: a build that broke a bound left
+                        # no .olean, and every later caller would otherwise take
+                        # the "lean failed" path and report it as a build error
+                        # instead of as the thing it is.
+                        raise RuntimeError(result.exceeded)
                     if result.returncode != 0:
                         raise RuntimeError((result.stderr or result.stdout
                                             or "lean failed").strip())
@@ -860,13 +1260,42 @@ def _digest(path: str) -> bytes:
     return value
 
 
-def lean_version(lean: str, timeout: int = 120) -> str:
+_LEAN_VERSIONS: dict = {}
+
+
+def lean_version(lean: str, timeout: float = 120.0) -> str:
+    """The toolchain's own `--version` string, or "unknown".
+
+    Through the launcher like everything else, with a bound this short because
+    the run is `lean --version`: it prints a line and exits.  That is not an
+    excuse for no bound — a `lean` that cannot print its version is a `lean` that
+    hangs before `main`, and the first version of this had no bound at all.
+
+    The verdict this string feeds is a CAS KEY, so "unknown" is a real answer
+    here and not a shrug: it is a key no other machine produces, which is what
+    makes a run under an unusable toolchain a MISS rather than a collision.
+
+    Memoised on the binary's (size, mtime), because this is on the path of every
+    `_olean_key` and every `proof_verdict_key` — five modules and a proof per
+    `ensure_library` — and re-running it per key meant re-spawning `lean` (and,
+    since the launcher arrived, re-reading `ps`) for a string that cannot have
+    changed within one process.  Keyed on the binary's identity rather than its
+    path alone so a toolchain swapped underneath a long run is still re-read.
+    """
     try:
-        result = subprocess.run([lean, "--version"], capture_output=True,
-                                text=True, timeout=timeout)
-        return (result.stdout or result.stderr or "").strip()
-    except Exception:
-        return "unknown"
+        st = os.stat(lean)
+        key = (lean, st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = (lean, None, None)
+    hit = _LEAN_VERSIONS.get(key)
+    if hit is not None:
+        return hit
+    res = run_lean(lean, ["--version"], wall_s=timeout, cpu_s=timeout)
+    got = "unknown" if (res.exceeded or res.returncode != 0) else \
+        (res.stdout or res.stderr or "").strip()
+    _LEAN_VERSIONS[key] = got
+    return got
+
 
 
 # v3 added the library census (`lib_sorries`, `lib_detail`) to the stored body,
@@ -904,7 +1333,7 @@ Census = collections.namedtuple(
 
 
 def proof_census(proof_path: str, repo_root: str | None = None,
-                 timeout: int = 1200) -> Census:
+                 timeout: float | None = None, cpu_s: float | None = None) -> Census:
     """`(ok, detail, cached, n_sorries, lib_sorries, lib_detail, lines)`.
 
     `check_proof_cached` is this with the census rendered; it exists separately
@@ -916,10 +1345,17 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     a census that cannot be measured is printed as unmeasured, never as zero.
     That is deliberate and it is the reason this can land in the middle of four
     other agents' work without changing a verdict anyone is relying on.
+
+    `timeout`/`cpu_s` are the launcher's bounds for the PROOF check and default
+    to `PROOF_WALL_S`/`PROOF_CPU_S`; the library build it depends on uses its own
+    (`library_bounds()`), because the two are different work with different
+    honest costs. Under its old name `timeout` means wall seconds, which is what
+    it meant before the launcher existed and what every caller passed.
     """
     root = repo_root or _default_root()
     lib_dir = os.path.join(root, "lib")
     lean = find_lean(root)
+    wall_s = PROOF_WALL_S if timeout is None else float(timeout)
 
     def census(ok, detail, cached, n_sorries, lib):
         lines = _census_lines(proof_path, lib_dir, n_sorries, lib)
@@ -930,7 +1366,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     if not lean:
         return census(False, "lean not found", False, 0, {})
     try:
-        ensure_library(lean, lib_dir, timeout)
+        ensure_library(lean, lib_dir)
     except Exception as e:
         return census(False, f"proof library build failed: {e}", False, 0, {})
     try:
@@ -942,7 +1378,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     # swallowed on purpose: the census is a report, and a report that cannot be
     # produced must not turn a passing proof into a failing one.
     try:
-        lib = library_census(lean, lib_dir, timeout)
+        lib = library_census(lean, lib_dir)
     except Exception:
         lib = {}
     stored = cas_lookup_verdict(key)
@@ -950,10 +1386,21 @@ def proof_census(proof_path: str, repo_root: str | None = None,
         ok, n_sorries, lib_sorries, lib_detail, detail = stored
         lib = _lib_from_record(lib, lib_sorries, lib_detail)
         return census(ok, detail, True, n_sorries, lib)
-    ok, detail, n_sorries = _run_lean(proof_path, lib_dir, lean, timeout)
+    ok, detail, n_sorries, exceeded = _run_lean(proof_path, lib_dir, lean,
+                                                wall_s, cpu_s)
     lib_sorries, lib_detail = _lib_totals(lib)
-    _publish_verdict(key, ok, n_sorries, lib_sorries, lib_detail, detail)
-    return census(ok, detail, False, n_sorries, lib)
+    if not exceeded:
+        _publish_verdict(key, ok, n_sorries, lib_sorries, lib_detail, detail)
+        return census(ok, detail, False, n_sorries, lib)
+    # A BREACH IS NOT A VERDICT, and the difference is worth a branch. What the
+    # CAS stores is a pure function of the proof's bytes and the toolchain; a
+    # bound is a function of the MACHINE (how loaded, how many proofs at once),
+    # so caching it turns one slow afternoon into a permanent red that no
+    # re-run can clear — which is exactly what
+    # `bugs/FORMAL_OPUS_dylib_termination_handoff.md` records about a cached
+    # timeout. So a breach is reported, never published, and its hole census is
+    # UNMEASURED rather than the partial prefix the killed run managed to print.
+    return census(False, detail, False, None, lib)
 
 
 def cas_lookup_verdict(key: str):
@@ -1166,13 +1613,19 @@ def _emit_census(lines: list) -> None:
 
 
 def check_proof_cached(proof_path: str, repo_root: str | None = None,
-                       timeout: int = 1200) -> tuple[bool, str, bool, int]:
+                       timeout: float | None = None) -> tuple:
     """check_proof, memoised on the exact inputs. Third element is True on a
     cache hit (nothing was run); fourth is the number of declarations that
     admitted a `sorry` (see `_run_lean`). Both verdicts are cached: a
     known-failing example is just as deterministic as a passing one, and
     re-deriving it with a multi-minute Lean run is what made iterating on the
     suite painful.
+
+    The ONE thing not cached is a bound breach, and that is a distinction of
+    kind rather than of convenience: the CAS key is a pure function of the
+    proof's bytes and the toolchain, while "exceeded 600s wall" is a fact about
+    this machine at this moment. `proof_census` returns it uncached, `ok=False`,
+    and with the hole census `None` rather than 0.
 
     Those four elements are the whole contract and they are unchanged. What is
     new is that the CENSUS IS NOW READ: `proof_census` records the library's
@@ -1189,14 +1642,21 @@ def check_proof_cached(proof_path: str, repo_root: str | None = None,
 
 
 def check_proof(proof_path: str, repo_root: str | None = None,
-                timeout: int = 1200) -> tuple[bool, str]:
+                timeout: float | None = None) -> tuple[bool, str]:
     ok, detail, _, _ = check_proof_cached(proof_path, repo_root, timeout)
     return ok, detail
 
 
-def _run_lean(proof_path: str, lib_dir: str, lean: str,
-              timeout: int) -> tuple[bool, str, int]:
-    """`(ok, detail, n_sorries)`.
+def _run_lean(proof_path: str, lib_dir: str, lean: str, wall_s: float,
+              cpu_s: float | None = None) -> tuple:
+    """`(ok, detail, n_sorries, exceeded)`.
+
+    The fourth element is the bound this run broke, or `None`. It is a separate
+    return rather than a shape of `detail` because the two callers need it for
+    different things: `proof_census` refuses to CACHE a breach (a machine's
+    property, not the proof's), and every reader of `detail` needs it printed.
+    Folding it into `detail` would make "was this a failure or a bound" a string
+    match, which is the thing this module keeps arguing against.
 
     `n_sorries` is the number of declarations Lean reports as "uses `sorry`" —
     the ONLY sound way to count holes, and the reason this census is worth
@@ -1221,21 +1681,25 @@ def _run_lean(proof_path: str, lib_dir: str, lean: str,
     apart on purpose, because "the file Lean read" and "the proof the file
     rests on" are different things and a single total would hide which one a
     hole is in.
+
+    **A breach reports no count at all**, not zero: the elaborator was killed
+    part-way through the file, so its warnings are a prefix of the answer. Zero
+    is the one number that reads as "measured, clean", which is the failure this
+    whole module is about — so `None` it is, which the report already knows how
+    to render ("hole census not measured").
     """
     env = os.environ.copy()
     env["LEAN_PATH"] = os.pathsep.join(
         (os.path.dirname(os.path.abspath(proof_path)), lib_dir))
-    try:
-        result = subprocess.run(
-            [lean, os.path.basename(proof_path)],
-            capture_output=True, text=True, timeout=timeout, env=env,
-            cwd=os.path.dirname(os.path.abspath(proof_path)),
-        )
-    except subprocess.TimeoutExpired:
-        return False, "lean timed out", 0
+    result = run_lean(lean, [os.path.basename(proof_path)], env=env,
+                      wall_s=wall_s, cpu_s=cpu_s,
+                      cwd=os.path.dirname(os.path.abspath(proof_path)))
+    if result.exceeded:
+        return False, result.exceeded, None, result.exceeded
     n_sorries = _census_from_output(
         (result.stdout or "") + (result.stderr or ""),
         _read_lines(proof_path))[0]
     if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "lean failed").strip(), n_sorries
-    return True, "", n_sorries
+        return (False, (result.stderr or result.stdout or "lean failed").strip(),
+                n_sorries, None)
+    return True, "", n_sorries, None
