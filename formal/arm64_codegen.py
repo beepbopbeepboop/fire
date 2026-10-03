@@ -20,7 +20,7 @@ from formal.arm64 import *
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, _range_args, TYPE_NAMES,
-                          STRING_TYPE_NAMES)
+                          STRING_TYPE_NAMES, DICT_TYPE_NAMES)
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -2920,7 +2920,10 @@ dylib_exports: list = None, globals_base: int = None,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
-            ctor_field_value=self._ctor_field_value_for(name))
+            ctor_field_value=self._ctor_field_value_for(name),
+            callee_is_dict=lambda callee: self._callee_is_dict(
+                callee, stack | {name}),
+            dict_names=DICT_TYPE_NAMES)
         self._vkinds_cache[name] = vk
         return vk
 
@@ -3217,6 +3220,32 @@ dylib_exports: list = None, globals_base: int = None,
             return M.INT_KIND
         return vk.return_kind
 
+    def _callee_is_dict(self, name, stack):
+        """Whether a call to this unit's function `name` produces a DICT, or
+        None when the source does not say.
+
+        `_callee_kind`'s evidence read on the other axis. That one answers what
+        KIND a call result is, and on this path a dict and a list are one word
+        pointing at a blob with the same 8-byte count header — so `return_kind`
+        says "a blob" for both and `d["a"]` on the result of either took the
+        sequence subscript. The two questions need two pieces of evidence, and
+        this one is assembled from the same two: the callee's DECLARED return
+        type first (`-> Dict[String, Int]` says it outright), then its RETURN
+        STATEMENTS by unanimous agreement (`def mk(): … return d` states a dict
+        without annotating anything).
+
+        The stack and the memo are `_callee_kind`'s, deliberately: a
+        `def a(): return b()` / `def b(): return a()` cycle is a word here and
+        must be a word here too.
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.declared_type_is_dict(getattr(fn, "return_type", None),
+                                   DICT_TYPE_NAMES):
+            return True
+        return self._vkinds_for(name, fn, stack).return_is_dict
+
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
         """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
 
@@ -3316,6 +3345,19 @@ dylib_exports: list = None, globals_base: int = None,
         if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
+        elif isinstance(value, F.CallExpr) and self._callee_is_dict(
+                M.subscript_callee_name(value) or M._flat_callee(value),
+                frozenset()):
+            # `d = mk()` where `mk` returns a dict. The binding has no literal
+            # in it, so this arm used to fall through to the clearing `else`
+            # and the subscript that followed took the SEQUENCE path: `d["a"]`
+            # was emitted as a load at the key's interned ADDRESS, and the
+            # image exited 1 from a build that was green. Measured on both
+            # architectures, for an annotated callee and for an unannotated one
+            # whose `return` states a dict literal. See
+            # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md.
+            self._dict_vars.add(name)
+            self._string_vars.discard(name)
         elif isinstance(value, F.SetExpr) or (
                 isinstance(value, F.Comprehension)
                 and value.kind in ("set", "list", "generator")):
@@ -3357,19 +3399,35 @@ dylib_exports: list = None, globals_base: int = None,
             self._dict_vars.discard(name)
 
     def _is_dict_subscript(self, obj) -> bool:
-        """True when `obj` is known to hold a dict pair-blob pointer."""
+        """True when `obj` is known to hold a dict pair-blob pointer.
+
+        Three sources, and the ORDER is the same precedence `_expr_str_kind`
+        uses for the string axis: the flow-sensitive `_dict_vars` first, since
+        it is strictly better informed than the whole-function map, and
+        `ValueKinds` after it for the shapes no BINDING statement can describe.
+
+        * `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+          COMPREHENSION is a `Comprehension` with kind='dict', and asking
+          only about literals sent `d[k]` down the index path. See
+          `M.is_dict_expr`.
+        * `_dict_vars` — what the emission of this very function has bound.
+        * `ValueKinds.is_dict_value` — the base with NO binding statement at
+          all, which is a `Dict[String, Int]` PARAMETER. Measured: `def show(d:
+          Dict[String, Int]): d["a"]` exited 1 with nothing printed on both
+          architectures, because a parameter is bound by the signature and
+          `_note_binding` never sees it. See
+          `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+        """
         if isinstance(obj, F.IdentExpr):
-            return obj.name in self._dict_vars
+            if obj.name in self._dict_vars:
+                return True
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
-            return key is not None and key in self._dict_vars
-        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
-        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
-        # only about literals sent `d[k]` down the index path. See
-        # `M.is_dict_expr`.
+            if key is not None and key in self._dict_vars:
+                return True
         if M.is_dict_expr(obj):
             return True
-        return False
+        return self._vkinds.is_dict_value(obj) is True
 
     def _is_string_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a char* (byte index path).
@@ -3783,6 +3841,20 @@ dylib_exports: list = None, globals_base: int = None,
         if self._is_dict_key_subscript(e):
             self._emit_dict_lookup_addr(e)
             return
+        # A string index against a base whose shape nothing states: the one
+        # spelling of this subscript that neither the dict path nor the byte
+        # path can answer, and the residue after
+        # `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`'s
+        # other three (a module slot, a call result and a `Dict[…]`-annotated
+        # parameter all have evidence now). Asked here — after the dict
+        # dispatch and before the blob fallback — because those two are the
+        # readings that DO exist and this is the pair the source does not
+        # choose between.
+        why = M.unstated_base_string_index_refusal(
+            False, self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
+            M.spelled(e.obj), M.spelled(e.index))
+        if why is not None:
+            raise CodegenError(why)
         if self._is_string_subscript(e.obj):
             # A string INDEX would make this `s + i` with two addresses. Asked
             # HERE, in the single choke point a read, a store and an augmented

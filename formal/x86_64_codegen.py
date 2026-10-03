@@ -33,7 +33,7 @@ raise CodegenError naming the construct rather than silently miscompiling.
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
-                          STRING_TYPE_NAMES)
+                          STRING_TYPE_NAMES, DICT_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import fire_compiler as F
@@ -3750,6 +3750,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if self._is_dict_subscript(e.obj):
             self._emit_dict_lookup_addr(e)
             return
+        # arm64's twin of the same refusal, asked at the same point in the same
+        # dispatch: a string index against a base whose shape nothing states,
+        # which is neither the dict KEY scan nor a byte offset into a `char *`.
+        # See
+        # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md.
+        why = M.unstated_base_string_index_refusal(
+            False, self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
+            M.spelled(e.obj), M.spelled(e.index))
+        if why is not None:
+            raise CodegenError(why)
         self._emit_expr(e.obj)
         self._push_slot(Reg.RAX)                    # base
         self._emit_expr(e.index)
@@ -4202,16 +4212,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer, so a
-        subscript is a key lookup rather than an index."""
+        subscript is a key lookup rather than an index.
+
+        arm64's twin, with the same three sources in the same precedence: the
+        literal, the flow-sensitive `_dict_vars`, and then
+        `ValueKinds.is_dict_value` for the base with no binding statement —
+        a `Dict[String, Int]` PARAMETER, which exited 1 with nothing printed
+        here as it did there. See
+        `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+        """
         # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
         # COMPREHENSION is a `Comprehension` with kind='dict', and asking
         # only about literals sent `d[k]` down the index path, which reads
         # the key as the value. See `M.is_dict_expr`.
         if M.is_dict_expr(obj):
             return True
-        if isinstance(obj, F.IdentExpr):
-            return obj.name in self._dict_vars
-        return False
+        if isinstance(obj, F.IdentExpr) and obj.name in self._dict_vars:
+            return True
+        return self._vkinds.is_dict_value(obj) is True
 
     def _refuse_string_iteration(self, op: str, obj) -> None:
         """Refuse to ITERATE a `char *` as a container.
@@ -6026,7 +6044,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
-            ctor_field_value=self._ctor_field_value_for(name))
+            ctor_field_value=self._ctor_field_value_for(name),
+            callee_is_dict=lambda callee: self._callee_is_dict(
+                callee, stack | {name}),
+            dict_names=DICT_TYPE_NAMES)
         self._vkinds_cache[name] = vk
         return vk
 
@@ -6324,6 +6345,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.signature_return_type(
             entry.get("signature") or "").strip() == "void"
 
+    def _callee_is_dict(self, name, stack):
+        """Whether a call to this unit's function `name` produces a DICT, or
+        None when the source does not say.
+
+        `_callee_kind`'s evidence read on the other axis, and arm64's twin. A
+        dict and a list are one word pointing at a blob with the same 8-byte
+        count header on this path, so `return_kind` says "a blob" for both and
+        `d["a"]` on the result of either took the SEQUENCE subscript — a load
+        at the key's interned address, and an exit 1 from a green build. The
+        declared return type says it outright (`-> Dict[String, Int]`), and a
+        callee that annotates nothing says it by unanimous agreement over its
+        return statements (`def mk(): … return d`).
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.declared_type_is_dict(getattr(fn, "return_type", None),
+                                   DICT_TYPE_NAMES):
+            return True
+        return self._vkinds_for(name, fn, stack).return_is_dict
+
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
         fn = self._functions.get(name)
@@ -6431,6 +6473,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if M.is_dict_expr(value) or (
                 isinstance(value, F.IdentExpr)
                 and value.name in self._dict_vars):
+            self._dict_vars.add(name)
+        elif isinstance(value, F.CallExpr) and self._callee_is_dict(
+                M.subscript_callee_name(value) or M._flat_callee(value),
+                frozenset()):
+            # `d = mk()` where `mk` returns a dict. arm64's twin, and the same
+            # consequence when it is missing: the binding holds no literal, so
+            # every later arm fell through and cleared `_dict_vars`, and
+            # `d["a"]` was emitted as a load at the key's interned ADDRESS.
+            # Measured on both architectures. See
+            # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md.
             self._dict_vars.add(name)
         elif self._is_container_expr(value) or (
                 isinstance(value, F.IdentExpr)
