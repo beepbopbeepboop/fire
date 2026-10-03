@@ -487,8 +487,7 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     # typedef came out of `_is_foreign_main`, three fields
                     # and no `self`. With one shared list, whichever member
                     # the fixup reaches first appends and every member (and
-                    # every env fill emitted from it) sees the field. See
-                    # bugs/CODEGEN_closure_env_struct_omits_a_captured_field.md.
+                    # every env fill emitted from it) sees the field.
                     _mci.captures = _shared_list
                     _mci.env_struct = _shared_env
                     _mci.mut_names = _shared_mut

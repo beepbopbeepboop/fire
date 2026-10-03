@@ -2071,7 +2071,6 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         # definition the same table declares `MojoDict *`. Same rule
         # `_lower_named_call` applies to `ret_type` itself a few hundred lines
         # up (emit_calls.py's `_SELFHOST_FUNC_RETURN_TYPES` fallback).
-        # See bugs/CODEGEN_compute_exc_descendants_call_site_return_temp_is_the_box.md.
         imported_ret = (gen.imported_symbols.get(fname) or {}).get('c_return_type')
     # Also check func_return_types (Mojo function return types) for same mismatch,
     # but skip if fname is a known C stdlib function (to avoid Mojo shadow overriding).

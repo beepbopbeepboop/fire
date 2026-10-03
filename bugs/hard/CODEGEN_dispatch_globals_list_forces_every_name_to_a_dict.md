@@ -1,13 +1,33 @@
 # `selfhost`: the dispatch-globals list forced every name to `MojoDict *`
 
-## Status: the reported defect is FIXED; the layer it was masking is 11 errors
-## from green and is four further defects, each filed separately.
+## Status: FIXED, and so is every defect it was masking — the self-host
+## closure's generated C compiles with **0** gcc errors and `selfhost` is
+## green. 2026-10-03, `work/merge-bugs3-r4`.
 
-`python3 tools/suite.py selfhost` still fails, but not for the reason this doc
-was written for. The four `# ERROR: compiling imported module ...` lines are
-gone, `gimple` / `modcache` / `linkmode` are green, and the self-host build's
-own gcc error count went **35 -> 11**. What is left is listed at the bottom,
-with a bug doc each.
+`python3 tools/suite.py selfhost` passes: it self-compiles, LINKS, and the
+produced binary compiles a two-line program to a 27 KB `.ci`
+(`test_selfhost.py`'s `run_produced_binary`). The error count went
+**35 -> 11 -> 0**, the 11 having been four further defects whose docs are
+deleted and whose fixes are one commit each on that branch:
+
+| errors | root cause | fix |
+|---|---|---|
+| 2 | a shared closure-env struct's field list was a per-member COPY, and the typedef is emitted from whichever member comes first | `mojo/middle/closures.py`, one shared list object per call group |
+| 1 | `_emit_call`'s `imported_symbols` text-scan guess outranked the pinned `_SELFHOST_SIGS` answer | `mojo/backend_gimple/emit_infra.py`, the cascade now skips names the pinned table lists |
+| 6 | the `s.fields` "don't know" placeholder `<Cls> *` outranked a `self.X = ...` assignment's evidence | `mojo/backend_gimple/module_gen.py`, `can_override` fires for it too |
+| 2 | `_func_kwargs_slot['MojoFunction___call__']` was the index for the OLD `(self, interpreter, *args, **kwargs)`, so the vararg merge packed one positional too few | a module-level `_SELFHOST_KWARGS_SLOTS` beside `_SELFHOST_SIGS`, checked from `inspect` in `test_gimple.py` |
+
+One further defect was behind the 0-byte `.ci` that survived all eleven: a
+`**expr` pair in a dict literal was stored as a dict KEY instead of merged, and
+this compiler's own `emit_infra.py::_reset_func` seeds `gen._dict_val_types`
+with one. Fixed in `mojo/backend_gimple/emit_exprs.py` and pinned by
+`test_gimple.py`'s `dict_literal_star_star_pair_merges_instead_of_storing`.
+
+**This file survives the fixes on purpose.** CLAUDE.md deletes the doc of a
+fully fixed bug, and the defect above is fully fixed — but what is left here is
+the one place the measurement recipe is written down, and it is what made the
+eleven tractable at all (below). Anyone changing the compiled path needs it;
+keep it, and keep the recipe in step with the tree.
 
 ## What I ran
 
@@ -178,35 +198,24 @@ are pre-existing and all four are reachable only through that rollback:
 Counts: 35 at the merged tip, 71 after the mapping, 53 after (1), 18 after
 (2)+(3), 11 after (4).
 
-## What is left, and where it is filed
+## What was left, and where it went
 
-Eleven errors, in four further defects, each with its own doc:
-
-* `bugs/CODEGEN_closure_env_struct_omits_a_captured_field.md` — 2 errors.
-  `gen_module_impl`'s merged closure env
-  (`gen_module_impl__is_foreign_main__mk_round_env`) declares three captured
-  fields and both the allocator and the body write a fourth, `self`.
-* `bugs/CODEGEN_selfhost_class_field_type_comes_from_the_receiver.md` — 4
-  errors. One defect behind all four: a self-host class's struct field typed
-  with a pointer to the RECEIVER. `MojoFunction._interp`,
-  `_MojoBoundComptimeFunction._interp` and `MojoOverloadSet._interp` (three
-  "non-trivial conversion" errors, and gcc prints the construct for them via
-  `bootstrap-stage2-cc`) plus `Parser._comptime_rhs_failures`, which is
-  ANNOTATED `list` and still gets it.
-* `bugs/CODEGEN_myinterpreter_star_args_call_passes_kwargs_twice.md` — 2
-  errors. `myinterpreter_MojoFunction___call__` is declared `(MojoFunction *,
-  MojoList *, MojoDict *)` and called with FOUR arguments.
-* `bugs/CODEGEN_compute_exc_descendants_call_site_return_temp_is_the_box.md` —
-  1 error. The call `self._exc_descendants =
-  _compute_exc_descendants(all_struct_defs)` declares its result temp `int64_t`
-  while the definition and the table both say `MojoDict *`.
-
-`python3 tools/suite.py mojoc` reports the identical eleven: it builds the same
-self-host closure, and `bootstrap-stage2-cc` gets far enough to compile it only
-because the stage-1 dumps came from the pre-merge tree.
+The section this replaces recorded the eleven as four open defects with four
+docs. All four are fixed, their docs are deleted with the fixes, and the table
+at the top names each root cause and the commit that closed it. Kept here only
+so the sequence is readable in one place; nothing in it is still open.
 
 ## Re-verify with
 
-`test_selfhost.py`, then `make bootstrap` — the residual errors are in the
-compiled closure's own bodies, and only a real stage-1/2/3 run says whether a
-fix to them holds.
+The recipe in "How it is measured now" above, then `test_selfhost.py`. It
+reports 0, and `python3 tools/suite.py mojoc selfhost bootstrap-stage2-cc
+gimple` is green — `mojoc` and `selfhost` build the same closure and
+`bootstrap-stage2-cc` compiles it, so all three are the same measurement by
+three routes.
+
+Note the two traps that recipe exists to avoid, both of which cost time here:
+`.ci` is 42 MB with a 22 MB `#line`-stripped copy, so regenerating it is ~2
+minutes and the syntax-only pass over the stripped copy is ~1.3 seconds (a
+30-minute `mojoc` per attempt is not needed), and the stripped copy has to be
+re-derived from the `.ci` each time — reusing a stale one silently reports the
+previous run's error list at the previous run's line numbers.
