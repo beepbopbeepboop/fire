@@ -267,9 +267,19 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # first-parameter-only defect this closes, and `AP._entry_arg_names` is the
     # reader both backends use -- so the two cannot bind a different number of
     # parameters than the entry has.
-    _sp = [p[0] for p in (fn.params or [])]
+    # `AP._entry_env`, not a comprehension written here: it is the one answer to
+    # "which Lean binder is this source parameter" (`_entry_arg_names` by
+    # position), and the copy that was here was keyed the WRONG WAY ROUND —
+    # theorem binder -> source name — while `_cmp_go` looks names up by their
+    # SOURCE spelling. So a two-parameter entry's second parameter was not in the
+    # environment at all, and the `NotImplementedError` that raised here was
+    # swallowed by the caller's `except Exception` and turned into the `sorry`
+    # form of this very section: a hole, silently, for every program whose
+    # condition mentions anything but the first parameter. `AP._collect_conds`
+    # used to DISCARD its `env` argument, which is why the wrong-way-round map
+    # was harmless while it was ignored, and why nothing caught it.
+    env = AP._entry_env(fn, arity)
     _en = AP._entry_arg_names(arity)
-    env = ({_en[i]: _sp[i] for i in range(len(_sp))} if _sp else {})
     # vtypes/call_types, so the `by_cases` conditions and the model's own `if`
     # are the same term, and `sKey` (ProofLib's sign-flip, which is how both
     # render a signed comparison) in the simp set so `simp` sees that the
