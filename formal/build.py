@@ -11674,6 +11674,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         | {child.name for st in structs_by_name.values()
            for _f, _s, child in M.struct_nested_frame_fields(
                st, structs_by_name)})
+    # …and the same premise's other half: a call to a function of THIS module
+    # whose declaration says it returns a plain word cannot hand back a blob,
+    # so a method may store one in a frame field. Published beside the table
+    # above and cleared with it, for the same reason: the consumer is a node
+    # walk with no unit in hand. A context manager's `__enter__` is what needed
+    # it — `self.name = mkdtemp(p)` — and `bugs/FORMAL_tempfile_context_
+    # manager_needs_a_way_out_of_a_with.md` is the measurement.
+    M.publish_plain_word_callees(M.plain_word_callee_names(
+        functions, structs_by_name,
+        int_names=FT.TYPE_NAMES, string_names=FT.STRING_TYPE_NAMES))
     # A method declared with NO parameters takes no receiver. `def first():`
     # inside a class is a plain function that happens to be spelled like a
     # method, and prepending `Regs` to its call passes a NAME where a value is
@@ -11717,6 +11727,24 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     from formal.imports import imported_modules as _imported_modules
     _this_unit_modules = tuple(_imported_modules(stmts) or ())
     for fn in functions:
+        # A `with` is CPython's context-manager PROTOCOL, and this path used to
+        # lower its first line and drop the two calls that ARE it — the emitters
+        # said so in their own docstrings, which is how `with
+        # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+        # answers and left the directory on disk, and how `with closing(7) as
+        # v:` printed `v=7` where CPython raises AttributeError.  Both are a
+        # wrong-but-exit-0 artifact with nothing on the link line to catch it.
+        #
+        # FIRST in the loop, for two reasons that are about what the rewrite
+        # emits.  It REPLACES a statement with four, and everything below reads
+        # this body as the source's shape: `_collect_one_field_receiver_rebinds`
+        # would otherwise see the `with`'s own statements (fine) while
+        # `_rewrite_method_calls` would see the context construction and decide
+        # a holder from a statement the source did not write.  And the lowered
+        # form is a `try`/`finally`, which the handler-arm refusal above has
+        # already cleared for this module: a `with` that lowered to a `try` with
+        # a handler would be refused for the wrong reason.
+        _rewrite_with_statements(fn, structs_by_name)
         # A one-field struct's mutator that rebinds its receiver to a name of its
         # own type. Asked HERE, at the top of the loop, because
         # `_rewrite_self_fields` below collapses `recv.<sole field>` onto `recv`
@@ -12045,6 +12073,209 @@ def _ambiguous_method_owners(base, structs_by_name: dict) -> list:
     declaring = [st for st in (structs_by_name or {}).values()
                  if any(m.name == base.member for m in M.struct_methods(st))]
     return declaring if len(declaring) > 1 else []
+
+
+# ── `with`: lowered to the protocol, or refused by name ───────────────────────
+#
+# The statement containers a `with` can sit inside, and the reason the list is
+# written out rather than discovered.  `M.rewrite_tree` is the mutating sibling
+# of `M.iter_nodes` and reaches every dataclass field, but it REPLACES a node
+# with what the visitor returns rather than splicing a list of statements into
+# its parent, and the lowering below is four statements where the source had
+# one.  So this walk owns the two things that needs: which fields hold
+# statements, and how a replacement list is spliced.
+#
+# `elifs` is its own entry because `IfStmt.elifs` is a list of TUPLES
+# `(condition, body)` — the only place in the tree where a container is not a
+# `list`, and invisible from a node's field list.  A walk that recursed on
+# `isinstance(value, list)` descends every `if` body and stops dead at the first
+# `elif`, which is measured (`formal/model.py`, the `_GenexpDesugarer` note):
+# a method call inside an `elif` arm once reached a late check unrewritten.
+# A nested `FunctionDef` is NOT descended: each function on the list this pass
+# runs over is visited on its own, and descending here would rewrite a body
+# twice — harmless while the rewrite is a no-op on a body with no `with`, and a
+# duplicated context manager the moment there is one.
+_STMT_LIST_FIELDS = {
+    "IfStmt": ("then_body", "else_body"),
+    "WhileStmt": ("body",),
+    "ForStmt": ("body",),
+    "TryStmt": ("body", "else_body", "finally_body"),
+    "MatchStmt": ("cases",),
+    "MatchCase": ("body",),
+    "ComptimeIfStmt": ("then_body", "else_body"),
+    "ComptimeForStmt": ("body",),
+    "WithStmt": ("body",),
+}
+_STMT_TUPLE_LIST_FIELDS = {
+    "IfStmt": ("elifs",),
+    "ComptimeIfStmt": ("elifs",),
+}
+# The one field name that is a list of statements on EVERY statement, so a new
+# node shape cannot be silently missed by the table above: `MatchCase.body` and
+# `WithStmt.body` are already in it, and a future `Match`-like node that adds a
+# body under another name is a row in `_STMT_LIST_FIELDS` instead of a bug found
+# by a program.
+_SKIP_DESCEND_FIELDS = {("FunctionDef", "body"), ("LambdaExpr", "body")}
+
+
+def _rewrite_stmt_lists(stmts: list, visit) -> list:
+    """`stmts` with `visit` applied to every statement, spliced where it splits.
+
+    `visit(stmt)` returns either the statement (kept) or a LIST of statements
+    that take its place.  The recursion happens BEFORE the visit, so a `with`
+    nested inside an `if` arm is rewritten whether the reader arrived at it
+    through this function's loop or through the arm.
+    """
+    out = []
+    for stmt in (stmts or []):
+        kind = type(stmt).__name__
+        for field in _STMT_LIST_FIELDS.get(kind, ()):
+            if (kind, field) in _SKIP_DESCEND_FIELDS:
+                continue
+            value = getattr(stmt, field, None)
+            if isinstance(value, list):
+                value[:] = _rewrite_stmt_lists(value, visit)
+        for field in _STMT_TUPLE_LIST_FIELDS.get(kind, ()):
+            for pair in (getattr(stmt, field, None) or []):
+                if isinstance(pair, (list, tuple)) and len(pair) == 2 \
+                        and isinstance(pair[1], list):
+                    pair[1][:] = _rewrite_stmt_lists(pair[1], visit)
+        pieces = visit(stmt)
+        out.extend(pieces if isinstance(pieces, list) else [pieces])
+    return out
+
+
+def _with_temp_names(fn) -> set:
+    """Every name the function's own body mentions, for a collision-free temp.
+
+    A `with` that evaluates its context expression once needs a name to hold it,
+    and the name has to be one the source cannot also mean: a `__with_ctx` that
+    shadowed a local would silently change what that local holds for the rest of
+    the function, which is a wrong answer rather than a refusal.  Every name in
+    the tree is collected — parameters, locals, fields spelled through a
+    receiver — because a name this function never assigns can still be READ.
+    """
+    names = set()
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        name = getattr(node, "name", None)
+        if isinstance(name, str):
+            names.add(name)
+        elif isinstance(node, F.MemberExpr):
+            member = getattr(node, "member", None)
+            if isinstance(member, str):
+                names.add(member)
+    return names
+
+
+def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
+    """Every `with` in `fn` becomes the protocol, or is refused by name.
+
+    What it emits, for one item, is CPython's own order:
+
+        <tmp> = EXPR                          # once, into a local
+        try:
+            TARGET = S___enter__(<tmp>)       # what the alias names
+            <body>
+        finally:
+            S___exit__(<tmp>)                 # on EVERY way out
+
+    `finally` rather than a statement after the body, and that is the whole
+    reason the cleanup is correct rather than nearly correct: measured on both
+    architectures, a `return` from inside a `try` body still runs the
+    `finally`, so `with TmpDir() as d: … return x` removes the directory —
+    which is the entire contract `formal/hostmods/tempfile.mojo` refuses to
+    fake.  A statement after the body would leave the directory behind on every
+    early return, and a temporary directory left behind is the bug this exists
+    to remove rather than a detail.
+
+    The callee is emitted as the LIFTED name `S___enter__` / `S___exit__`
+    rather than as `tmp.__enter__()`, for a reason that is about ordering rather
+    than taste: `_rewrite_method_calls` runs later in this same loop and is what
+    lifts `recv.m(a)` into `S_m(recv, a)`, so writing the lifted call here means
+    this pass does not depend on that one having run, on the receiver's frame
+    analysis existing yet, or on the dispatch table being asked to name a struct
+    from a receiver it has no table for yet.  The method is already a compiled
+    function taking `self` first, so the call is an ordinary call with the
+    frame address as its first argument — the by-reference receiver's own shape.
+
+    Multiple items nest: CPython enters left to right and exits right to left,
+    and nesting the rewrites inside one another produces exactly that.
+
+    `async with` is the same rewrite.  This path has no event loop, so there is
+    no suspension point for the protocol to resume across; the `is_async` flag
+    has no other meaning here, and the emitters already said so where they used
+    to drop the exit call.
+    """
+    used = _with_temp_names(fn)
+    counter = [0]
+
+    def fresh_name():
+        while True:
+            counter[0] += 1
+            name = f"_with_ctx{counter[0]}"
+            if name not in used:
+                used.add(name)
+                return name
+
+    def visit(stmt):
+        if not isinstance(stmt, F.WithStmt):
+            return stmt
+        items = list(stmt.items or [])
+        if not items:
+            # A `with` with no items has no context expression and no cleanup;
+            # there is nothing to lower and nothing to refuse, so it runs its
+            # body — which is also what it means.
+            return list(stmt.body or [])
+        # Inside-out, so the FIRST item's `__exit__` runs LAST.
+        result = list(stmt.body or [])
+        for item in reversed(items):
+            result = _one_with_item(fn, item, result, structs_by_name,
+                                    fresh_name)
+        return result
+
+    fn.body = _rewrite_stmt_lists(getattr(fn, "body", None), visit)
+
+
+def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name):
+    """One `with` item, wrapped around `body`. Raises CodegenError if it cannot."""
+    struct = M.with_expr_struct(item.expr, structs_by_name)
+    if struct is None or not M.struct_is_context_manager(struct):
+        raise CodegenError(
+            M.refuse_unlowerable_with(fn, item, item.expr, struct,
+                                      structs_by_name))
+    tmp = fresh_name()
+    enter = F.CallExpr(
+        func=F.IdentExpr(M.method_function_name(struct.name,
+                                               M.CONTEXT_ENTER)),
+        args=[F.IdentExpr(tmp)], kwargs=[])
+    exit_ = F.CallExpr(
+        func=F.IdentExpr(M.method_function_name(struct.name, M.CONTEXT_EXIT)),
+        args=[F.IdentExpr(tmp)], kwargs=[])
+    # `WithItem.alias` is typed `object` and is a bare STRING on this front end
+    # (and an `IdentExpr` where the self-hosted one boxes it), which is why
+    # `mojo/middle/boundnames.py` has a helper that asks the node case
+    # explicitly: `alias.name` on the string raises, and in the compiled path
+    # that raise silently truncated the enclosing function. Both spellings are
+    # accepted here for the same reason, and neither is normalised anywhere else.
+    alias = item.alias
+    alias_name = (alias if isinstance(alias, str)
+                  else getattr(alias, "name", None))
+    if isinstance(alias_name, str):
+        opened = F.VarDecl(alias_name, None, enter)
+    elif alias is None:
+        opened = F.ExprStmt(enter)
+    else:
+        # `with EXPR as (a, b)` and `with EXPR as obj.attr` are two shapes this
+        # path does not lower, and the alias is where the protocol's result
+        # goes, so it is refused rather than dropped: dropping it is a `with`
+        # whose contract is the exit call alone, with nothing bound.
+        raise CodegenError(M.refuse_unlowerable_with(
+            fn, item, item.expr, struct, structs_by_name))
+    return [
+        F.VarDecl(tmp, None, item.expr),
+        F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
+                  finally_body=[F.ExprStmt(exit_)]),
+    ]
 
 
 def _rewrite_method_calls(node, owners: dict, wide: dict = None,

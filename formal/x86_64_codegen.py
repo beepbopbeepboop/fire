@@ -365,12 +365,6 @@ def var_register_map(f: F.FunctionDef) -> dict[str, Reg]:
             for i, name in enumerate(names[:len(CALLEE_SAVED)])}
 
 
-def _with_item_alias_name(alias) -> str:
-    """The local name a `with ... as NAME` binds, or None."""
-    from mojo.middle.boundnames import _with_item_alias_name as _impl
-    return _impl(alias)
-
-
 def _callee_symbol(func) -> str | None:
     """Flatten a CallExpr callee to a symbol name string.
 
@@ -1710,10 +1704,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(stmt, F.WithStmt):
-            # async with lowers as a plain with (no event loop / context
-            # manager protocol on this path).
-            self._emit_with(stmt)
-            return
+            # An internal invariant, not a source construct.  `formal/build.py`
+            # lowers every `with` to the context-manager protocol before any
+            # codegen runs (`_rewrite_with_statements`), so a `WithStmt` here
+            # means that pass did not see it — and the emitter used to have a
+            # lowering of its own for it, which is how `with
+            # tempfile.TemporaryDirectory() as d:` built, ran, printed the right
+            # answers and left the directory on disk.  One implementation of the
+            # protocol, in the pass that owns statement rewriting.
+            raise CodegenError(
+                f"{getattr(self._cur_fn, 'name', '<module>')}: a `with` "
+                f"reached the emitter unrewritten, which is a bug in "
+                f"formal/build.py's `_rewrite_with_statements` and not a "
+                f"construct in this file: every `with` is lowered to "
+                f"`__enter__`/`__exit__` before codegen")
 
         if isinstance(stmt, F.IfStmt):
             self._emit_if(stmt)
@@ -2073,9 +2077,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         path (which, without EH, is simply the fall-through). A `finally` is
         pushed onto `_pending_finally` so the paths that leave early
         (return/break/continue/raise) run it too, and the normal fall-through
-        emits it here."""
+        emits it here.
+
+        The fall-through copy is emitted even when an exit edge inside the body
+        already flushed this frame, because that flush happens where the exit
+        is EMITTED while the fall-through is a different, still-reachable path
+        through the same block; dropping it is how a conditional `return` and a
+        `continue` inside a loop each cost a `finally` its cleanup on the normal
+        path (measured on both architectures, and the same fix and the same
+        measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
         fin = stmt.finally_body or []
-        need_fallthrough = bool(fin)
         if fin:
             self._pending_finally.append(fin)
         try:
@@ -2084,36 +2095,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
-            if fin:
-                if (self._pending_finally
-                        and self._pending_finally[-1] is fin):
-                    self._pending_finally.pop()
-                else:
-                    # A return/raise inside the body already flushed it, so
-                    # the frame is gone and this code is unreachable.
-                    need_fallthrough = False
-        if need_fallthrough:
-            for s in fin:
-                self._emit_stmt(s)
-
-    def _emit_with(self, stmt: F.WithStmt) -> None:
-        """with-items, without a context-manager protocol.
-
-        Evaluate each context expression for its side effects (open(), lock
-        acquisition, ...); with no __enter__/__exit__ runtime an `as` alias
-        binds to the context expression's own value, not to an entered one.
-        The body always runs on the fall-through path, and return/break/
-        continue inside it do no cleanup (there is none to do). `async with`
-        lowers as a plain with. Same reading as the arm64 backend.
-        """
-        for it in stmt.items or []:
-            self._emit_expr(it.expr)
-            if it.alias is not None:
-                alias = _with_item_alias_name(it.alias)
-                if alias is not None:
-                    self._store_var(alias, Reg.RAX)
-        for s in stmt.body:
+            if fin and self._pending_finally \
+                    and self._pending_finally[-1] is fin:
+                self._pending_finally.pop()
+        for s in fin:
             self._emit_stmt(s)
+
 
     def _emit_extern_call(self, name: str) -> None:
         """Call an unbound symbol, in whichever of the two extern forms the
@@ -7096,6 +7083,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if isinstance(e.func, F.MemberExpr) and \
                 self._is_value_receiver(e.func.obj):
             self._emit_value_method(e, e.func.member)
+            return
+        # `mod.S(...)` — a CONSTRUCTION of a struct the module publishes. The
+        # decision and its reasons are `model.dotted_struct_construction`, read
+        # from the same three tables arm64 reads, and placed immediately after
+        # the value-receiver arm for the reason that arm gives: a base that is a
+        # MODULE is the only thing left, and only for it is a dotted call a
+        # construction rather than an extern.
+        if not is_extern_call and M.dotted_struct_construction(
+                e.func, self._structs, self._import_aliases):
+            self._emit_struct_constructor(e, e.func.member,
+                                          self._structs[e.func.member])
             return
         # A TYPE is not a function. Intercepted before the extern path, which
         # would emit a `call _S` against a symbol named after the type —

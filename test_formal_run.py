@@ -178,15 +178,96 @@ CASES = [
     # — a diagnostic naming neither the construct nor an error the reader can
     # reproduce.
     #
-    # The expected answer is the two emitters' own documented lowering, not
-    # CPython's: with no `__enter__`/`__exit__` on this path the alias is bound
-    # to the context expression's VALUE and the body runs on the fall-through
-    # (`arm64_codegen._emit_with` and its x86-64 twin say so). 7 is what that is
-    # for `with 7 as y`, and `x = y` inside the body is what proves the alias
-    # was stored before the body rather than after it.
-    ("with_alias_is_bound_before_the_body",
+    # **This row used to expect the emitters' own lowering** — the alias bound to
+    # the context expression's VALUE, which is what `_emit_with` documented on
+    # both machines — and it is a `refuse:` case now, because `with` is lowered
+    # to the context-manager PROTOCOL (`formal/build.py`'s
+    # `_rewrite_with_statements`): `__enter__` produces the name the body sees
+    # and `__exit__` runs on the way out. `with 7 as y` has neither, and CPython
+    # raises `TypeError: 'int' object does not support the context manager
+    # protocol` — so the answer this path owes the reader is that refusal, not a
+    # program that binds `y` to 7 and silently skips the exit call. The
+    # property the row was written for is now
+    # `with_enter_binds_the_alias_before_the_body` below, where the alias is a
+    # real `__enter__` result.
+    ("with_on_a_word_is_the_context_manager_protocol_or_a_refusal",
      "def main():\n    x = 0\n    with 7 as y:\n        x = y\n"
-     "    printf(\"x=%d\", x)\n    return x\n", 7, "x=7"),
+     "    printf(\"x=%d\", x)\n    return x\n",
+     "refuse:is CPython's CONTEXT-MANAGER PROTOCOL", None),
+    # …and the property itself, on a value that IS a context manager. The alias
+    # is `__enter__`'s return value and not the object, which is the whole
+    # difference between the protocol and "bind the expression's own value":
+    # this program prints 20, and it would print 11 if the alias were the
+    # manager.
+    ("with_enter_binds_the_alias_before_the_body",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter@@\")\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def main():\n    x = 0\n    with Ctx(20, \"c\") as y:\n"
+     "        x = y\n        printf(\"x=%d@@\", x)\n"
+     "    printf(\"after=%d@@\", x)\n    return x\n",
+     20, "enter@@x=20@@exit@@after=20@@"),
+    # The exit on the FALL-THROUGH, and — the reason this is a separate row —
+    # on a `return` out of the block. A cleanup written "after the body" is
+    # right on the first and wrong on the second, and this path lowers the
+    # whole `with` to a `try`/`finally` so the second is right too. Before the
+    # fix this row also failed for a THIRD reason, in the emitters rather than
+    # here: a `finally` was dropped from the fall-through path once an exit edge
+    # inside the body had flushed it, which is a `finally` that silently does
+    # nothing (measured: a conditional `return` in the body printed nothing from
+    # the clause on the path that did not return).
+    ("with_exit_runs_on_an_early_return",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def f(n):\n    with Ctx(1, \"c\") as y:\n        printf(\"body@@\")\n"
+     "        if n > 0:\n            return 9\n    return 0\n\n"
+     "def main():\n    printf(\"r=%d@@\", f(1))\n    printf(\"r=%d@@\", f(0))\n"
+     "    return 0\n",
+     0, "body@@exit@@r=9@@body@@exit@@r=0@@"),
+    # Two items: CPython enters left to right and exits RIGHT TO LEFT, and
+    # nesting the rewrites inside one another is what produces that order.
+    ("with_two_items_exit_in_reverse_order",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter %s@@\", self.name)\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit %s@@\", self.name)\n"
+     "        return 0\n\n"
+     "def main():\n"
+     "    with Ctx(1, \"A\") as a, Ctx(2, \"B\") as b:\n"
+     "        printf(\"a=%d b=%d@@\", a, b)\n    return 0\n",
+     0, "enter A@@enter B@@a=1 b=2@@exit B@@exit A@@"),
+    # `with EXPR:` with no `as` — CPython still calls `__enter__` and still runs
+    # `__exit__`; the value is simply discarded. A lowering that treated a
+    # missing alias as "no context manager" would skip the exit, which is the
+    # silent half this whole protocol exists to remove.
+    ("with_no_alias_still_enters_and_exits",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        printf(\"enter@@\")\n"
+     "        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit@@\")\n"
+     "        return 0\n\n"
+     "def main():\n    with Ctx(1, \"c\"):\n        printf(\"body@@\")\n"
+     "    return 0\n",
+     0, "enter@@body@@exit@@"),
+    # A context manager inside a LOOP, with a `continue` — the exit has to run
+    # on that edge too, and it is the shape that found the dropped-`finally`
+    # defect above (a `continue` inside the block flushed the pending clause at
+    # EMIT time, so every LATER iteration's normal path had no cleanup at all).
+    ("with_exit_runs_on_a_continue_inside_a_loop",
+     "struct Ctx:\n    var tag: Int\n    var name: String\n"
+     "    fn __enter__(self) -> Int:\n        return self.tag\n"
+     "    fn __exit__(self) -> Int:\n        printf(\"exit %d@@\", self.tag)\n"
+     "        return 0\n\n"
+     "def f(n):\n    var i = 0\n    var seen = 0\n    while i < n:\n"
+     "        with Ctx(i, \"c\") as v:\n"
+     "            if v == 0:\n                i = i + 1\n                continue\n"
+     "            seen = seen + 1\n        i = i + 1\n    return seen\n\n"
+     "def main():\n    printf(\"seen=%d@@\", f(3))\n    return 0\n",
+     0, "exit 0@@exit 1@@exit 2@@seen=2@@"),
     ("seven", "def seven():\n    return 7\n", 7, None),
     ("absval", "def absval(n):\n    if n > 0:\n        return n\n"
                "    else:\n        return 0 - n\n", 10, None),

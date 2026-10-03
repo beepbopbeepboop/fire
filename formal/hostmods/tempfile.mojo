@@ -31,7 +31,7 @@ draw. Those 109 files, by the name each one binds:
 | name | files | what this module does about it |
 |---|---|---|
 | `mkdtemp` | 51 | **answered**, as `mkdtemp(prefix)` — see THE SIGNATURE below |
-| `TemporaryDirectory` | 64 | **absent**, and the reason is the second half of the module |
+| `TemporaryDirectory` | 64 | **answered**, with its removal on the way out — see `TemporaryDirectory` below and `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` for what it took |
 | `NamedTemporaryFile` | 9 | **absent** (a FILE OBJECT) |
 | `mkstemp` | 2 | **absent** (a two-element TUPLE) |
 | nothing | 2 | closure: they import `tempfile` and never use it |
@@ -133,20 +133,19 @@ and for the same reason — an empty path is not a directory.
 
 WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
 ----------------------------------------------------------------------
-  * `TemporaryDirectory` (64 files in the corpus, the largest single use of this
-    module) — **its whole contract is what happens on the way OUT of a `with`.**
-    `formal/hostmods/contextlib.mojo` measured that `with EXPR as TARGET`
-    evaluates `EXPR`, evaluates the body, and binds `TARGET` to the expression:
-    there is no dispatch through an `__exit__` to hook, and that is why
-    `nullcontext` is one function there. A `TemporaryDirectory` modelled as
-    "create the directory, return its path" would therefore build, run, print
-    the right answers, and **leave the tree behind** — which is the module's
-    own decision about `closing`, in its own words: "a name that answers the
-    easy half of its contract and drops the half that matters is the one thing a
-    mirror of CPython must not export." The half that matters here is the
-    removal, so the name is absent rather than half-present.
-    `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` has the
-    census, the measurement and the next step.
+  * `TemporaryDirectory`'s **`suffix=` and `dir=` arguments** — the two of its
+    parameters that are not answered here. `dir=` would be a field this struct
+    keeps and `__enter__` honours, and it is absent because every corpus
+    spelling that uses it (`dir=os.environ.get("TMPDIR")`, three sites) is
+    refused upstream by `os.environ` (`bugs/FORMAL_module_state_no_storage.md`)
+    — `io.mojo`'s rule again: a parameter is here when a caller needs it,
+    checked rather than assumed. `suffix=` cannot be honoured by ANY
+    implementation here: it goes at the END of the name, and this path has no
+    writable buffer to append into (`formal/model.py`'s
+    `LENGTH_DEPENDENT_METHODS` is the same absence that keeps `mkdtemp` a
+    one-parameter function). Both are CPython parameters, so a caller that
+    passes one is refused with `unexpected keyword argument` naming it rather
+    than given a wrong answer.
   * `NamedTemporaryFile`, `TemporaryFile` (9 files) — a FILE OBJECT: a `FILE *`
     and a cursor and a buffer, which is more than one 64-bit word, and
     `formal/hostmods/io.mojo` says the same thing one level up about `sys.stdout`.
@@ -182,6 +181,7 @@ from os import getenv_or, getcwd, mkdir
 from os.path import isdir, abspath, join
 from os._syscalls import fs_access, fs_arc4random
 from os._syscalls import str_len, str_build
+from shutil import rmtree
 
 # CPython's `tempfile.characters`, the alphabet `_RandomNameSequence` draws its
 # eight characters from. Read out of this interpreter's own `tempfile` by
@@ -395,3 +395,88 @@ def mkdtemp(prefix) -> str:
             return abspath(path)
         seq = seq + 1
     return ""
+
+struct TemporaryDirectory:
+    """`tempfile.TemporaryDirectory(...)` — a directory that is REMOVED on the
+    way out of the `with` that made it.
+
+    **This is the whole contract, and it is why the name used to be absent.**
+    `with EXPR as TARGET` used to evaluate `EXPR`, evaluate the body, and bind
+    `TARGET` to the expression: there was no dispatch through an `__exit__` to
+    hook, so a `TemporaryDirectory` modelled as "create the directory, return
+    its path" built, ran, printed the right answers and LEFT THE TREE BEHIND —
+    the module's own rule about `closing`, in its own words: "a name that
+    answers the easy half of its contract and drops the half that matters is
+    the one thing a mirror of CPython must not export." 64 of the 111 files the
+    corpus ranking counts use this one name.
+
+    **It is a struct with `__enter__` and `__exit__` because that is now what
+    a `with` lowers to** (`formal/build.py`'s `_rewrite_with_statements`, and
+    `formal/model.py`'s `struct_is_context_manager` for the rule): `__enter__`
+    produces the name the body sees, `__exit__` runs on the way out, and a
+    `with` whose value is not enterable and exitable is refused rather than
+    quietly skipping the exit. Two consequences worth stating, because both are
+    why this is shaped the way it is:
+
+      * **a context manager here must be a struct of more than one field.** A
+        one-field struct's receiver IS that field, so there is no address to
+        dispatch a method on and no room for the second thing. CPython's own
+        `TemporaryDirectory` keeps three attributes, so the honest mirror is
+        representable and this one is: `prefix` and `delete` are two of its
+        arguments, and `name` is its `.name`.
+      * **the directory is created by `__enter__`, not by the construction.**
+        A field's class-level initializer must be a LITERAL on this path (a call
+        in one is refused: "the default is not a literal, and this constructor
+        has no scope to evaluate it in"), and a `__init__` is lowered by inlining
+        its `self.<field> = <bare parameter>` stores at the construction site, so
+        a `__init__` whose body calls `mkdtemp` is refused too. `__enter__` is an
+        ordinary method and may do anything, and it runs before the body — so for
+        every `with` the directory exists for the whole block and is gone after
+        it. **The one divergence from CPython is an object used OUTSIDE a
+        `with`**: CPython creates the directory in `__init__`, so `t.name` is
+        readable before `with t:`, and here `t.name` is `""` until `__enter__`
+        runs. No caller in this corpus does that (measured: every one of the 64
+        uses is `with tempfile.TemporaryDirectory() as d:`), and the alternative
+        — creating the directory in the construction and not being able to remove
+        it — is the failure this file was written to refuse.
+
+    `delete=0` is CPython 3.12's `delete=False`: keep the directory. It is a real
+    field and `__exit__` reads it, rather than a second field invented to reach
+    the two a context manager needs.
+    """
+    var prefix: str = ""
+    var delete: Int = 1
+    var name: str = ""
+
+    fn __enter__(self) -> str:
+        """Create the directory and hand its path to the `with`'s name.
+
+        `gettempprefix()` when the caller gave no prefix, which is CPython's own
+        default; `mkdtemp` is the whole of the creation and returns `""` on every
+        failure (THE RETURN-VALUE RULE above), so a `with` whose directory could
+        not be made binds the empty string rather than a path that is not there.
+        """
+        var p = self.prefix
+        if str_len(p) == 0:
+            p = gettempprefix()
+        self.name = mkdtemp(p)
+        return self.name
+
+    fn __exit__(self) -> int:
+        """Remove what `__enter__` created — the whole point of the class.
+
+        `rmtree` and not `rmdir`: a temporary directory in this corpus is a
+        directory a program WRITES INTO (64 callers, every one of them building
+        something under `d`), and `rmdir` fails with `ENOTEMPTY` on a directory
+        that has entries in it, which would leave exactly the tree this contract
+        exists to remove. `maxdepth` is spelled because a call across a dylib
+        boundary cannot omit an argument
+        (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`).
+
+        The answer is `shutil.rmtree`'s — the number of entries removed, so a
+        `delete=0` manager and a failed removal are both distinguishable by a
+        caller that looks — and it is not CPython's `None`.
+        """
+        if self.delete == 0:
+            return 0
+        return rmtree(self.name, 64)

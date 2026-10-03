@@ -21030,9 +21030,16 @@ def _is_container_value(value, containers: set) -> str:
       * a list, tuple or dict DISPLAY — unconditionally a container;
       * a call to something this path does not place — conservatively a
         container, because `List[Self.T]()` is a bump-allocated region and a
-        call this path cannot see through might be one.  A call to a framed
-        struct of this unit is the exception: its result is a placed frame
-        address, one word, with a lifetime the frame layout governs;
+        call this path cannot see through might be one.  There are TWO
+        exceptions and both are about a result whose lifetime is not the
+        callee's activation.  A call to a framed struct of this unit is a placed
+        frame address, one word, with a lifetime the frame layout governs; and a
+        call to a function of this module whose DECLARED return type is a plain
+        word (`_callee_returns_plain_word`, published per module by
+        `publish_plain_word_callees`) hands back a `malloc`'d buffer or a number
+        rather than a region of the callee's scratch — which is what
+        `self.name = mkdtemp(p)` inside a context manager's `__enter__` is, and
+        it was refused here until that arm existed;
       * a NAME this method is known to have bound to a container
         (`containers`) — one hop of propagation, which is what catches
         `tmp = [1, 2, 3]; self.items = tmp`;
@@ -21050,6 +21057,19 @@ def _is_container_value(value, containers: set) -> str:
     if isinstance(value, F.CallExpr):
         callee = value.func.name if isinstance(value.func, F.IdentExpr) else None
         if callee and _callee_is_placed_frame(callee):
+            return ""
+        if callee and _callee_returns_plain_word(callee):
+            # The callee is a function of THIS module and its declaration says
+            # it returns a word. That settles the question premise (B1) asks,
+            # because the hazard is specific: a container is a bump-allocated
+            # region of the CALLEE's scratch, so it dies with the callee's
+            # activation, while a `str` is a `malloc`'d buffer the caller owns
+            # and a number is a number. Measured on the case that needed it:
+            # `self.name = mkdtemp(p)` inside `TemporaryDirectory.__enter__` was
+            # refused here, which is the same refusal
+            # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`
+            # needed closed before `with tempfile.TemporaryDirectory() as d:`
+            # could mean anything.
             return ""
         return (f"a call to {callee!r}, whose result this path does not place "
                 f"— `List[T]()` and every other container constructor on this "
@@ -21116,6 +21136,67 @@ def _container_write(node, receivers, found: list, containers: set) -> None:
 
 
 _PLACED_FRAME_CALLEES = None
+
+# The callees of THIS module whose DECLARED return type is a plain word — a
+# string, an integer, a pointer — and so cannot hand back a bump-allocated blob.
+# Published for the same reason `_PLACED_FRAME_CALLEES` is: the container-write
+# scan is a node walk over one struct's methods with no unit in hand, and the
+# unit is the only thing that knows what a callee's declaration says. Cleared at
+# the same point, by the same call, because a stale table would answer about a
+# module this process is no longer compiling.
+_PLAIN_WORD_CALLEES = None
+
+
+def publish_plain_word_callees(names) -> None:
+    """Tell the container-write scan which callees of this module return a word.
+
+    The narrowing that premise (B1) needed and did not have: a method that
+    stores `mkdtemp(p)` into a frame field was refused because "a call this
+    path cannot see through might be" a container constructor, while
+    `mkdtemp`'s own declaration says it returns a `str` — and a `str` here is a
+    `malloc`'d buffer the caller owns for as long as it likes
+    (`formal/hostmods/os/_syscalls.mojo`, `str_alloc`), or an interned literal,
+    and never a region of the callee's reserved scratch. Storing one in a slot
+    the caller outlives is therefore exactly as safe as storing a number, and
+    the refusal was a true statement about an unstated possibility applied to a
+    program that had said what it meant.
+
+    Only functions of THIS module are in the table. A callee in another unit is
+    a call this path cannot see through whatever its source says, and the
+    conservative reading is the right one there: the whole premise is about a
+    value whose lifetime is the callee's activation, and across a dylib boundary
+    this build has the callee's declaration but not its allocation.
+    """
+    global _PLAIN_WORD_CALLEES
+    _PLAIN_WORD_CALLEES = frozenset(names or ())
+
+
+def _callee_returns_plain_word(callee: str) -> bool:
+    return bool(_PLAIN_WORD_CALLEES) and callee in _PLAIN_WORD_CALLEES
+
+
+def plain_word_callee_names(functions, structs_by_name=None,
+                            int_names=(), string_names=()) -> set:
+    """The functions of a module whose declared return type is a plain word.
+
+    `declared_type_kind` is asked rather than a private list of type names,
+    because that function is the one place that maps an annotation to a
+    representation and the two backends already read it — a second list here
+    would be a second answer to "is `-> str` a word", and they would drift the
+    first time a name was added to one of them.
+
+    A FRAME return is a word too and is deliberately absent: a frame address is
+    one word, but a frame belongs to the function that created it, so storing
+    one in a slot has its own lifetime question and is not this table's answer.
+    """
+    out = set()
+    decls = structs_by_name or {}
+    for fn in functions or ():
+        ann = getattr(fn, "return_type", None)
+        kind = declared_type_kind(ann, int_names, string_names, decls)
+        if kind in (STR_KIND, INT_KIND, "float", "bool"):
+            out.add(fn.name)
+    return out
 
 
 def _callee_is_placed_frame(callee: str) -> bool:
@@ -21605,10 +21686,22 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        if not isinstance(node, F.CallExpr) or not isinstance(node.func,
-                                                             F.IdentExpr):
+        if not isinstance(node, F.CallExpr):
             continue
-        st = framed.get(node.func.name)
+        # A construction is a BARE `S(...)` or a DOTTED `mod.S(...)`, and both
+        # reserve the same block: the object is laid out by whoever builds it,
+        # and `mod.S(...)` builds it here. Reading only the bare spelling made
+        # this table and the emitter disagree — the emitter emitted the
+        # construction and this table had reserved nothing for it, which is the
+        # "the frame layout and the body disagree" refusal, on a program with
+        # nothing wrong with it.
+        if isinstance(node.func, F.IdentExpr):
+            st = framed.get(node.func.name)
+        elif isinstance(node.func, F.MemberExpr) \
+                and isinstance(node.func.member, str):
+            st = framed.get(node.func.member)
+        else:
+            continue
         if st is None:
             continue
         nested, block = struct_frame_block_layout(st, structs_by_name)
@@ -26557,3 +26650,212 @@ def variadic_read_refusal(fn_name: str, name: str, is_kwarg: bool,
             f"change to the calling convention both backends AND the Lean "
             f"proof share. Take the arguments as named parameters, or read "
             f"them from a list the caller passes")
+
+
+# ── `with`: the context-manager protocol, and the only shape of it this path can
+#    honour ────────────────────────────────────────────────────────────────────
+#
+# `with EXPR as TARGET:` is not "evaluate, bind, run the body".  In CPython it is
+# `mgr = EXPR; TARGET = type(mgr).__enter__(mgr); <body>; type(mgr).__exit__(…)`,
+# and the two calls are the whole point: a `contextlib.redirect_stdout` that does
+# not redirect, a `TemporaryDirectory` that does not remove, and a
+# `contextlib.closing` that never closes all look like working programs, print
+# their results, and exit 0.  This path used to lower the first line and drop the
+# other two — the emitters' own docstrings said so ("with-items without a
+# context-manager protocol … an `as` alias is bound to the expression result
+# itself") — which made every one of those a wrong-but-exit-0 answer with
+# nothing on the link line to catch it.
+#
+# The fix is not a wider value: a context manager here has to be a value this
+# path can dispatch two methods on, and the only such value is a FRAME ADDRESS
+# (the by-reference receiver, `struct_is_framed`).  So the protocol is lowered
+# for a framed struct that declares both `__enter__` and `__exit__`, and every
+# other `with` is refused by name — which is what CPython itself does with one
+# that has neither (AttributeError), stated here as a refusal because this
+# backend has no unwinder to raise it through.
+
+CONTEXT_ENTER = "__enter__"
+CONTEXT_EXIT = "__exit__"
+
+
+def struct_is_context_manager(struct_def) -> bool:
+    """True when `struct_def` is a context manager this path can enter and exit.
+
+    Three conditions, each of which is a separate capability rather than a
+    detail:
+
+      * it declares BOTH dunders.  `__enter__` alone binds the alias and leaves
+        the way out with nothing to call, which is the silent half this whole
+        family exists to stop; `__exit__` alone has no way to produce the value
+        the alias names.
+      * its receiver is a FRAME (`struct_is_framed`).  A one-field struct's
+        receiver IS its field — there is no address to call a method on, and no
+        place to keep a second thing — so a one-field class cannot be a context
+        manager here however the two dunders are written.  This is the price of
+        the one-word value model and it is stated rather than hidden: CPython's
+        own `TemporaryDirectory` and `nullcontext` both keep more than one
+        attribute, so the honest mirror of either is representable.
+      * neither dunder takes an argument other than the receiver, and `__enter__`
+        RETURNS a value.  `__exit__`'s three exception arguments are a question
+        about the unwinder this path does not have (see
+        `refuse_dropped_handler_arm`): there is nothing to pass them, and a
+        `__exit__` that wanted them could not act on them anyway.
+    """
+    if struct_def is None or not struct_is_framed(struct_def):
+        return False
+    methods = {getattr(m, "name", None): m for m in struct_methods(struct_def)}
+    for name in (CONTEXT_ENTER, CONTEXT_EXIT):
+        m = methods.get(name)
+        if m is None or _dunder_receiver_params(m) != 1:
+            return False
+    return True
+
+
+def _dunder_receiver_params(method) -> int:
+    """How many parameters a method declares, receiver included; -1 if unknown.
+
+    `*args`/`**kwargs` cannot be counted from the tree and are -1, which fails
+    every comparison here — a variadic context-manager method is refused rather
+    than assumed, for the same reason a variadic call is
+    (`refuse_variadic_parameter_read`).
+    """
+    params = list(getattr(method, "params", None) or ())
+    if getattr(method, "vararg", None) or getattr(method, "kwarg", None):
+        return -1
+    return len(params)
+
+
+def with_expr_struct(expr, structs_by_name: dict, functions: dict = None):
+    """The struct a `with` item's EXPRESSION constructs, or None if undecidable.
+
+    Deliberately narrow: the expression must be a CONSTRUCTION, spelled
+    `S(...)` or `mod.S(...)`, and `S` must be a struct this image knows.  Every
+    other spelling answers None, which the caller turns into the refusal below.
+
+    The narrowness is the point.  A context manager is entered through its
+    type, so the question "what type is this value" has to have an answer that
+    is a fact rather than a guess, and on this path the only fact available is
+    the constructor the source itself wrote.  A name, a field read, a call to
+    some other function: each would need a return-type table this image does not
+    have for values that cross a dylib boundary, and each guess is a program
+    that enters the wrong `__enter__`.
+
+    `mod.S(...)` resolves through the same table as `S(...)` on purpose: a
+    context manager published by a host module (`tempfile.TemporaryDirectory`) is
+    a struct of THIS image too, because `formal/build.py` compiles the imported
+    module's own declarations into `structs_by_name` before this runs.
+    """
+    if isinstance(expr, tuple):        # a parenthesised expression
+        expr = expr[0] if expr else None
+    callee = getattr(expr, "func", None)
+    if callee is None:
+        return None
+    # `mod.S(...)` is a `MemberExpr`, whose `member` is a plain string — the
+    # same two spellings `_with_item_alias_name` has to ask about, and read
+    # here rather than through a helper so this function answers for the AST it
+    # is handed.
+    name = getattr(callee, "name", None) or getattr(callee, "member", None)
+    if not isinstance(name, str) or not name:
+        return None
+    return structs_by_name.get(name)
+
+
+def refuse_unlowerable_with(fn, where, expr, struct, structs_by_name) -> str:
+    """Why this `with` cannot be the context-manager protocol, in reader's terms.
+
+    The three shapes this message has to tell apart, because they are three
+    different edits and a reader who cannot tell them apart looks for the wrong
+    one:
+
+      * the expression CONSTRUCTS a struct that is not enterable — not framed
+        (the one-word value model), or framed without both dunders.  The fix is
+        in the struct, and the message says which half is missing.
+      * the expression constructs a struct that IS enterable but this image does
+        not compile — which cannot happen here and is not given an arm, because
+        an arm that is never reached is a sentence a future reader has to check.
+      * the expression is not a construction at all, so nothing says what type it
+        is.  The fix is in the spelling: bind the context manager in a `var`
+        this build can see the type of, or construct it here.
+
+    The sentence that matters most is the last one: what this path used to do
+    instead.  A `with` lowered as "evaluate, bind, run the body" is a program
+    that builds, runs, prints its results and exits 0 while skipping the call
+    that is the entire contract — the failure CLAUDE.md calls the one no check
+    on this path can see.
+    """
+    # The `with` ITEM is what carries the line, and it is what the reader's
+    # editor jumps to; the statement's own line is the same line here and would
+    # be one hop away when they ever differ.
+    line = getattr(where, "line", 0) or 0
+    head = f"line {line}: " if line else ""
+    # `expr_spelling`, not a private spelling helper: a diagnostic about a `with`
+    # that printed `CallExpr` would send the reader to the AST, which is the
+    # opposite of what quoting the call site is for.
+    spelled = expr_spelling(expr)
+    detail = ("this build cannot answer what type it is, because it is not a "
+              "construction of a struct this image compiles"
+              if struct is None else
+              ("it is a struct of ONE field, so its receiver IS that field and "
+               "there is no address to call a method on"
+               if not struct_is_framed(struct) else
+               f"it declares no {CONTEXT_ENTER}"
+               + ("" if _declares(struct, CONTEXT_EXIT)
+                  else f" and no {CONTEXT_EXIT}")
+               + ", so there is nothing to enter and nothing to call on the way "
+                 "out"))
+    return (
+        f"{head}{fn.name}: `with {spelled} as …` is CPython's CONTEXT-MANAGER "
+        f"PROTOCOL — `type(mgr).__enter__` binds the name, and "
+        f"`type(mgr).__exit__` runs on the way out — and this path cannot "
+        f"honour it here: {detail}. A formal value is one 64-bit word, so the "
+        f"only value this path can enter and exit is a FRAMED struct that "
+        f"declares both dunders (`struct_is_context_manager`), whose receiver is "
+        f"the frame's address. Binding the name to the expression's own value "
+        f"and running the body — which is what this path used to do — builds a "
+        f"program that exits 0 having skipped the call that IS the contract: "
+        f"CPython raises AttributeError on a word, a redirect that does not "
+        f"redirect prints the program's own output and looks right, and a "
+        f"temporary directory is left on disk. Give the value a struct with "
+        f"`{CONTEXT_ENTER}` and `{CONTEXT_EXIT}`, or construct it in the `with` "
+        f"itself; a `with` whose context is a plain value cannot be made "
+        f"faithful here."
+    )
+
+
+def _declares(struct_def, method_name) -> bool:
+    return any(getattr(m, "name", None) == method_name
+               for m in struct_methods(struct_def))
+
+
+def dotted_struct_construction(func, structs: dict, import_aliases: dict) -> bool:
+    """True when `mod.S(...)` constructs a struct this image knows — not an extern call.
+
+    A dotted call has three readings and the emitters used to know two of them:
+    `recv.m(...)` is a method call on a value, and `mod.f(...)` is a call across
+    a module boundary.  The third is a CONSTRUCTION of a struct that the module
+    publishes, and it has to be read as one because the dylib exports a struct's
+    METHODS and not its constructor (`_formal_exports`: a frame-returning
+    function is not exportable and a struct's fields are laid out by whoever
+    builds the object), so `mod.S(...)` is lowered inline by the caller exactly
+    as a bare `S(...)` is.
+
+    Left on the extern path it became `BL mod.S` — a flat symbol no library
+    defines — and the failure arrived as a link-time "the image would bind 1
+    symbol(s) that nothing provides", which names a missing provider rather than
+    the reading that was wrong.
+
+    Two conditions, and the first is what keeps this from swallowing a method
+    call: the BASE has to be a name this unit imported as a module
+    (`import_aliases` is `{local name: (module, defining name)}`, the same table
+    the dotted-callee arm of both emitters already consults), so `recv.m(...)`
+    on a local, on a field, on a string literal or on a frame slot is not
+    touched here — those are decided by position and by receiver shape, and they
+    are decided earlier.
+    """
+    if not isinstance(func, F.MemberExpr):
+        return False
+    member = getattr(func, "member", None)
+    if not isinstance(member, str) or member not in (structs or {}):
+        return False
+    base = getattr(func, "obj", None)
+    return isinstance(base, F.IdentExpr) and base.name in (import_aliases or {})

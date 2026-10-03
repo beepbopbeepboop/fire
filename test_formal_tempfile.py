@@ -4,7 +4,7 @@ r"""Build `formal/hostmods/tempfile.mojo` and RUN it against CPython's `tempfile
     python3 test_formal_tempfile.py [-v] [group ...]
 
 Groups: `constants`, `gettempdir`, `candidates`, `mkdtemp`, `name`, `exclusive`,
-`absent`. With no argument, all.
+`temporary-directory`, `absent`. With no argument, all.
 
 WHY THE ORACLE IS CPython'S OWN `tempfile` AND NOT A TABLE OF ANSWERS
 --------------------------------------------------------------------
@@ -60,6 +60,7 @@ convention every other host-module suite here follows.
 import argparse
 import os
 import platform
+import shutil
 import stat as CPY
 import sys
 import tempfile as CPY_TEMPFILE     # the oracle. Not shadowed below: every
@@ -629,11 +630,6 @@ def group_absent(tmpdir, archs, verbose):
 
     Four shapes, and each is a different reason:
 
-      * `TemporaryDirectory` — its contract is the removal on the way OUT of a
-        `with`, and `formal/hostmods/contextlib.mojo` measured that there is no
-        `__exit__` to dispatch to. **64 of the 111 files** the ranking counts
-        want this one, so the refusal is the most consequential line in this
-        file and it is asserted rather than left in a docstring.
       * `NamedTemporaryFile` — a FILE OBJECT: a `FILE *` and a cursor and a
         buffer, which is more than one 64-bit word.
       * `mkstemp` — a `(fd, name)` tuple, which is a frame blob.
@@ -655,15 +651,11 @@ def group_absent(tmpdir, archs, verbose):
     question the same way. `test_formal_core_hostmods.py`'s absent groups make
     the same choice for the same reason.
     """
+    # `TemporaryDirectory` was in this list until the `with` statement learned to
+    # run an `__exit__` (`formal/build.py`'s `_rewrite_with_statements`); it is
+    # in the `temporary-directory` group now, with its contract measured rather
+    # than asserted absent.
     cases = [
-        ("TemporaryDirectory", """\
-from tempfile import TemporaryDirectory
-
-def main(n):
-    with TemporaryDirectory() as d:
-        printf("d=%s@@", d)
-    return 0
-""", "TemporaryDirectory"),
         ("NamedTemporaryFile", """\
 from tempfile import NamedTemporaryFile
 
@@ -712,8 +704,134 @@ def main(n):
     return True, f"{len(cases)} absent names refused, each naming itself"
 
 
+def group_temporary_directory(tmpdir, archs, verbose):
+    """`with TemporaryDirectory() as d:` — created on the way IN, GONE on the
+    way out, on both architectures.
+
+    The contract, and the reason the name used to be absent: a
+    `TemporaryDirectory` whose removal never happened would build, run, print
+    the right answers and leave the tree behind, which is the module's own rule
+    about `closing` ("a name that answers the easy half of its contract and
+    drops the half that matters is the one thing a mirror of CPython must not
+    export"). **64 of the 111 files** the corpus ranking counts use this one
+    name, so what is asserted here is the removal and not the path.
+
+    Four shapes, and each is a different way the exit could be skipped:
+
+      * the plain block — `__exit__` runs on the fall-through path;
+      * a `return` from inside the block — the cleanup has to happen on the way
+        out of the FUNCTION, which is the shape a cleanup written "after the
+        body" gets wrong, and `formal/build.py` lowers this `with` to a
+        `try`/`finally` for exactly this reason;
+      * `delete=0`, CPython 3.12's `delete=False` — the directory SURVIVES, so
+        a test that only ever checked "gone" would pass an implementation that
+        never removed anything and never kept anything either;
+      * the `prefix=` spelling, because the corpus uses it (8 sites) and because
+        it is the one that proves the constructor's arguments reach a field.
+
+    Every path is checked by asking the FILESYSTEM, from this process, whether
+    the directory the image printed exists — not by asking the image, which is
+    the program under test. A `printf` inside `__exit__` would prove the exit
+    ran; `os.path.isdir` proves the tree is gone.
+    """
+    src = """\
+import os
+from tempfile import TemporaryDirectory
+
+def early():
+    with TemporaryDirectory() as d:
+        printf("early=%s@@", d)
+        return 1
+    return 0
+
+def kept():
+    with TemporaryDirectory(delete=0) as d:
+        printf("kept=%s@@", d)
+    return os.path.isdir(d)
+
+def main(n):
+    with TemporaryDirectory() as d:
+        printf("plain=%s@@", d)
+        printf("inside=%d@@", os.path.isdir(d))
+    printf("after=%d@@", os.path.isdir(d))
+    with TemporaryDirectory(prefix="formal-td-") as p:
+        printf("prefix=%s@@", p)
+    printf("prefixafter=%d@@", os.path.isdir(p))
+    printf("earlyret=%d@@", early())
+    printf("keptafter=%d@@", kept())
+    return 0
+"""
+    seen = {}
+
+    def compare(arch, recs):
+        got = recs_of(recs)
+        for label in ("plain", "early", "kept", "prefix"):
+            path = got.get(label)
+            check(path, f"[{arch}] {label} printed no path, so nothing else in "
+                        f"this group is meaningful: {got}")
+            check(os.path.isabs(path),
+                  f"[{arch}] {label}={path!r} is not an absolute path, so "
+                  f"this process cannot check it")
+            # Deliberately NOT `os.path.isdir(path)` here: the image has already
+            # exited by the time this runs, and the only directories that can
+            # still be on disk are the ones the contract says to KEEP. The
+            # "exists while the block is open" half is `inside=`, which the
+            # image asks the filesystem itself from inside the block.
+        check(got.get("inside") == "1",
+              f"[{arch}] the directory did not exist INSIDE the block "
+              f"(inside={got.get('inside')!r})")
+        check(got.get("after") == "0",
+              f"[{arch}] the directory SURVIVED the block "
+              f"(after={got.get('after')!r}) — the whole contract of this name")
+        check(got.get("prefixafter") == "0",
+              f"[{arch}] the `prefix=` directory survived the block "
+              f"(prefixafter={got.get('prefixafter')!r})")
+        check(got.get("earlyret") == "1",
+              f"[{arch}] the `return` from inside the block did not return 1 "
+              f"(earlyret={got.get('earlyret')!r})")
+        check(got.get("keptafter") == "1",
+              f"[{arch}] `delete=0` did not keep the directory "
+              f"(keptafter={got.get('keptafter')!r})")
+        seen[arch] = got
+
+    # The four paths carry eight RANDOM characters each, so the two
+    # architectures cannot be compared record-for-record and `cross` drops them.
+    # Every record that IS comparable — `inside`, `after`, `prefixafter`,
+    # `earlyret`, `keptafter` — still has to be byte-identical across the two,
+    # which is the point `build_and_run` makes about a module that lowers
+    # differently on the two machines.
+    def without_paths(recs):
+        return [r for r in recs
+                if not r.startswith(("plain=", "early=", "kept=", "prefix="))]
+
+    D.build_and_run(src, "tdprobe", tmpdir, compare, backends=archs,
+                    cross=without_paths)
+    for arch, got in seen.items():
+        for label in ("plain", "early", "prefix"):
+            path = got.get(label, "")
+            check(not os.path.exists(path),
+                  f"[{arch}] {label}={path!r} is still on disk after the image "
+                  f"exited — `__exit__` did not remove it")
+    # The one thing this process has to clean up, and it is the ONE case where
+    # the image is supposed to leave something behind.
+    for arch, got in seen.items():
+        kept = got.get("kept")
+        check(kept and os.path.isdir(kept),
+              f"[{arch}] delete=0 did not leave the directory on disk "
+              f"({kept!r}): `__exit__` removed what CPython keeps, so this "
+              f"suite's 'it is gone' assertions would pass an implementation "
+              f"that removed everything")
+        if kept and os.path.isdir(kept):
+            shutil.rmtree(kept, ignore_errors=True)
+    if verbose:
+        print(f"    created, removed, removed-on-return, kept-with-delete=0; "
+              f"{len(archs)} backends")
+    return True, f"created in, gone out (return too), delete=0 keeps it"
+
+
 GROUPS = {
     "constants": group_constants,
+    "temporary-directory": group_temporary_directory,
     "gettempdir": group_gettempdir,
     "candidates": group_candidates,
     "mkdtemp": group_mkdtemp,
