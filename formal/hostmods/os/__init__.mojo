@@ -303,7 +303,7 @@ def unsetenv(name) -> int:
 #     k in os.environ          environ_has(e, k)
 #     os.environ.get(k)        environ_get(e, k)          0 when unset
 #     os.environ.get(k, d)     environ_get_or(e, k, d)
-#     os.environ.keys()        environ_keys(e)            a blob of the keys
+#     os.environ.keys()        environ_keys(e, i) for i < environ_count(e)
 #     os.environ.items()       environ_items(e)           the view itself
 #     os.environ[k] = v        e2 = environ_set(e, k, v)  see that function
 #     del os.environ[k]        environ_del(e, k)          0, or -1 when unset
@@ -597,66 +597,55 @@ def environ_del(e: Pointer[Int64], k) -> int:
     return 0
 
 
-def environ_keys(e: Pointer[Int64]) -> Pointer[Int64]:
-    """`os.environ.keys()` as a blob, in the same `[count][element]…` shape.
-
-    A NEW blob and the CALLER OWNS it, released by `environ_free`.  Its
-    elements are COPIES of the view's keys rather than aliases of them, and
-    that is the reason `environ_free` is one function for both blobs: a keys
-    blob of aliases would need a second release function and every caller would
-    have to know which of the two it was holding, which is the kind of
-    knowledge a shape is supposed to remove.  So the keys are copied, one
-    allocation each, and both blobs can be released the same way.
-
-    A keys blob of an EMPTY view is `1` word with 0 in it, not a 0: the 0 is
-    what `environ()` returns when there is no environment at all.
-    """
-    if e == 0:
-        return 0
-    n = e[0]
-    var b: Pointer[Int64] = malloc(8 * (1 + n))
-    memset(b, 0, 8 * (1 + n))
-    i = 0
-    while i < n:
-        b[1 + i] = str_dup(e[1 + 2 * i])
-        i = i + 1
-    b[0] = n
-    return b
-
-
 def environ_items(e: Pointer[Int64]) -> Pointer[Int64]:
     """`os.environ.items()` — which IS the view, so this returns `e` itself.
 
     The pairs of a view are `(environ_key(e, i), environ_value(e, i))` for
     `i < environ_count(e)`, so the items view and the view are the same words in
-    the same order.  A second blob with a different layout would be a second
-    representation of one fact, and `environ_del` above reorders pairs in place
-    — two layouts would then have to be kept in step with each other for no
-    gain.  So this names the operation and hands back the thing it already is;
-    a caller that wants a COPY has `environ_keys` for the half of it that is not
-    an alias of a value.
+    the same order, and `environ_keys` below is the same two accessors again.
+    A second blob for either one would be a second representation of one fact,
+    and `environ_del` above reorders pairs in place — two layouts would then
+    have to be kept in step with each other for no gain.
     """
     return e
 
 
+def environ_keys(e: Pointer[Int64], i) -> str:
+    """The `i`th key of `os.environ.keys()`, i.e. `environ_key(e, i)`.
+
+    **THERE IS NO KEYS BLOB, and this is why.** `keys()` is the keys of the view
+    in the view's order, which is `environ_key(e, i)` for `i < environ_count(e)`
+    — the whole of it, with no copy and no second shape.  A `[count][key]…`
+    blob was written first and is wrong in a way worth recording: `environ_free`
+    releases a view's pairs at words `1 + 2i` and `2 + 2i`, so handing it a
+    `[count][key]…` blob frees words `1, 3, 5, …` as if they were keys, reads
+    past the end for every other one, and lands in the allocator with a double
+    free — measured, SIGABRT after a whole correct run of every other operation
+    in the program, which is the worst possible moment for it.  Two shapes need
+    two release functions, and a caller holding one blob and not knowing which
+    of the two it is holding is exactly the knowledge a shape is supposed to
+    remove.
+    """
+    return environ_key(e, i)
+
+
 def environ_free(e: Pointer[Int64]) -> int:
-    """Release a view, a keys blob, or an `items()` view. 0.
+    """Release a view and every buffer in it. 0.
 
     A view is `1 + 2n` allocations — every key, every value, and the blob — and
     this is all of them, in the count's own order so a blob that `environ_del`
-    has left stale words past its count cannot free one of them twice.  A keys
-    blob is `1 + n`, and `environ_free` reads its count and frees the key at
-    `1 + i`, which is the right word in both shapes because the words either
-    side of the count are ELEMENTS in both.
+    has left stale words past its count cannot free one of them twice.  There is
+    exactly ONE shape of blob this module hands out (`environ`, and `items()`
+    which is the same words), and that is what lets this be one function.
 
     0 for a 0, so the same call releases "nothing" and a caller that never had
     a view does not have to test first — the bargain `listdir_free` makes.
 
     **A KEY OR A VALUE IS NOT A BLOB AND MUST NOT COME HERE.** Both are
-    aliases into a view (`environ_key`, `environ_value`), so freeing one would
-    leave the view holding a pointer the C library has already reclaimed.  The
-    strings `os_free` releases are a different set: those are the ones the path
-    functions allocated on their own.
+    aliases into a view (`environ_key`, `environ_value`, `environ_get`), so
+    freeing one would leave the view holding a pointer the C library has
+    already reclaimed.  The strings `os_free` releases are a different set:
+    those are the ones the path functions allocated on their own.
     """
     if e == 0:
         return 0

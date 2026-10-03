@@ -91,12 +91,25 @@ class Case:
     """
 
     def __init__(self, name, source, expect=None, oracle=None, refusal=None,
-                 archs=None, archs_reason=None):
+                 archs=None, archs_reason=None, env=None):
         self.name = name
         self.source = source
         self.expect = expect
         self.oracle = oracle
         self.refusal = refusal
+        # The ENVIRONMENT the image is started with, or None to inherit this
+        # process's. It is a constructor argument and not an oracle fact
+        # because of the one case that needs it: `os.environ`'s whole claim is
+        # that it is populated from the real environment, so a case that reads
+        # it has to know exactly which environment "the real" was. Inheriting
+        # gives an answer that changes with the machine and with whatever ran
+        # before — measured, and the difference is not small: this process's
+        # `os.environ` and the `envp` block its child inherits disagreed by one
+        # entry, because a shell adds `_` to the child's block and cannot add
+        # it to a parent that has already started. A fixed dict answers that,
+        # and a fixed dict can hold the shapes an inherited one cannot (a
+        # variable set to the empty string, a value containing `=`).
+        self.env = env
         # Which architectures this case can run on, or None for all of them, and
         # WHY when the list is short. The reason is a constructor argument and
         # not a sentence in the runner because this file used to carry ONE
@@ -775,6 +788,285 @@ def _listdir_oracle(root):
     return out
 
 
+# ── 7. `os.environ`, against a FIXED process environment ───────────────────
+#
+# The fifth construct, and the only one whose answer is a fact about the host
+# rather than about a file: the process environment. `formal/hostmods/os/
+# __init__.mojo` reaches the `envp` block by asking the dynamic loader for the
+# `environ` global at RUN time (`os/_syscalls.mojo`'s `fs_environ_vec`), so
+# what has to be measured is that the block the kernel actually built is the
+# block the view reports — the keys, the values, the ORDER, the count, and the
+# two shapes an inherited environment cannot provide.
+#
+# **THE ENVIRONMENT IS FIXED, AND THAT IS THE POINT.** An inherited one cannot
+# answer this: a shell adds `_` to a child's block and cannot add it to a parent
+# that has already started, so this process's `os.environ` and the `envp` its
+# child inherits are not the same dictionary — measured, one entry apart before
+# any test code ran. A fixed dict makes the oracle exact, and it lets the case
+# hold the two entries that separate a dict from a `getenv(3)` wrapper:
+#
+#   * `FORMAL_ENV_VIEW_EMPTY` set to the EMPTY STRING. Present, and not the same
+#     as absent. `os.getenv` cannot tell those apart (both are `""`) and
+#     `environ_get` can (0 against `""`), which is the whole reason the view is
+#     a dict and not three functions.
+#   * `FORMAL_ENV_VIEW_EQUALS` whose VALUE contains `=`. The split is at the
+#     FIRST `=`, which is what `execve` says, so this is key
+#     `FORMAL_ENV_VIEW_EQUALS` and value `a=b=c`.
+#
+# ORDER is compared, not just membership: the view walks `envp` in the order the
+# block has, `subprocess` builds that block from this dict's iteration order,
+# and CPython's `os.environ` keeps the order it was given. Two of the three
+# moving and the third not would show up as a mismatch on `K0`.
+#
+# The `@@` in a value is replaced before it is printed, for the reason `REC`
+# gives: a value that contained the terminator would split a record in half and
+# the suite would report a disagreement that is really its own punctuation.
+ENV_VIEW_ENV = {
+    # Present on BOTH architectures and in this exact position on purpose.
+    # `run_case` starts the x86-64 image through `arch -x86_64`, and a
+    # TRANSLATED process is launched with `__CF_USER_TEXT_ENCODING` in its
+    # environment whether the parent put it there or not — measured, arm64 with
+    # `env -i` sees 0 variables and x86-64 with `env -i` sees this one. Putting
+    # it in the fixed dict is what makes the two arms compare the SAME block:
+    # the wrapper SETS the variable rather than appending a second one, so with
+    # it declared both arms see exactly these entries in exactly this order.
+    "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
+    "FORMAL_ENV_VIEW_PLAIN": "one",
+    "FORMAL_ENV_VIEW_EMPTY": "",
+    "FORMAL_ENV_VIEW_EQUALS": "a=b=c",
+    "FORMAL_ENV_VIEW_SPACE": "two words",
+    "FORMAL_ENV_VIEW_TAIL": "last",
+}
+
+ENV_VIEW_PROGRAM = """\
+from os import environ, environ_count, environ_key, environ_value
+from os import environ_find, environ_get, environ_get_or, environ_has
+from os import environ_set, environ_del, environ_items, environ_keys
+from os import environ_free, getenv, putenv
+from os._syscalls import str_replace_all
+
+def show(s):
+    return str_replace_all(s, "@@", "\\x01")
+
+
+def main(n):
+    var e = environ()
+    var c = environ_count(e)
+    printf("count %d@@", c)
+    printf("start-has %d@@", environ_has(e, "FORMAL_ENV_VIEW_PROBE"))
+    # EVERY key and value, in order: the whole claim of the view is that the
+    # block the kernel built is the block this reports.
+    var i = 0
+    while i < c:
+        printf("K%d [%s]@@", i, show(environ_key(e, i)))
+        printf("V%d [%s]@@", i, show(environ_value(e, i)))
+        i = i + 1
+    # a key that is not there, through every spelling of "not there"
+    printf("find-missing %d@@", environ_find(e, "FORMAL_ENV_VIEW_PROBE"))
+    printf("has-missing %d@@", environ_has(e, "FORMAL_ENV_VIEW_PROBE"))
+    printf("getor-missing [%s]@@",
+           show(environ_get_or(e, "FORMAL_ENV_VIEW_PROBE", "dflt")))
+    printf("del-missing %d@@", environ_del(e, "FORMAL_ENV_VIEW_PROBE"))
+    # out of range in both directions
+    printf("oob-key [%s]@@", show(environ_key(e, c)))
+    printf("neg-value [%s]@@", show(environ_value(e, 0 - 1)))
+    printf("items-is-view %d@@", environ_items(e) == e)
+    printf("keys-vs-key %d@@", environ_keys(e, 0) == environ_key(e, 0))
+    printf("keys-oob [%s]@@", show(environ_keys(e, c)))
+    # `os.environ[k] = v` on a key that is not there: the blob grows and BOTH
+    # answers move, because CPython's __setitem__ calls putenv.
+    var e2 = environ_set(e, "FORMAL_ENV_VIEW_PROBE", "one")
+    printf("set-new-count %d@@", environ_count(e2))
+    printf("set-new-has %d@@", environ_has(e2, "FORMAL_ENV_VIEW_PROBE"))
+    printf("set-new-get [%s]@@", show(environ_get(e2, "FORMAL_ENV_VIEW_PROBE")))
+    printf("set-new-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PROBE")))
+    # and on a key that is: the value is replaced, the count does not move
+    var e3 = environ_set(e2, "FORMAL_ENV_VIEW_PROBE", "two")
+    printf("set-same-count %d@@", environ_count(e3))
+    printf("set-same-get [%s]@@", show(environ_get(e3, "FORMAL_ENV_VIEW_PROBE")))
+    # `putenv` after the snapshot moves getenv and NOT the view, which is
+    # CPython's own rule rather than a limitation of this one.
+    printf("putenv %d@@", putenv("FORMAL_ENV_VIEW_LATE", "late"))
+    printf("late-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_LATE")))
+    printf("late-view-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_LATE"))
+    printf("late-view-get-is-0 %d@@",
+           environ_get(e3, "FORMAL_ENV_VIEW_LATE") == 0)
+    # `del os.environ[k]`: the pair goes and the variable goes
+    printf("del %d@@", environ_del(e3, "FORMAL_ENV_VIEW_PROBE"))
+    printf("del-count %d@@", environ_count(e3))
+    printf("del-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_PROBE"))
+    printf("del-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PROBE")))
+    # the keys, at both ends, after the pair that was appended is gone
+    printf("keys-0 [%s]@@", show(environ_keys(e3, 0)))
+    printf("keys-last [%s]@@", show(environ_keys(e3, environ_count(e3) - 1)))
+    printf("free-view %d@@", environ_free(e3))
+    return 0
+"""
+
+
+def _env_view_oracle():
+    """CPython's answers for `ENV_VIEW_PROGRAM` over `ENV_VIEW_ENV`.
+
+    The environment-dependent half is read off `ENV_VIEW_ENV` rather than off
+    this process's `os.environ`, because `ENV_VIEW_ENV` is what the image is
+    started with — see `ENV_VIEW_ENV`'s own comment for why those are not the
+    same dictionary.
+
+    The rest are CPython's answers about the operations, stated rather than
+    derived, and each is a fact the case would otherwise only be able to check
+    against the module:
+
+      * `set-new-getenv` is `[one]` because `os.environ[k] = v` calls `putenv`,
+        so `os.getenv(k)` answers the new value too;
+      * `late-view-has` is 0 and `late-getenv` is `[late]` because
+        `os.putenv` changes what `os.getenv` says and leaves `os.environ`
+        holding what it held — the disagreement this module's `putenv`
+        docstring is about, measured rather than described;
+      * `del-getenv` is `[]` because `__delitem__` calls `unsetenv`;
+      * `del-missing` is -1 where CPython raises `KeyError`, and
+        `getor-missing` is the default where `os.environ.get(k, d)` would
+        return it. Both are the recorded divergence, pinned.
+    """
+    items = list(ENV_VIEW_ENV.items())
+    n = len(items)
+    out = {
+        "count": str(n),
+        "start-has": "0",
+        "find-missing": "-1",
+        "has-missing": "0",
+        "getor-missing": "[dflt]",
+        "del-missing": "-1",
+        "oob-key": "[]",
+        "neg-value": "[]",
+        "items-is-view": "1",
+        "keys-vs-key": "1",
+        "keys-oob": "[]",
+        "set-new-count": str(n + 1),
+        "set-new-has": "1",
+        "set-new-get": "[one]",
+        "set-new-getenv": "[one]",
+        "set-same-count": str(n + 1),
+        "set-same-get": "[two]",
+        "putenv": "0",
+        "late-getenv": "[late]",
+        "late-view-has": "0",
+        "late-view-get-is-0": "1",
+        "del": "0",
+        "del-count": str(n),
+        "del-has": "0",
+        "del-getenv": "[]",
+        "keys-0": f"[{items[0][0]}]",
+        "keys-last": f"[{items[-1][0]}]",
+        "free-view": "0",
+    }
+    for i, (k, v) in enumerate(items):
+        out[f"K{i}"] = f"[{k}]"
+        out[f"V{i}"] = f"[{v}]"
+    return out
+
+
+CASES.append(Case("environ_view", ENV_VIEW_PROGRAM, None,
+                  oracle=_env_view_oracle, env=dict(ENV_VIEW_ENV)))
+
+
+# ── 8. `os.environ`: a variable set to the EMPTY STRING, and an EMPTY view ──
+#
+# The other end of the same range, and the one that separates a dict from a
+# `getenv(3)` wrapper. `environ_get` answers 0 for a key that is NOT there and
+# `""` for a key that is there holding nothing, and those two are the same word
+# through `os.getenv` — `formal/hostmods/os/__init__.mojo`'s `getenv`
+# docstring says so and this is the case that would notice if it stopped being
+# true.
+#
+# It also walks a view down to ZERO pairs, which is the smallest view there is
+# and the only place `environ_keys(e, -1)` is asked of a real view rather than
+# of an index past the end.
+#
+# `__CF_USER_TEXT_ENCODING` is here for the reason `ENV_VIEW_ENV` gives, and it
+# carries `arch`'s own value: a translated process OVERWRITES that variable
+# rather than adding one, so passing it empty is not the way to get an empty
+# value — measured, arm64 answered `[]` and x86-64 answered
+# `[0x1F9:0x0:0x0]` for the same dict. `ENV_VIEW_ENV`'s value is the one that
+# makes the two arms agree.
+ENV_VIEW_EMPTY_ENV = {
+    "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
+    "FORMAL_ENV_VIEW_EMPTY": "",
+}
+
+ENV_VIEW_EMPTY_PROGRAM = """\
+from os import environ, environ_count, environ_key, environ_value
+from os import environ_has, environ_get, environ_set, environ_del
+from os import environ_keys, environ_free
+
+NAME = "FORMAL_ENV_VIEW_EMPTY"
+ABSENT = "FORMAL_ENV_VIEW_ABSENT"
+
+def main(n):
+    var e = environ()
+    var c = environ_count(e)
+    printf("count %d@@", c)
+    printf("empty-has %d@@", environ_has(e, NAME))
+    printf("empty-get [%s]@@", environ_get(e, NAME))
+    # THE CASE: present-and-empty is NOT absent, and the two are different
+    # words.
+    printf("empty-get-is-0 %d@@", environ_get(e, NAME) == 0)
+    printf("absent-has %d@@", environ_has(e, ABSENT))
+    printf("absent-get-is-0 %d@@", environ_get(e, ABSENT) == 0)
+    printf("keys-0 [%s]@@", environ_keys(e, 0))
+    printf("keys-last [%s]@@", environ_keys(e, c - 1))
+    # overwriting a key that IS there replaces the value and leaves the count
+    var e2 = environ_set(e, NAME, "x")
+    printf("set-same-count %d@@", environ_count(e2))
+    printf("set-same-get [%s]@@", environ_get(e2, NAME))
+    # and `del` walks the view down to nothing
+    printf("del-empty %d@@", environ_del(e2, NAME))
+    printf("del-empty-count %d@@", environ_count(e2))
+    printf("del-cf %d@@", environ_del(e2, "__CF_USER_TEXT_ENCODING"))
+    printf("del-count %d@@", environ_count(e2))
+    printf("del-has %d@@", environ_has(e2, NAME))
+    printf("keys-empty [%s]@@", environ_keys(e2, 0))
+    printf("keys-neg [%s]@@", environ_keys(e2, 0 - 1))
+    printf("free %d@@", environ_free(e2))
+    return 0
+"""
+
+
+def _env_view_empty_oracle():
+    """CPython's answers for a two-variable environment, one of them empty.
+
+    `empty-get-is-0` is 0 and `absent-get-is-0` is 1, and that pair is the whole
+    case: `os.environ[NAME]` is `""` and `os.environ.get(ABSENT)` is `None`, so
+    an implementation that answered both with the same word could not tell them
+    apart — which is exactly what `os.getenv` cannot do either, and why this is
+    the case rather than one more lookup in the case above.
+    """
+    return {
+        "count": "2",
+        "empty-has": "1",
+        "empty-get": "[]",
+        "empty-get-is-0": "0",
+        "absent-has": "0",
+        "absent-get-is-0": "1",
+        "keys-0": "[__CF_USER_TEXT_ENCODING]",
+        "keys-last": "[FORMAL_ENV_VIEW_EMPTY]",
+        "set-same-count": "2",
+        "set-same-get": "[x]",
+        "del-empty": "0",
+        "del-empty-count": "1",
+        "del-cf": "0",
+        "del-count": "0",
+        "del-has": "0",
+        "keys-empty": "[]",
+        "keys-neg": "[]",
+        "free": "0",
+    }
+
+
+CASES.append(Case("environ_view_empty", ENV_VIEW_EMPTY_PROGRAM, None,
+                  oracle=_env_view_empty_oracle,
+                  env=dict(ENV_VIEW_EMPTY_ENV)))
+
+
 def build(src, out, arch):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
@@ -783,7 +1075,7 @@ def build(src, out, arch):
     return p.returncode, (p.stderr or p.stdout or "")
 
 
-def run(out, arch):
+def run(out, arch, env=None):
     """`(rc, stdout, stderr)` for one image, a HANG reported rather than raised.
 
     A timeout is a FAILURE of the case, not of the suite: a formal image that
@@ -793,13 +1085,18 @@ def run(out, arch):
     hangs is reported and every other case still runs. `rc` is the shell's
     timeout convention (124) and stderr names the timeout, so the caller sees a
     case that failed with a reason rather than a case that vanished.
+
+    `env` replaces the environment the image starts with; `None` inherits this
+    process's, which is what every case but `environ_view` wants. It is the
+    CHILD's block either way: `arch` on the x86-64 arm is resolved in this
+    process, so a case with a minimal `env` still finds it.
     """
     argv = [out]
     if arch == "x86_64" and sys.platform == "darwin":
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT)
+                           timeout=RUN_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
     return p.returncode, p.stdout, p.stderr
@@ -931,7 +1228,7 @@ def run_case(case, arch, tmpdir, verbose, fixture=None):
         return True, ""
     if rc != 0:
         return False, f"build failed: {text.strip()[-400:]}"
-    rc, stdout, stderr = run(out, arch)
+    rc, stdout, stderr = run(out, arch, case.env)
     if rc != 0:
         return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
     got = parse(stdout)
