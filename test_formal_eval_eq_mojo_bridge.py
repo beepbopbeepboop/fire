@@ -341,14 +341,16 @@ class TestTheBridgeBindsEveryParameter(unittest.TestCase):
 # source model that is a model of a different program.  Nothing caught it
 # because both sides of the bridge made the SAME mistake -- `evalExpr` evaluated
 # `unop "not"` the same way -- so `eval_eq_mojo` agreed, about a program nobody
-# ran.  `bugs/FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one.md`
-# is the measurement; the fix carries four sites (three in the generator, one in
+# ran.  The bug that measured this was filed as
+# FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one and is FIXED,
+# so its doc is deleted per CLAUDE.md and the commit that landed this is the
+# record.  The fix carries four sites (three in the generator, one in
 # `lib/ProofLib.lean`) and has to carry all four, because a fix that lifted only
 # the `_go` halves would make `eval_eq_mojo` FALSE for every program using `~`.
 #
-# The machine half turned out to need a fifth change, which the same doc
-# asserted was not needed ("`~` lowers to ORN/NOT, and both are in the step
-# tables"): `arm64_step`'s ORN arm matched `0x0A200000`, which is ORN
+# The machine half turned out to need a fifth change, which that bug's "what is
+# NOT the cause" asserted was not needed ("`~` lowers to ORN/NOT, and both are
+# in the step tables"): `arm64_step`'s ORN arm matched `0x0A200000`, which is ORN
 # (IMMEDIATE), while the codegen emits ORN (SHIFTED REGISTER) at `0xAA200000`
 # as `MVN`'s alias -- so the word `~x` lowers to fell through every arm, and
 # proof generation for ANY program containing `~` was refused with "CFG
@@ -530,8 +532,8 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
     instruction bytes, so it is the one assertion that cannot be satisfied by
     two wrong renderings of the same source. Before the fix it could not even be
     reached on arm64 (proof generation refused the program), and on the x86-64
-    generator the same program's run test is what reported `is false` in
-    `bugs/FORMAL_the_semantic_model_renders_a_bitwise_not_as_a_logical_one.md`.
+    generator the same program's run test is what reported `is false` (the bug doc
+    is deleted with its fix; the commit that landed this is the record).
 
     Skipped, loudly, when Lean or `lib/ProofLib.olean` is absent -- and that is
     a real gap in this file's coverage, because the fix it checks cannot be
