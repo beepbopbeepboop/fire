@@ -3740,16 +3740,23 @@ def _definitely_stored(blocks: list, entry: int, seed: set,
     # reads: a name is available at a READ POINT only if the implication held
     # when the block was ENTERED, so the block's own definitions — which run
     # after any statement above them — must not be in the value a read consults.
-    # `universe` is this domain's top: "no claim", which is what a block the
-    # condition says nothing about contributes, and which narrowing from
-    # removes. It is the opposite choice from the stored-names domain above for
-    # a reason that is the whole difference between the two: "every name is
-    # stored" is a safe top for a fixpoint that narrows towards a refusal,
-    # while "if this condition held, EVERY name is stored" is a claim, and a
-    # block reached before the test has no such claim to make.
-    guarded_out: dict = {b.index: {k: frozenset(universe) for k in keys}
+    # **This domain is initialised from the BOTTOM and grows, which is the
+    # opposite choice from the stored-names domain above and is not a
+    # preference.** A claim is a set of names the analysis PROVES are stored
+    # whenever the condition held, so "no names" is the safe starting point and
+    # "every name" is not: seeding it with the universe had the header of the
+    # first `if` imply every name, which propagated into the join and made the
+    # mechanism a no-op. Growing means the transfer must be monotone upwards —
+    # a block's claim is the meet over its predecessors' claims plus its own
+    # definitions, and both only gain — which is what makes the loop-carried
+    # claim converge instead of oscillating.
+    #
+    # The cost of the bottom is that the meet cannot tell "this predecessor
+    # proved nothing" from "this predecessor proved nothing on any path", and it
+    # treats both as the latter, which is the direction that refuses more.
+    guarded_out: dict = {b.index: {k: frozenset() for k in keys}
                          for b in blocks}
-    guarded_in: dict = {b.index: {k: frozenset(universe) for k in keys}
+    guarded_in: dict = {b.index: {k: frozenset() for k in keys}
                         for b in blocks}
     changed = True
     rounds = 0
@@ -3770,10 +3777,27 @@ def _definitely_stored(blocks: list, entry: int, seed: set,
                 p_out = (out[p] | blocks[p].defs) - blocks[p].kills
                 merged = set(p_out) if merged is None else (merged & p_out)
                 pf = facts[p]
+                # The same first-round back-edge skip as the claim below, and
+                # for the same reason: a fact is true here only if every path
+                # says so, and a loop's own body cannot say so until the header
+                # that enters it has — so counting the un-computed back edge
+                # drops the fact at the body and every path round the loop loses
+                # it. A `while`'s body really is only reachable when the
+                # condition held.
+                if rounds == 1 and p > b.index:
+                    continue
+                # `pf.get(k) is v` and NOT `pf.get(k, v) is v`: a predecessor
+                # that says nothing about the condition DISAGREES about it being
+                # true on every path, because a path that reached here without
+                # passing any test of it is one where it may be false. The
+                # default made those agree, and a join after a `break` out of
+                # one arm of a loop — whose other predecessor is the loop
+                # header, which never tested anything — came out believing the
+                # body's fact and accepted `return p` where CPython raises.
                 merged_facts = (
                     dict(pf) if merged_facts is None
                     else {k: v for k, v in merged_facts.items()
-                          if pf.get(k, v) is v})
+                          if pf.get(k) is v})
             if merged is None:
                 # The entry block has no predecessors: its IN set is the seed
                 # and its facts are whatever it introduces.
@@ -3830,31 +3854,53 @@ def _definitely_stored(blocks: list, entry: int, seed: set,
             merged_in: dict = {}
             merged_out: dict = {}
             for k in keys:
+                # A block that WRITES a name the condition mentions drops the
+                # claim: the condition's own value moved, so an implication
+                # carried from an EARLIER test of it says nothing about here —
+                # the fact is dead and the claim that rode on it dies with it.
+                # `is_tuple = f()` between two `if is_tuple:` arms is the
+                # shape, and dropping only the fact would leave the claim to
+                # license the very read the fact existed to justify.
                 if written_here & ((cond_names or {}).get(k) or set()):
-                    # The condition's own value moved in this block, so an
-                    # implication carried from an EARLIER test of it says
-                    # nothing about here — the fact is dead and the claim that
-                    # rode on it dies with it. `is_tuple = f()` between two
-                    # `if is_tuple:` arms is the shape, and dropping only the
-                    # fact would leave the claim to license the very read the
-                    # fact existed to justify.
                     merged_in[k] = frozenset()
                     merged_out[k] = frozenset()
                     continue
                 acc_in = None
                 for p in b.preds:
+                    # A predecessor that reaches this block only by the
+                    # condition having FAILED contributes nothing: the claim is
+                    # vacuous on that path, and that is what makes it vacuous
+                    # rather than what makes it false. **Skipping it is the whole
+                    # mechanism** — counted as a claim, it intersects the
+                    # implication away at the join after the first `if` and the
+                    # second one has nothing left to use.
                     if (b.false_from or {}).get(p) == k:
                         continue
                     if facts[p].get(k) is False:
                         continue
-                    cand = set(guarded_out[p].get(k) or ())
-                    acc_in = cand if acc_in is None else (acc_in & cand)
-                # A block nothing reaches claims nothing, and the entry block's
-                # claim is its own definitions: those ran on every path, so
-                # every condition implies them and nothing else does yet.
+                    # Every OTHER predecessor constrains, and a predecessor with
+                    # no claim of its own constrains to NOTHING: it is a path on
+                    # which no name is implied, and treating it as unconstraining
+                    # would hand this block the other paths' names.
+                    #
+                    # …except on the FIRST round, where a predecessor that comes
+                    # LATER in the block order is a loop's back edge and its
+                    # claim is not computed yet. Counting it then is what makes a
+                    # loop's body claim nothing: the body's only other way in is
+                    # the loop header, and the meet of the header's claim with
+                    # the empty claim the back edge carries is empty, so
+                    # nothing is ever carried around the loop. Skipping it for one
+                    # round leaves this block with the claim its FORWARD paths
+                    # justify — an over-estimate, since a meet can only shrink —
+                    # and every round after this one intersects the rest.
+                    if rounds == 1 and p > b.index:
+                        continue
+                    cand = guarded_out[p].get(k) or frozenset()
+                    acc_in = set(cand) if acc_in is None else (acc_in & cand)
                 claim = frozenset() if acc_in is None else frozenset(acc_in)
                 merged_in[k] = claim
-                merged_out[k] = frozenset((set(claim) | b.defs) - b.kills)
+                merged_out[k] = frozenset(claim | b.defs) if not b.kills \
+                    else frozenset(claim | b.defs) - b.kills
             if merged_in != guarded_in[b.index]:
                 guarded_in[b.index] = merged_in
                 changed = True
