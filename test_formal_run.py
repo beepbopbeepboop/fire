@@ -2352,26 +2352,44 @@ CASES = [
      "    printf(\"%d\\n\", r)\n"
      "    return 0\n",
      "refuse:unary '-' is refused on a string", None),
-    # `not s` is the one that is a fabricated FALSITY rather than a fabricated
-    # number, and it is the worst of the set for that reason: a pointer is
-    # never zero, so `not s` is FALSE for every string INCLUDING THE EMPTY
-    # ONE. Observed on the pre-change tree, on both backends:
-    #     s = "abc"; e = ""; printf("%d %d", 1 if not s else 0, 1 if not e else 0)
-    # printed `0 0`. Python's answer is `0 1` — a program testing a string for
-    # emptiness is told the empty string is non-empty.
+    # `not s` was a FABRICATED FALSITY rather than a fabricated number, and it
+    # was the worst of the set for that reason: a pointer is never zero, so the
+    # old lowering (`cmp #0; cset eq` on the operand's own word) said `not s` is
+    # False for every string INCLUDING THE EMPTY ONE.  Observed on the pre-change
+    # tree, on both backends: `s = "abc"; e = ""; printf("%d %d", 1 if not s else
+    # 0, 1 if not e else 0)` printed `0 0`.  Python's answer is `0 1` — a program
+    # testing a string for emptiness is told the empty string is non-empty.
     #
-    # The honest lowering is `len(s) == 0`, which is a `strlen` and nothing
-    # else, and it is NOT available at this site: `not` tests a value already in
-    # a register and this emitter cannot see what produced it. `if s:` and
-    # `while s:` have the same defect and are still lowered; both are written
-    # down in bugs/FORMAL_string_value_model.md with the next step.
-    ("str_not_refused_because_empty_string_is_falsy",
+    # It is now the SAME conversion `if s:` makes — `truthy_lowering`, i.e. the
+    # `strlen` the refusal itself told the reader to write by hand — so the two
+    # spellings of one question cannot come to disagree.  The empty string is the
+    # case that separates a correct lowering from a null test, which is why it is
+    # the first thing to check any change here against.
+    ("not_a_string_is_the_truthiness_conversion",
      "def main(n):\n"
      "    s = \"abc\"\n"
      "    e = \"\"\n"
-     "    printf(\"%d %d\\n\", 1 if not s else 0, 1 if not e else 0)\n"
-     "    return 0\n",
-     "refuse:`not s` is refused because s is a string", None),
+     "    printf(\"%d %d\", 1 if not s else 0, 1 if not e else 0)\n"
+     "    return 0\n", 0, "0 1"),
+    # The other two rows of the same table, in the same program, because a fix
+    # that made `not` a `strlen` for strings only would be "refuse every `not`"
+    # with extra steps: an integer is 0 or it is not, and a container's
+    # truthiness IS its count, so `not []` is True.  And a SHORT-CIRCUIT chain,
+    # which is the operand whose truthiness is not the truthiness of the word it
+    # evaluates to — `p and ""` yields the EMPTY STRING, so `not` of it is True
+    # even though `p` is not.  All four values are what Python prints.
+    ("not_of_an_int_a_container_and_a_short_circuit_chain",
+     "def main(n):\n"
+     "    a = 0\n"
+     "    b = 3\n"
+     "    xs = [1]\n"
+     "    ys = []\n"
+     "    p = \"x\"\n"
+     "    printf(\"%d %d %d %d\", 1 if not a else 0, 1 if not b else 0,"
+     " 1 if not xs else 0, 1 if not ys else 0)\n"
+     "    if not (p and \"\"):\n"
+     "        printf(\" chain\")\n"
+     "    return 0\n", 0, "1 0 0 1 chain"),
     # GUARD: `not` on an INTEGER is untouched by the refusal above, or the
     # fix would be "refuse every `not`". This passed before the change too.
     ("str_not_on_an_int_is_a_guard",

@@ -4589,19 +4589,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_unary(self, expr) -> None:
         # `-s` is negation of an address and `~s` is a bit complement of one,
-        # and `not s` is FALSE for every string including the empty one,
-        # because a pointer is never zero. Measured on both backends: `~s`
-        # returned 8881076 on arm64 and 3236815 on x86-64, and `not ""`
-        # returned 0 where Python returns 1. `model` holds the messages and
-        # the measurements; asking here is what makes the two architectures
-        # refuse the same thing.
+        # and both are refused with `model.string_unary_refusal`, which holds
+        # the message and the measurements; asking here is what makes the two
+        # architectures refuse the same thing. `not` is NOT in that table any
+        # more: it goes through `_emit_truthy_word` below, so it is the same
+        # `strlen` `if s:` makes and not a pointer test — see the arm there and
+        # the docstring on `model.string_unary_refusal` for the measurement.
         ureason = M.string_unary_refusal(
             expr.op, self._expr_str_kind(expr.operand),
             M.spelled(expr.operand))
         if ureason is not None:
             raise CodegenError(ureason)
         if expr.op == "not":
-            self._emit_expr(expr.operand)
+            self._emit_truthy_word(expr.operand, Reg.RAX)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._emit_setcc_bool(Reg.RAX, "sete")
             return

@@ -5667,45 +5667,37 @@ def string_compare_word_refusal(op: str, left_kind, right_kind, left, right,
 
 
 def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:
-    """Why `-s` / `~s` / `not s` cannot be lowered for a string, or None.
+    """Why `-s` / `~s` cannot be lowered for a string, or None.
 
     `-` and `~` are the arithmetic table again with one operand: negation of an
-    address and a bit complement of one. `not` is here for a different reason
-    and is a DIFFERENT KIND of wrong answer, which is why it is worth naming:
-    a string is a pointer, and a pointer is never zero, so `not s` is FALSE for
-    every string on this path INCLUDING THE EMPTY ONE. Measured, both backends:
+    address and a bit complement of one.  `not` is NOT here any more, and the
+    reason it left is the interesting part: it used to be refused because "a
+    string is a pointer, and a pointer is never zero, so `not s` is FALSE for
+    every string on this path INCLUDING THE EMPTY ONE" — measured, both
+    backends:
 
         s = "abc"
         e = ""
         printf("%d %d", 1 if not s else 0, 1 if not e else 0)   # -> 0 0
 
-    Python's answer is `0 1`. This one is a fabricated FALSITY — a program that
+    Python's answer is `0 1`. That one was a fabricated FALSITY — a program that
     tests a string for emptiness is told the empty string is non-empty, and no
     downstream check can tell.
 
-    The condition sites — `if s:`, `while s:`, `s and k`, `a if s else b` — had
-    the same defect and are now LOWERED, through `truthy_lowering` below; that
-    is the same `strlen(s) != 0` this message tells the reader to write by hand.
-    `not` itself is still refused, and that is now a choice rather than a limit:
-    `_emit_truthy_word` can produce the honest answer here too, so the only
-    thing left holding `not` back is that the refusal is what a test asserts
-    today. Whoever wants it should delete the marker and the message together
-    (see bugs/FORMAL_string_value_model.md, "found and not fixed").
+    The refusal said so itself and then named the fix: "`_emit_truthy_word` can
+    produce the honest answer here too, so the only thing left holding `not`
+    back is that the refusal is what a test asserts today".  `not` now goes
+    through `truthy_lowering`, the SAME table `if s:` / `while s:` / `s and k`
+    already use, so it is `strlen(s) == 0` and not a pointer test — which is
+    the same `strlen` the refusal told the reader to write by hand, and the
+    empty string is the case that tells a correct lowering from a null test.
+    One table, three or four spellings of one question; see
+    bugs/FORMAL_string_value_model.md ("found and not fixed").
     """
-    if op not in STRING_ARITHMETIC_UNARY_OPS and op != "not":
+    if op not in STRING_ARITHMETIC_UNARY_OPS:
         return None
     if not string_operand_is_string(kind):
         return None
-    if op == "not":
-        return (
-            f"`not {spelled_operand}` is refused because {spelled_operand} is "
-            f"a string. A string on this path is a bare `char *` and a pointer "
-            f"is never zero, so this test is FALSE for every string — including "
-            f"the empty one, which is what Python calls falsy. Measured on both "
-            f"backends: `not \"\"` returned 0 where Python returns 1. The "
-            f"answer is knowable — it is the same `{STRING_LENGTH_SYMBOL}` "
-            f"`if {spelled_operand}:` now makes, see `truthy_lowering` — but it "
-            f"is not emitted HERE. Write `len({spelled_operand}) == 0`")
     return (
         f"unary {op!r} is refused on a string. A string on this path is a "
         f"bare `char *`, so {op!r} is an integer operation on an ADDRESS, and "

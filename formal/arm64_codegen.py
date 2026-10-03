@@ -2631,19 +2631,31 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(expr, F.UnaryOp):
             # `-s` is negation of an address and `~s` is a bit complement of
-            # one, and `not s` is FALSE for every string including the empty
-            # one, because a pointer is never zero. Measured on both backends:
-            # `~s` returned 8881076 on arm64 and 3236815 on x86-64, and
-            # `not ""` returned 0 where Python returns 1. `model` holds the
-            # messages and the measurements; asking here is what makes the two
-            # architectures refuse the same thing.
+            # one, and both are refused with `model.string_unary_refusal`,
+            # which holds the message and the measurements; asking here is what
+            # makes the two architectures refuse the same thing. `not` is not
+            # in that table any more — the arm below is why.
             ureason = M.string_unary_refusal(
                 expr.op, self._expr_str_kind(expr.operand),
                 M.spelled(expr.operand))
             if ureason is not None:
                 raise CodegenError(ureason)
             if expr.op == "not":
-                self._emit_expr(expr.operand)
+                # The TRUTHINESS conversion and its negation, so one table
+                # answers `not s` and `if s:` and they cannot disagree:
+                # `_emit_truthy_word` leaves a word whose ZERONESS is the answer
+                # (`strlen(s)` for a string, a blob's count for a container, the
+                # word itself for an integer or a frame address) and `eq`
+                # against zero is `not`.
+                #
+                # Before this the operand was evaluated directly and compared
+                # with zero, which is FALSE for every string including the
+                # empty one — measured on both backends, `1 if not e else 0`
+                # printed 0 where Python prints 1, so a program testing a
+                # string for emptiness was told the empty string is non-empty.
+                # `model.string_unary_refusal` used to hold that message; `-`
+                # and `~` still need it, `not` no longer does.
+                self._emit_truthy_word(expr.operand)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
                 self.asm.emit(encode_cset_xd_cond(0, "eq"))
                 return
