@@ -7322,10 +7322,10 @@ def _constant_site(st, kind: str, member: str = None) -> tuple:
     knew about one, so a file that read an enum member AND had a `None`-valued
     constant raised `ValueError: too many values to unpack (expected 2, got 3)` out
     of the middle of `_prepare_functions` — the backend RAISING where it owes a
-    refusal, on four of this repository's own files in the 668-file sweep
-    (`bugs/FORMAL_backend_raises_on_a_three_element_unpack.md`). A heterogeneous
-    table is not a style question: it is a shape a caller cannot destructure
-    without reading every producer, which is exactly what one of them did not do.
+    refusal, on four of this repository's own files in the 668-file sweep of
+    2026-10-03. A heterogeneous table is not a style question: it is a shape a
+    caller cannot destructure without reading every producer, which is exactly
+    what one of them did not do.
 
     `member` is the enum member's own accessor (`value` / `name`) and is None for
     every other spelling, which is the one spelling that has no accessor at all.

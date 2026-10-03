@@ -1164,12 +1164,13 @@ CASES = [
     # `ValueError: too many values to unpack (expected 2, got 3)` out of the
     # middle of `_prepare_functions` — the backend falling over on a construct it
     # owes a refusal for, and doing it on four of this repository's own files
-    # (`type_system.py` and three that import it; see
-    # `bugs/FORMAL_backend_raises_on_a_three_element_unpack.md`).
+    # (`type_system.py` and three that import it).
     #
     # It is here, in this table, because the row above it is the one that says
     # "this check still refuses where the language says it must": together they
-    # separate "the crash is gone" from "the check was dropped".
+    # separate "the crash is gone" from "the check was dropped". One shape for
+    # every entry (`formal/build.py`'s `_constant_site`) is what fixed it, rather
+    # than a patch to the one caller that had destructured the other shape.
     ("refuse_none_in_a_file_that_also_reads_an_enum_member",
      "from enum import Enum\n"
      "\n"
