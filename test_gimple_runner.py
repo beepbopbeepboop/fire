@@ -784,11 +784,14 @@ main()
     # coercion as `(int64_t)`, so `char *` and `MojoList *` fields stored a
     # raw word against a pointer field -- a second non-trivial conversion, and
     # one that cost this program its build entirely. The VALUES they still
-    # print wrong (a pointer decimal) are a SEPARATE gap: a callable that
-    # comes back out of a function into an unannotated `int64_t` parameter
-    # loses its return type at the `mojo_fnptr_call_N` boundary, which is not
-    # an env-field question and is recorded in
-    # bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md.
+    # print wrong (a pointer decimal) are a SEPARATE gap and they are not
+    # env-field questions: the callable comes back out of a function into an
+    # unannotated `int64_t` parameter, which loses its return type at the
+    # `mojo_fnptr_call_N` boundary. That is
+    # bugs/CODEGEN_callable_return_type_lost_at_more_hops.md — the same hop
+    # `use(<callable>)` is at the bottom of
+    # `gimple_nested_def_capturing_lambda_call_is_typed` below, which pins the
+    # hop one level in (the factory's own `outer()()`) and passes.
     # `test_gimple_execution` is the honest assertion for that: it fails on a
     # gcc error, which is what this case is about.
     test_gimple_execution("gimple_capturing_lambda_nested_def_ptr_kinds_build", """\

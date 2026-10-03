@@ -1,5 +1,8 @@
 # CODEGEN: a nested container as a dict-comprehension key, and as a tuple slot, is not described
 
+## Status — 2026-10-02: two more of the four closed; the content key's REPR
+## is the one left, and it is not this doc's to take
+
 Found 2026-10-01 while fixing the three docs in the
 `bugs-silent-values-b` batch (see their commits). Both shapes below are
 **pre-existing and independent** of that batch: verified by reverting every
@@ -8,7 +11,79 @@ re-measuring — identical output on both trees. Filed rather than fixed there
 because they are a different mechanism (a nested container read through the
 wrong accessor) from any of the three.
 
-## Status — PARTIALLY FIXED (2026-10-02): the comprehension's key and the
+### Closed 2026-10-02: a nested container as a TUPLE SLOT, read on its own
+
+`print(([1, 2], 3))` printed `([1, 2], <object at 0x3>)`. A tuple is a
+`mojo_mark_as_tuple`'d MojoList, so every uniform repr helper reaches it, and
+each takes ONE accessor for the whole value plus one list-wide element ctype
+for what that accessor reads. Neither says anything about a 2-slot tuple whose
+slots disagree: the list-wide ctype is the inner list's own element type
+(`int64_t`, because slot 0 is a list of ints), so `_mojo_repr_intlists` read
+slot 1 — a plain int — through the inner-list reader, found no list, and fell
+to `mojo_repr_obj`.
+
+The fix is where the record already was. `_lower_tuple_literal` emits
+`mojo_list_set_kinds(t, "li")` for a tuple literal whose slot kinds are not
+all the same, and `runtime/fire_runtime.c`'s
+`_mojo_repr_defers_to_kinds` exists to make every uniform repr helper prefer
+exactly that record. Four of the six helpers defer; `_mojo_repr_intlists` and
+`_mojo_repr_pairlist` did not. `mojo_repr_list_slotkinds` gets it too, for the
+same reason one level out: its `kinds` argument describes the CALLER's inner
+slots, so for a value that is itself a heterogeneous tuple
+(`([[1, 2], 3], 4)`) it was not a description of that value and the scalar
+slot rendered as `<object at 0x4>`.
+
+This section's "Next step 2 and 3" proposed a codegen-side `_tuple_vals` set
+so `_list_repr_fn` could route a tuple through `mojo_repr_list_kinds`. The
+runtime deferral reaches the same answer with no new table to propagate
+across assignment and return, and covers the derived values for free
+(`list(t)`, `str(t)`, a `t` returned from a function all keep the kinds row
+that travelled with the value). Measured on `([1, 2], 3)`, `([1, 2], 3.5)`,
+`([1, 2], "z")`, `([1, 2], None)`, `([[1, 2], 3], 4)`, `t = (...); print(t)`,
+`list(t)` and `str(t)` — all eight now match CPython, and no previously
+correct line changed. Regression:
+`test_runtime_diff.py`'s `tuple_with_a_nested_container_slot` (CPython-compared
+through the JIT path; it fails on the parent commit at the first line).
+
+Note that this doc's item 3, "`[([1, 2], 3)]` SEGSEGVs", was already fixed
+before either of these commits; see "Already fixed on this tree" below.
+
+### Closed 2026-10-02: the dict LITERAL's key and the subscript's key are one spelling
+
+`lit = {(9, 9): "lit"}` followed by `lit[(9, 9)] = "lit2"` grew TWO entries and
+`lit[(9, 9)]` read the second one. `_emit_dict_pair_store` is the literal's
+half and the only dict-key site that did not hand over the raw word: it
+stringified a container key through `_repr_value` (`'(9, 9)'`) while the
+subscript stored under the runtime's content key (`mojo_dict_key_for`'s
+length-delimited encoding). It now spells the key the way the subscript, `in`,
+`d.get`, `pop` and the comprehension's key all do — `_char_to_cstr(...,
+transient=True, word_ok=True)` plus a store through `_emit_call`, which is
+where `_apply_kw_keys` resolves the placeholder into the `_kw` twin.
+
+`gimplerunner`'s `gimple_tuple_dict_key_is_content_keyed` asserted this and
+was RED on the parent commit (`lit2 1` expected, `lit2 2` got); it is green
+now. This is also the doc's "Not landed: the literal and the subscript still
+use DIFFERENT key spellings" section, closed.
+
+### Still open, and assigned elsewhere: the content key's PRINTED form
+
+`print({(9, 9): "lit"})` prints `{'T1100032100039100039': 'lit'}` where CPython
+prints `{(9, 9): 'lit'}`. That is not specific to any one key path — a plain
+subscript store has always shown it, on this tree and on a pristine HEAD —
+and it is the inverse of `mojo_dict_key_for`'s encoding rather than the
+spelling, so it belongs to whoever owns the content key:
+`bugs/CODEGEN_dict_content_key_aliases_a_string_key.md` §1, which currently
+asserts that "a content key IS TEXT — the container's own `repr`". **That
+assertion is stale on this tree** — measured, the content key is
+`mojo_dict_key_for`'s length-delimited encoding, not the repr — and this
+branch does not edit that doc because it is another worker's claim.
+
+One consequence to be aware of when that lands: before the literal-key fix a
+dict LITERAL printed `{'(9, 9)': 'lit'}`, which is wrong but close to
+CPython's text, and now prints the same gibberish the subscript path always
+printed. Both are wrong; the lookup is what became right.
+
+## Status — PARTIALLY FIXED (2026-10-02, earlier pass): the comprehension's key and the
 ## lookup now agree; the CONTENT KEY's repr does not, and the tuple-slot
 ## repr is still the generic walker's
 
