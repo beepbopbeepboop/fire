@@ -1563,10 +1563,115 @@ def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
           f"the report does not say which side is wrong: {report}")
 
 
+def test_an_export_symbol_that_already_begins_with_an_underscore(tmpdir, shared):
+    """A module whose own NAME begins with `_`, end to end, on both halves.
+
+    Every other symbol in the tree begins with a letter, because
+    `reflect.export_exclusions` denies a private `def _foo` and `doc/ABI.md` has
+    no other way to mint one. The exception is a MODULE name: `abi_module_name`
+    flattens dots to `_` (`a.b` -> `a_b`) and nothing else, so a module called
+    `__pkg` qualifies its imports as `__pkg__helper` and exports
+    `__pkg__helper_twice_9f63a2` — a legal C identifier that starts with an
+    underscore, and the only shape on this path that does.
+
+    Three places used to spell "the Mach-O name of this C identifier" and two of
+    them spelled it CONDITIONALLY, from opposite ends: `_export_trie` wrote a
+    name that already began with `_` unchanged, and `_bind_info` removed one
+    leading `_` from the bind-stream name. So the trie held
+    `__pkg__helper_twice_9f63a2` while a consumer's bind stream asked dyld for
+    `_pkg__helper_twice_9f63a2`, and dyld died at load for a function that was
+    right there. The library's own audit did not see it, because it re-derived
+    the export name with the unconditional prepend — so it refused the BUILD
+    first, naming a symbol the image did not lack, and the shape never got far
+    enough to be observed as a load failure.
+
+    All three now ask `macho_linker.macho_export_name`, which is one function and
+    has no case in it. What is asserted, in the order the failure appeared:
+
+      1. the writer puts the export where `macho_export_name` says, read back by
+         THIS FILE's trie reader rather than by the writer;
+      2. the audit ACCEPTS the library it just wrote — the build-time half;
+      3. the bind stream carries the C name AS GIVEN, and the name dyld forms
+         from it is the export the library has — the run-time half, and the one
+         that turns a correct refusal into a silent load failure if it regresses
+         alone;
+      4. and the audit still REFUSES a name the image really lacks, including the
+         one-character-short spelling, so the check was corrected rather than
+         removed. Without this the fix could equally well have been "delete the
+         check", and every assertion above would still pass.
+    """
+    from formal import build as B
+    from formal import macho_linker as ML
+    # `formal_sweep` is the committed reader for a bind stream (`tools/`, imported
+    # the way test_formal_sweep.py imports it) rather than a fourth reader here:
+    # this file's own trie reader covers the export half, and the bind opcodes
+    # have exactly one reader in the tree.
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_sweep                       # tools/: the bind-stream reader
+    symbols = ["__pkg__helper_twice_9f63a2", "helper_add_2dbb98"]
+    out = os.path.join(tmpdir, "lead.dylib")
+    data = ML.build_macho_dylib(
+        b"", ML.TEXT_BASE + ML.dylib_code_offset(out, False, [], False),
+        [{"symbol": s, "entry": ML.TEXT_BASE + 16 * (i + 1)}
+         for i, s in enumerate(symbols)],
+        out, arch="arm64")
+    with open(out, "wb") as f:
+        f.write(data)
+    trie = parse_macho(data)["exports"] or {}
+    for s in symbols:
+        check(ML.macho_export_name(s) in trie,
+              f"the trie carries {sorted(trie)}, so it does not carry "
+              f"{ML.macho_export_name(s)!r} for the ABI symbol {s!r}: "
+              f"macho_export_name is not what _export_trie writes")
+
+    # The audit, on the library it just wrote, and on one name short of it.
+    absent = B._advertised_but_absent(out, [{"symbol": s} for s in symbols])
+    check(absent == [],
+          f"the audit refuses a library that advertises exactly what its own "
+          f"trie carries, reporting {absent!r}; a symbol already beginning "
+          f"with an underscore is a C identifier like any other and the Mach-O "
+          f"name is that with ONE underscore in front (formal/macho_linker.py's "
+          f"macho_export_name)")
+    fabricated = {"symbol": "__pkg__helper_absent_9f63a2", "name": "absent",
+                  "module": "__pkg__helper", "arity": 1, "kind": None,
+                  "signature": "absent", "frame_params": []}
+    short = {"symbol": symbols[0][1:], "name": "short", "module": "x",
+             "arity": 1, "kind": None, "signature": "short", "frame_params": []}
+    missing = B._advertised_but_absent(
+        out, [{"symbol": s} for s in symbols] + [fabricated, short])
+    check(missing == ["__pkg__helper_absent_9f63a2", "_pkg__helper_twice_9f63a2"],
+          f"the audit reported {missing!r} for two advertised names the image "
+          f"does not define; it must name both, and in particular the "
+          f"one-character-short spelling of a name it DOES define is a "
+          f"different name")
+
+    # The run-time half: what dyld is asked for is what the library exports.
+    # Built here rather than by a real program because the property is about the
+    # bind stream alone, and the sweep's end-to-end case
+    # (`test_formal_sweep.py`'s `test_a_bind_name_that_itself_begins_with_an_underscore_resolves`)
+    # runs the image on both architectures for exactly this shape.
+    image = ML.build_macho_executable_extern(
+        ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4), symbols, "arm64",
+        dylibs=[{"install_name": out, "symbols": set(symbols)}])
+    binds = [name for _ordinal, name in formal_sweep._binds(image)]
+    check(binds == symbols,
+          f"the image binds {binds!r} for the C names {symbols!r}; the bind "
+          f"stream carries the C identifier as given and dyld prepends the "
+          f"underscore, so a name that already begins with one must not lose "
+          f"it (formal/macho_linker.py's _bind_info)")
+    for name in binds:
+        check(ML.macho_export_name(name) in trie,
+              f"the image binds {name!r}, so dyld looks for "
+              f"{ML.macho_export_name(name)!r}, which the library does not "
+              f"export: {sorted(trie)}")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("the manifest offers nothing the image does not define",
      test_the_manifest_offers_nothing_the_image_does_not_define),
+    ("an export symbol that already begins with an underscore",
+     test_an_export_symbol_that_already_begins_with_an_underscore),
     ("exported functions execute", test_exported_functions_execute),
     ("a symbol that prefixes another is still exported",
      test_a_symbol_that_prefixes_another_is_still_exported),

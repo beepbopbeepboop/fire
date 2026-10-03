@@ -37,7 +37,8 @@ from formal.macho import build_macho, compute_macho_got_addrs
 from formal.macho_linker import (EXTERN_ENTRYOFF, EXTERN_GLOBALS_ENTRYOFF,
                                   NOEXTERN_ENTRYOFF, NOEXTERN_GLOBALS_ENTRYOFF,
                                   TEXT_BASE, build_macho_dylib,
-                                  dylib_code_offset, externer_layout)
+                                  dylib_code_offset, externer_layout,
+                                  macho_export_name)
 from mojo.middle.closures import discover_closures
 from formal.comptime_runner import make_call_hook
 from formal import dataclass_transform as DC
@@ -979,8 +980,16 @@ def _advertised_but_absent(path: str, exports: list) -> list:
         # against is the thing that matters, and its image is unreadable.
         return advertised + [f"(the export trie could not be read: {e})"]
     # A Mach-O name is its C name with dyld's leading underscore, which is what
-    # `_c_export_name` takes back off in the other direction.
-    return [s for s in advertised if f"_{s}" not in defined]
+    # `_c_export_name` takes back off in the other direction. It is asked of
+    # `macho_export_name` — the writer's own function — rather than spelled here,
+    # because this used to be a second and a third statement of the rule (this
+    # `f"_{s}"`, and a conditional prepend in `_export_trie`) that disagreed for
+    # every ABI symbol already beginning with an underscore, which is what a
+    # module whose own NAME does is. `formal/build.py` writes the audit and
+    # `tools/formal_sweep.py::_macho_symbol` reads it, and all three now ask one
+    # function, so a fourth spelling cannot be introduced here without this line
+    # changing too.
+    return [s for s in advertised if macho_export_name(s) not in defined]
 
 
 def _advertised_absent_report(source_path: str, missing: list) -> str:

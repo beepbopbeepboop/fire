@@ -2085,11 +2085,17 @@ def _macho_symbol(bind_name: str) -> str:
     """The Mach-O EXPORT NAME dyld forms from a bind-stream name.
 
     Exactly one leading underscore, and it is dyld's: the bind stream carries
-    the C name (`macho_linker._bind_info` takes the underscore off when it
-    writes the stream), while the export trie — and every other lookup table in
-    the format — carries the Mach-O name, which is that C name with one `_` in
-    front. `_os__syscalls_str_alloc_9f63a2` is the export; the bind says
-    `os__syscalls_str_alloc_9f63a2`.
+    the C name (`macho_linker._bind_info` writes it as given), while the export
+    trie — and every other lookup table in the format — carries the Mach-O name,
+    which is that C name with one `_` in front. `_os__syscalls_str_alloc_9f63a2`
+    is the export; the bind says `os__syscalls_str_alloc_9f63a2`.
+
+    `macho_linker.macho_export_name` IS that mapping, and this asks it rather
+    than repeating it: the probe exists to corroborate the build's own symbol
+    accounting against the loader, so a fourth independent spelling of the rule
+    would be able to disagree with the three that produce the image — and did,
+    in the one case where it mattered, which is why the two ends of the rule now
+    live in one function.
 
     The dlopen arm gets this for free: on macOS `ctypes` prepends the same
     underscore before calling `dlsym`, so it is handed the bind name unchanged.
@@ -2100,7 +2106,8 @@ def _macho_symbol(bind_name: str) -> str:
     `formal/hostmods/ast.mojo`, whose three binds all came back "not exported"
     from a dylib that exports all three.
     """
-    return "_" + bind_name
+    from formal.macho_linker import macho_export_name
+    return macho_export_name(bind_name)
 
 
 def _libsystem_provides(name: str) -> bool:
