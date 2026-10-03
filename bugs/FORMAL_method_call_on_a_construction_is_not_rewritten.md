@@ -1,11 +1,65 @@
 # A method called on a CONSTRUCTION is not rewritten, and the build dies at the link naming a symbol the source never spells
 
+**Status 2026-10-03 (`work/formal13-4`): step 1 is LANDED and pinned; step 2 is
+measured NOT ANSWERABLE yet, and the measurement is a SIGSEGV.**
+
+Step 1 — refuse the construct by name — is in the tree, from the same landing that
+gave `_receiver_shape_refusal` its call-result clause (its docstring dates it
+2026-10-03 and names `m.make().take(r)`). The program at the top of this document
+is now refused on both architectures, with the construct in the message:
+
+    $ python3 fire.py build --formal --no-prove --backend=arm64 -o .tmp/ow/ctor .tmp/ow/ctor_recv.mojo
+    build: main: `Box().get(…)` cannot be lowered: dispatch here is BY NAME, so a
+      method call is lifted to `Box_get(receiver, …)` from the name alone — and
+      `Box()` is not a bare name, so there is no name to lift from. What is
+      missing is the receiver's TYPE …
+
+Pinned by `test_formal_receiver_position.py`'s
+`refuse_a_method_call_on_a_construction_receiver`, which is a NEW row rather than
+an existing one: the two cases already there are `m.make().take(r)` and
+`m.make().take[r](r)`, whose receiver is a call to a FUNCTION, and a construction
+is a different spelling with a different reason — `Box()`'s type is settled by the
+declaration, and what the lift still cannot do is name a RECEIVER. Measured with
+`_receiver_shape_refusal`'s `F.CallExpr` clause narrowed back to `F.SubscriptExpr`:
+all three rows go red, and this one reports the LINK sentence this document filed
+("…the image would bind 1 symbol(s) that nothing provides: get"), which is the
+defect the refusal replaces.
+
+**Step 2 — lift it — is blocked, and the measurement is why.** This document says
+"`struct_construction_plan` / `struct_nested_frame_fields` place a nested frame for
+a struct that is itself a holder, and whether they place one for a construction of
+the holder is the question. Measured answer: no". That still holds, and the refusal
+the reader is now given makes it matter more, because **its advice is the shape
+that crashes**:
+
+    build: main: `Box().get(…)` cannot be lowered … Declaring it is the same
+      program with an answer — give the receiver a local of a declared struct
+      type, or bind it to one (`var x = T()`, `def f(v: T)`) so the lift has a
+      name to work from.
+
+```python
+def main() -> int:
+    var b = Box()
+    return b.get()
+```
+
+builds on both architectures and dies with **SIGSEGV (exit 139)**. With
+`b.inner = Opt()` first — the program `7632c881` landed — it answers 41 on both.
+So lifting `Box().get()` would put the same unbuilt nested frame behind the call,
+and the crash would arrive one step later rather than not at all. Filed, with the
+four-row boundary table and the direction to take, as
+`bugs/FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_nothing_built.md`;
+that document's step 2 (place the frame at the construction site) is what would
+make this document's step 2 landable, so they are one piece of work and not two.
+
+Nothing below this line changed on 2026-10-03.
+
 **Area:** FORMAL (`formal/build.py`, `_rewrite_method_calls` /
 `_method_call_target`). Found 2026-10-03 on `work/formal8-8-r2` while closing
-`FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`, whose §"One more gap,
-in the same neighbourhood" recorded this and was right to keep it separate: it
-fires whether or not the method body is read, so the receiver seeding that
-doc's fix needed has nothing to do with it.
+`FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`, whose §"One more gap, in
+the same neighbourhood" recorded this and was right to keep it separate: it fires
+whether or not the method body is read, so the receiver seeding that doc's fix
+needed has nothing to do with it.
 
 ## The measurement
 
