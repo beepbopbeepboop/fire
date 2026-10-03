@@ -22088,6 +22088,19 @@ def expr_spelling(node) -> str:
     return type(node).__name__
 
 
+# One clause, shared by the two refusals that describe the same defect from two
+# places: `field_access_refusal` below, which is raised by an emitter that has
+# only a slot key, and `undeclared_linked_struct_refusal` after it, which is
+# raised by the build pass where the type IS known and can name the library.
+# Written once because it is a WARNING rather than a diagnosis — both sentences
+# are advice about what not to do, and a fix that corrected one of them and not
+# the other would leave a program that re-declares the struct looking like a
+# program that fixed its bug.
+RE_DECLARE_IS_A_DIFFERENT_TYPE = (
+    "Do not re-declare the struct here — that is a different type with the "
+    "same name, and the layout the library's methods use would not be it")
+
+
 def field_access_refusal(name: str, fn_name: str, root: str,
                          holder: bool) -> str:
     """The diagnostic for `root.field` where nothing says what `root` holds.
@@ -22146,9 +22159,67 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"constructor whose declaration THIS IMAGE can see (`x = S()`): an "
             f"`import` brings the declaration with it, and a `--link-dylib` "
             f"library brings one when the source it was built from is still "
-            f"readable. Do not re-declare the struct here — that is a "
-            f"different type with the same name, and the layout the library's "
-            f"methods use would not be it")
+            f"readable. {RE_DECLARE_IS_A_DIFFERENT_TYPE}")
+
+
+def undeclared_linked_struct_refusal(struct_name: str, owners: list,
+                                     recorded_source: str = None) -> str:
+    """`S()` where S is a linked library's struct and this image has no S.
+
+    The build-pass half of `field_access_refusal`'s finding, and the half that
+    can NAME the library: an emitter's slot-allocator fall-through is handed a
+    slot key and nothing else, so its message can only say "this path has no
+    way to say what the base holds" — which is true and sends the reader after a
+    type inference this backend does not have, when the actual fact is one hop
+    away and checkable (`bugs/FORMAL_field_access_refusal_names_the_wrong_
+    module.md`). This one is raised where the construction `S()` itself is, and
+    it reports what is actually missing: a DECLARATION, whose field list and
+    frame layout are read from the module's source.
+
+    Three facts in the text, each of which the reader can check:
+
+      * a library on this link line DOES have the struct — `owners` is derived
+        from that library's own `kind: "method"` exports, so "nothing defines
+        this name" is not what is wrong, and the bind audit's message says the
+        opposite;
+      * what is missing is the declaration, and `recorded_source` is where the
+        manifest says it was read from, so "the source is gone" is a fact with a
+        path in it rather than a guess;
+      * the two repairs are the two that exist, and neither of them is
+        "declare it here" — a struct re-declared in the importing file is a
+        DIFFERENT type with the same name, whose layout is not the one the
+        library's methods were compiled against. That clause is shared with
+        `field_access_refusal` rather than written twice.
+    """
+    libs = []
+    for o in owners or ():
+        if o["library"] not in libs:
+            libs.append(o["library"])
+    module = ""
+    for o in owners or ():
+        if o.get("module"):
+            module = o["module"]
+            break
+    one = libs[0] if len(libs) == 1 else (f"{len(libs)} libraries on this "
+                                          f"link line")
+    where = ""
+    if recorded_source:
+        where = (f" The manifest records that source as {recorded_source!r}, "
+                 f"which this build cannot read.")
+    repair = (f"`from {module} import {struct_name}`" if module
+              else f"an import that brings `{struct_name}`'s declaration")
+    return (f"{struct_name}() constructs a struct this image has no "
+            f"DECLARATION for: `{struct_name}` is not declared in this file, "
+            f"and no module this file imports declares it. A linked library "
+            f"does provide its methods — {one} exports "
+            f"{owners[0]['signature']} — so this is not a name nothing "
+            f"defines; what is missing is the type, and a field list and a "
+            f"frame layout are read from the module's source rather than from "
+            f"the symbol table.{where} Two repairs, and only two: rebuild the "
+            f"library where this build can read the module's source, so its "
+            f"manifest records a path this build can open; or link the module "
+            f"by IMPORT ({repair}), which brings the declaration with it. "
+            f"{RE_DECLARE_IS_A_DIFFERENT_TYPE}")
 
 
 # ── How a call's arguments bind: the ONE shape, read by everything ─────────

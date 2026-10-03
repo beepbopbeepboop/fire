@@ -796,16 +796,27 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
     correct verdict, since emitting a `BL` against a symbol nothing defines, or
     guessing a layout, is the outcome the whole mechanism exists to prevent.
 
-    And the refusal's REPAIRS have to be the two that exist for this program.
-    It used to say "`b` is bound here as a parameter" and "bind the base from a
-    constructor THIS MODULE declares", both of which are false about the file in
-    front of the reader: `b` is `var b = Bag()`, and `Bag` is declared in a file
-    this build cannot read, so it is not a constructor this module declares and
-    cannot become one. The two clauses the message carries now are the
-    declaration must be VISIBLE (an import brings one, a `--link-dylib` library
-    brings one while its source is readable) and do NOT re-declare the struct
-    here — which would be a different type with the same name, and the layout
-    the library's methods use would not be it.
+    **And the refusal has to be the one that NAMES the library**, because that
+    is the only message a reader can act on: `var b = Bag()` is a construction
+    of a struct that arrived in a manifest and not in a declaration, and the two
+    messages this used to be are both about something else. `b.n` was refused by
+    `field_access_refusal`, which is raised from an emitter's slot-allocator
+    fall-through and is handed a slot key and nothing else — so it cannot say
+    the struct is one hop away, and its repair ("bind the base from a
+    constructor whose declaration THIS IMAGE can see") is a true sentence about a
+    fact the reader cannot change. With no field access at all the same program
+    was refused by the bind audit ("the image would bind 1 symbol(s) that
+    nothing provides: Bag"), which says the opposite of the truth: the library
+    on the link line exports `Bag`'s methods, and `Bag` is in every one of those
+    manifest entries.
+
+    So the refusal is raised in the BUILD PASS, where the construction is, and it
+    reports the three things a reader can check — the struct, the library that
+    has it, and the path its manifest records for the source this build cannot
+    read — with the two repairs that exist (rebuild the library where the source
+    is readable, or link the module by IMPORT) and NOT the one that does not
+    (re-declare the struct here, which would be a different type with the same
+    name and a layout the library's methods were not compiled against).
     (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`.)
     """
     import json
@@ -826,18 +837,84 @@ def test_a_linked_dylib_whose_source_is_gone_is_still_refused(tmpdir, _):
         f.write("\n")
     result, _out = build(root, "prog.aout", expect_ok=False,
                          extra=["--link-dylib", dylib])
-    refuses(result, "is a field access through 'b'")
+    refuses(result, "Bag() constructs a struct this image has no DECLARATION for")
     text = result.stderr or result.stdout
     for gone in ("is bound here as a parameter",
-                 "constructor this module declares (`x = S()`)"):
+                 "constructor this module declares (`x = S()`)",
+                 "symbol(s) that nothing provides"):
         check(gone not in text,
-              f"the refusal still claims {gone!r}, which is false about a "
+              f"the refusal still says {gone!r}, which is false about a "
               f"library whose source this build cannot read: {text[-400:]}")
-    for want in ("whose declaration THIS IMAGE can see",
+    # The method the message quotes is read off the manifest rather than written
+    # here, so this cannot pin an export ORDER the manifest does not promise —
+    # only the fact that the sentence is quoting the library's own table.
+    methods = {e["signature"] for e in payload["exports"]
+               if e.get("kind") == "method"}
+    check(methods and any(sig in text for sig in methods),
+          f"the refusal quotes none of the library's own method exports "
+          f"{sorted(methods)}, so its claim that the library has the struct is "
+          f"not one it can show: {text[-400:]}")
+    for want in ("heaplib.dylib",                 # the library that has it
+                 os.path.join("not", "there", "heaplib.mojo"),   # its source
+                 "rebuild the library",           # repair 1
+                 "from heaplib import Bag",       # repair 2
                  "Do not re-declare the struct here"):
         check(want in text,
               f"the refusal does not offer {want!r}, so the reader is sent "
               f"after a repair that does not exist: {text[-400:]}")
+
+
+def test_a_gone_source_is_refused_whatever_the_construction_spells(tmpdir, _):
+    """The same refusal with no field access and with arguments — two routes.
+
+    The refusal above is reached through `b.n`, and it is worth pinning that the
+    ANSWER does not depend on which construct of the program happens to be
+    reached first, because there were two other answers before it and neither
+    was true:
+
+      * with no field access at all, `var b = Bag()` was a dangling call and the
+        bind audit reported it — "the image would bind 1 symbol(s) that nothing
+        provides: Bag", which asserts the opposite of the manifest's contents;
+      * with ARGUMENTS, `Bag(1, 2)` was no constructor call this path has a
+        shape for, and it was refused for that. A check written against an
+        EMPTY argument list would have let this one past, which is the mistake
+        the bug doc's own last paragraph records: the scan has to be "a name this
+        image has no declaration for that a linked library does", not "a name
+        that was called with no arguments".
+
+    Both architectures, because a refusal that differs between them is the
+    two-backend split this file exists to keep closed, and both are refusals
+    before and after — what is asserted is the WORDS.
+    """
+    import json
+    fresh_cas()
+    variants = {
+        "noargs": "def main(k):\n    var b = Bag()\n    return 0\n",
+        "args": "def main(k):\n    var b = Bag(1, 2)\n    return 0\n",
+    }
+    for label, prog in variants.items():
+        for arch in ("arm64", "x86_64"):
+            root = os.path.join(tmpdir, f"gone_{label}_{arch}")
+            os.makedirs(root)
+            write_tree(root, {"heaplib.mojo": HEAP_LIB, "prog.mojo": prog})
+            _r, dylib = build_dylib(root, "heaplib.dylib", ["heaplib.mojo"])
+            manifest_path = dylib + ".manifest.json"
+            with open(manifest_path) as f:
+                payload = json.load(f)
+            payload["source"] = os.path.join(root, "not", "there",
+                                            "heaplib.mojo")
+            with open(manifest_path, "w") as f:
+                json.dump(payload, f, indent=1, sort_keys=True)
+                f.write("\n")
+            result, _out = build(root, "prog.aout", expect_ok=False, arch=arch,
+                                 extra=["--link-dylib", dylib])
+            refuses(result,
+                    "Bag() constructs a struct this image has no DECLARATION "
+                    "for")
+            text = result.stderr or result.stdout
+            check("symbol(s) that nothing provides" not in text,
+                  f"{label}/{arch}: the bind audit's answer is back, and it "
+                  f"says the library provides nothing: {text[-300:]}")
 
 
 # ── (3b) the same three arity questions with no DECLARATION to read ─────────
@@ -1280,6 +1357,8 @@ TESTS = [
      test_a_linked_dylibs_struct_is_usable_with_no_import),
     ("a linked dylib whose source is gone is still refused",
      test_a_linked_dylib_whose_source_is_gone_is_still_refused),
+    ("a gone source is refused however the construction spells itself",
+     test_a_gone_source_is_refused_whatever_the_construction_spells),
     ("the manifest's call contract holds with no declaration to read",
      test_the_manifests_call_contract_holds_when_there_is_no_declaration),
     ("too many arguments with no declaration is refused",

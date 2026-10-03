@@ -1836,7 +1836,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
-    check_construction_shapes(functions, by_name)
+    check_construction_shapes(functions, by_name, link_line)
     check_frame_return_shapes(functions)
     # …and the one hole the returned-frame convention opens in premise (B1),
     # which is the same premise with the sign reversed.
@@ -5319,7 +5319,8 @@ def check_dataclass_constructs(stmts: list, functions: list) -> None:
         DC.check_reflection_calls(functions, names)
 
 
-def check_construction_shapes(functions, structs_by_name) -> None:
+def check_construction_shapes(functions, structs_by_name,
+                            link_line=None) -> None:
     """Decide every `S(...)` in the unit, and refuse the ones with no shape.
 
     Called by the ENTRY POINTS, beside `check_frame_field_blob_premises`, and
@@ -5353,9 +5354,33 @@ def check_construction_shapes(functions, structs_by_name) -> None:
     its source is; a function with no holders has none published, and an empty
     table is the right answer there — a name that is not a holder is a plain
     word, and the copy decision refuses exactly that.
+
+    `link_line` is the manifests this image links, and it is what the SECOND
+    branch needs: a name this unit has no struct for, which some library on
+    the line DOES have, is a struct whose declaration this build cannot reach —
+    and the library that has it is knowable from the manifest alone, with no
+    source in hand (`formal.imports.linked_struct_owners`). That case used to be
+    reported by the bind audit ("the image would bind 1 symbol(s) that nothing
+    provides: Bag") or, when the program touched a field of the object, by
+    `field_access_refusal` — which is raised from an emitter that has a slot key
+    and nothing else, so it can say the base is unclassified but cannot say the
+    struct is one hop away in a manifest. Both are refusals today and this is
+    still one; what changed is that it now names the struct, the library and the
+    two repairs
+    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`).
+
+    The early `return` for an image with no structs at all used to stand in
+    front of both branches, and that is exactly the image the second branch is
+    for: a program whose only struct came from a `--link-dylib` library whose
+    source is gone declares no struct of its own. So the shape test moved into
+    the loop rather than around it, and the loop still costs nothing on a file
+    with no constructions.
     """
-    if not structs_by_name:
-        return
+    from formal.imports import linked_struct_owners
+    owners = linked_struct_owners(link_line) if link_line else {}
+    declared = {fn.name for fn in functions or ()}
+    sources = {lib.get("source") for lib in (link_line or [])
+               if lib.get("source")}
     rets = M.function_return_types(functions)
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
@@ -5363,13 +5388,37 @@ def check_construction_shapes(functions, structs_by_name) -> None:
             if not isinstance(node, F.CallExpr) \
                     or not isinstance(node.func, F.IdentExpr):
                 continue
-            st = structs_by_name.get(node.func.name)
-            if st is None or M.type_constructor_kind(node.func.name) is not None:
+            name = node.func.name
+            st = structs_by_name.get(name)
+            if st is None:
+                # A TYPE constructor (`Pointer(x)`, `String(s)`) is a
+                # conversion, not a construction of something undeclared, and
+                # a FUNCTION of this unit is called rather than constructed —
+                # both are names this image can resolve, which is the whole
+                # distinction the table below turns on.
+                if M.type_constructor_kind(name) is not None \
+                        or name in declared or name not in owners:
+                    continue
+                raise CodegenError(M.undeclared_linked_struct_refusal(
+                    name, owners[name], _one(sources)))
+            if M.type_constructor_kind(name) is not None:
                 continue
             _plan, refusal = M.struct_construction_plan(
                 st, node, structs_by_name, cands, rets)
             if refusal is not None:
                 raise CodegenError(refusal)
+
+
+def _one(paths):
+    """The single path in `paths`, or None — for a message that can name one.
+
+    Two libraries recording two sources is a fact no single sentence can
+    report, and the message that tries says less than the one that names the
+    one it found, so the path is named when there is exactly one and the
+    sentence drops the clause when there are several.
+    """
+    paths = [p for p in paths or () if p]
+    return paths[0] if len(paths) == 1 else None
 
 
 # `_check_nested_frame_writes` USED to live here, refusing any write to a field
@@ -12623,6 +12672,14 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
+    # The manifest is a PROMISE to every consumer, and this is where the promise
+    # is checked against the file that was just written: read the export trie
+    # back with an independent parser and refuse if the two disagree. The
+    # direction that was missing is the one that hurts — a library advertising a
+    # symbol nothing defines produces a manifest every consumer's bind audit
+    # believes, and a dyld failure at load rather than a refusal here
+    # (`bugs/FORMAL_frame_receiver_handoff.md`, "A dylib advertises exports
+    # without checking the emitter produced them").
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
         source=source_paths[0],
