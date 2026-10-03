@@ -56,6 +56,37 @@ PROGRAMS = {
                   "a function with no parameters must not be given one"),
 }
 
+# Programs whose SEMANTIC MODEL has to state a string's value, which on this
+# path is the ADDRESS of the literal's interned bytes.  Both of these used to
+# generate a proof of something FALSE — the model's answer for a string literal
+# was a fabricated `0`, the machine's was an address, and **Lean rejected the
+# proof**.  So this is not a hole that was filled; it is "no program in this
+# table proved at all", and the table is separate from `PROGRAMS` because it is
+# driven on BOTH architectures (see `STRING_ARCHES`): the model is per-IMAGE,
+# since the address is a property of the layout, and a fix that landed on one
+# backend would leave the other emitting the false theorem.
+STRING_PROGRAMS = {
+    # name: (source, what the test is about)
+    "printf_literal": (
+        "def main(n: Int) -> Int:\n"
+        "    printf(\"hi\\n\")\n"
+        "    return 5\n",
+        "an extern call whose ARGUMENT is a string literal: the emitted "
+        "`pre_arg` theorem says the machine's x0 holds the model's value of "
+        "the format string, and that is an address"),
+    "return_literal": (
+        "def main(n: Int) -> Int:\n"
+        "    return \"small\"\n",
+        "a function whose RESULT is a string: the end-to-end theorem compares "
+        "the machine's result register against `mojo`, and `mojo` is the "
+        "interned address"),
+}
+
+# Both backends, because the model generator is shared and the ADDRESS is not.
+# A test that only built one of them would pass with the other machine emitting
+# a false `eval_eq_mojo` — which is the whole failure this table records.
+STRING_ARCHES = ("arm64", "x86_64")
+
 # Programs the generator must REFUSE, with the reason it must give.  A call to a
 # second function in the same image is provable -- every byte is present and
 # `arm64_go_exit` follows the call and the return -- but the CFG walk is
@@ -825,6 +856,298 @@ class TestEntryArity(unittest.TestCase):
                                  f"{arch}: the two-parameter proof admits {n} "
                                  f"`sorry`; a wider entry must not have added "
                                  f"a trust boundary")
+
+
+class TestStringValueInTheModel(unittest.TestCase):
+    """A string literal's value in the semantic model, on BOTH backends.
+
+    The defect this pins is not a hole and not a refusal: the model's value for
+    a `StringLiteral` was the fabricated `(0 : UInt64)`, while the machine's
+    value is the ADDRESS the emitter gave that text's bytes.  So every theorem
+    that put the two side by side was false, and **Lean rejected the proof**:
+
+      * `return "small"` — the end-to-end theorem said the program returns 0 and
+        it does not (measured: four `is false` obligations on arm64);
+      * `printf("hi")` — the `pre_arg` theorem said x0 holds 0 and it holds
+        the format string's address, so **no program that prints a literal
+        proved on either machine**.
+
+    `print(42)` — the case in `PROGRAMS` above — passed throughout, which is
+    exactly why this went unseen: an integer argument is a machine word the
+    model does have, so the one program in the table with a call was the one
+    program the defect could not reach.
+
+    Three things are asserted, and the third is the one that keeps the fix from
+    coming back as a fabrication somewhere else: the address is PUBLISHED by
+    both emitters, the model's term for the literal IS that address, and a
+    literal with no entry in the table is refused rather than defaulted.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.build as fb
+        cls.tmp = tempfile.mkdtemp(prefix="a2-strval-")
+        cls.info = {}
+        cls.proof_text = {}
+        cls.proof_path = {}
+        cls.errors = {}
+        for arch in STRING_ARCHES:
+            for name, (src, _why) in STRING_PROGRAMS.items():
+                path = os.path.join(cls.tmp, f"{name}-{arch}.mojo")
+                with open(path, "w") as f:
+                    f.write(src)
+                out = os.path.join(cls.tmp, f"{name}-{arch}.aout")
+                try:
+                    r = fb.compile_formal(path, arch=arch, output=out,
+                                          prove=True, check=False)
+                except Exception as e:                # noqa: BLE001
+                    cls.errors[(arch, name)] = f"{type(e).__name__}: {e}"
+                    continue
+                cls.info[(arch, name)] = r["info"]
+                cls.proof_path[(arch, name)] = r["proof_path"]
+                cls.proof_text[(arch, name)] = open(
+                    r["proof_path"], encoding="utf-8").read()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_both_architectures_build_and_generate_a_proof(self):
+        for arch in STRING_ARCHES:
+            for name in STRING_PROGRAMS:
+                with self.subTest(arch=arch, program=name):
+                    self.assertNotIn((arch, name), self.errors,
+                                     f"{name} on {arch}: "
+                                     f"{self.errors.get((arch, name))}")
+
+    def test_the_intern_table_is_published_by_both_emitters(self):
+        """`info["str_addrs"]`, keyed by DECODED text, on both backends.
+
+        The map cannot be recomputed by the proof generator: the data label is
+        `str_<emission counter>`, so the address of a given text is a property
+        of the order the emitter happened to intern in.  Publishing the
+        emitter's own map is what makes the model's string value a fact about
+        the image rather than a guess.
+        """
+        for arch in STRING_ARCHES:
+            for name, (_src, _why) in STRING_PROGRAMS.items():
+                info = self.info.get((arch, name))
+                if info is None:
+                    continue
+                with self.subTest(arch=arch, program=name):
+                    table = info.get("str_addrs")
+                    self.assertIsInstance(table, dict,
+                                          f"{name} on {arch}: no str_addrs")
+                    self.assertTrue(table,
+                                    f"{name} on {arch}: the image holds "
+                                    f"string bytes but published no address "
+                                    f"for them")
+                    for text, addr in table.items():
+                        self.assertIsInstance(addr, int)
+                        self.assertGreater(addr, 0,
+                                           f"{name} on {arch}: {text!r} has "
+                                           f"address {addr}, which is not a "
+                                           f"mappable address")
+
+    def test_the_same_text_has_one_address_per_image(self):
+        """Interning is by CONTENT, so the KEYS are the same on both machines.
+
+        The addresses differ — the two layouts put the data at different
+        offsets — and that is the reason the model is threaded per image rather
+        than computed once.  What must not differ is the set of strings: a
+        table whose key set depends on the architecture would mean one backend
+        models a program the other refuses.
+        """
+        for name in STRING_PROGRAMS:
+            tables = {arch: self.info[(arch, name)].get("str_addrs")
+                      for arch in STRING_ARCHES
+                      if (arch, name) in self.info}
+            if len(tables) != len(STRING_ARCHES):
+                continue
+            with self.subTest(program=name):
+                keys = {arch: set(t) for arch, t in tables.items()}
+                first = STRING_ARCHES[0]
+                for arch in STRING_ARCHES[1:]:
+                    self.assertEqual(keys[arch], keys[first],
+                                     f"{name}: {arch} interns {keys[arch] - keys[first]} "
+                                     f"that {first} does not, and the reverse "
+                                     f"for {keys[first] - keys[arch]}")
+
+    def test_a_returned_string_is_modelled_as_its_interned_address(self):
+        """The MODEL's term, read out of the generated Lean.
+
+        The end-to-end theorem proving is the evidence that the model and the
+        machine agree; this is the evidence of *which* term they agreed on, so a
+        model that went back to `0` — and a Lean check that somehow passed
+        anyway — would both be caught.  `def main_go … = <the address>` is the
+        whole claim, and this is the program where the model's answer IS the
+        machine's answer.
+        """
+        for arch in STRING_ARCHES:
+            key = (arch, "return_literal")
+            info, text = self.info.get(key), self.proof_text.get(key)
+            if info is None or text is None:
+                continue
+            addr = info["str_addrs"].get("small")
+            self.assertIsNotNone(
+                addr, f"{key}: `small` is not in the intern table, so the "
+                      f"model has no value for it")
+            with self.subTest(arch=arch):
+                self.assertIn(
+                    f"def main_go (n : UInt64) : UInt64 :=\n  "
+                    f"(UInt64.ofNat {addr})",
+                    text,
+                    f"{key}: the semantic model of `return \"small\"` is not "
+                    f"the literal's interned address {addr}")
+
+    def test_a_string_argument_is_the_same_word_in_the_model_and_the_ast(self):
+        """The AST half, and it is a separate reader from the model's.
+
+        `_expr_ast` had `MojoExpr.var ""` where `_expr_go` had a fabricated
+        `0`: two placeholders that agreed, so `eval_eq_mojo` was provable and
+        the model was wrong. With the model fixed, the AST has to be fixed with
+        it IN THE SAME READER, and this asserts both halves landed — a fix to
+        one of them makes `eval_eq_mojo` unprovable, so the theorem is the
+        check and this is the diagnosis.
+        """
+        for arch in STRING_ARCHES:
+            key = (arch, "printf_literal")
+            info, text = self.info.get(key), self.proof_text.get(key)
+            if info is None or text is None:
+                continue
+            addr = info["str_addrs"].get("hi\n")
+            self.assertIsNotNone(
+                addr, f"{key}: the format string is not in the intern table, "
+                      f"so the model has no value for it")
+            with self.subTest(arch=arch):
+                self.assertIn(
+                    f'MojoExpr.call "printf" (MojoExpr.int '
+                    f'(UInt64.ofNat {addr}))',
+                    text,
+                    f"{key}: the AST bridge does not carry the format "
+                    f"strings interned address {addr}, so the AST and the "
+                    f"model are two different words for one literal")
+
+    def test_a_returned_string_is_still_run_tested_on_x86_64(self):
+        """The workaround this made dead, asserted gone by what replaced it.
+
+        `x86_64_proof_gen.py` carried `_returns_string_literal` and a
+        `string_result` branch that suppressed the concrete run tests for any
+        function handing back a string, on the stated ground that "no numeric
+        model of `return "small"` is that address". That ground was the defect
+        above: the model now IS that address, so the suppression was hiding
+        theorems that are true and decidable. With the guard removed (it is
+        deleted rather than left switched off — a flag nobody reads is a second
+        thing to keep in step), `main_runs_n` and `main_terminates_n` are back
+        in the file, so a guard that returned would fail HERE rather than
+        silently reduce coverage.
+        """
+        text = self.proof_text.get(("x86_64", "return_literal"))
+        self.assertIsNotNone(text, "no x86-64 proof was generated")
+        self.assertNotIn("NO RUN TESTS", text,
+                         "the run tests are suppressed for a program whose "
+                         "model the machine agrees with")
+        for n in (0, 1, 2, 5, 10):
+            with self.subTest(input=n):
+                self.assertIn(f"theorem main_runs_{n} :", text)
+                self.assertIn(f"theorem main_terminates_{n} :", text)
+
+    def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):
+        """The negative guard, and the reason the default is a refusal.
+
+        A string the program contains is a string the emitter interned, so this
+        is reachable only from a caller with no image to read — a generator
+        unit test, or a future caller that forgets `str_addrs`.  Answering `0`
+        there is the fabrication this whole change removed, reintroduced in the
+        one place nobody would notice it, so the table is asked and a miss
+        REFUSES.  The message names the representation, because "no intern
+        table entry" alone reads like a plumbing failure.
+        """
+        import formal.arm64_proof_gen as G
+        lit = G.String(value="not interned anywhere")
+        for scope in (None, G._Scope()):
+            with self.subTest(scope=type(scope).__name__):
+                with self.assertRaises(NotImplementedError) as caught:
+                    G._str_addr_term(lit, scope)
+                said = str(caught.exception)
+                for needle in ("char *", "address", "FALSE"):
+                    self.assertIn(needle, said,
+                                  f"the refusal must say that a string is an "
+                                  f"address and that 0 was false; got {said!r}")
+
+    def test_a_string_whose_address_is_known_is_rendered_as_that_address(self):
+        """The positive half of the same reader, without a build."""
+        import formal.arm64_proof_gen as G
+        scope = G._Scope()
+        scope.str_addrs = {"hi\n": 0x100000384}
+        self.assertEqual(G._str_addr_term(G.String(value="hi\\n"), scope),
+                         "(UInt64.ofNat %d)" % 0x100000384)
+
+    def test_the_generated_proofs_typecheck_on_both_machines(self):
+        """LEAN. The end-to-end claim: the proof is not just generated.
+
+        Skipped loudly without Lean, like `TestLean` above — but kept in THIS
+        class rather than folded into that one, because these programs are the
+        ones whose proofs were FALSE rather than absent, and a reader looking
+        for "did anybody check the string model against Lean" should find the
+        answer in the same class as the model assertions.
+        """
+        lean = _lean()
+        if not lean or not os.path.isfile(
+                os.path.join(HERE, "lib", "ProofLib.olean")):
+            self.skipTest("no Lean / no lib/ProofLib.olean: skipping the "
+                          "typecheck; the generator assertions above still run")
+        # The two machines have DIFFERENT trust boundaries and both are
+        # documented in the file each generator writes: arm64's post-extern and
+        # run-test machinery is decided, and x86-64's `compile_correct` /
+        # `compiles_correctly` pair is `sorry` by construction (see
+        # `x86_64_proof_gen.py`'s `_TRUST_HEADER`). So "0 sorries" is the
+        # arm64 assertion and on x86-64 the assertion is that the holes are
+        # exactly those two named ones — which is what says the string model
+        # added none.
+        for arch in STRING_ARCHES:
+            for name in STRING_PROGRAMS:
+                key = (arch, name)
+                path = self.proof_path.get(key)
+                if path is None:
+                    continue
+                ok, detail, n = _check_proof(path)
+                with self.subTest(arch=arch, program=name):
+                    self.assertTrue(ok, f"{name} on {arch}: {detail}")
+                    if arch == "arm64":
+                        self.assertEqual(
+                            n, 0,
+                            f"{name} on {arch}: the proof admits {n} `sorry`")
+                        continue
+                    holes = self._sorry_theorems(
+                        self.proof_text.get(key, ""))
+                    self.assertLessEqual(
+                        holes, {"main_compile_correct",
+                                "main_compiles_correctly"},
+                        f"{name} on {arch}: the proof admits holes outside the "
+                        f"two trust boundaries x86_64_proof_gen's own header "
+                        f"declares: {sorted(holes)}")
+        # …and the two ARE there, so the assertion above cannot pass by a
+        # generator that stopped emitting them.
+        x86 = [k for k in self.proof_path if k[0] == "x86_64"]
+        if x86:
+            holes = self._sorry_theorems(self.proof_text[x86[0]])
+            self.assertEqual(
+                holes, {"main_compile_correct", "main_compiles_correctly"},
+                "x86-64's declared trust boundaries are not the ones it emits; "
+                "the header and the file have drifted apart")
+
+    @staticmethod
+    def _sorry_theorems(text):
+        """The names of the theorems whose body is `sorry`, in the file."""
+        out = set()
+        current = None
+        for line in text.splitlines():
+            if line.startswith("theorem "):
+                current = line.split()[1].split(":")[0]
+            elif line.strip() == "sorry" and current:
+                out.add(current)
+        return out
 
 
 class TestAstBridgeCallLimit(unittest.TestCase):

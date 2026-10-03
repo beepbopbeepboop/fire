@@ -1024,6 +1024,19 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.labels[f.name]
                 for f in M.module_body_functions(functions)
                 if f.name in self.asm.labels],
+            # The INTERN TABLE, keyed by DECODED text: a string literal's value
+            # on this path is the address of its bytes, and this is where those
+            # addresses are.  `self._str_intern` is interning by content, so it
+            # is one entry per distinct string and the mapping is 1:1 — which is
+            # what lets a proof generator state "the machine's x0 holds THIS
+            # word" about a call's string argument instead of fabricating one.
+            # Published rather than recomputed: the label spelling is
+            # `str_<emission counter>`, so the address is not derivable from
+            # the text without replaying the emitter's own emission order.
+            "str_addrs": {
+                text: self.asm.labels[label]
+                for text, label in self._str_intern.items()
+                if label in self.asm.labels},
             # PCs of the branches that test an `if`/`elif`/`while`/ternary
             # condition.  The proof generator needs these because a
             # short-circuit `and`/`or` in a condition emits a CBZ/CBNZ that
