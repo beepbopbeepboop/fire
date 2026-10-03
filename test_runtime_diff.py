@@ -639,6 +639,41 @@ BUILTIN_PROGRAMS = {
             print([(7,)])
             print([(0, 0)])
     """),
+    # A TUPLE holding a nested container in one of its slots, read on its own —
+    # `comprehension_of_tuples_and_lists`'s shape one level down, where the
+    # container is a tuple SLOT rather than an element. Every uniform repr
+    # helper takes one accessor for the whole value and one list-wide element
+    # ctype for what that accessor is reading, and neither says anything about a
+    # 2-slot tuple whose slots disagree: the list-wide ctype here is the inner
+    # list's own element type (`int64_t`, because slot 0 is a list of ints), so
+    # `_mojo_repr_intlists` read slot 1 — a plain int — through the inner-list
+    # reader, found no list there, and fell to `mojo_repr_obj`
+    # (`([1, 2], <object at 0x3>)`). The literal already records its own
+    # per-slot kinds on the VALUE (`mojo_list_set_kinds`, "li"), so the fix is
+    # for those two helpers to describe the value by them first, exactly as
+    # `_mojo_repr_defers_to_kinds` already does for the int/double/bool/bytes
+    # helpers. `str()` and a local are here because the value's own kinds row
+    # travels with the value, so a derived read needs no second record.
+    # `([[1, 2], 3], 4)` is the same defect one level out and takes the
+    # `slotkinds` helper instead, whose `kinds` argument describes the INNER
+    # slots and so was not a description of this value at all.
+    "tuple_with_a_nested_container_slot": textwrap.dedent("""\
+        def main():
+            print(([1, 2], 3))
+            print(([1, 2], 3.5))
+            print(([1, 2], "z"))
+            print(([1, 2], None))
+            print((1, [2, 3], "a", 4.5))
+            print(([1, 2], [3, 4]))
+            t = ([1, 2], 3)
+            print(t)
+            print(list(t))
+            print(t[0])
+            print(str(([1, 2], 3)))
+            print(([[1, 2], 3], 4))
+            print(((1, 2), 3))
+            print([([1, 2], 3)])
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 
