@@ -151,12 +151,9 @@ them exactly where they are.
 and `test_formal_tempfile.py` landed with it, `tempfile` left `HOST_UNREACHABLE`,
 and `mkstemp` is absent with a measured reason. §7.
 
-## 6. Reproducing this
+## 6. Reproducing §1-§5
 
-```sh
-export PATH=/opt/homebrew/bin:$PATH
-
-# The row, before and after, over the importing files only.
+The full commands are in §9; this is the short form.
 python3 - <<'EOF' > .tmp/sp_list.txt
 import sys, os, re
 sys.path.insert(0, 'tools'); sys.path.insert(0, '.')
@@ -242,7 +239,7 @@ is the same one; these two are what it looks like from here.
 | `importlib` | 5 | 5 | **0** — an embedded CPython | — |
 | `signal` | 3 | 5 | **0** — a process-wide host object | — |
 | `types` | 3 | 4 | **0** — a type factory (`FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time`) | `formal8-1` |
-| `textwrap` | 4 | 3 | **YES — pure string computation**, and `formal/hostmods/os/_syscalls.mojo` already has `str_find`, `str_replace_all`, `str_len`, `str_at`, `str_starts`, `str_rstrip_len` | **unclaimed** |
+| `textwrap` | 4 | 3 | **WAS — and it LANDED on 2026-10-03**; §8 | landed |
 | `random` | 3 | 3 | `arc4random_buf` is in libSystem | — |
 | `inspect` | 2 | 2 | flagged as considered, not missed | — |
 | `socket` | 2 | 2 | **0** | — |
@@ -256,12 +253,11 @@ now one step further along than when it was written: the keyword capability it
 was waiting on landed in 6189ec2f and `glob.recursive=True` binds now, so what
 is left is the `**` segment walk and nothing else.
 
-**`textwrap` is the next row that is unclaimed and reachable**, and it is the
-one this task's "then do the same for the next largest host-import modules"
-resolves to. It is pure computation over strings — `wrap`, `fill`, `dedent`,
-`indent`, `shorten`, `dedent` — with no host object anywhere in it, and the
-string primitives are already in `_syscalls`. Its ceiling to PASS is 0 for the
-reason every row here is: the 7 files that want it are test drivers.
+**`textwrap` was the next row that is unclaimed and reachable**, and it landed
+(§8). Its ceiling to PASS was 0 for the reason every row here is: the 5 files
+that want it are test drivers.
+
+**So `glob` is what is left**, and it is `formal10-3`'s: see §8.
 
 Two things this row cost that are worth knowing before the next one:
 
@@ -278,6 +274,78 @@ Two things this row cost that are worth knowing before the next one:
     substitutes the last six bytes, so `.txt` after them is part of the name.
     The entry point that takes a suffix is `mkstemps(3)`, which is the callee
     the bug above is about.
+
+## 8. `textwrap`, landed
+
+`formal/hostmods/textwrap.mojo`, `test_formal_textwrap.py`, and `textwrap` out
+of `HOST_MODELLED`. `dedent` and `indent`, over the `str_len`/`str_lead`/
+`str_find`/`str_cmp` that `formal/hostmods/os/_syscalls.mojo` already has.
+**Zero admitted contracts** for the third time, and the reason is the same one
+each time: a string is a `char *` this path already carries, so there is nothing
+to trust.
+
+The cheapest row in the census, and that is what made it the right one to do
+next rather than a small one: five files in this repository import `textwrap`
+and spell `dedent` 78 times and `indent` twice, with no keyword argument
+between them. `wrap`, `fill` and `shorten` are absent because a rendering WIDTH
+is their subject and no file here asks for one.
+
+Its own rule is the thing worth reading the docstring for, because the obvious
+implementation is wrong: CPython's margin is the ` `/`	` prefix the
+lexicographic MINIMUM and MAXIMUM of the non-blank lines agree on, not the
+minimum of their leading-run lengths, and the two differ on `dedent("  a\n \tb")`
+(0 against 1). `test_formal_textwrap.py`'s corpus group names the rows the
+design rests on, requires them present, and asserts that the discriminating row
+still discriminates against CPython on the host running it — so the docstring
+and the corpus cannot drift apart without one of them failing.
+
+Measured, `-j 4 -t 60`, arm64, over the 128 files that import `tempfile` (a
+slice containing all five): `not-answerable/host-import` 95 → 92,
+`not-answerable/system-module-call` 9 → 11, answerable denominator 21 → 22.
+
+**What is left on this row is `glob`, and it is not mine to take**:
+`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` is claimed by
+`formal10-3`, whose claim covers glob, copy, collections and io together, and
+its recorded recommendation is now one step further along than when it was
+written — the keyword capability it was waiting on landed in `6189ec2f`, so
+`glob.glob(pat, recursive=True)` binds and what remains is the `**` segment walk
+and nothing else.
+
+---
+
+## 9. Reproducing everything above
+
+```sh
+export PATH=/opt/homebrew/bin:$PATH
+
+# The file list each slice is over: the repo half of the sweep's scope, minus
+# the stdlib tree (which has no `import subprocess`/`import tempfile` in it, and
+# whose presence would only change the denominators).
+python3 - <<'EOF' > .tmp/sub_list.txt
+import sys, os, re
+sys.path.insert(0, 'tools'); sys.path.insert(0, '.')
+import formal_sweep as S
+for f in S.find_source_files([os.getcwd()]):
+    if re.search(r'^\s*import\s+subprocess\b',
+                 open(f, encoding='utf-8', errors='replace').read()):
+        print(f)
+EOF
+sed 's/subprocess/tempfile/' .tmp/sub_list.txt > /dev/null   # §7's slice
+
+# A slice sweep, before and after.
+python3 tools/memslot.py --gb 8 --label spslice -- \
+  python3 tools/formal_sweep.py -j 4 -t 60 --no-stdlib \
+  $(cat .tmp/sub_list.txt | tr '\n' ' ') > .tmp/sp_slice.txt 2>&1
+
+# The per-file class delta between two runs (§2, §7), which is three regexes
+# and a Counter and is what every "N files changed class" number here is.
+python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-arm-7.txt   # §3, §5
+
+# The three test files, which are the durable half of all of it.
+python3 test_formal_admitted.py            # the ratchet + subprocess surface
+python3 test_formal_tempfile.py            # tempfile
+python3 test_formal_textwrap.py            # textwrap
+```
 
 **-j 4 -t 60, not -j 6 -t 120**: this is 143 files of the 673-file scope and
 every one of them is a REFUSAL, which is cheap — `~2.2 s of wall per build`
