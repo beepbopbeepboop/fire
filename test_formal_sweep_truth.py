@@ -1070,5 +1070,421 @@ class TestLeanLaunchEstate(unittest.TestCase):
                          "in formal/lean.py: " + "; ".join(offenders))
 
 
+# ── the .olean currency check, and the IMPORTS it used to ignore ─────────────
+#
+# `formal/lean.py::ensure_library` decides whether a `.olean` is current by
+# comparing a stamp against a digest of the module's own source, and a Lean
+# `.olean` EMBEDS its imports' definitions. The library modules import each
+# other, so editing `lib/X86.lean` changes what `work.olean` MEANS while
+# leaving `work.lean` byte-identical — and nothing rebuilt it. Nothing anywhere
+# reported an error: every individual file was fine, the artifact the checker
+# read was simply not the artifact its source now describes, and Lean's answer
+# to a stale import is to recompile it in-process in every one of the
+# concurrent typecheckers. Measured: `python3 test_formal.py` went from 1.2 GB
+# to a 32 GB kill with no red anywhere. The CAS key had the same hole, which
+# is worse — a hit would have served the stale `.olean` to every machine.
+#
+# `_effective_digest` is the fix: this module's own bytes AND every
+# `LIBRARY_MODULES` name its `import` lines name, transitively. These cases are
+# pure file-content arithmetic, so nothing here runs Lean.
+class TestOleanCurrency(unittest.TestCase):
+    """`_effective_digest`: a module's own bytes AND its imports', transitively.
+
+    `formal/lean.py::ensure_library` decides whether a `.olean` is current by
+    comparing a stamp against a digest of the module's own source, and a Lean
+    `.olean` EMBEDS its imports' definitions. The library modules import each
+    other, so editing `lib/X86.lean` changes what `work.olean` MEANS while
+    leaving `work.lean` byte-identical — and nothing rebuilt it. Nothing
+    anywhere reported an error: every individual file was fine, the artifact
+    the checker read was simply not the artifact its source now describes, and
+    Lean's answer to a stale import is to recompile it in-process in every one
+    of the concurrent typecheckers. Measured: `python3 test_formal.py` went
+    from 1.2 GB across 31 processes to a 32 GB kill, with no red anywhere.
+
+    The CAS key had the same hole, which is worse — a hit would have served the
+    stale `.olean` to every machine that shares the store, making the divergence
+    permanent rather than local.
+
+    Every case here is pure file-content arithmetic, so none of it runs Lean.
+    """
+
+    # The real graph's SHAPE, which is the part that matters: one root that
+    # imports nothing from the set (`ProofLib`), a middle module, and two
+    # leaves that reach it by different routes. Two modules importing `X86` is
+    # the case the defect was measured on — three modules rebuilt from one
+    # edit — and one importing only the root is what says the fix does not
+    # over-invalidate.
+    SOURCES = {
+        "ProofLib": "import Lean\n",
+        "X86": "import ProofLib\n",
+        "work": "import ProofLib\nimport X86\n",
+        "Refine": "import ProofLib\n",
+        "Contracts": "import ProofLib\nimport Refine\n",
+    }
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="olean_currency_")
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+        for stem, text in self.SOURCES.items():
+            with open(os.path.join(self.dir, stem + ".lean"), "w") as f:
+                f.write(text)
+
+    def _digests(self):
+        return {stem: L._effective_digest(stem, self.dir)
+                for stem in self.SOURCES}
+
+    def _edit(self, stem, extra="\n-- an edit\n"):
+        with open(os.path.join(self.dir, stem + ".lean"), "a") as f:
+            f.write(extra)
+
+    def test_the_fixtures_are_the_real_graph(self):
+        """A graph of invented names would pass every case below with an
+        `_effective_digest` that followed nothing.
+
+        The digest's dependency walk is deliberately scoped to
+        `LIBRARY_MODULES` — `import Lean` and the toolchain are the version
+        half of the key's business, not this mechanism's — so a fixture whose
+        names are not in that tuple exercises nothing at all. That is what
+        makes this the first case rather than a formality.
+        """
+        self.assertEqual(set(self.SOURCES), set(L.LIBRARY_MODULES))
+        for stem, text in self.SOURCES.items():
+            named = set()
+            for line in text.splitlines():
+                if line.startswith("import "):
+                    token = line[len("import "):].strip().split()
+                    if token:
+                        named.add(token[0])
+            self.assertEqual(
+                L._module_imports(os.path.join(self.dir, stem + ".lean")),
+                named & set(L.LIBRARY_MODULES),
+                f"{stem}'s library imports are read out of the source")
+
+    def _imports_of(self, stem):
+        """The fixture's own graph, parsed HERE rather than through
+        `formal.lean._module_imports`.
+
+        That is the point: an expectation computed with the function under test
+        cannot fail when that function returns nothing, so the expected closure
+        below is derived from `SOURCES` text alone.
+        """
+        named = set()
+        for line in self.SOURCES[stem].splitlines():
+            if line.startswith("import "):
+                token = line[len("import "):].strip().split()
+                if token:
+                    named.add(token[0])
+        return named & set(L.LIBRARY_MODULES)
+
+    def _closure(self, stem, seen=None):
+        seen = set() if seen is None else seen
+        if stem in seen:
+            return seen
+        seen.add(stem)
+        for dep in self._imports_of(stem):
+            self._closure(dep, seen)
+        return seen
+
+    def _dependents(self, stem):
+        """The modules whose digest FOLLOWS `stem` — the dependency closure read
+        the other way round, which is the direction the invalidation travels."""
+        return {other for other in self.SOURCES
+                if stem in self._closure(other)}
+
+    def test_editing_a_module_moves_exactly_its_import_closure(self):
+        """The whole rule, in one loop over every module.
+
+        Both directions matter and they are the two failure modes a fix for
+        this defect has: a digest that stops short misses a module that must be
+        rebuilt, and one that over-reaches costs a 27MB Lean build on a module
+        nothing touched. The expected set is the transitive set of DEPENDENTS
+        of the edited module, computed from the fixture text.
+        """
+        for edited in self.SOURCES:
+            before = self._digests()
+            self._edit(edited, f"\n-- edited {edited}\n")
+            after = self._digests()
+            moved = {stem for stem in self.SOURCES
+                     if before[stem] != after[stem]}
+            self.assertEqual(moved, self._dependents(edited),
+                             f"editing {edited} must move the digests of "
+                             f"exactly the modules that import it (expected "
+                             f"{sorted(self._dependents(edited))}, moved "
+                             f"{sorted(moved)})")
+
+    def test_the_two_measured_answers_of_the_real_graph(self):
+        """Stated, so a reader does not have to re-derive the closure, and so a
+        change to the fixture cannot quietly change what is being pinned.
+
+        Editing `X86` — the case the defect was found on — rebuilds `work` and
+        leaves `ProofLib` (27MB, ~80s) and the two modules that never import it
+        alone. Editing `ProofLib` rebuilds everything, because every other
+        module imports it, directly or through one hop.
+        """
+        before = self._digests()
+        self._edit("X86")
+        mid = self._digests()
+        self.assertEqual({s for s in self.SOURCES if before[s] != mid[s]},
+                         {"X86", "work"})
+        self._edit("ProofLib")
+        after = self._digests()
+        self.assertEqual({s for s in self.SOURCES if mid[s] != after[s]},
+                         {"ProofLib", "X86", "work", "Refine", "Contracts"})
+
+    def test_a_touch_is_not_an_edit(self):
+        """Content-based, with no `mtime` in the decision — at the DIGEST's
+        level too. `touch lib/X86.lean`, a git checkout, or an editor that
+        rewrites mtimes must not move any digest, or the whole library is
+        rebuilt by anything that touches a file."""
+        before = self._digests()
+        os.utime(os.path.join(self.dir, "X86.lean"), (0, 0))
+        self.assertEqual(before, self._digests())
+
+    def test_a_cycle_does_not_hang(self):
+        """The walk is recursive, and a future cycle must not hang the library
+        build — which is a build that never finishes rather than an error."""
+        with open(os.path.join(self.dir, "work.lean"), "a") as f:
+            f.write("import work\n")
+        self.assertEqual(len(L._effective_digest("work", self.dir)), 64)
+
+    def test_a_module_that_is_not_there_digests_to_nothing(self):
+        self.assertEqual(L._effective_digest("NoSuchModule", self.dir), "")
+
+    def test_the_import_graph_is_read_and_not_tabulated(self):
+        """A table beside the sources is a second copy of the graph to forget,
+        and the graph is the thing that has to stay right.
+
+        So the import list comes out of each source, and a name the sources do
+        not import stays out of the walk even though it IS a
+        `LIBRARY_MODULES` member — asserted through `Refine`, whose only
+        library import is `ProofLib`.
+        """
+        refine = os.path.join(self.dir, "Refine.lean")
+        self.assertEqual(L._module_imports(refine), {"ProofLib"})
+        before = L._effective_digest("Refine", self.dir)
+        self._edit("X86")
+        self.assertEqual(before, L._effective_digest("Refine", self.dir))
+
+    def test_the_real_library_sources_declare_the_graph_they_have(self):
+        """`lib/` itself, because the fix reads the imports off the sources: a
+        module that FORGOT to import something is not caught by the digest, it
+        is caught by Lean, late and expensively, by recompiling it in every
+        checker.
+
+        So every module in `LIBRARY_MODULES` must name, at its own top, what it
+        depends on from the set — which is what the check below reads, and a
+        module whose `import` lines are not at the top of the file is reported
+        here rather than silently carried in nobody's digest.
+        """
+        for stem in L.LIBRARY_MODULES:
+            source = os.path.join(LIB, stem + ".lean")
+            if not os.path.isfile(source):
+                self.skipTest(f"lib/{stem}.lean is not in this checkout")
+            named = set()
+            with open(source, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if not line.startswith("import "):
+                        if line.strip() and not line.startswith("import "):
+                            break          # imports are a header, not scattered
+                        continue
+                    token = line[len("import "):].strip().split()
+                    if token:
+                        named.add(token[0])
+            self.assertEqual(L._module_imports(source),
+                             named & set(L.LIBRARY_MODULES),
+                             f"lib/{stem}.lean's library imports")
+
+    def test_the_olean_key_moves_with_the_imports(self):
+        """The CAS key, which is the same hole with a longer reach."""
+        stem = "work"
+        source = os.path.join(self.dir, stem + ".lean")
+        before = L._olean_key(stem, source, "lean", L._effective_digest(
+            stem, self.dir))
+        own_only = L._olean_key(stem, source, "lean")
+        self._edit("X86")
+        after = L._effective_digest(stem, self.dir)
+        self.assertNotEqual(before, L._olean_key(stem, source, "lean", after))
+        # And the DEFAULT is the hole, which is what makes the argument
+        # non-optional and the scan below necessary: this is the key an
+        # unguarded caller computes.
+        self.assertEqual(own_only, L._olean_key(stem, source, "lean"))
+
+    def test_every_digest_decision_takes_the_effective_one(self):
+        """The call sites, by AST, because the hole is only closed at all of
+        them.
+
+        `_olean_key` and `_write_stamp` DEFAULT to the module's own bytes when
+        no digest is passed, so a call site that forgets the argument is
+        silently back to the defect rather than raising. The cases above pin
+        the function; this pins the callers, including the one that threads a
+        local (`digest = _effective_digest(...)`) into three of them.
+        """
+        import ast
+        path = os.path.join(HERE, "formal", "lean.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=path)
+        wanted = {"_olean_key": 3, "_write_stamp": 3, "_library_is_current": 3}
+
+        def is_effective(node, assigned):
+            """Is this expression the effective digest — written out, or a name
+            assigned from one in the same function?"""
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "_effective_digest":
+                return True
+            if isinstance(node, ast.Name):
+                return node.id in assigned
+            return False
+
+        checked = {name: 0 for name in wanted}
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            assigned = set()
+            for stmt in ast.walk(fn):
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call) \
+                        and isinstance(stmt.value.func, ast.Name) \
+                        and stmt.value.func.id == "_effective_digest":
+                    for tgt in stmt.targets:
+                        if isinstance(tgt, ast.Name):
+                            assigned.add(tgt.id)
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in wanted):
+                    continue
+                name = node.func.id
+                checked[name] += 1
+                where = f"formal/lean.py:{node.lineno} in {fn.name}"
+                self.assertGreaterEqual(
+                    len(node.args), wanted[name] + 1,
+                    f"{where} calls {name} with no digest at all, so it falls "
+                    "back to this module's OWN bytes — the defect this whole "
+                    "class is about")
+                self.assertTrue(
+                    is_effective(node.args[wanted[name]], assigned),
+                    f"{where} calls {name} without the effective digest")
+        for name, count in checked.items():
+            self.assertGreater(count, 0,
+                               f"{name} is never called in formal/lean.py, so "
+                               "this scan proves nothing about it")
+
+
+class TestOleanCurrencyCheck(unittest.TestCase):
+    """`_library_is_current` — the decision, over a stamp that is really there.
+
+    This is the half that does not need Lean either: a stamp, an `.olean` of
+    some bytes, and a source. The digest is an ARGUMENT, so these cases pass
+    the old one (own bytes) and the new one (effective) and require the two to
+    disagree about the same three files — which is the whole defect, at the
+    level where it can be stated as an assertion.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp(prefix="olean_stamp_")
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+        for stem, text in self.SOURCES.items():
+            with open(os.path.join(self.dir, stem + ".lean"), "w") as f:
+                f.write(text)
+        # An `.olean` of arbitrary bytes plus a stamp that records it: the
+        # check only ever compares digests, so the artifact's CONTENT is not
+        # what is under test here.
+        self.olean = os.path.join(self.dir, "work.olean")
+        with open(self.olean, "wb") as f:
+            f.write(b"not really an olean")
+        self.stamp = self.olean + ".srcsha256"
+
+    # The chain `work` → `X86` → `ProofLib`, which is the one the defect was
+    # measured on.
+    SOURCES = TestOleanCurrency.SOURCES
+
+    def _current(self, stem="work"):
+        source = os.path.join(self.dir, stem + ".lean")
+        return L._library_is_current(
+            source, self.olean, self.stamp,
+            L._effective_digest(stem, self.dir))
+
+    def _edit(self, stem, extra="\n-- an edit\n"):
+        with open(os.path.join(self.dir, stem + ".lean"), "a") as f:
+            f.write(extra)
+
+    def test_a_stamped_olean_is_current(self):
+        L._write_stamp(self.stamp, os.path.join(self.dir, "work.lean"),
+                       self.olean, L._effective_digest("work", self.dir))
+        self.assertTrue(self._current())
+
+    def test_editing_an_import_invalidates_through_the_effective_digest(self):
+        """The regression, as a single assertion.
+
+        The stamp below is written the way the code wrote it before the fix —
+        from this module's OWN bytes — so it is accepted after `X86.lean` is
+        edited, and the stale `.olean` is served. Both halves are asserted on
+        purpose: that the own-bytes digest says CURRENT is what makes the
+        effective one saying "rebuild" a fact about the fix rather than about
+        the fixture.
+        """
+        source = os.path.join(self.dir, "work.lean")
+        L._write_stamp(self.stamp, source, self.olean,
+                       L._sha256_file(source))
+        self._edit("X86")
+        self.assertTrue(
+            L._library_is_current(source, self.olean, self.stamp,
+                                  L._sha256_file(source)),
+            "the own-bytes digest cannot see an edit to an import, which is "
+            "exactly why it is not the one the check is given")
+        self.assertFalse(self._current(),
+                         "an edit to X86.lean must rebuild work.olean")
+
+    def test_editing_the_module_itself_still_invalidates(self):
+        """The half that was never broken, and the one a fix for the imports
+        could plausibly break: an edit to `work.lean` itself must still say
+        "rebuild"."""
+        L._write_stamp(self.stamp, os.path.join(self.dir, "work.lean"),
+                       self.olean, L._effective_digest("work", self.dir))
+        self._edit("work")
+        self.assertFalse(self._current())
+
+    def test_a_touch_is_not_an_edit(self):
+        """No `mtime` in the decision, and this is why the effective digest had
+        to stay content-based: a module's imports can change with its own
+        bytes changing AT ALL, so an mtime rule would either rebuild the whole
+        library on every touch or miss the import edit."""
+        source = os.path.join(self.dir, "work.lean")
+        L._write_stamp(self.stamp, source, self.olean,
+                       L._effective_digest("work", self.dir))
+        os.utime(source, (0, 0))
+        self.assertTrue(self._current())
+
+    def test_an_olean_swapped_out_from_under_the_stamp_invalidates(self):
+        """The other half of the stamp: it records the `.olean`'s own digest as
+        well as the source's, so a file replaced by something else — a
+        truncated concurrent write, a copy out of a stale store — is not served
+        as current either."""
+        L._write_stamp(self.stamp, os.path.join(self.dir, "work.lean"),
+                       self.olean, L._effective_digest("work", self.dir))
+        with open(self.olean, "wb") as f:
+            f.write(b"something else entirely")
+        self.assertFalse(self._current())
+
+    def test_a_missing_stamp_or_a_missing_olean_is_not_current(self):
+        """No stamp at all is the fresh-clone case, and it must not read as
+        current — that is the stamp-only adoption path in `ensure_library`
+        doing its job, not a currency answer."""
+        self.assertFalse(self._current())
+        L._write_stamp(self.stamp, os.path.join(self.dir, "work.lean"),
+                       self.olean, L._effective_digest("work", self.dir))
+        os.remove(self.olean)
+        self.assertFalse(self._current())
+
+    def test_a_truncated_stamp_is_not_current(self):
+        """A stamp written by an older tree, or a half-written line, must read
+        as "not current" rather than raising: this is a REPORT about an
+        artifact, and an exception here would take down every caller."""
+        L._write_stamp(self.stamp, os.path.join(self.dir, "work.lean"),
+                       self.olean, L._effective_digest("work", self.dir))
+        with open(self.stamp, "w") as f:
+            f.write("deadbeef")
+        self.assertFalse(self._current())
+
 if __name__ == "__main__":
     unittest.main()
