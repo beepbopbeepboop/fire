@@ -8482,14 +8482,22 @@ dylib_exports: list = None, globals_base: int = None,
 
         Bare Ident/Member del is a no-op (no GC; SRA slots persist).
 
-        A multi-element subscript index is refused HERE, before the branches
-        below, because the SubscriptExpr branch below is unreachable (it sits
-        after the SliceExpr branch's `continue`), so without this
-        `del a[i, j]` fell off the end of the loop and did NOTHING: it built,
-        it ran, and the list still had three elements. A silent no-op where
-        the source says "remove" is the one outcome this backend may not
-        produce, and the refusal belongs at the point where the shape is still
-        visible rather than in a branch nothing reaches."""
+        The SubscriptExpr arm below used to sit UNDER the SliceExpr arm's
+        `continue`, so every subscript target fell off the end of the loop body
+        and emitted no instructions at all: `del lst[0]` and `del lst[1:3]`
+        built, ran, exited 0, and removed nothing, on both list and dict
+        (`len(a)` still 3, `a[0]` still 10). A silent no-op where the source
+        says "remove" is the one outcome this backend may not produce, and the
+        four `_emit_del_*` helpers it needed were dead code behind that one
+        `continue` — written, reviewed, and stranded.
+
+        A multi-element subscript index is refused BEFORE the branches below,
+        for the same reason: `del a[i, j]` is not one of the three lowered
+        shapes, and the refusal belongs where the shape is still visible.
+
+        The shapes this cannot lower are refused through the shared
+        `M.del_refusal`, so this backend and its x86-64 twin say the same
+        words about the same source."""
         for target in stmt.targets:
             if isinstance(target, (F.IdentExpr, F.MemberExpr)):
                 continue
@@ -8503,27 +8511,46 @@ dylib_exports: list = None, globals_base: int = None,
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "
                     "on the formal arm64 path")
+            why = M.del_refusal(
+                target,
+                self._is_string_subscript(target.obj)
+                if isinstance(target, F.SubscriptExpr) else False,
+                self._del_base_is_pointer(target))
+            if why is not None:
+                raise CodegenError(why)
             if isinstance(target, F.SliceExpr):
                 self._emit_del_slice(target)
                 continue
-                if isinstance(target, F.SubscriptExpr):
-                    if self._is_dict_subscript(target.obj):
-                        self._emit_del_dict_key(target)
-                        continue
-                    if isinstance(target.index, F.SliceExpr):
-                        self._emit_del_slice_index(target)
-                        continue
-                    if self._is_string_subscript(target.obj):
-                        raise CodegenError(
-                            "del on a string index is not supported on the "
-                            "formal arm64 path")
-                    self._emit_del_list_index(target)
+            if isinstance(target, F.SubscriptExpr):
+                if self._is_dict_subscript(target.obj):
+                    self._emit_del_dict_key(target)
                     continue
-                # Dict/list slot behind a bare MemberExpr base is handled
-                # above via _member_slot_key; unknown shapes fall through.
-                raise CodegenError(
-                    f"unsupported del target on the formal arm64 path "
-                    f"(got {type(target).__name__})")
+                if isinstance(target.index, F.SliceExpr):
+                    self._emit_del_slice_index(target)
+                    continue
+                self._emit_del_list_index(target)
+                continue
+            # Dict/list slot behind a bare MemberExpr base is handled
+            # above via _member_slot_key; unknown shapes fall through.
+            raise CodegenError(
+                f"unsupported del target on the formal arm64 path "
+                f"(got {type(target).__name__})")
+
+    def _del_base_is_pointer(self, target) -> bool:
+        """Whether `target`'s base is a POINTER rather than a container.
+
+        The READ path's own question — `subscript_base_lowering`, which answers
+        `"load"` for a pointer whose pointee width this module established —
+        asked here so `del` over a `Pointer` is refused instead of taking the
+        buffer's first word for a count. A `SliceExpr` target has the same base
+        as a subscript, and `del p[0:2]` is the same mistake with two bounds.
+        """
+        obj = getattr(target, "obj", None)
+        if obj is None:
+            return False
+        shape, _width, _signed, _why = M.subscript_base_lowering(
+            self._cur_fn, obj, self._structs, self._functions, self._structs)
+        return shape == "load"
 
     def _emit_del_list_index(self, target) -> None:
         """`del lst[i]` / `del obj.attr[i]` — shift left, count-- (OOB → exit).
@@ -8553,9 +8580,16 @@ dylib_exports: list = None, globals_base: int = None,
         loop = f"{fn}_dls{wid}"
         endl = f"{fn}_dle{wid}"
         self.asm.label(loop)
+        # `CBNZ` and not `CBZ`: the exit is the `>= count` case, and the
+        # scanner in `_emit_dict_lookup_addr` spells the same test the same
+        # way. With `CBZ` the loop left before its own body on every
+        # iteration, so the count came down and the elements did not move —
+        # `del a[0]` on `[10, 20, 30]` printed `2 10`, which is a shorter
+        # list rather than a removal. Invisible until now only because
+        # nothing reached this function (see `_emit_del`).
         self.asm.emit(encode_cmp_xn_xm(3, 1))
         self.asm.emit(encode_cset_xd_cond(4, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 4))
+        self.asm.emit(encode_cbnz_xn(0, 4))
         self.asm.emit_label_rel(endl, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(5, 10, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
@@ -8615,9 +8649,10 @@ dylib_exports: list = None, globals_base: int = None,
         # shift pairs [i+1, count) → [i, count-1); count--
         self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))  # j = i+1
         self.asm.label(shift)
+        # `CBNZ`, matching the scan loop above: `j >= count` is the exit.
         self.asm.emit(encode_cmp_xn_xm(2, 1))
         self.asm.emit(encode_cset_xd_cond(3, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(shd, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 2))
@@ -8676,64 +8711,76 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_del_list_range(self, name: str, start, stop, step) -> None:
         """Remove [start, stop) from list `name` (memmove tail + count).
 
-        Bounds are Python-normalized (negative → +count; stop clamped to
-        [start, count]). start >= stop is a no-op. Callers reject step."""
+        Bounds are Python-normalized: a negative bound gains the count, one
+        still negative after that clamps to 0, `stop` clamps to
+        [start, count], and start >= stop removes nothing. Callers reject a
+        step.
+
+        TWO THINGS THIS FUNCTION HAD WRONG, both of them measured, and both of
+        them invisible while the function was unreachable.
+
+        **The branches were backwards.** Each test is spelled
+        `cset X3, <cond>` then a `CBZ`/`CBNZ X3` that `emit_label_rel` points
+        at the SKIP label — so the body runs when the condition is TRUE. The
+        previous version wrapped that in an extra unconditional `encode_b(0)`,
+        which inverts it: with `cset X3, lt` and `CBNZ X3, #0` followed by
+        `B <clamp-to-zero>`, a NON-negative bound went to the clamp and a
+        negative one was wrapped. So `del lst[1:3]` normalized `start` to 0
+        and then `stop = max(stop, start)` took it the other way, `n_del`
+        came out 0, and the list was unchanged — the silent no-op this whole
+        construct is about, reached for a second time and by a different
+        route. `_emit_slice_store` above is the same normalization written the
+        other way round, and that one works.
+
+        **The base and the count were live across the bound EXPRESSIONS.**
+        `X10` (base) and `X1` (count) were loaded first and the bounds were
+        evaluated afterwards, and a bound is where a call, a nested
+        subscript or a blob materialization runs — any of which writes
+        scratch registers. They are pushed here instead, and the copy loop
+        reloads them, which costs two loads and removes the question.
+        """
         if step is not None:
             raise CodegenError(
                 "del slice with step is not supported on the formal arm64 "
                 "path")
         self._load_var(name, 10)                       # X10 = base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))  # X1 = count
+        self.asm.emit(encode_stp_sp_pre(1, 31))        # [SP+0] count
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         # --- start index → X2 ---
+        # ALWAYS pushed, omitted bound included: the count sits at [SP+16]
+        # once start is on the stack, and a conditional push would make every
+        # later offset conditional too (`del lst[:2]` read the count out of
+        # the slot `start` had not taken and removed nothing).
         if start is None:
             self.asm.emit(encode_movz_xd_imm(2, 0))
         else:
             self._emit_expr_to(start, "X2")
-            self.asm.emit(encode_cmp_xn_imm(2, 0))
-            self.asm.emit(encode_cset_xd_cond(3, "lt"))
-            self.asm.emit(encode_cbnz_xn(0, 3))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drn{wid}", here_offset=-4)
-            self.asm.emit(encode_add_xd_xn_xm(2, 2, 1))  # start += count
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drc{wid}", here_offset=-4)
-            self.asm.label(f"{fn}_drn{wid}")
-            self.asm.emit(encode_movz_xd_imm(2, 0))       # negative → 0
-            self.asm.label(f"{fn}_drc{wid}")
+            self._emit_slice_bound_normalize(2, 0)
+        self.asm.emit(encode_stp_sp_pre(2, 31))         # [SP+0] start
         # --- stop index → X4 ---
         if stop is None:
-            self.asm.emit(encode_mov_zr_xn(4, 1))
+            self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))   # stop = count
         else:
             self._emit_expr_to(stop, "X4")
-            self.asm.emit(encode_cmp_xn_imm(4, 0))
-            self.asm.emit(encode_cset_xd_cond(3, "lt"))
-            self.asm.emit(encode_cbnz_xn(0, 3))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_dro{wid}", here_offset=-4)
-            self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))  # stop += count
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drp{wid}", here_offset=-4)
-            self.asm.label(f"{fn}_dro{wid}")
-            self.asm.emit(encode_movz_xd_imm(4, 0))       # negative → 0
-            self.asm.label(f"{fn}_drp{wid}")
+            self._emit_slice_bound_normalize(4, 16)
+            self.asm.emit(encode_ldr_xt_xn_imm(2, 31, 0))    # start
         # stop = min(stop, count)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))  # X1 = count
         self.asm.emit(encode_cmp_xn_xm(4, 1))
-        self.asm.emit(encode_cset_xd_cond(3, "hi"))
-        self.asm.emit(encode_cbnz_xn(0, 3))
-        self.asm.emit(encode_b(0))
+        self.asm.emit(encode_cset_xd_cond(3, "hi"))      # 1 when stop > count
+        self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(f"{fn}_dru{wid}", here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 1))
+        self.asm.emit(encode_mov_zr_xn(4, 1))           # stop = count
         self.asm.label(f"{fn}_dru{wid}")
         # stop = max(stop, start)  (empty when stop <= start)
         self.asm.emit(encode_cmp_xn_xm(4, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "lt"))
-        self.asm.emit(encode_cbnz_xn(0, 3))
-        self.asm.emit(encode_b(0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))      # 1 when stop < start
+        self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(f"{fn}_drv{wid}", here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 2))
+        self.asm.emit(encode_mov_zr_xn(4, 2))           # stop = start
         self.asm.label(f"{fn}_drv{wid}")
         # n_del = stop - start; if 0 → done
         self.asm.emit(encode_sub_xd_xn_xm(5, 4, 2))
@@ -8743,6 +8790,10 @@ dylib_exports: list = None, globals_base: int = None,
         dskip = f"{fn}_drs{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(dskip, here_offset=-4)
+        # The bounds may have clobbered the base and the count; both are on the
+        # stack, so reload rather than trust the registers.
+        self._load_var(name, 10)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))
         # copy [stop, count) → [start, start + (count - stop))
         self.asm.emit(encode_mov_zr_xn(6, 4))             # j = stop
         self._while_counter += 1
@@ -8750,8 +8801,8 @@ dylib_exports: list = None, globals_base: int = None,
         mend = f"{fn}_dre{self._while_counter}"
         self.asm.label(mloop)
         self.asm.emit(encode_cmp_xn_xm(6, 1))
-        self.asm.emit(encode_cset_xd_cond(3, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit(encode_cset_xd_cond(3, "ge"))      # 1 when j >= count
+        self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(mend, here_offset=-4)
         self.asm.emit(encode_sub_xd_xn_xm(7, 6, 4))       # j - stop
         self.asm.emit(encode_add_xd_xn_xm(7, 7, 2))       # + start
@@ -8767,6 +8818,44 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_sub_xd_xn_xm(1, 1, 5))       # count -= n_del
         self.asm.emit(encode_str_xt_xn_imm(1, 10, 0))
         self.asm.label(dskip)
+        # pop start and count — on BOTH paths, `dskip` included, because the
+        # push above is unconditional and a pop that only sometimes happens is
+        # a stack that only sometimes comes back.
+        self.asm.emit(encode_ldp_sp_post(2, 31))
+        self.asm.emit(encode_ldp_sp_post(1, 31))
+
+    def _emit_slice_bound_normalize(self, reg: int, count_off: int) -> None:
+        """Python's negative-index rule for one slice bound, in `reg`.
+
+        A negative bound gains the count; one still negative after that
+        clamps to 0, because `del lst[-99:2]` on a four-element list removes
+        two elements and not the whole list. `count_off` is the byte offset
+        from SP of the count pushed by the caller, so this is safe to run
+        between two bound EXPRESSIONS — which may write any scratch register.
+
+        The idiom is `_emit_slice_store`'s, which is the one in this file that
+        runs: `cset` the condition, `CBZ` past the body, and point the `CBZ`
+        at the label after it. Everything about `del` that was wrong was this
+        shape spelled the other way round.
+        """
+        self._while_counter += 1
+        w = self._while_counter
+        fn = self.func_name
+        wrapped = f"{fn}_drw{w}"
+        clamped = f"{fn}_drcl{w}"
+        self.asm.emit(encode_cmp_xn_imm(reg, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(wrapped, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(17, 31, count_off))   # X17 = count
+        self.asm.emit(encode_add_xd_xn_xm(reg, reg, 17))
+        self.asm.label(wrapped)
+        self.asm.emit(encode_cmp_xn_imm(reg, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(clamped, here_offset=-4)
+        self.asm.emit(encode_movz_xd_imm(reg, 0))
+        self.asm.label(clamped)
 
 
 def _always_returns(stmts: list) -> bool:

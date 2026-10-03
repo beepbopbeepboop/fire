@@ -1705,6 +1705,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                                      line=stmt.line, col=stmt.col))
             return
 
+        if isinstance(stmt, F.DelStmt):
+            self._emit_del(stmt)
+            return
+
         if isinstance(stmt, F.ComptimeForStmt):
             # Folded when the iterable is a compile-time-known sequence (the
             # `comptime for i in range(0, 8)` idiom), else emitted as the
@@ -5263,6 +5267,335 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             "assignment to a slice target is not lowered on the formal "
             "x86-64 path: a slice is a materialized copy here, so writing "
             "through one would have to write back into its source blob")
+
+    # ── `del` ───────────────────────────────────────────────────────────────
+    #
+    # The same three shapes arm64 lowers, in the same order and against the
+    # same shared refusals, and the reason is the whole point of this group:
+    # `DelStmt` was NOT in this backend's statement dispatch, so `del lst[0]`
+    # built on arm64 (where it removed nothing, see
+    # `bugs/FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64.md`) and did
+    # not build here, with "unsupported statement DelStmt" as the whole
+    # diagnostic. One architecture silently wrong and the other refusing is the
+    # shape that must not survive, so the vocabularies are shared
+    # (`model.del_refusal`) and the algorithms are twins.
+
+    def _emit_del(self, stmt) -> None:
+        """`del target…` — list index/slice remove, dict key shift-delete.
+
+        Bare Ident/Member del is a no-op (no GC; SRA slots persist), which is
+        arm64's reading and the only one that can be true of a slot: there is
+        no allocator to give the bytes back to.
+
+        The multi-element index and the MLIR template are refused before the
+        branches, through the same `multi_index_refusal_for` arm64 asks, and
+        the four shapes this cannot lower come from `model.del_refusal` — so
+        both architectures print the same words about the same source.
+        """
+        for target in stmt.targets:
+            if isinstance(target, (F.IdentExpr, F.MemberExpr)):
+                continue
+            if isinstance(target, F.SubscriptExpr) and (
+                    M.is_multi_index(target.index)
+                    or M.is_mlir_template(target)):
+                why = M.multi_index_refusal_for(
+                    target, self._is_dict_subscript(target.obj),
+                    self._functions, self._structs)
+                raise CodegenError(
+                    f"del {why}" if why is not None else
+                    "del on a subscript with a tuple index is not supported "
+                    "on the formal x86-64 path")
+            why = M.del_refusal(
+                target,
+                self._is_string_subscript(target.obj)
+                if isinstance(target, F.SubscriptExpr) else False,
+                self._del_base_is_pointer(target))
+            if why is not None:
+                raise CodegenError(why)
+            if isinstance(target, F.SliceExpr):
+                self._emit_del_list_range(
+                    self._del_base_key(target.obj), target.start, target.stop,
+                    target.step)
+                continue
+            if isinstance(target, F.SubscriptExpr):
+                if self._is_dict_subscript(target.obj):
+                    self._emit_del_dict_key(target)
+                    continue
+                if isinstance(target.index, F.SliceExpr):
+                    self._emit_del_list_range(
+                        self._del_base_key(target.obj),
+                        target.index.start, target.index.stop,
+                        target.index.step)
+                    continue
+                self._emit_del_list_index(target)
+                continue
+            raise CodegenError(
+                f"unsupported del target on the formal x86-64 path "
+                f"(got {type(target).__name__})")
+
+    def _del_base_key(self, obj) -> str:
+        """The local-slot key `del` reads the blob out of.
+
+        An IdentExpr names the slot; an IdentExpr-rooted MemberExpr chain is an
+        SRA slot (`a.b.c` → `"a.b.c"`), which is the same table `_store_var`
+        and `_tuple_target_key` use. arm64's twin is `_member_slot_key` too.
+        """
+        key = (obj.name if isinstance(obj, F.IdentExpr)
+               else _member_slot_key(obj))
+        if key is None:
+            raise CodegenError(M.del_refusal(obj, False, False) or "")
+        return key
+
+    def _del_base_is_pointer(self, target) -> bool:
+        """Whether `target`'s base is a POINTER rather than a container.
+
+        The READ path's own question — `subscript_base_lowering` answers
+        `"load"` for a pointer whose pointee width this module established —
+        asked here so `del p[0]` is refused rather than taking the buffer's
+        first word for a count. arm64's twin asks the same predicate.
+        """
+        obj = getattr(target, "obj", None)
+        if obj is None:
+            return False
+        shape, _width, _signed, _why = M.subscript_base_lowering(
+            self._cur_fn, obj, self._structs, self._functions, self._structs)
+        return shape == "load"
+
+    def _emit_del_list_index(self, target) -> None:
+        """`del lst[i]` — shift left, count-- (out of range → exit 1).
+
+        The bounds check and the negative-index wrap are `_emit_subscript_addr`'s
+        — the element ADDRESS comes out of the same computation the read path
+        uses, so `del lst[9]` and `printf(lst[9])` fail the same way — and the
+        index is recovered from that address rather than re-evaluated, which is
+        what keeps a `del lst[f()]` from calling `f` twice.
+        """
+        self._emit_subscript_addr(target)             # RAX = &elem
+        self._push_slot(Reg.RAX)                      # [rsp] = elem address
+        # The base is read straight into R12 and NOT pushed: the one slot on
+        # the stack has to be the element address, and a second push here put
+        # the base where the pop expected the address — `del a[0]` then
+        # recovered index 2 out of `&elem[0]`, shifted nothing and printed
+        # `2 10`, which is the pre-fix arm64 answer on this architecture.
+        self._emit_expr(target.obj)                   # RAX = base
+        self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RAX))       # base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
+        self._pop_slot(Reg.R14)                       # R14 = element address
+        # i = (elem - (base + 8)) >> 3
+        self.asm.emit(encode_mov_r64_r64(Reg.R15, Reg.R12))
+        self.asm.emit(encode_add_r64_imm8(Reg.R15, 8))
+        self.asm.emit(encode_sub_r64_r64(Reg.R14, Reg.R15))
+        self.asm.emit(encode_shift_r64_imm8(">>", Reg.R14, 3))
+        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))            # j = i + 1
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop_label = f"{fn}_dlsi{wid}"
+        end_label = f"{fn}_dlse{wid}"
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self._emit_jcc(COND_AE, end_label)            # j >= count → done
+        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R15)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.R15, 0))     # elem[j]
+        self.asm.emit(encode_sub_r64_imm8(Reg.R15, 8))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R15, 0, Reg.R9))     # elem[j-1]
+        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(end_label)
+        self.asm.emit(encode_sub_r64_imm8(Reg.R13, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R13))
+        self._pop_slot(Reg.RAX)                       # release elem address
+
+    def _emit_del_dict_key(self, target) -> None:
+        """`del d[k]` — scan for the key, then shift the pairs over it.
+
+        A missing key exits 1, the same signal the dict READ path gives
+        (`_emit_dict_lookup_addr` has no exception runtime to raise KeyError
+        with) — one convention for both directions through the same blob, so
+        `del d["nope"]` and `printf("%d", d["nope"])` agree.
+        """
+        base_key = self._del_base_key(target.obj)
+        self._emit_expr(target.index)                 # RAX = key
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))   # R10 = key
+        self._load_var(base_key, Reg.R12)             # R12 = blob
+        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
+        self._emit_mov_imm(Reg.R14, 0)                # R14 = i
+        self._if_counter += 1
+        iid = self._if_counter
+        fn = self.func_name
+        loop_label = f"{fn}_ddk{iid}_loop"
+        miss_label = f"{fn}_ddk{iid}_miss"
+        found_label = f"{fn}_ddk{iid}_found"
+        next_label = f"{fn}_ddk{iid}_next"
+        shift_label = f"{fn}_ddk{iid}_shift"
+        shd_label = f"{fn}_ddk{iid}_shd"
+        end_label = f"{fn}_ddk{iid}_end"
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self._emit_jcc(COND_AE, miss_label)           # i >= count → not found
+        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R9, header=8, scale=4)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.R9, 0))       # key_i
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R10))
+        # SETcc then a TEST before the Jcc: a bare Jcc after a SETcc reads
+        # the flags the CMP left, which is a second run of the comparison
+        # rather than its result — `_emit_jcc_bool`'s whole reason.
+        self._emit_setcc_bool(Reg.R8, "sete")
+        # COND_E, and not the COND_NE `_emit_dict_lookup_addr` uses on the same
+        # `sete`: there the branch IS the hit, here the fall-through is. With
+        # COND_NE the scan skipped the pair it had just matched and removed
+        # the NEXT one — `del d["a"]` took "a" out of the count and left "a"
+        # in the blob, so `d["b"]` then missed and the program exited 1 with
+        # its output still in the stdio buffer.
+        self._emit_jcc_bool(Reg.R8, COND_E, next_label)
+        self._emit_jmp(found_label)
+        self.asm.label(next_label)
+        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(found_label)
+        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))            # j = i + 1
+        self.asm.label(shift_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R14, Reg.R13))
+        self._emit_jcc(COND_AE, shd_label)            # j >= count → done
+        self._emit_elem_addr(Reg.R12, Reg.R14, Reg.R9, header=8, scale=4)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R9, 0))     # key_j
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R9, 8))     # value_j
+        self.asm.emit(encode_sub_r64_imm8(Reg.R9, 16))             # pair j-1
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 0, Reg.R10))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R9, 8, Reg.R11))
+        self.asm.emit(encode_add_r64_imm8(Reg.R14, 1))
+        self._emit_jmp(shift_label)
+        self.asm.label(shd_label)
+        self.asm.emit(encode_sub_r64_imm8(Reg.R13, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R13))
+        self._emit_jmp(end_label)
+        self.asm.label(miss_label)
+        self._emit_call_exit(1)
+        self.asm.label(end_label)
+
+    def _emit_del_list_range(self, name: str, start, stop, step) -> None:
+        """Remove [start, stop) from list `name` (memmove the tail, count).
+
+        Python's bound rules, in arm64's order and for arm64's reasons: a
+        negative bound gains the count, one still negative after that clamps
+        to 0, `stop` clamps to [start, count], and start >= stop removes
+        nothing. A `step` is refused by `model.del_refusal` before this runs.
+
+        THE BOUNDS ARE EVALUATED WITH THE COUNT ON THE STACK, because a bound
+        is where a call, a nested subscript or a blob materialization runs and
+        any of them writes RAX — which is where the base and the count live
+        when they are loaded. Two pushes, and the copy loop reloads the base
+        and the count from the stack rather than trusting the registers across
+        the two bound expressions.
+        """
+        if step is not None:
+            raise CodegenError(
+                "del slice with step is not supported on the formal x86-64 "
+                "path")
+        self._load_var(name, Reg.R12)                 # R12 = blob
+        self.asm.emit(encode_mov_r64_rm64(Reg.R13, Reg.R12, 0))   # count
+        self._push_slot(Reg.R13)                      # [rsp] = count
+        if start is None:
+            self._emit_mov_imm(Reg.R14, 0)
+        else:
+            self._emit_expr(start)                    # RAX = start
+            self.asm.emit(encode_mov_r64_r64(Reg.R14, Reg.RAX))
+            self._emit_slice_bound_normalize(Reg.R14, 0)
+        self._push_slot(Reg.R14)                      # [rsp] = start
+        # TWO pushes above, so TWO pops here — the omitted `stop` included.
+        # Popping only one of them left `start` where the count was, so
+        # `del lst[-2:]` removed [2, 2) and printed the list unchanged; and a
+        # third pop underflows the frame and leaves RSP 16 bytes high for the
+        # rest of the function, which is its own silent corruption.
+        if stop is None:
+            self._pop_slot(Reg.R14)                   # start
+            self._pop_slot(Reg.R15)                   # count
+            self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R15))  # stop = count
+        else:
+            self._emit_expr(stop)                     # RAX = stop
+            self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.RAX))
+            self._emit_slice_bound_normalize(Reg.R13, 16)
+            self._pop_slot(Reg.R14)                   # start
+            self._pop_slot(Reg.R15)                   # count
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        keep_hi = f"{fn}_dlkh{wid}"
+        keep_lo = f"{fn}_dlkl{wid}"
+        loop_label = f"{fn}_dlrm{wid}"
+        mend_label = f"{fn}_dlre{wid}"
+        skip_label = f"{fn}_dlrs{wid}"
+        # stop = min(stop, count): keep the bound when count is ABOVE it.
+        # `cmp R15, R13` is count - stop, so `ja` (count > stop) is the keep
+        # and the fall-through is the clamp — the other polarity turns
+        # `del b[1:3]` on a four-element list into `del b[1:4]`, which removes
+        # three elements and then reads the fourth out of a three-element
+        # blob.
+        self.asm.emit(encode_cmp_r64_r64(Reg.R15, Reg.R13))
+        self._emit_jcc(COND_A, keep_hi)
+        self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R15))   # stop = count
+        self.asm.label(keep_hi)
+        # stop = max(stop, start)  (empty when stop <= start)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R13, Reg.R14))
+        self._emit_jcc(COND_AE, keep_lo)              # stop >= start → keep
+        self.asm.emit(encode_mov_r64_r64(Reg.R13, Reg.R14))   # stop = start
+        self.asm.label(keep_lo)
+        # n_del = stop - start; nothing to do when it is 0
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R13))
+        self.asm.emit(encode_sub_r64_r64(Reg.R8, Reg.R14))
+        self._emit_jcc_bool(Reg.R8, COND_E, skip_label)
+        # The bound EXPRESSIONS may have written the base and the count, so
+        # both come back from the name rather than from the registers. `stop`
+        # is in R13 through all of this and the count moves to R15, which is
+        # why the copy loop below does not reload it into R13 and lose it.
+        self._load_var(name, Reg.R12)                 # base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R15, Reg.R12, 0))   # count
+        # copy [stop, count) → [start, start + (count - stop))
+        self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.R13))       # j = stop
+        self.asm.label(loop_label)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R9, Reg.R15))
+        self._emit_jcc(COND_AE, mend_label)            # j >= count → done
+        self._emit_elem_addr(Reg.R12, Reg.R9, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # elem[j]
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.R9))
+        self.asm.emit(encode_sub_r64_r64(Reg.R11, Reg.R13))       # j - stop
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R14))       # + start
+        self._emit_elem_addr(Reg.R12, Reg.R11, Reg.R11)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self.asm.emit(encode_add_r64_imm8(Reg.R9, 1))
+        self._emit_jmp(loop_label)
+        self.asm.label(mend_label)
+        self.asm.emit(encode_sub_r64_r64(Reg.R15, Reg.R8))        # count -= n
+        self.asm.emit(encode_mov_rm64_r64(Reg.R12, 0, Reg.R15))
+        self.asm.label(skip_label)
+
+    def _emit_slice_bound_normalize(self, reg: Reg, count_off: int) -> None:
+        """Python's negative-index rule for one slice bound, in `reg`.
+
+        A negative bound gains the count; one still negative after that clamps
+        to 0, because `del lst[-99:2]` on a four-element list removes two
+        elements and not the whole list. `count_off` is the byte offset from
+        RSP of the count pushed by the caller, so this is safe to run between
+        two bound EXPRESSIONS — either of which writes RAX and anything else
+        it likes.
+
+        The signed compare against zero is the one `_emit_bounds_check` uses
+        for the same question (a negative subscript index), so `del lst[-1]`
+        and `printf("%d", lst[-1])` agree on which element that is.
+        """
+        self._if_counter += 1
+        bid = self._if_counter
+        fn = self.func_name
+        wrapped = f"{fn}_dlw{bid}"
+        done = f"{fn}_dlc{bid}"
+        self.asm.emit(encode_cmp_r64_imm8(reg, 0))
+        self._emit_jcc(COND_GE, wrapped)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, count_off))
+        self.asm.emit(encode_add_r64_r64(reg, Reg.RAX))          # += count
+        self.asm.label(wrapped)
+        self.asm.emit(encode_cmp_r64_imm8(reg, 0))
+        self._emit_jcc(COND_GE, done)
+        self._emit_mov_imm(reg, 0)
+        self.asm.label(done)
 
     def _tuple_target_key(self, el):
         """One element of a tuple-assignment target, as something `_store_var`

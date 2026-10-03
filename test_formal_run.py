@@ -8227,16 +8227,20 @@ SUBSCRIPT_CASES = [
      "        `> : i1`]\n"
      "    return 0\n",
      "refuse:target_has_feature('neon') is a per-CPU question", None),
-    # `del a[i, j]`. arm64 reaches the subscript here and refuses with the
-    # shared message; x86-64 has no `del` at all and refuses the STATEMENT
-    # first, which is correct and complete but names a different thing. Both
-    # refusing is the assertion, and the two reasons are genuinely different,
-    # which `refuse:` cannot express — hence `refuse_either:`.
+    # `del a[i, j]`. BOTH backends reach the subscript and refuse with the
+    # shared message — x86-64 used to refuse the STATEMENT first ("unsupported
+    # statement DelStmt") because it had no `del` at all, and the two spellings
+    # of the same refusal are why this reads `refuse_either:`; the second
+    # alternative is kept because a `del` reaching a backend that cannot lower
+    # it is exactly the divergence the case is here for.
     #
-    # This case exists because the shape used to be a silent NO-OP: the
-    # SubscriptExpr branch of arm64's `_emit_del` sits after the SliceExpr
-    # branch's `continue`, so `del a[i, j]` fell off the end of the loop,
-    # built, ran, and left all three elements in place.
+    # This case exists because the shape used to be a silent NO-OP on arm64:
+    # the SubscriptExpr branch of `_emit_del` sits after the SliceExpr branch's
+    # `continue`, so `del a[i, j]` fell off the end of the loop, built, ran,
+    # and left all three elements in place. The three shapes that branch DID
+    # reach were wrong in the same unreachable way — three of the four `del`
+    # helpers had an inverted branch — and are now `test_formal_x86_64_parity.py`
+    # rows measured against CPython, which is where a value assertion belongs.
     ("sub_multi_index_del",
      "def main(n):\n"
      "    a = [1, 2, 3]\n"
@@ -8909,11 +8913,14 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     # backend must refuse, and each must name ONE OF the given reasons. It
     # exists for a construct where the two architectures refuse at DIFFERENT
     # depths, so the shared-text rule cannot apply and a common substring does
-    # not exist — `del a[i, j]`, which arm64 refuses at the subscript and
-    # x86-64 refuses at the statement, because it lowers no `del` at all. Both
-    # are correct; the point the case is making is that neither BUILDS, and
-    # `|` in the expectation separates the alternatives. Prefixed so it cannot
-    # be mistaken for a single needle.
+    # not exist. `del a[i, j]` is the case it was written for: arm64 refused it
+    # at the subscript and x86-64 at the statement, because it lowered no `del`
+    # at all. Both now refuse at the SUBSCRIPT with the same shared text (both
+    # lower `del` — see `test_formal_x86_64_parity.py`'s `del_*` rows), and the
+    # statement-depth alternative is kept in that case's needle list so a
+    # backend that loses its `del` lowering again fails the case instead of
+    # passing it on the other alternative. Prefixed so it cannot be mistaken
+    # for a single needle.
     if isinstance(want_exit, str) and want_exit.startswith("refuse_either:"):
         needles = want_exit[len("refuse_either:"):].split("|")
         for backend in ("arm64", "x86_64"):

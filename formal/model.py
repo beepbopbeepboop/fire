@@ -6236,6 +6236,18 @@ def spelled(expr) -> str:
         # `46` names the node's type rather than the thing the reader is
         # looking at.
         return str(expr.value)
+    if isinstance(expr, F.SliceExpr):
+        # `a[1:3]`, not `SliceExpr`. A `del a[1:3]` target PARSES as a bare
+        # `SliceExpr` (the subscript is the target's own shape, not a
+        # `SubscriptExpr` with a slice index), so a refusal that quotes this
+        # node without spelling it named the parser's type and not the line —
+        # and a stepped-slice `del` is exactly the case that needs the bounds
+        # in the message.
+        bounds = [getattr(expr, part, None) for part in ("start", "stop")]
+        step = getattr(expr, "step", None)
+        if step is not None:
+            bounds.append(step)
+        return (f"{spelled(expr.obj)}[{':'.join(spelled(b) for b in bounds)}]")
     if isinstance(expr, F.SubscriptExpr):
         # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
         # whose spelling is both short and exact, and it is the shape a byte
@@ -6260,6 +6272,142 @@ def spelled(expr) -> str:
         # and `UnaryOp` tells the reader nothing they can act on.
         return f"{expr.op}{spelled(getattr(expr, 'operand', None))}"
     return type(expr).__name__
+
+
+def del_refusal(target, base_is_string: bool = False,
+                base_is_pointer: bool = False) -> str | None:
+    """Why this `del` target cannot be lowered here, or None when it can.
+
+    THE SHAPE-ASKED REFUSAL FOR `del`, and the one that closes a silent no-op
+    rather than a fault.
+    `bugs/FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64.md` measured it
+    on both architectures:
+
+        del lst[0]      arm64  exit 0, `3 10` — the list still has 3 elements
+        del lst[1:3]    arm64  exit 0, `4 10 20` — the slice is still there
+        del d["a"]      arm64  exit 0, `2 2` — the key is still there
+        del p[0]        arm64  exit 0, `9 20` — a POINTER, corrupted
+        all five         x86-64 refused the STATEMENT (`DelStmt` was not in the
+                         statement dispatch at all), so for `del` the two
+                         architectures disagreed about whether the program had
+                         an answer
+
+    The arm64 cause was one `continue`: the `SubscriptExpr` branch sat below
+    the `SliceExpr` branch's `continue`, so every subscript target fell off the
+    end of the loop body and emitted NO instructions — which is why the build
+    was green, the image ran, and nothing was removed. That is the one outcome
+    this backend may not produce, and it is why the four `del` lowering helpers
+    were dead code with no other caller: written, reviewed, and stranded behind
+    a line nobody read twice. Three of them were also wrong once reached, which
+    is what "dead code is not reviewed by running it" costs — the emitters'
+    own comment about the branch polarity is in `arm64_codegen.py`'s
+    `_emit_del_list_range`.
+
+    So `del` is asked HERE, once, in a vocabulary both backends lower:
+
+        name / member   a bare name or field — a no-op, and a documented one:
+                        there is no GC and an SRA slot has no storage to free
+        list_index      `del lst[i]` — shift left, count--
+        slice           `del lst[a:b]` — memmove the tail, count -= b-a
+        dict_key        `del d[k]` — shift-delete over the pair array
+        string_index    REFUSED — see below
+        pointer_base    REFUSED — see below
+        stepped_slice   REFUSED — see below
+        unnamed_base    REFUSED — see below
+        unsupported     REFUSED — anything else
+
+    The four refusals are the residue after the lowered shapes, and each one is
+    TRUE OF THE SHAPE on this path rather than a statement that the construct is
+    too new:
+
+    * `string_index` — a string here is a bare `char *` into static storage, so
+      `del s[0]` has no element to remove, no count to shift and nothing whose
+      address this path could hand a caller. The byte it would have "removed"
+      is a constant in `__TEXT`. Same question `string_index_refusal` asks of
+      the other end of the subscript, and it is refused here for the same
+      reason rather than lowered as a pointer decrement.
+    * `pointer_base` — a `Pointer[T]` has no count header and no length, so
+      there is nothing to shift the survivors into and nothing whose count to
+      decrement: `del p[0]` on a `malloc`'d buffer whose first word is `10`
+      printed `9 20`, because the first word was read as the COUNT and
+      decremented while the buffer's contents stayed put. A buffer is not a
+      list that forgot its length; it is a pointer, and the storage behind it
+      belongs to something else.
+    * `stepped_slice` — `del lst[0:4:2]` removes elements 0 and 2, and a
+      shift-left is not that; it is a compaction with holes. Emitting the
+      contiguous lowering would produce a list whose length is right and whose
+      contents are wrong, which is the same silent wrong answer as the no-op.
+    * `unnamed_base` — a base this path has no slot for: a call result, an
+      attribute chain rooted at one, a temporary. `del mk()[0]` says "remove an
+      element of a value that has nowhere to live", so the lowering would have
+      to invent the storage first.
+
+    `base_is_string` and `base_is_pointer` are the backend's own answers to
+    "what does this base hold" — `_is_string_subscript` and
+    `subscript_base_lowering`, the same two the READ path asks through
+    `_emit_subscript_addr`, so a base this function accepts is a base the read
+    path already lowers. The shape decides the refusal and the value decides
+    WHICH refusal.
+    """
+    if isinstance(target, (F.IdentExpr, F.MemberExpr)):
+        return None
+    if isinstance(target, F.SliceExpr):
+        if target.step is not None:
+            return _del_shape_refusal(
+                target, "stepped_slice",
+                "a `step` removes elements that are not adjacent "
+                "(`del lst[0:4:2]` removes elements 0 and 2), so the "
+                "contiguous shift-left this path would emit produces a list "
+                "of the right length and the wrong contents. There is no "
+                "sound lowering of it here, and a wrong list is worse than "
+                "no answer")
+        return None
+    if not isinstance(target, F.SubscriptExpr):
+        return _del_shape_refusal(
+            target, "unsupported",
+            f"it is a `{type(target).__name__}`, and `del` on this path "
+            "lowers a subscript target (a list index, a list slice or a dict "
+            "key) and treats a bare name or field as the no-op it is")
+    if base_is_pointer:
+        return _del_shape_refusal(
+            target, "pointer_base",
+            "the base is a POINTER, and a pointer here has no count header and "
+            "no length: there is nothing to shift the survivors into and "
+            "nothing whose count to come down, so the lowering this path would "
+            "emit decrements the first word of the buffer itself — measured on "
+            "both architectures, `del p[0]` on a `malloc`'d buffer holding 10 "
+            "printed 9. A buffer is not a list that forgot its length; use a "
+            "slice assignment, or clear the element yourself")
+    if base_is_string:
+        return _del_shape_refusal(
+            target, "string_index",
+            "the base is a string, and a string here is a bare `char *` into "
+            "static storage: there is no element to remove, no count to "
+            "shift and nothing whose address this path could hand a caller — "
+            "the byte would be a constant in `__TEXT`. A string is immutable "
+            "here, so `del s[0]` has nothing to do")
+    if getattr(target.index, "step", None) is not None:
+        return _del_shape_refusal(
+            target, "stepped_slice",
+            "a `step` removes elements that are not adjacent "
+            "(`del lst[0:4:2]` removes elements 0 and 2), so the contiguous "
+            "shift-left this path would emit produces a list of the right "
+            "length and the wrong contents. There is no sound lowering of it "
+            "here, and a wrong list is worse than no answer")
+    if not isinstance(getattr(target, "obj", None), (F.IdentExpr, F.MemberExpr)):
+        return _del_shape_refusal(
+            target, "unnamed_base",
+            "the base is not a name or a field this path has a slot for, and "
+            "`del` needs one: removing an element means writing a new count "
+            "into the blob the base names, so a value with nowhere to live "
+            "has nothing to write to. Bind the container to a name first")
+    return None
+
+
+def _del_shape_refusal(target, shape: str, why: str) -> str:
+    """The `del` refusal text for `shape`, quoted from the source spelling."""
+    return (f"`del {spelled(target)}` is not lowered on the formal path: "
+            f"{why}.")
 
 
 def string_has_static_storage() -> bool:
