@@ -507,7 +507,8 @@ class X86_64Codegen:
                  dylib_syms: dict = None, comptime_hook=None,
                  module_source: str = "", dylib_exports: list = None,
                  globals_base: int = None, target_fmt: str = "macho",
-                 import_aliases: dict = None, extern_decls: dict = None):
+                 import_aliases: dict = None, extern_decls: dict = None,
+                 entry_args: list = None):
         """test_input: the value the startup stub passes to the entry.
 
         extern_style: how a call to an unbound symbol is emitted.
@@ -552,6 +553,12 @@ class X86_64Codegen:
             raise CodegenError(
                 f"unknown extern_style {extern_style!r} (expected stub|got)")
         self.test_input = test_input
+        # The startup stub's argument values, already NORMALISED by
+        # `formal/build.py::_make_codegen` (the one place both backends are
+        # constructed), so this backend and its proof generator read the same
+        # list rather than each re-deriving it.  For the one-argument entry
+        # every program in the corpus has, this is `[test_input]`.
+        self.entry_args = list(entry_args) if entry_args else [test_input]
         self.extern_style = extern_style
         self._target_fmt = target_fmt
         self._dylib_syms = dict(dylib_syms or {})
@@ -819,7 +826,18 @@ class X86_64Codegen:
             self.asm.emit(encode_push_r64(Reg.RBP))
             self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
             if functions[0].params:
-                self._emit_mov_imm(ARG_REGS[0], self.test_input)
+                # One materializer per entry argument, in argument order, for
+                # the same reason arm64's startup stub has one per argument: a
+                # `def main(n: Int, m: Int)` receives its second parameter in
+                # RSI, and the proof's concrete run test compares against
+                # exactly what is emitted here.  The values are normalised by
+                # `formal/build.py::_make_codegen` (`model.entry_arg_values`),
+                # so the one-argument entry every program in the corpus has
+                # still emits the single `MOV` it always did, and a nullary
+                # entry still emits none.
+                for _ai, _av in enumerate(
+                        self.entry_args[:len(functions[0].params)]):
+                    self._emit_mov_imm(ARG_REGS[_ai], _av)
             self.asm.emit(encode_call_rel32(0))
             self.asm.emit_label_rel32(first_func_name, here_offset=-4)
             self.asm.emit(encode_pop_r64(Reg.RBP))
@@ -861,6 +879,10 @@ class X86_64Codegen:
             "external_syms": external_syms,
             "extern_calls": extern_calls,
             "test_input": self.test_input,
+            # EVERY entry argument's value, in order — the proof generator's
+            # entry state is built from this list, so a two-parameter entry has
+            # its RSI set to the same word the stub above materialized into it.
+            "entry_args": list(self.entry_args),
             "cond_branches": sorted(self._cond_branch_pcs),
             # ADDRESSES (not offsets into `code` — `asm.label` records
             # `org + len(text)`, so a label is already the mapped address), in

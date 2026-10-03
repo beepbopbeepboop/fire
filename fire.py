@@ -254,7 +254,7 @@ def _first_input_index(argv: list) -> int:
 
 
 def _pop_test_input(argv: list):
-    """Pop the formal backend's `-n <int>` (entry function's X0 argument).
+    """Pop the formal backend's `-n <int>` (the entry function's ARGUMENTS).
 
     Only from the CLI's own portion of the command line: `-n` is consumed when
     it appears before the input file, and left alone when it appears after it,
@@ -262,6 +262,17 @@ def _pop_test_input(argv: list):
     `fire --formal prog.mojo -n 5` still hands -n to prog (everything after the
     input file is the program's argv). A bare `-n` with no value, or a
     non-integer one, is a usage error.
+
+    **One value per parameter, and the comma is the separator.**  `-n 5` is
+    what this has always meant and is unchanged -- the whole of every program in
+    `formal/examples`, whose entry points take one argument.  `-n 5,7` supplies
+    two, which is what a `def main(n: Int, m: Int)` needs: the startup stub
+    materializes one word per value into the argument registers in order
+    (`formal/model.py::entry_arg_values` pads a short list with the `0` those
+    registers already hold), and the proof's concrete run test is stated against
+    the same list.  Before this, a two-parameter entry point could only be given
+    its first argument from the command line, and the second register held
+    `argv` -- the model said `0` and the binary said a pointer.
     """
     argv = sys.argv
     first_file = _first_input_index(argv)
@@ -274,10 +285,18 @@ def _pop_test_input(argv: list):
     raw = argv[i + 1]
     del argv[i:i + 2]
     try:
-        return int(raw)
+        vals = [int(part) for part in raw.split(',')]
     except ValueError:
-        print(f"{_tool_name()}: -n expects an integer, got {raw!r}", file=sys.stderr)
+        print(f"{_tool_name()}: -n expects an integer or a comma-separated "
+              f"list of them, got {raw!r}", file=sys.stderr)
         sys.exit(2)
+    if len(vals) == 1:
+        return vals[0]
+    if not vals:
+        print(f"{_tool_name()}: -n expects at least one integer, got {raw!r}",
+              file=sys.stderr)
+        sys.exit(2)
+    return vals
 
 
 def _sorry_note(result) -> str:

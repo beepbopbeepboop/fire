@@ -59,6 +59,14 @@ _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 # refuse.
 _ABI_ARG_REGS = 8
 
+# The argument registers BY NAME, in argument order.  `_ABI_ARG_REGS` is the
+# count and the call path uses register NUMBERS (the encoders take numbers);
+# the startup stub is the one site that materializes a literal into an
+# argument register, and `_emit_mov_imm` takes a name.  x86-64's counterpart
+# is `formal/x86_64.py`'s `ARG_REGS`, and it is here for the same reason it is
+# there: the register file is the platform's, not the language's.
+_ARG_X_REGS = ("X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7")
+
 # How many incoming arguments this backend passes IN TOTAL — eight in registers
 # plus a stack area for the rest.  AAPCS has a stack convention and it is
 # implemented, not refused: argument `8 + k` lives at `[SP + 8k]` as the callee
@@ -558,8 +566,16 @@ class ARM64Codegen:
     def __init__(self, test_input: int = 10, dylib_syms: dict = None,
                  comptime_hook=None, module_source: str = "",
 dylib_exports: list = None, globals_base: int = None,
-                 import_aliases: dict = None, extern_decls: dict = None):
+                 import_aliases: dict = None, extern_decls: dict = None,
+                 entry_args: list = None):
         self.test_input = test_input
+        # The startup stub's argument values, already NORMALISED by
+        # `formal/build.py::_make_codegen` (the one place both backends are
+        # constructed), so this backend and its proof generator read the same
+        # list rather than each re-deriving it.  A one-argument entry is the
+        # whole of every program in the corpus, and for it this is `[test_input]`
+        # — the single `MOV` the stub always emitted.
+        self.entry_args = list(entry_args) if entry_args else [test_input]
         # Where this unit's module-global data segment is MAPPED. A parameter
         # and not a lookup, because it differs per container (macho_linker and
         # elf define separate constants) and because every slot access has to be
@@ -859,8 +875,12 @@ dylib_exports: list = None, globals_base: int = None,
             # emitted a truncated word, and nothing caught it because the
             # default is 10), and the same call is what `_emit_expr` makes for
             # every literal, so the startup word and a literal word are the same
-            # code path.
-            self._emit_mov_imm("X0", test_val)
+            # code path.  One materializer per entry argument, in argument
+            # order, because a `def main(n: Int, m: Int)` receives its second
+            # parameter in x1 and the proof's concrete run test compares
+            # against exactly what is emitted here (`model.entry_arg_values`).
+            for _ai, _av in enumerate(self.entry_args[:len(_ARG_X_REGS)]):
+                self._emit_mov_imm(_ARG_X_REGS[_ai], _av)
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(first_func_name, here_offset=-4)
             self.asm.emit(encode_ldp_sp_post(29, 30))
@@ -902,6 +922,11 @@ dylib_exports: list = None, globals_base: int = None,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
             "test_input": self.test_input,
+            # EVERY entry argument's value, in order — the proof generator's
+            # entry state is built from this list, so a two-parameter entry has
+            # its x1 set to the same word the stub above materialized into it
+            # rather than left to whatever the machine had.
+            "entry_args": list(self.entry_args),
             # ADDRESSES (not offsets into `code` — `asm.label` records
             # `org + len(text)`, so a label is already the address the image
             # will map), in emission order, for the load-time initializer a
