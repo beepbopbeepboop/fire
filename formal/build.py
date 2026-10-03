@@ -4464,45 +4464,39 @@ def _rewrite_one_word_nested_fields(fn, chains) -> None:
     did not name is either a value read (`outer` holds an `Int32`) or a nested
     frame read (`outer` holds a framed struct), both of which already lower
     through the tables this does not touch.
+
+    `model.rewrite_tree`, and it REPLACES the node rather than only rewriting its
+    children, because `o.in1.a` is the top of the expression at the places this
+    is reached — `return o.in1.a`, `o.in1.a + 1`. A walk that could only rewrite
+    in place would handle `o.in1.a + 1` and silently leave `return o.in1.a`
+    standing, which is the half that then reaches the emitter with no slot and is
+    refused by name.
+
+    The hand-rolled recursion this replaces descended lists but not tuples, so it
+    could not reach an `elif` arm — measured, it did not need to, because the
+    `iter_nodes` loop it was driven from hands it every node in the tree
+    including the ones inside the `(condition, body)` pairs, and a node whose
+    PARENT is a pair is the one shape it cannot replace (`elif o.in1.a:`, the
+    chain as the whole condition). That is a shape no rewrite should depend on
+    the driver for: two walks over one tree, one of which reaches the arms
+    because of how the other happens to iterate. `rewrite_tree` descends the
+    pair itself, so the answer does not depend on the caller.
     """
     spellings = {chain: outer for chain, outer in chains}
     if not spellings:
         return
-    for node in M.iter_nodes(getattr(fn, "body", None)):
-        for name in node.__dataclass_fields__:
-            if name in ("line", "col"):
-                continue
-            node.__setattr__(name, _rewrite_one_word_nested_field(
-                getattr(node, name), spellings))
+
+    def visit(n):
+        if isinstance(n, F.MemberExpr):
+            outer = spellings.get(_member_chain(n))
+            if outer is not None:
+                root, member = outer.split(".", 1)
+                return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
+        return n
+
+    M.rewrite_tree(getattr(fn, "body", None), visit)
 
 
-def _rewrite_one_word_nested_field(node, spellings):
-    """`_rewrite_one_word_nested_fields` for one subtree, returning the
-    replacement for `node` itself.
-
-    The recursion has to be able to REPLACE the node it is handed, not only its
-    children, because `o.in1.a` is the top of the expression at the places this
-    is reached — `return o.in1.a`, `o.in1.a + 1`. A rewrite that could only
-    rewrite in place would handle `o.in1.a + 1` and silently leave `return
-    o.in1.a` standing, which is the half that then reaches the emitter with no
-    slot and is refused by name.
-    """
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _rewrite_one_word_nested_field(x, spellings)
-        return node
-    if isinstance(node, F.MemberExpr):
-        chain = _member_chain(node)
-        outer = spellings.get(chain)
-        if outer is not None:
-            root, member = outer.split(".", 1)
-            return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
-    for name in getattr(node, "__dataclass_fields__", {}):
-        if name in ("line", "col"):
-            continue
-        setattr(node, name,
-                _rewrite_one_word_nested_field(getattr(node, name), spellings))
-    return node
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
     """`h.a.m(x)` → `A_m(h.a, x)`, for the fields `nested_fields` names.
 
@@ -6717,41 +6711,65 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     use for this question (`arm64_codegen._specialization_of` delegates to
     `comptime.specialization_name`), so the write-back and the call it rewrites
     now name the callee the same way.
+
+    `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
+    list of `(condition, body)` TUPLES, so the hand-rolled recursion below
+    descended every `if` body and every `else` and stopped dead at the first
+    `elif` — and the construct it then missed is a STORE, so what came out was
+    not a refusal but a program that computed the wrong number. Measured, both
+    architectures, `c.bump(5)` in an `elif` arm of a one-field struct:
+
+        if k > 100: c.bump(100)
+        elif k > 0: c.bump(5)          # 10 + 5 = 15, and the image says 10
+
+    with the `if`/`else` twin of the same program answering 15 on both. That is
+    `_apply_receiver_writeback`'s own docstring's recorded defect ("the program
+    built, ran, and printed the value the caller had") reached by a door the
+    rewrite had already closed everywhere else, so this is the LAST of the four
+    rewrites the `elif` walk reached; see
+    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+
+    The two `None` returns are the arm that means "handled, do not descend", and
+    each is the behaviour the hand-rolled walk had rather than a new decision:
+
+      * an `ExprStmt` is a STATEMENT, and nothing inside an expression is one —
+        this walk rewrites `c.bump(x)` into `c = Cell_bump(c, x)` only because it
+        is a statement whose value is a discarded call;
+      * a `CallExpr` is not descended either, so the calls this can refuse as a
+        value-position write-back are exactly the ones it used to refuse: a call
+        read out of a statement's own slot (`x = c.bump(5)`, `return c.bump(5)`).
+        A call nested in another call's ARGUMENTS is not among them, before or
+        after, and it does not need to be: the receiver is handed to the callee
+        by reference, so the store the mutator made is visible through the
+        caller's own binding — measured, `if k > 0: sink(c.bump(5))` leaves `c`
+        at 15 on both architectures.
     """
-    if isinstance(node, list):
-        i = 0
-        while i < len(node):
-            item = node[i]
-            if isinstance(item, F.ExprStmt) and isinstance(item.value,
-                                                          F.CallExpr):
-                call = item.value
-                wb = writebacks.get(M.call_callee_name(call.func))
-                if wb is not None:
-                    recv = call.args[0] if call.args else None
-                    if not isinstance(recv, F.IdentExpr):
-                        raise CodegenError(
-                            M.mutating_receiver_target_refusal(
-                                wb.owner, wb.member,
-                                _writeback_spelling(recv)))
-                    node[i] = F.AssignStmt(target=recv, value=call,
-                                           line=item.line)
-                    i += 1
-                    continue
-            _apply_receiver_writeback(item, writebacks)
-            i += 1
-        return
-    if isinstance(node, F.ExprStmt):
-        return                        # a statement: the list arm handled it
-    if isinstance(node, F.CallExpr):
-        wb = writebacks.get(M.call_callee_name(node.func))
-        if wb is not None:
-            recv = node.args[0] if node.args else None
-            raise CodegenError(M.mutating_receiver_value_refusal(
-                wb.owner, wb.member,
-                _writeback_spelling(recv) if recv is not None else "the receiver"))
-        return
-    for field in getattr(node, "__dataclass_fields__", {}):
-        _apply_receiver_writeback(getattr(node, field), writebacks)
+    def visit(n):
+        if isinstance(n, F.ExprStmt):
+            call = n.value
+            if not isinstance(call, F.CallExpr):
+                return None
+            wb = writebacks.get(M.call_callee_name(call.func))
+            if wb is None:
+                return None
+            recv = call.args[0] if call.args else None
+            if not isinstance(recv, F.IdentExpr):
+                raise CodegenError(
+                    M.mutating_receiver_target_refusal(
+                        wb.owner, wb.member, _writeback_spelling(recv)))
+            return F.AssignStmt(target=recv, value=call, line=n.line)
+        if isinstance(n, F.CallExpr):
+            wb = writebacks.get(M.call_callee_name(n.func))
+            if wb is not None:
+                recv = n.args[0] if n.args else None
+                raise CodegenError(M.mutating_receiver_value_refusal(
+                    wb.owner, wb.member,
+                    _writeback_spelling(recv) if recv is not None
+                    else "the receiver"))
+            return None
+        return n
+
+    M.rewrite_tree(node, visit)
 
 
 def _rewrite_self_fields(node, mapping: dict):
@@ -6773,7 +6791,7 @@ def _rewrite_self_fields(node, mapping: dict):
     rewrote the inner `b.inner` and returned `b.v` — one level short, a name
     in no register home and no frame slot, refused as a field access through a
     base the source never spelled. Matched on the whole chain, `b.inner.v` is
-    the local `b` and the program builds. `_rewrite_one_word_nested_field` a
+    the local `b` and the program builds. `_rewrite_one_word_nested_fields` a
     few hundred lines below is the frame-slot half of this same rewrite and
     has always matched the whole chain, for the same reason.
 
@@ -6782,19 +6800,37 @@ def _rewrite_self_fields(node, mapping: dict):
     a longer chain reads through a field whose declared type is a multi-field
     struct — a frame — and belongs to the nested-frame path rather than to
     this one.
+
+    `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
+    list of `(condition, body)` TUPLES, so the hand-rolled recursion descended
+    every `if` body and every `else` and stopped dead at the first `elif`. The
+    identity not firing is a REFUSAL rather than a wrong answer here, and the
+    message is one this file has already been shown to be false about the
+    program: measured, both architectures, a one-field struct's own field read
+    in an `elif` arm (`self.n` in `Cell.get`) was refused with
+
+        'self.n' is a field access through 'self', and this path has no way to
+        say what 'self' holds. … Bind the base from a constructor whose
+        declaration THIS IMAGE can see
+
+    with the `if`/`else` twin of the same program building and computing the
+    right answer. `self` is the field; the arm is the whole of it. See
+    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+
+    The replacement is handed back and not descended into, which is
+    `rewrite_tree`'s rule rather than a decision here: it is `F.IdentExpr(root)`,
+    a bare name, and the node it was built from — the chain — is precisely what
+    must not be offered to this rewrite a second time.
     """
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _rewrite_self_fields(x, mapping)
-        return node
-    if isinstance(node, F.MemberExpr):
-        root, _, path = _member_chain(node).partition(".")
-        sole = mapping.get(root)
-        if sole and _is_sole_field_prefix(path, sole):
-            return F.IdentExpr(name=root)
-    for name in getattr(node, "__dataclass_fields__", {}):
-        setattr(node, name, _rewrite_self_fields(getattr(node, name), mapping))
-    return node
+    def visit(n):
+        if isinstance(n, F.MemberExpr):
+            root, _, path = _member_chain(n).partition(".")
+            sole = mapping.get(root)
+            if sole and _is_sole_field_prefix(path, sole):
+                return F.IdentExpr(name=root)
+        return n
+
+    M.rewrite_tree(node, visit)
 
 
 def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
@@ -7862,74 +7898,82 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     publish is left alone, so `xs.count`, `struct.field` and a module's own
     function keep whatever answers they had.
 
-    ONE test, in `_rewrite_dotted_child`, used from every parent shape — and that is
-    the whole design. A child reached from a list element, from a dataclass
-    field, from a call's argument list and from a store's VALUE side are four
-    spellings of the same parent-directed rewrite, and a rewrite applied in
-    three of them and not the fourth is not a rewrite. Measured, that fourth
-    omission was live: `print(mod.K)` lowered (a call argument goes through
-    `_rewrite_dotted_child`) while `x = mod.K` and `var x = mod.K` were refused
-    with `mod_global_refusal` — the message that claims a dylib cannot publish a
-    VARIABLE, about a name that is a folded CONSTANT the module's own manifest
-    already carries. Both spellings were refused by the same walk with the same
-    message, so the construct looked like a storage gap in half its positions.
-    Hence the assignment below rather than a bare recursive call: the store's
-    value is a CHILD of the statement, so the replacement has to be written back
-    into the statement's slot, which is what `_rewrite_dotted_child` returns it
-    for.
+    ONE test, asked of every node the walk reaches, and that is the whole
+    design. A read reached from a list element, from a dataclass field, from a
+    call's argument list, from a store's VALUE side and from an `elif` arm's
+    condition are five spellings of the same rewrite, and a rewrite applied in
+    four of them and not the fifth is not a rewrite. Measured, the fourth was
+    live: `print(mod.K)` lowered (a call argument goes through the walk) while
+    `x = mod.K` and `var x = mod.K` were refused with `mod_global_refusal` —
+    the message that claims a dylib cannot publish a VARIABLE, about a name that
+    is a folded CONSTANT the module's own manifest already carries. Both
+    spellings were refused by the same walk with the same message, so the
+    construct looked like a storage gap in half its positions.
+
+    `model.rewrite_tree`, which is what puts the `elif` arm in the set as well:
+    `IfStmt.elifs` is a list of `(condition, body)` TUPLES and the hand-rolled
+    recursion here tested `isinstance(node, list)`, so it stopped at the first
+    `elif`. The fifth position was unreachable for a fourth reason that is worth
+    writing down, because it is not a property of this walk: `_fold_target_queries`
+    runs EARLIER in the same pipeline and normalizes every `elif` pair into a
+    LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
+    assigned into). So this walk reached the arms by an accident of ANOTHER
+    pass's traversal, with nothing recording the dependency — and the two walks
+    that run before it, `_rewrite_self_fields` and `_apply_receiver_writeback`,
+    are still tuples by then and still miss every arm
+    (`bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`).
+
+    A store's TARGET and a call's CALLEE are the two positions a name must not be
+    rewritten in, and each is a node the walk HANDLES rather than descends:
+
+      * `mod.K = 5` writes another module's state, which has nowhere to live and
+        is refused by name (`bugs/FORMAL_module_state_no_storage.md`);
+        substituting it would trade a refused store for a dropped one. A `for`
+        target is a store too and is excluded for the same reason;
+      * `mod.f(...)` must not become `7(...)`, a call to a number, if some
+        module on the line also publishes a constant `f`.
+
+    The VALUE side of a store and both sides of a call's arguments go through
+    the walk, which is what the assignment in the store arm and the
+    `kwargs[i]` write-back below are for. A store's `type_ann` is not walked,
+    and that is the same rule `_apply_constant_sites` applies to a type position
+    and for the same reason: an annotation is not evaluated on this path, and a
+    literal substituted into one is a type the source never wrote.
     """
-    if isinstance(node, list):
-        done = 0
-        for i, child in enumerate(node):
-            node[i], n = _rewrite_dotted_child(child, tables, bound)
-            done += n
-        return done
-    if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
-        # The TARGET is a store and is left alone — `mod.K = 5` writes another
-        # module's state, which has nowhere to live and is refused by name
-        # (`bugs/FORMAL_module_state_no_storage.md`); substituting it would trade
-        # a refused store for a dropped one. The VALUE side is an ordinary read
-        # and goes through the ONE test.
-        value, n = _rewrite_dotted_child(getattr(node, "value", None),
-                                         tables, bound)
-        if hasattr(node, "value"):
-            node.value = value
+    done = [0]
+
+    def visit(n):
+        if isinstance(n, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
+            if hasattr(n, "value"):
+                # The ASSIGNMENT, not a bare call: `rewrite_tree` mutates a
+                # field in place only when the node it was handed is the node it
+                # hands back, so a replacement has to be written into the slot
+                # here. Reading the walk's return value and dropping it is how
+                # `x = mod.K` kept its `MemberExpr` while the walk reported one
+                # site rewritten — the count and the tree disagreeing, which is
+                # the shape this walk's own docstring calls a rewrite that
+                # silently did nothing.
+                n.value = M.rewrite_tree(n.value, visit)
+            return None
+        if isinstance(n, F.CallExpr):
+            M.rewrite_tree(n.args or [], visit)
+            for i, pair in enumerate(n.kwargs or []):
+                if not isinstance(pair, (tuple, list)) or len(pair) < 2:
+                    continue
+                value = M.rewrite_tree(pair[1], visit)
+                if value is not pair[1]:
+                    if isinstance(pair, list):
+                        pair[1] = value
+                    else:
+                        n.kwargs[i] = (pair[0], value)
+            return None
+        if _is_dotted_constant(n, tables, bound):
+            done[0] += 1
+            return _imported_constant_node(n, tables)
         return n
-    if isinstance(node, F.CallExpr):
-        # The callee is a SYMBOL, not a read of a value — the same rule the
-        # identifier rewriter follows, for the same reason: `mod.f(...)` must
-        # not become `7(...)`, a call to a number, if some module on the line
-        # also publishes a constant `f`.
-        done = _apply_imported_constant_sites(node.args or [], tables, bound)
-        for i, pair in enumerate(node.kwargs or []):
-            if not isinstance(pair, (tuple, list)) or len(pair) < 2:
-                continue
-            value, n = _rewrite_dotted_child(pair[1], tables, bound)
-            node.kwargs[i] = (pair[0], value)
-            done += n
-        return done
-    done = 0
-    for fname in getattr(node, "__dataclass_fields__", {}):
-        if fname in ("line", "col"):
-            continue
-        child, n = _rewrite_dotted_child(getattr(node, fname, None), tables, bound)
-        setattr(node, fname, child)
-        done += n
-    return done
 
-
-def _rewrite_dotted_child(child, tables: dict, bound: set):
-    """`(possibly-replaced child, sites rewritten)`.
-
-    The one test, and the one place a replacement is produced: a node this
-    rewrites is a node its PARENT holds, so the replacement is recorded in the
-    parent's slot. A rewrite that handed a new node back to a caller with
-    nowhere to put it would be a rewrite that silently did nothing."""
-    if child is None or isinstance(child, (str, int, float, bool)):
-        return child, 0
-    if _is_dotted_constant(child, tables, bound):
-        return _imported_constant_node(child, tables), 1
-    return child, _apply_imported_constant_sites(child, tables, bound)
+    M.rewrite_tree(node, visit)
+    return done[0]
 
 
 def _imported_constant_node(expr, tables: dict):

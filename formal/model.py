@@ -18149,10 +18149,29 @@ def rewrite_tree(node, visit):
         not is a BEHAVIOUR change, and a rewrite pass that starts refusing
         programs it used to build is not a refactor.
       * the node ITSELF — keep it, and descend into its children. The common
-        case for a walk whose work is in place (this is what both current callers
-        return for a node they had nothing to do with).
-      * any OTHER value — the replacement to put in the parent's slot, and
-        descend into it.
+        case for a walk whose work is in place (this is what every current caller
+        returns for a node they had nothing to do with).
+      * any OTHER value — the replacement to put in the parent's slot, and NOT
+        descended.
+
+    The last clause is the one that had to be measured rather than assumed, and
+    the reason is the sentence the `None` arm already argues: descending where the
+    previous version did not is a BEHAVIOUR change. A visit that hands back a
+    DIFFERENT node has already decided what that node is, and the node it was
+    built from is usually the very construct it consumed — `c.bump(4)` as a
+    statement of its own becomes `c = Cell_bump(c, 4)`, and the call inside that
+    new store is the one the rewrite exists to place. Descending offered the
+    replacement to the same rewrite that had just produced it, and that pass's
+    own value-position refusal fired on the store it had just written: every
+    one-field mutator call became "it is called here as a VALUE rather than as a
+    statement of its own" (`_apply_receiver_writeback`). A caller that wants the
+    walk to continue into a node it built mutates that node in place and hands
+    the NODE back; a caller that has consumed the construct hands back `None`.
+
+    Nothing that existed before this clause returned a replacement, so no walk
+    that was already on this function changes what it reaches — checked by
+    reading both callers (`_rewrite_method_calls`,
+    `_rewrite_one_word_field_method_calls`), which return `None` or the node.
 
     Descends into every dataclass field AND through `list` and `tuple`
     containers, so a caller cannot forget the `elifs` shape — that is the entire
@@ -18170,11 +18189,11 @@ def rewrite_tree(node, visit):
     replaced = visit(node)
     if replaced is None:
         return node
-    if replaced is not node:
-        return rewrite_tree(replaced, visit)
-    for name in node.__dataclass_fields__:
-        setattr(node, name, rewrite_tree(getattr(node, name), visit))
-    return node
+    if replaced is node:
+        for name in node.__dataclass_fields__:
+            setattr(node, name, rewrite_tree(getattr(node, name), visit))
+        return node
+    return replaced
 
 
 def struct_block_children(struct_def, decls: dict, base: int = 0,

@@ -824,9 +824,21 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
         "assign":    "  x = mylib.CONST\n",
         "augassign": "  x = 1\n  x += mylib.CONST\n",
         "vardecl":   "  var x: int = mylib.CONST\n",
+        # An `elif` ARM, the fifth position of the one test. `IfStmt.elifs` is a
+        # list of `(condition, body)` TUPLES, so the walk this replaced tested
+        # `isinstance(node, list)` and stopped at the first `elif`; it reached
+        # this position only because `_fold_target_queries` normalizes every pair
+        # into a list earlier in the same pipeline, for its own reasons. Nothing
+        # recorded the dependency, and the two walks that run BEFORE that
+        # normalization did miss their arms (`bugs/FORMAL_elif_arms_and_random_
+        # mojo_remainder.md`), so the position is asserted here rather than left
+        # to a pass that happens to run first.
+        "elif_arm":  "  if x == 1:\n    x = 2\n  elif x == 3:\n"
+                     "    x = mylib.CONST\n",
     }
     for label, body in shapes.items():
-        src = "import mylib\n\ndef main():\n" + body + "  return 0\n"
+        src = ("import mylib\n\ndef main():\n  var x = 0\n" + body
+               + "  return 0\n")
         stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
         fns, _structs, _syms, _slots = B._prepare_functions(
             stmts, synthetic=False)
@@ -845,6 +857,25 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
                   for v in values),
               f"{label}: no store's value is the module's literal, so the "
               f"constant did not cross: {values!r}")
+
+    # The same walk over an `elif` CONDITION, which is the one position whose
+    # node is not a store at all: there is no value slot to assert on, so the
+    # assertion is that the literal is anywhere in the arm. It is the shape the
+    # tuple container actually hid — the condition is the element of the pair
+    # itself rather than something inside the body list.
+    src = ("import mylib\n\ndef main():\n  var x = 0\n"
+           "  if x == 1:\n    x = 2\n  elif mylib.CONST:\n    x = 3\n"
+           "  return 0\n")
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
+    fns, _structs, _syms, _slots = B._prepare_functions(stmts, synthetic=False)
+    done = B._apply_imported_constant_sites(fns[0].body, tables,
+                                            B._names_bound_in(fns[0]))
+    lits = [n for n in B.M.iter_nodes(fns[0].body)
+            if isinstance(n, F.IntLiteral) and n.value == 41]
+    check(done == 1 and len(lits) == 1,
+          f"an `elif` CONDITION reading `mod.CONST` rewrote {done} site(s) and "
+          f"left {len(lits)} literal(s); expected 1 and 1 — an arm's condition is "
+          f"an ordinary expression position and the one the pair container hid")
 
     # …and the TARGET of a store to another module is still not rewritten.
     src = "import mylib\n\ndef main():\n  mylib.CONST = 5\n  return 0\n"

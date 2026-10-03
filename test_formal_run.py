@@ -6519,6 +6519,11 @@ ONE_WORD_FIELD_METHOD_REFUSALS = [
 # a case that only has the arm cannot tell a fix from a rewrite that stopped
 # emitting the branch: `a` alone and `a` + `b` are different numbers, and the
 # `comptime` pair differs by which arm the specialization takes.
+#
+# The four cases at the end of the group are the four remaining REWRITES that
+# stopped at an arm, and they are here for the reason the first two are: each is
+# paired with, or distinguished from, the answer the same program gives with the
+# arm turned into an `else`.
 CONDITIONAL_ARM_CASES = [
     # 9 = the `elif` arm's answer (diff 6 + lo 3). The `if` twin is 0, so a
     # rewrite that dropped the arm entirely would be caught by the exit status
@@ -6589,6 +6594,105 @@ CONDITIONAL_ARM_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return pick[2](15, 5, 30)\n", 45, None),
+    # ── the three remaining REWRITES that stopped at an `elif` ──
+    #
+    # `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`, Part 1. Four walks
+    # recursed on `isinstance(node, list)` and therefore missed every `elif` arm;
+    # two of them had been moved onto `model.rewrite_tree` already, and these are
+    # the other two. What the arm costs is DIFFERENT for each, which is why they
+    # are four cases and not one:
+    #
+    #   * a one-word struct's own field read (`self.n`) — a REFUSAL, and one this
+    #     file has seen before in a different walk: `model.field_access_refusal`
+    #     says it "has no way to say what 'self' holds", and in a method of a
+    #     one-field struct it is exactly the one thing the walk knows.
+    ("one_word_field_read_in_an_elif_arm_is_still_the_receiver",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        if self.n > 100:\n"
+     "            return 1\n"
+     "        elif self.n > 0:\n"
+     "            return 2\n"
+     "        else:\n"
+     "            return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 5\n"
+     "    return c.get()\n", 2, None),
+    # …and its `if`/`else` twin, which was already right: 2 here and 2 there, so
+    # the case above cannot pass by the walk being deleted rather than repaired.
+    ("one_word_field_read_in_an_if_arm_is_still_the_receiver",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        if self.n > 0:\n"
+     "            return 2\n"
+     "        else:\n"
+     "            return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 5\n"
+     "    return c.get()\n", 2, None),
+    # The one-field MUTATOR's write-back, which is the one that was a WRONG
+    # ANSWER rather than a refusal: `c.bump(5)` in an `elif` arm never became
+    # `c = Cell_bump(c, 5)`, so the call was computed and the value the callee
+    # handed back was discarded — which is the defect this pass's own docstring
+    # records as measured ("the program built, ran, and printed the value the
+    # caller had"). 15 is 10 + 5; the unfixed image exits 10, so this is a row
+    # that could not pass by accident. All three arms store, so a rewrite that
+    # dropped the `elif` outright would answer 1 and fail rather than pass.
+    ("one_field_mutator_in_an_elif_arm_stores_back",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def bump(mut self, by: Int):\n"
+     "        self.n += by\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 10\n"
+     "    if n > 100:\n"
+     "        c.bump(100)\n"
+     "    elif n > 0:\n"
+     "        c.bump(5)\n"
+     "    else:\n"
+     "        c.bump(1)\n"
+     "    return c.get()\n", 15, None),
+    # The frame-slot half of the same identity (`o.in1.a` → `o.in1`). This one is
+    # a CONTROL and it is here because the other three were all live defects: it
+    # answers 2 before the change as well as after, because `_frame_receivers`
+    # runs after `_fold_target_queries`, which normalizes every `elif` pair into
+    # a list as a side effect of its own tuple handling. So the walk reached the
+    # arm by an accident of ANOTHER pass's traversal. It is pinned so the
+    # conversion of that walk onto `model.rewrite_tree` cannot be the thing that
+    # changes it, and so the accident is visible to the next reader rather than
+    # being rediscovered as a mystery.
+    ("nested_one_word_chain_as_an_elif_condition",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var in1: Inner\n"
+     "    var pad: Int\n"
+     "\n"
+     "def f(o: Outer, x: Int) -> Int:\n"
+     "    if x == 100:\n"
+     "        return 1\n"
+     "    elif o.in1.a:\n"
+     "        return 2\n"
+     "    else:\n"
+     "        return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(Outer(Inner(5), 0), 0)\n", 2, None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
