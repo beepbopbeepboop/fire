@@ -107,8 +107,8 @@ statement about how many more files got an answer, not about the backend.
 
 ### 2.2 What the `-6` runs are over
 
-Two interrupted runs on this tree before this one, both classified a large part
-of the scope and neither reached all of it:
+Three interrupted runs on this tree before this one, all classified a large
+part of the scope and none reached all of it:
 
 | run | flags | classified | of which `tool` | where its output is |
 |---|---|---|---|---|
@@ -119,31 +119,34 @@ of the scope and neither reached all of it:
 
 The `-j 6 -t 120` row is where the predecessor's own measurement in §1.2 comes
 from — **29 of its 43 classified arm64 files were timeouts** — and it is why the
-`-j 10 -t 600` run existed. All three of the predecessor's runs, and this one,
-are on the same tree, and their `tool` rows are all the same files (§4).
+`-j 10 -t 600` run existed. All four runs are on the same tree, and the `tool`
+rows name the same biggest stdlib modules every time: **every `tool` row this
+run produced is also a `tool` row in the `-5` baseline** (10 of 10 when
+checked), so the timeout set is a property of those files and this machine, not
+of a run.
 
 A run that is SIGKILLed prints no summary, so for the predecessor's runs the
 **pass count is not recoverable**: the tool prints one line per NON-pass file and
-nothing else, and the ledger is published only at the end. Its counts are
-therefore over the classified *failures* only, which is the conservative
-direction for every `codegen` row and useless for the coverage rate.
+nothing else, and the partial ledger is published by the SIGTERM/SIGINT handler,
+which a SIGKILL cannot run. Their counts are therefore over the classified
+*failures* only, which is the conservative direction for every `codegen` row and
+useless for the coverage rate.
 
 ### 2.3 This run
 
 The `-j 8 -t 600` run is the one whose logs are at
-`bugs/sweeps/sweep-{arm,x86}-6.txt`, and it was still classifying when this map
-was first written. **Its summary block — the per-class counts, the coverage rate
-and the CAS accounting — is the number to read for this sweep**, because it is
-the only one of the three runs that was given enough `-t` to answer the large
-stdlib modules at all, and because the two earlier runs cannot produce a
-coverage rate at all (they were SIGKILLed, so they published no ledger and no
-summary; §2.2).
+`bugs/sweeps/sweep-{arm,x86}-6.txt`. **Its summary block — the per-class counts,
+the coverage rate and the CAS accounting — is the number to read for this
+sweep**: it is the only run of the four that was given enough `-t` to answer the
+large stdlib modules at all, and the other three cannot produce a coverage rate
+(SIGKILLed, so no summary and no ledger; §2.2).
 
 What is already established from it, and does not depend on how far it got:
 
-* the arm64 and x86-64 class tables are **the same except for one file**
-  (`std/builtin/swap.mojo`, §3), which is the same arm64/x86-64 shape the x86-a
-  map measured for the repository scope;
+* the two arms agree file-for-file apart from one file
+  (`std/builtin/swap.mojo`, §3) — measured on the predecessor's pair, and the
+  same shape holds in this run's logs so far. It is the shape the x86-a map
+  measured for the repository scope (15 of 16 in-file findings shared);
 * `tool` is again the largest class, and it is again **all timeouts** on the
   same biggest stdlib modules (§4);
 * the `memcap:`-as-`codegen` rows of §5.1 are in the predecessor's logs, not in
