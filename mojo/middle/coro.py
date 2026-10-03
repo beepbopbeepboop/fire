@@ -2647,6 +2647,30 @@ def _mark_coro_body(body_fd):
     return body_fd
 
 
+def _mark_coro_callable_param_fns(body_fd, fn):
+    """Attach `{param: the function its declared default names}` to a
+    synthesized coroutine body, as `body_fd._mojo_coro_callable_param_fns`.
+
+    NAMES, not return types, and that is the whole point of attaching them
+    here instead of resolving them: `register` runs as an AST PRE-PASS,
+    before `gen_module_impl` has registered any module-level function's
+    `func_return_types` entry, so a return type looked up there is not there
+    yet. `gen_func` runs during module generation, when it is — so the body
+    carries the fact and the codegen resolves it. `_mark_coro_param_elem_kinds`
+    is the same idiom (evidence attached to the body because "the generator's
+    own FunctionDef is GONE" downstream).
+
+    The consumer is `_lower_fnptr_call_value`: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it (`len`, a
+    `for` loop, `print`) had nothing to dispatch on — exit 0 and no output.
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    """
+    _fns = _callable_param_function_defaults(fn)
+    if _fns:
+        body_fd._mojo_coro_callable_param_fns = _fns
+
+
 def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     """Attach the C element ctype of every LIST-typed parameter to a
     synthesized coroutine body, as `body_fd._mojo_coro_param_elem_kinds`
@@ -4726,6 +4750,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
     _mark_coro_param_elem_kinds(body_fd, real_params, env)
+    _mark_coro_callable_param_fns(body_fd, fn)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])
@@ -4787,6 +4812,41 @@ def _callable_param_generator_names(fn: N.FunctionDef) -> dict:
             continue
         _d = _dflts.get(_pn)
         if isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS:
+            _out[_pn] = _cm_as_str(_d.name)
+    return _out
+
+
+def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
+    """`{param: the top-level function its declared default names}` for the
+    parameters of `fn`, EXCLUDING the ones `_callable_param_generator_names`
+    already owns.
+
+    The A3 rewrite moves every source parameter into a `var p =
+    __mojo_gen_arg(...)` local, so the body the ordinary codegen emits
+    carries no `param_defaults` — which is why the generator half of this
+    fact has to be re-derived here and hung on the BODY function for
+    `gen_func` to copy out. This is the ordinary-function half, and it needs
+    the same treatment for the same reason: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it
+    (`len`, a `for` loop, `print`) then had nothing to dispatch on —
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+
+    A bare name only, for the reason
+    `calls_shared._callable_param_ret_types` gives: the answer is then the
+    DEFINING function's own `func_return_types` entry, read in the second
+    pass below (after every function in the module is registered), so a
+    callee declared LATER than the consumer still resolves.
+    """
+    _dflts = getattr(fn, 'param_defaults', None) or {}
+    _gens = _callable_param_generator_names(fn)
+    _out = {}
+    for _pn, _pann in (getattr(fn, 'params', None) or []):
+        _pn = _cm_as_str(_pn)
+        if _pn.startswith('*') or _pn in _gens:
+            continue
+        _d = _dflts.get(_pn)
+        if isinstance(_d, N.IdentExpr):
             _out[_pn] = _cm_as_str(_d.name)
     return _out
 
@@ -5146,8 +5206,6 @@ def register(gen, meta: list) -> None:
     # consumer.
     for m in meta:
         _cpg = m.get('callable_param_generators') or {}
-        if not _cpg:
-            continue
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)

@@ -1308,6 +1308,50 @@ print(mk2(2))
 print(Inner(2).twice())
 """, "8\n8\n4\n60\n200\n")
 
+    # A callable-valued PARAMETER, CALLED in an ordinary function body. The
+    # call returned `mojo_fnptr_call_N`'s homogenized `int64_t` box — right
+    # for the box, wrong for the value inside — so a `char *` result printed
+    # its own pointer decimal, `len()` of it was 0, and a `for` loop over it
+    # iterated nothing:
+    #
+    #     def upper(s):
+    #         return s.upper()
+    #     def apply_to(items, _f=upper):
+    #         r = _f(items)
+    #         print(r)          # CPython AB
+    #         print(len(r))      # CPython 2
+    #         for ch in r: ...
+    #     apply_to('ab')        # compiled 4337064208 / 0 / nothing, exit 0
+    #
+    # The parameter is typed `int64_t` because `_param_ctype` is shared by
+    # both generator emitters and neither has a callable category, so the fix
+    # is the doc's own second option: carry the parameter's callable-ness as
+    # side-table metadata the way `_callable_param_gen_api` already does.
+    # `calls_shared._callable_param_ret_types` reads the declared default's
+    # bare name out of `func_return_types`; `_lower_fnptr_call_value`
+    # consults it where it already consults `_callable_ret_types`.
+    #
+    # `print(s.upper())` directly above each line is the control that says
+    # the loss is in the callable PARAMETER and not in a string-returning
+    # function's own call site.
+    test_gimple_stdout("gimple_callable_param_result_keeps_its_type", """\
+def upper(s):
+    return s.upper()
+
+def apply_to(items, _f=upper):
+    r = _f(items)
+    print(r)
+    print(len(r))
+    for ch in r:
+        print(ch)
+
+def main():
+    apply_to('ab')
+    print('ab'.upper())
+    print(len('ab'.upper()))
+main()
+""", "AB\n2\nA\nB\nAB\n2\n")
+
     # The same hoisting, in the statement lists a class statement can hide in:
     # an `if` arm, a loop body (re-created per iteration, so the struct must
     # not carry per-call state), and a METHOD body — the last one is the case

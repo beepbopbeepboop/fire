@@ -221,6 +221,14 @@ def _reset_func(gen, body: list = None, params: list = None,
     # call, once `param_defaults` is in hand. See
     # `calls_shared._callable_param_generator_apis`.
     gen._callable_param_gen_api: dict[str, dict] = {}
+    # The same shape for the ORDINARY function a higher-order parameter's
+    # default names: `{param: the callee's return C type}`, so
+    # `_lower_fnptr_call_value` stops handing back the homogenized int64_t
+    # box for a `char *` / `MojoList *` result. Per-FUNCTION and reset HERE
+    # for the reason the line above gives. Seeded in `gen_func` from
+    # `calls_shared._callable_param_ret_types`, and for an A3 stack-switch
+    # body from `_coro_body_callable_param_rets`.
+    gen._callable_param_ret_types: dict[str, str] = {}
     # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
     # closure) -- reset per function so a stale entry from a
     # previously-compiled closure can never leak into an unrelated

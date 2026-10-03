@@ -2333,8 +2333,19 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_gen_api = dict(
             (getattr(gen, '_coro_body_callable_param_apis', None) or {})
             .get(node.name, {}))
+        # A coroutine body carries the FACT (`_mojo_coro_callable_param_fns`,
+        # attached by `coro._mark_coro_callable_param_fns`) rather than the
+        # answer, because `register` is an AST pre-pass that runs before any
+        # module-level function's `func_return_types` entry exists. Resolved
+        # here, where it does exist -- see that function's docstring.
+        gen._callable_param_ret_types = {}
+        for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
+            _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
+            if _cpt_rt and _cpt_rt != 'void':
+                gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
+        gen._callable_param_ret_types = ggc._callable_param_ret_types(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is

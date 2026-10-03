@@ -48,7 +48,7 @@ from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
-    _callable_param_generator_apis, _callable_value_symbol, _default_expr_to_pair,
+    _callable_param_generator_apis, _callable_param_ret_types, _callable_value_symbol, _default_expr_to_pair,
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
 )
@@ -5470,6 +5470,19 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     # api is keyed by it; `_lower_fnptr_call` loads a global/captured
     # callable through the IdentExpr path instead, in which case there is
     # no parameter default to consult and nothing is recorded.
+    # The ordinary-function sibling of the arm below: a parameter whose
+    # declared default names a plain top-level function of this compile
+    # (`def apply_to(items, _f=upper)`) returns that function's real type,
+    # so `_lower_fnptr_call_N`'s box is read as the `char *` / `MojoList *` it
+    # actually holds. Consulted for the same reason and at the same point:
+    # the helper's own return type is what every consumer below dispatches
+    # on, and `int64_t` is the box, not the value.
+    _cpt = (getattr(gen, '_callable_param_ret_types', None) or {}).get(fp_raw)
+    if _cpt and ret_type == 'int64_t':
+        if _cpt == 'double':
+            return 'double', gen._new_val('double', f'(double){raw_t}')
+        if _cpt != 'void':
+            return _cpt, gen._new_val(_cpt, f'({_cpt}){raw_t}')
     _cap_api = (getattr(gen, '_callable_param_gen_api', None) or {}).get(fp_raw)
     if _cap_api is not None:
         _gen_t = gen._new_val('MojoGenerator *', f'(MojoGenerator *){raw_t}')

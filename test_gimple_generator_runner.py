@@ -4401,6 +4401,41 @@ def main():
         print(v)
 """, "k\n0\n")
 
+    # A callable-valued PARAMETER, CALLED inside a coroutine body. This is
+    # the ordinary-path half of
+    # bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md,
+    # and it needs its own plumbing: the A3 rewrite moves every source
+    # parameter into a `var p = __mojo_gen_arg(...)` local, so the body the
+    # ordinary codegen emits carries NO `param_defaults` — so the fact cannot
+    # be read off the body at all and has to travel with it. It travels as
+    # `_mojo_coro_callable_param_fns` (`{param: the function its default
+    # names}`), attached by `coro._mark_coro_callable_param_fns`, and is
+    # RESOLVED in `gen_func` — because `register` is an AST pre-pass that runs
+    # before any module-level function's `func_return_types` entry exists,
+    # which is the same reason `_mark_coro_param_elem_kinds` attaches names
+    # rather than answers.
+    #
+    # `yield len(r)` is the assertion: the callable's `char *` result used to
+    # come back as the homogenized `int64_t` box, so `len` of it was 0.
+    # `yield r` itself is NOT here — a generator that yields a STRING
+    # obtained by iterating a string is a different defect
+    # (bugs/CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md),
+    # and it was already broken before this change.
+    test_generator_stdout("generator_callable_param_result_keeps_its_type", """\
+def upper(s):
+    return s.upper()
+
+def apply_to(items, _f=upper):
+    r = _f(items)
+    yield len(r)
+    yield len(_f(items))
+
+def main():
+    for v in apply_to('ab'):
+        print(v)
+main()
+""", "2\n2\n")
+
     # A nested `def` or a nested `class` inside a coroutine body is its OWN
     # function scope, and the A3 rewrite used to descend into it: every
     # `_rewrite_*_stmts` in `mojo/middle/coro.py` recurses into a statement's
