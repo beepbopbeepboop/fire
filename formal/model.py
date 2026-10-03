@@ -14653,7 +14653,85 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
             f"that needs to publish mutable state rather than functions is a "
             f"different gap, written down in "
             f"bugs/FORMAL_module_state_no_storage.md")
+    refusal = dylib_value_member_refusal(name, module, leaf, by_module,
+                                         forwarded)
+    if refusal:
+        raise CodegenError(refusal)
     return (syms or {}).get(name, name)
+
+
+def dylib_value_member_refusal(name: str, module: str, leaf: str,
+                               by_module: dict, forwarded: dict):
+    """The diagnostic for `mod.attr.member(...)` where `attr` is a VALUE, or None.
+
+    **THE CHAIN IS ONE LINK TOO DEEP, and it is the shape `os.environ.get(k)`
+    has.** `module` here is `os.environ`, which is not a module with a library
+    on this link line, so the arms above cannot report anything about it: there
+    is no export table for a thing that is not a module, and
+    `_module_is_linked` answers False for the same reason. What used to happen
+    is that the name fell through to a bare reference, the bind audit caught
+    `os.environ.get` as a symbol nothing provides, and the reader was told their
+    LINK LINE was wrong — which is the wrong half of the story, and it became
+    the wrong half the moment `os` began publishing `environ` at all: before
+    that, `module_spine_link_resolves` said `os.environ` resolved to nothing, so
+    `check_module_symbols` refused the chain as an ATTRIBUTE READ with a message
+    naming the module and what it publishes. Publishing the accessor turned a
+    precise refusal into a link-audit one, and that is a diagnostic regression
+    caused by a fix, so it is repaired here rather than left.
+
+    The discriminator is the PARENT's own table: `attr` is an export of the
+    module one link up (`environ` is a function of `os`), and a function is a
+    value, not a library. So `mod.attr.member(...)` is a call through a value,
+    which is the shape `FORMAL_module_state_no_storage.md` §(2) is about, and the
+    sentence says that rather than the linker.
+
+    **THE REPAIR IS NAMED, and it is read off the same table.** A module that
+    publishes `foo` and also `foo_get`, `foo_set`, `foo_len` has published the
+    OPERATIONS on the value it hands back as functions of its own, because a
+    dylib publishes functions and cannot publish the object they are called on.
+    So the message lists the exports whose name begins with `attr_`, which for
+    `os.environ` is the whole of `environ_count` … `environ_value` and is the
+    answer rather than a hint. The prefix rule is not a guess about this
+    module: it is the only generic statement available about how a host module
+    spells an operation on its own value, and it is falsifiable — a module that
+    publishes nothing of the sort produces an empty list, which is reported as
+    such rather than left out.
+
+    None when `attr` is not an export of the parent, which is the two cases this
+    must not touch: `pkg.sub.twice(…)` (a SUBMODULE with its own library, so the
+    arms above already answered it) and `pkg.nosuchattribute.twice(…)` (nothing
+    publishes `nosuchattribute`, so the link audit is still the honest report —
+    `test_formal_module_attr.py`'s `a_spine_link_that_resolves_to_nothing_is_an_
+    attribute_read` is that case and pins it).
+    """
+    parent, _, attr = module.rpartition(".")
+    if not attr:
+        return None
+    ops = set(dylib_export_module(by_module, parent))
+    ops |= set(dylib_export_module(forwarded, parent) if forwarded else ())
+    if attr not in ops:
+        return None
+    related = sorted(n for n in ops if n.startswith(attr + "_"))
+    if related:
+        shown = ", ".join(related[:8])
+        if len(related) > 8:
+            shown += ", …"
+        repair = (f"the operations on it are published as FUNCTIONS of "
+                  f"`{parent}`, and those beginning `{attr}_` are they: "
+                  f"{shown} — call one of those, passing whatever the "
+                  f"`{attr}`-returning function hands back")
+    else:
+        repair = (f"`{parent}` publishes no function whose name begins "
+                  f"`{attr}_`, so it publishes no operation on it at all, and "
+                  f"there is no spelling of `{leaf}` for this path")
+    return (f"{name}(): `{module}` is not a module with a library on this "
+            f"link line — `{attr}` is a FUNCTION of `{parent}`, so "
+            f"`{name}()` is a call through a VALUE and there is no symbol for "
+            f"it to bind. A dylib publishes functions, not the objects they "
+            f"are called on, so an operation on a value a module hands back "
+            f"cannot be spelled as a member of it; {repair}. "
+            f"bugs/FORMAL_module_state_no_storage.md §(2) records why a value "
+            f"cannot cross a dylib boundary at all")
 
 
 def module_spine_link_resolves(qualifier: str, by_module: dict,
