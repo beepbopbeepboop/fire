@@ -7336,6 +7336,28 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_blob_base(self._blob_base + self._ret_frame_base
                                  + sret_site[1], Reg.RAX)
             self._push_slot(Reg.RAX)
+            # The slot is the hidden word's own argument-register index, which
+            # is the ORDINARY GPR the callee reads it from — the same
+            # `ARG_REGS[len(params)]` its prologue names, one line above
+            # `_store_var(_SRET_LOCAL, …)`. So `"sret"` is in `reg_plan` only
+            # to carry that index, and it takes the same move as every `"gpr"`
+            # entry below.
+            #
+            # It used to `continue` past it, on the reasoning that being the
+            # FIRST register argument popped put it in RAX already. RAX is not
+            # an argument register on this ABI (arm64's X0 is, which is where
+            # the argument came from), and every ordinary argument popped after
+            # it overwrites it, so the word was dropped on the floor and the
+            # callee read whatever the previous call left in RDX. The symptom
+            # was a SIGSEGV rather than a wrong value because that word is a
+            # callee-SAVED register, so it survives the prologue and the
+            # callee dereferenced it as a block address: `make(1, 2)` copying
+            # its result frame through a stale RDX. It only reached an argument
+            # position when the returned struct's FIELD was read, because the
+            # call's own result register is the block base either way and
+            # `r.give().x` re-derives the block from the site — which is why
+            # the storage, the field read and a struct built locally were each
+            # correct on their own and only the composition faulted.
             reg_plan.append((len(args), "sret", len(reg_plan)))
         # An SSE argument goes STRAIGHT from the pop into its XMM register and
         # never through a GPR, because SysV AMD64 passes a `double` in
@@ -7354,12 +7376,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         nxmm = 0
         for _j, c, slot in reversed(reg_plan):
             self._pop_slot(Reg.RAX)
-            if c == "sret":
-                # The hidden word is the LAST register argument and the first
-                # one popped, so it is already in RAX. Every ordinary argument
-                # that follows it in argument order is popped after it and
-                # overwritten by its own pop.
-                continue
             if c == "xmm":
                 self.asm.emit(encode_movq_xmm_rm64(slot, Reg.RAX))
                 nxmm = max(nxmm, slot + 1)

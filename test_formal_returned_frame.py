@@ -1125,6 +1125,53 @@ DIFF_CASES = [
      '    print("r=%d q=%d,%d" % (build(3, 4), q.x, q.y), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+
+    # THE HIDDEN WORD REACHES THE CALLEE, and it is here as a case rather than
+    # folded into the ones above because those four facts were each correct on
+    # their own: the block's storage was right (a returned struct never read
+    # exited 0), the field READ was right (`return q.x + q.y` gave 3), a struct
+    # built in `main` had its fields passed to `printf` correctly, and a
+    # returned struct's field handed to a plain callee SEGFAULTED. Only the
+    # composition failed, and nothing above isolates WHICH register.
+    #
+    # `twice` is a plain typed Mojo callee, so nothing in this program is
+    # `printf` and nothing is variadic: it is the case that says the defect was
+    # the CALL SITE's argument register rather than the C runtime's. It reads
+    # the field of a returned frame directly in the call (`twice(make(1, 2).x)`)
+    # AND through a named holder (`q.x`), because the two reach the block base
+    # differently — the first re-derives it from the call site, the second from
+    # the call's result register — and both have to work.
+    ("a_returned_frames_field_reaches_a_plain_callee",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def make(a, b):\n"
+     "    var p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def twice(v: Int) -> Int:\n"
+     "    return v * 2\n\n"
+     "def main(n):\n"
+     "    var q = make(1, 2)\n"
+     '    printf("a=%d b=%d", twice(make(3, 4).x), twice(q.y) + q.x)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def make(a, b):\n"
+     "    p = Point()\n"
+     "    p.x = a\n"
+     "    p.y = b\n"
+     "    return p\n\n"
+     "def twice(v):\n"
+     "    return v * 2\n\n"
+     "def main():\n"
+     "    q = make(1, 2)\n"
+     '    print("a=%d b=%d" % (twice(make(3, 4).x), twice(q.y) + q.x), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 
@@ -1162,6 +1209,70 @@ def check_predicate_is_two_argument():
             print(f"FAIL  {backend} hands dict.get to a two-argument predicate")
     if ok:
         print("  PASS  neither_backend_passes_dict_get_as_the_predicate")
+    return ok
+
+
+def check_sret_word_reaches_the_callee():
+    """Every backend that pushes the hidden word must also MOVE it.
+
+    The convention has two ends and they can drift apart without either end
+    looking wrong: the callee reads the block address out of an argument
+    register (`ARG_REGS[len(params)]` on x86-64, X-`len(incoming)` on arm64),
+    and the call site pushes the address and then has to put it in that same
+    register. x86-64 dropped it — the popped word was skipped, on the reasoning
+    that being popped first meant it was already in RAX, which is true of
+    arm64's X0 and of no register on this ABI.
+
+    It is a SIGSEGV rather than a wrong value because the hidden word lands in
+    a callee-SAVED register, so the callee's prologue keeps whatever the
+    previous call left there and dereferences it as a block address. Every
+    case that does not read a returned frame's field PASSED with that in place:
+    the block's storage was right, the field read was right, a struct built
+    locally was right. So the differential cases cannot be the only guard, and
+    neither can a source-shaped check on `"sret"` — the dropped entry carried
+    the class name and only lacked the move.
+
+    What is checked is therefore the strongest thing available without
+    building: the popped word has a use. `continue` inside the pop loop is
+    refused outright, and the pop loop is located by the pushes that feed it
+    rather than by a line number.
+    """
+    ok = True
+    for backend in ("formal/arm64_codegen.py", "formal/x86_64_codegen.py"):
+        path = os.path.join(HERE, backend)
+        with open(path) as fh:
+            src = fh.read()
+        # The pop loop: it pops and moves, in both backends, in the shape the
+        # two architectures share. Find it as the loop that pops.
+        pop_loop = None
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            if "for " in line and ("reversed(reg_plan)" in line
+                                   or "range(min(nargs" in line
+                                   or "range(nargs" in line):
+                pop_loop = lines[i:i + 12]
+                break
+        if pop_loop is None:
+            ok = False
+            print(f"FAIL  {backend}: no argument pop loop found, so the "
+                  f"hidden word's move cannot be checked")
+            continue
+        body = "\n".join(pop_loop)
+        if "continue" in body:
+            ok = False
+            print(f"FAIL  {backend}: the argument pop loop skips a popped "
+                  f"word with `continue`; the returned-frame hidden word was "
+                  f"dropped exactly that way, and the callee then read "
+                  f"whatever the previous call left in its argument register")
+        if not any(m in body for m in ("encode_mov_r64_r64(ARG_REGS",
+                                       "encode_mov_zr_xn",
+                                       "_load_home_from_reg",
+                                       "encode_mov_zr_xn")):
+            ok = False
+            print(f"FAIL  {backend}: the argument pop loop moves no popped "
+                  f"word into an argument register")
+    if ok:
+        print("  PASS  every_popped_argument_word_reaches_its_register")
     return ok
 
 def run_cpython(source):
@@ -1322,6 +1433,16 @@ def main():
     # private one.
     if not args.cases:
         if check_predicate_is_two_argument():
+            passed += 1
+        else:
+            failed += 1
+
+    # …and the second shape check, for the same reason: the convention's two
+    # ends are in two functions in the same file, a SIGSEGV-only-when-composed
+    # defect survives every differential case, and this one does not need a
+    # build to see.
+    if not args.cases:
+        if check_sret_word_reaches_the_callee():
             passed += 1
         else:
             failed += 1
