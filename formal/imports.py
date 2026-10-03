@@ -132,13 +132,18 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal. `tempfile` is here for the `TMPDIR`-derived half of that
-    # sentence rather than the terminal half, and `shutil` WAS here too — under
-    # "a writable filesystem this target does not get", which was FALSE and is
-    # now `formal/hostmods/shutil.mojo`; `get_terminal_size` is the half that
-    # survived the removal and is absent in that module with the reason at its
-    # own definition.
-    "getpass", "webbrowser", "tempfile",
+    # A terminal. `tempfile` WAS here too — under this heading, for the
+    # `TMPDIR`-derived half of it rather than the terminal half — and left on
+    # 2026-10-03, because both halves were measured away: the terminal one is
+    # still true and is why `formal/hostmods/tempfile.mojo` asks for nothing
+    # that needs one, and the `TMPDIR` one was false, since `os` has `getenv`,
+    # `mkdir` and `os.path.isdir`. That module is the reason this list is worth
+    # reading rather than trusting: every other entry under this heading is a
+    # fact about the target, and the way to tell the two apart is to ask whether
+    # `os` can already do the thing the entry names. `shutil`'s
+    # `get_terminal_size` is the half that survived the same removal and is
+    # absent in that module with the reason at its own definition.
+    "getpass", "webbrowser",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else.
     "zlib", "gzip", "locale",
@@ -430,6 +435,27 @@ HOST_MODELLED = frozenset((
     #     cross-device fallback because `errno` cannot be bound
     #     (`__error` has a leading underscore), and the archives are a library
     #     with a struct layout nobody in the sweep asks for.
+    #   `tempfile`  — `formal/hostmods/tempfile.mojo`, checked against
+    #     CPython's own `tempfile` by `test_formal_tempfile.py`: `gettempdir`
+    #     over CPython's candidate list, `gettempprefix`, `TMP_MAX`, and
+    #     `mkdtemp`'s real directory, mode 448, eight-character name over
+    #     CPython's own alphabet, and its retry-on-collision loop. It was in
+    #     `HOST_UNREACHABLE` under "a terminal", and that claim was half false:
+    #     a temporary directory is a directory, and `os` had `getenv`,
+    #     `getcwd`, `mkdir` and `os.path.isdir` all along. It is the LARGEST
+    #     host-import row in the sweep — 111 files, 109 of which name something
+    #     the module publishes, ranked by
+    #     `tools/formal_sweep_causes.py --host` — and what it moves is the
+    #     SUBJECT of each file's refusal rather than its verdict: every call
+    #     site in this corpus spells `mkdtemp(prefix=…)`, and a call across a
+    #     dylib boundary cannot fill a default
+    #     (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), so
+    #     what those 51 files get is a refusal naming the argument they did not
+    #     pass. What is absent is at the top of that file and it is 64 files'
+    #     worth: `TemporaryDirectory`'s contract is the removal on the way OUT
+    #     of a `with`, and `formal/hostmods/contextlib.mojo` measured that
+    #     there is no `__exit__` to hook —
+    #     `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md`.
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same

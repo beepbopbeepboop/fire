@@ -550,12 +550,26 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
     `test_formal_run.py`, a needle in `test_formal_sweep_truth.py` and the
     chain the sweep peels are all written against that sentence, and "several"
     must not cost the single case its wording.
+
+    **THE TWO UNRESOLVABLE NAMES ARE `glob` AND `zlib`, AND THEY USED TO BE
+    `glob` AND `tempfile`.** `tempfile` stopped being unresolvable on 2026-10-03
+    — `formal/hostmods/tempfile.mojo` landed, and a host module with a source
+    resolves before the tier lists are ever consulted — so a fixture naming it
+    stopped testing what it is for: with `tempfile` resolvable, the diagnostic
+    names `glob` alone, the completeness loop finds one of its two names, and
+    the test fails on a property that is still true. The failure is loud, which
+    is the good case; a fixture that had asserted only "the build fails" would
+    have gone on passing as a ONE-module test with a two-module name in it.
+    Both replacements are host modules with no source and real rows in the
+    sweep's host ranking (`tools/formal_sweep_causes.py --host`: `glob` 18
+    files, `zlib` 15), so the fixture is still made of names a reader could
+    meet in this tree.
     """
     root = os.path.join(tmpdir, "many")
     os.makedirs(root)
     orderings = {
-        "alpha": "import glob\nimport tempfile\nimport sys\n",
-        "omega": "import tempfile\nimport glob\n",
+        "alpha": "import glob\nimport zlib\nimport sys\n",
+        "omega": "import zlib\nimport glob\n",
     }
     for tag, imports in orderings.items():
         write_tree(root, {f"{tag}.mojo":
@@ -572,7 +586,7 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
         check("Traceback" not in text,
               f"{tag}: an unresolved import should be a clean error:\n"
               f"{text[-400:]}")
-        for mod in ("glob", "tempfile"):
+        for mod in ("glob", "zlib"):
             check(mod in text,
                   f"{tag}: the diagnostic names {mod!r} nowhere, so fixing it "
                   f"only reveals the next one:\n{text[-400:]}")
