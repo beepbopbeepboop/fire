@@ -403,15 +403,46 @@ here that still earns the file its place in the queue.
   selection is by arity. What is left of premise (B2) is the four shapes the
   inline genuinely cannot supply, each with its own message, and they are in
   the `__init__` section rather than here.
-* **The unannotated-callee residual** in the dead-blob check (above) — **the
-  one open item in this file.** Closes with the value kind of a call's result,
-  which is `ValueKinds`' question and not a re-derivation to be smuggled into
-  the construction pass. It is a deliberate tie-break rather than an oversight
-  (the refusal's own docstring argues the permissive direction at length), so
-  closing it means teaching `_kind_of_call` the difference between a callee's
-  DECLARED return type and the fallback word — which is the same provenance
-  `ValueKinds.own_shape_kind` refuses to trust for want of it, and the two
-  should be one change rather than two.
+* **The unannotated-callee residual** in the dead-blob check (above) — **still
+  the one open item in this file, and as of 2026-10-03 (`work/formal8-11`) it is
+  known NOT to be a change to `_kind_of_call`, which is what the next reader
+  would try.** Closes with the value kind of a call's result, which is
+  `ValueKinds`' question and not a re-derivation to be smuggled into the
+  construction pass. It is a deliberate tie-break rather than an oversight (the
+  refusal's own docstring argues the permissive direction at length), and
+  `ValueKinds.own_shape_kind` wants the same provenance — the difference between
+  a callee's DECLARED return type and the fallback word — so the two should be
+  one change.
+
+  **Measured, and it is a PLUMBING boundary rather than a table.** The check runs
+  in `formal/build.py`'s `check_construction_shapes`, at PREPARE time, and every
+  `ValueKinds` hook is owned by an EMITTER: `int_names`/`string_names` are
+  `formal.types`' vocabularies, but `func_kind` needs `_vkinds_for`, which needs
+  the emitter's own `_structs`, `_frame_candidates` and dylib tables, and
+  `_callee_kind` is where a callee's return kind is decided — recursion-guarded
+  against `_functions` and the image's export manifests. So `build.py` cannot ask
+  the question without either duplicating `_callee_kind` (the one thing CLAUDE.md
+  forbids, and the failure `_frame_candidates` exists to prevent) or the check
+  moving to where a `ValueKinds` exists. Extracting `_callee_kind` into
+  `formal/model.py` as one function both backends and the build pass call is the
+  real shape of it, and it is a change to the kind path rather than to this
+  family.
+
+  **The residual is INERT today, which is why the cost of leaving it is a
+  diagnostic surface rather than a wrong answer:** reaching it needs a method
+  that mutates the container through the slot, and `list.append()` is refused on
+  its own terms (`constr_append_through_a_field_is_still_refused`), so the day
+  the append is lowered the case is visibly false rather than quietly stale.
+
+  **What the same provenance question looks like when it CAN be answered**, since
+  it is the shape of the fix and it is measured: `printf("[%s]", str(c))` on a
+  one-field struct was a SIGSEGV for the same reason — a CALL's kind is not
+  evidence, and `_own_shape_of` counts every call as none — and it closed by
+  asking the OPERAND (`model.identity_conversion_operand` +
+  `model.printf_arg_text_evidence`, 2026-10-03). That is the same "distinguish
+  declared from inferred" rule with a reader that had the table to hand; the
+  construction pass has no such reader, and that is the whole of the difference
+  between the two.
 * **No proof-side lemma was added or specified as needed.** NOT a bug and not a
   residual — a note, kept because it is the one thing on this list a reader of
   the generated proof would want and would not find. The copy is a load/store of

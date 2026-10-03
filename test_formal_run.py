@@ -2358,26 +2358,44 @@ CASES = [
      "    printf(\"%d\\n\", r)\n"
      "    return 0\n",
      "refuse:unary '-' is refused on a string", None),
-    # `not s` is the one that is a fabricated FALSITY rather than a fabricated
-    # number, and it is the worst of the set for that reason: a pointer is
-    # never zero, so `not s` is FALSE for every string INCLUDING THE EMPTY
-    # ONE. Observed on the pre-change tree, on both backends:
-    #     s = "abc"; e = ""; printf("%d %d", 1 if not s else 0, 1 if not e else 0)
-    # printed `0 0`. Python's answer is `0 1` — a program testing a string for
-    # emptiness is told the empty string is non-empty.
+    # `not s` was a FABRICATED FALSITY rather than a fabricated number, and it
+    # was the worst of the set for that reason: a pointer is never zero, so the
+    # old lowering (`cmp #0; cset eq` on the operand's own word) said `not s` is
+    # False for every string INCLUDING THE EMPTY ONE.  Observed on the pre-change
+    # tree, on both backends: `s = "abc"; e = ""; printf("%d %d", 1 if not s else
+    # 0, 1 if not e else 0)` printed `0 0`.  Python's answer is `0 1` — a program
+    # testing a string for emptiness is told the empty string is non-empty.
     #
-    # The honest lowering is `len(s) == 0`, which is a `strlen` and nothing
-    # else, and it is NOT available at this site: `not` tests a value already in
-    # a register and this emitter cannot see what produced it. `if s:` and
-    # `while s:` have the same defect and are still lowered; both are written
-    # down in bugs/FORMAL_string_value_model.md with the next step.
-    ("str_not_refused_because_empty_string_is_falsy",
+    # It is now the SAME conversion `if s:` makes — `truthy_lowering`, i.e. the
+    # `strlen` the refusal itself told the reader to write by hand — so the two
+    # spellings of one question cannot come to disagree.  The empty string is the
+    # case that separates a correct lowering from a null test, which is why it is
+    # the first thing to check any change here against.
+    ("not_a_string_is_the_truthiness_conversion",
      "def main(n):\n"
      "    s = \"abc\"\n"
      "    e = \"\"\n"
-     "    printf(\"%d %d\\n\", 1 if not s else 0, 1 if not e else 0)\n"
-     "    return 0\n",
-     "refuse:`not s` is refused because s is a string", None),
+     "    printf(\"%d %d\", 1 if not s else 0, 1 if not e else 0)\n"
+     "    return 0\n", 0, "0 1"),
+    # The other two rows of the same table, in the same program, because a fix
+    # that made `not` a `strlen` for strings only would be "refuse every `not`"
+    # with extra steps: an integer is 0 or it is not, and a container's
+    # truthiness IS its count, so `not []` is True.  And a SHORT-CIRCUIT chain,
+    # which is the operand whose truthiness is not the truthiness of the word it
+    # evaluates to — `p and ""` yields the EMPTY STRING, so `not` of it is True
+    # even though `p` is not.  All four values are what Python prints.
+    ("not_of_an_int_a_container_and_a_short_circuit_chain",
+     "def main(n):\n"
+     "    a = 0\n"
+     "    b = 3\n"
+     "    xs = [1]\n"
+     "    ys = []\n"
+     "    p = \"x\"\n"
+     "    printf(\"%d %d %d %d\", 1 if not a else 0, 1 if not b else 0,"
+     " 1 if not xs else 0, 1 if not ys else 0)\n"
+     "    if not (p and \"\"):\n"
+     "        printf(\" chain\")\n"
+     "    return 0\n", 0, "1 0 0 1 chain"),
     # GUARD: `not` on an INTEGER is untouched by the refusal above, or the
     # fix would be "refuse every `not`". This passed before the change too.
     ("str_not_on_an_int_is_a_guard",
@@ -4320,12 +4338,133 @@ DECLARED_TYPE_CASES = [
      "    fn go(self) -> Int:\n"
      "        return self.in1.bump()\n"
      "\n"
+"def main(n: Int) -> Int:\n"
+    "    var o = Outer()\n"
+    "    o.in1.a = 2\n"
+    "    o.in1.b = 3\n"
+    "    o.in1.c = 4\n"
+    "    return o.go()\n", 10, None),
+    # ── THREE LEVELS: the innermost frame of a chain two frames deep ──
+    #
+    # Depth 2 is the shape above and it has been there since C5.  Depth 3 is
+    # `o.inner.inner2.x`, and it was refused on BOTH architectures with a
+    # diagnostic about the WRONG LEVEL: the build pass spelled the outer field as
+    # `chain.split(".")[-2]`, which for `o.inner.inner2.x` is `inner2` — a
+    # spelling the source does not use and a slot whose layout was never
+    # consulted.  It is now a WALK (`formal/build.py`'s `_nested_frame_levels`),
+    # so each level asks the placement question in the order the source asks it.
+    #
+    # Nothing in either emitter changed, and that is the shape of the answer: both
+    # resolve a `_frame_nested_slots` key by loading the chain with its last field
+    # removed and indexing the frame that leaves, so filling every PREFIX of the
+    # chain is the whole of the third level.  Two objects with different values
+    # at the innermost level, because "the innermost frame is shared" is the wrong
+    # answer a single object cannot see.
+    ("byref_three_level_nested_frames_read_and_write",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
      "    var o = Outer()\n"
-     "    o.in1.a = 2\n"
-     "    o.in1.b = 3\n"
-     "    o.in1.c = 4\n"
-     "    return o.go()\n", 10, None),
+     "    o.inner.inner2.x = 5\n"
+     "    o.inner.inner2.y = 6\n"
+     "    o.inner.z = 7\n"
+     "    o.w = 8\n"
+     "    printf(\"x=%d y=%d z=%d w=%d\", o.inner.inner2.x, o.inner.inner2.y,"
+     " o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=5 y=6 z=7 w=8"),
+    ("byref_three_level_nested_frames_two_objects_no_alias",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Outer()\n"
+     "    var b = Outer()\n"
+     "    a.inner.inner2.x = 1\n"
+     "    a.inner.inner2.y = 2\n"
+     "    a.inner.z = 3\n"
+     "    a.w = 4\n"
+     "    b.inner.inner2.x = 11\n"
+     "    b.inner.inner2.y = 12\n"
+     "    b.inner.z = 13\n"
+     "    b.w = 14\n"
+     "    printf(\"a=%d,%d,%d,%d \", a.inner.inner2.x, a.inner.inner2.y,"
+     " a.inner.z, a.w)\n"
+     "    printf(\"b=%d,%d,%d,%d\", b.inner.inner2.x, b.inner.inner2.y,"
+     " b.inner.z, b.w)\n"
+     "    return 0\n", 0, "a=1,2,3,4 b=11,12,13,14"),
+    # A ONE-FIELD struct at the third level, which is the one case where the
+    # chain is NOT a frame access: a struct of one field has no block, so the
+    # word in `o.inner.inner2` IS `Inner2`'s only field and
+    # `o.inner.inner2.x` is the same word under a longer spelling.  The
+    # REWRITE (`_rewrite_one_word_nested_fields`) collapses it onto
+    # `o.inner.inner2`, and every level it walks needs a table entry for the
+    # collapsed spelling to have an address — which is why the fill is shared
+    # with the frame case rather than duplicated for it.
+    ("byref_three_level_chain_through_a_one_field_struct",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.w = 7\n"
+     "    o.inner.inner2.x = 8\n"
+     "    printf(\"x=%d z=%d w=%d\", o.inner.inner2.x, o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=8 z=0 w=7"),
+    # …and the same with the type coming from the nested struct's `__init__`
+    # rather than from the class-body annotation, which is a DIFFERENT evidence
+    # source (`struct_field_type`'s "assigned" row rather than its "declared"
+    # one) and therefore its own case.  `o.inner = Inner(Inner2(5), 6)` puts a
+    # whole `Inner` block in the slot, and the depth-3 chain below has to reach
+    # through it.
+    ("byref_three_level_chain_with_the_type_assigned_in_init",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "    def __init__(self, i: Inner2, b: Int):\n"
+     "        self.inner2 = i\n"
+     "        self.z = b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.inner = Inner(Inner2(5), 6)\n"
+     "    o.w = 7\n"
+     "    o.inner.inner2.x = 8\n"
+     "    printf(\"x=%d z=%d w=%d\", o.inner.inner2.x, o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=8 z=6 w=7"),
 ]
 
 DECLARED_TYPE_REFUSALS = [
@@ -8410,6 +8549,82 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    printf(\"100%% [%*d] [%s] [%s] %s\", 4, 7, \"a\", \"b\", \"c\")\n"
      "    return 0\n", 0, "100% [   7] [a] [b] c"),
+    # A ONE-FIELD STRUCT is the last shape `%s` walked off the end of, and it
+    # got past every check because there was nothing to check: a struct of one
+    # field has no frame, so `_check_frame_escapes` has no frame ADDRESS to
+    # refuse, and the statement that binds the name is a CONSTRUCTION, which
+    # `ValueKinds._own_shape_of` counts as no evidence at all. Measured before
+    # this case existed, on BOTH architectures from a GREEN build: nothing
+    # printed, SIGSEGV, exit 139 — `%s` walking bytes at address 7 looking for
+    # a NUL. `model.one_word_value_text_evidence` is what closes it, on the
+    # DECLARATION rather than on the integer default.
+    ("printf_s_of_a_one_field_struct_is_refused",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%s]\", c)\n"
+     "    return 0\n",
+     "refuse:struct of ONE field has no frame at all", None),
+    # The GUARDS, and they are why the fix is not "a name in the one-word table
+    # is False for a `%s` conversion".  A one-field struct whose field is a
+    # STRING is text, and it worked before this change and works now: `w` IS
+    # the `char *`.  And a conversion that does not DEREFERENCE renders the word
+    # whatever it is, so `%d` of a one-field Int struct is `7` — which is the
+    # same convention `str(c)` and `print(c)` already follow.
+    ("printf_s_of_a_one_field_struct_holding_a_string_still_prints",
+     "struct W:\n"
+     "    var s: String\n"
+     "\n"
+     "def main(n):\n"
+     "    var w = W(\"hi\")\n"
+     "    printf(\"[%s]\", w)\n"
+     "    return 0\n", 0, "[hi]"),
+    ("printf_d_of_a_one_field_struct_renders_the_field",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%d]\", c)\n"
+     "    return 0\n", 0, "[7]"),
+    # The rest of the family, and it is one family: `%s` is the one conversion
+    # that DEREFERENCES its argument, so every shape whose word is a number is a
+    # walk off the end of it.  Measured on both architectures, from GREEN
+    # builds, before this decision existed — SIGSEGV exit 139 in every case:
+    #   printf("[%s]", 42)              bytes at address 42
+    #   printf("[%s]", 2 + 4)           bytes at address 6
+    #   printf("[%s]", str(42))         the word `str()` moved, unchanged
+    # `str()` and `String()` are word-for-word IDENTITY conversions here
+    # (`printf("[%d]", String(7))` prints 7), so the call's kind table entry —
+    # which claims a string — is a claim about the CONVERSION rather than about
+    # its operand, and `printf_text_conversion_refusal` asks the operand
+    # instead: `model.identity_conversion_operand` + `printf_arg_text_evidence`.
+    ("printf_s_of_a_literal_a_binop_and_a_conversion_are_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", 42)\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    ("printf_s_of_an_arithmetic_expression_is_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", 2 + 4)\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    ("printf_s_of_a_conversion_of_a_number_is_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", str(42))\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    # And the GUARD for that unwrapping: a conversion of TEXT is text, and the
+    # unwrapping must not cost that.  Without the guard, "a conversion is its
+    # operand" would read as "a conversion is never text", and every
+    # `String(s)` in the corpus would be refused.
+    ("printf_s_of_a_conversion_of_a_string_still_prints",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%s][%s][%s]\", String(s), str(s), String(\"lit\"))\n"
+     "    return 0\n", 0, "[abc][abc][lit]"),
 ]
 
 

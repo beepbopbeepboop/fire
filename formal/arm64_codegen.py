@@ -990,6 +990,15 @@ dylib_exports: list = None, globals_base: int = None,
         # same table rather than from two walkers that could disagree.
         self._frame_candidates = dict(
             getattr(f, "_frame_candidates", None) or {})
+        # `{name: [StructDef, …]}` — the ONE-WORD mirror of the above, and the
+        # second thing a word can be that is not an integer and not a frame: a
+        # struct of exactly one field has no block, so `P(7)` binds a plain word
+        # that IS `P`'s only field and every frame table is silent about it.
+        # Published for the same reason the frame one is — a consumer that has
+        # to know what a word is asks the table the analysis already built
+        # rather than re-deriving the recognition (see `_printf_arg_is_text`).
+        self._one_word_candidates = dict(
+            getattr(f, "_one_word_candidates", None) or {})
         # `{name: declared return annotation}` — the evidence a construction
         # argument needs to be told apart from a container returned by a
         # callee.  Read once per function from the same function table the
@@ -2633,19 +2642,31 @@ dylib_exports: list = None, globals_base: int = None,
 
         if isinstance(expr, F.UnaryOp):
             # `-s` is negation of an address and `~s` is a bit complement of
-            # one, and `not s` is FALSE for every string including the empty
-            # one, because a pointer is never zero. Measured on both backends:
-            # `~s` returned 8881076 on arm64 and 3236815 on x86-64, and
-            # `not ""` returned 0 where Python returns 1. `model` holds the
-            # messages and the measurements; asking here is what makes the two
-            # architectures refuse the same thing.
+            # one, and both are refused with `model.string_unary_refusal`,
+            # which holds the message and the measurements; asking here is what
+            # makes the two architectures refuse the same thing. `not` is not
+            # in that table any more — the arm below is why.
             ureason = M.string_unary_refusal(
                 expr.op, self._expr_str_kind(expr.operand),
                 M.spelled(expr.operand))
             if ureason is not None:
                 raise CodegenError(ureason)
             if expr.op == "not":
-                self._emit_expr(expr.operand)
+                # The TRUTHINESS conversion and its negation, so one table
+                # answers `not s` and `if s:` and they cannot disagree:
+                # `_emit_truthy_word` leaves a word whose ZERONESS is the answer
+                # (`strlen(s)` for a string, a blob's count for a container, the
+                # word itself for an integer or a frame address) and `eq`
+                # against zero is `not`.
+                #
+                # Before this the operand was evaluated directly and compared
+                # with zero, which is FALSE for every string including the
+                # empty one — measured on both backends, `1 if not e else 0`
+                # printed 0 where Python prints 1, so a program testing a
+                # string for emptiness was told the empty string is non-empty.
+                # `model.string_unary_refusal` used to hold that message; `-`
+                # and `~` still need it, `not` no longer does.
+                self._emit_truthy_word(expr.operand)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
                 self.asm.emit(encode_cset_xd_cond(0, "eq"))
                 return
@@ -4173,33 +4194,26 @@ dylib_exports: list = None, globals_base: int = None,
         return frags, operands
 
     def _printf_arg_is_text(self, arg):
-        """True / False / None: does this `printf` vararg hold text.
+        """True / evidence / None: does this `printf` vararg hold text.
 
-        The three-way answer `model.printf_text_conversion_refusal` is written
-        against, and the distinction is the whole of the narrowing. A STRING
-        LITERAL is text without any question asked. A name `_expr_str_kind`
-        classifies `STR_KIND` is text for the reason that classification exists.
-        A bare name a statement of THIS function bound to an INTEGER on that
-        statement's own shape is NOT text — that is `ValueKinds.own_shape_kind`,
-        the same predicate the container-element refusal asks, so one evidence
-        test answers "is this an element address" and "is this a string" and the
-        two architectures cannot disagree about which names carry it.
-
-        Everything else is `None` — the source does not say. That includes an
-        UNANNOTATED PARAMETER, which is a word this build cannot classify, and
-        refusing it would refuse `def show(s): printf("[%s]", s)` for every
-        caller that passes a string: measured working, both architectures, exit
-        0 and `[abc]`. `None` is the permissive direction by design and
-        `printf_text_conversion_refusal`'s docstring says why at length.
+        Delegation, and nothing else: `model.printf_arg_text_evidence` is the
+        decision, so x86-64's copy of this method cannot come to disagree with
+        this one about what a format string means. What is passed in is the
+        three facts only an emitter has — this function's `ValueKinds`, the
+        flow-sensitive `_expr_str_kind`, and the one-field candidates
+        `formal/build.py` published for the function (`None` for a name the FRAME
+        table owns, which is the precedence `_seed_one_word_bindings` states:
+        a name in both tables is a name with two layouts and the frame one is
+        the truth).
         """
-        if isinstance(arg, F.StringLiteral):
-            return True
-        if M.string_operand_is_string(self._expr_str_kind(arg)):
-            return True
-        if (isinstance(arg, F.IdentExpr)
-                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
-            return False
-        return None
+        return M.printf_arg_text_evidence(
+            arg, self._vkinds,
+            is_text=lambda e: M.string_operand_is_string(self._expr_str_kind(e)),
+            one_word_text=lambda name: (
+                None if name.name in self._frame_holders else
+                M.one_word_value_text_evidence(
+                    self._one_word_candidates.get(name.name),
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
     def _refuse_printf_text_conversion(self, name, e: F.CallExpr) -> None:
         """Raise when `e` hands a `%s` conversion something that is not text.
@@ -6057,12 +6071,58 @@ dylib_exports: list = None, globals_base: int = None,
 
         Nested frames first, and first because the block is laid out with the
         object's own slots at the bottom: bringing a nested frame up needs its
-        own base, and the outer base is recomputed per store anyway.
-        `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
-        declared type that was not placed cannot reach this loop.
+        own base, and the outer base is recomputed per store anyway.  The site's
+        OWN slots are not touched here — the constructor brings those up itself,
+        and a nested frame's ADDRESS is stored into its slot after them.
+
+        `site[0]` is the struct, and `model.struct_block_direct_children` is its
+        OWN nested frames with their offsets — one level, not the flattened list,
+        because the placement is a RECURSION and a recursive walk is what carries
+        the parent's offset.  Reading the level from the model rather than from
+        `site[2]` is what keeps a frame two levels down from being written at the
+        top object's own offset.
         """
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off)
+        for _fname, _slot, child, child_off in \
+                M.struct_block_direct_children(site[0], self._structs,
+                                               site[1]):
+            self._emit_nested_frame_defaults(child, child_off)
+
+    def _emit_frame_defaults(self, st, offset: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
+        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+            if kind == M.DEFAULT_STRING:
+                self._emit_expr(F.StringLiteral(value=payload))
+            else:
+                self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
+            self._emit_frame_base(offset)
+            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+
+    def _emit_nested_frame_defaults(self, st, offset: int) -> None:
+        """`st`'s nested subtree, defaults first, deepest first.
+
+        The same walk `model.struct_block_direct_children` describes, and it is
+        the recursion that used to crash: it unpacked FOUR values out of
+        `model.struct_nested_frame_fields`, which returns three, so it worked
+        only while no nested frame had a nested frame of its OWN — the list was
+        empty and the unpack never ran. Measured, both architectures: a struct
+        whose nested struct has a nested struct of its own raised `ValueError:
+        not enough values to unpack (expected 4, got 3)` from the CONSTRUCTOR,
+        which is the class a sweep files as a compiler bug, and it happened before
+        any read of the chain could be reached.
+
+        `base=offset` is load-bearing and is the difference between the offsets
+        being absolute and being relative to each level: a nested frame's own
+        children sit at `offset + its own frame size`, and asking the model for
+        this level's children with no base hands back offsets counted from
+        `st`'s own block — which for the third level of `Outer/Inner/Inner2` put
+        `Inner2`'s defaults at 16, on top of `Inner`'s own frame, and the read of
+        `o.inner.inner2.x` then returned a DIFFERENT garbage number on each
+        architecture.
+        """
+        for _fname, _slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs, offset):
+            self._emit_nested_frame_defaults(child, child_off)
+        self._emit_frame_defaults(st, offset)
 
     def _emit_frame_nested_addresses(self, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -6071,11 +6131,31 @@ dylib_exports: list = None, globals_base: int = None,
         typed-nested field, in the same order as `_emit_frame_nested`, so the
         address stored and the frame initialized are the same one by
         construction rather than by two walks agreeing.
+
+        RECURSIVE, and that is the depth-2 half of it: the address of a frame
+        two levels down goes into the slot of the frame that HOLDS it, and only
+        a walk carrying each level's own offset knows whose slot that is. This
+        loop used to read the FLATTENED list, which has no parent left in it, so
+        a grandchild's address would have been stored in the top object's frame
+        at the grandchild's slot index — a silent wrong layout behind the crash
+        above.
         """
-        for _fname, slot, _child, child_off in site[2]:
+        self._emit_nested_frame_addresses(site[0], site[1])
+
+    def _emit_nested_frame_addresses(self, st, offset: int) -> None:
+        """This frame's nested frames' addresses, then their own subtrees'.
+
+        `base=offset` for the reason `_emit_nested_frame_defaults` gives: a
+        level's rows are counted from ITS OWN block unless it is told where that
+        block is, and an address stored at a relative offset writes into the
+        wrong frame.
+        """
+        for _fname, slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs, offset):
+            self._emit_nested_frame_addresses(child, child_off)
             self._emit_frame_base(child_off)
             self.asm.emit(encode_mov_zr_xn(0, 9))
-            self._emit_frame_base(site[1])
+            self._emit_frame_base(offset)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_block_store(self, site, slot: int, value) -> None:
@@ -6167,35 +6247,6 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_frame_base(site[1])
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_nested_frame_init(self, st, offset: int, depth: int = 0) -> None:
-        """Bring a NESTED receiver frame up at its own slot defaults.
-
-        The recursion is the same shape as `model.struct_frame_block_bytes`,
-        which is what keeps the BYTES reserved and the defaults STORED in
-        agreement: the model's recursion decides the size, this one fills it, and
-        both walk `struct_nested_frame_fields` in the same order from the same
-        function.  A cycle is bounded by the model's `MAX_NESTED_FRAME_DEPTH` and
-        the same bound is applied here, so a cyclic declaration graph produces a
-        truncated init in both rather than a hang in one.
-
-        Every default goes through X0 and the base through X9, exactly as the
-        outer constructor does, so there is no register discipline to get wrong
-        between the two levels.
-        """
-        if depth >= M.MAX_NESTED_FRAME_DEPTH:
-            return
-        for _fname, _slot, child, child_off in \
-                M.struct_nested_frame_fields(st, self._structs):
-            self._emit_nested_frame_init(child, child_off, depth + 1)
-        self._emit_frame_base(offset)
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
-            if kind == M.DEFAULT_STRING:
-                self._emit_expr(F.StringLiteral(value=payload))
-            else:
-                self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
-            self._emit_frame_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
-
     def _emit_frame_return(self, value) -> None:
         """`return <frame>` in a function the convention applies to.
 
@@ -6237,10 +6288,24 @@ dylib_exports: list = None, globals_base: int = None,
         for off in range(0, block, 8):
             self.asm.emit(encode_ldr_xt_xn_imm(16, 0, off))
             self.asm.emit(encode_str_xt_xn_imm(16, 17, off))
-        for _fname, slot, _child, child_off in nested:
-            _emit_add_imm(self.asm, 16, 17, child_off)
-            self.asm.emit(encode_str_xt_xn_imm(16, 17, 8 * slot))
+        self._emit_nested_rebase(self._returns_frame, 17)
         self.asm.emit(encode_mov_zr_xn(0, 17))
+
+    def _emit_nested_rebase(self, st, base_reg: int) -> None:
+        """Re-point the COPY's nested slots at the copy, level by level.
+
+        The FLATTENED placement has no parent left in it, so a level-2 frame's
+        address would have been stored in the TOP object's slot
+        at the grandchild's index and the copy would point at the block being
+        reclaimed.  A recursive walk over `struct_block_direct_children` keeps
+        each row's parent in hand, which is the same reason the placement loops
+        are recursive.
+        """
+        for _fname, slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs):
+            _emit_add_imm(self.asm, 16, base_reg, child_off)
+            self.asm.emit(encode_str_xt_xn_imm(16, base_reg, 8 * slot))
+            self._emit_nested_rebase(child, base_reg)
 
     def _emit_frame_base(self, offset: int) -> None:
         """X9 = the address of the receiver frame `offset` bytes into the area.

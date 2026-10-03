@@ -3595,76 +3595,111 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             f"refusing")
                 continue
             if depth > 1:
-                # A field of a field in a VALUE position.  Same three answers
-                # as the call case above, and the one that matters is the
-                # nested frame: `self.a.b` where `a` is declared to be a framed
-                # struct of this module is a load from the slot followed by a
-                # load from the nested frame, and both addresses are placed.
-                # `chain` is the whole chain, so the OUTER field is the one
-                # before the last and the inner is `node.member` — the chain
-                # is spelled rather than reconstructed because
-                # `self.a.b.c`'s outer field is `b`, not `a`.
+                # A field of a field in a VALUE position.  Same answers as the
+                # call case above, and the one that matters is the nested frame:
+                # `self.a.b` where `a` is declared to be a framed struct of this
+                # module is a load from the slot followed by a load from the
+                # nested frame, and both addresses are placed.
+                #
+                # The chain is WALKED, level by level, rather than having its
+                # outer field spelled as `chain.split(".")[-2]`.  That spelling
+                # is right for a depth-2 chain and wrong for every deeper one —
+                # `self.a.b.c`'s outer field is `a`, not `b` — and being wrong
+                # here was a diagnostic about the wrong LEVEL: the refusal named
+                # the slot `o.inner2` for the source's `o.inner.inner2.x`, a
+                # spelling the program does not use and a slot whose layout was
+                # never consulted, so a depth-3 chain could not even be told
+                # what was wrong with it, let alone fixed.  A depth-3 chain is
+                # TWO layout questions ("does the slot `a` hold a frame, and then
+                # does the slot `b` of THAT frame hold one") and the only honest
+                # order to answer them in is the order they are asked in, which
+                # is what `_nested_frame_levels` does — one walk, shared with the
+                # method-receiver arm above, so the two cannot disagree about
+                # which level is the outer one.
                 parts = chain.split(".")
-                outer_field = parts[-2] if len(parts) >= 2 else node.member
+                fields = parts[1:]
                 cands = by_name.get(base) or []
-                nested = _typed_nested_frame(
-                    base, outer_field, cands, structs_by_name, None)
-                if nested is _NOT_TYPED:
-                    vrows = _type_rows(cands, outer_field, structs_by_name)
-                    raise CodegenError(
-                        f"{chain} reads a field of a field through the receiver "
-                        f"{base}: a frame slot holds one 64-bit word, and the word "
-                        f"in the slot {base}.{outer_field} is a value, not a "
-                        f"struct, so there is no second layout to read through. "
-                        f"Two things would make it representable and neither is a "
-                        f"change to this function: a TYPE for "
-                        f"{outer_field!r} that EVERY binding of the name agrees "
-                        f"on and that names a struct declared here — a declaration "
-                        f"in the class body, or a construction its __init__ "
-                        f"assigns — which would then be a nested frame, placed in "
-                        f"the outer object's own block, or a builtin method on "
-                        f"the value, which is {node.member!r}() as a call, not "
-                        f"a field read. Nothing types {outer_field!r} here: "
-                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
-                    )
-                if nested is _REASSIGNED:
-                    vann = _field_annotation(cands, outer_field, structs_by_name)
-                    raise CodegenError(
-                        f"{chain} reads through {base}.{outer_field}, which is "
-                        f"a "
-                        f"{M.annotation_base_name(_field_annotation(cands, outer_field, structs_by_name))}"
-                        f" — a struct of this module whose receiver is a frame — "
-                        f"but a method of "
-                        f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
-                        f"it, so the word in the slot is a frame belonging to "
-                        f"whichever function ran the assignment. Assign the "
-                        f"field to a name and read through the name, which is the "
-                        f"same program with a lifetime this analysis can see"
-                    )
-                if nested is None:
-                    # Agreed, and not a frame of this unit — so the outer field
-                    # is a plain value and the inner name is a member of
+                walked, level, stop, why = _nested_frame_levels(
+                    cands, fields[:-1], structs_by_name, None)
+                if stop is not None:
+                    outer_field = stop
+                    if why is _NOT_TYPED:
+                        vrows = _type_rows(level, outer_field, structs_by_name)
+                        raise CodegenError(
+                            f"{chain} reads a field of a field through the "
+                            f"receiver {base}: a frame slot holds one 64-bit "
+                            f"word, and the word in the slot "
+                            f"{base}.{outer_field} is a value, not a struct, so "
+                            f"there is no second layout to read through. "
+                            f"Two things would make it representable and "
+                            f"neither is a change to this function: a TYPE for "
+                            f"{outer_field!r} that EVERY binding of the name "
+                            f"agrees on and that names a struct declared here — "
+                            f"a declaration in the class body, or a construction "
+                            f"its __init__ assigns — which would then be a "
+                            f"nested frame, placed in the outer object's own "
+                            f"block, or a builtin method on the value, which is "
+                            f"{fields[-1]!r}() as a call, not a field read. "
+                            f"Nothing types {outer_field!r} here: "
+                            f"{M.field_type_disagreement(level, outer_field, vrows)}"
+                        )
+                    if why is _REASSIGNED:
+                        raise CodegenError(
+                            f"{chain} reads through {base}.{outer_field}, which "
+                            f"is a "
+                            f"{M.annotation_base_name(_field_annotation(level, outer_field, structs_by_name))}"
+                            f" — a struct of this module whose receiver is a "
+                            f"frame — but a method of "
+                            f"{', '.join(sorted({st.name for st in level}))} "
+                            f"ASSIGNS it, so the word in the slot is a frame "
+                            f"belonging to whichever function ran the "
+                            f"assignment. Assign the field to a name and read "
+                            f"through the name, which is the same program with a "
+                            f"lifetime this analysis can see"
+                        )
+                    if why is _UNPLACED:
+                        odis = M.struct_frame_slot_candidates(
+                            level, outer_field)[1][0]
+                        raise CodegenError(
+                            f"{chain} reads through {base}.{outer_field}, which "
+                            f"cannot be placed, so the walk has no load at that "
+                            f"level: "
+                            + ("the candidate layouts disagree — "
+                               + M.field_type_disagreement(
+                                   level, outer_field,
+                                   _type_rows(level, outer_field,
+                                              structs_by_name))
+                               if odis else
+                               f"no candidate declares it as a field of a frame")
+                        )
+                    # Agreed, and not a frame of this unit — so this level is a
+                    # plain value and the rest of the chain names members of
                     # whatever that value is.  Not this pass's business UNLESS
                     # that value is a one-field struct of this module, which is
                     # the one case where there IS a business: the word in the
-                    # slot is that struct's only field, so this chain is ONE
-                    # load at the OUTER field's own slot.
+                    # slot is that struct's only field, so a chain ONE level
+                    # below it is a single load at that level's own slot.
+                    #
+                    # The rewrite is collected rather than placed: see
+                    # `_rewrite_one_word_nested_fields` below for why the answer
+                    # is a REWRITE rather than a `_frame_slots` entry keyed by
+                    # the chain.
                     #
                     # `model.field_type_one_word_struct` is the recogniser, and
-                    # it is asked from the SAME `cands`/`structs_by_name` as
-                    # `_typed_nested_frame` above rather than re-derived, so
-                    # "agreed on a type" is one answer with two readers rather
-                    # than two answers that agree by luck.
-                    one = M.field_type_one_word_struct(cands, outer_field,
+                    # it is asked from the SAME `level`/`structs_by_name` the
+                    # walk decided with rather than re-derived, so "agreed on a
+                    # type" is one answer with two readers rather than two
+                    # answers that agree by luck.
+                    one = M.field_type_one_word_struct(level, outer_field,
                                                        structs_by_name)
                     if one is None:
                         # Not one word, or not a struct of this module, or the
-                        # candidates disagree: the inner name is a member of
-                        # whatever the value is, and the ordinary value
-                        # lowering owns it.
+                        # candidates disagree: the rest of the chain names
+                        # members of whatever that value is, and the ordinary
+                        # value lowering owns it.
                         continue
                     sole = M.struct_sole_field_name(one)
-                    if sole is None or sole != node.member:
+                    if sole is None or sole != fields[-1]:
                         # A one-field struct whose one field binds no name has
                         # no word to call, so there is nothing this chain could
                         # be reading — the same refusal `_sole_field_name`
@@ -3673,34 +3708,47 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         raise CodegenError(
                             M.one_word_nested_sole_field_refusal(
                                 f"{base}.{outer_field}", one))
-                    # Collected, not placed: see `_one_word_nested_chains` below
-                    # for why the answer is a REWRITE rather than a `_frame_slots`
-                    # entry keyed by the chain.
-                    one_word_nested.append((chain, f"{base}.{outer_field}"))
+                    # The rewrite lands the chain on its own PREFIX, which is
+                    # this level's spelling — `o.inner.inner2` for
+                    # `o.inner.inner2.x`.  For the depth-2 shape that prefix is
+                    # the depth-1 key the source also spells, so the depth-1 arm
+                    # has already put it in `_frame_slots`; for a DEEPER chain
+                    # nothing else spells it, so every level it walks gets an
+                    # entry here or the rewritten chain has no address at all —
+                    # which is the build pass and the emitter disagreeing about
+                    # the function's receivers, refused as a compiler bug.
+                    prefix = _fill_chain_levels(
+                        base, walked, level, outer_field, slots, nested_slots)
+                    if prefix is None:
+                        raise CodegenError(
+                            f"{base}.{outer_field} cannot be placed, so the "
+                            f"chain {chain} has no load at that level: "
+                            f"the candidate layouts disagree, or no candidate "
+                            f"declares it as a field of a frame")
+                    one_word_nested.append((chain, prefix))
                     continue
-                # A nested frame read in a value position: two loads, and the
-                # OUTER one is already in `_frame_slots` (the depth-1 MemberExpr
-                # of the same chain was visited on an earlier turn of this walk,
-                # and if it was not then the name is not a holder's field and
-                # there is nothing to place).  The INNER one goes in its own
-                # table, because a `_frame_slots` entry is one load and this is
-                # two, and a two-load access with a one-load table entry is a
-                # wrong answer rather than a failure.
-                outer_slot, (odis, orows) = M.struct_frame_slot_candidates(
-                    cands, outer_field)
-                if odis or outer_slot is None:
-                    trows = _type_rows(cands, outer_field, structs_by_name)
-                    raise CodegenError(
-                        f"{base}.{outer_field} cannot be placed, so the nested "
-                        f"read {chain} has no first load: "
-                        + ("the candidate layouts disagree — "
-                           + M.field_type_disagreement(
-                               cands, outer_field,
-                               _type_rows(cands, outer_field, structs_by_name))
-                           if odis else
-                           f"no candidate declares it as a field of a frame")
-                    )
-                inner = M.struct_frame_slot(nested, node.member)
+                # A nested frame read in a value position: ONE LOAD PER LEVEL,
+                # and the FIRST one goes in `_frame_slots` because that table is
+                # what a one-load access is keyed by (the depth-1 MemberExpr of
+                # the same chain was visited on an earlier turn of this walk, and
+                # if it was not then the name is not a holder's field and there is
+                # nothing to place).  Every DEEPER level, and the last field
+                # itself, goes in `_frame_nested_slots`: a `_frame_slots` entry
+                # is one load and those are two or more, and a multi-load access
+                # with a one-load table entry is a wrong answer rather than a
+                # failure.
+                #
+                # The emitters need NO new arm for the deeper levels, and that is
+                # the shape of the answer rather than a coincidence: both
+                # `_load_var` and `_store_var` resolve a nested key by loading
+                # the chain with its LAST field removed and then indexing the
+                # frame that leaves, so a key whose own prefix is in the table is
+                # two levels of that recursion and nothing else.  Filling every
+                # prefix is therefore the whole of the depth-3 half — which is
+                # also why the prefix is written for every level here and not
+                # only for the innermost.
+                nested = walked[-1][2]
+                inner = M.struct_frame_slot(nested, fields[-1])
                 if inner is None:
                     # The METHOD check `member_read_without_a_field` makes for a
                     # depth-1 read, applied here too, and it is the same defect
@@ -3716,10 +3764,10 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     # One recogniser (`model.structs_declaring_method`) so the
                     # two sites cannot drift, which is the property the depth-1
                     # message was written to have.
-                    owners = M.structs_declaring_method([nested], node.member)
+                    owners = M.structs_declaring_method([nested], fields[-1])
                     if owners:
                         raise CodegenError(
-                            f"{chain} names {node.member!r}, which is a METHOD "
+                            f"{chain} names {fields[-1]!r}, which is a METHOD "
                             f"of the nested {owners[0].name} frame rather than "
                             f"one of its fields: a value-position method "
                             f"reference is a bound method, and a method is not "
@@ -3731,12 +3779,17 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             f"was used"
                         )
                     raise CodegenError(
-                        f"{chain} reads {node.member!r} out of a nested "
+                        f"{chain} reads {fields[-1]!r} out of a nested "
                         f"{nested.name} frame, and that struct's "
                         f"{M.struct_field_summary(nested)} has no such field"
                     )
-                slots[f"{base}.{outer_field}"] = outer_slot
-                nested_slots[f"{base}.{outer_field}.{node.member}"] = inner
+                # Every prefix of the chain gets its own table entry, INCLUDING the last
+                # field's own: `_fill_chain_levels` is that loop, and its
+                # docstring is why the first level goes in `_frame_slots` and
+                # the rest in `_frame_nested_slots`.
+                prefix = _fill_chain_levels(base, walked, None, None, slots,
+                                            nested_slots)
+                nested_slots[f"{prefix}.{fields[-1]}"] = inner
                 continue
             if not cands:
                 # bound from a constructor that is not framed: a plain word.
@@ -5044,6 +5097,13 @@ def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
 # to say so.
 _NOT_TYPED = object()
 _REASSIGNED = object()
+# A level of a chain that names a nested FRAME but has no slot to hold it: the
+# holder's candidates disagree about the field, or none of them declares it.  A
+# fifth answer of `_nested_frame_levels` rather than of `_typed_nested_frame`,
+# because it is a question about the SLOT (`struct_frame_slot_candidates`) and
+# not about the field's declared type, and the two arms want to say so in
+# different words.
+_UNPLACED = object()
 
 
 def _field_annotation(cands, name, decls=None):
@@ -5120,6 +5180,111 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
                    in M.struct_nested_frame_fields(st, structs_by_name)):
             return _REASSIGNED
     return nested
+
+
+def _nested_frame_levels(cands, fields, structs_by_name, method_owner=None):
+    """`(walked, level_cands, stop, why)` — the placed frames a chain walks.
+
+    `walked` is `[(field, slot, struct)]`, one entry per field of `fields` that
+    is a PLACED NESTED FRAME, in chain order; `level_cands` are the candidates
+    of the struct holding the NEXT field (the holder's own for the first, the
+    previous entry's struct after that), and `stop` is the field the walk could
+    not go through, with `why` being `_NOT_TYPED`, `_REASSIGNED`, None (that
+    level is a plain value) or `_UNPLACED` (a nested frame with no slot in the
+    holder, which means the candidates disagree or declare no such field).
+
+    **The walk, and it replaces a spelling.** Both frame arms used to take the
+    outer field of a chain as `chain.split(".")[-2]`, which is right for a
+    depth-2 chain and wrong for every deeper one: `o.inner.inner2.x` reported the
+    slot `o.inner2` — a spelling the source does not use and a slot whose layout
+    was never consulted — so a depth-3 chain produced a refusal about the wrong
+    LEVEL, and while the heuristic stood a depth-3 fix looked like it had done
+    nothing. A chain is TWO layout questions for a depth of three ("does the slot
+    `inner` hold a frame, and then does the slot `inner2` of THAT frame hold
+    one"), and the only honest way to answer them in order is to walk.
+
+    One walk for both arms, and it is the reason they cannot disagree about
+    which level is the outer one: the value-position read and the method
+    receiver are the same question with the same answer, and each is answered
+    from `_typed_nested_frame` per level — the one place
+    `struct_nested_frame_fields`' placement is decided — rather than by a second
+    reader of the layout.
+
+    `method_owner` is the struct declaring the method being called on the chain,
+    and it belongs to the LAST level only: an intermediate level is a frame
+    holder and its type is not what the call dispatches on, so the mis-dispatch
+    rule (`_typed_nested_frame`'s `method_owner.name != nested.name` arm) is a
+    question about the value the method is called ON and not about the frames
+    above it.
+
+    Bounded by `model.MAX_NESTED_FRAME_DEPTH`, the same bound the PLACEMENT
+    recursion uses (`struct_frame_block_bytes`, `_emit_nested_frame_init`), so a
+    cyclic declaration graph produces one refusal here rather than a truncated
+    chain in one place and a full one in another.
+    """
+    walked = []
+    level = list(cands or ())
+    for i, field in enumerate(fields):
+        nested = _typed_nested_frame(
+            None, field, level, structs_by_name,
+            method_owner if i == len(fields) - 1 else None)
+        if nested is _NOT_TYPED or nested is _REASSIGNED:
+            return walked, level, field, nested
+        if nested is None:
+            return walked, level, field, None
+        slot, (disagree, _rows) = M.struct_frame_slot_candidates(level, field)
+        if disagree or slot is None:
+            return walked, level, field, _UNPLACED
+        walked.append((field, slot, nested))
+        level = [nested]
+    return walked, level, None, None
+
+
+def _fill_chain_levels(base, walked, level, field, slots, nested_slots):
+    """Put one table entry per level a chain walks, and return its PREFIX.
+
+    `walked` is `_nested_frame_levels`' output for the levels before this one and
+    `field` is the level this call is placing, so the rows are the whole chain.
+
+    WHICH table each row goes in is the whole of the answer, and it is the same
+    rule in both directions: the first level is a one-load access off the
+    holder's own frame, so it is a `_frame_slots` key, and every level after it
+    is a load off a frame the previous level's word names, so those are
+    `_frame_nested_slots` keys.  Both emitters resolve such a key by loading the
+    chain with its last field removed and indexing the frame that leaves
+    (`_load_var` / `_store_var`), so a key whose own prefix is in a table is one
+    more level of that recursion and nothing else — which is why filling every
+    level is the whole of the depth-3 half and why the two emitters need no new
+    arm for it.
+
+    The value the chain yields at the LAST level is a plain word rather than a
+    frame address when this is the one-word rewrite (see
+    `_rewrite_one_word_nested_fields`), and that is the same load either way: a
+    slot holds one word and the question is never which word it holds but how
+    many loads reach it.
+
+    `None` when the last level has no slot in the holder's candidates, so the
+    caller can refuse rather than fill in a chain it cannot address.
+    """
+    prefix = base
+    for i, (f, slot, _st) in enumerate(walked):
+        key = f"{prefix}.{f}"
+        if i == 0:
+            slots[key] = slot
+        else:
+            nested_slots[key] = slot
+        prefix = key
+    if field is not None:
+        slot, (disagree, _rows) = M.struct_frame_slot_candidates(level, field)
+        if disagree or slot is None:
+            return None
+        key = f"{prefix}.{field}"
+        if prefix == base:
+            slots[key] = slot
+        else:
+            nested_slots[key] = slot
+        prefix = key
+    return prefix
 
 
 def _defer_subscript_escape(fn, value, holders, by_name, spelled,

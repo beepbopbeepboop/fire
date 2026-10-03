@@ -940,6 +940,12 @@ class X86_64Codegen:
         # recognising the source, and two recognitions could disagree.
         self._frame_candidates = dict(
             getattr(f, "_frame_candidates", None) or {})
+        # `{name: [StructDef, …]}` — the ONE-WORD mirror, published for the same
+        # reason and read by the same consumer as arm64's: a struct of one field
+        # has no block, so the name holds a plain word that IS its only field
+        # and no frame table has anything to say about it.
+        self._one_word_candidates = dict(
+            getattr(f, "_one_word_candidates", None) or {})
         # The x86-64 twin of arm64's, from the same function table: a
         # construction argument has to be told apart from a container returned
         # by a callee, and the declared return type is the only evidence there
@@ -2619,28 +2625,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _printf_arg_is_text(self, arg):
-        """True / False / None: does this `printf` vararg hold text.
+        """True / evidence / None: does this `printf` vararg hold text.
 
-        The three-way answer `model.printf_text_conversion_refusal` is written
-        against.  arm64's copy of this method is the authority on why each arm
-        is what it is; what is shared is the EVIDENCE, which is
-        `ValueKinds.own_shape_kind` — the same predicate that answers "is this
-        name a container element", so one test carries two families and the two
-        architectures cannot disagree about which names it fires for.
-
-        `None` — the source does not say — is the permissive direction and
-        covers the unannotated parameter, which is a word this build cannot
-        classify; refusing it would refuse every function that takes a string
-        it was never told about, and those work today.
+        Delegation, like `_refuse_printf_text_conversion` below:
+        `model.printf_arg_text_evidence` is the decision and arm64's copy of
+        this method is the same three lines, so the two architectures cannot
+        disagree about which arguments a `%s` conversion may be handed.
         """
-        if isinstance(arg, F.StringLiteral):
-            return True
-        if M.string_operand_is_string(self._expr_str_kind(arg)):
-            return True
-        if (isinstance(arg, F.IdentExpr)
-                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
-            return False
-        return None
+        return M.printf_arg_text_evidence(
+            arg, self._vkinds,
+            is_text=lambda e: M.string_operand_is_string(self._expr_str_kind(e)),
+            one_word_text=lambda name: (
+                None if name.name in self._frame_holders else
+                M.one_word_value_text_evidence(
+                    self._one_word_candidates.get(name.name),
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
     def _refuse_printf_text_conversion(self, name, e) -> None:
         """Raise when `e` hands a `%s` conversion something that is not text.
@@ -4590,19 +4589,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_unary(self, expr) -> None:
         # `-s` is negation of an address and `~s` is a bit complement of one,
-        # and `not s` is FALSE for every string including the empty one,
-        # because a pointer is never zero. Measured on both backends: `~s`
-        # returned 8881076 on arm64 and 3236815 on x86-64, and `not ""`
-        # returned 0 where Python returns 1. `model` holds the messages and
-        # the measurements; asking here is what makes the two architectures
-        # refuse the same thing.
+        # and both are refused with `model.string_unary_refusal`, which holds
+        # the message and the measurements; asking here is what makes the two
+        # architectures refuse the same thing. `not` is NOT in that table any
+        # more: it goes through `_emit_truthy_word` below, so it is the same
+        # `strlen` `if s:` makes and not a pointer test — see the arm there and
+        # the docstring on `model.string_unary_refusal` for the measurement.
         ureason = M.string_unary_refusal(
             expr.op, self._expr_str_kind(expr.operand),
             M.spelled(expr.operand))
         if ureason is not None:
             raise CodegenError(ureason)
         if expr.op == "not":
-            self._emit_expr(expr.operand)
+            self._emit_truthy_word(expr.operand, Reg.RAX)
             self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
             self._emit_setcc_bool(Reg.RAX, "sete")
             return
@@ -6848,10 +6847,23 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         for off in range(0, block, 8):
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, off))
             self.asm.emit(encode_mov_rm64_r64(Reg.R10, off, Reg.RAX))
-        for _fname, slot, _child, child_off in nested:
-            self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.R10, child_off))
-            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 8 * slot, Reg.RAX))
+        self._emit_nested_rebase(self._returns_frame, Reg.R10)
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+
+    def _emit_nested_rebase(self, st, base_reg: Reg) -> None:
+        """Re-point the COPY's nested slots at the copy, level by level.
+
+        The x86-64 twin of arm64's `_emit_nested_rebase`, and the reason it is a
+        walk: the flattened placement has no parent left in it, so a level-2
+        frame's address would have been stored in the TOP object's slot at the
+        grandchild's index, and the copy would point at the block being reclaimed
+        rather than at itself.
+        """
+        for _fname, slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs):
+            self.asm.emit(encode_lea_r64_rm64(Reg.RAX, base_reg, child_off))
+            self.asm.emit(encode_mov_rm64_r64(base_reg, 8 * slot, Reg.RAX))
+            self._emit_nested_rebase(child, base_reg)
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str, st) -> None:
         """`S()`, `S(a, b, …)`, `S(a, b, c)` with an `__init__`, or `S(x)`.
@@ -6920,11 +6932,47 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         Nested frames FIRST, in the same order arm64 does it and for the same
         reason: the block is laid out with the object's own slots at the
-        bottom.  `site[2]` is the PLACEMENT (`model.struct_constructor_sites`),
-        so a declared type that was not placed cannot reach this loop.
+        bottom.  The site's OWN slots are not touched here — the constructor
+        brings those up itself, one shape per shape, and a nested frame's address
+        is stored into its slot after them.
+
+        `site[0]` is the struct and `model.struct_block_direct_children` is its
+        OWN nested frames with their offsets — one level, not the flattened list,
+        because the placement is a RECURSION and a recursive walk is what
+        carries the parent's offset.  The layout and the list of children both
+        come from the shared model, so the bytes reserved and the defaults stored
+        cannot disagree.
         """
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off + self._blob_base)
+        for _fname, _slot, child, child_off in \
+                M.struct_block_direct_children(site[0], self._structs,
+                                               site[1]):
+            self._emit_nested_frame_defaults(child,
+                                              child_off + self._blob_base)
+
+    def _emit_frame_defaults(self, st, base: int) -> None:
+        """One frame's own slots, at their class-level defaults."""
+        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
+            if kind == M.DEFAULT_STRING:
+                self._emit_expr(F.StringLiteral(value=payload))
+            else:
+                self._emit_mov_imm(Reg.RAX, int(payload or 0))
+            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
+                                              Reg.RAX))
+
+    def _emit_nested_frame_defaults(self, st, base: int) -> None:
+        """`st`'s nested subtree, defaults first, deepest first.
+
+        The x86-64 twin of arm64's, over the same `struct_block_direct_children`
+        rows.  It replaces a loop that unpacked FOUR values out of
+        `model.struct_nested_frame_fields`, which returns three, so it worked
+        only while no nested frame had a nested frame of its OWN; measured, both
+        architectures, the 3-value unpack raised `ValueError` from the
+        constructor of exactly such a struct.
+        """
+        for _fname, _slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs, base):
+            self._emit_nested_frame_defaults(child, child_off + self._blob_base)
+        self._emit_frame_defaults(st, base)
 
     def _emit_frame_nested_addresses(self, base: int, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
@@ -6932,10 +6980,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         Which is the whole of "the slot holds a nested frame": one store per
         typed-nested field, in the same order as `_emit_frame_nested`, so the
         address stored and the frame initialized are the same one by
-        construction rather than by two walks agreeing.
+        construction rather than by two walks agreeing.  RECURSIVE, because a
+        frame two levels down has its address stored in the slot of the frame
+        that HOLDS it, and the flattened list has no parent left in it.
         """
-        for _fname, slot, _child, child_off in site[2]:
-            self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
+        self._emit_nested_frame_addresses(site[0], base)
+
+    def _emit_nested_frame_addresses(self, st, base: int) -> None:
+        """This frame's nested frames' addresses, then their own subtrees'.
+
+        `base` is ABSOLUTE (RBP-relative, `self._blob_base` already added) and
+        stays absolute through the recursion, so `struct_block_direct_children`
+        is asked with it as the base and each row's offset is already one. Adding
+        `self._blob_base` again at either level put the innermost frame's address
+        at `blob_base + blob_base + …` — measured, the returned-frame case read
+        `a=0 b=0` where the source says `a=3 b=4`, because the copy re-pointed a
+        slot at a block two regions below the one it reserved.
+        """
+        for _fname, slot, child, child_off in \
+                M.struct_block_direct_children(st, self._structs, base):
+            self._emit_nested_frame_addresses(child, child_off)
+            self._emit_blob_base(child_off, Reg.RAX)
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
 
@@ -6995,34 +7060,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
         self._emit_blob_base(base, Reg.RAX)
-
-    def _emit_nested_frame_init(self, st, base: int, depth: int = 0) -> None:
-        """Bring a NESTED receiver frame up at its own slot defaults.
-
-        The x86-64 twin of arm64's `_emit_nested_frame_init`, and it recurses
-        through the same `model.struct_nested_frame_fields` and stops at the
-        same `model.MAX_NESTED_FRAME_DEPTH`, so a cyclic declaration graph
-        truncates identically on both machines rather than hanging on one.
-
-        `base` is the ABSOLUTE byte offset from `RBP` (arm64 passes the
-        relative offset and adds nothing, because its `_emit_frame_base` adds
-        the scratch base itself); the shape of the emitted stores is otherwise
-        identical, which is what makes a default one machine can bring up and
-        the other cannot not expressible.
-        """
-        if depth >= M.MAX_NESTED_FRAME_DEPTH:
-            return
-        for _fname, _slot, child, child_off in \
-                M.struct_nested_frame_fields(st, self._structs):
-            self._emit_nested_frame_init(child, child_off + self._blob_base,
-                                         depth + 1)
-        for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
-            if kind == M.DEFAULT_STRING:
-                self._emit_expr(F.StringLiteral(value=payload))
-            else:
-                self._emit_mov_imm(Reg.RAX, int(payload or 0))
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
 
     def _emit_fresh_one_word(self, name: str, st) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.

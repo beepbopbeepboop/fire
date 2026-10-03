@@ -14,7 +14,12 @@ larger thing, is the collision between that representation and the stdlib's own
 `String` struct — which is what all 16 of the "a String receiver is
 returned/passed" refusals in the stdlib sweep actually are, and which is not a
 string-value-model problem at all. Two regressions that arrived from outside
-this work, with a merge, are at the bottom.
+this work, with a merge, are at the bottom. **`not <string>` — the one item this
+document left as "a choice rather than a limit" — landed 2026-10-02 on
+`work/formal8-11` (see "Sites deliberately NOT routed" below), and the `%s`
+family that reached a non-text value through a one-field struct, through a
+conversion and through a bare expression is closed with
+`bugs/FORMAL_struct_receiver_as_a_printf_string.md` deleted.**
 
 ## The decision, and the reasoning that decides it
 
@@ -463,11 +468,20 @@ reads.
 
 **Sites deliberately NOT routed, and why:**
 
-- **`not s`** is still a refusal (`str_not_refused_because_empty_string_is_falsy`).
-  It is not a wrong answer, and it is now a CHOICE rather than a limit:
-  `_emit_truthy_word` can produce the honest answer here too, so the only thing
-  left holding it back is that the refusal is what a test asserts today. Whoever
-  wants it should delete the marker and the message together.
+- **`not s`** — **LANDED (2026-10-02, `work/formal8-11`), and it was the item
+  this bullet named.** Both `not` arms now go through `_emit_truthy_word`, so
+  `not s` is the same `strlen` `if s:` makes and `cmp/cset eq` against zero is
+  its negation; `model.string_unary_refusal` keeps `-` and `~` and lost the
+  `not` row. Measured before and after on both architectures, `s = "abc"`,
+  `e = ""`, `printf("%d %d", 1 if not s else 0, 1 if not e else 0)`: **`0 0`
+  before, `0 1` after**, where CPython says `0 1`. The other two rows of the
+  same table are in the same test — `not 0` is 1, `not 3` is 0, `not []` is 1,
+  `not [1]` is 0 — plus a short-circuit chain, whose operand is the WORD the
+  chain returns (`p and ""` yields the empty string, so `not` of it is True even
+  though `p` is not): `1 0 0 1 chain`. That last row is the one a null test
+  cannot get right and is why the conversion is shared rather than
+  re-implemented. `str_not_refused_because_empty_string_is_falsy` became
+  `not_a_string_is_the_truthiness_conversion`, with the guard rows beside it.
 - **Every `CBZ`/`CBNZ`/`TEST` that tests a compiler-generated invariant** — a
   division-by-zero guard, a list slice's clamped bound, a `strlen` result of
   zero inside `count`, a blob's count against a cap, a loop counter against an

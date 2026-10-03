@@ -1,12 +1,79 @@
-# FORMAL_subscripted_method_callee_and_three_level_nested_frames: row 12's four files are two unrelated gaps, and neither one is worth lifting
+# FORMAL_subscripted_method_callee_and_three_level_nested_frames: row 12's four files are two unrelated gaps, and the three-level half is FIXED
 
-**Status: found, measured, NOT fixed — and the depth-3 half re-measured on
-2026-10-01 on BOTH architectures, which is the measurement this file was
-missing.** Row 12 of
-`bugs/FORMAL_sweep_work_map_2026-09-30.md` — "a field of a nested frame that the
-struct does not declare", 4 files — filed 2026-09-30 with the measurement that
-settles it. The map's row is a bucket of MESSAGES, not a construct: these four
-files are two different constructs, and both are behind something else.
+**Status (2026-10-03, `work/formal8-11`): the THREE-LEVEL NESTED FRAME half is
+FIXED — the doc's steps 1, 2 and 3 all landed, measured before and after on BOTH
+architectures. The SUBSCRIPTED METHOD CALLEE half is untouched and still has the
+measured ceiling of zero its own section records.** What was measured when this
+file was written, and what is now true, in that order.
+
+## What landed, and what each step turned out to be
+
+**Step 2 (the walk) — done, and it was the whole of the diagnostics.** Both frame
+arms spelled a chain's outer field as `chain.split(".")[-2]`, which is right for
+a depth-2 chain and wrong for every deeper one: `o.inner.inner2.x` reported the
+slot `o.inner2`. `formal/build.py`'s `_nested_frame_levels` now walks the layout
+level by level through `_typed_nested_frame` — the one place
+`struct_nested_frame_fields`' placement is decided — and returns the placed
+frames in order plus the level it stopped at and why. One walk, asked by the
+value-position read AND the method-receiver arm, so the two cannot disagree about
+which level is the outer one. For a depth-2 chain the walk IS the old
+heuristic's answer (one level, `parts[-2]`), which is why every existing message
+is unchanged and why the depth-2 suite did not move.
+
+**Step 1 (the third load) — done, and NO EMITTER ARM WAS NEEDED.** The doc's
+worry was "a representation neither table has". There is one, and it was already
+there: both `_load_var` and `_store_var` resolve a `_frame_nested_slots` key by
+loading the chain with its last field removed and indexing the frame that leaves,
+so a key whose own PREFIX is in a table is one more level of that recursion and
+nothing else. Filling every prefix (`_fill_chain_levels`) is therefore the whole
+of the depth-3 half — which is also why the three other readers of
+`_frame_nested_slots` (arm64's `_collect_var_names` guard, x86-64's MemberExpr
+store, its augmented-assign target) become correct for the deeper chain by the
+same change rather than needing a decision each.
+
+**Two CRASHES the doc did not know about, both found by RUNNING the result.** The
+emitter's placement recursion unpacked FOUR values out of
+`model.struct_nested_frame_fields`, which returns three, so it worked only while
+no nested frame had a nested frame of its OWN — the list was empty and the unpack
+never ran. A struct whose nested struct has a nested struct of its own raised
+`ValueError: not enough values to unpack (expected 4, got 3)` from the
+CONSTRUCTOR, on both architectures, which is the class a sweep files as a
+compiler bug and which is reached by any depth-2 nest the moment the ACCESS path
+stops refusing it. And `_emit_frame_return`'s re-basing read the FLATTENED
+placement, which has no parent left in it, so a level-2 frame's address would
+have been stored in the TOP object's slot at the grandchild's index — a silent
+wrong layout behind the crash. Both loops are now recursions over a new
+`model.struct_block_direct_children` (ONE level, with the parent in hand;
+`struct_block_children` is written in terms of it, so the offset arithmetic
+exists once and the bytes reserved are the bytes addressed).
+
+**Step 3 (a case per level) — done, four of them in `test_formal_run.py`:**
+`byref_three_level_nested_frames_read_and_write`,
+`byref_three_level_nested_frames_two_objects_no_alias` (two objects, because "the
+innermost frame is shared" is the wrong answer a single object cannot see),
+`byref_three_level_chain_through_a_one_field_struct` (a struct of ONE field at
+the third level, where the chain is not a frame access at all and the one-word
+rewrite collapses it — the case that caught a fill putting the collapsed key in
+the wrong table), and `byref_three_level_chain_with_the_type_assigned_in_init`
+(the type coming from the nested struct's `__init__`, which is `struct_field_type`
+'s "assigned" evidence rather than its "declared" one).
+
+Measured, both architectures, before and after:
+
+    o.inner.inner2.x = 5; o.inner.inner2.y = 6; o.inner.z = 7; o.w = 8
+    printf("x=%d y=%d z=%d w=%d", o.inner.inner2.x, o.inner.inner2.y,
+           o.inner.z, o.w)
+
+| | before | after |
+|---|---|---|
+| arm64 | REFUSED: `… the word in the slot o.inner2 is a value, not a struct …` | `x=5 y=6 z=7 w=8`, exit 0 |
+| x86-64 | REFUSED, identical message | `x=5 y=6 z=7 w=8`, exit 0 |
+
+**`std/collections/string/iterators.mojo` was still not swept past the new
+refusal boundary** — this session was not permitted to run a `formal_sweep`, so
+its own ceiling stays unknown and the doc's claim that the fix is worth its cost
+for that file is still unmeasured. Everything below about the SUBSCRIPTED
+callee is unchanged and is the other half of this row.
 
 ## What the four files actually are
 
@@ -124,20 +191,30 @@ reconstructed because `self.a.b.c`'s outer field is `b`, not `a`". For
 (`StringSlice … has no such field`) is about `self._slice._slice` rather than
 about `self._slice` — a message about the wrong two levels of the chain.
 
-## The exact next step
+## The exact next step — LANDED 2026-10-03 (`work/formal8-11`)
 
-1. A `_frame_nested_chain` table, keyed `"<holder>.<f1>.<f2>.<f3>"` → the ordered
+Kept verbatim as written on 2026-10-01, because what it asked for is what landed
+and the reasons it gave are the reasons it worked:
+
+1. ~~A `_frame_nested_chain` table, keyed `"<holder>.<f1>.<f2>.<f3>"` → the ordered
    slot list, filled by walking `struct_nested_frame_fields` recursively rather
-   than twice, and a `_load_var` arm that consumes the chain in one place. Both
-   backends read it, so it belongs in `formal/model.py` beside
-   `struct_frame_block_bytes` — the same reason that one does.
-2. Replace the `split(".")[-2]` heuristic with the same walk, so the depth-2 and
-   depth-3 arms cannot disagree about which level is the outer one. Do this
-   BEFORE step 1: while the heuristic stands, a depth-3 chain reports a refusal
-   about the wrong level and a fix looks like it did nothing.
-3. A case per level: `struct Inner/Inner2/Outer` with `var a: Inner2` typed by an
-   ANNOTATION first (which lowers today), then the same with the type coming from
-   `__init__`, each with two objects so a shared innermost frame would show.
+   than twice, and a `_load_var` arm that consumes the chain in one place.~~ **The
+   table is `_frame_nested_slots` with every PREFIX filled, and the `_load_var`
+   arm turned out not to be needed** — its nested branch already recurses through
+   the prefix. See "What landed" above.
+2. ~~Replace the `split(".")[-2]` heuristic with the same walk.~~ **Done, and
+   first, as this said it had to be:** `_nested_frame_levels`.
+3. ~~A case per level … typed by an ANNOTATION first, then the same with the type
+   coming from `__init__`, each with two objects.~~ **Done, four cases** (the
+   one-field third level is a fifth shape the list did not have, and it is the
+   one that is not a frame access at all).
+
+**What is left of this file is the SUBSCRIPTED CALLEE recogniser**, whose next
+step is unchanged and still unclaimed: `recv.m[ordering=X](1)` is a keyword
+argument, `recv.get[idx]()` is a compile-time TEMPLATE parameter, and
+`recv.f()[k](x)` is a subscript of a call's result — a recogniser that accepts
+them all has to know WHICH, which is a decision about Mojo's call syntax and not
+about the frame layout, and its measured ceiling on this corpus is zero.
 
 ## What was measured, and what was not
 
