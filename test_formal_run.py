@@ -4736,6 +4736,73 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var s = Scale(3, 7)\n"
      "    return s.total()\n", 51, None),
+    # ── THE SCALAR STORE IN A ZERO-ARGUMENT `__init__` OF A ONE-FIELD STRUCT ──
+    #
+    # The three rows above store through a TUPLE target or with a constructor
+    # that HAS a parameter, and all three worked; this row is the shape that did
+    # not, and it is here rather than in `CASES` because both backends answered
+    # it with the SAME wrong number (0), which is the failure no parity suite,
+    # no `refuse:` row and no engine diff can see.
+    #
+    # WHY 0, and why only for one field: a struct's field is lowered three ways
+    # and which applies is decided by the BINDING of the base, not by a type
+    # (bugs/FORMAL_method_param_field_access.md). A ONE-FIELD struct's receiver
+    # IS its field — there is no storage of its own to point at — so for
+    # `One20()` the one-word path evaluated the construction's value. Both
+    # backends asked `model.struct_construction_plan` only when the call carried
+    # an ARGUMENT (`if e.args or e.kwargs:`), so a construction with no argument
+    # never asked and answered a fresh zero word without asking anyone: the
+    # constructor body was DROPPED at the site. Nothing was refused, the exit
+    # status was a plausible small integer, and the two machines agreed.
+    #
+    # The three classes are in ONE program so no single-row special case can
+    # pass it, and their answers are deliberately different from each other and
+    # from 0:
+    #   One20   ONE field, `__init__(self)` with no parameter   -> 20 (was 0)
+    #   Two203  TWO fields, the same zero-arg `__init__`         -> 20*10+3 = 203
+    #   Arg20   one field, `__init__(self, k: Int)`              -> 20
+    # `Two203` is the row that was already right and had to stay right — a fix
+    # that de-inlined the constructor to make `One20` work would trade a wrong
+    # answer for a wall of refusals — and `Arg20` is the other already-right
+    # neighbour. `direct` reads the field from `main` without a method at all,
+    # because the SAME construction feeds both halves and the method call is not
+    # what loses the store.
+    #
+    # MEASURED: reverting the fix (both emitters, `model.one_word_construction`)
+    # prints `c=0 d=203 e=20 direct=0` on arm64 AND on x86-64; with it,
+    # `c=20 d=203 e=20 direct=20` on both. The method names differ per class
+    # because dispatch on this path is by BARE method name, and three classes
+    # declaring `total` make `d.total()` a call on a value (refused by name).
+    ("both_arch_zero_arg_init_stores_a_one_field_scalar",
+     "class One20:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "    def one_total(self):\n"
+     "        return self.n\n"
+     "\n"
+     "class Two203:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "    def two_total(self):\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "class Arg20:\n"
+     "    def __init__(self, k: Int):\n"
+     "        self.n = k\n"
+     "    def arg_total(self):\n"
+     "        return self.n\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var c = One20()\n"
+     "    var d = Two203()\n"
+     "    var e = Arg20(20)\n"
+     "    var x = c.one_total()\n"
+     "    var y = d.two_total()\n"
+     "    var z = e.arg_total()\n"
+     "    var w = c.n\n"
+     "    printf(\"c=%d d=%d e=%d direct=%d\", x, y, z, w)\n"
+     "    return 0\n", 0, "c=20 d=203 e=20 direct=20"),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
