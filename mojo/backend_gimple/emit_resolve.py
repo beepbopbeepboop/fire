@@ -3166,12 +3166,20 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
             # See the dict-literal case's identical comment: vt alone
-            # can't distinguish a real bool literal from a genuine int.
-            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
-                gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            # can't distinguish a real bool literal from a genuine int. `node.key`
+            # is the VALUE expression here -- the parser stores a dict
+            # comprehension as element=key_expr, key=val_expr (see the comment
+            # above `kt, kv = gen.lower_expr(node.element)`).
+            #
+            # The PER-SLOT store carries the kind, in place of the dict-wide
+            # `mojo_mark_dict_bool_values` marker this replaces (deleted; it made
+            # one bool value render every other value in the dict as
+            # True/False).
+            _suffix = ('bool' if gimple_exprtypes.is_python_bool_expr(
+                gen, node.key) else 'int')
             gen._note_dict_callable_ret(res, vv, vt)
             vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
+            gen._emit(f"  mojo_dict_set_{_suffix} ({res}, {kv}, {vv64});")
 
 
 

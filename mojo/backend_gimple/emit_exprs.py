@@ -5333,11 +5333,22 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
         # already right. `is_python_bool_expr` is the one predicate, shared
         # with the print dispatch.
+        _bsuf = 'bytes_' if _bytes_key else ''
         if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
+            # The PER-SLOT store, which is the whole-dict marker's successor:
+            # `mojo_mark_dict_bool_values` was a dict-wide flag, so one bool
+            # value made every OTHER value in the same dict print as
+            # True/False (`{'name': p.name, 'ok': p.ok}` rendered both True).
+            # The marker's call sites emitted it beside the int store it
+            # belonged to, so the store that follows is the one that carries
+            # the kind -- `mojo_dict_set_bool` tags THIS slot, exactly as
+            # `emit_dict_int_value_store` does for every other store shape.
+            gen._note_dict_callable_ret(t, vv, vt)
+            gen._emit(f"  mojo_dict_set_{_bsuf}bool ({t}, {kv}, {gen._to_int64(vt, vv)});")
+            return 'MojoDict *', t
         gen._note_dict_callable_ret(t, vv, vt)
         vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
+        gen._emit(f"  mojo_dict_set_{_bsuf}int ({t}, {kv}, {vv64});")
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
