@@ -1399,14 +1399,12 @@ dylib_exports: list = None, globals_base: int = None,
 
         **Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way
-        rather than as the shorter `CMP SP, X16`: `arm64_reg` answers 0 for
-        index 31, so a `CMP SP, Xm` decodes to the shifted-register `SUBS
-        XZR, X31, X16` whose modelled operands are `0` and `X16`
-        (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`), and a proof
-        generated over it would be a proof about a different instruction. `ADD
-        Xd, SP, #imm` is one of the handful of forms whose `Rn = 31` case the
-        model spells as `s.sp`, and the `CMP` that follows names two ordinary
-        registers, so both steps are the instructions the machine executes.
+        rather than as the shorter `CMP SP, X16`: the model reads an `Rn` of 31
+        as `s.sp` in exactly the forms A64 gives that encoding to — `ADD Xd, SP,
+        #imm` and the register `CMP` among them — and as the ZERO register
+        everywhere else. So both the `ADD Xd, SP, #0` and the `CMP` that
+        follows name two ordinary registers once the first has run, which is
+        the same pair of instructions the machine executes either way.
 
         X16 and X17: the intra-procedure scratch pair `_emit_global_init` and
         the spill addressing already use. Neither holds anything across a

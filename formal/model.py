@@ -24831,16 +24831,13 @@ def recursive_function_names(functions, structs: dict = None) -> set:
 #   charged against the budget rather than added to it, and that is the
 #   conservative direction.
 # * **The compare reads SP into a scratch register first on arm64** rather than
-#   using `CMP SP, Xm`. Both spell the same instruction to the hardware, but
-#   `lib/ProofLib.lean`'s `arm64_reg` answers 0 for index 31, so the
-#   shifted-register `SUBS` that `CMP SP, Xm` decodes to would be proved about
-#   `0 - Xm` — a proof of a different instruction
-#   (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`). `ADD Xd, SP, #0`
-#   is one of the forms the model already reads as `s.sp`, and the `CMP` that
-#   follows then names two ordinary registers. The bug doc for the guard
-#   concluded that the arm64 model gap BLOCKED it; this is the way round that,
-#   and it is why the sequence is written down here rather than left to two
-#   emitters.
+#   using `CMP SP, Xm`. Both spell the same instruction to the hardware, and the
+#   model now reads both correctly — `arm64_reg_or_sp` gives an `Rn` of 31 the
+#   meaning A64 gives it in the forms that HAVE that encoding, so the register
+#   `CMP` (`SUBS XZR, Rn, Rm`) is `cmp sp, floor` and `ADD Xd, SP, #imm` is the
+#   sp-based add. The two-instruction spelling is kept because it predates that
+#   and because it names two ordinary registers either way, which is the cheaper
+#   thing to have a proof about; it is a choice, not a workaround.
 
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
