@@ -1260,7 +1260,7 @@ class TestCacheContract(unittest.TestCase):
         # and the crash stays a miss.
         import formal_sweep as mod
         err = "build: 'X' object has no attribute 'y'\n" + TB_BACKEND
-        proc = mod.BuildRun(1, "", err, False, None)
+        proc = mod.BuildRun(1, "", err, False, None, False)
         published = []
         # `_run_build` itself, not `subprocess.run` under it: how the sweep
         # spawns a build (and kills its tree on a timeout) is the sweep's
@@ -1411,7 +1411,7 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
             S._run_build = lambda *a, **k: S.BuildRun(
                 125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
                      "memcap: peak observed before the kill: 4.1 GB\n", "",
-                True, 4.1)
+                True, 4.1, False)
             try:
                 v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
             finally:
@@ -1430,7 +1430,7 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
         S._run_build = lambda *a, **k: S.BuildRun(
             125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
                  "memcap: peak observed before the kill: 4.1 GB\n",
-            "build: some.construct cannot be lowered: ...", True, 4.1)
+            "build: some.construct cannot be lowered: ...", True, 4.1, False)
         try:
             with tempfile.TemporaryDirectory() as td:
                 path = os.path.join(td, "big.mojo")
@@ -1442,6 +1442,124 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
         self.assertEqual(v.cls, S.CLASS_TOOL)
         self.assertEqual(v.cause, S.CAUSE_MEMORY)
         self.assertNotIn("cannot be lowered", v.detail)
+
+
+class TestWrapperDied(unittest.TestCase):
+    """A build whose per-file wrapper never reported is not a finding.
+
+    2026-10-02: six files per architecture in the b6 sweep carried memcap's
+    BANNER as their `codegen` "refusal" — the class whose count is a gap in the
+    backend, the class that fails a run — and were PUBLISHED to the CAS, so a
+    machine fact outlived the run that observed it. The files are not memory
+    hogs: `bit/mask.mojo`, one of the six, builds in 0.1 GB and is refused for a
+    real reason. `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+    """
+
+    BANNER = ("memcap: big.mojo -- ceiling 4.0 GB across the process tree\n")
+
+    def _run_with(self, buildrun, tag="x"):
+        """run_one() against a forced _run_build, the way the breach tests do.
+
+        Two things this has to get right or it tests nothing. `cas.publish` is
+        stubbed, because a verdict reached through a forced _run_build is an
+        artefact of the test and must not reach the store. And the source
+        carries `tag`, because `cas.formal_build_key` takes the path only
+        through the source it names — two tests with the same bytes share a key,
+        so the second one gets the first one's CACHED verdict and never reaches
+        the branch under test. (That is not hypothetical: the first draft of
+        this class asserted on a detail and got the previous test's.)
+        """
+        saved_run, saved_pub = S._run_build, S.cas.publish
+        S._run_build = lambda *a, **k: buildrun
+        S.cas.publish = lambda *a, **k: None
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                path = os.path.join(td, "big.mojo")
+                with open(path, "w") as f:
+                    f.write(f"# {tag}\ndef f():\n    return 1\n")
+                return S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+        finally:
+            S._run_build, S.cas.publish = saved_run, saved_pub
+
+    def test_a_wrapper_that_never_reported_is_no_verdict(self):
+        v = self._run_with(S.BuildRun(-9, self.BANNER, "", False, None, True),
+                          tag="no-verdict")
+        self.assertEqual(v.cls, S.CLASS_TOOL)
+        self.assertEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertIn(S.CLASS_TOOL, S.DIRTY,
+                      "a file nobody answered for fails the run")
+        # NOT the memory wording, and that is the point of a separate label:
+        # nothing was measured against the ceiling, so a reader told "killed at
+        # the 4 GB ceiling" goes looking for a memory bug that is not there.
+        self.assertNotIn("killed at", v.detail)
+        self.assertNotIn("memcap:", v.detail)
+
+    def test_a_wrapper_that_never_reported_is_not_published(self):
+        # The same reason a timeout and a breach are not: the wrapper's death is
+        # a fact about this run's machine, and a verdict published under this
+        # key would pin the file here until the key changed.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "big.mojo")
+            # A distinct source for the reason _run_with's docstring gives: the
+            # key takes the path only through the source, so a shared body would
+            # let another test's verdict answer this one from the cache.
+            with open(path, "w") as f:
+                f.write("# not-published\ndef f():\n    return 1\n")
+            published = []
+            saved_pub, saved_run = S.cas.publish, S._run_build
+            S.cas.publish = lambda *a, **k: published.append(a)
+            S._run_build = lambda *a, **k: S.BuildRun(
+                -9, self.BANNER, "", False, None, True)
+            try:
+                v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+            finally:
+                S.cas.publish, S._run_build = saved_pub, saved_run
+        self.assertEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertEqual(published, [],
+                         "a machine fact must not become a cached verdict")
+
+    def test_the_builds_own_message_still_wins(self):
+        # The wrapper being silent is only a fact when the build said nothing
+        # too. A build that refused a construct and then had its wrapper killed
+        # has still refused it, and losing that would trade one misfiling for
+        # another.
+        v = self._run_with(S.BuildRun(
+            -9, self.BANNER, "build: some.construct cannot be lowered: ...\n",
+            False, None, True), tag="build-spoke")
+        self.assertNotEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertIn("cannot be lowered", v.detail)
+
+    def test_a_wrapper_death_is_told_apart_from_a_breach_by_evidence(self):
+        # memcap prints its banner before it starts anything and exactly one
+        # outcome line afterwards, so "banner and no outcome" is the whole
+        # discriminator. A breach, a clean finish and an interrupted watchdog
+        # all report, and none of them is a wrapper death.
+        self.assertTrue(procrun.memcap_wrapper_died(self.BANNER))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            self.BANNER + "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
+            "memcap: peak observed before the kill: 4.1 GB\n"))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            self.BANNER + "memcap: done, peak 0.1 GB across up to 1 procs "
+            "(ceiling 4.0 GB), child exit 0\n"))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            "build: some.construct cannot be lowered: ...\n"),
+            "no memcap line at all means the ceiling was off (-M 0)")
+
+    def test_memcap_accounting_is_never_the_files_own_refusal(self):
+        # A build that printed NOTHING leaves memcap's `done ... child exit -9`
+        # as the last line of the captured text. The namedtuple's docstring
+        # promises nothing downstream can match a `memcap:` line as if the build
+        # had printed it; this is the line that promise is about. The CLASS is
+        # left alone on purpose — the silent-death fallback is a documented
+        # choice (a refusal whose message went to stdout is common), and this
+        # test is about not putting the wrapper's bookkeeping in the file's
+        # mouth, not about overruling that.
+        v = self._run_with(S.BuildRun(
+            -9, self.BANNER + "memcap: done, peak 0.2 GB across up to 1 procs "
+            "(ceiling 4.0 GB), child exit -9\n", "", False, 0.2, False),
+            tag="silent")
+        self.assertNotIn("memcap:", v.detail)
+        self.assertEqual(v.detail, "exit -9")
 
 
 class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
