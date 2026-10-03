@@ -6770,7 +6770,11 @@ dylib_exports: list = None, globals_base: int = None,
         # about one call.
         if not is_extern_call and name not in self._functions \
                 and M.callee_is_a_bound_value(self._cur_fn, name):
-            raise CodegenError(M.callee_value_refusal(name, self._cur_fn))
+            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
+            # flattens to `c`, and a refusal that names `c` sends the reader
+            # to the wrong line. `member_chain_text` prints both spellings.
+            raise CodegenError(M.callee_value_refusal(
+                name, self._cur_fn, M.member_chain_text(e.func)))
         is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the

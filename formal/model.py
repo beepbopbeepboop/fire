@@ -4554,7 +4554,7 @@ def callee_is_a_bound_value(fn, name: str) -> bool:
     return name in bound
 
 
-def callee_value_refusal(name: str, fn) -> str:
+def callee_value_refusal(name: str, fn, spelling: str = None) -> str:
     """The refusal for calling a name the calling function binds.
 
     ARCH-FREE, asked by BOTH backends from `_emit_call` beside
@@ -4562,7 +4562,7 @@ def callee_value_refusal(name: str, fn) -> str:
     language implementation, one answer.
 
     `name` is a parameter or a local of `fn` (`callee_is_a_bound_value` is the
-    reader that decides it), so `name(…)` is a call THROUGH A VALUE. This path
+    reader that decides it), so the call is a call THROUGH A VALUE. This path
     has no function values at all, and it has none for the same reason it has
     no heap: a formal value is one 64-bit word with a home in a register, a
     spill slot, a receiver's frame or a folded module constant, and the word a
@@ -4572,6 +4572,13 @@ def callee_value_refusal(name: str, fn) -> str:
     (`check_module_symbols`: "'target' has no home"), which is the other half of
     the same fact and worth pointing at: there is no spelling of this construct
     that works, so the reader is not being sent from one refusal to another.
+
+    `spelling` is what the SOURCE wrote and `name` is what `_callee_symbol`
+    flattened it to, and they are two names in the message when they differ
+    because a refusal that names the base of `c.f` while the reader is looking
+    at `c.f` sends them to the wrong line for the same reason the `no home`
+    message does. `member_chain_text` is the reader for it, for the reason its
+    own docstring gives.
 
     **The measured alternative is an image that cannot be loaded.** With the
     extern path taking the call, `map(size, func)` emitted a branch against a
@@ -4583,21 +4590,23 @@ def callee_value_refusal(name: str, fn) -> str:
     `apply(size, kind: Int)` with one arm per operation, or `apply(n, f)` where
     `f` is a function of THIS unit and the call is named."""
     where = getattr(fn, "name", None) or "this function"
+    subject = (f"`{name}`" if not spelling or spelling == name
+               else f"`{spelling}`, which flattens to the base name `{name}`,")
     return (
-        f"{name} is a name {where} binds, so `{name}(…)` is a call through a "
-        f"VALUE rather than through a function of this unit — and this path "
-        f"has no representation for a function value. A formal value is one "
-        f"64-bit word with a home in a register, a spill slot, a receiver's "
-        f"frame or a folded module constant; the word a function value needs is "
-        f"a code address, and a closure needs an environment, which is a box "
-        f"this target has no allocator for. Passing one in is refused for the "
-        f"same reason (a function name read as a value has no home). Refused "
-        f"rather than emitted as a branch against a symbol named `{name}`, "
-        f"which is what this used to do: the image was written, and then the "
-        f"loader refused it. Take what the operation DOES rather than the "
-        f"operation — `apply(size, kind: Int)` with one arm per operation is "
-        f"the same program with a representation — or call a function of this "
-        f"unit by name"
+        f"{subject} is a call through a VALUE rather than through a function "
+        f"of this unit — `{name}` is a name {where} binds, a parameter or a "
+        f"local of it, and this path has no representation for a function "
+        f"value. A formal value is one 64-bit word with a home in a register, "
+        f"a spill slot, a receiver's frame or a folded module constant; the "
+        f"word a function value needs is a code address, and a closure needs "
+        f"an environment, which is a box this target has no allocator for. "
+        f"Passing one in is refused for the same reason (a function name read "
+        f"as a value has no home). Refused rather than emitted as a branch "
+        f"against a symbol named `{name}`, which is what this used to do: the "
+        f"image was written, and then the loader refused it. Take what the "
+        f"operation DOES rather than the operation — `apply(size, kind: Int)` "
+        f"with one arm per operation is the same program with a "
+        f"representation — or call a function of this unit by name"
     )
 
 
