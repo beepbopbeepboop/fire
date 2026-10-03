@@ -4,10 +4,11 @@
 # the branch that carries this program's whole control flow writes no register
 # and sets no flags. That is why proving it was a separate piece of work from
 # encoding it: a conditional branch's source-level proposition used to be read
-# out of the CSET that wrote the tested register, and there is no CSET here
-# (`bugs/FORMAL_arm64_bit_test_branch_is_not_provable.md`, deleted with the arm
-# that closed it). Both spellings are here because the polarity is the whole of
-# the difference: the bit CLEAR is TBZ's test and TBNZ's is the bit SET.
+# out of the CSET that wrote the tested register, and there is no CSET here, so
+# the generator refused with `unsupported: branch condition value flow
+# (frame/flag unavailable)` — the correct failure, and the wrong stopping point.
+# Both spellings are here because the polarity is the whole of the difference:
+# the bit CLEAR is TBZ's test and TBNZ's is the bit SET.
 #
 # **The third shape the doc's example had, `if 16 & n:` — the mask written the
 # other way round — is not here, and the reason is not the bit test.** It emits

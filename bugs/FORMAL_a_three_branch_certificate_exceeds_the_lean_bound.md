@@ -3,10 +3,10 @@
 
 **Status: OPEN, measured on arm64, 2026-10-03, and NOT a bit-test problem.**
 Found while landing the bit-test proof arm
-(`bugs/FORMAL_arm64_bit_test_branch_is_not_provable.md`, deleted with it): the
-arm64 whole-program certificate for a function with THREE conditional branches
-does not finish inside `formal/lean.py`'s 1500 s wall bound, and the control
-experiment says the instruction is irrelevant.
+(the bit-test proof arm, whose doc is deleted with it): the arm64 whole-program
+certificate for a function with THREE conditional branches does not finish inside
+`formal/lean.py`'s 1500 s wall bound, and the control experiment says the
+instruction is irrelevant.
 
 ## The measurement
 
