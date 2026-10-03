@@ -6,6 +6,29 @@ not started — and the measurement is the whole finding.** Found on
 `functools` to `formal/hostmods/` alongside `collections`, `enum` and
 `contextlib`. `enum` and `contextlib` landed; this is the other two.
 
+**Update 2026-10-02: the safeguard this document's last line leans on now
+exists.** It said "the test's `functools`-shaped absence group is what keeps that
+true" — and `grep functools test_formal_core_hostmods.py` returned nothing, so
+the promise was not kept and a `functools.mojo` could have landed exporting
+`lru_cache` with every suite still green. `test_formal_core_hostmods.py` has the
+group now: `functools-absent`, 20 names from this document's own census plus the
+`@functools.lru_cache(maxsize=1)` spelling, each asserted to be refused AND to
+name the module, because a refusal that does not name the module sends the
+reader to fix the wrong file. The decorator case is separate on purpose: it is
+the one program that would BUILD if the import stopped being what refuses it,
+since a decorator on this path is parsed and never applied. Measured: 7/7
+groups in that file pass.
+
+**What is still exactly as below, and is the whole of the remaining work:**
+nothing here is module-shaped. Step 1 (a first-class function value) is a
+lowering in both backends plus a representation rule, and the representation
+question belongs with the owner of the value model rather than with a module
+author — `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
+and §4c of `FORMAL_frame_receiver_handoff.md` both name the same missing
+capability, and whichever lands first unblocks this. Step 2 (decorator
+application) must land before any decorator is exported, and it is
+`bugs/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
+
 ## What I ran
 
 With a stub `formal/hostmods/functools.mojo` on the search root, arm64, plus a

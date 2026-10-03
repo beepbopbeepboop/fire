@@ -2685,6 +2685,31 @@ FD_CASES = [
 # because a frame belongs to the function that created it and a receiver that
 # outlives its creator would be dereferenced after its bytes were reused.
 BYREF_CASES = [
+    # A function whose NAME is a Python builtin, defined here. This is a GUARD,
+    # and the side it guards is the one `formal/model.py`'s
+    # `UNIMPLEMENTED_BUILTINS` table could plausibly take away: that table is
+    # consulted by `frame_undefined_callee_refusal`, whose whole subject is a
+    # callee this build compiles NOWHERE, so a locally defined `getattr` must
+    # keep being an ordinary function that takes a frame receiver by reference
+    # and returns 7. If a change made the table name-only, this case would start
+    # being refused with "getattr is a Python BUILTIN … no part of this path
+    # implements it" — false about this program, which implements it.
+    #
+    # Labelled a GUARD rather than a demonstration because it was already true
+    # before the table existed; it is here because the table is a name test and
+    # a name test is exactly the kind of change that can be wrong in this
+    # direction silently.
+    ("byref_a_local_getattr_is_not_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def getattr(o: P, name: Int) -> Int:\n"
+     "    return o.a + o.b\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return getattr(p, 0)\n", 7, None),
     # The cheapest width, and the whole design in one program: two fields, a
     # constructor, a write through the receiver, a read back through a
     # DIFFERENT method. 3 + 4 = 7.
@@ -3311,6 +3336,43 @@ BYREF_REFUSALS = [
      "    print(p)\n"
      "    return n\n",
      "refuse:is a builtin of the language rather than a C entry point", None),
+    # A PYTHON BUILTIN rather than a name somebody forgot to declare. The arm
+    # above says "this module defines no FUNCTION of that name … and no
+    # `from … import …` in it binds the name either", and for a builtin both of
+    # those are impossible — the name comes from the LANGUAGE — so the sentence
+    # sent the reader to look for a missing `def` that cannot exist. `type_of`
+    # is on the list on the measurement in
+    # `bugs/FORMAL_frame_by_value_ceiling_zero.md` (`std/memory/unsafe_pointer`
+    # is refused with this very message and the doc's note is "`type_of` is a
+    # missing builtin, on any receiver"); the two cases below are the two
+    # families the table carries, and the needle is the clause that names what
+    # the callee is rather than what this file lacks.
+    #
+    # The prefix "which is a name with no definition in hand" is asserted by
+    # neither needle and is load-bearing anyway: two taxonomies key on that
+    # exact substring (`tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    # `tools/formal_sweep_causes.py`), so an arm that reworded the opening would
+    # silently move files out of the family they are counted in.
+    ("byref_refuse_type_of_names_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return type_of(p)\n",
+     "refuse:type_of` is a Python BUILTIN", None),
+    ("byref_refuse_getattr_names_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return getattr(p, \"a\")\n",
+     "refuse:getattr` is a Python BUILTIN", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary

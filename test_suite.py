@@ -2926,13 +2926,27 @@ UNREGISTERED = {
     # common. `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`
     # records the gap and what closing it properly costs.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
+    'test_formal_admitted.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
+    'test_formal_fcntl.py': _FORMAL_SUITE_REASON,
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    'test_formal_math.py': _FORMAL_SUITE_REASON,
+    'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
+    'test_formal_platform.py': _FORMAL_SUITE_REASON,
+    'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
+    'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
+    'test_formal_shutil.py': _FORMAL_SUITE_REASON,
+    'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
+    'test_formal_stat.py': _FORMAL_SUITE_REASON,
+    'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
+    'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
+    'test_formal_type_application.py': _FORMAL_SUITE_REASON,
+    'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
     # NOT the reason above, and deliberately said so: this one is CHEAP.
     # Measured 2026-10-02 on the merge of work/merge-formal4, `python3
     # tools/memslot.py --gb 8 -- python3 test_formal_hostmods_census.py`:
@@ -2952,15 +2966,6 @@ UNREGISTERED = {
         'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
         'test cannot see. Cheap (17.5 s, 0.1 GB measured) and green (4/4), so '
         'it wants registering rather than listing; the row is spelled out above.',
-    'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
-    'test_formal_platform.py': _FORMAL_SUITE_REASON,
-    'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
-    'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
-    'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
-    'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
-    'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
-    'test_formal_type_application.py': _FORMAL_SUITE_REASON,
-    'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
 
     # ── the encoders, differentially, against the platform assembler ──
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '

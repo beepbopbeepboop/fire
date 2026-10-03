@@ -28,6 +28,7 @@ Invoked via `make check-formal-dylib` or directly:
 """
 import argparse
 import ctypes
+import itertools
 import json
 import os
 import platform
@@ -408,10 +409,41 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     check(text["initprot"] == VM_PROT_READ | VM_PROT_EXECUTE,
           f"__TEXT initprot {text['initprot']:#x} is not r-x")
     check(text["vmaddr"] % 0x1000 == 0, "__TEXT vmaddr is not page aligned")
-    check(linkedit["vmaddr"] == text["vmaddr"] + text["vmsize"],
-          "__LINKEDIT does not start where __TEXT ends")
     check(linkedit["vmaddr"] % 0x1000 == 0,
           "__LINKEDIT vmaddr is not page aligned")
+    # No two segments may OVERLAP, in memory or in the file, and the link edit
+    # must sit above the code.
+    #
+    # This replaced "⟨LINKEDIT starts where __TEXT ends⟩", which was not an
+    # invariant but a coincidence: it held for as long as an image had no data
+    # segment, and it stopped holding the moment every image got one
+    # (`formal/model.py`'s `STACK_FLOOR_BUDGET_BYTES`). The data segment is
+    # mapped at a FIXED address well above the image's slide — `__DATA` is
+    # `GLOBALS_VM`, not "the next page" — so the three segments are neither
+    # contiguous nor in file order, and a contiguity assertion would be
+    # asserting the coincidence again on the next change. What the loader
+    # actually requires is disjoint ranges, and that is what is checked: two
+    # segments sharing an address is memory corruption, which is the failure
+    # this whole file's segment checks exist to catch.
+    segs = info["segments"]
+    for a, b in itertools.combinations(sorted(segs), 2):
+        sa, sb = segs[a], segs[b]
+        vm_overlap = (sa["vmaddr"] < sb["vmaddr"] + sb["vmsize"]
+                      and sb["vmaddr"] < sa["vmaddr"] + sa["vmsize"])
+        check(not vm_overlap,
+              f"segments {a} [{sa['vmaddr']:#x}, "
+              f"{sa['vmaddr'] + sa['vmsize']:#x}) and {b} "
+              f"[{sb['vmaddr']:#x}, {sb['vmaddr'] + sb['vmsize']:#x}) overlap "
+              f"in memory, so the loader maps them over each other")
+        f_overlap = (sa["fileoff"] < sb["fileoff"] + sb["filesize"]
+                     and sb["fileoff"] < sa["fileoff"] + sa["filesize"])
+        check(not f_overlap,
+              f"segments {a} and {b} overlap in the FILE "
+              f"({a} [{sa['fileoff']}, {sa['fileoff'] + sa['filesize']}) vs "
+              f"{b} [{sb['fileoff']}, {sb['fileoff'] + sb['filesize']})")
+    check(linkedit["vmaddr"] >= text["vmaddr"] + text["vmsize"],
+          f"__LINKEDIT at {linkedit['vmaddr']:#x} is not above __TEXT, which "
+          f"ends at {text['vmaddr'] + text['vmsize']:#x}")
 
     dataoff, datasize = info["commands"]["LC_DYLD_EXPORTS_TRIE"]
     check(linkedit["fileoff"] <= dataoff
@@ -1194,8 +1226,56 @@ def test_frame_params_are_published_not_empty(tmpdir, shared):
           f"contract must name P as a frame holder; published {contract!r}")
 
 
+def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
+    """The check on the direction that used to be unchecked, both ways.
+
+    `_audit_bound_symbols` asks whether every name an image BINDS has a
+    provider, and it has asked it on both paths since it was factored out. The
+    other direction — a library whose MANIFEST advertises a symbol its export
+    trie does not contain — was never asked, and it is the one that reaches
+    another build: the consumer's bind audit reads the name out of the manifest,
+    so it is satisfied, the image links cleanly, and dyld fails at load. The
+    honest fix is the `nm`-style verification `build_stdlib_dylib.py` has for
+    the gimple path, reading the file back with an independent parser
+    (`formal/build.py`'s `_advertised_but_absent` over `macho_dylib_exports`)
+    rather than asking the writer.
+
+    Both directions are asserted here, and the negative one is manufactured by
+    ADDING an entry to a real export list — the shape of the defect is "the two
+    lists disagree", so the test has to make them disagree, and it cannot do
+    that by making the emitter drop code (that would need a codegen bug to
+    exist first, which is the whole reason the check is wanted).
+
+    The positive half is not decoration: this is the check every dylib build in
+    the tree now runs, so a library whose real exports are not all in its own
+    trie would fail this case on the shared fixture.
+    """
+    from formal import build as B
+    out = shared["dylib"]
+    exports = list(manifest_exports(out).values())
+    check(exports, "precondition: the shared dylib advertises something")
+    check(B._advertised_but_absent(out, exports) == [],
+          "a library advertises exports its own image does not define, and "
+          "the build did not notice")
+
+    fabricated = {"name": "not_emitted", "symbol": "libmath_not_emitted",
+                  "module": "libmath", "arity": 1, "kind": None,
+                  "signature": "not_emitted", "frame_params": []}
+    missing = B._advertised_but_absent(out, exports + [fabricated])
+    check(missing == ["libmath_not_emitted"],
+          f"the check reported {missing!r} for one advertised symbol the "
+          f"image does not define; it must name that one and only that one")
+    report = B._advertised_absent_report("libmath.mojo", missing)
+    check("libmath_not_emitted" in report,
+          f"the report does not name the symbol: {report}")
+    check("manifest" in report and "dyld" in report,
+          f"the report does not say which side is wrong: {report}")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
+    ("the manifest offers nothing the image does not define",
+     test_the_manifest_offers_nothing_the_image_does_not_define),
     ("exported functions execute", test_exported_functions_execute),
     ("a symbol that prefixes another is still exported",
      test_a_symbol_that_prefixes_another_is_still_exported),

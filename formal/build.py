@@ -735,9 +735,11 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     the caller last left in the register."""
     # Where this unit's module-global data segment will be MAPPED, handed to
     # both backends because every slot access is an absolute address computed
-    # before the image exists. None when the module declares no writable
-    # global, so an ordinary program pays nothing and emits no data segment.
-    gbase = globals_base(fmt) if M.module_slots() else None
+    # before the image exists. Always handed over: the data image carries the
+    # backend's two reserved words even when the module declares no writable
+    # global (`model.STACK_FLOOR_BUDGET_BYTES`), so an ordinary program does pay
+    # a data segment — one page — and gets the stack-floor word with it.
+    gbase = globals_base(fmt)
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
@@ -779,11 +781,15 @@ def globals_image(fmt: str = "macho"):
 
     None for a module with no `global NAME` — the ordinary case — so a program
     that does not use this capability gets byte-for-byte the image it got
-    before."""
-    table = M.module_slots()
-    if not table:
-        return None
-    return M.build_data_image(table, globals_base(fmt))
+    before.
+
+    **It no longer returns None.** `build_data_image` always lays out the
+    backend's two reserved words — the initializer flag and the stack floor — so
+    every image carries a `__DATA` whether or not the module declares a global
+    (`model.STACK_FLOOR_BUDGET_BYTES` and the bug doc it belongs to). The
+    reason it matters is that the program that most needs the stack-floor word
+    is the one with no globals: `deep(N)` is three lines and declares none."""
+    return M.build_data_image(M.module_slots(), globals_base(fmt))
 
 
 def globals_base(fmt: str = "macho") -> int:
@@ -926,6 +932,65 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
             f"causes share. (Provider check: {_libsystem_probe_status()}.)")
 
 
+def _advertised_but_absent(path: str, exports: list) -> list:
+    """Every export in a library's manifest that the library's own image lacks.
+
+    The OTHER direction of the same boundary, and the one that was unchecked.
+    `_audit_bound_symbols` asks "does every name this image BINDS have a
+    provider?" — a dylib's manifest advertises names to its CONSUMERS, so a
+    library whose manifest lists a symbol its export trie does not contain
+    passes that check and then fails at the consumer's `dlopen`, with a symbol
+    the consumer's own bind audit believed was provided.
+
+    The set is structurally a subset of the compiled set — `_formal_exports`
+    emits an entry only for `fn in ordered` — so nothing in the tree has ever
+    hit this. "Structurally" is not "verified", though: `_struct_methods` lifts
+    a method into `ordered`, and what the emitter then does with a lifted
+    function is not something the export list re-reads. `build_stdlib_dylib.py`
+    has the `nm`-style verification for the gimple path; this is the formal
+    path's version of it, and it reads the FILE with `macho_dylib_exports` —
+    an independent parser of the load commands and the trie dyld consults —
+    rather than asking the writer, so a writer's bug cannot hide here.
+
+    Returns the missing SYMBOLS, in manifest order, and the caller refuses.
+    An empty trie with exports advertised is the degenerate case and comes back
+    as every symbol missing, which is what it is: dyld would bind each of them
+    to nothing.
+    """
+    advertised = [e.get("symbol") or e.get("name") for e in (exports or [])]
+    advertised = [s for s in advertised if s]
+    if not advertised:
+        return []
+    try:
+        defined = macho_dylib_exports(path)
+    except FormalBuildError as e:
+        # The export surface could not be read at all, so none of the advertised
+        # names can be shown to be there. Reported as what it is rather than
+        # swallowed: a library whose manifest is a list a consumer will bind
+        # against is the thing that matters, and its image is unreadable.
+        return advertised + [f"(the export trie could not be read: {e})"]
+    # A Mach-O name is its C name with dyld's leading underscore, which is what
+    # `_c_export_name` takes back off in the other direction.
+    return [s for s in advertised if f"_{s}" not in defined]
+
+
+def _advertised_absent_report(source_path: str, missing: list) -> str:
+    """The one wording for "this library advertises what it does not define"."""
+    named = [m for m in missing if not m.startswith("(")]
+    return (f"{os.path.basename(source_path)}: this library's manifest "
+            f"advertises {len(missing)} export(s) its own image does not "
+            f"define: {', '.join(named[:8])}"
+            f"{' …' if len(named) > 8 else ''}. A consumer that binds one of "
+            f"these dies in dyld at load, and its own bind audit cannot catch "
+            f"it: the name comes from a manifest, so it reads as provided. The "
+            f"advertised set is computed from the compiled function list "
+            f"(`formal/build.py`'s `_formal_exports`) and the trie is read back "
+            f"out of the file (`macho_dylib_exports`), so this is the point "
+            f"where the two are known to agree."
+            + (f" {' '.join(m for m in missing if m.startswith('('))}"
+               if len(named) != len(missing) else ""))
+
+
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
                       structs: list = None, source_path: str = None,
@@ -1003,7 +1068,12 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # so the image the linker is about to be handed and the layout the code was
     # emitted for are the same fact read twice.
     from formal.macho_linker import extern_entry_offset
-    has_globals = bool(M.module_slots())
+    # ALWAYS true, and not a derived fact any more: the data image carries the
+    # backend's two reserved words even when the module declares no global, so
+    # every image has a `__DATA` (`model.STACK_FLOOR_BUDGET_BYTES`). Read from
+    # the same image the linker is handed rather than recomputed from the slot
+    # table, which is the reason this line used to sit here.
+    has_globals = True
     base_extern = TEXT_BASE + extern_entry_offset(
         [d["install_name"] for d in dylibs], has_globals=has_globals)
     base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
@@ -1836,7 +1906,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     check_value_position_method_reads(functions, structs)
     check_construction_mismatches(functions)
     check_shadowed_global_reads(functions)
-    check_construction_shapes(functions, by_name)
+    check_construction_shapes(functions, by_name, link_line)
     check_frame_return_shapes(functions)
     # …and the one hole the returned-frame convention opens in premise (B1),
     # which is the same premise with the sign reversed.
@@ -5484,7 +5554,8 @@ def check_dataclass_constructs(stmts: list, functions: list) -> None:
         DC.check_reflection_calls(functions, names)
 
 
-def check_construction_shapes(functions, structs_by_name) -> None:
+def check_construction_shapes(functions, structs_by_name,
+                            link_line=None) -> None:
     """Decide every `S(...)` in the unit, and refuse the ones with no shape.
 
     Called by the ENTRY POINTS, beside `check_frame_field_blob_premises`, and
@@ -5518,9 +5589,32 @@ def check_construction_shapes(functions, structs_by_name) -> None:
     its source is; a function with no holders has none published, and an empty
     table is the right answer there — a name that is not a holder is a plain
     word, and the copy decision refuses exactly that.
+
+    `link_line` is the manifests this image links, and it is what the SECOND
+    branch needs: a name this unit has no struct for, which some library on
+    the line DOES have, is a struct whose declaration this build cannot reach —
+    and the library that has it is knowable from the manifest alone, with no
+    source in hand (`formal.imports.linked_struct_owners`). That case used to be
+    reported by the bind audit ("the image would bind 1 symbol(s) that nothing
+    provides: Bag") or, when the program touched a field of the object, by
+    `field_access_refusal` — which is raised from an emitter that has a slot key
+    and nothing else, so it can say the base is unclassified but cannot say the
+    struct is one hop away in a manifest. Both are refusals today and this is
+    still one; what changed is that it now names the struct, the library and the
+    two repairs.
+
+    The early `return` for an image with no structs at all used to stand in
+    front of both branches, and that is exactly the image the second branch is
+    for: a program whose only struct came from a `--link-dylib` library whose
+    source is gone declares no struct of its own. So the shape test moved into
+    the loop rather than around it, and the loop still costs nothing on a file
+    with no constructions.
     """
-    if not structs_by_name:
-        return
+    from formal.imports import linked_struct_owners
+    owners = linked_struct_owners(link_line) if link_line else {}
+    declared = {fn.name for fn in functions or ()}
+    sources = {lib.get("source") for lib in (link_line or [])
+               if lib.get("source")}
     rets = M.function_return_types(functions)
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
@@ -5528,13 +5622,37 @@ def check_construction_shapes(functions, structs_by_name) -> None:
             if not isinstance(node, F.CallExpr) \
                     or not isinstance(node.func, F.IdentExpr):
                 continue
-            st = structs_by_name.get(node.func.name)
-            if st is None or M.type_constructor_kind(node.func.name) is not None:
+            name = node.func.name
+            st = structs_by_name.get(name)
+            if st is None:
+                # A TYPE constructor (`Pointer(x)`, `String(s)`) is a
+                # conversion, not a construction of something undeclared, and
+                # a FUNCTION of this unit is called rather than constructed —
+                # both are names this image can resolve, which is the whole
+                # distinction the table below turns on.
+                if M.type_constructor_kind(name) is not None \
+                        or name in declared or name not in owners:
+                    continue
+                raise CodegenError(M.undeclared_linked_struct_refusal(
+                    name, owners[name], _one(sources)))
+            if M.type_constructor_kind(name) is not None:
                 continue
             _plan, refusal = M.struct_construction_plan(
                 st, node, structs_by_name, cands, rets)
             if refusal is not None:
                 raise CodegenError(refusal)
+
+
+def _one(paths):
+    """The single path in `paths`, or None — for a message that can name one.
+
+    Two libraries recording two sources is a fact no single sentence can
+    report, and the message that tries says less than the one that names the
+    one it found, so the path is named when there is exactly one and the
+    sentence drops the clause when there are several.
+    """
+    paths = [p for p in paths or () if p]
+    return paths[0] if len(paths) == 1 else None
 
 
 # `_check_nested_frame_writes` USED to live here, refusing any write to a field
@@ -12763,7 +12881,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # same table. The per-file tables each numbered their slots from zero, so
     # this merge is what makes the library's slots distinct.
     M.publish_global_slots(library_slots)
-    has_globals = bool(library_slots)
+    # Always: see the executable path's `has_globals`, and
+    # `model.STACK_FLOOR_BUDGET_BYTES`. A library with no module globals has the
+    # same two reserved words every other image has.
+    has_globals = True
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
@@ -12821,11 +12942,23 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                                       dep_install, has_globals),
         exports, install_name, arch=arch, external_syms=external_syms,
         deps=dep_install, dep_syms=dep_syms,
-        globals_image=globals_image("macho") if has_globals else None)
+        globals_image=globals_image("macho"))
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
+    # The manifest is a PROMISE to every consumer, and this is where the promise
+    # is checked against the file that was just written: read the export trie
+    # back with an independent parser and refuse if the two disagree. The
+    # direction that was missing is the one that hurts — a library advertising a
+    # symbol nothing defines produces a manifest every consumer's bind audit
+    # believes, and a dyld failure at load rather than a refusal here
+    # (`bugs/FORMAL_frame_receiver_handoff.md`, "A dylib advertises exports
+    # without checking the emitter produced them").
+    absent = _advertised_but_absent(output, exports)
+    if absent:
+        raise FormalBuildError(
+            _advertised_absent_report(source_paths[0], absent))
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
         source=source_paths[0],

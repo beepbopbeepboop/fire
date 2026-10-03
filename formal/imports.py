@@ -1113,6 +1113,45 @@ def linked_module_paths(linked: list) -> list:
     return out
 
 
+def linked_struct_owners(linked: list) -> dict:
+    """`{struct name: [{"library", "module", "signature"}, …]}` off the link line.
+
+    The complement of `linked_module_paths`, and it answers with NO source at
+    all: a library advertises a struct's METHODS (`kind: "method"` entries, one
+    per `add`/`__len__`/`__init__`) whether or not the file it was built from
+    is still readable, and the struct's NAME is in every one of them. So a
+    manifest alone can say "this image links a library that has `Bag`", which is
+    the fact a build-pass refusal needs when the declaration itself is missing
+    (`check_construction_shapes`'s `undeclared_linked_struct_refusal` arm).
+
+    The struct name is the `signature` up to its last `.`, because that is what
+    `_formal_exports` writes there — `f"{struct}.{method}"`, so `Bag.__len__`
+    and `My_Bag.add` both yield the struct and neither yields a fragment of it.
+    Deriving it from `name.split("_")[0]` instead would turn `My_Bag` into `My`,
+    which is a different type; that is why there is one rule and not two
+    spellings to choose between.
+
+    Entries are deduped per library, because a struct with four methods would
+    otherwise contribute four near-identical rows to a message and the reader
+    would read the repetition as four libraries. Link order is kept."""
+    out: dict = {}
+    for lib in linked or []:
+        library = lib.get("install_name") or lib.get("path") or ""
+        module = lib.get("module") or ""
+        seen = set()
+        for entry in (lib.get("exports") or []):
+            if entry.get("kind") != "method":
+                continue
+            signature = entry.get("signature") or ""
+            struct, dot, _method = signature.rpartition(".")
+            if not dot or not struct or struct in seen:
+                continue
+            seen.add(struct)
+            out.setdefault(struct, []).append(
+                {"library": library, "module": module, "signature": signature})
+    return out
+
+
 def module_struct_defs(path: str, project_root: str = None) -> list:
     """The `StructDef`s the module at `path` declares, following its re-exports.
 

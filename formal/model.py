@@ -9040,6 +9040,74 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 ))
 
 
+# PYTHON BUILTINS THIS PATH DOES NOT IMPLEMENT, and why each one has no answer
+# here. The values are the second half of the sentence they appear in.
+#
+# This is the table `bugs/FORMAL_frame_receiver_handoff.md` names as the thing
+# the `getattr`/`setattr` finding was waiting for — "a program that reaches one
+# of them is a program with a Python builtin this backend does not implement,
+# which is a fact about the backend's surface rather than about the image, and
+# naming it needs a table of what the backend DOES implement" — and it is also
+# the one remaining wrong diagnosis in
+# `bugs/FORMAL_frame_by_value_ceiling_zero.md`'s landing table, where
+# `std/memory/unsafe_pointer.mojo` is refused with "a Pointer receiver is
+# passed to type_of()" and the doc's own note says what that sentence is worth:
+# "`type_of` is a missing builtin, on any receiver".
+#
+# **Why the existing sentence is wrong for these and only these.** The last arm
+# of `frame_undefined_callee_refusal` says "this module defines no FUNCTION of
+# that name … and no `from … import …` in it binds the name either", which sends
+# the reader to look for a missing `def` or a missing import. For a builtin both
+# of those are impossible: the name comes from the LANGUAGE, so there is
+# nothing to define and nothing to import. Every other callee in this branch is
+# a name somebody might have meant to define, which is exactly why the sentence
+# is right for them.
+#
+# `type_of` is here on the measurement in that doc; the four attribute builtins
+# are here on the `getattr`/`setattr` finding in the hand-off doc, which names
+# them as reaching this same branch. Neither list is exhaustive and this is the
+# one place to add to — a name added here changes a diagnostic, never a verdict:
+# the hand-off is unsound either way, because none of these has a compiled body
+# to hand an address to.
+#
+# **A name here is a name THIS IMAGE has no function of, not a spelling.** The
+# arm is inside `frame_undefined_callee_refusal`, and the refusal it is reached
+# from returns None for a callee that is one of this module's own functions
+# (`frame_receiver_escape_refusal`'s docstring, case by case). So a module that
+# defines its own `getattr` never arrives here and keeps being an ordinary
+# function that takes a frame receiver by reference — which is the one thing a
+# name-keyed table can get wrong silently, and which
+# `test_formal_run.py`'s `byref_a_local_getattr_is_not_the_builtin` pins.
+UNIMPLEMENTED_BUILTINS = {
+    "type_of": (
+        "its answer is a TYPE, and this path has no value that denotes a type: "
+        "every value is one 64-bit word (`pointer_value_model`), a struct "
+        "crosses a boundary as a LAYOUT rather than as something that is 'of' "
+        "its class, and a type name read as a value has no home at all — so "
+        "there is no answer to hand back whatever the receiver is, and the "
+        "receiver's layout is not the question here"),
+    "getattr": (
+        "the attribute it names is a STRING at run time, and a field read on "
+        "this path is a load from `[base, #8k]` with a slot index the build "
+        "computed from the struct's own field list; a frame has no element "
+        "width and no length, so a run-time-indexed read of one is not an "
+        "address arithmetic question this backend can answer"),
+    "setattr": (
+        "the same run-time string, and a store rather than a load — which also "
+        "means the write's target is not a slot the build established, so "
+        "there is nowhere proved to write to"),
+    "hasattr": (
+        "its answer is whether the attribute is there, and on this path a field "
+        "read has no absent case to report: a frame's slots are its whole "
+        "layout, so the question has no representation to be answered in"),
+    "delattr": (
+        "its effect is to remove a field from an object, and an object here is "
+        "a frame block with a fixed layout and no storage to give up — the "
+        "field list the build compiled against is not something a call can "
+        "change"),
+}
+
+
 def frame_undefined_callee_refusal(callee: str, struct_names,
                                    imported_from: str = None,
                                    comptime_param_of: str = None,
@@ -9128,6 +9196,20 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"of its 50 spellings), and that construct is what this path "
             f"refuses; this name is its operand rather than a call of its own. "
             f"Nothing about the receiver's layout is at fault here")
+    if callee in UNIMPLEMENTED_BUILTINS:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and the reason is not that "
+            f"anything is MISSING and not that this file forgot to declare it: "
+            f"`{callee}` is a Python BUILTIN, a name the language provides, so "
+            f"there is no `def` to find here and no import that could bind it. "
+            f"No part of this path implements it, and there is no answer for it "
+            f"to give: {UNIMPLEMENTED_BUILTINS[callee]}. That is a fact about "
+            f"what this backend does, not about the receiver — so nothing about "
+            f"{who}'s layout is at fault, and no declaration of {callee} in "
+            f"this file would change it. `bugs/"
+            f"FORMAL_frame_by_value_ceiling_zero.md` has the measurement that "
+            f"put this name on the list")
     if comptime_param_of:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -21024,9 +21106,56 @@ class GlobalDataImage:
     def __len__(self):
         return len(self.blob)
 
+    @property
+    def stack_floor_offset(self) -> int:
+        """The word AFTER the initializer flag: where this image's stack floor
+        is written, and whether one is.
+
+        A PROPERTY rather than a fifth field, because a field would be a second
+        thing to keep equal to `init_flag_offset + GLOBAL_SLOT_BYTES` and the
+        bug this whole change is about is two answers to one question about an
+        image's layout.
+
+        **Nothing writes it yet.** The word exists, it is in every image, and it
+        reads as zero; `STACK_FLOOR_BUDGET_BYTES` below is the policy the writer
+        will use. It is here, and not later with the writer, because the word has
+        to exist in an image with no module globals at all — which is what
+        `deep(N)`, the reproducer of the frame-size bug, compiles to.
+        """
+        return self.init_flag_offset + GLOBAL_SLOT_BYTES
 
     def __bool__(self):
         return bool(self.blob)
+
+
+# THE STACK-FLOOR BUDGET, and why it is a constant at all.
+#
+# Every function on this path subtracts a FIXED frame from the stack pointer
+# (arm64: `_SCRATCH`, 128 KiB; x86-64: `_BLOB_BYTES` plus the computed locals)
+# and nothing compares the result against a floor, so the reachable recursion
+# depth is the stack size divided by the frame size and crossing it is a
+# SIGSEGV — no output, no message, no status a caller can read. Measured on this
+# tree (2026-10-02, `ulimit -s` 8176 KiB, `RLIMIT_STACK` 8372224), same
+# three-line `deep`: arm64 answers at 61 and dies with exit -11 at 62; x86-64
+# answers at 450 and dies at 500. So the usable stack below the startup stub's SP
+# is between 7.63 and 7.75 MiB, against a limit of 7.98 MiB.
+#
+# A guard compares SP against `SP_at_entry - BUDGET`, and `SP_at_entry` is a
+# run-time fact (which is why the floor is a word and not an address), but
+# BUDGET is a POLICY number: how much of the process's stack this compiler is
+# willing to promise before it refuses instead of dying. It has to be BELOW the
+# real floor to be worth having — a budget above it fires after the kernel has
+# already killed the process — and it costs depth when it is below: at 128 KiB a
+# frame, 256 KiB of margin is two levels of recursion on arm64.
+#
+# 7.5 MiB is that trade made explicitly: under the measured usable floor by
+# 128–256 KiB (one to two arm64 frames), and 480 KiB under the process limit.
+# The failure mode of being wrong is stated here because it is the whole risk:
+# a BUDGET that overestimates the real stack (a thread stack rather than the
+# main one, or a host with a smaller `ulimit -s`) leaves the guard silent and the
+# program dies as it does today — no worse than the defect being fixed — while a
+# BUDGET that underestimates costs depth, which is a refusal and never a crash.
+STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
@@ -21902,9 +22031,20 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
 
     Layout, in this order and for a reason: every SLOT first, in `index` order,
     so a backend that computes `GLOBAL_SLOT_BYTES * slot.index` addresses the
-    right word whatever else the module has; then the container blobs the
+    right word whatever else the module has; then the two RESERVED words (the
+    initializer flag and the stack floor, below); then the container blobs the
     address-valued slots point at, each 8-byte aligned so a blob word is a word
     at the address the slot holds.
+
+    **The image is never empty, and that is a change of policy rather than an
+    oversight** (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    The two reserved words are the backend's own bookkeeping rather than any
+    program's storage, so they exist whether or not the module declares a
+    global — which means `has_globals` is true of every image and `__DATA` is
+    emitted unconditionally in both containers. The alternative was a program
+    with no module globals having no `__DATA` at all, which is exactly the
+    reproducer of the stack-floor bug (`deep` has no globals), so the word the
+    fix needs would not exist in the image that needs it.
 
     A slot's own word is `base + offset-of-what-it-points-at`, and the fixup
     records where that word is so the codegen can emit one store. A STRING word
@@ -21912,18 +22052,19 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     other kind: its target is the interned literal in `__TEXT`, which is not in
     this image, so it goes in `string_cells` for the code to fill and its eight
     bytes here are left zero."""
-    if not table:
-        return GlobalDataImage(b"", [], 0, [])
-    count = max(s.index for s in table.values()) + 1
     # The initializer flag occupies the word immediately after the slots, so it
     # is at a fixed offset from the slot table and both backends and the linker
-    # can name it without another table.
+    # can name it without another table. The stack floor is the word after
+    # that (`GlobalDataImage.stack_floor_offset`), and both are emitted even
+    # with no slots at all — hence `flag_offset` is 0 for an empty table rather
+    # than a `None` that every reader would have to test for.
+    count = max(s.index for s in table.values()) + 1 if table else 0
     flag_offset = count * GLOBAL_SLOT_BYTES
-    blob = bytearray(flag_offset + GLOBAL_SLOT_BYTES)
+    blob = bytearray(flag_offset + 2 * GLOBAL_SLOT_BYTES)
     fixups = []
     string_cells = []
-    # The trailing area starts after the flag, so a slot's address never depends
-    # on how many trailing items there are.
+    # The trailing area starts after the reserved words, so a slot's address
+    # never depends on how many trailing items there are.
     tail = bytearray()
     for slot in sorted(table.values(), key=lambda s: s.index):
         kind = slot.init[0]
@@ -21941,7 +22082,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
         elif kind == "blob":
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
-            offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
+            offset = flag_offset + 2 * GLOBAL_SLOT_BYTES + len(tail)
             for j, word in enumerate(slot.init[2]):
                 at_word = offset + GLOBAL_SLOT_BYTES * j
                 if isinstance(word, str):
@@ -21959,7 +22100,12 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             fixups.append((at, offset))
         # `("unknown", …)` writes eight zero bytes, and the read is refused by
         # name before anything can observe the zero.
-    # The flag starts CLEAR: zero means "not yet filled in".
+    # The flag starts CLEAR: zero means "not yet filled in". So does the floor:
+    # it is the backend's own word, nothing writes it yet, and a reader that
+    # finds it clear must treat the floor as UNKNOWN rather than as zero —
+    # which is the safe direction for the guard this word exists for, because a
+    # zero floor compares as "nothing is below the stack pointer" and so never
+    # fires (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
 
@@ -22333,6 +22479,19 @@ def expr_spelling(node) -> str:
     return type(node).__name__
 
 
+# One clause, shared by the two refusals that describe the same defect from two
+# places: `field_access_refusal` below, which is raised by an emitter that has
+# only a slot key, and `undeclared_linked_struct_refusal` after it, which is
+# raised by the build pass where the type IS known and can name the library.
+# Written once because it is a WARNING rather than a diagnosis — both sentences
+# are advice about what not to do, and a fix that corrected one of them and not
+# the other would leave a program that re-declares the struct looking like a
+# program that fixed its bug.
+RE_DECLARE_IS_A_DIFFERENT_TYPE = (
+    "Do not re-declare the struct here — that is a different type with the "
+    "same name, and the layout the library's methods use would not be it")
+
+
 def field_access_refusal(name: str, fn_name: str, root: str,
                          holder: bool) -> str:
     """The diagnostic for `root.field` where nothing says what `root` holds.
@@ -22360,16 +22519,18 @@ def field_access_refusal(name: str, fn_name: str, root: str,
     the raiser had no way to know and which was false about a real program —
     `var b = Bag(); b.n = 4` against a `--link-dylib` library whose source was
     no longer readable, where the binding is a construction and the struct is
-    declared in a file this build does not have
-    (`bugs/FORMAL_field_access_refusal_names_the_wrong_module.md`). So the
+    declared in a file this build does not have. So the
     message states what the raiser knows — the base is not classified, and a
     field needs a classification to be lowered — and the REPAIRS are the two
-    that are actually available, which is the other half of that document's
-    finding: "bind the base from a constructor THIS MODULE declares" is
+    that are actually available, which is the other half of the same finding:
+    "bind the base from a constructor THIS MODULE declares" is
     impossible to follow for a struct this module does not and cannot declare,
     and suggesting the reader declare it here would be worse than useless — it
     would be a DIFFERENT type with the same name, and the frame the library's
-    methods are called on would not be it."""
+    methods are called on would not be it. That other half now has its own
+    message, `undeclared_linked_struct_refusal`, raised by the build pass where
+    the construction is and the library is known; this one is what is left when
+    the base is not a construction this pass can see the type of."""
     who = f"{fn_name}: " if fn_name else ""
     if holder:
         return (f"{who}{name!r} is a field of {root!r}, which the build "
@@ -22391,9 +22552,67 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"constructor whose declaration THIS IMAGE can see (`x = S()`): an "
             f"`import` brings the declaration with it, and a `--link-dylib` "
             f"library brings one when the source it was built from is still "
-            f"readable. Do not re-declare the struct here — that is a "
-            f"different type with the same name, and the layout the library's "
-            f"methods use would not be it")
+            f"readable. {RE_DECLARE_IS_A_DIFFERENT_TYPE}")
+
+
+def undeclared_linked_struct_refusal(struct_name: str, owners: list,
+                                     recorded_source: str = None) -> str:
+    """`S()` where S is a linked library's struct and this image has no S.
+
+    The build-pass half of `field_access_refusal`'s finding, and the half that
+    can NAME the library: an emitter's slot-allocator fall-through is handed a
+    slot key and nothing else, so its message can only say "this path has no
+    way to say what the base holds" — which is true and sends the reader after a
+    type inference this backend does not have, when the actual fact is one hop
+    away and checkable (`bugs/FORMAL_field_access_refusal_names_the_wrong_
+    module.md`). This one is raised where the construction `S()` itself is, and
+    it reports what is actually missing: a DECLARATION, whose field list and
+    frame layout are read from the module's source.
+
+    Three facts in the text, each of which the reader can check:
+
+      * a library on this link line DOES have the struct — `owners` is derived
+        from that library's own `kind: "method"` exports, so "nothing defines
+        this name" is not what is wrong, and the bind audit's message says the
+        opposite;
+      * what is missing is the declaration, and `recorded_source` is where the
+        manifest says it was read from, so "the source is gone" is a fact with a
+        path in it rather than a guess;
+      * the two repairs are the two that exist, and neither of them is
+        "declare it here" — a struct re-declared in the importing file is a
+        DIFFERENT type with the same name, whose layout is not the one the
+        library's methods were compiled against. That clause is shared with
+        `field_access_refusal` rather than written twice.
+    """
+    libs = []
+    for o in owners or ():
+        if o["library"] not in libs:
+            libs.append(o["library"])
+    module = ""
+    for o in owners or ():
+        if o.get("module"):
+            module = o["module"]
+            break
+    one = libs[0] if len(libs) == 1 else (f"{len(libs)} libraries on this "
+                                          f"link line")
+    where = ""
+    if recorded_source:
+        where = (f" The manifest records that source as {recorded_source!r}, "
+                 f"which this build cannot read.")
+    repair = (f"`from {module} import {struct_name}`" if module
+              else f"an import that brings `{struct_name}`'s declaration")
+    return (f"{struct_name}() constructs a struct this image has no "
+            f"DECLARATION for: `{struct_name}` is not declared in this file, "
+            f"and no module this file imports declares it. A linked library "
+            f"does provide its methods — {one} exports "
+            f"{owners[0]['signature']} — so this is not a name nothing "
+            f"defines; what is missing is the type, and a field list and a "
+            f"frame layout are read from the module's source rather than from "
+            f"the symbol table.{where} Two repairs, and only two: rebuild the "
+            f"library where this build can read the module's source, so its "
+            f"manifest records a path this build can open; or link the module "
+            f"by IMPORT ({repair}), which brings the declaration with it. "
+            f"{RE_DECLARE_IS_A_DIFFERENT_TYPE}")
 
 
 # ── How a call's arguments bind: the ONE shape, read by everything ─────────

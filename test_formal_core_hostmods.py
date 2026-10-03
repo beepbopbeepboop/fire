@@ -3,8 +3,8 @@
 
     python3 test_formal_core_hostmods.py [-v] [group ...]
 
-Groups: `enum-value`, `enum-shape`, `enum-absent`, `ctx`, `ctx-absent`, `resolve`.
-With no argument, all.
+Groups: `enum-value`, `enum-shape`, `enum-absent`, `ctx`, `ctx-absent`,
+`functools-absent`, `resolve`. With no argument, all.
 
 WHY THESE TWO ARE IN ONE FILE
 -----------------------------
@@ -24,6 +24,13 @@ diagnostic about the TARGET where it needed one about itself:
 Neither file BUILDS after its module lands, and this file does not pretend
 otherwise — `enum-shape` says so in its own assertions. What moved is the
 subject of the refusal, which is the whole value of a module in that directory.
+
+`functools` IS HERE AS AN ABSENCE, and that is the point of its group: every
+one of its names needs either a first-class function value or DECORATOR
+semantics, and a decorator on this path is parsed and never applied — so an
+exported `lru_cache` would be a program that runs and skips the work it asked
+for. `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
+and the two refusals that are measurements rather than readings.
 
 WHY THE ORACLE IS CPython AND NOT A TABLE
 -----------------------------------------
@@ -458,12 +465,113 @@ def group_resolve(tmpdir, verbose):
     return True, "enum and contextlib resolve, and both left HOST_MODELLED"
 
 
+def group_functools_absent(tmpdir, verbose):
+    """`functools` is ABSENT, and every one of its names must say so.
+
+    An omission nobody pins is indistinguishable from an implementation — and
+    `functools` is the module where that would be WORST, because two of the three
+    capabilities it needs are two this backend produces silently:
+
+      * a DECORATOR on this path is parsed and then never applied. `@tag` on a
+        function and `@unique` on a class both BUILD, and neither the decorator
+        body nor anything it was supposed to enforce ever runs — measured in
+        `bugs/COMPILE_FAIL_decorator_application_dropped.md`, and re-measured
+        here in the doc's terms: a `printf` inside the decorator prints
+        nothing. So an `lru_cache` that exported successfully would build a
+        program that caches nothing, which is answer-preserving for `version()`
+        and wrong for everything else;
+      * a first-class CALLABLE as an ARGUMENT is refused outright, measured on
+        both shapes — `functools.reduce(add2, [1,2,3], 0)` does not lower, and
+        neither does `def call2(f, a): return f(a)` called as `call2(dbl, 5)`
+        with both functions in the caller's own file, so it is not a
+        dylib-boundary problem.
+
+    The third is the one this group cannot check and the doc says why:
+    `get_cache_token()` returns `len()` of a private cache list, and there is no
+    cache registry on this path to derive it from, so any number is a fabricated
+    token rather than a mirror — which is why the list below is everything EXCEPT
+    that name, and why a module of it would be refused by
+    `doc/ABI.md`'s export rule anyway (a library that exports no public function
+    is not a library).
+
+    The names are the doc's own census of CPython 3.14.7's `functools` by what
+    each one needs (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`),
+    minus the one it says has no correct constant answer. This group exists
+    because that document's closing line — "the test's `functools`-shaped
+    absence group is what keeps that true" — was a promise about a test that did
+    not exist: `grep functools test_formal_core_hostmods.py` returned nothing.
+    """
+    absent = ["cache", "cmp_to_key", "partial", "partialmethod",
+              "singledispatch", "singledispatchmethod", "total_ordering",
+              "update_wrapper", "wraps", "cached_property", "MethodType",
+              "reduce", "GenericAlias", "UnionType", "itemgetter",
+              "MappingProxyType", "RLock", "Placeholder", "WRAPPER_ASSIGNMENTS",
+              "WRAPPER_UPDATES"]
+    for name in absent:
+        src = (f"import functools\n\ndef main() -> int:\n  "
+               f"functools.{name}\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_functools_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_functools_{name}"), tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"functools.{name} resolved, but the module is documented as "
+              f"absent — either the doc is wrong or a functools.mojo landed "
+              f"without the decorator and callable support it was measured to "
+              f"need")
+        msg = r.stderr or r.stdout
+        check("functools" in msg,
+              f"functools.{name} was refused without naming the MODULE the "
+              f"reader has to go and fix: {msg.strip()[-300:]}")
+    # The decorator spelling is its own case, because it is the one that would
+    # build if the import ever stopped being the thing that refuses it: a
+    # `@functools.lru_cache(maxsize=1)` on a function that calls itself. If a
+    # functools module ever lands, THIS is the program that runs and skips the
+    # work it asked for, so the group asserts it is refused rather than trusting
+    # the import to be.
+    src = ("import functools\n\n"
+           "def fib(n: int) -> int:\n"
+           "  if n < 2:\n"
+           "    return n\n"
+           "  return fib(n - 1) + fib(n - 2)\n\n"
+           "@functools.lru_cache(maxsize=1)\n"
+           "def counted(n: int) -> int:\n"
+           "  return fib(n)\n\n"
+           "def main() -> int:\n"
+           '  printf("%d\\n", counted(10))\n'
+           "  return 0\n")
+    tmp = os.path.join(TEMP, "absent_functools_decorator.mojo")
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run(
+        [sys.executable, FIRE, "build", "--formal", "--no-prove",
+         "-o", os.path.join(TEMP, "absent_functools_decorator"), tmp],
+        capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+    check(r.returncode != 0,
+          "@functools.lru_cache(maxsize=1) BUILT. That is the shape this whole "
+          "group is for: a decorator on this path is parsed and never applied, "
+          "so it would be a program that runs and skips the memoisation it "
+          "asked for, exiting 0")
+    msg = r.stderr or r.stdout
+    check("functools" in msg,
+          f"the decorated program was refused without naming functools: "
+          f"{msg.strip()[-300:]}")
+    if verbose:
+        print(f"    {len(absent) + 1} absent functools names refused, each "
+              f"naming the module")
+    return True, f"{len(absent) + 1} absent functools names refused"
+
+
 GROUPS = {
     "enum-value": group_enum_value,
     "enum-shape": group_enum_shape,
     "enum-absent": group_enum_absent,
     "ctx": group_ctx,
     "ctx-absent": group_ctx_absent,
+    "functools-absent": group_functools_absent,
     "resolve": group_resolve,
 }
 
