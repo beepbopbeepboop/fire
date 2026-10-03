@@ -96,8 +96,11 @@ the self-hosted compiler, and both are now measured:
   (`bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md`);
 * a per-character string scan allocated one `malloc(2)` per character —
   `gimple_char_scan_allocates_nothing_per_character` measured **246.7 MB** and
-  now measures **1.6 MB**
-  (`bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md`).
+  now measures **1.6 MB**. That one was `s[i]` spelled `mojo_cstr_slice(s, i,
+  i + 1)` (the slice allocates a two-byte buffer per character and nothing owns
+  it) because gimple refuses a `char`-typed argument at a call; it now goes
+  through a new `mojo_char_at(char *, int64_t)`, which answers from the same
+  256 shared immortal character strings `c == "x"` already used.
 
 Neither is the self-hosted-compiler subject of this doc, so neither moves the
 number in the table above. They are here because the standard they are measured

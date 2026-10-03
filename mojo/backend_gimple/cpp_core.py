@@ -3690,8 +3690,7 @@ def _cpp_expr(gen, e) -> str:
         # char* like every other string value in this scalar model, and so it
         # answers from the shared immortal character table instead of a fresh
         # two-byte malloc per character — the same value the GIMPLE path's own
-        # string subscript now gets
-        # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). Its bounds
+        # string subscript now gets. Its bounds
         # are `mojo_cstr_slice(s, i, i+1)`'s, which is what this emitted.
         # Only applies when the SUBJECT is string-ish: a plain identifier,
         # a string literal, or a slice/subscript chain (whose result this

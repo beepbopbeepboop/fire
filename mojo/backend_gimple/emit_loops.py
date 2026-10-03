@@ -1534,8 +1534,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     gen._ptr_helpers_needed.add('char')
     # `mojo_char_at`, for _gen_for_cstr's reason in full: gimple rejects a
     # `char` argument, so the slice stood in for `mojo_char_to_str` and
-    # allocated a two-byte buffer per character of every scan
-    # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). The result is
+    # allocated a two-byte buffer per character of every scan. The result is
     # a shared immortal string, deliberately absent from the codegen's
     # `_FRESH_STRING_RETURNS`, so no generated path frees it.
     gen._emit(f"  {cval_var} = mojo_char_at ({s_val}, {idx_t});")
@@ -2179,8 +2178,8 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     # both produce a NUL-terminated 1-char C string of the right VALUE, but
     # the slice allocates a fresh two-byte buffer per character and nothing
     # owns it — measured at 16.06 B per character, the entire residual of a
-    # per-character scan (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
-    # The slice was there only because gimple REFUSES a `char`-typed argument
+    # per-character scan. The slice was there only because gimple REFUSES a
+    # `char`-typed argument
     # ("invalid argument to gimple call" / "non-trivial conversion in
     # 'integer_cst'"), which is what `mojo_char_to_str(char)` needs;
     # `mojo_char_at` takes an int64_t index instead and reaches the same shared

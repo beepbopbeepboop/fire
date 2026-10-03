@@ -7206,7 +7206,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # used, and the slice allocates a two-byte buffer per character
             # that nothing owns — 16.06 B per character measured against 16.1 B
             # for a bare malloc(2), i.e. the entire residual of a per-character
-            # scan (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md).
+            # scan, fixed here and the reason this call site is not a slice.
             # `mojo_char_at` is the int64-indexed route to the SAME shared
             # immortal string `c == "x"` in this very loop body already goes
             # through, so the two spellings of the same character are now one
@@ -7407,10 +7407,9 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # `mojo_char_at` rather than `mojo_cstr_slice(ov, i, i + 1)`, and the
     # reason is the boxed branch's own comment in full: gimple refuses a
     # `char` argument so the slice was the only allocating route to the same
-    # answer, and it leaked a two-byte buffer per character of every scan
-    # (bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md). The result is
-    # a shared immortal string, deliberately absent from `_FRESH_STRING_RETURNS`
-    # so no generated path can `free()` it.
+    # answer, and it leaked a two-byte buffer per character of every scan.
+    # The result is a shared immortal string, deliberately absent from
+    # `_FRESH_STRING_RETURNS` so no generated path can `free()` it.
     if et == 'char':
         return 'char *', gen._new_val(
             'char *', f"mojo_char_at ({ov}, {idx64})")
