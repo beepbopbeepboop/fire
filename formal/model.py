@@ -18202,23 +18202,74 @@ def one_word_field_struct(struct_def, name, decls: dict):
     st = (decls or {}).get(base) if base and evidence else None
     if st is not None:
         return st, evidence
+    st = init_stores_a_parameter_struct(struct_def, name, decls)
+    return (st, "assigned") if st is not None else (None, None)
+
+
+def init_stores_a_parameter_struct(struct_def, name, decls: dict):
+    """The `StructDef` of this module a `__init__` field store is a NAME of, or
+    None.
+
+    **THE PLACEMENT PREDICATE, and it is the one question `struct_nested_frame_fields`
+    was not asking.** That function placed a nested frame in every field whose
+    DECLARED type names a framed struct of this module and whose only writer is
+    `__init__` — which is the constructor reserving a block in the object's own
+    block and storing that block's ADDRESS in the slot. But the constructor does
+    not always build one there:
+
+        struct Holder:
+            var src: R                     # declared R, a framed struct of THIS module
+            def __init__(self, r: R):
+                self.src = r               # … and stores a NAME
+
+    Here the slot holds the CALLER's frame, not one this constructor made, so
+    reserving a block for it and writing a block address into it is wrong twice
+    over: the block is never filled, and the store that would fill it —
+    `formal/build.py`'s `_frame_field_store_is_sound` — is right to refuse
+    ("the slot belongs to the function that created THAT frame") because the slot
+    IS placed. That is the deadlock `bugs/FORMAL_receiver_stored_in_a_field.md`
+    measured: a DELEGATING constructor over a struct of this module is refused
+    for a reason that only exists because of the placement, and the placement
+    exists because of the declared type.
+
+    **`self.src = r` is a POINTER slot, and `struct_nested_frame_fields` now says
+    so.** It is a pointer slot for a lifetime reason, not a typing one: `r`
+    arrived as an argument, so the CALLER reserved its bytes in the caller's own
+    scratch and the two die together — which is exactly the argument
+    `_frame_field_store_is_sound` already makes and which the placement was
+    cancelling out.
+
+    Unanimous-or-nothing, as everywhere else on this axis, and the negative
+    direction is the one that keeps the old behaviour: any assigned value that
+    is not a bare NAME of an `__init__` parameter annotated with a struct of this
+    module — a construction `R()`, a call, a ternary, a name the parameter table
+    does not resolve — leaves the field PLACED, because that is the shape the
+    placement was built for and this predicate is not a rewrite of it. It is
+    asked only of a field `struct_nested_frame_fields` has already agreed is a
+    nested frame of this module, so it can only ever REMOVE a placement, never
+    invent one.
+
+    `one_word_field_struct` is the other reader of the same evidence and calls
+    this, rather than the two walking `__init__`'s body separately and one of
+    them learning about a spelling the other does not.
+    """
     values = _init_field_assignments(struct_def).get(name) or []
     if not values:
-        return None, None
+        return None
     params = None
     named = set()
     for v in values:
         if not (isinstance(v, F.IdentExpr) and v.name != "None"):
-            return None, None
+            return None
         if params is None:
             params = _init_declared_parameters(struct_def, decls)
         st = params.get(v.name)
         if st is None:
-            return None, None
+            return None
         named.add(st.name)
     if len(named) != 1:
-        return None, None
-    return structs_declared(named.pop(), decls), "assigned"
+        return None
+    return structs_declared(named.pop(), decls)
 
 
 def _init_declared_parameters(struct_def, decls: dict) -> dict:
@@ -18851,12 +18902,13 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
 
     The PLACEMENT decision, and the reason a declared type is not the
     silently-wrong direction: this is the list the constructor walks to reserve
-    a block per field and store each nested frame's address into its own slot.
+    a     block per field and store each nested frame's address into its own slot.
     A declared type that this function did not place is not used, so the
     negative cases (`frame_field_type_candidates`'s `None`) cannot leak into
     the emitter.
 
-    Three conditions, and all three are load-bearing:
+    Four conditions, and all four are load-bearing:
+
 
       * the field is in `struct_frame_slots`, so the frame layout has a slot to
         put an address in — the same discipline `struct_frame_slot` applies;
@@ -18872,6 +18924,21 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
         dropping the condition moved 164 files' verdicts, every one of them
         because ordinary code (`self._bytes = remaining`) was being refused for
         a frame the program had just replaced.
+      * **the constructor BUILDS one there**, rather than storing a name
+        (`init_stores_a_parameter_struct`).  The fourth is the newest and the
+        smallest in source and the largest in what it unblocks: a DELEGATING
+        constructor — `self.src = r` where `r: R` is `__init__`'s own annotated
+        parameter — does not build a nested frame in that slot, it stores the
+        CALLER's frame address, so the slot is a pointer slot and reserving a
+        block for it is what makes the delegating store unsound
+        (`formal/build.py`'s `_frame_field_store_is_sound`, whose lifetime
+        argument the placement was cancelling out).  It is the last reason
+        `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating row was still
+        refused, and the predicate is asked only AFTER the first three so it can
+        only ever REMOVE a placement.
+
+    A declared type this function did not place is not used, so the negative
+    cases (`frame_field_type_candidates`'s `None`) cannot leak into the emitter.
 
     `depth` is the recursion bound; a chain longer than it is dropped from the
     answer rather than silently truncated, which is what makes the bound a
@@ -18891,6 +18958,8 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
             continue
         slot = struct_frame_slot(struct_def, name)
         if slot is None:
+            continue
+        if init_stores_a_parameter_struct(struct_def, name, decls) is not None:
             continue
         out.append((name, slot, nested))
     return out

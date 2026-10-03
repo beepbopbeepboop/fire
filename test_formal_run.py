@@ -6054,6 +6054,93 @@ BOTH_ARCH_CASES = [
          for i in range(61))
      + "def main(n: Int) -> Int:\n"
        "    return d0(n)\n", 11, None),
+    # ── A DELEGATING CONSTRUCTOR OVER A STRUCT OF THIS MODULE ──────────────
+    #
+    # The last reason `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating
+    # row was refused. It is a THREE-step deadlock between two decisions that
+    # were each individually right:
+    #
+    #   1. `model.struct_nested_frame_fields` PLACED a nested frame in every
+    #      field whose declared type names a framed struct of this module and
+    #      whose only writer is `__init__` — the constructor reserving a block in
+    #      the object's own block and storing that block's ADDRESS in the slot.
+    #   2. which made `formal/build.py`'s `_frame_field_store_is_sound` refuse
+    #      `self.src = r`, correctly: the slot IS placed, so a pointer stored
+    #      over it leaves a word where every reader computes a frame base from
+    #      it.
+    #   3. and `_typed_nested_frame` answered `_REASSIGNED` at the read, because
+    #      the placement list — the authority it consults — did not have the
+    #      field in it.
+    #
+    # The store and the read are both right about a field the constructor BUILDS
+    # there. This one does not build one: it stores the CALLER's frame. So the
+    # slot is a POINTER slot, `struct_nested_frame_fields` now says so
+    # (`model.init_stores_a_parameter_struct`, the predicate `one_word_field_struct`
+    # was already asking for the same evidence), `_typed_nested_frame` says so
+    # too — and it must say it with the STRUCT rather than with `_REASSIGNED`,
+    # because `_REASSIGNED`'s own sentence ("a frame belonging to whichever
+    # function ran the assignment") is false here: the only assignment is
+    # `__init__`'s and the frame in the slot is the caller's.
+    #
+    # 7 + 1 = 8, and the reader is a METHOD (`h.total()`) as well as a field read
+    # (`h.src.a`) because the two go through different arms and a fix that
+    # reached only the value-position read would leave the method receiver
+    # refusing.
+    ("both_arch_a_delegating_constructor_over_a_struct_of_this_module",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Holder:\n"
+     "    var src: R\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(self, r: R):\n"
+     "        self.src = r\n"
+     "        self.n = 1\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return self.src.a + self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    var h = Holder(r)\n"
+     "    printf(\"%d %d\", h.src.a, h.total())\n"
+     "    return h.src.a + h.n\n", 8, "7 8"),
+    # GUARD for the placement itself, in the direction that keeps it working: a
+    # slot whose `__init__` writes only `self.tag` — never `in1` — is still a
+    # PLACED nested frame, and two objects still get two frames. Without this row
+    # a fix that dropped the placement rather than narrowing it would look green.
+    #
+    # It is the shape `assigned_type_nested_frame_two_objects_no_alias` uses,
+    # deliberately: that case's `Outer` has a two-field frame (`tag`, `pad`) so
+    # `in1` lands at slot 2, which is what makes it a depth-2 nested frame rather
+    # than the depth-1 one-word case, and it is the only shape on this path that
+    # both PLACES a nested frame and writes through one afterwards.
+    ("a_constructed_nested_frame_is_still_placed",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.tag = 0\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.in1.a = 1\n"
+     "    o1.in1.b = 2\n"
+     "    o2.in1.a = 7\n"
+     "    o2.in1.b = 8\n"
+     "    printf(\"%d %d\", o1.in1.a * 10 + o1.in1.b, o2.in1.a * 10 + o2.in1.b)\n"
+     "    return o1.in1.a + o2.in1.a\n", 8, "12 78"),
     # ── A LOOP VARIABLE'S KIND, ON BOTH ARCHITECTURES ──────────────────────
     #
     # Every other row of this change is in PRINTF_TEXT_CASES and runs on the
@@ -9049,23 +9136,25 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
-# (8) The SAME construction into a field DECLARED with that struct's type,
-    # and the message is a different one — the frame's.  `f` is declared `In3`,
-    # a struct of this module whose receiver is a frame, so the parameter is a
-    # FRAME HOLDER (the declared type is the evidence; there is no call site
-    # that hands it one, because `In4.__init__` is called by nobody here) and
-    # `self.f = f` parks a frame address in a field.  That is
-    # `frame_return_refusal`'s sibling for a store, and it is the more useful of
-    # the two messages because it names the LIFETIME question: the slot belongs
-    # to the frame that created THAT object and nothing here can say the two
-    # lifetimes agree.  It used to be answered by the placement instead
-    # (`construction_nested_slot_refusal`, "a store over a placed nested frame"),
-    # which was right about the slot and silent about the address being stored
-    # in it; the ORDER moved because the frame analysis runs before the
-    # construction checks and now recognises the parameter.  Still a refusal, and
-    # a separate case because two refusals for one family is exactly what "the
-    # needle is the fact that is wrong" is for.
-    ("constr_refuse_an_init_store_over_a_placed_nested_frame",
+# (8) The SAME construction into a field DECLARED with that struct's type, and
+    # **this one used to be a refusal and is now the row that says why it is
+    # not** (`model.init_stores_a_parameter_struct`, 2026-10-03,
+    # `bugs/FORMAL_receiver_stored_in_a_field.md`).
+    #
+    # It was refused as "a store over a placed nested frame", and the PLACEMENT
+    # is what made the store unsound — `struct_nested_frame_fields` reserves a
+    # block in the object's own block and writes that block's address into `f`,
+    # so a pointer stored over it leaves a word where every reader computes a
+    # frame base from it.  But this constructor does not BUILD a nested frame in
+    # `f`: it stores the CALLER's, because `f` arrived as its own annotated
+    # parameter.  `f` is therefore a POINTER slot, `g` is the only placed one,
+    # and `x.f.a` reads the caller's frame at the slot's own offset.
+    #
+    # Which is why this case changed from `refuse:` to an ANSWER rather than
+    # being deleted: it is the smallest source that reaches the whole deadlock,
+    # and a reader who finds the placement predicate and wants to know what it
+    # moved should find the answer here.  1 + 2 + 3 = 6.
+    ("constr_a_delegating_store_into_a_typed_nested_slot_builds",
      "struct In3:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -9080,8 +9169,7 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var x = In4(In3(1, 2), 3)\n"
-"    return x.g",
-     "refuse:is stored in the field 'self.f'", None),
+     "    return x.f.a + x.f.b + x.g\n", 6, None),
     # The other side of the same line, and the one the change made a REFUSAL:
     # a zero-argument `S()` on a struct whose `__init__` REQUIRES a parameter.
     # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
