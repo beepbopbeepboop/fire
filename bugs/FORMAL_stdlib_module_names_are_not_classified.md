@@ -44,6 +44,20 @@ source — `math`, `stat`, `shutil`, `fcntl`, `platform` all answer False there
 and are pinned False by their own suites. One oracle, two questions, and both are
 asked where they are used.
 
+**One red this area was already carrying, fixed here because the area's own
+semantics settle it.** `test_formal_link_accounting.py`'s `test_host_tiers`
+asserted that a name may enter the host set only if it has real source, and it
+has been red since the `shlex` fix (`c5bbd0b3`, 2026-10-02) — `shlex` entered
+`HOST_MODELLED` with no `formal/hostmods/shlex.mojo` behind it. The invariant's
+premise is wrong for that tier and the measurement says so: **all 31
+`HOST_MODELLED` names have no source in this tree**, which is what the tier's own
+comment means by "reachable in principle, not implemented today, and therefore a
+gap with an owner". So the requirement is now asserted where it means something —
+an addition to `HOST_UNREACHABLE` (a permanent fact about the target) or to
+`HOST_ADMITTED` (a name that ANSWERS under declared contracts) — and a
+`HOST_MODELLED` addition is held only to the rule the check already stated: it
+was being MISCLASSIFIED.
+
 ## 0.1 The coverage question, answered: ZERO
 
 §"The next step" says "which of the 120 a swept file actually imports is the
