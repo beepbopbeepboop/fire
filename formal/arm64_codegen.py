@@ -5821,7 +5821,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         if op in alu:
             self._emit_expr(e.left)
             self.asm.emit(encode_stp_sp_pre(0, 2))
+            # `p + k` on a POINTER is element arithmetic, not address arithmetic:
+            # Mojo's `Pointer[T].__add__` moves `k` ELEMENTS, so the offset has
+            # to be scaled by the pointee's width or `p + 1` on a `Pointer[Int64]`
+            # reads the second element. The scale is emitted and not assumed, and
+            # `model.pointer_offset_scale` is the ONE predicate that says when —
+            # the same call `_offset_scale` makes when the load asks whether the
+            # address it is about to read through is already scaled, so the two
+            # architectures and the two halves of a dereference cannot disagree.
+            # A one-byte pointee is the identity scale and is not emitted at all,
+            # so every `char *` program is byte-identical to what it was.
+            scale = M.pointer_offset_scale(self._cur_fn, e) if op in ("+", "-") \
+                else None
             self._emit_expr_to(e.right, "X1")
+            if scale:
+                self.asm.emit(encode_movz_xd_imm(2, scale))
+                self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
             self.asm.emit(alu[op](0, 0, 1))
             if op in ("+", "-", "*"):

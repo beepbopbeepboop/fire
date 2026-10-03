@@ -1,16 +1,76 @@
 # FORMAL: a struct whose ONLY field is a nested frame cannot be compiled into a dylib, because its `__init__` is read as returning a frame
 
+**Status, 2026-10-03 (`work/formal13-5`): §"Why step 3 is the wrong answer" is
+FIXED and the doc's reproducer turns out to be the half that is RIGHT. The
+refusal stays for the shape below and goes for the shape next to it; the two
+differ in one line of source, and only one of them is a real escape.**
+
 **Area:** FORMAL (the frame receiver, the receiver writeback, and the dylib
 export set). Found 2026-10-03 on `work/formal10-5` while measuring the first
-arrow of `bugs/FORMAL_stdlib_optional_needs_a_representation.md`. **NOT FIXED —
-it belongs to whoever owns the frame/export boundary, and it is not this
-session's claim.**
+arrow of `bugs/FORMAL_stdlib_optional_needs_a_representation.md`.
 
-The whole stdlib is downstream of it: `std/builtin/builtin_slice.mojo` is
-refused for exactly this, which is why `std/utils/variant.mojo` and every
-`std.format` / `std.builtin.rebind` importer now stop there instead of at the
-construct their own docs are about. 20+ files in
-`bugs/sweeps/sweep-x86-6.txt` carry it as their `CODEGEN/DEPENDENCY` text.
+## 0. What landed, and what it says about this document's own claim
+
+The write-back `_return_the_receiver` appends is now TAGGED, and both readers of
+the tag agree on what a tag means:
+
+| | where | what |
+|---|---|---|
+| the tag | `formal/build.py::_return_the_receiver` | every `return` it creates or fills in carries `_receiver_writeback`; it is the only place that knows which returns it made, because one-field mutators are the only functions that get an appended `return` at all |
+| the rebinding test | `_writeback_rebound_receivers` | the receiver is REBOUND in this body — asked AFTER `_rewrite_self_fields`, which is what makes it the honest question: a store THROUGH the receiver and a rebinding of it are the same assignment by then |
+| reader 1 | `_frame_return_status` | a tagged return of an UNREBOUND receiver is not a frame return, so the dylib export refusal does not fire |
+| reader 2 | `_check_frame_escapes` | …and it is not an ESCAPE either: the caller already held that block |
+
+Measured, both classifications, on the two constructors that differ in one line:
+
+| constructor | before | after |
+|---|---|---|
+| `self.inner.a = a` — writes THROUGH the caller's block | refused twice: "returns a frame address, so it cannot be compiled into a dylib", and once that was out of the way "a Inner receiver is returned from a method of Box1, which did not create the frame" | **the dylib builds** |
+| `self.inner = Inner(a, b)` — ASSIGNS a frame to its own one word, which the elision makes a rebinding | refused | **still refused**, with the same sentence |
+
+The second sentence of the first row is the one worth keeping: it was the escape
+check refusing its own convention, and it named a frame the CALLER created and
+still owns.
+
+**So this document's central claim is half wrong, and the measurement is what
+says so.** §"Why step 3 is the wrong answer" argues that "the appended
+`return self` is a NO-OP for this receiver" for the reproducer at the top of this
+file. It is a no-op only when the body WRITES THROUGH. For this document's own
+reproducer — `self.inner = Inner(a, b)` — `_rewrite_self_fields` collapses the
+store onto `self` BEFORE `_frame_return_status` runs, so the callee really does
+bind a frame it built itself and really does hand back its address. **That is an
+escape and the refusal is right**, and a fix that took the doc's advice would have
+exported a function whose returned word points into a dead frame. The rule that
+replaces the doc's advice is the one in the table above: a write-back is not a
+frame return unless the receiver was rebound.
+
+**What the doc's §"The related question the fix must not skip" asked for is
+therefore already answered, by a refusal that predates all of this.** A
+cross-module construction of such a struct is refused BY NAME at the
+construction site, on both architectures, for the body this path cannot inline:
+
+```
+build: constructing Box1 with arguments is a call to a user-defined `__init__`
+whose body this path does not inline: `Inner(…)`, a construction of a struct
+whose receiver is a frame … OR `a local assignment (`self.inner.a = …`)` …
+so what it needs from the body is that it IS a sequence of those
+```
+
+So there is no window in which an importer gets a wrong answer: the export
+exists, and the only construct that would consume it is refused before it is
+lowered. Whether that refusal should become a *by-name* cross-module refusal
+rather than a construction-inlining one is a decision, and it is recorded below
+rather than taken.
+
+**`std/builtin/builtin_slice.mojo` is still refused, and now for the right
+reason.** `StridedSlice.__init__` is `self._inner = Slice(start, end, stride)` —
+the ASSIGNING shape — so it is a real returned frame and this change does not
+unblock it. The 20+ `CODEGEN/DEPENDENCY` rows in `bugs/sweeps/sweep-x86-6.txt`
+that carry its text keep carrying it. Unblocking it needs the by-reference
+construction convention (`bugs/FORMAL_wide_receiver_by_reference.md`), not a
+classification change.
+
+## 1. What was here before this update
 
 ## The 15-line reproducer, both shapes measured
 
@@ -119,17 +179,47 @@ the importer gets a wrong answer". The honest pair is: export nothing a caller
 cannot use, and refuse the cross-module CONSTRUCTION by name at the import site.
 Whether that second refusal is wanted is a decision, not a measurement.
 
+> **Answered 2026-10-03, and the pair already holds.** The cross-module
+> construction is refused by name today, on both architectures, with a sentence
+> that names the body it cannot inline (`constructing Box1 with arguments is a
+> call to a user-defined `__init__` whose body this path does not inline: a local
+> assignment (`self.inner.a = …`)`). §0's change therefore exports a symbol with
+> no consumer that can reach it, rather than exporting a wrong answer. The
+> decision left open is whether the refusal should be re-spelled as a
+> cross-module refusal, which would be a message change and not a behaviour one.
+
 ## Blast radius, measured where it is cheap
 
 * `std/builtin/builtin_slice.mojo` is refused, and with it every importer of
   `std.format._utils` / `std.builtin.rebind` — `bugs/sweeps/sweep-x86-6.txt`
-  carries the text on 20+ `CODEGEN/DEPENDENCY` rows.
+  carries the text on 20+ `CODEGEN/DEPENDENCY` rows. **Unchanged by §0**: its
+  constructor is the ASSIGNING shape, so it is a real returned frame.
+* The WRITE-THROUGH shape now builds as a dylib, and the cost of that is one
+  new case in `test_formal_dylib.py` (`a receiver write-back is not a returned
+  frame`), which asserts both directions: that the write-through library is
+  written and that the assigning one is still refused with its own sentence.
 * This session's own chain: `variant.mojo` and `builtin_slice.mojo` both stop
   here on arm64 AND x86-64, which is worth stating because the refusal is raised
   by the BUILD PASS (arch-free classification) even though `fire.py dylib
   --formal` only builds an arm64 dylib — so the classification that causes it is
   the same on both architectures and the export table is simply not built for
   x86-64.
+
+## What is still open here
+
+1. **`std/builtin/builtin_slice.mojo`**, which is the whole of the blast radius
+   above. Its `__init__` assigns a frame to its own one word, so the only fix
+   left for it is the by-reference CONSTRUCTION convention — the callee builds
+   the frame in the block the CALLER reserved instead of in its own — and that
+   is `bugs/FORMAL_wide_receiver_by_reference.md`, another lane's design
+   question.
+2. **A related crash in the same family, filed separately** because it is not a
+   dylib question at all:
+   `bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_word.md`
+   — `Box1()` gives the one word ZERO, so the first field access through it is a
+   load from address 0 (SIGSEGV on both architectures), and the same tree holds a
+   two-backend disagreement about a one-field mutator whose receiver is a frame
+   address.
 
 ## Reproducing
 

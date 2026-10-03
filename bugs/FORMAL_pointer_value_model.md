@@ -9,9 +9,11 @@ no header, no tag, no lifetime. With the pointee recovered, `value()` /
 pointee's own width, and the one-byte `UInt8` load that D1 refused over is the
 one this emits.
 
-**§9 status, re-measured 2026-10-02** — of the eight items in "Also found, and
-NOT fixed", one is now FIXED and one is confirmed open with its next step
-unchanged; the rest are unchanged or in other lanes:
+**§9 status, re-measured 2026-10-03** — of the eight items in "Also found, and
+NOT fixed", **two are now FIXED** (the x86-64 one-field-struct field read, and
+the `p + k` offset scale, which is the item this update is about); the rest are
+unchanged or in other lanes, and the next step worth taking is §9's second item
+(`fn._param_pointees`).
 
 * **The x86-64 one-field-struct field read is FIXED.** That was the only
   SILENT WRONG ANSWER in the list (it returned 0 where the source said 4242, and
@@ -26,28 +28,49 @@ unchanged; the rest are unchanged or in other lanes:
   `formal/build.py` work and declines to claim it as this change's, which
   remains the right attribution: it is wave-4 D2's holder work, not the pointer
   value model.
-* **The `p + k` offset scaling is OPEN, and the current behaviour is sharper
-  than §9 states.** Measured, both architectures:
 
-      def read_at(p: Pointer[UInt8], k: Int) -> Int:   var q = p + k; …
-        ANSWERED — `q`'s pointee is recovered through the `p + k` RHS and
-        width 1 is the identity scale (`_offset_scale` returns True before it
-        looks at the arithmetic at all), so the corpus's whole `p + k` is
-        answerable
-      def read_at(p: Pointer[Int64], k: Int) -> Int:  var q = p + k; …
-        REFUSED, by `_offset_scale`'s own sentence, which names the arithmetic,
-        the width and the `p + k * 8` workaround
+* **The `p + k` offset scale is FIXED, on both backends, and it is the lowering
+  §9 asked for.** `p + 1` on a `Pointer[Int64]` now moves one ELEMENT, which is
+  what `Pointer[T].__add__` means, and the load that follows it is at the right
+  address because both halves ask ONE predicate:
 
-  So the refusal is where §9 says it is and the ANSWER side is real, which the
-  doc's two pinned cases already assert (`deref_offset_on_a_one_byte_pointee_is
-  _the_answer`, `deref_refuse_unscaled_offset`; both re-run green here, 18/18
-  across `POINTER_DEREF_CASES` and `POINTER_DEREF_REFUSALS`). The next step is
-  unchanged and still the one worth taking as its own change: scale in
-  `_emit_binop`, ~10 lines per backend, conditional on a KNOWN pointee of width
-  != 1 so that every other program's emitted code is byte-identical. It is not
-  done here because `_emit_binop` is the hottest site in both backends and it
-  deserves its own diff and its own gate rather than being folded into a branch
-  that already carries five unrelated fixes.
+  | | where | what |
+  |---|---|---|
+  | the predicate | `formal/model.py`, `pointer_offset_scale` | the width to scale by, or None. `p ± k`; `p` a NAME with exactly one declared annotation naming a pointer whose pointee width `POINTEE_WIDTHS` establishes and which is not 1; `k` an integer by DECLARATION (`_is_integer_expression`) |
+  | the emitter | `formal/arm64_codegen.py::_emit_binop`, `formal/x86_64_codegen.py::_emit_two_sided` | `movz X2, #width; mul X1, X1, X2` / `imul scratch, scratch, imm8` — the same two instructions `p[i]` already emitted for the subscript, so the element scale is emitted in one shape rather than two |
+  | the model | `formal/model.py::_offset_scale` | the same call decides whether the address it is about to load through is already scaled, so the two cannot disagree in the direction that is a WRONG ANSWER |
+
+  Measured, both architectures, one program per width, expected values from
+  `struct.unpack` over the same bytes (`p + 0/1/2` on a 24-byte literal, and the
+  same through a `Pointer`-returning function so the scale has to compose across
+  a call boundary):
+
+      i64@0=1 i64@1=1 i64@2=1 | i32@0=1 i32@1=1 | u8@0=65 u8@3=68 u8@23=88
+
+  **Every other program's emitted code is byte-identical**, and that is not a
+  hope: a one-byte pointee returns None, so no instruction is added for any
+  `char *` — which is every pointer in the corpus today (`env.mojo`'s `getenv`
+  result, every `String(unsafe_from_utf8_ptr=…)`), and
+  `deref_offset_on_a_one_byte_pointee_is_the_answer` is the case that fails if
+  that ever stops being true. Three new answered cases
+  (`deref_offset_scales_by_the_pointee_width`,
+  `deref_offset_scales_by_four_for_a_32_bit_pointee`,
+  `deref_offset_backwards_scales_too`) and one new refusal
+  (`deref_refuse_offset_with_an_undeclared_offset`) replace
+  `deref_refuse_unscaled_offset`, which pinned the refusal this change removes.
+
+  **What is still refused, and why it is not the same refusal.** An offset whose
+  integer has no declaration — `def read_at(p: Pointer[Int64], k)` — has nothing
+  to say whether `k` is an `Int` at all, so the scale does not fire and the
+  dereference is refused with a message that names the missing declaration
+  rather than claiming (as the old one did) that the ALU adds a raw integer,
+  which stopped being true when the scale landed. That is
+  `formal.types.infer_expr`'s doing and not this change's: it answers a bare
+  name with the DEFAULT INTEGER TYPE, so it cannot tell `k` from `q`, and using
+  it here would scale `p + q`. **The next step for this item** is therefore to
+  let an UNANNOTATED offset be typed by the image's own integer model rather
+  than by a declaration — which is a types question, not a lowering one, and is
+  a day's work on its own.
 
 Two results in this document are worth more than the lowering, and both are
 count corrections rather than features:
@@ -656,8 +679,12 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
 
 ## 9. Also found, and NOT fixed — each with its next step
 
-- **`p + k` does not scale by the pointee's size, and the dereference refuses
-  rather than loading at the wrong address.** Measured: `q = p + 3` on a `char *`
+- **`p + k` did not scale by the pointee's size, and the dereference refused
+  rather than loading at the wrong address. FIXED 2026-10-03** (`work/formal13-5`;
+  see the Status block at the top for the files, the measurement and the case
+  names). The text below is what the measurement was, kept as the record:
+
+  Measured: `q = p + 3` on a `char *`
   gives `base + 3`, which is correct C for a one-byte pointee and wrong for every
   other. The ALU adds the raw integer. Unobservable while the only pointers on
   this path were `char *`, and observable the moment `Pointer[Int64].value()` is
@@ -665,12 +692,17 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
   SECOND element. So `_offset_scale` refuses any address chain that contains an
   offset when the width is not 1, and answers every one where it is
   (`deref_offset_on_a_one_byte_pointee_is_the_answer`, the guard).
-  **Next step:** scale in `_emit_binop`, which is ~10 lines per backend at the
-  `+`/`-` arm and provably behaviour-preserving for width 1 (every string).
-  Deliberately not done here: `_emit_binop` is the hottest site in both backends
-  and the scale has to come from the same `POINTEE_WIDTHS` the load does, which
-  means threading `self._cur_fn` into it. It is a lowering, not a model change,
-  and it is a clean standalone piece of work.
+  **Next step, as it was:** scale in `_emit_binop`, which is ~10 lines per
+  backend at the `+`/`-` arm and provably behaviour-preserving for width 1
+  (every string). Deliberately not done there: `_emit_binop` is the hottest site
+  in both backends and the scale has to come from the same `POINTEE_WIDTHS` the
+  load does, which means threading `self._cur_fn` into it. **What that took, and
+  the one thing it could not take:** `self._cur_fn` went in, and the width comes
+  from a NEW reader (`pointer_offset_scale`) rather than from `POINTEE_WIDTHS`
+  directly, because the emitters and `_offset_scale` must ask the same question
+  and `POINTEE_WIDTHS` answers "how wide is this pointee", not "is this offset an
+  element offset". An UNANNOTATED offset is still refused, which is the
+  remaining half of this item and is a types question.
 - **A pointer that crosses a call boundary loses its pointee.** 14 of the 47
   `unsafe_value` sites are a callee's parameter. The refusal is D2's own rule
   applied to a pointer and is correct, but it is a *coverage* limit with a
