@@ -152,16 +152,23 @@ algorithm CPython uses rather than a second implementation of it.
     string in this module is a parameter;
   * the sets that need a byte which cannot be written in a source literal (a
     tab, a form feed, a CR, the 128 bytes >= 0x80) are BUILT with `str_alloc`
-    + `memset`, the way `os.linesep` builds its newline: a string literal on
-    this path is interned VERBATIM and its escapes are not unescaped, so
-    `"\t"` is the two characters `\` and `t`. Every other set is a literal of
-    printable bytes, and every set here is pinned byte for byte by
-    `test_ast_formal.py`. The same verbatim rule has a second-order cost worth
-    knowing about, because it is why `test_ast_formal.py` does not embed its
-    corpus as literals: the compiler's LEXER honours an escape while finding a
-    literal's end, so a literal holding a backslash before a quote can swallow
-    the rest of the file
-    (`bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md`).
+    + `memset`, the way `os.linesep` used to build its newline. That idiom is no
+    longer forced: a literal on this path IS decoded, inside a module as well as
+    inside a program, on both architectures (`9023031b` gave these backends the
+    decoder every engine shares, measured and pinned by
+    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`), so
+    `"\t"` is a real tab and the sets here could be written as literals. They
+    are built instead because a set is assembled once at RUN time and its bytes
+    are laid down one at a time; the reasoning this comment used to give — "a
+    string literal on this path is interned VERBATIM and its escapes are not
+    unescaped" — was false from that commit onwards. Every set here is pinned
+    byte for byte by `test_ast_formal.py`, so the change is mechanical when
+    someone wants it; `bugs/FORMAL_sys_mojos_escape_note_is_stale.md`
+    §"what remains" is the list. A separate cost is real and unchanged: because
+    the compiler's LEXER honours an escape while finding a literal's end, a
+    literal holding a backslash before a quote can swallow the rest of the file
+    (`bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md`),
+    which is why `test_ast_formal.py` does not embed its corpus as literals.
   * the string primitives are `os/_syscalls.mojo`'s, imported rather than
     written again: `str_alloc`, `str_build`, `str_len`. That is a real
     dependency — an `ast` dylib links `os`'s — and it is the right one,
@@ -331,12 +338,18 @@ BRACKET_CAP = 64
 
 # ── the character sets ─────────────────────────────────────────────────────
 #
-# Every literal here is PRINTABLE bytes only, and that is not a style choice: a
-# string literal on this path is interned verbatim and its escapes are NOT
-# unescaped, so a `"\t"` in a `.mojo` file is the two characters `\` and `t`
-# and a set of whitespace written as a literal would be a set containing a
-# backslash. The sets that need an unprintable byte are built, below, with the
-# `str_alloc` + `memset` idiom `os.linesep` uses for its newline.
+# Every literal here is PRINTABLE bytes only, and the sets that need an
+# unprintable one are BUILT below with the `str_alloc` + `memset` idiom
+# `os.linesep` used for its newline. Both halves of that used to be forced by
+# one rule — "a string literal on this path is interned VERBATIM and its escapes
+# are NOT unescaped", so a `"\t"` in a `.mojo` file was the two characters `\`
+# and `t` and a set of whitespace written as a literal would be a set containing
+# a backslash. The rule stopped being true at `9023031b`: a literal is decoded,
+# in a module as well as in a program, on both architectures (measured, and
+# pinned by `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`).
+# The idiom stays because each set is assembled once at RUN time, byte by byte,
+# and the sets are pinned byte for byte by `test_ast_formal.py`.
+# bugs/FORMAL_sys_mojos_escape_note_is_stale.md §"what remains".
 
 SP = " "                  # 0x20
 BSLASH = "\\"             # 0x5C
@@ -502,20 +515,24 @@ def _formfeed() -> str:
 def _quotes() -> str:
     """The two quote bytes, 0x22 and 0x27, as a NUL-terminated set string.
 
-    BUILT, and not written as a literal, for a measured reason: a string literal
-    on this path is interned VERBATIM and its escapes are not unescaped, so
-    there is no spelling of a two-byte set holding both quotes. `"\""` emits a
-    backslash and a quote (the escape is not interpreted, so the set would also
-    match every backslash in the source), `'\''` emits a backslash and an
-    apostrophe for the same reason, and `'"'` — the one that looks right —
-    emits the double quote alone (measured: a `'x = 'y'` source lexed its
-    opening quote as a one-character OP). So the set is laid down a byte at a
-    time, the way `os.linesep` builds its newline.
+    A LITERAL, `"\\"'"`, and it is the clearest thing `9023031b` changed in this
+    file. This function used to allocate two bytes and `memset` them one at a
+    time, on a measured claim: "a string literal on this path is interned
+    VERBATIM and its escapes are not unescaped, so there is NO spelling of a
+    two-byte set holding both quotes" — `"\""` would emit a backslash and a
+    quote, `'\''` a backslash and an apostrophe, and `'"'` the double quote
+    alone because a `'x = 'y'` source lexed its opening quote as a one-character
+    OP.
+
+    None of that holds now. A literal is decoded, in a module as well as in a
+    program, on both architectures: measured through a module dylib, where
+    `sys.write_stderr("\\"'")` writes two bytes and returns 2, `"'"` writes one
+    and returns 1, and `var x = '"'` writes one and returns 1 — pinned by
+    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`. The set
+    is byte for byte what it was, and `test_ast_formal.py` pins every set in
+    this module byte for byte, so the change is checked rather than asserted.
     """
-    var b: Pointer[UInt8] = str_alloc(2)
-    memset(b, 34, 1)
-    memset(b + 1, 39, 1)
-    return b
+    return "\"'"
 
 
 def _lf() -> str:

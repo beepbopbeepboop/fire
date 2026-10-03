@@ -38,7 +38,14 @@ part that makes it a module:
      `fire_compiler.decode_c_escapes` and gave the formal backends the same
      one every other engine already used. It is kept as a test rather than
      dropped because it is the only place the module's writers are checked
-     against CPython's own answer for a literal with an escape in it.
+     against CPython's own answer for a literal with an escape in it;
+  9. and a literal inside a MODULE — a dylib, which is where every host
+     module's literals live — is decoded the same way. The program case above
+     is not evidence about the module case: they are separate compilations,
+     and half a dozen files in this tree still carry a comment saying a `\t`
+     in a `.mojo` file is two characters because it used to be. That was
+     `bugs/FORMAL_sys_mojos_escape_note_is_stale.md`, whose consequence was to
+     check those corpora; 10 says the check's answer, on both architectures.
 
 Invoked directly:
     python3 test_formal_sys.py [-v]
@@ -221,6 +228,37 @@ import sys
 def main():
   n = sys.write_stderr("a\\nb")
   print(n)
+  return 0
+"""
+
+# The same escape, but inside a MODULE rather than in the program. Every stale
+# statement about undecoded escapes in this tree is about module code — they are
+# in `formal/hostmods/ast.mojo`, `argparse.mojo`, `os/__init__.mojo` and
+# `re.mojo`, all of which are compiled into dylibs, and all of which used to
+# spell an awkward byte with `memset` because a literal could not hold one. A
+# decoder that works only in the program would leave every one of those true,
+# so the module case is its own measurement rather than a corollary.
+LITERAL_IN_MODULE = """\
+import sys
+
+def size() -> int:
+  return sys.write_stderr("a\\nb")
+
+def tabbed() -> int:
+  return sys.write_stderr("p\\tq")
+
+def quoted() -> int:
+  return sys.write_stderr('y')
+"""
+
+MODULE_CALLS_LITERAL = """\
+import sys
+import litmod
+
+def main():
+  print(litmod.size())
+  print(litmod.tabbed())
+  print(litmod.quoted())
   return 0
 """
 
@@ -542,6 +580,45 @@ def test_string_escapes_are_interpreted_as_cpython_does(tmp, _shared):
           f"three decoded bytes, not the five characters of the source")
 
 
+def test_a_literal_inside_a_module_is_decoded_too(tmp, _shared):
+    """`"a\\nb"` in a MODULE is three bytes as well, and `'y'` is one.
+
+    The program case above is not the case the host modules are in. Every one of
+    them is compiled into a dylib, and every one of them used to spell an
+    awkward byte by writing it with `memset`, because a string literal on this
+    path was interned verbatim: `ast.mojo`'s character sets, `argparse.mojo`'s
+    separators, `os.linesep`, and `re`'s escape tables all carry a comment
+    saying a `\\t` in a `.mojo` file was two characters. That was true until
+    9023031b and is false now, in the place that matters — a module — so the
+    corpora that were written around it may be simplified and the comments that
+    state it as a constraint are wrong.
+
+    Pinned here, on both architectures, because a decoder that reached only the
+    program would leave all four of those files telling the truth while this
+    suite stayed green: the program and the module are separate compilations,
+    and a literal in one is not evidence about the other.
+
+    The three cases are the three spellings those corpora needed and could not
+    use: `\\n` (a control byte), `\\t` (a second one), and a single-quoted
+    one-character literal (`ast.mojo` says `'x = 'y''` lexed its opening quote
+    as a one-character OP, which is why it builds its two-byte quote set with
+    `str_alloc` + `memset`).
+    """
+    root = workdir(tmp, "inmodule")
+    for arch in ARCHES:
+        with open(os.path.join(root, "litmod.mojo"), "w") as f:
+            f.write(LITERAL_IN_MODULE)
+        ran = build_and_run(root, "sys_inmodule", MODULE_CALLS_LITERAL)
+        check(ran.stderr == "a\nbp\tqy",
+              f"[{arch}] stderr was {ran.stderr!r}: expected the module's "
+              f"literals decoded — a real newline, a real tab — the way CPython "
+              f"decodes them")
+        check(ran.stdout == "3\n3\n1\n",
+              f"[{arch}] stdout was {ran.stdout!r}: expected the DECODED byte "
+              f"counts 3, 3 and 1 across the dylib boundary; 5, 5 and 4 would "
+              f"be the source's characters")
+
+
 # ── the sweep's verdict ────────────────────────────────────────────────────
 
 def test_the_sweep_calls_a_sys_refusal_a_codegen_finding(tmp, _shared):
@@ -605,6 +682,8 @@ TESTS = [
     ("the documented spelling exits", test_the_documented_spelling_exits),
     ("string escapes are interpreted as CPython does",
      test_string_escapes_are_interpreted_as_cpython_does),
+    ("a literal inside a module is decoded too",
+     test_a_literal_inside_a_module_is_decoded_too),
     ("the sweep calls a sys refusal a codegen finding",
      test_the_sweep_calls_a_sys_refusal_a_codegen_finding),
 ]
