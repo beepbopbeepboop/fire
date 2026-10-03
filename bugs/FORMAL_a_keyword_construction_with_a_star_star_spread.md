@@ -1,9 +1,70 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
-**Status:** open, unowned, found 2026-10-03 while clearing the single-file causes
-in `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2. **The refusal is CORRECT** —
-this doc records what it costs and what the two ways out are, not a bug in the
-refusal.
+**Status: PARTIAL — the false half is fixed and the real blocker is now
+measured.** Found 2026-10-03 while clearing the single-file causes in
+`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2. **The refusal itself is still
+CORRECT** — what changed is that the sentence it used to produce was false about
+the source, that a spread of a dict LITERAL is now answered rather than refused,
+and that the gap that remains is NOT the one this doc's §"The exact next step"
+thought. See "What landed" at the end, which is the part to read first.
+
+## What landed (2026-10-03, `formal/model.py`)
+
+**1. The spread was a POSITIONAL, and that is why the message named a duplicate
+the source does not contain.** `fire_compiler.py`'s `_parse_paren_args` keeps the
+`**` marker alive by appending `UnaryOp('**', mapping)` to `args` — right for an
+interpreter, which splices at call time, and wrong for the two readers that zip
+`args` against a parameter/field LIST:
+
+    S(a=1, **{'b': 2})   ->  constructing S with 'a' gives field 'a' more than one value
+
+`a` was never given twice; the whole mapping was bound to `a` as the first
+positional, and the keyword `a=1` then collided with it. Measured on both
+architectures, and with one keyword fewer it was not a refusal at all: the
+mapping's own word would have been stored in `a`'s slot.
+
+**2. A spread of a dict LITERAL is now un-spread, with its VALUES**, in
+`_unspread_keyword_mappings`, called from the two readers — `struct_construction_plan`
+for a construction and `bind_call_arguments` for a call. Both keys and values are
+written in the source and a dict subscript by a literal key already lowers
+(`d['a']` is 1), so `S(a=1, **{'b': 2})` builds and prints `1 2`, and
+`f(a=1, **{'b': 2})` prints 12 — both agreeing with CPython on both architectures.
+The duplicate check then applies UNCHANGED, which is what keeps
+`S(a=1, **{'a': 2})` refused with CPython's own `TypeError` rather than with
+something this path invented.
+
+**3. Any other spread is refused BY NAME**, naming the operand and saying the
+keys are not knowable at the construction site — which for
+`formal/x86_64_decode.py` reads `constructing Insn spreads `kw` with `**`` where
+it used to read `gives field 'offset' more than one value`.
+
+**4. The blocker for the remaining case is not the key set, and this is the
+measurement that reorders §"The exact next step".** That section's option 2 is
+"track a spread's key set when it is a literal … through a local that is only ever
+bound such a literal … keeping the set through a `**`-parameter". The premise is
+that a `**`-parameter is something whose keys could be carried — and on this path
+it is not: a formal value is one 64-bit word and the target has no variadic ABI,
+so a callee cannot read its own `**kwargs` AT ALL. Measured, both architectures,
+on this doc's own reproduction: the refusal that fires first is
+
+    build: mk: the body reads 'kw', its **-parameter, and this path has no
+    variadic ABI. A formal value is one 64-bit word, so the arguments a caller
+    passes past the fixed ones (this module's call sites pass …) have nowhere
+    to go
+
+So the exact next step is the variadic ABI, not the key set: **a `**kwargs`
+parameter has to become a dict blob the callee can read by literal key**, and only
+then is there a value to take a key set from. That is one feature with two
+consequences (the callee can read it; the caller's spread can be answered from
+it), and it is the same question `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md`
+asks on the gimple side — the two should share an answer, as this doc already said.
+
+Until then the two ways out of the original §"The exact next step" are unchanged:
+write the keywords out (which is what makes `formal/x86_64_decode.py` build), or
+build the variadic ABI.
+
+Rows: `test_formal_run.py`'s `SPREAD_CONSTRUCTION_CASES` (2, CPython-differential,
+both architectures) and `SPREAD_REFUSALS` (4, both architectures).
 
 ## What was run
 

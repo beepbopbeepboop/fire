@@ -502,6 +502,11 @@ MEASURED_PEAK_GB = {
     # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
     # under `tools/memslot.py --gb 8` before being named, like the two above.
     'formal-core-hostmods':  (0.1,  'measured'),   # 25 s, 6 groups
+    # …and the one `work/formal13-1` brought in, a pure SOURCE check over
+    # `HOST_OWNED_BLOBS` and the `hostmods` it describes: 0.036 GB and 0.63 s,
+    # the same cost class as the two below it and measured the same way one at a
+    # time under `tools/memslot.py --gb 8`.
+    'formal-blob-contract':  (0.036, 'measured'),
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2475,6 +2480,28 @@ test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
      extra=['test_formal_receiver_spelling.py', 'formal/model.py',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a receiver spelled `this`, diffed against a `self` twin and CPython')
+# `formal/imports.py`'s `HOST_OWNED_BLOBS` is the one place this tree says what
+# the words of another module's pointer MEAN, and it is a declaration rather
+# than something derived — `str_alloc` also returns a `malloc`'d block and the
+# caller owns every word of that one, so what separates them is who frees the
+# words, and a callee's own body does not say. A declaration that drifts from
+# the module it describes is worse than none: the refusal it produces would
+# refuse a store that is fine, or let one through that the module's `free` then
+# walks as a pointer.
+#
+# So this one is a SOURCE check with no image in it — 30 assertions over
+# `formal/hostmods/*.mojo` and the table — and the end-to-end half (the
+# contract reaches a manifest, and an importer is refused by name) is
+# `formal-os`'s `blob` group, which builds the real `os` dylib. The cheapest
+# formal coverage in the tree and one of the two cheapest overall: measured
+# 2026-10-03 under `tools/memslot.py --gb 8`, peak read by polling
+# `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` over the same run: **0.036
+# GB, 0.63 s wall**. `mem='tiny'` from that peak and not from the shape.
+test('formal-blob-contract', [PY, 'test_formal_blob_contract.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_blob_contract.py', 'formal/imports.py',
+            'formal/hostmods/os/__init__.mojo'],
+     desc="HOST_OWNED_BLOBS is checked against the hostmods' own source")
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2711,7 +2738,14 @@ BUCKETS = {
                 # tree (0.64 s, 0.033 GB, no build and no Lean) so `check`
                 # would be defensible too, and the choice is not worth a
                 # second argument.
-                'formal-typed-flag'],
+                'formal-typed-flag',
+                # …and `test_formal_blob_contract.py`, which came with
+                # `work/formal13-1` and was named by no bucket. Same shape of
+                # thing as the one above and the same cost: 0.63 s and 0.036 GB,
+                # a source check with no image and no Lean, so there is no
+                # argument for `check` that does not apply equally to
+                # `formal-typed-flag`.
+                'formal-blob-contract'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

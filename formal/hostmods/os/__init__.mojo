@@ -376,14 +376,37 @@ def chmod(path, mode) -> int:
 #     word 0      count, as an Int64
 #     word 1..n   one `char *` per entry, in `readdir` order
 #
-# The four functions below are the whole of the API, and the split is not
-# taste: this path has no way to return a container whose length is a run-time
-# value AND hand the caller a Python-level list, so the result is a word and
-# the length and the elements are read out of it by name. `len(names)` does not
-# work — a pointer has no count for the builtin to read — and `names[i]` does
-# not either, because the subscript would be asking the blob-walk question
-# about a pointer. `listdir_len` and `listdir_get` ask them of the blob, which
-# IS the shape those operations are about.
+# The result is a word, and both ways of saying what that word holds are here:
+# the DECLARED type, which is what a caller on the other side of a dylib
+# boundary reads (`model.imported_callee_kind`), and the three accessors, which
+# ask the blob directly.  They are not two answers to one question — the
+# declared type says what KIND of thing came back, and the accessors are how a
+# caller releases it and how a use site that must decide an element kind reads
+# it.  `listdir_free` has no spelling in the declaration, which is why it
+# exists.
+#
+# `-> List[String]`, and the annotation is not decoration — it is what puts the
+# CONTAINER KIND in this module's manifest, and a container kind is the one
+# thing a caller cannot derive: a list is one word, so the C signature is
+# `int64_t` whether it is declared a list or an integer and says nothing.
+# Measured, both architectures: with `-> int` an unannotated
+# `var names = listdir(dir)` is an INTEGER, so `names[0]` read the local's own
+# storage and answered 704698368 — a heap address — where `listdir_len` says 2.
+# So the trap was not "a pointer needs an annotation" but "this declaration
+# claimed the value was not one", and the two are fixed by different things:
+# the declaration is now true, and an unannotated binding of a cross-image
+# POINTER that has NO container kind is still REFUSED by name rather than
+# silently computing `[word + 8i]` — `formal/build.py`'s
+# `check_subscript_through_an_unclassified_import`, whose measured cases are
+# `re.escape`'s `-> Pointer[UInt8]` and not this one.
+#
+# A STORE through the result is refused by name as well, and that refusal is a
+# different question from the unclassified one: this blob's words are
+# `malloc`'d names that THIS module walks and frees, so `names[i] = v` is a
+# store into memory the caller does not own.  It is keyed on the export, not on
+# the value — `formal/imports.py`'s `HOST_OWNED_BLOBS` and build.py's
+# `check_imported_blob_stores` — so declaring the return type a list does not
+# make it writable, and the two checks do not have to know about each other.
 
 def listdir(path) -> List[String]:
     """The entries of the directory `path`, or 0 when there is no such
@@ -403,7 +426,9 @@ def listdir(path) -> List[String]:
     The three accessors REMAIN, because they are the honest spelling for a
     caller that wants to free the blob, and `listdir_len`/`listdir_get` are
     what the element-kind refusals read when a use site must decide. The caller
-    OWNS the result and every name in it.
+    OWNS the result and every name in it, which means `listdir_free` is the
+    caller's to call and a store through `names` is refused rather than
+    obeyed — the header above gives the two checks that decide that.
 
     `.` and `..` are NOT in it, as in CPython. The order is the C library's
     `readdir` order, which is the filesystem's own and not sorted — CPython's

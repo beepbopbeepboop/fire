@@ -1683,6 +1683,72 @@ HOST_MODULE_ADVICE = {
 # answer, so the reader is not stuck.
 
 
+# ── A MODULE-OWNED BLOB: the second thing a manifest contract can say ───────
+#
+# `frame_params` is the first: a parameter of an export that is a FRAME ADDRESS
+# of a struct, published per parameter and read by an importer through
+# `check_imported_frame_handoffs`.  This is the other half of the same idea for
+# a value that is a POINTER whose WORDS the exporting module owns — the
+# `listdir`/`walk` convention, where word 0 is the entry count and words `1 + i`
+# are `malloc`'d names the module's own release walks and frees.
+#
+# **WHY IT IS DECLARED AND NOT DERIVED, stated plainly because it is the one
+# judgement in this file that could have gone the other way.**  The obvious
+# derivation is "returns a `malloc`'d block", and it is wrong: `str_alloc` also
+# returns a `malloc`'d block and the caller OWNS every word of it — `p[0] = 65`
+# through it is the supported route into a caller-allocated buffer, and
+# `test_formal_os.py`'s `blob` group pins it on both architectures.  So the fact
+# that separates the two is not the allocation, it is the LAYOUT: whose words are
+# the pointers, and who frees them.  A callee's own body cannot say that —
+# `listdir` hands its block to `_listdir_fill` to write `b[0]` and `b[1 + n]`, and
+# the release that makes the convention observable is a DIFFERENT export — so
+# reading it would mean an interprocedural layout analysis whose answer a reader
+# could not check by looking at one function.  Declared once, here, beside the
+# other host-module facts, and checked against the module's source by
+# `test_formal_blob_contract.py` so the declaration cannot drift from the layout
+# it claims.
+#
+# The value is the LAYOUT, because that is what the importer needs in order to
+# refuse a store by name: "word 0 is the count, word `1 + i` is a pointer this
+# module owns and frees".  The accessors are carried with it so the refusal can
+# name the functions that DO let a caller write (none of them write; they read
+# and release) and point at the route that does — `os._syscalls.str_alloc`,
+# whose buffer the caller owns.
+HOST_OWNED_BLOBS = {
+    "os.listdir": {"returns": True, "count_word": 0, "entry_base": 1,
+                   "release": "os.listdir_free"},
+    "os.walk": {"returns": True, "count_word": 0, "entry_base": 1,
+                "release": "os.walk_free"},
+    "os.listdir_len": {"param": 0, "count_word": 0, "entry_base": 1,
+                       "release": "os.listdir_free"},
+    "os.listdir_get": {"param": 0, "count_word": 0, "entry_base": 1,
+                       "release": "os.listdir_free"},
+    "os.listdir_free": {"param": 0, "count_word": 0, "entry_base": 1,
+                        "release": "os.listdir_free"},
+    "os.walk_free": {"param": 0, "count_word": 0, "entry_base": 1,
+                     "release": "os.walk_free"},
+}
+
+
+def host_owned_blob(name: str) -> dict:
+    """The blob contract for the export `name` publishes, or `{}` for none.
+
+    `name` is a dotted `<module>.<export>` and is matched WHOLE, deliberately:
+    the contract is about one export of one module, and the module here is a
+    host module whose dylib is built by this same tree — so there is no alias
+    to resolve and a prefix match would claim `os.listdir_len` for a caller who
+    wrote `listdir`.
+
+    `{}` is the answer for every other name, which is what keeps the table from
+    being a claim about all pointers: a caller-allocated buffer (`str_alloc`),
+    an `os.path` string, and every `Pointer[T]` in the corpus are unaffected,
+    and a store into one of those is still a store this path can lower.
+    """
+    if not name:
+        return {}
+    return HOST_OWNED_BLOBS.get(name, {})
+
+
 def host_module_advice(name: str) -> str:
     """The `name`'s next step, or `''` when there is no measured one.
 

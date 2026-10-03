@@ -1270,6 +1270,54 @@ CASES = [
      "        return 7\n"
      "    return 8\n",
      8, None),
+    # ── WHAT AN ENUM MEMBER IS, on this path ────────────────────────────────────
+    #
+    # The value model answers "is an enum member its `.value`, or is it an
+    # object?" ONCE, and both rows below are consequences of the same answer —
+    # a member IS its value, and the member's IDENTITY is not in the word.  They
+    # cannot be allowed to disagree, so they are written as a pair: the first is
+    # the value model making a program answerable, the second is the value model
+    # refusing the one construct the word cannot express.  The bug doc is
+    # `3b733724` decided it, and it asked for the question to be decided rather
+    # than patched.
+    #
+    # THE REFUSAL, and it is a wrong answer this closes.  A member read
+    # materializes to its value (`printf("%d", Reg.A)` prints 7 for `A = 7`), so
+    # two members whose values are equal are ONE word, and comparing them answers
+    # by value where CPython answers by identity.  Measured on both
+    # architectures: with `A = 1` and `B = 1` this printed `same`, and CPython
+    # says False.
+    ("refuse_two_enum_members_compared_to_each_other",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A == Reg.B:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "refuse:are both reads of MEMBERS of the enum `Reg`", None),
+    # THE SAME COMPARISON against itself, which answers True for the wrong
+    # reason and is invisible — which is why the rule refuses the shape instead
+    # of trying to tell the two apart.  Without this row a narrower rule that
+    # compared the two SPELLINGS would pass the row above.
+    ("refuse_a_member_compared_with_itself",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A == Reg.A:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "refuse:are both reads of MEMBERS of the enum `Reg`", None),
     #
     # A string here is a bare `char *`: no header, no length, just bytes to a
     # NUL. That splits the string methods in two (formal/model.py,
@@ -8706,6 +8754,249 @@ CONSTRUCTION_CASES = [
      "    return 7\n", 7, None),
 ]
 
+# ── a one-field HOLDER's CONSTRUCTOR store: which refusal answers it ──
+#
+# `Box` below has exactly one field and that field is a FRAME, so
+# `_rewrite_self_fields` collapses `self.inner` onto `self` before any late pass
+# reads the store — which made the receiver-rebind rule answer a CONSTRUCTOR,
+# with a message that says the source rebinds `self` (it does not), that CPython
+# rejects the shape (it does not: `def __init__(self, o): self.inner = o` is the
+# most ordinary constructor in Python), and that names `Box___init__`, a symbol
+# `_fieldwise_ctor_synthesized` invented.
+#
+# The rule now stands down when the method IS the constructor
+# (`formal/build.py`'s `_collect_receiver_rebinds`), because this path never
+# CALLS one: `model.init_body_stores` inlines a constructor's `self.<field> =
+# …` stores into the fresh block at the CONSTRUCTION SITE, so there is no
+# callee-local `self` whose rebinding could drop a store.  These three rows are
+# the measurement of what answers each spelling instead, and they are the reason
+# the exemption is safe to land: every one of them is still refused, and each by
+# the rule whose question it actually is.
+#
+# (a) is formal10-2's original needle and the pair it belongs to is
+# `test_formal_method_param_field.py`'s
+# `refuse_a_struct_field_initialised_from_a_constructor_argument` plus
+# `a_struct_field_assigned_after_construction_is_the_same_program` (the
+# workaround, `v=41 h=1` on both architectures).
+SOLE_FIELD_CTOR_STORE_CASES = [
+    # (a) THE ARGUMENT.  The frame that reaches the object's block is the
+    # CALLER's, which is the construction-argument hazard and the sentence the
+    # reader can act on.
+    ("sole_field_ctor_store_of_an_argument_is_the_construction_argument",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:constructing Box with argument 'o' as field 'inner'", None),
+    # (b) A frame built HERE, which the receiver rule already stood down from
+    # (`_value_may_be_a_frame` recognises the construction) and which another
+    # rule answers — the field read at the call site, not the store.  It is a
+    # row because "unchanged" is an answer worth pinning: the exemption must not
+    # change which rule answers this one.
+    ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:'b.v' is a field access through 'b'", None),
+    # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
+    # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
+    # right-hand side, because only a bare parameter has the caller's own
+    # expression standing in for it at the construction site, and a call is not
+    # one.  Recorded as measured rather than as hoped: the honest answer is that
+    # the constructor is refused with the STATEMENT spelled out, which is the
+    # same refusal any other un-inlinable body gets and a different question
+    # from the receiver's.
+    ("sole_field_ctor_store_of_a_call_is_the_inlining_rule",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = mk(41)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:whose body this path does not inline", None),
+    # THE CONTROL for the exemption: the same store in an ordinary METHOD, which
+    # is not a constructor and keeps the receiver refusal — with the measured
+    # SIGSEGV behind it (`refuse_a_one_word_holder_of_a_frame_stored_through_its_
+    # receiver`, which is this program's `_fieldwise_ctor_synthesized` twin).
+    # Without this row an over-broad exemption — "skip one-field owners whose
+    # sole field is a frame", ignoring WHICH method it is — would pass every
+    # row above.
+    ("a_method_not_the_constructor_still_gets_the_receiver_refusal",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box()\n"
+     "    b.set(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:self is assigned o in Box_set()", None),
+]
+
+# ── a `**` SPREAD ──────────────────────────────────────────────────────
+#
+# `**mapping` reaches the AST as an entry of `args` wrapped in `UnaryOp('**')`,
+# which is right for an interpreter (it splices at call time) and was wrong here:
+# the field binding zipped `args` against the FIELD LIST, so a spread was read as
+# the next POSITIONAL value.  Measured on both architectures: `S(a=1,
+# **{'b': 2})` was refused with ‘gives field a more than one value’ — a duplicate
+# the source does not contain — and one keyword fewer would have stored the
+# mapping's own word into `a`'s slot.  The rows below are the three answers a
+# spread now has, and the middle one is the refusal that must survive them: a
+# literal spread's DUPLICATE is CPython's own `TypeError`, and the check that
+# catches it is the ordinary keyword check, which is the point of un-spreading
+# rather than special-casing.
+SPREAD_CONSTRUCTION_CASES = [
+    # The capability: both keys and both values are written in the source, and a
+    # dict subscript by a literal key already lowers, so this is ordinary
+    # Python with a representation. `12` is `a * 10 + b` = 1, 2 in CPython too.
+    ("a_dict_literal_spread_fills_the_fields_it_names",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **{'b': 2})\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    p = P(a=1, **{'b': 2})\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # The same on an ordinary CALL, which is the other reader of `args` —
+    # `bind_call_arguments`, the one implementation both backends use. It is a
+    # separate row because a fix that only taught the construction path would
+    # leave this one saying "multiple values for argument 'a'", which is the same
+    # fabrication about a different construct.
+    ("a_dict_literal_spread_fills_a_calls_keywords",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\", f(a=1, **{'b': 2}))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2}))\n"),
+]
+
+SPREAD_REFUSALS = [
+    # THE DUPLICATE, which is CPython's `TypeError: got multiple values for
+    # argument a` and is now reported by the ordinary keyword check — the same
+    # sentence, arrived at honestly. Without this row a fix that dropped the
+    # duplicate check for spreads would pass the two above.
+    ("a_literal_spread_that_duplicates_a_keyword_is_still_a_duplicate",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P(a=1, **{'a': 2})\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:more than one value", None),
+    # A spread whose keys are NOT in the source, at a construction — refused by
+    # name, with the reason and the way out.
+    ("a_spread_through_a_mapping_name_is_refused_by_name",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d\", p.a)\n"
+     "    return 0\n",
+     "refuse:constructing P spreads `d` with `**`", None),
+    # …and through a `**`-PARAMETER, which is the corpus case
+    # (`formal/x86_64_decode.py`'s `insn()` helper forwards `**kw`) and the shape
+    # the refusal names as the real blocker: a formal value is one 64-bit word
+    # and this target has no variadic ABI, so the callee cannot read its own
+    # `**kwargs` at all. The row is here so that, when that capability lands,
+    # this is the row that says so.
+    ("a_spread_through_a_kwargs_parameter_is_refused_by_name",
+     "struct Insn:\n"
+     "    var offset: Int\n"
+     "    var length: Int\n"
+     "\n"
+     "def mk(off: Int, ln: Int, **kw) -> Insn:\n"
+     "    return Insn(offset=off, length=ln, **kw)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var i = mk(1, 2)\n"
+     "    printf(\"%d\", i.offset)\n"
+     "    return 0\n",
+     "refuse:constructing Insn spreads `kw` with `**`", None),
+    # The same on a call, so the two readers cannot drift: one message, one
+    # cause, and the subject spelled by the construct it is about.
+    ("a_spread_through_a_mapping_name_is_refused_by_name_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "refuse:call f() spreads `d` with `**`", None),
+]
+
 CONSTRUCTION_REFUSALS = [
     # ── a declared `__init__`, which makes `S(...)` a CALL ──
     #
@@ -15182,6 +15473,104 @@ COMPTIME_ATTRIBUTE_CASES = [
      "    rank = 9\n"
      "def main():\n"
      "    sys.stdout.write(\"%d %d\" % (Base.rank, Child.rank))"),
+
+    # ── the two halves of ‘what an enum member is’ that must KEEP working ──────────
+    #
+    # The refusal rows above are half of one decision; these are the other half,
+    # and they are the reason the rule is as narrow as it is.  A field of an enum
+    # type is a WORD on this path, so the ordinary enum idiom — a slot compared
+    # with a member — is a comparison of two values and answers itself, and a
+    # comparison of two `.value` reads is two values too.  Refusing either would
+    # cost every reader who writes `self.kind == Kind.A`, which is the shape an
+    # enum exists for.
+    ("a_slot_compared_with_a_member_is_a_comparison_of_two_values",
+     "from enum import Enum\n"
+     "\n"
+     "class Kind(Enum):\n"
+     "    A = 1\n"
+     "    B = 2\n"
+     "\n"
+     "struct Holder:\n"
+     "    var kind: Int\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var h = Holder()\n"
+     "    h.kind = Kind.A\n"
+     "    if h.kind == Kind.A:\n"
+     "        printf(\"A\")\n"
+     "    else:\n"
+     "        printf(\"B\")\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Kind:\n"
+     "    A = 1\n"
+     "    B = 2\n"
+     "class Holder:\n"
+     "    def __init__(self):\n"
+     "        self.kind = 0\n"
+     "def main():\n"
+     "    h = Holder()\n"
+     "    h.kind = Kind.A\n"
+     "    sys.stdout.write(\"A\" if h.kind == Kind.A else \"B\")\n"),
+    # …and the two `.value` reads, where equal values really are equal in
+    # CPython too — the row that says the refusal is about IDENTITY and not
+    # about the values behind the members.
+    ("two_member_values_compare_by_value",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.A.value == Reg.B.value:\n"
+     "        printf(\"same\")\n"
+     "    else:\n"
+     "        printf(\"diff\")\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Reg:\n"
+     "    A = 1\n"
+     "    B = 1\n"
+     "def main():\n"
+     "    sys.stdout.write(\"same\" if Reg.A == Reg.B else \"diff\")\n"),
+    # A MEMBER as a field default, which is the position the value model was
+    # refused at: `origin: TypeOrigin = TypeOrigin.DEFAULT` was refused with
+    # ‘not a value this build can materialize’ because a member read is not a
+    # literal.  It is one word now — the member IS its value — so the field
+    # constructs and reads `default`.  A `@dataclass` because that is the corpus
+    # case (three files blocked on it) and because the dataclass path raises the
+    # refusal itself, so this row is the one that says the fix reached it.
+    #
+    # Read through `t.origin` and NOT `t.origin.value`: the member is gone from
+    # the word, so `.value` on it is a method reference on a string and is
+    # refused.  That is the trade this value model makes and the reason the
+    # message of the next line is a different question — see
+    # `3b733724`.
+    ("a_member_as_a_field_default_materializes_to_its_value",
+     "from dataclasses import dataclass\n"
+     "from enum import Enum\n"
+     "\n"
+     "class TypeOrigin(Enum):\n"
+     "    DEFAULT = \"default\"\n"
+     "\n"
+     "@dataclass\n"
+     "class Type:\n"
+     "    origin: TypeOrigin = TypeOrigin.DEFAULT\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var t = Type()\n"
+     "    printf(\"%s\", t.origin)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class TypeOrigin:\n"
+     "    DEFAULT = \"default\"\n"
+     "class Type:\n"
+     "    def __init__(self):\n"
+     "        self.origin = TypeOrigin.DEFAULT\n"
+     "def main():\n"
+     "    t = Type()\n"
+     "    sys.stdout.write(\"%s\" % t.origin)\n"),
 ]
 
 
@@ -15264,6 +15653,166 @@ MUTATING_RECEIVER_REFUSALS = [
      "    printf(\"%d\", x)\n"
      "    return 0\n",
      "refuse:called here as a VALUE rather than as a statement", None),
+]
+
+
+# ── a call THROUGH a one-field struct's own field ──────────────────────────
+#
+# `formal/build.py`'s `_rewrite_self_fields` is the identity that keeps
+# `self.f` and `self` one storage: a one-field struct's receiver IS its field.
+# It cannot tell a field READ from a CALL of that field, because both arrive as
+# the same node — and in callee position the rewrite used to collapse the
+# callee as well, so `c.f(5)` became `c(5)`, a call of the RECEIVER.  Both
+# backends refused that one stage later with the only name they had left:
+#
+#     `c` is a call through a VALUE rather than through a function of this unit
+#
+# which is true of the node they held and useless to the reader, who wrote
+# `c.f`.  The refusal happens at the rewrite, by name, on both architectures and
+# in the same words (`formal/model.py`'s `sole_field_call_refusal`); the
+# measurement it answers is in `82c22a48`.
+#
+# The pair is the assertion: a field READ and a METHOD CALL on the same struct
+# must both still build and compute, so a fix that refused every member access on
+# a one-field struct — the over-correction this shape invites — fails here.
+# Each refusal names the FIELD (`c.f`, `self.f`, `b._leaf.x`), because the
+# spelling is the whole point: a message naming `c` sends the reader to the
+# wrong line, and costs a second build to discover that `f` is the field.
+SOLE_FIELD_CALLEE_REFUSALS = [
+    # The reported shape: a field read in callee position on a LOCAL.
+    ("call_through_a_one_word_structs_own_field_is_refused_by_its_name",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    var v = c.f(5)\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n",
+     "refuse:`c.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+    # THE SAME THING inside the struct's own method, where the receiver is
+    # spelled `self` — a different name in the message and therefore a
+    # different row.  Before the fix this one said `self`, which reads as "the
+    # method's own receiver is the problem".
+    ("call_through_a_one_word_receivers_own_field_is_refused_by_its_name",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        var v = self.f(5)\n"
+     "        return v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    printf(\"%d\", c.go())\n"
+     "    return 0\n",
+     "refuse:`self.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+    # The TRANSITIVE chain, which is the same rule reached through
+    # `_one_word_sole_field_chain` walking two structs: `Box`'s sole field is
+    # `Leaf`, `Leaf`'s is `x`, so `b._leaf.x` and `b` are one word.  This is the
+    # row that says the refusal covers the chain and not just the one-hop
+    # spelling, and the row a fix that compared the chain's LENGTH against the
+    # map's would fail.
+    ("call_through_a_transitive_sole_field_chain_is_refused_by_its_name",
+     "struct Leaf:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(5))\n"
+     "    printf(\"%d\", b._leaf.x(1))\n"
+     "    return 0\n",
+     "refuse:`b._leaf.x` is a call of a VALUE rather than of a function of "
+     "this unit", None),
+    # A local whose name is ALSO a module-level function — and this is the
+    # case where the old collapse was not even a refusal.  `c.f(5)` became
+    # `c(5)`, which is a call of the function `c` this unit compiles, so it
+    # BUILT, ran, and printed 10 where CPython raises `TypeError: 'int' object
+    # is not callable`.  The row asserts the refusal, because "it computes
+    # something" is the worse outcome here and the only way to say so is to
+    # refuse.
+    ("a_call_through_a_field_is_not_the_function_the_receiver_is_named_after",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "def c(n: Int) -> Int:\n"
+     "    return n * 2\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    printf(\"%d\", c.f(5))\n"
+     "    return 0\n",
+     "refuse:`c.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+]
+
+# The two spellings that must keep BUILDING, as the CPython-pair shape, because
+# the assertion is about an answer rather than about a message: a field READ and
+# a METHOD CALL on a one-word struct, and a method call THROUGH such a field.
+# They are here rather than in the refusal group because "must not be refused"
+# is not a refusal expectation — `refuse_either:` asserts that the build FAILS.
+# `5` is the field's value, `5 5` is the read and the method on one struct.
+SOLE_FIELD_CALLEE_CASES = [
+    ("a_one_word_fields_read_and_method_both_answer",
+     "struct Cell:\n"
+     "    var _v: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self._v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._v = 5\n"
+     "    printf(\"%d %d\", c._v, c.get())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._v = 0\n"
+     "    def get(self):\n"
+     "        return self._v\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._v = 5\n"
+     "    sys.stdout.write(\"%d %d\" % (c._v, c.get()))\n"),
+    # A method call THROUGH the field, which is the shape a fix that refused
+    # every chain through a sole field would take with it.
+    # `_rewrite_one_word_field_method_calls` lifts it to `Leaf_get(b)` before
+    # `_rewrite_self_fields` runs, so the chain in the callee is `b._leaf.get`
+    # and it is not a prefix of the map's `_leaf.x`.  The declared-type twin of
+    # this row is `test_formal_receiver_spelling.py`'s
+    # `one_word_field_through_one_field_receiver`; this one has no declaration to
+    # read, so the lift is off the binding `b = Box(...)` alone.
+    ("a_method_through_a_transitive_sole_field_is_still_answered",
+     "struct Leaf:\n"
+     "    var x: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(5))\n"
+     "    printf(\"%d\", b._leaf.get())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Leaf:\n"
+     "    def __init__(self, x):\n"
+     "        self.x = x\n"
+     "    def get(self):\n"
+     "        return self.x\n"
+     "class Box:\n"
+     "    def __init__(self, leaf):\n"
+     "        self._leaf = leaf\n"
+     "def main():\n"
+     "    b = Box(Leaf(5))\n"
+     "    sys.stdout.write(\"%d\" % b._leaf.get())\n"),
 ]
 
 ONE_FIELD_MUTATOR_CASES = [
@@ -16428,7 +16977,9 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
-                  + REPEAT_REFUSALS
++ REPEAT_REFUSALS
+                  + SOLE_FIELD_CTOR_STORE_CASES
+                  + SPREAD_CONSTRUCTION_CASES + SPREAD_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
@@ -16442,7 +16993,7 @@ def main():
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
-                  + MUTATING_RECEIVER_REFUSALS
+                  + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS
                   # STDERR_CASES is also a different shape (name, source, exit,
                   # needles) and is selected here so the `--cases` filter knows
                   # the name, then dispatched by `stderr_names` below. It is
@@ -16461,8 +17012,10 @@ def main():
     pair_names = ({c[0] for c in TYPE_APPLICATION_CASES}
                   | {c[0] for c in COMPTIME_ALIAS_PAIR_CASES}
                   | {c[0] for c in COMPTIME_ATTRIBUTE_CASES}
+                  | {c[0] for c in SPREAD_CONSTRUCTION_CASES}
                   | {c[0] for c in OVERLOAD_LAYOUT_CASES}
                   | {c[0] for c in ONE_FIELD_MUTATOR_CASES}
+                  | {c[0] for c in SOLE_FIELD_CALLEE_CASES}
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
@@ -16471,9 +17024,11 @@ def main():
                   | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
+                     + SPREAD_CONSTRUCTION_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
+                     + SOLE_FIELD_CALLEE_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
                      + REPEAT_CASES + SET_UNION_CASES
                      + CTOR_RECEIVER_CASES

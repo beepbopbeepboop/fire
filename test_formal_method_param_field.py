@@ -717,23 +717,30 @@ CASES = [
     # agreeing with a wrong expectation — and the transcriptions are oracles,
     # not tables.
     #
-    # **WHICH refusal answers `Box(o)`, and why the needle is the receiver's.**
-    # It was `constructing Box with argument 'o' as field 'inner'` — the
-    # construction-argument rule — when this row was written, and it is still
-    # the sentence for every OTHER holder. `Box` here has exactly ONE field, so
-    # `_rewrite_self_fields` collapses `self.inner` onto `self`; and
-    # `model.one_word_sole_field_frame` (7632c881, on master before this merge)
-    # withdrew `_collect_receiver_rebinds`'s one-field exemption for exactly
-    # these owners, because `self = o` overwrites the frame address the caller
-    # still holds. That rule now pre-empts the construction one, so this row
-    # pins the receiver refusal. BOTH are true of the program and neither builds
-    # it; which one SHOULD answer a CONSTRUCTOR's store is open, and
-    # `bugs/FORMAL_a_one_word_frame_holder_constructor_is_answered_by_the_
-    # receiver_rule.md` carries the measurement and the next step. The refusal
-    # and its promise are still what this row is for — the pair below is the
-    # half that has to keep working — and the second program here is the
-    # workaround the first refusal names, whether that is this message or the
-    # other one.
+    # **WHICH refusal answers `Box(o)`, and why it is the CONSTRUCTION one.**
+    # The receiver rule pre-empted it for a while: `Box` here has exactly ONE
+    # field, so `_rewrite_self_fields` collapses `self.inner` onto `self` before
+    # anything late looks at the store, and `model.one_word_sole_field_frame`
+    # (7632c881) withdrew `_collect_receiver_rebinds`'s one-field exemption for
+    # exactly these owners, because `self = o` overwrites the frame address the
+    # caller still holds. That sentence is FALSE about this source in three ways
+    # at once — it names a rebinding of `self` the file does not contain, it
+    # claims CPython rejects the shape (CPython runs
+    # `def __init__(self, o): self.inner = o` all day), and it names
+    # `Box___init__`, which on the `_fieldwise_ctor_synthesized` programs is a
+    # name in no file the reader has open. So the rule now stands down for a
+    # method that IS the constructor (`method_member_name(owner, fn) ==
+    # "__init__"`), on the ground that this path never CALLS one: `init_body_stores`
+    # inlines the stores into the fresh block at the CONSTRUCTION SITE, so there
+    # is no callee-local `self` for a rebinding to lose — and a constructor whose
+    # body is not a straight line of stores is refused by `init_body_stores`
+    # itself. The needle below is therefore back to the sentence this row was
+    # written with, and the same reader the message was written for.
+    #
+    # The exemption is narrow on purpose: `test_formal_run.py`'s
+    # `refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver` is the
+    # same store in an ordinary METHOD (`set`), and it stays refused by the
+    # receiver rule with its measured SIGSEGV behind it.
     ("refuse_a_struct_field_initialised_from_a_constructor_argument",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -767,7 +774,7 @@ CASES = [
      "b = Box(o)\n"
      "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
      None, None,
-     "self is assigned o in Box___init__"),
+     "constructing Box with argument 'o' as field 'inner'"),
     ("a_struct_field_assigned_after_construction_is_the_same_program",
      "struct Opt:\n"
      "    var v: Int\n"

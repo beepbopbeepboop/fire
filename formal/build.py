@@ -1941,6 +1941,19 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # which is why it is the one check with a new argument rather than one of
     # the five that only need this unit's own tables.
     check_imported_frame_handoffs(functions, link_line or [])
+    # The OTHER published contract, read the same way and refused for the same
+    # reason: an importer cannot classify a value another image allocated, so
+    # the exporting module publishes what its words are. It is here rather than
+    # in the emitters because a store into a module-owned blob is a defect of
+    # the SOURCE — the store is emitted happily by both backends and the abort
+    # happens later, inside the module's own `free`.
+    check_imported_blob_stores(functions, link_line or [])
+    # The SAME manifest signature, asked a different question: not "whose words
+    # are these" but "what does an UNTYPED local bound from this call hold". A
+    # pointer result with no kind behind it is a word, and a subscript through a
+    # word reads the local's own storage — a silent wrong answer, which is the
+    # outcome this tree treats as worse than a refusal.
+    check_subscript_through_an_unclassified_import(functions, link_line or [])
     # A `@dataclass` option this backend cannot lower is a fact about the FILE
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
@@ -2701,6 +2714,14 @@ def _call_receivers(fn):
 # call); the bound is a backstop that raises rather than the alternative, which is
 # a hang in the compiler on a program whose rewrite is not monotone.
 _HOLDER_FIXPOINT_ROUNDS = 4
+
+# How many times `check_imported_blob_stores` may hand a module-owned blob to a
+# parameter of a function in the same image before it stops. A backstop and not
+# a budget, for the reason `_HOLDER_FIXPOINT_ROUNDS` is: the relation only grows
+# by adding a parameter some call site already passes a blob to, so it saturates
+# in one round per link of the helper chain and the bound only says what happens
+# if that is ever false.
+_BLOB_PROPAGATION_ROUNDS = 8
 
 
 def _fn_key(fn):
@@ -4458,8 +4479,39 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
         # `_frame_receivers` it is reachable at all — which is why the two halves
         # of `model.one_word_sole_field_frame` have to land together, and why
         # they read it from one place.
+        #
+        # **…and a CONSTRUCTOR is not the case this rule is about.**  The
+        # premise is that the method's `self` is a NAME the callee can rebind,
+        # so the store it makes into a field never reaches the caller.  An
+        # `__init__` has no such name: this path never CALLS a constructor —
+        # `model.init_body_stores` inlines its `self.<field> = …` stores into the
+        # fresh block AT THE CONSTRUCTION SITE, in the CALLING function — so the
+        # store lands in the object's own block and there is nothing to drop.  A
+        # constructor whose body is not a straight line of stores is refused by
+        # `init_body_stores` itself, with the offending statement spelled out, so
+        # this exemption cannot open the shape where a rebinding would be real:
+        # there is no spelling of an `__init__` this path RUNS as a method.
+        #
+        # What the exemption exposes is the rule that DOES apply to a
+        # constructor's store, and it is a different question with a different
+        # reader: `self.inner = o` from a constructor ARGUMENT is the
+        # construction-argument hazard (`construction_arg_frame_value`), because
+        # the frame that reaches the object's block is the CALLER's, and the
+        # message names `Box(o)` — the call the reader wrote — rather than a
+        # rebinding of `self` the source never mentions.  Measured, both
+        # architectures, and the three spellings are in
+        # `test_formal_run.py`'s SOLE_FIELD_CTOR_STORE_CASES:
+        # `self.inner = o` is refused as `constructing Box with argument 'o'
+        # as field 'inner'`; `self.inner = Opt()` is answered by another rule
+        # entirely; and `self.inner = mk(41)`, whose frame the CALLEE made,
+        # builds and prints `v=41 h=1` on both.
+        #
+        # `method_member_name` rather than `fn.name.endswith("___init__")`, for
+        # the reason it exists: which method this is has to be read from the
+        # struct, not from the spelling the lift happened to produce.
         if M.struct_is_one_field(owner) \
-                and M.one_word_sole_field_frame(owner, structs_by_name) is None:
+                and (M.one_word_sole_field_frame(owner, structs_by_name) is None
+                     or M.method_member_name(owner, fn) == "__init__"):
             continue
         receivers = M.struct_receivers(owner)
         # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
@@ -6454,6 +6506,296 @@ def check_imported_frame_handoffs(functions, link_line) -> None:
                 raise CodegenError(refusal)
 
 
+def check_imported_blob_stores(functions, link_line) -> None:
+    """Refuse a subscript STORE into a blob another module's export owns.
+
+    The second consumer of a published contract, and the same shape as
+    `check_imported_frame_handoffs` for the reason that one is where it is: a
+    value that came out of ANOTHER image is not something this image can
+    classify, so the exporting module has to say what its words are. What it
+    says is in the manifest (`owned_blob`, from `formal.imports`'s
+    `HOST_OWNED_BLOBS`), and this is where the two halves meet: a local bound
+    from a call whose export returns such a blob is one of those blobs, and a
+    subscript store through it is the defect
+    fixed in `d9874a93`, where it was measured — a silent build,
+    then SIGABRT inside the module's own `free`, with the count word still saying
+    how many entries there were.
+
+    **THREE PHASES, and the order is load-bearing.** Which names hold a blob is
+    answered for the WHOLE image before any store is looked at, because the
+    third way a name comes to hold one — being a parameter a CALL SITE handed a
+    blob to — is evidence in a function this one may already have been walked
+    past. Measured, that is not a theoretical ordering concern: a program that
+    writes its store in a helper (`def poke(names): names[i] = v`) built silently
+    and died in `free` until the helper's parameter was seeded from the caller's
+    call site.
+
+      * seed — per function, two arms: a local BOUND from a call whose export
+        returns a blob (`var names = listdir(dir)`), and a local PASSED as the
+        argument an export declares a blob PARAMETER for (`listdir_free(names)`,
+        `listdir_len(names)`, `listdir_get(names, i)` — all parameter 0). The
+        second is not provenance and does not pretend to be: it is the module
+        saying "this argument is one of mine", which is enough to refuse a store
+        and is the only statement available across the boundary. A function that
+        RETURNS the blob is the same evidence as the binding, read off the one
+        other shape a call result leaves a function through.
+      * propagate — repeatedly hand a blob to a parameter of a function in this
+        image, because the helper may itself call a helper. Saturated rather than
+        run once, and the bound (`_BLOB_PROPAGATION_ROUNDS`) is a backstop
+        rather than a budget: the relation only grows by adding a parameter some
+        call site already passes a blob to, so it saturates in one round per link
+        of the chain.
+      * refuse — per function, the first store through a name the first two
+        phases agreed on. One finding, which is the rule every other check in
+        this family follows: a reader who has fixed it will find the next.
+
+    **Over-approximating blob-ness is the safe direction and is a choice, not an
+    accident.** A function reached with a blob at one call site and a
+    caller-owned buffer at another is a function whose store is wrong on one of
+    those paths, and the reader is the only one who can say which — so it is
+    refused, and the message says what the blob is.
+
+    **A store through a blob this image built is not this check.** A caller that
+    pre-sizes with `str_alloc` gets a buffer with no header and no owner but
+    itself, `p[0] = 65` is the supported route into one, and
+    `test_formal_os.py`'s `blob` group pins it on both architectures. The
+    refusal is therefore keyed on the CONTRACT and never on "this is a pointer":
+    a pointer with no module-owned convention behind it is a word this path
+    stores through every day.
+    """
+    by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    fns = list(functions or ())
+    # Keyed by NAME throughout: a FunctionDef is a dataclass and therefore
+    # unhashable, and a name is what a call site resolves a callee through
+    # anyway — which is the only resolution this check is entitled to.
+    fns_by_name = {getattr(f, "name", None): f for f in fns}
+    blobs = {getattr(f, "name", None): {} for f in fns}
+    param_names = {getattr(f, "name", None): set() for f in fns}
+
+    def blob_contract(call):
+        """`(callee, module, contract)` for a call into ANOTHER image."""
+        callee = M.call_callee_name(call.func) or ""
+        if not callee:
+            return None
+        entry = M.dylib_export_lookup(by_name, by_module, callee, forwarded)
+        contract = M.exported_owned_blob(entry)
+        if not contract:
+            return None
+        module = (entry or {}).get("module") or callee.rsplit(".", 1)[0]
+        return (callee, module, contract)
+
+    # ONE FIXPOINT rather than a seed pass and a propagation pass, and the four
+    # things it closes are the four ways a name in this image comes to hold a
+    # module-owned blob. They feed each other — a helper that receives a blob can
+    # return it, a call to that helper binds a blob, and a name bound from that
+    # call can be handed to a third helper — so separate passes would each be a
+    # round behind the others.
+    #
+    #   (1) BINDING: `var names = listdir(dir)` from an export that RETURNS one.
+    #   (2) ARGUMENT: `listdir_free(names)` — a local PASSED as the argument an
+    #       export declares a blob PARAMETER for (`listdir_len`, `listdir_get`,
+    #       `walk_free`: all parameter 0). Not provenance, and it does not
+    #       pretend to be: it is the module saying "this argument is one of
+    #       mine", which is enough to refuse a store and is the only statement
+    #       available across the boundary.
+    #   (3) ALIAS and PASS-THROUGH: `var x = names` is the same word, and a
+    #       function that RETURNS a blob hands the next caller the same words —
+    #       which is `def grab(path): return listdir(path)`, the shape a caller
+    #       writes to keep `os` out of its own helpers.
+    #   (4) PARAMETER: handing a blob to a parameter of a function in this image,
+    #       which is what makes a store inside such a helper answerable at all.
+    #       Measured, not theoretical: a program that writes its store in a
+    #       helper (`def poke(names): names[i] = v`) built silently and died in
+    #       the module's `free` until (4) existed.
+    #
+    # `returns_blob` is `{}` for every function that does not return one, which
+    # is nearly every function; it is a table rather than a flag on the
+    # FunctionDef because a FunctionDef is this pipeline's shared mutable
+    # carrier and a fact only this check has no business leaving on it.
+    returns_blob = {}
+    for _round in range(_BLOB_PROPAGATION_ROUNDS):
+        grew = False
+        for fn in fns:
+            me = getattr(fn, "name", None)
+            for node in M.iter_nodes(getattr(fn, "body", None) or []):
+                if isinstance(node, F.VarDecl):
+                    target, value = node.name, node.value
+                elif isinstance(node, F.AssignStmt):
+                    target = (node.target.name
+                              if isinstance(node.target, F.IdentExpr) else None)
+                    value = node.value
+                elif isinstance(node, F.ReturnStmt):
+                    target, value = None, getattr(node, "value", None)
+                else:
+                    target, value = None, None
+
+                # (1)/(3) — what a call result or a name became.
+                if isinstance(value, F.CallExpr):
+                    got = blob_contract(value)
+                    if not got:
+                        got = returns_blob.get(
+                            M.call_callee_name(value.func) or "")
+                    if got and got[2].get("returns") and target \
+                            and target not in blobs[me]:
+                        blobs[me][target] = got
+                        grew = True
+                elif isinstance(value, F.IdentExpr):
+                    got = blobs[me].get(value.name)
+                    if not got:
+                        continue
+                    if target:
+                        if target not in blobs[me]:
+                            blobs[me][target] = got
+                            grew = True
+                    elif returns_blob.get(me) is not got:
+                        returns_blob[me] = got
+                        grew = True
+
+                if not isinstance(node, F.CallExpr):
+                    continue
+                callee = M.call_callee_name(node.func) or ""
+
+                # (2) — this argument is one the callee module says is its blob.
+                got = blob_contract(node)
+                position = got[2].get("param") if got else None
+                args = list(getattr(node, "args", None) or ())
+                if isinstance(position, int) and position < len(args):
+                    arg = args[position]
+                    if isinstance(arg, F.IdentExpr) \
+                            and arg.name not in blobs[me]:
+                        blobs[me][arg.name] = got
+                        grew = True
+
+                # (4) — and this argument is a blob going into THIS image.
+                target_fn = param_names.get(callee)
+                if target_fn is None or callee in returns_blob:
+                    continue
+                # The callee's OWN declared parameter list, in ABI order, so the
+                # argument index here and the parameter it lands on are read
+                # from the one place they are declared. `M.incoming_args` rather
+                # than `.params` because a comptime parameter travels in the same
+                # word and would shift every runtime index after it.
+                params = [p[0] for p in M.incoming_args(fns_by_name[callee])]
+                for index, arg in enumerate(args):
+                    got = blobs[me].get(arg.name) \
+                        if isinstance(arg, F.IdentExpr) else None
+                    if not got or index >= len(params) or not params[index]:
+                        continue
+                    if params[index] in target_fn:
+                        continue
+                    target_fn.add(params[index])
+                    blobs[callee].setdefault(params[index], got)
+                    grew = True
+        if not grew:
+            break
+
+    # ── the stores, one finding each function.
+    for fn in fns:
+        mine = blobs.get(getattr(fn, "name", None)) or {}
+        if not mine:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            target = getattr(node, "target", None)
+            if not isinstance(target, F.SubscriptExpr) \
+                    or not isinstance(target.obj, F.IdentExpr):
+                continue
+            got = mine.get(target.obj.name)
+            if not got:
+                continue
+            callee, module, contract = got
+            raise CodegenError(M.owned_blob_store_refusal(
+                M.spelled(target), target.obj.name, callee, module, contract))
+
+
+def check_subscript_through_an_unclassified_import(functions, link_line) -> None:
+    """Refuse a subscript through an UNTYPED binding of a cross-image POINTER.
+
+    The third consumer of a published contract, and the one that needs no
+    contract of its own: the callee module's own DECLARATION is already in the
+    manifest signature, and this is the question "what does an untyped local
+    bound from this call hold?" asked of it. The answer is a word with no layout
+    unless the signature says `char *`, and a subscript through such a word
+    computes `[word + 8i]` from the local's OWN storage.
+
+    **Measured, both architectures, and the reason it is a refusal and not a
+    limitation.** `re.escape` is declared `-> Pointer[UInt8]`, so:
+
+      * `var r = escape("AB"); printf("%s", r)` prints `AB` — the word IS the
+        pointer — while `r[0]` is 0 where the buffer holds 65. One program, one
+        answer that looks right and one that does not, and the wrong one is the
+        subscript.
+      * `r[0] = 90` builds, runs and exits 0, writing to a slot nothing reads. A
+        program that fills a caller-owned buffer through an untyped binding
+        appears to work and computes nothing.
+      * `hashlib.sigma_table()[0]` prints 185207048, a number assembled out of
+        whatever the slot held.
+
+    The repair is one line and the message names it, which is the same answer as
+    for an unclassified PARAMETER (`M.pointee`'s refusals): an absent answer is
+    the answer, and this path has no inference that reads a pointee out of
+    another image's signature — it has no allocation model, so a width it
+    inferred would be a guess about the callee's own locals.
+
+    **What is deliberately NOT refused**, and each is a measurement rather than a
+    preference: a `char *` result (`os._syscalls.str_alloc`, and every one of
+    this tree's 66 string-returning host-module exports), whose subscript is a
+    byte of the string and which `test_formal_os.py`'s `blob` group pins on both
+    architectures; an ANNOTATED binding, which is the repair and must therefore
+    work (`var r: Pointer[UInt8] = escape("AB")` reads 65, 66); and a subscript
+    through a name that is not bound from a cross-image call at all, which is the
+    ordinary local this path has always answered.
+    """
+    by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    for fn in functions or ():
+        # `{name: (callee, module, pointee)}` for the UNTYPED bindings only —
+        # an annotated binding is the reader having said what the name holds, and
+        # asking again would refuse the repair this message recommends.
+        untyped = {}
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            if isinstance(node, F.VarDecl):
+                target, value, ann = node.name, node.value, node.type_ann
+            elif isinstance(node, F.AssignStmt):
+                target = (node.target.name
+                          if isinstance(node.target, F.IdentExpr) else None)
+                value, ann = node.value, None
+            else:
+                continue
+            if not target or ann or not isinstance(value, F.CallExpr):
+                continue
+            callee = M.call_callee_name(value.func) or ""
+            if not callee:
+                continue
+            entry = M.dylib_export_lookup(by_name, by_module, callee, forwarded)
+            pointee = M.dylib_export_pointer_pointee(entry)
+            if pointee:
+                untyped[target] = (callee, (entry or {}).get("module") or callee,
+                                   pointee)
+        if not untyped:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            # A STORE is a subscript too, and it is the worse half: it writes
+            # through the same word arithmetic into the local's own slot. Both
+            # are spelled as the subscript itself rather than as the statement
+            # that contains them — `AssignStmt` names the parser's node, and the
+            # reader is looking at `r[0] = 90`.
+            if isinstance(node, F.SubscriptExpr):
+                sub = node
+            elif isinstance(node, F.AssignStmt) \
+                    and isinstance(getattr(node.target, "obj", None),
+                                   F.IdentExpr):
+                sub = node.target
+            else:
+                continue
+            got = untyped.get(sub.obj.name)
+            if not got:
+                continue
+            callee, module, pointee = got
+            raise CodegenError(M.unclassified_import_pointer_refusal(
+                M.spelled(sub), sub.obj.name, callee, module, pointee))
+
+
 def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     """Refuse a frame-returning callee with no argument register left.
 
@@ -7682,7 +8024,7 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     M.rewrite_tree(node, visit)
 
 
-def _rewrite_self_fields(node, mapping: dict):
+def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict) -> None:
     """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
     node itself.
 
@@ -7711,6 +8053,35 @@ def _rewrite_self_fields(node, mapping: dict):
     struct — a frame — and belongs to the nested-frame path rather than to
     this one.
 
+    **A call's CALLEE is not a field read, and treating it as one is what
+    turned `c.f(5)` into a call of the receiver.** For a one-field struct the
+    sole field IS the object, so the rewrite above rewrites the callee `c.f`
+    to `c` and the call becomes `c(5)` — a call of a VALUE. The two backends
+    each refused it one stage later, with the only name they had:
+
+        build: `c` is a call through a VALUE rather than through a function of
+        this unit — `c` is a name main binds …
+
+    which is true of the node they held and useless to the reader, who wrote
+    `c.f`: `c` is not the problem, and finding that out costs a build
+    (`d9874a93`'s neighbour `82c22a48`, which is where the
+    measurement behind this paragraph is).
+    Two things changed here and neither is optional on its own. The rewrite
+    no longer touches a node in callee position — `id()` of the callee,
+    because `rewrite_tree` hands the visitor a node and no parent, the same
+    position test `_call_receivers` exists for and the one
+    `refuse_member_reads_through_a_literal_base` reads — and a callee this
+    rewrite WOULD have collapsed is REFUSED instead of collapsed, by name and
+    at the spelling (`model.sole_field_call_refusal`). Refusing rather than
+    merely skipping is the other half: a skipped callee would reach an emitter
+    that flattens `c.f` to `c` anyway and refuses it there with the same
+    sentence, one pass later and with the spelling already lost. A callee the
+    rewrite would NOT collapse is left entirely alone, which is what keeps
+    `self._inner.get(5)` (a method call on the field, lifted by name before
+    this pass runs) and `c.mk(5).x` (a field of a call's answer, refused by
+    the emitters' own field-access rule with `Cb_mk(…)` in the message) exactly
+    as they were.
+
     `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
     list of `(condition, body)` TUPLES, so the hand-rolled recursion descended
     every `if` body and every `else` and stopped dead at the first `elif`. The
@@ -7732,15 +8103,31 @@ def _rewrite_self_fields(node, mapping: dict):
     a bare name, and the node it was built from — the chain — is precisely what
     must not be offered to this rewrite a second time.
     """
-    def visit(n):
-        if isinstance(n, F.MemberExpr):
-            root, _, path = _member_chain(n).partition(".")
-            sole = mapping.get(root)
-            if sole and _is_sole_field_prefix(path, sole):
-                return F.IdentExpr(name=root)
-        return n
+    body = getattr(fn, "body", None)
+    # Built HERE rather than at the call site because this is the only consumer
+    # of the chain, and the refusal below needs the STRUCT that derives each
+    # chain in order to name it. `one_word` is `{name: the one-word struct the
+    # name holds}` — the value `_one_word_field_map` and `_rewrite_method_calls`
+    # read, so there is still one recognition of "this name is a one-word
+    # struct's word".
+    mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
+               for name, one in one_word.items()}
+    call_recv = _call_receivers(fn)
 
-    M.rewrite_tree(node, visit)
+    def visit(n):
+        if not isinstance(n, F.MemberExpr):
+            return n
+        root, _, path = _member_chain(n).partition(".")
+        sole = mapping.get(root)
+        if not (sole and _is_sole_field_prefix(path, sole)):
+            return n
+        if id(n) in call_recv:
+            raise CodegenError(M.sole_field_call_refusal(
+                _member_chain(n), one_word[root].name, ".".join(sole), root,
+                getattr(fn, "name", None)))
+        return F.IdentExpr(name=root)
+
+    M.rewrite_tree(body, visit)
 
 
 def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
@@ -11769,6 +12156,59 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
     return None
 
 
+def refuse_enum_member_comparisons(functions: list,
+                                   structs_by_name: dict) -> None:
+    """Refuse `==` / `!=` / `is` between two reads of ENUM MEMBERS.
+
+    The sibling of `refuse_none_comparisons`, asked at the same point and for the
+    same reason, and the fold it protects is the other lossy one on this path: a
+    member and its value are ONE 64-bit word (`model.enum_member_accessor`, and
+    a bare `Reg.A` materializes to its value — measured, `printf("%d", Reg.A)`
+    prints 7 for `A = 7`), so two DISTINCT members whose values are equal are one
+    word. Every use that cannot observe the difference is answered from the word;
+    the one construct that can is this.
+
+    **The measured wrong answer**, both architectures:
+
+        class Reg(Enum):
+            A = 1
+            B = 1
+
+        if Reg.A == Reg.B:   →  ‘same’, where CPython says False
+
+    which is why the rule is a refusal and not a widening of the fold: there is
+    nowhere in an untagged word to record WHICH member it holds, so ‘are these
+    the same member’ has no answer here. `Reg.A == Reg.A` answers True for the
+    wrong reason too, and that one is invisible — so the rule refuses the shape
+    rather than trying to tell the two cases apart.
+
+    **Narrow on purpose.** `model.enum_member_read` recognises the bare
+    `Reg.NAME` and nothing else, so the comparisons a reader actually writes are
+    untouched: `x.kind == y.kind` (two slots holding values), `x.kind == Kind.A`
+    (a slot and a member), `Reg.A.value == Reg.B.value` (two values). All three
+    are answered from the words they already are, and each would be a real cost
+    to refuse — `self.kind == Kind.A` is the ordinary enum idiom.
+
+    Before the substitution that materializes a member read, for the reason the
+    sibling gives: afterwards the read is a word and the fact that it was a
+    member is gone.
+    """
+    if not structs_by_name:
+        return
+    for fn in functions:
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.BinaryOp) or node.op not in (
+                    "==", "!=", "is", "is not"):
+                continue
+            left = M.enum_member_read(structs_by_name, node.left)
+            right = M.enum_member_read(structs_by_name, node.right)
+            if not (left and right):
+                continue
+            enum_name = left.partition(".")[0]
+            raise CodegenError(M.enum_member_comparison_refusal(
+                left, right, node.op, enum_name))
+
+
 def refuse_member_reads_through_a_literal_base(functions: list) -> None:
     """Refuse `EXPR.<member>` in a VALUE position when `EXPR` is a literal.
 
@@ -11991,15 +12431,52 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # run beside `check_construction_shapes`, for the reason the comment on
     # that call site gives (a file that imports a host module has a more
     # fundamental fact about it than a codegen gap).
+# An ENUM MEMBER as a class-level default, materialized to the literal it
+    # holds.  Before `DC.lower_field_defaults` below because that is what
+    # RAISES for a dataclass field (`field_refusal`), and before
+    # `_rewrite_class_constants` because a class-level constant is materialized
+    # where it is READ, so this is the position that answers the default itself.
     #
-    # `structs_by_name` goes with it for the one default that is not a literal
-    # and is still known: `origin: TypeOrigin = TypeOrigin.DEFAULT`, an enum
-    # member, which is how this repository's `type_system.py` spells it and is
-    # the sweep's `codegen` row for "a class-level default that is not a value
-    # this build can materialize". It is the SAME module's own declarations
-    # (`structs_by_name` above, not the wider `structs`) for the reason the
-    # paragraph above gives: an imported class is lowered when THAT module is
-    # compiled, and its defaults are resolved against its own table then.
+    # **A REWRITE, in place, on the field's own node** — and that is what makes
+    # it one pass rather than an argument threaded through six functions and two
+    # emitters.  `literal_default_word` reads the default node and folds it; a
+    # member read is not a literal, so it needs the STRUCTS TABLE to know that
+    # `TypeOrigin` is an enum at all, and threading that table into
+    # `struct_frame_defaults` → `struct_field_default` → `class_constant_word` →
+    # `literal_default_word` and out to both backends is a change to the hottest
+    # shared path in the tree for a verdict this one line decides.  Materializing
+    # the node leaves every reader — the emitters' per-field defaults, the class
+    # constant census, `field_refusal` — reading a LITERAL, which is what they
+    # already know how to do.
+    #
+    # What it changes is exactly the set of currently-REFUSED defaults, because a
+    # member read is what `literal_default_word` calls opaque and nothing else
+    # materializes one: no working program moves.  And what the reader gets is
+    # the value, not the member — `p.origin` is then the string “python's
+    # `p.origin` is the member and `p.origin.value` is the string”, and the
+    # comparison between two member reads is refused by
+    # `refuse_enum_member_comparisons` for the reason this same value model
+    # gives.  Measured, both architectures: `class TypeOrigin(Enum): DEFAULT =
+    # "default"` with `origin: TypeOrigin = TypeOrigin.DEFAULT` was refused at
+    # the field (`not a value this build can materialize`) and now constructs.
+    #
+    # `structs_by_name` is this module's OWN declarations and not the wider
+    # `structs`, for the reason the paragraph above gives: an imported class is
+    # lowered when THAT module is compiled, and its defaults are resolved
+    # against its own table then.  It is also the same table
+    # `model.class_constant_word_in` resolves a class-BODY initializer through,
+    # and the two cannot disagree about an enum member because after this loop
+    # the node it is asked about is already the literal — that function's
+    # `literal_default_word` short-circuit answers first.  The two are two
+    # POSITIONS rather than two rules: this one is a dataclass FIELD's default,
+    # which is materialized before anything reads it, and that one is a
+    # class-level CONSTANT's initializer, which is materialized where it is read.
+    for _st in structs:
+        for _f in M.struct_fields(_st):
+            _lit = M.enum_member_literal(structs_by_name,
+                                         getattr(_f, "value", None))
+            if _lit is not None:
+                _f.value = _lit
     dc_classes = DC.dataclass_classes(stmts)
     if dc_classes:
         DC.lower_field_defaults(dc_classes, structs_by_name)
@@ -12074,6 +12551,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # …and the OTHER lossy fold on this path, asked at the same point for the
+    # same reason: a member and its value are one word, so two members with equal
+    # values are one word and `Reg.A == Reg.B` answers True where CPython says
+    # False. The comparison that can observe that is refused; the three spellings
+    # a reader actually writes (`x.kind == y.kind`, `x.kind == Kind.A`,
+    # `Reg.A.value == Reg.B.value`) are not this rule's business.
+    refuse_enum_member_comparisons(functions, structs_by_name)
     # The ONE-FIELD MUTATOR write-back, decided once for the whole module
     # because it is a property of the image rather than of one function: the
     # callee half is "return the receiver on every path" and the caller half is
@@ -12103,16 +12587,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # before both of them rather than beside their old callers, because a
         # rewrite whose evidence is computed after it has run is a rewrite that
         # sees nothing. `one_word` is what `_rewrite_self_fields` and
-        # `_lift_one_word_field_method` have always read; `elems` is the same
-        # question about a LIST rather than a single word, and it is what makes
-        # a SUBSCRIPT receiver liftable (`model.list_element_structs`). One
-        # walk of the bindings each, neither recomputed by a consumer.
+        # `_lift_one_word_field_method` have always read — and it is handed the
+        # table, not a chain derived from it, because the rewrite needs the
+        # struct too; `elems` is the same question about a LIST rather than a
+        # single word, and it is what makes a SUBSCRIPT receiver liftable
+        # (`model.list_element_structs`). One walk of the bindings each, neither
+        # recomputed by a consumer.
         st = method_owners.get(fn.name)
         one_word = _one_word_field_map(fn, structs_by_name, st)
         if st is not None and M.struct_is_one_field(st):
             one_word["self"] = st
-        chains = {name: _one_word_sole_field_chain(one, structs_by_name)
-                  for name, one in one_word.items()}
         elems = M.list_element_structs(fn, structs_by_name, structs_by_name,
                                        st)
         elem_chains = {name: _one_word_sole_field_chain(one, structs_by_name)
@@ -12128,6 +12612,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
+# A method's `self` IS the field; a local initialised from a one-word
+        # constructor holds that struct's sole field directly.  The table holds
+        # the STRUCT and the rewrite derives the chain from it, because the
+        # rewrite needs the struct too — to name it in the refusal a call
+        # through one of those fields gets — and the chain is one line away
+        # either way.  One recognition of "this name is a one-word word", read
+        # once.  (Built with `one_word` at the top of this loop rather than
+        # here, beside `elems`, for the reason the comment there gives.)
         # A method call THROUGH a one-word field, lifted while the field's
         # DECLARED type can still be read — the identity below is about the same
         # storage but it keeps the method name and loses the struct, and a
@@ -12148,9 +12640,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             fn.body, one_word, structs_by_name, receiverless,
             _bound_receiver_structs(fn, structs_by_name,
                                     [f.name for f in functions], st))
-        mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
-                   for name, one in one_word.items()}
-        _rewrite_self_fields(fn.body, mapping)
+# `mapping` is derived inside `_rewrite_self_fields` now, because the
+        # rewrite is handed the table it derives the chain from — it needs the
+        # struct as well as the chain, for the refusal a call through one of
+        # those fields gets. So neither the chain nor the table is built twice.
+        _rewrite_self_fields(fn, one_word, structs_by_name)
         # …and the same identity through a SUBSCRIPT receiver. After the lift
         # above, so a method call has already become `Box_get(bs[0], …)` and only
         # field reads and writes are left; after `_rewrite_self_fields`, so both
@@ -12882,7 +13376,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "call": e.get("call"),
                      "signature": e.get("signature", ""),
                      "kind": e.get("kind"),
-                     "frame_params": e.get("frame_params") or []}
+                     "frame_params": e.get("frame_params") or [],
+                     "owned_blob": e.get("owned_blob") or None}
                     for e in exports],
     }
     # Atomic, like every other manifest write: this one truncates a file other
@@ -14056,6 +14551,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 "signature": signature,
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
+                "owned_blob": _export_owned_blob(module, fn.name),
             })
             continue
         if fn.name not in exported:
@@ -14072,8 +14568,29 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "signature": entry.get("signature", ""),
             "kind": entry.get("kind"),
             "frame_params": _export_frame_contract(fn),
+            "owned_blob": _export_owned_blob(prefix, fn.name),
         })
     return out
+
+
+def _export_owned_blob(module: str, name: str) -> dict:
+    """The MODULE-OWNED BLOB contract this export publishes, or `{}`.
+
+    Read from `formal.imports.HOST_OWNED_BLOBS`, the one place the convention
+    is declared, and published beside `frame_params` for the same reason and
+    with the same consequence: an importer compiled a DIFFERENT image of this
+    module and cannot re-derive what its words mean, so the exporting
+    compilation has to leave the answer behind.
+
+    The module name is the one this export is published UNDER, not the file it
+    came from — `os` for `formal/hostmods/os/__init__.mojo`, which is what a
+    call site spells and therefore what the table has to be keyed by. A module
+    with no such convention publishes `{}`, which is every other export in the
+    tree: the key is absent, `model.exported_owned_blob` answers `{}`, and a
+    store into a caller-owned pointer is untouched.
+    """
+    from formal.imports import host_owned_blob
+    return host_owned_blob(f"{module}.{name}") if module else {}
 
 
 def _export_frame_contract(fn) -> list:

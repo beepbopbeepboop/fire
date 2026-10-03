@@ -4619,6 +4619,67 @@ def callee_value_refusal(name: str, fn, spelling: str = None) -> str:
     )
 
 
+def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,
+                            fn_name: str = None) -> str:
+    """Why `c.f(5)` is a call of a VALUE: the callee is the struct's own field.
+
+    ARCH-FREE, and asked from the shared pass — `formal/build.py`'s
+    `_rewrite_self_fields`, at the rewrite that would have lost the spelling —
+    rather than from an emitter.  The emitter is the wrong place, and the reason
+    is that the rewrite that keeps `self.f` and `self` one storage used to
+    collapse the CALLEE as well: by the time a backend saw `c.f(5)` the node it
+    held was `IdentExpr('c')`, and the only name it could print was `c`.  A
+    refusal naming a name the reader did not write is
+    `bugs/FORMAL_known_limits.md`'s failure mode — it costs a second build to
+    discover that `f` is the field, and a reader who does not check concludes
+    that `c` is the problem.  `callee_value_refusal` above is what a backend
+    reaches for on the collapsed node and it is TRUE of it (`c` is a name the
+    function binds), which is exactly why it had to be answered before the
+    collapse rather than after it.
+
+    **The refusal belongs to the REWRITE, because every chain it would collapse
+    in callee position names FIELDS.**  `chain` is `_one_word_sole_field_chain`'s
+    answer, which stops where the identity stops: a two-field struct in the slot
+    is a FRAME, and `b.inner.v` is then a load at a frame base rather than a
+    spelling of `b`.  So a callee this rewrite matches is a chain of field reads
+    and nothing else — there is no spelling of it that names a method, because a
+    method name is not a field name.  That is why one arm covers both the
+    single-hop `c.f(5)` and the transitive `self._inner._k(5)`, and why nothing
+    here asks whether the last step is a field or a method: once a METHOD is
+    called through the field (`self._inner.get(5)`) the chain does not match,
+    and `_rewrite_one_word_field_method_calls` has lifted that call by name
+    before this pass runs.
+
+    **CPython agrees, which is what makes this a refusal and not a limitation.**
+    A field read is a value there too, so `c.f(5)` is
+    `TypeError: 'int' object is not callable` — the source does not compute
+    something else, it does not compute anything.  The two spellings this path
+    CAN answer are named in the message, because "call a function of this unit by
+    name" (the advice a call through a VALUE gets) sends the reader hunting for
+    a function named `f` that does not exist.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (
+        f"{who}`{spelling}` is a call of a VALUE rather than of a function of "
+        f"this unit: `{spelling}` is a read of `{chain}`, and a one-field "
+        f"struct's receiver IS its field — `{chain}` is `{struct}`'s whole "
+        f"value, so `{spelling}` and `{root}` are ONE 64-bit word here and the "
+        f"word holds a value, which is not something this path can call. There "
+        f"is no function value in it either: a code address is a word whose "
+        f"target this build cannot establish, and a closure needs an "
+        f"environment, which is a box this target has no allocator for. "
+        f"CPython says the same about the source — a field read is a value "
+        f"there as well, so `{spelling}` is a `TypeError: '… object is not "
+        f"callable'` — and the two spellings this path CAN answer are a METHOD "
+        f"call, `{root}.<method>(…)` with a method `{struct}` declares, and a "
+        f"field READ, `{spelling}` without the call. Refused at the rewrite "
+        f"that would have made it `{root}(…)`, a call of the RECEIVER: the "
+        f"rewrite cannot tell a field read from a call of one, and an emitter "
+        f"downstream could only see the name the rewrite had already "
+        f"invented."
+    )
+
+
 # The kind constants live HERE, above every table that names one, because the
 # string-method table below records what each method YIELDS and a table that
 # had to spell "str" as a literal to dodge a forward reference would be one
@@ -11555,6 +11616,161 @@ def resolve_frame_parameter_contract(candidates, position, argument_structs,
         argument_structs, argument_spelling))
 
 
+def exported_owned_blob(entry) -> dict:
+    """The MODULE-OWNED BLOB contract one manifest export entry publishes.
+
+    `{}` for an entry that publishes none, which is every export of every
+    module that has no such convention — and that is the answer that has to be
+    cheap and total, because this is asked about every call in the image.
+
+    The second per-parameter contract a manifest can carry, beside
+    `frame_params`: where that one says "parameter *i* is the ADDRESS of a frame
+    of this struct", this one says "the value on this side of the boundary is a
+    block whose words the EXPORTING module owns", and it names the layout (which
+    word is the count, which is the first pointer) because the layout is what a
+    refusal has to tell the reader and what makes the store unsafe.
+
+    The declaration itself lives in `formal/imports.py`'s `HOST_OWNED_BLOBS`,
+    and the reason it is declared rather than derived is that table's own
+    comment: `str_alloc` returns a `malloc`'d block too, and the caller owns
+    every word of THAT one.  What separates the two is who frees the words, and
+    a callee's own body does not say — `listdir` fills its block in a helper
+    and the release that walks it is a different export.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    contract = entry.get("owned_blob")
+    return contract if isinstance(contract, dict) else {}
+
+
+def owned_blob_store_refusal(spelling: str, name: str, callee: str,
+                             owner: str, contract: dict) -> str:
+    """Why writing into a word of a module-owned blob is refused.
+
+    ARCH-FREE, asked from the shared pass (`formal/build.py`'s
+    `check_imported_blob_stores`) because both backends lower the same store and
+    a store one architecture refuses and the other performs is the outcome the
+    contract mechanism exists to prevent.
+
+    **The refusal is at the STORE and not at the release**, and the measured
+    reason is the order the program runs in: `names[1] = 5` then
+    `listdir_free(names)`.  Built silently on both architectures, and the abort
+    is in the module's own `free` — exit 134, SIGABRT, with `before=2` printed
+    and `freed` never printed.  So the store is accepted, the program runs, and
+    the damage is done by a function the caller believes it is calling correctly.
+
+    **The type cannot carry this**, which is why the contract exists at all: the
+    blob's type is `Pointer[Int64]`, and a pointer permits any store.  That is
+    also why the message does not stop at "read-only": it says WHICH word is the
+    header and which are the pointers, names the release that walks them, and
+    gives the two routes that do work — the module's accessors for reading, and
+    `os._syscalls.str_alloc` for a buffer the caller does own.  A refusal that
+    only said "that is not yours" sends the reader to the module's source, and
+    the one fact they need is in a comment there.
+    """
+    count = contract.get("count_word", 0)
+    base = contract.get("entry_base", 1)
+    release = contract.get("release") or callee
+    return (
+        f"`{spelling}` writes into a blob {owner} OWNS rather than one you do: "
+        f"word {count} of this blob is its entry COUNT and word `{base} + i` is "
+        f"entry `i`'s `malloc`'d name, which `{release}` releases by "
+        f"calling `free` on each of them. Overwriting one leaves that release "
+        f"freeing a small integer — measured on both architectures, the build "
+        f"is silent, the program prints its own answers and then dies in `free` "
+        f"with SIGABRT (exit 134), after the release has already been handed a "
+        f"blob whose count word still says how many entries there were. The type "
+        f"cannot say any of this: the blob is a `Pointer[Int64]`, which permits "
+        f"any store. Read it through the module's own accessors — "
+        f"`{owner}.listdir_len` for the count, `{owner}.listdir_get` for entry "
+        f"`i` — and if you need a buffer you can WRITE, that is a different "
+        f"call: `os._syscalls.str_alloc(n)` returns raw `malloc`'d memory "
+        f"with no header and no owner but you, which is the route to pre-size "
+        f"and fill."
+    )
+
+
+def dylib_export_pointer_pointee(entry) -> str:
+    """The pointee type a manifest export's `T *` result declares, or `''`.
+
+    `''` for a result that is not a pointer, and `''` for the one pointer
+    result this path ALREADY classifies from the signature — `char *`, whose
+    subscript is a byte of the string it names. That exclusion is
+    `dylib_export_return_kind` asked directly, rather than a second copy of its
+    rule, so the two cannot answer differently about one export; it is what makes
+    `os._syscalls.str_alloc`'s unannotated `var p = str_alloc(64)` subscriptable
+    while `re.escape`'s is not.
+
+    A `MojoList *` result is NOT excluded, and the reason is worth stating
+    because it looks like an oversight: a container blob is classified from an
+    ANNOTATION (`List[T]` and friends, `BLOB_TYPE_CTORS`), so an unannotated
+    binding of one has no container kind either, and a subscript through a word
+    with no kind is the case this refusal is about. No host module in this tree
+    declares one today, so the answer is a choice made from the model rather than
+    from a measurement — the conservative one, and the one a reader can undo with
+    an annotation.
+
+    `uint8_t *` is the case that reaches it, and it is reached because
+    `re.escape` is declared `-> Pointer[UInt8]`, `re.sub` likewise, and
+    `hashlib.sigma_table` returns a byte table. Nothing was reading that: a
+    subscript through the unannotated binding of one read the LOCAL's own
+    storage and printed 0 where the buffer held 65 (`re.escape`), and
+    `hashlib.sigma_table()[0]` printed 185207048 — a number assembled out of
+    whatever the slot held. See `unclassified_import_pointer_refusal`.
+    """
+    if not entry or dylib_export_return_kind(entry) is not None:
+        return ""
+    ret = signature_return_type(entry.get("signature") or "")
+    base = ret.replace("const", "").strip()
+    return base[:-1].strip() if base.endswith("*") else ""
+
+
+def unclassified_import_pointer_refusal(spelling: str, name: str, callee: str,
+                                         module: str, pointee: str) -> str:
+    """Why a subscript through an untyped cross-image pointer is refused.
+
+    ARCH-FREE, asked from the shared pass (`formal/build.py`'s
+    `check_subscript_through_an_unclassified_import`) beside
+    `owned_blob_store_refusal` and for the same reason: both backends lower the
+    same subscript, and a value one architecture refuses and the other computes
+    is the outcome this tree treats as worse than either answer.
+
+    **A number that looks plausible and is not the program's is the outcome
+    this exists to prevent**, and the measurement is what makes it a refusal
+    rather than a limitation: `re.escape` is declared `-> Pointer[UInt8]`, so its
+    manifest signature says `uint8_t *`, and with an unannotated local
+    `r[0]` read the LOCAL's own storage — 0 where the buffer holds 65, while
+    `printf("%s", r)` printed `AB` correctly in the same program, so the reader
+    has one answer that looks right and one that does not. `r[0] = 90` was worse
+    still: it built, ran, exited 0, and wrote to a slot nothing reads, so a
+    program that fills a caller-owned buffer through an untyped binding appears
+    to work and computes nothing. `hashlib.sigma_table()[0]` printed 185207048.
+
+    The repair is named and it is one line: say what the name holds. That is the
+    same answer as for an unclassified parameter, and for the same reason — an
+    absent answer IS the answer, and this path has no inference that reads a
+    pointee out of another image's signature (it has no allocation model, so a
+    width it guessed would be a guess about the callee's own locals).
+    """
+    hint = f"Pointer[{pointee}]" if pointee else "Pointer[Int64]"
+    return (
+        f"{spelling} subscripts `{name}`, whose value came from `{callee}` in "
+        f"{module} \u2014 and that export\u0027s own declaration is a POINTER "
+        f"(`{pointee} *`), which this path does not carry into an unannotated "
+        f"local. A cross-image result is classified from its manifest signature "
+        f"only when that says `char *` (a string, whose subscript is a byte of "
+        f"it) or a container blob; every other pointer arrives as a plain WORD "
+        f"with no layout, and a subscript through a plain word computes "
+        f"`[word + 8i]` from the local\u0027s own storage \u2014 measured, both "
+        f"architectures: `re.escape(\"AB\")` bound without a type gave `r[0]` = "
+        f"0 where the buffer holds 65, `r[0] = 90` wrote to a slot nothing reads, "
+        f"and `hashlib.sigma_table()[0]` printed 185207048. Say what the name "
+        f"holds \u2014 `var {name}: {hint} = ...` \u2014 which is the same program "
+        f"with an answer: a subscript through an annotated `Pointer` reads the "
+        f"buffer, and one through a word cannot."
+    )
+
+
 def frame_declared_parameter_refusal(callee, position, param, struct_name,
                                     shape, sites) -> str:
     """A parameter classified from its DECLARED type, reached with the wrong
@@ -12595,6 +12811,26 @@ def print_format(fragments: list, sep=" ", end="\n") -> str:
 # (`_note_binding` tracks it per function, flow sensitively); ValueKinds is the
 # same question asked of a whole function at once, for the callers that have to
 # decide before any statement is emitted.
+#
+# AN ENUM MEMBER IS ITS VALUE, and its identity is not in the word.  That is a
+# decision about this section and not about the enum machinery, so it is
+# recorded here with the rest of "what a value is": there is no representation
+# for an enum member as a distinct object (it is one 64-bit word, and nothing in
+# it says WHICH member), so every position that materializes a value treats a
+# member read as the value the member holds — `enum_member_literal` for a
+# class-level DEFAULT, and `enum_member_accessor` for a `.value` / `.name` read,
+# which is why `Reg.A` and `Reg.A.value` are the same word and a bare `Reg.A`
+# prints 7 for `A = 7`.
+#
+# The consequence has to be paid for in the same place, and it is the reason the
+# decision was worth writing down rather than leaving to each caller:
+# `enum_member_comparison_refusal`, asked by `build.refuse_enum_member_
+# comparisons`, refuses `==` between two MEMBER READS, because two distinct
+# members with equal values are one word and would compare equal where CPython
+# says False (measured, both architectures, `A = 1` and `B = 1`). Everything else
+# about enums is unaffected and stays answerable: a slot of an enum type is a
+# word, so `x.kind == y.kind` and `x.kind == Kind.A` are comparisons of values
+# and answer themselves.
 
 def list_kind(elem_kind):
     """The kind of a list blob whose elements are all of `elem_kind`."""
@@ -21345,6 +21581,130 @@ def construction_keyword_refusal(name: str, keys, why: str,
             f"`{name}()` and assign the fields")
 
 
+def keyword_spread_refusal(subject: str, operand: str) -> str:
+    """Why `S(a=1, **m)` / `f(a=1, **m)` is refused: the KEYS are not knowable.
+
+    `subject` is the phrase the refusal is about, already spelled by its caller
+    in that caller's own terms — `constructing P`, `call f()` — because the two
+    sites that raise it are different constructs and a message that named the
+    wrong one would send the reader to the wrong line, which is the failure mode
+    `bugs/FORMAL_known_limits.md` records.
+
+    ARCH-FREE and asked from the shared plan (`struct_construction_plan`), which
+    is where the false sentence it replaces was produced.
+
+    **The sentence it replaces was false about the program.** `**m` reaches the
+    AST as an entry of `args` wrapped in `UnaryOp('**')`, and the field binding
+    zipped `args` against the FIELD LIST, so the spread was read as a POSITIONAL
+    value: `S(a=1, **{'b': 2})` bound `a` to the whole mapping and then reported
+    that field `a` had "more than one value" — a duplicate the source does not
+    contain — and one keyword fewer would have stored the mapping's own word
+    into `a`'s slot. A literal spread is now un-spread into the keyword list
+    before any of that, so this message is only reached by a spread whose keys
+    cannot be read at the construction site.
+
+    **CPython agrees with the refusal**, which is what makes it a limitation and
+    not a defect: `S(a=1, **{"a": 2})` is a run-time `TypeError` there too, and
+    the only way to know which is which is to know the keys. Answering it the
+    other way — "the explicit keywords win and the spread fills the rest" —
+    would silently accept the program the rule exists to catch.
+
+    The last sentence names the OTHER half of the gap, because a reader who
+    reaches for `**kwargs` hits it immediately and it is the true blocker: a
+    `**`-PARAMETER is not readable on this path at all — a formal value is one
+    64-bit word and a callee has no variadic ABI to find the extra arguments in
+    — so the keys cannot be carried through one either. See
+    `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` for the gimple-side
+    half of the same question.
+    """
+    return (
+        f"{subject} spreads `{operand}` with `**`, and a spread's "
+        f"KEYS are not knowable at the construction site: the mapping is a value "
+        f"this path cannot enumerate, so there is no saying which field each key "
+        f"names, and `S(a=1, **{{'a': 2}})` is a run-time `TypeError` in "
+        f"CPython too — the only way to tell it from `S(a=1, **{{'b': 2}})` is "
+        f"to know the keys. A spread of a dict LITERAL is un-spread and "
+        f"answered like any other keyword (both keys and values are in the "
+        f"source), so write the keywords out, or pass the mapping as an ordinary "
+        f"parameter this path can carry. Note that a `**`-PARAMETER cannot be "
+        f"the operand here either: a formal value is one 64-bit word and this "
+        f"target has no variadic ABI, so a callee cannot read its own "
+        f"`**kwargs` — which is the capability to build before a spread through "
+        f"one is answerable."
+    )
+
+
+def _unspread_keyword_mappings(args, kwargs, name: str = "this construction"):
+    """`(args, kwargs, refusal)` — `**` spreads folded in, or why one cannot be.
+
+    A `**mapping` is not an argument: it is a set of arguments whose NAMES are in
+    the mapping. `fire_compiler.py`'s `_parse_paren_args` keeps the `**` marker
+    alive by appending `UnaryOp('**', mapping)` to `args`, which is right for an
+    interpreter (it splices at call time) and was wrong here, because the field
+    binding zips `args` against the field list and so read the spread as the
+    next POSITIONAL value.
+
+    **A dict LITERAL is un-spread, with its VALUES**, which is the whole of what
+    makes this an added capability rather than a new refusal: `S(a=1, **{'b':
+    2})` is ordinary Python, both keys and both values are written in the
+    source, and a dict subscript by a literal key already lowers (`d['a']` is
+    1), so the keyword list the rest of the plan sees is exactly the one the
+    source wrote. The duplicate check then applies unchanged, which is what keeps
+    `S(a=1, **{'a': 2})` a refusal — CPython's `TypeError` — rather than
+    something this path invented.
+
+    Any other operand (a name, a computed dict, a call) is refused by name: the
+    keys are not in the source at this point and guessing them is the fabrication
+    `formal/known_limits.md` calls a false PASS. A `*` spread is deliberately NOT
+    touched: it is a POSITIONAL expansion rather than a keyword one, it has its
+    own refusal, and it is not this function's business.
+    """
+    plain, folded, refusal = [], list(kwargs), None
+    for arg in args:
+        if isinstance(arg, F.UnaryOp) and arg.op == "**":
+            items = literal_dict_items(arg.operand)
+            if items is None:
+                refusal = keyword_spread_refusal(name, spelled(arg.operand))
+                break
+            folded.extend(items)
+            continue
+        plain.append(arg)
+    return plain, folded, refusal
+
+
+def literal_dict_items(expr):
+    """`[(key, value)]` for a dict LITERAL with literal keys, else None.
+
+    None for anything whose keys are not written where the mapping is: a name, a
+    call, a comprehension, a dict with a non-literal key. `None` is what the
+    caller turns into a refusal, so the conservative answer has to be the
+    un-answerable one — a key that is computed could be any of the struct's
+    fields, or none of them.
+
+    Both halves are needed, not just the keys: the value is what the field gets
+    stored, and a spread whose keys are known but whose values are computed
+    would have to be evaluated through the mapping, which is the read this path
+    has no representation for. `StringLiteral` and `IntLiteral` keys only, since
+    those are the two a struct field name can be spelled as in a dict display
+    that this parser produces (`{'a': 1}` is a keyword; `{"a": 1}` is a
+    string).
+    """
+    if not isinstance(expr, F.DictExpr):
+        return None
+    out = []
+    for pair in (getattr(expr, "pairs", None) or ()):
+        key = pair[0] if isinstance(pair, (list, tuple)) and pair else None
+        value = pair[1] if isinstance(pair, (list, tuple)) and len(pair) > 1 \
+            else None
+        if isinstance(key, F.StringLiteral):
+            out.append((key.value, value))
+        elif isinstance(key, F.IntLiteral):
+            out.append((str(key.value), value))
+        else:
+            return None
+    return out
+
+
 def construction_nested_slot_refusal(name: str, field: str, arg,
                                     nested_name: str) -> str:
     """A construction argument landing on a field the constructor PLACED.
@@ -21465,6 +21825,17 @@ def struct_construction_plan(struct_def, call, decls: dict,
     candidates = candidates or {}
     args = list(getattr(call, "args", None) or [])
     kwargs = list(getattr(call, "kwargs", None) or [])
+    # A `**` SPREAD is folded into the keyword list before anything reads
+    # `args`, and this is the only place it can be: `args` is zipped against the
+    # field list further down, so a spread left in it would be read as a
+    # POSITIONAL value — which is how `S(a=1, **{'b': 2})` came to say that
+    # field `a` had "more than one value". `_unspread_keyword_mappings`'s own
+    # docstring has the measurement and the reason a literal spread is answered
+    # rather than refused.
+    args, kwargs, spread_refusal = _unspread_keyword_mappings(
+        args, kwargs, f"constructing {name}")
+    if spread_refusal is not None:
+        return (None, spread_refusal)
     slots = struct_frame_slots(struct_def)
     shapes = struct_init_shapes(struct_def)
     summary = struct_field_summary(struct_def)
@@ -23708,6 +24079,19 @@ def class_constant_word_in(structs_by_name: dict, node,
     the constant the read started at, not `None`, so a caller that refuses can
     name the thing a reader would have to change — `class_constant_word`'s own
     convention, which `_constant_literal` carries through to its message.
+
+    This is the CLASS-BODY position, and `enum_member_literal` below is the
+    FIELD-DEFAULT one; both answer "what does `S.NAME` hold" and neither can be
+    moved into the other, because the two are asked at different moments and of
+    different nodes. A dataclass field's default is materialized BEFORE anything
+    reads it (`formal/build.py`'s rewrite, one pass over the fields, so every
+    later reader sees a literal), which needs the LITERAL NODE to put in place of
+    the member read; a class constant's initializer is materialized where the
+    read is, which needs a `(kind, payload)` this function already returns. They
+    agree by construction rather than by two rules that happen to match: the
+    field rewrite has already replaced the node by the time a constant is asked
+    about it, and this function's `literal_default_word` short-circuit answers
+    first when it is not.
     """
     kind, payload = literal_default_word(node)
     if kind != DEFAULT_OPAQUE or not isinstance(structs_by_name, dict):
@@ -23727,6 +24111,124 @@ def class_constant_word_in(structs_by_name: dict, node,
         return class_constant_word_in(structs_by_name, default,
                                       seen | {(owner, const_name)})
     return (kind, payload)
+
+
+def enum_member_read(struct_defs, expr):
+    """`"S.NAME"` when `expr` reads an ENUM MEMBER, else `None`.
+
+    The one shape `refuse_enum_member_comparisons` asks about, and it is
+    deliberately narrow: `Reg.NAME` and nothing else. A `.value` read
+    (`Reg.NAME.value`) is a read of the VALUE, which is a word this path can
+    compare, and a read through a slot (`t.origin`) is a read of whatever the
+    slot holds — also a word. Only the bare member is the construct with no
+    representation, and widening this to the other two would refuse
+    `x.kind == y.kind`, which is a comparison of two values and answers itself.
+
+    Gated on `struct_is_enum` for the reason `enum_member_accessor` states: on a
+    class that is not an enum, `S.NAME` is a class constant and its value is a
+    word, so there is nothing to refuse. `NAME` must be one of the class's own
+    constants, which is what keeps `Reg.__name__` and a method reference out.
+    """
+    if not isinstance(expr, F.MemberExpr) or not isinstance(expr.obj, F.IdentExpr):
+        return None
+    st = (struct_defs or {}).get(expr.obj.name)
+    if st is None or not struct_is_enum(struct_defs, expr.obj.name):
+        return None
+    if expr.member not in {name for name, _default in struct_class_constants(st)}:
+        return None
+    return f"{expr.obj.name}.{expr.member}"
+
+
+def enum_member_comparison_refusal(left: str, right: str, op: str,
+                                   enum_name: str) -> str:
+    """Why `Reg.A == Reg.B` is refused: two MEMBERS are not two words.
+
+    ARCH-FREE, asked from the shared pass beside `refuse_none_comparisons`
+    (`formal/build.py`), and for the same reason: the fold that makes a member
+    materializable is lossy in exactly one direction — two DISTINCT members with
+    the same value are one word — so the one construct that can observe the
+    difference is refused by name.
+
+    **The measured wrong answer this closes**, both architectures:
+
+        class Reg(Enum):
+            A = 1
+            B = 1
+
+        if Reg.A == Reg.B:  →  prints ‘same’; CPython says False
+
+    `Reg.A == Reg.A` answers True for the wrong reason too, and that one is
+    invisible — which is why the rule refuses the shape rather than trying to
+    distinguish the two cases: there is nowhere in one untagged word to record
+    WHICH member a word holds, so the question "are these the same member" has
+    no answer here and only the reader can say.
+
+    The repairs are named because ‘an absent answer is the answer’ is only
+    useful with a next step: compare the VALUES (`Reg.A.value == Reg.B.value`),
+    which is what the source usually means when it is asking about two members of
+    the same enum, or branch on a value the model can tell apart. The cost of the
+    rule is stated here rather than left to be discovered: a field of an enum
+    type is a WORD on this path, so `x.kind == y.kind` and `x.kind == Kind.A`
+    both still work, and only a comparison of two bare member reads is refused.
+    """
+    return (
+        f"`{left}` and `{right}` are both reads of MEMBERS of the enum "
+        f"`{enum_name}`, and `{op}` between two members asks whether they are the "
+        f"SAME member. This path has no representation for that: a member and "
+        f"its value are one 64-bit word (`model.enum_member_accessor` says so, "
+        f"and a member read materializes to its value), so two distinct members "
+        f"whose values are equal are one word and compare equal — measured, both "
+        f"architectures, `A = 1` and `B = 1` answered `Reg.A == Reg.B` True where "
+        f"CPython says False. Compare the VALUES when that is what you mean "
+        f"(`{left}.value == {right}.value`), or branch on something the model can "
+        f"tell apart. A field of an enum type is a word too, so `x.kind == y.kind` "
+        f"and `x.kind == Kind.A` are both still answered — only two bare member "
+        f"reads are refused."
+    )
+
+
+def enum_member_literal(struct_defs, expr):
+    """The LITERAL an enum member read holds, or `None`.
+
+    `Reg.DEFAULT` → the `StringLiteral` `"default"` that is `Reg`'s constant
+    `DEFAULT`, because on this path a member and its value are one word
+    (`enum_member_accessor` states it and a bare `Reg.A` materializes to its
+    value — measured, `printf("%d", Reg.A)` prints 7 for `A = 7`). A member whose
+    constant does not itself fold to a literal answers `None`, which is the
+    honest refusal rather than a guess: the member is then a word holding
+    something this path cannot name, and every position that materializes a
+    value has to say so.
+
+    **This is the value-model question the enum machinery was asking, answered
+    once here.** The aggregate note at the top of this file (“what a value
+    is”) records the answer — a member IS its value, and the member's IDENTITY
+    is not in the word — and this is the reading of it that the default
+    positions use, while `enum_member_comparison_refusal` is the consequence
+    that follows from the same answer: if a member is its value, two members
+    with equal values are one word, so a comparison between two member reads is
+    refused rather than answered. The two must not be able to disagree, which is
+    why both live here and neither in a caller.
+
+    `struct_is_enum` gates it for the reason `enum_member_accessor` states: on
+    a class that is not an enum, `S.NAME` is a class constant whose value is a
+    word in its own right, and materializing it is `class_constant_word`'s job
+    with no question left to ask.
+    """
+    st = (struct_defs or {}).get(getattr(getattr(expr, "obj", None), "name", "")
+                                 or "") if isinstance(expr, F.MemberExpr) else None
+    if st is None or not struct_is_enum(struct_defs, st.name):
+        return None
+    for name, default in struct_class_constants(st):
+        if name != expr.member:
+            continue
+        folded = fold_literal_expr(default)
+        if isinstance(folded, bool):
+            return F.IntLiteral(value=int(folded))
+        if isinstance(folded, int):
+            return F.IntLiteral(value=folded)
+        if isinstance(folded, str):
+            return F.StringLiteral(value=folded)
+    return None
 
 
 def struct_fits_one_word(struct_def) -> bool:
@@ -27852,6 +28354,16 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         should be told so."""
     shape = function_param_shape(fn)
     positional = shape.positional
+    # A `**` SPREAD is folded in before the arity is counted, for the reason
+    # `_unspread_keyword_mappings` gives: the spread arrives in `args`, so
+    # counting it as a positional both invented an argument (and, with one fewer
+    # keyword, reported `multiple values for argument` about a duplicate the
+    # source does not contain — measured) and put a mapping where a value
+    # belonged.
+    args, kwargs, spread_refusal = _unspread_keyword_mappings(
+        list(args or []), list(kwargs or []), f"call {name}()")
+    if spread_refusal is not None:
+        return None, spread_refusal
     slots: list = list(args or [])
     if len(slots) > len(positional):
         if not shape.variadic:
@@ -27863,13 +28375,13 @@ def bind_call_arguments(name: str, fn, args: list, kwargs: list) -> tuple:
         # and have nowhere to go. See the docstring.
         slots = slots[:len(positional)]
     slots.extend([None] * (len(positional) - len(slots)))
-    for k, v in (kwargs or []):
+    for k, v in kwargs:
         idx = shape.index_of(k)
         if idx is None or shape.names[idx] not in positional:
             if shape.kwarg is not None:
                 continue        # **kwargs swallows it; no register to put it in
             return None, f"call {name}(): unexpected keyword argument {k!r}"
-        if idx < len(args or []):
+        if idx < len(args):
             return None, (f"call {name}(): multiple values for argument "
                           f"{k!r}")
         if slots[idx] is not None:
