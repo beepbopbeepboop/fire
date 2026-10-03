@@ -6260,6 +6260,43 @@ def gen_module_impl(self, stmts):
                                        gimple_ctypes.BoolLiteral,
                                        gimple_ctypes.NoneLiteral)):
                         st = 'int64_t'
+                    elif isinstance(a, (gimple_ctypes.ListExpr,
+                                        gimple_ctypes.DictExpr,
+                                        gimple_ctypes.SetExpr,
+                                        gimple_ctypes.TupleExpr,
+                                        gimple_ctypes.Comprehension)):
+                        # A CONTAINER literal is the one argument shape that
+                        # is provably a POINTER and still contributes nothing
+                        # above, so a slot reached from `f(2.5)` and
+                        # `f([1, 2])` observed only `{'double'}` — unanimous,
+                        # and the parameter declared `double f(double)` while
+                        # the list's `MojoList *` went to a `double` formal:
+                        # "pointer value used where a floating-point was
+                        # expected", a hard GCC error and no binary at all.
+                        # The same hole with `char *` instead of `double` is
+                        # worse, because it is silent: `char * f(char *)` plus
+                        # a list argument is `mojo_print` over the list
+                        # HEADER's bytes.
+                        #
+                        # `void *` is the shape that makes both vetoes, and it
+                        # is deliberately a string this pass's own whitelist
+                        # (`len(types) != 1 or not (_has_dbl or _has_cs)`)
+                        # already rejects: one non-scalar member in the set
+                        # drops the slot to the `int64_t` box, which is the
+                        # same answer every other disagreeing pair gets and
+                        # the one the `_tagged_dyn_` machinery is built for.
+                        # Recorded HERE rather than in `_arg_scalar_type` for
+                        # the reason the IntLiteral arm above gives: that
+                        # function's four other consumers each whitelist its
+                        # answers differently.
+                        #
+                        # The pointer is real information and is NOT
+                        # discarded: `mojo_list_set_kinds`/`_elem_types`
+                        # already record the container's element type for the
+                        # call-site walk, and the printed value being a
+                        # pointer decimal here is the same class this doc's
+                        # remaining rows describe.
+                        st = 'void *'
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
                     # .setdefault(pnames[i], set()).add(st)` into typed

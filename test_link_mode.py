@@ -799,6 +799,39 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # returned through a forwarding hop
         ('def f(x):\n    return x\n\n\ndef g(x):\n    return f(x)\n\n\n'
          'print(g(1))\nprint(g("s"))\n', '1\ns\n'),
+        # A CONTAINER argument alongside a `char *` one. A container literal at
+        # a call site used to contribute no observation at all, so the slot saw
+        # `{'char *'}` — unanimous — and `f([1, 2])` stored the list through a
+        # `char *` formal, which `mojo_print` then strlen'd over the list
+        # HEADER's bytes (`X\n`). The pointer now vetoes the resolution, as for
+        # every other disagreeing pair, and the printed value comes back right
+        # in both orders.
+        ('def f(x):\n    print(x)\n\n\nf("s")\nf([1, 2])\n', 's\n[1, 2]\n'),
+        ('def f(x):\n    print(x)\n\n\nf([1, 2])\nf("s")\n', '[1, 2]\ns\n'),
+    ]
+    # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
+    #
+    #   prog.py:6:3: error: pointer value used where a floating-point was
+    #   expected
+    #     6 | f([1, 2])
+    #
+    # A `double` parameter and a list argument in the same program, so the
+    # unanimity contract resolved the slot to `double` and the list's
+    # `MojoList *` went to a `double` formal. `float_only` and `list_only` are
+    # here too, because the fix is a VETO on a non-scalar observation and the
+    # two single-kind programs are what prove it did not disturb either.
+    #
+    # What is asserted is BUILDABILITY, and deliberately so: the values these
+    # two print are still wrong (`2` for `2.5`, a pointer decimal for the
+    # list), which is the separate float-boxing and runtime-tag rows of
+    # bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md. Asserting
+    # the wrong text would pin a bug; asserting only that it COMPILES is the
+    # whole content of this row, and it was a hard failure before.
+    builds_only = [
+        'def f(x):\n    print(x)\n\n\nf(2.5)\nf([1, 2])\n',
+        'def f(x):\n    print(x)\n\n\nf([1, 2])\nf(2.5)\n',
+        'def f(x):\n    print(x)\n\n\nf(2.5)\n',
+        'def f(x):\n    print(x)\n\n\nf([1, 2])\n',
     ]
     ok = True
     for i, (src, want) in enumerate(cases):
@@ -810,6 +843,19 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             print(f"  ✗ unannotated_param_disagreeing_call_sites[{i}]: "
                   f"rc={rc} stdout={stdout!r} "
                   f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
+    for i, src in enumerate(builds_only):
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                rc, _stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+        except Exception as e:
+            ok = False
+            print(f"  ✗ unannotated_param_container_does_not_break_the_build"
+                  f"[{i}]: did not compile: {str(e)[:200]}")
+            continue
+        if rc != 0:
+            ok = False
+            print(f"  ✗ unannotated_param_container_does_not_break_the_build"
+                  f"[{i}]: compiled but exited {rc}")
     return ok
 
 
