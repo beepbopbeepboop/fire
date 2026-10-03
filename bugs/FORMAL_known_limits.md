@@ -317,7 +317,11 @@ under a different cause entirely and this family read 3 files. **A family's size
 is a function of how far the walk gets before it reaches the question**, so a
 row in this document can be an order of magnitude out of date without anything
 being wrong — the audit table is a measurement of a walk's progress as much as
-of a module's shape. The re-measurement is
+of a module's shape. It has now happened a THIRD time on this file, in the
+other direction: the walk got FURTHER (the `List[Self.T]()` and then the
+`len(self._data)` refusals are both gone as of 2026-10-03,
+`work/formal12-binary-heap`) and the family is still this size, because the
+export gate is waiting behind both of them. The re-measurement is
 `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
 available: with the 35 files behind it, this family is now the largest single
 cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
@@ -403,6 +407,18 @@ chains and numbers in `FORMAL_dylib_export_gate_ceiling.md`):
   own body (`len(self._data)` on a `List[Self.T]` slot has no representable
   value), so the module carrying the 35 does not lower today whatever its export
   table says.
+- **Re-measured 2026-10-03 on `work/formal12-binary-heap`, and the probe's
+  prediction held exactly.** The `len(self._data)` value IS representable now —
+  it took three defects, none of them the refusal's own text, and the file no
+  longer refuses on it anywhere (§`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md`
+  §1 names them). Ten of the 165 files behind it were re-swept on x86-64 and
+  **0 of 10 moved**, with the terminal cause advanced from the export gate to
+  `binary_heap.mojo`'s own next construct, which is what "the refusal advances
+  one level" meant. Then the decisive one: **with every codegen refusal in that
+  file bypassed, the module-dylib build fails at the export gate with the very
+  message the sweep recorded.** So this row has two walls and codegen was only
+  the first — a plan that reads the sweep map's "one file has to lower first"
+  as "and then 164 files move" is wrong about the second half.
 - Deleting the re-export, so `binary_heap.mojo` is not in the closure at all,
   moves **0 of 35** as well: all 35 land on `dtype.mojo`'s MLIR constructs (26)
   or `_assembly.mojo`'s `inlined_assembly` (9), which are §2 and §1.1 — true
