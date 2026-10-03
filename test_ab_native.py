@@ -393,7 +393,28 @@ def test_scratch_isolation() -> tuple:
 
     # 6. The invariant the module exists to keep, checked against the whole
     #    directory rather than against what this test happened to write.
-    leaked = set(os.listdir(HERE)) - root_before - {'abt999999_deadbeef_stale.ci'}
+    #
+    #    `SCRATCH_ROOT` is the one name here that is not litter, so it is
+    #    subtracted BY PATH and only when it really is a child of HERE: it is
+    #    this module's declared container — deliberately inside the worktree,
+    #    gitignored, and on a worktree machine also the worktree's `TMPDIR` —
+    #    and the first `scratch_dir()` above created it, so on a checkout
+    #    that had none (the ordinary case: nothing else creates it) the check
+    #    was reporting the container as the self-test's own leak, which is how
+    #    `suite-self-test` failed naming `['.tmp']` for months while every
+    #    scratch property above it was green.
+    #
+    #    Subtracting a name is only as good as what replaces it, so the
+    #    exemption is paid for: the container must be left holding nothing of
+    #    THIS run's. A blanket "ignore `.tmp`" would otherwise be a blind spot
+    #    exactly where this module's transients go.
+    ours = [n for n in os.listdir(SCRATCH_ROOT) if _RUN_TAG in n]
+    want(not ours, "the scratch root is left holding nothing of this run's",
+         f"{sorted(ours)}")
+    exempt = {'abt999999_deadbeef_stale.ci'}
+    if os.path.dirname(os.path.abspath(SCRATCH_ROOT)) == os.path.abspath(HERE):
+        exempt.add(os.path.basename(SCRATCH_ROOT))
+    leaked = set(os.listdir(HERE)) - root_before - exempt
     want(not leaked, "nothing this test wrote is left in the repo root",
          f"{sorted(leaked)}")
 
