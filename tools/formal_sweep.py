@@ -2556,14 +2556,36 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
                 # timeout and a memory kill are not: it is a fact about this
                 # run's machine, and a verdict published under this key would
                 # pin the file here until the key changed.
+                #
+                # The signal is NAMED, read off the wrapper's own exit status,
+                # because "what killed the wrapper" used to be an open question
+                # for exactly this state (six files per architecture, 2026-10-02,
+                # `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`) and an
+                # exit status answers it without anybody reproducing it. memcap
+                # handles SIGTERM and SIGINT (it reports `interrupted`, kills its
+                # tree and exits 130/143), so the only signal that can leave this
+                # state behind is SIGKILL — and in this repository the only thing
+                # that sends one is `tools/control.py guard`, aimed at the largest
+                # process in a worker tree once the tree's RSS sum passes its
+                # budget. So the row now names its own cause instead of leaving
+                # a reader to guess which of the two it was.
+                sig = (-proc.returncode if proc.returncode is not None
+                       and proc.returncode < 0 else None)
+                who = ("killed by SIGKILL, which nothing here can catch: in this "
+                       "tree that is tools/control.py guard, aimed at the "
+                       "largest process in a worker worktree once the tree's "
+                       "RSS sum passes its budget"
+                       if sig == 9 else
+                       f"killed by signal {sig}" if sig else
+                       "gone, and its exit status says nothing about how")
                 return verdict(
                     False,
                     f"the {mem_gb:g} GB per-file wrapper (tools/memcap.py) died "
-                    f"before it reported an outcome — its banner is in the "
-                    f"output and no breach and no completion, so this build's "
-                    f"own verdict was never observed. A fact about this run's "
-                    f"machine, not about the source; not cached, so re-running "
-                    f"re-measures it",
+                    f"before it reported an outcome — {who} — so its banner is "
+                    f"in the output with no breach and no completion and this "
+                    f"build's own verdict was never observed. A fact about this "
+                    f"run's machine, not about the source; not cached, so "
+                    f"re-running re-measures it",
                     CAUSE_WRAPPER_DIED, False)
             # No message at all still counts as the build's own verdict: with
             # no traceback there is no evidence of a crash, and a silent death

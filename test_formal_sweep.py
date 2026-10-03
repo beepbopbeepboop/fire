@@ -1698,8 +1698,107 @@ class TestWrapperDied(unittest.TestCase):
             "build: some.construct cannot be lowered: ...\n"),
             "no memcap line at all means the ceiling was off (-M 0)")
 
+    def test_the_row_names_the_signal_that_killed_the_wrapper(self):
+        # "What killed the wrapper" was an OPEN QUESTION for this state — six
+        # files per architecture in the 2026-10-02 sweep, and
+        # bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md recorded the
+        # candidates without concluding. The wrapper's own exit status answers
+        # it, so the row says which signal rather than leaving a reader to
+        # guess, and the SIGKILL case names the one thing in this repository
+        # that sends one.
+        v = self._run_with(S.BuildRun(-9, self.BANNER, "", False, None, True),
+                           tag="sigkill")
+        self.assertIn("killed by SIGKILL", v.detail)
+        self.assertIn("tools/control.py guard", v.detail)
+        # A SIGTERM could not produce this state at all — memcap handles it,
+        # reports `interrupted` and kills its tree — so if one ever shows up
+        # here it is a different story and the row must not claim the guard.
+        v = self._run_with(S.BuildRun(-15, self.BANNER, "", False, None, True),
+                           tag="sigterm")
+        self.assertIn("killed by signal 15", v.detail)
+        self.assertNotIn("control.py guard", v.detail)
+        # And a wrapper that exited without a signal (a machine that reported
+        # something else) says so rather than inventing a cause.
+        v = self._run_with(S.BuildRun(1, self.BANNER, "", False, None, True),
+                           tag="nosig")
+        self.assertIn("exit status says nothing about how", v.detail)
+
+    def test_memcap_handles_a_sigterm_so_it_cannot_produce_that_state(self):
+        """The other half: remove the state rather than explain it.
+
+        memcap installs a SIGTERM/SIGINT handler that takes the tree down and
+        PRINTS the outcome, so a signalled wrapper is never the silent one. This
+        runs the real binary rather than calling `main()`: what is under test is
+        a signal delivered to a process with a child of its own, and the only
+        faithful way to ask is to send one. Three properties, all of which the
+        silent-death reader depends on:
+
+          * it prints an outcome `procrun.memcap_accounted` recognises, so
+            `memcap_wrapper_died` is False for the output a SIGTERM produces —
+            the word is `interrupted`, which is the one in that set;
+          * it exits 143 (128+15), so the caller can tell a terminated run from
+            an interactive interrupt at 130;
+          * the child is gone. A wrapper that dies on a TERM without killing
+            its tree recreates the runaway the ceiling exists to prevent.
+        """
+        import signal as _signal
+        import subprocess
+        import time as _time
+        with tempfile.TemporaryDirectory() as td:
+            marker = os.path.join(td, "grandchild.pid")
+            child = os.path.join(td, "slow.py")
+            with open(child, "w") as f:
+                f.write("import os, subprocess, sys, time\n"
+                        "kid = subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(600)'])\n"
+                        f"open({marker!r}, 'w').write(str(kid.pid))\n"
+                        "time.sleep(600)\n")
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(S.REPO, "tools", "memcap.py"),
+                 "--limit-gb", "4", "--label", "sigterm", "--", sys.executable,
+                 child],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                deadline = _time.time() + 20
+                while _time.time() < deadline and not os.path.exists(marker):
+                    _time.sleep(0.1)
+                self.assertTrue(os.path.exists(marker),
+                                "the workload under memcap never started")
+                with open(marker) as f:
+                    pid = int(f.read())
+                proc.send_signal(_signal.SIGTERM)
+                out, _ = proc.communicate(timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 143,
+                         f"a SIGTERMed wrapper exits 128+15; got "
+                         f"{proc.returncode} with output {out!r}")
+        self.assertIn("memcap: interrupted", out)
+        self.assertTrue(procrun.memcap_accounted(out),
+                        f"a signalled wrapper must report an outcome; "
+                        f"got {out!r}")
+        self.assertFalse(procrun.memcap_wrapper_died(out),
+                         f"this output must not read as a silent wrapper "
+                         f"death: {out!r}")
+        # The child, gone. Polled rather than checked once, because it is
+        # reparented to init when the workload dies and init takes a moment.
+        alive = True
+        deadline = _time.time() + 10
+        while alive and _time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                alive = False
+                break
+            _time.sleep(0.2)
+        self.assertFalse(alive,
+                         f"the workload (pid {pid}) survived the wrapper's "
+                         f"SIGTERM, which is the runaway the ceiling exists "
+                         f"to prevent")
+
     def test_memcap_accounting_is_never_the_files_own_refusal(self):
-        # A build that printed NOTHING leaves memcap's `done ... child exit -9`
         # as the last line of the captured text. The namedtuple's docstring
         # promises nothing downstream can match a `memcap:` line as if the build
         # had printed it; this is the line that promise is about. The CLASS is

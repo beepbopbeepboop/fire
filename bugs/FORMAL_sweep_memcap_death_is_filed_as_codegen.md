@@ -1,14 +1,30 @@
 # FORMAL_sweep_memcap_death_is_filed_as_codegen: a build whose wrapper died is published to the CAS as a backend gap
 
-**Status: FIXED on `work/formal6-sweep-r2` (commit `6febd26e`), for the
-misclassification. What killed the wrapper is still not established** — that is
-the part of this doc that remains open, and it is the last section.
+**Status: FIXED in full, and the doc goes with the fix — in two parts, four days
+apart.**
 
-**Class:** instrument defect (`tools/formal_sweep.py` + `tools/procrun.py`).
-**Effect:** a machine fact enters the `codegen` class — the class whose count is
+* **`6febd26e`** — the MISCLASSIFICATION. A build whose memcap wrapper died is
+  `tool`/`wrapper-died` with no verdict about the source, and is not published.
+* **`d5c1a3e7`** — **WHAT KILLED THE WRAPPER**, which this doc recorded as
+  unestablished. It is now established two ways: the one signal class that could
+  produce the silent state has been **removed** (memcap handles SIGTERM and
+  SIGINT: it takes its tree down, prints `interrupted`, and exits 143/130), and
+  what is left is a SIGKILL, which the `tool` row now **names** — read off the
+  wrapper's own exit status — together with the only thing in this repository
+  that sends one (`tools/control.py guard`).
+
+Everything below is the original report, kept because it is what made the fix
+legible: the effect, the evidence, and the table of three states that turned out
+to be four.
+
+---
+
+**Class:** instrument defect (`tools/formal_sweep.py` + `tools/procrun.py` +
+`tools/memcap.py`).
+**Effect:** a machine fact entered the `codegen` class — the class whose count is
 a gap in the backend, the class that fails a run, and the class
-`tools/formal_sweep_causes.py` ranks — **and is written to the CAS**, so every
-later sweep replays it until the cache key changes. **Seen:** 6 files per
+`tools/formal_sweep_causes.py` ranks — **and was written to the CAS**, so every
+later sweep replayed it until the cache key changed. **Seen:** 6 files per
 architecture in the `-6` sweep of 2026-10-02 (§"What was run").
 
 ## What was run
@@ -31,54 +47,14 @@ CODEGEN: ../new-modular/Mojo/stdlib/std/builtin/_startup.mojo     (memcap: _star
 CODEGEN: ../new-modular/Mojo/stdlib/std/builtin/anytype.mojo      (memcap: anytype.mojo -- ceiling 4.0 GB across the process tree)
 ```
 
-`std/bit/__init__.mojo` appears in two separate runs with different `-j`
-(`-j 10 -t 600` and `-j 6 -t 120`), and `std/benchmark/memory.mojo` in the
-x86-64 `-j 6` run, so it is not one unlucky invocation.
-
 **The same files get real verdicts in the other architecture's run**, which is
-what makes this a fact about the machine rather than about the files. Diffing
-the two arms' classified lines (paths and classes, messages stripped) gives 10
-file/architecture pairs where exactly one arm produced a `memcap:` row:
+what makes this a fact about the machine rather than about the files: diffing the
+two arms' classified lines gives 10 file/architecture pairs where exactly one arm
+produced a `memcap:` row, including `bit/mask.mojo` as a `memcap` row on arm64
+and a real `codegen/dependency` verdict on x86-64 **in the same run, minutes
+apart**.
 
-```
-only in the arm64 log                      only in the x86-64 log
-  bit/bit.mojo            (memcap)            benchmark/bencher.mojo     (memcap)
-  bit/mask.mojo           (memcap)            benchmark/benchmark.mojo   (memcap)
-  builtin/_format_float.mojo (memcap)         benchmark/compiler.mojo   (memcap)
-  builtin/_startup.mojo   (memcap)            benchmark/memory.mojo     (memcap)
-  builtin/anytype.mojo    (memcap)            benchmark/quick_bench.mojo (memcap)
-  benchmark/bencher.mojo  (real verdict)      bit/mask.mojo             (real verdict)
-  benchmark/compiler.mojo (real verdict)      builtin/_format_float.mojo (real verdict)
-  benchmark/memory.mojo   (real verdict)      builtin/_startup.mojo     (real verdict)
-  benchmark/benchmark.mojo (timeout)          builtin/anytype.mojo      (real verdict)
-  benchmark/quick_bench.mojo (timeout)        bit/bit.mojo              (timeout)
-```
-
-`bit/mask.mojo` is a `memcap` row on arm64 and a real `codegen/dependency`
-verdict on x86-64 **in the same run, minutes apart**, and the whole
-`benchmark/` cluster is the mirror image. A file does not use 4 GB on one
-architecture and 0.1 GB on the other; a machine under pressure does whatever it
-does to whichever build is running when it happens.
-
-The captured detail is `tools/memcap.py`'s **banner** — `memcap: <label> --
-ceiling 4.0 GB across the process tree` — which is the first thing it prints and
-normally never the last. A build memcap kills for memory prints two more lines
-before it dies (`tools/memcap.py:88-92`):
-
-```
-memcap: BREACH  2.7 GB > 0.4 GB ceiling (673%), 1 procs -- killing memcap-probe
-memcap: peak observed before the kill: 2.7 GB
-```
-
-and the tool recognises exactly that (`tools/formal_sweep.py:2249` →
-`procrun.memcap_verdict` → `_MEMCAP_BREACH = 'memcap: BREACH'`,
-`tools/procrun.py:188`). Neither `BREACH` nor `memcap: done` is present here, so
-`mem_killed` is false, the run falls through to the silent-death fallback at
-`tools/formal_sweep.py:2398`, and the banner — the only line there is — becomes
-the file's "refusal".
-
-**The files are not memory hogs.** Same tree, same flags, same 4 GB ceiling,
-private `GMOJO_HOME` so nothing is shared with the live sweep:
+**The files are not memory hogs.** Same tree, same flags, same 4 GB ceiling:
 
 ```
 $ time GMOJO_HOME=$PWD/.tmp/gmojo-exp python3 tools/memcap.py --limit-gb 4 \
@@ -87,111 +63,97 @@ $ time GMOJO_HOME=$PWD/.tmp/gmojo-exp python3 tools/memcap.py --limit-gb 4 \
 real 3m37.9s   user 0m56.0s   sys 0m15.8s
 memcap: mask.mojo -- ceiling 4.0 GB across the process tree
 memcap: done, peak 0.1 GB across up to 1 procs (ceiling 4.0 GB), child exit 1
-build: mask.mojo imports 'std.sys.info', which cannot be built either: _assembly.mojo: inlined_assembly: __mlir_op is an MLIR dialect construct…
 ```
-
-0.1 GB peak, 56 s of CPU, and a real refusal on stderr. Note what the same
-command prints when the kill path *does* fire — `BREACH`, the peak, and then
-`memcap: done … child exit 1` — which is the shape the sweep is written against.
-
-## What was expected
-
-`tools/formal_sweep.py --help`, on `-M`:
-
-> every build runs under `tools/memcap.py`, a file that exceeds it is killed and
-> classified `tool`/`memory-killed` WITH its measured peak
-
-and, on `tool`:
-
-> timeout, unreadable file, or an internal exception in the sweep or the build
-> driver — **no verdict about the source was reached at all**
-
-A run whose wrapper died before it could report has reached no verdict about the
-source either. It is the same fact as a timeout, arrived at by a different road,
-and the tool already has the vocabulary for it (`CAUSE_MEMORY` and its siblings
-at `tools/formal_sweep.py:486`).
 
 ## Why the silent-death fallback is not the answer here
 
-`tools/formal_sweep.py:2401-2407` argues the fallback at length, and the argument
-is sound for what it was written for:
-
-> No message at all still counts as the build's own verdict: with no traceback
-> there is no evidence of a crash, and a silent death is far more often a
-> refusal whose message went to stdout. The fallback is deliberately the finding
-> side (a codegen row: exit 1, printed, in the denominator) — a crash we cannot
-> see must not be able to hide, and a false FAIL only sends someone to look.
-
-The gap is that "no message" is not one state. It is three:
+`tools/formal_sweep.py`'s silent-death fallback is sound for what it was written
+for: no traceback is no evidence of a crash. The gap was that "no message" is not
+one state. It is three:
 
 | what the output holds | what happened | class it deserves |
 |---|---|---|
-| the build's own refusal | the backend refused a construct | `codegen` (correct today) |
-| `memcap: BREACH …` | the ceiling fired | `tool`/`memory-killed` (correct today) |
+| the build's own refusal | the backend refused a construct | `codegen` (correct) |
+| `memcap: BREACH …` | the ceiling fired | `tool`/`memory-killed` (correct) |
 | `memcap: <banner>` and nothing else | **the wrapper died before it could account for the run** | `tool`, cause of its own — misfiled as `codegen` |
 
-The third row is distinguishable with no new information: `tools/memcap.py`
-prints its banner before it starts anything (`tools/memcap.py:72`) and always
-prints `BREACH`, `done`, `interrupted` or `WATCHDOG FAILED` afterwards, so a
-captured output whose only memcap line is the banner is a wrapper that was killed
-mid-run. That is a fact about the machine, and today it is filed as a fact about
-the source **and written to the CAS** (`tools/formal_sweep.py:2419`), which is
-worse than the misclassification: it survives the run that observed it.
+## Part 1 — the misclassification (`6febd26e`)
 
-What killed the wrapper is **not established here**. `tools/control.py guard`
-(`--limit-gb 55 --total-gb 90`) SIGKILLs the largest processes in any worker
-worktree once their sum passes its budget, and it was running throughout; that
-is a candidate, not a conclusion, and this doc does not claim it.
-
-## The fix, as landed
-
-All four steps below are in `6febd26e`, with five cases in
-`test_formal_sweep.py::TestWrapperDied` (84 tests pass there; 33 in
-`test_formal_sweep_truth.py` and 5 groups in `test_formal_sweep_cache_key.py`
-also pass). What the commit does differently from the sketch below:
-
-* `memcap_verdict` keeps its `(breached, peak)` contract — three other tools read
-  it as a pair (`tools/suite.py`, `tools/ab_run_one.py`) — and the third state is
-  a sibling predicate, `procrun.memcap_wrapper_died`, sharing ONE definition of
-  "memcap reported an outcome" (`memcap_accounted`) with the breach reader rather
-  than adding a second parser.
+* `procrun.memcap_wrapper_died` is a sibling predicate beside `memcap_verdict`,
+  sharing ONE definition of "memcap reported an outcome" (`memcap_accounted`)
+  with the breach reader rather than adding a second parser;
 * `BuildRun` gained a `wrapper_died` field, and the branch fires only when the
-  BUILD printed nothing either (`build_lines` is empty), so a build that refused
-  a construct and then had its wrapper killed still reports the refusal. That case
-  is pinned by a test, because getting it wrong trades one misfiling for another.
+  BUILD printed nothing either, so a build that refused a construct and then had
+  its wrapper killed still reports the refusal;
 * the same branch stops a silent death's `detail` from being memcap's
-  `done … child exit -9` line. The CLASS is deliberately unchanged: the
-  silent-death fallback is a documented choice (a refusal whose message went to
-  stdout is common) and the fix is about not putting the wrapper's bookkeeping in
-  the file's mouth.
+  `done … child exit -9` line, and the class is deliberately unchanged (the
+  silent-death fallback is a documented choice; the fix is about not putting the
+  wrapper's bookkeeping in the file's mouth).
 
-## The exact next step, as specified before the fix
+## Part 2 — what killed the wrapper (`d5c1a3e7`)
 
-1. **`tools/procrun.py::memcap_verdict`** — return a third state instead of a
-   `(breached, peak)` pair, or a small sibling predicate beside it: a
-   `memcap:` banner present with **no** `BREACH` and **no** `done` line means the
-   wrapper died. Keep the existing contract (`breached` must stay memcap's own
-   words, never exit code 125 — its docstring is right about that) and keep
-   `peak_gb = None`, because no peak was measured.
-2. **`tools/formal_sweep.py::run_one`** — a third branch next to the existing
-   `if proc.mem_killed:` at line 2385, returning a `tool` verdict with a new
-   `CAUSE_WRAPPER_DEATH` next to `CAUSE_MEMORY` (`tools/formal_sweep.py:486`).
-   The detail should name the wrapper and the fact: it is a machine failure, not
-   a verdict, and it is not a *memory* verdict (nothing was measured against the
-   ceiling).
-3. **`test_formal_sweep_truth.py`** — the classifier tests already live there
-   (the `-M` cases from the 2026-10-02 x86-a map). Three cases: banner-only →
-   `tool`; `BREACH` + peak → `tool`/`memory-killed` **with the peak in the
-   detail** (unchanged); a build's own refusal with no memcap line at all →
-   `codegen` (unchanged). The second and third are the regression guards for the
-   existing behaviour.
-4. **Cost to expect:** `tools/formal_sweep.py`'s own bytes are in every cache key
-   (`_criteria_id`), so this invalidates the CAS for every sweep on the machine
-   and the next sweep rebuilds. That is the tool working as designed — a rule
-   change must take effect — and it is worth saying out loud in the commit
-   message, because it is the price of the fix and the next person will otherwise
-   think the cache broke.
+The original report was careful not to conclude: `tools/control.py guard` was
+"a candidate, not a conclusion". Two facts make it a conclusion now, and the
+second one means nobody has to reproduce a machine failure to see it.
 
-Until this lands, a reader of any sweep log should treat a `codegen` line whose
-detail starts with `memcap:` as a `tool` row, and should know that the CAS is
+**The state is no longer reachable by any signal memcap can catch.** memcap had
+no SIGTERM handler, so its default action skipped every line it prints — and left
+the workload running unmonitored, which is the exact failure the ceiling exists
+to prevent. That is the second-order cost, and it is the one that mattered: a
+wrapper killed by TERM orphans the build it was watching. `tools/control.py reap`
+sends `os.killpg(pid, 15)` and `os.kill(pid, 15)`, so a sweep in a finished
+worker's tree was a candidate for exactly this, and so was any operator's
+`kill -TERM`. Now:
+
+```
+$ python3 tools/memcap.py --limit-gb 4 --label fg -- python3 slow.py &   # then kill -TERM
+memcap: fg -- ceiling 4.0 GB across the process tree
+
+memcap: interrupted by signal 15, killing fg -- nothing below this wrapper is
+left running, and this run was NOT accounted for by any ceiling
+$ echo $?   ->  143
+```
+
+and `procrun.memcap_accounted` recognises that line, so `memcap_wrapper_died` is
+False for it. The outcome WORD is `interrupted` and not `terminated`, because
+`memcap_accounted` reads a set of words and a word outside it would have left a
+signalled wrapper still reading as a silent one.
+
+**What is left is a SIGKILL, and the row says so.** The wrapper's own exit status
+answers the question this doc could not:
+
+```
+the 4 GB per-file wrapper (tools/memcap.py) died before it reported an outcome —
+killed by SIGKILL, which nothing here can catch: in this tree that is
+tools/control.py guard, aimed at the largest process in a worker worktree once
+the tree's RSS sum passes its budget — so its banner is in the output with no
+breach and no completion …
+```
+
+Which is checkable against this repository rather than asserted: `control.py`
+guard is the only code that aims a SIGKILL at a process by name
+(`tools/control.py:381`, `os.kill(pid, 9)`), `tools/control.py reap` and
+`tools/autointegrate.py` both use 15, memcap's own group kill happens after it
+has printed `BREACH`, and the sweep's other kill (`procrun.kill_group`) is on the
+timeout path, which raises `TimeoutExpired` and so never reaches this branch. The
+row also refuses to name a cause it does not have: a wrapper that exited without a
+signal says so instead of claiming the guard.
+
+**Three cases in `TestWrapperDied`** (plus the five from `6febd26e`): the row
+names SIGKILL and the guard for `-9`, names the signal and NOT the guard for
+`-15`, and declines to invent a cause for a positive exit code; and one case runs
+the real `tools/memcap.py` binary, sends it a SIGTERM and asserts all three
+things the silent-death reader depends on — an outcome `memcap_accounted`
+recognises, exit 143, and **the workload gone** (polled, because it is reparented
+to init when it dies). `test_formal_sweep.py`: 95 tests OK.
+
+## The cost of the fix, which the reader should not have to rediscover
+
+`tools/formal_sweep.py`'s own bytes are in every cache key (`_criteria_id`), so
+the classification change invalidated the CAS for every sweep on the machine and
+the next sweep rebuilt. That is the tool working as designed — a rule change must
+take effect — and it is the price of the fix.
+
+Until this landed, a reader of any sweep log should treat a `codegen` line whose
+detail starts with `memcap:` as a `tool` row, and should know that the CAS was
 serving it as a finding.
