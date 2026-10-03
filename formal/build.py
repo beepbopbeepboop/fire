@@ -1162,14 +1162,37 @@ def _imported_structs(source_path: str, stmts: list, arch: str,
     from one file and cannot disagree with the library on the link line."""
     if not fmt_wants_macho(arch):
         return []
-    from formal.imports import (imported_struct_defs, linked_module_paths,
-                                module_struct_defs)
+    from formal.imports import (imported_instantiations, imported_struct_defs,
+                                linked_module_paths, module_struct_defs)
     out, seen = [], set()
     for st in imported_struct_defs(source_path, stmts,
                                    project_root=source_path):
         seen.add(st.name)
         out.append(st)
-    for path in linked_module_paths(linked):
+    linked_paths = linked_module_paths(linked)
+    # The INSTANTIATED declarations, for the modules' generic templates this file
+    # applies — `Pair[Int]` is `Pair_Int` at the boundary (`doc/ABI.md`
+    # §Generics), and a constructor call only reaches the emitter as a struct
+    # this build has a declaration for.  Asked for AFTER the plain declarations
+    # and therefore never overriding one: this file's own `struct Pair_Int` is
+    # the same name by definition, and a local definition shadowing an import is
+    # the precedence `imported_struct_defs` states.
+    #
+    # This call also REWRITES the `Pair[Int]()` call sites in `stmts` to the
+    # mangled spelling, from the same table it returns its declarations out of;
+    # see `formal/imports.py::imported_instantiations` for why those two are one
+    # table and not two computations.  It mutates `stmts`, which is why it runs
+    # here and not inside `imported_struct_defs`: every reader of the
+    # declarations should get the rewrite's table, and exactly one place should
+    # perform it.
+    for name, st in imported_instantiations(
+            source_path, stmts, project_root=source_path,
+            linked_paths=linked_paths).items():
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(st)
+    for path in linked_paths:
         for st in module_struct_defs(path, source_path):
             if st.name not in seen:
                 seen.add(st.name)
@@ -1275,11 +1298,30 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             raise ImportBuildError(
                 unresolvable_import_errors(source_path, missing))
         chain = []
+        # The INSTANTIATIONS of generic templates this file asks of the modules
+        # it imports, attributed to the module that DECLARES each one
+        # (`formal/imports.py::instantiation_demands`).  This is the demand
+        # half of `doc/ABI.md` §Generics: a template is not a boundary symbol,
+        # each instantiation is, and this program is what says which ones it
+        # binds.  Read from `stmts`, so it must be asked BEFORE any rewrite
+        # turns `Pair[Int]()` into the concrete `Pair_Int()` — afterwards the
+        # brackets are gone and the answer would be empty.
+        from formal.imports import (instantiation_demands,
+                                    module_source_text)
+        demands = {}
+        for mod, path in resolved:
+            for other, wanted in instantiation_demands(
+                    path, module_source_text(source_path),
+                    project_root=source_path).items():
+                merged = dict(demands.get(other) or {})
+                for tmpl, args in wanted.items():
+                    merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
+                demands[other] = merged
         for mod, path in resolved:
             try:
                 dylib = build_module_dylib(mod, path, out_dir, arch,
                                            project_root=source_path,
-                                           _parent=parent)
+                                           _parent=parent, demands=demands)
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
