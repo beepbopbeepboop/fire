@@ -31,6 +31,7 @@ from types import SimpleNamespace
 
 import fire_compiler as F
 from formal import model as M
+from formal import types as FT
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
 from formal.macho_linker import (EXTERN_ENTRYOFF, EXTERN_GLOBALS_ENTRYOFF,
@@ -9375,6 +9376,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if why is not None:
                     raise CodegenError(
                         M.global_value_refusal(name, fn.name, why))
+                # The other half of the same discipline, and it is a different
+                # question: a slot the MODULE BODY fills has an initializer that
+                # RUNS rather than one the linker lays out, so "has an
+                # initializer" is not "has it yet". The module body is the entry,
+                # so only a call written in it above the store can get here
+                # first — and a load that beats the store reads the zero.
+                # `module_slot_readable_in` turns that order into a verdict and
+                # `module_slot_unreadable_refusal` names what fills it, because
+                # the number this would print (0) is not a diagnosis.
+                if not M.module_slot_readable_in(gslot, fn):
+                    raise CodegenError(
+                        M.module_slot_unreadable_refusal(gslot, fn))
                 continue
             sym = M.module_symbol(name)
             # A TYPE read as a value is the same kind of misdirection as the
@@ -10320,7 +10333,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # Published for the reason `_MODULE_SYMBOLS` is: the consumers are a
     # per-function walk inside each backend and the linker, and none of them has
     # the module statements in hand.
-    slots = M.collect_global_slots(stmts, functions)
+    # `formal.types`' annotation vocabularies, so the KIND of a slot the module
+    # body fills by a call is the callee's declared return type read through the
+    # ONE `declared_type_kind` both backends read, and so a slot holding a DICT
+    # is recognised as one from the same annotation. Taken from the caller for
+    # the reason that function takes them from the caller: two private copies of
+    # "what does this annotation mean" is one architecture answering `len()` and
+    # the other refusing it.
+    slots = M.collect_global_slots(stmts, functions,
+                                   int_names=FT.TYPE_NAMES,
+                                   string_names=FT.STRING_TYPE_NAMES,
+                                   dict_names=FT.DICT_TYPE_NAMES)
     M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever

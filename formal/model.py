@@ -20659,15 +20659,58 @@ class GlobalSlot:
     0x100000398 and runs at 0x104da4398. `build_data_image` returns the fixup
     list beside the bytes so each linker emits a relocation for exactly the
     address words and not for the integers beside them.
+
+    `filled_by_body` is the third source of a slot's value, and the one this
+    capability had no word for: the MODULE BODY stores the name
+    (`G = compute()` at file level), so the slot is written by the module's own
+    top-level statements before anything reads it. It is a FACT about where the
+    value comes from rather than about what it is, so it is a flag beside `init`
+    rather than a fourth `init` kind — `build_data_image` still lays the word out
+    as zeros (nothing static to write), and `static_initializer_refusal_reason`
+    is what must NOT refuse, because an unwritten slot here is not an
+    uninitialized one: the body writes it first.
+
+    The flag is set for a slot whose value is ALREADY in the image too, when the
+    body also rebinds the name — `G = [1, 2]` then a top-level `G = [3, 4]` has
+    both — so it answers "does the body write this", and the initializer is
+    whatever the image holds before the first such write.
+
+    `body_site` is the `BodyStoreSite` `module_body_store_sites` recorded for it,
+    and it is what `module_slot_readable_in` turns into a verdict about a read at
+    a particular place. `None` for a slot the body does not fill, and for a body
+    store this build could not place in the body's statement list at all — which
+    `module_slot_readable_in` then refuses rather than assumes, because the
+    conservative answer there is the one that cannot be a wrong number.
+
+    `kind` is the `ValueKinds` kind the slot's value has, and `is_dict` is the
+    one distinction that kind cannot carry, for the slots whose initializer does
+    not state them: a slot the MODULE BODY fills is `("unknown", …)`, so the
+    only thing that says what lands in it is the call the store makes, and that
+    call's declared return type says it. Both are carried on the slot rather
+    than derived at each read because `global_slot_kind` and
+    `global_slot_is_dict` have no access to the unit's functions — and because
+    "what does this name hold" must be ONE answer whether the value folded, was
+    laid out in `__DATA`, or is computed by the module's own top-level
+    statements. `is_dict` is a separate field and not a kind for a reason the
+    field's own reader states: every container on this path is one word and one
+    kind, so a `kind` that said "dict" would have to lie about the other three
+    container types to say it.
     """
 
-    __slots__ = ("name", "index", "init", "site")
+    __slots__ = ("name", "index", "init", "site", "filled_by_body", "body_site",
+                 "kind", "is_dict")
 
-    def __init__(self, name: str, index: int, init, site=None):
+    def __init__(self, name: str, index: int, init, site=None,
+                 filled_by_body=False, body_site=None, kind=None,
+                 is_dict=False):
         self.name = name
         self.index = index
         self.init = init
         self.site = site
+        self.filled_by_body = filled_by_body
+        self.body_site = body_site
+        self.kind = kind
+        self.is_dict = is_dict
 
     @property
     def is_address(self) -> bool:
@@ -20803,6 +20846,220 @@ def functions_writing_globals(functions) -> dict:
     return out
 
 
+def module_body_store_names(functions) -> set:
+    """The names the MODULE BODY assigns — which are the MODULE's own writes.
+
+    The counterpart of `functions_writing_globals`, and the same fact read from
+    the other end. `G = compute()` at file level is a store of `G`, and the
+    only function that runs it is the synthetic one the module's top level is
+    compiled as (`_module_body_function`), so `G` is written by exactly one
+    function in the image and that function is the ENTRY.
+
+    This is why the module body cannot be scoped like an ordinary function.
+    Read as one, `G` is a local of `__module_body__`, so `module_slot_for` sends
+    its reads and writes to a register — and a register dies with the body,
+    which is the whole of `bugs/FORMAL_module_state_no_storage.md`'s subject: the
+    module's own value computed somewhere nobody can read it. The name needs the
+    module's `__DATA` slot for the same reason a name written through
+    `global G` inside a function needs one, and it needs it for the same
+    reason: **the writer and the reader are different functions and only one of
+    them is on the stack at a time.**
+
+    Asked with the SAME walk the register allocator uses (`bound_names_in_order`),
+    so "which names the body binds" has one answer here and in both emitters.
+    It is deliberately NOT filtered to names with a slot: that filter is
+    `global_names_bound_in`'s, and it is what leaves a body-local with no module
+    home — a `for` target, a `with` alias, an ordinary temporary of a top-level
+    statement — in a register, where it belongs.
+    """
+    bodies = [f for f in (functions or [])
+              if getattr(f, "name", None) == MODULE_BODY_NAME]
+    if not bodies:
+        return set()
+    from mojo.middle.boundnames import bound_names_in_order
+    out = set()
+    for fn in bodies:
+        try:
+            out |= {n for n in bound_names_in_order(
+                getattr(fn, "body", None) or [], []) if isinstance(n, str)}
+        except Exception:
+            continue
+    return out
+
+
+def module_body_store_sites(functions) -> dict:
+    """`{name: BodyStoreSite}` — what the module body can reach before a store.
+
+    The ORDER facts that decide whether a body-filled slot's value is there yet
+    when a read happens, and they are order facts plus a transitive closure
+    rather than a whole-program analysis because of one measured property of
+    this path: **the module body IS the entry** (`entry_function` rule 1), so
+    nothing in the image runs before the module's first statement, and the only
+    thing that can put a function onto the stack is a CALL the body makes.
+
+    So "is this read premature" is "can this reader run before the store", and
+    the body is a straight line of statements, which makes it two closures of
+    the same call graph:
+
+      * `earlier` — every function this unit defines reachable from a call in a
+        statement ABOVE the store. A reader in that set can run before the slot
+        holds anything, whatever order the rest of the body is in.
+      * `self_reaches` — the same closure from the store statement's OWN value.
+        `G = compute()` runs `compute` before the store completes, so a
+        `compute` that reads `G` is the same hazard one statement higher, and a
+        direct-callee check misses it.
+
+    `opaque_above` / `opaque_self` are the two shapes no closure can answer: a
+    call through a value rather than through a function of this unit, or through
+    one rooted at a name this unit binds (`S.helper()`, `h.method()`). Both may
+    be this unit's own code, so both are treated as reaching everything — the
+    conservative direction, and the only one that can produce a refusal rather
+    than a wrong number.
+
+    Why a closure and not "the first call in the body": the first call is almost
+    always the store of ANOTHER computed global, and refusing every reader below
+    it would refuse `NUMS = make()` followed by `NAME = greet()` with both read
+    from `main` — a correct program whose readers `main` reaches from nothing
+    the body calls before the assignment. A reader's NAME is the question, and a
+    closure answers it.
+
+    `_call_reach` splits a call three ways, and the split is what keeps the other
+    image out of this: `REPO = os.path.dirname(HERE)` roots at `os`, which is
+    another IMAGE, and code in another image has no symbol for this unit's
+    `__DATA` slot — so it cannot read the value however deep the chain goes, and
+    a call like that must not make every later reader look premature."""
+    bodies = [f for f in (functions or [])
+              if getattr(f, "name", None) == MODULE_BODY_NAME]
+    if not bodies:
+        return {}
+    from mojo.middle.boundnames import bound_names_in_order
+    # `{name: [FunctionDef]}` for a unit's own definitions, because Mojo
+    # overloads are ordinary (`def reversed[...]` appears eight times in
+    # std/builtin/reversed.mojo) and a closure has to follow the same name-keyed
+    # question `entry_function` and `_check_frame_escapes` already ask: every
+    # definition of one name is reachable from a call to it.
+    by_name: dict = {}
+    for fn in (functions or []):
+        nm = getattr(fn, "name", None)
+        if nm:
+            by_name.setdefault(nm, []).append(fn)
+    # Every name this unit BINDS, so a call's base can be told from a module's.
+    unit_bound = set()
+    for fn in (functions or []):
+        params = [p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
+                  for p in (getattr(fn, "params", None) or [])]
+        unit_bound |= {p for p in params if isinstance(p, str)}
+        try:
+            unit_bound |= {n for n in bound_names_in_order(
+                getattr(fn, "body", None) or [], []) if isinstance(n, str)}
+        except Exception:
+            continue
+
+    def calls_of(fn) -> set:
+        out = set()
+        for node in iter_nodes(getattr(fn, "body", None) or []):
+            if isinstance(node, F.CallExpr) and isinstance(node.func,
+                                                           F.IdentExpr):
+                out.add(node.func.name)
+        return out
+
+    def _call_reach(call) -> str:
+        """Can this call reach a function of THIS unit, so could it read us?
+
+        `"follow"` — a bare-name callee, which the closures walk, and which is
+        harmless when this unit defines no such name (a builtin or an unbound
+        symbol, and neither can read this unit's slot).
+
+        `"safe"` — a dotted callee rooted at a name this unit does NOT bind, i.e.
+        another image's namespace. Nothing over there has a symbol for this
+        unit's slot.
+
+        `"opaque"` — a dotted callee rooted at a name this unit binds (a struct's
+        static method, a local receiver), or a callee this path cannot decompose
+        at all (a subscript, a call result). Both may be this unit's own code.
+        """
+        func = getattr(call, "func", None)
+        if isinstance(func, F.IdentExpr):
+            return "follow"
+        if isinstance(func, F.MemberExpr):
+            node = func
+            while isinstance(node, F.MemberExpr):
+                node = getattr(node, "obj", None)
+            if isinstance(node, F.IdentExpr):
+                return "opaque" if node.name in unit_bound else "safe"
+        return "opaque"
+
+    def _split(stmt):
+        """`(callee names, opaque?)` for one body statement."""
+        follow, opaque = set(), False
+        for node in iter_nodes(stmt):
+            if not isinstance(node, F.CallExpr):
+                continue
+            reach = _call_reach(node)
+            if reach == "follow":
+                follow.add(node.func.name)
+            elif reach == "opaque":
+                opaque = True
+        return follow, opaque
+
+    def _closure(frontier):
+        """Every name reachable from `frontier` in this unit's call graph."""
+        reaches, frontier = set(), set(frontier)
+        while frontier:
+            nxt = frontier - reaches
+            if not nxt:
+                break
+            reaches |= nxt
+            frontier = set()
+            for callee in nxt:
+                for target in by_name.get(callee, ()):
+                    frontier |= calls_of(target)
+        return reaches
+
+    out: dict = {}
+    for fn in bodies:
+        stmts = list(getattr(fn, "body", None) or [])
+        calls = [_split(s) for s in stmts]
+        # Running union of the calls above each statement, so `earlier` is a
+        # lookup rather than a re-walk per name. Two module-level computed
+        # globals in one file is the ordinary case and there can be a handful.
+        above_calls, above_opaque = set(), False
+        running_calls, running_opaque = set(), False
+        for i, (follow, opaque) in enumerate(calls):
+            above_calls, above_opaque = set(running_calls), running_opaque
+            running_calls |= follow
+            running_opaque = running_opaque or opaque
+            name = _module_binding_name(stmts[i])
+            if name is None or name in out:
+                continue
+            follow_here, opaque_here = follow, opaque
+            out[name] = BodyStoreSite(
+                i, _closure(above_calls), above_opaque,
+                _closure(follow_here), opaque_here)
+    return out
+
+
+class BodyStoreSite:
+    """What the module body can reach before it stores one name.
+
+    Five fields, and the only reader is `module_slot_readable_in` — kept
+    together in a record rather than a tuple because "a reader in this set" and
+    "this call cannot be followed" are the two halves of one question and a
+    caller that had to remember which is which is a caller that will eventually
+    read only one."""
+
+    __slots__ = ("store_at", "earlier", "opaque_above", "self_reaches",
+                 "opaque_self")
+
+    def __init__(self, store_at: int, earlier: set, opaque_above: bool,
+                 self_reaches: set, opaque_self: bool):
+        self.store_at = store_at
+        self.earlier = earlier
+        self.opaque_above = opaque_above
+        self.self_reaches = self_reaches
+        self.opaque_self = opaque_self
+
+
 def global_names_bound_in(fn) -> set:
     """The names `fn` declares `global`, which are therefore NOT its locals.
 
@@ -20812,8 +21069,21 @@ def global_names_bound_in(fn) -> set:
     pick whichever the emitter consulted first. That is not a theoretical
     disagreement — it is the exact shape of the X19/zero fall-through this file
     exists to prevent, reintroduced through the allocator instead of the
-    emitter."""
-    return {n for n in functions_writing_globals([fn])} or set()
+    emitter.
+
+    **The MODULE BODY is the second spelling of the same declaration**, and it is
+    here for the reason `module_body_store_names` gives: a file-level
+    `G = compute()` is a write of `G` by the MODULE, so `G` is not a local of
+    `__module_body__` — its home is the module's `__DATA`, exactly as a
+    `global G` inside a function has. Gated on the name HAVING a slot, which is
+    what keeps a body-local with no module home (a `for` target, a `with` alias,
+    an ordinary temporary of a top-level statement) out of this and in a
+    register."""
+    out = {n for n in functions_writing_globals([fn])}
+    if getattr(fn, "name", None) == MODULE_BODY_NAME:
+        out |= {n for n in module_body_store_names([fn])
+                if module_slot(n) is not None}
+    return out
 
 
 def module_slot_for(name: str, local_names):
@@ -20885,15 +21155,17 @@ def module_slot_for(name: str, local_names):
     return module_slot(name)
 
 
-def collect_global_slots(stmts: list, functions: list) -> dict:
+def collect_global_slots(stmts: list, functions: list, int_names=(),
+                         string_names=(), dict_names=()) -> dict:
     """`{name: GlobalSlot}` for every module-level name that needs STORAGE.
 
-    The question is one — "can the build FOLD this name?" — with two answers,
-    and the storage table is what serves the "no" for both of them:
+    The question is one — "can the build FOLD this name, or does something in
+    this image change it while the program runs?" — with three answers, and the
+    storage table is what serves the last two:
 
       * **a function WRITES it.** `global G; G = G + 1` changes G's value while
         the program runs, so there is no one value to substitute at the reads.
-        This is the case the folding path was already correct to refuse, and it
+        This was the case the folding path was already correct to refuse, and it
         was refused by NAME rather than by a mechanism. Measured before this
         existed: `G = 5` with `bump()` called twice printed `G=5` where CPython
         prints `G=7` — a silently wrong answer, because the read was the folded
@@ -20905,6 +21177,14 @@ def collect_global_slots(stmts: list, functions: list) -> dict:
         can hold its address. `NUMS = [10,20,30]` read from a function is the
         case `bugs/FORMAL_module_state_no_storage.md` §1 measured as the first
         one, and it builds and runs correctly now.
+      * **the MODULE BODY writes it.** `G = compute()` at file level is the
+        module's own top-level statement, compiled as the synthetic
+        `__module_body__` and run before anything else — so it is a store, not
+        an image initializer, and the slot it needs is filled by that store. This
+        is the third of the doc's "three things a slot cannot be" that turned out
+        to be two: a value computed before the program runs has no STATIC
+        initializer, but it does have a module-level statement that computes it,
+        and that statement is already the entry point.
 
     Anything else is still folded and still needs no storage: an int, a bool or a
     string whose value is a literal, with nothing writing it. A name in NEITHER
@@ -20914,10 +21194,34 @@ def collect_global_slots(stmts: list, functions: list) -> dict:
     bodies for the WRITES, because the two live in different places: the value is
     stated once, at module level, and the writes are stated inside the bodies.
 
+    `int_names` / `string_names` are `formal.types`' annotation vocabularies,
+    taken from the caller for the reason `declared_type_kind` takes them from the
+    caller: the two backends must not answer "what does this annotation mean"
+    from two private lists, and a default of empty leaves the answer the
+    conservative one rather than a guess. `dict_names` is the third member of the
+    same vocabulary, and the reason it is a separate argument is
+    `_body_store_shape`: a KIND cannot say "dict" (every container is one word
+    here, and `declared_type_kind` answers all four with the bare list prefix),
+    while a SUBSCRIPT has to. They are read for exactly one name: a slot the
+    module body fills by a call.
+
     ORDER is the order the names are first declared at module level, so the
     layout is a function of the source rather than of dictionary iteration and
     two builds of the same file produce the same image."""
     written = functions_writing_globals(functions)
+    body_written = module_body_store_names(functions)
+    body_sites = module_body_store_sites(functions)
+    rets = function_return_types(functions)
+    # `{name: [FunctionDef]}` for the definitions of a name, because the
+    # ELEMENT question `_body_store_shape` asks is a question about every
+    # definition of the callee and not about the last one — `std/builtin/reversed`
+    # is defined eight times over and Mojo overloads are ordinary. Same name-keyed
+    # shape `module_body_store_sites` builds, for the same reason.
+    by_name: dict = {}
+    for fn in (functions or []):
+        nm = getattr(fn, "name", None)
+        if nm:
+            by_name.setdefault(nm, []).append(fn)
     finals: dict = {}
     order: list = []
     for stmt in (stmts or []):
@@ -20927,7 +21231,9 @@ def collect_global_slots(stmts: list, functions: list) -> dict:
         if name is None:
             continue
         value = getattr(stmt, "value", None)
-        if name not in written and not _is_container_literal(value):
+        filled_by_body = name in body_written and not _is_container_literal(value)
+        if name not in written and not filled_by_body \
+                and not _is_container_literal(value):
             continue
         if name not in finals:
             order.append(name)
@@ -20935,9 +21241,102 @@ def collect_global_slots(stmts: list, functions: list) -> dict:
     slots = {}
     for index, name in enumerate(order):
         stmt = finals[name]
-        slots[name] = GlobalSlot(name, index, _static_initializer(
-            getattr(stmt, "value", None)), site=stmt)
+        value = getattr(stmt, "value", None)
+        kind, is_dict = _body_store_shape(value, by_name, rets, int_names,
+                                          string_names, dict_names)
+        slots[name] = GlobalSlot(name, index, _static_initializer(value),
+                                 site=stmt,
+                                 filled_by_body=name in body_written,
+                                 body_site=body_sites.get(name),
+                                 kind=kind, is_dict=is_dict)
     return slots
+
+
+def _body_store_shape(value, by_name: dict, rets: dict, int_names, string_names,
+                      dict_names):
+    """`(kind, is_dict)` for a module-level CALL's value, from its CALLEE.
+
+    The third source of a value's shape, beside a folded literal and a container
+    literal, and it completes the set: a name bound at module level to
+    `compute()` is stored by the module body, and the only thing that says what
+    lands in the slot is the call — so the call's DECLARED return type says it,
+    which is the same evidence `declared_type_kind` reads everywhere else and the
+    same discipline: a callee this unit does not define, or one with no
+    annotation, claims nothing.
+
+    A `List[Int]` answer is the bare `LIST_PREFIX` rather than `list:<elem>`
+    unless the callee's own RETURNS pin an element, which is the one upgrade
+    `declared_type_kind` cannot make (it maps a blob annotation to a blob without
+    reading its element, because an annotation is a statement about a TYPE and
+    the element question is asked of a value). Both backends have always
+    answered that question the other way round — `_callee_kind` takes the
+    annotation for a scalar and the RETURN STATEMENTS for everything else — so
+    `def make() -> List[Int]: return [3, 14, 0]` has been `list:int` for a LOCAL
+    bound from it since before a module-level slot could exist at all, and
+    `print(l[0])` lowering while `print(L[0])` was refused is what that costs.
+    `_callee_blob_elem_kind` is the same question asked of the same evidence for
+    the one spelling that had no `ValueKinds`, and unanimity over every
+    definition of the callee is what keeps it from being a guess.
+
+    `is_dict` is the half a kind cannot carry, and it is asked SEPARATELY rather
+    than by widening the kind vocabulary because the four container annotations
+    are one representation: `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and
+    `Dict[String, Int]` are all a bare `char *`-shaped word, so a kind that
+    said "dict" would be a lie about the other three. What says it is the
+    annotation's BASE NAME, through the one `formal.types` vocabulary both
+    backends share (`DICT_TYPE_NAMES`), which is the same evidence
+    `global_slot_is_dict` reads off a dict LITERAL's initializer. A callee that
+    declares NOTHING claims nothing here either, so the dict-vs-sequence question
+    stays refused rather than guessed for the same reason the kind does.
+
+    Asked only of a bare `CallExpr` to a name. Anything else — a binop, a
+    subscript, a dotted call into another image — claims nothing rather than
+    being guessed at, for the reason every other kind hook in this file
+    underwrites deliberately."""
+    if not isinstance(value, F.CallExpr) or not isinstance(value.func,
+                                                           F.IdentExpr):
+        return None, False
+    callee = value.func.name
+    ann = rets.get(callee)
+    if not ann:
+        return None, False
+    base = annotation_base_name(ann)
+    kind = declared_type_kind(ann, int_names, string_names, None)
+    if kind == list_kind(None):
+        elem = _callee_blob_elem_kind(by_name.get(callee), int_names,
+                                      string_names)
+        if elem is not None:
+            kind = list_kind(elem)
+    return kind, (base is not None and base in dict_names)
+
+
+def _callee_blob_elem_kind(candidates, int_names, string_names):
+    """The element kind the callee's own `return` statements state, or None.
+
+    `ValueKinds.return_kind` for a callee of this unit, read WITHOUT the
+    `func_kind` hook, and that omission is the safety argument rather than a
+    shortcut: the hook resolves a call in a return position by recursing into the
+    callee, so a no-hook reading of `def a() -> List[Int]: return b()` is a word
+    where a hooked one would be `list:str`. Undecidable is the direction that
+    refuses, and a bare `LIST_PREFIX` is exactly the answer a container of
+    unstated elements already gets — so the one shape this gets less precise
+    about is the one that was already refused.
+
+    UNANIMITY over every definition of the name, or nothing, for the rule every
+    flow-insensitive map in this file uses: a definition whose returns do not
+    classify as a list at all disagrees with the others about what the call
+    produces, and a module-level `L = make()` has to be one word for the whole
+    program. `list_elem_kind` of a bare prefix is None, so a callee that agrees
+    its elements are unstated also claims nothing, rather than claiming the bare
+    prefix as if it were an element."""
+    elems = set()
+    for fn in (candidates or ()):
+        kind = ValueKinds(fn, int_names=int_names,
+                          string_names=string_names).return_kind
+        if not is_list_kind(kind):
+            return None
+        elems.add(list_elem_kind(kind))
+    return elems.pop() if len(elems) == 1 else None
 
 
 def _is_container_literal(value) -> bool:
@@ -21078,8 +21477,22 @@ def static_initializer_refusal_reason(slot) -> str:
     `("unknown", …)`, because they have different repairs: a value computed by a
     call needs the module-level sequence that would fill it, a name imported
     from another module needs that module's storage, and a container with an
-    element that is not a word needs a nested layout."""
+    element that is not a word needs a nested layout.
+
+    **A slot the MODULE BODY fills is the one `("unknown", …)` shape that is not
+    a refusal**, and it is checked here rather than at the three callers so the
+    two cannot disagree. `G = compute()` has no static initializer because the
+    value is not known before the program runs — but the statement that computes
+    it IS the module's top level, and that runs first (`module_body_store_names`).
+    The zero an unwritten slot gives is therefore not what any read can see, in
+    exactly the way it is not what any read can see for a slot that does have an
+    initializer. Refusing here would be refusing a value the image computes
+    before its first read, which is the case `bugs/FORMAL_module_state_no_storage.md`
+    §"the exact next step" item 1 is about.
+    """
     if slot is None or slot.init[0] != "unknown":
+        return None
+    if slot.filled_by_body:
         return None
     node = getattr(slot.site, "value", None)
     if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
@@ -21089,6 +21502,97 @@ def static_initializer_refusal_reason(slot) -> str:
     if isinstance(node, (F.ImportStmt, F.FromImportStmt)):
         return "imported"
     return "unknown"
+
+
+def module_slot_readable_in(slot, fn) -> bool:
+    """Can `fn` read this slot, or would the read see a value nobody wrote?
+
+    Only a slot the MODULE BODY fills can be unreadable here, and the reason is
+    the one thing about the body that is easy to get wrong: it is the ENTRY, so
+    a function cannot run before the module's first statement — but a CALL the
+    body makes can, and then the function's read of the slot sees the zero an
+    unwritten slot gives. Zero is a plausible number, so this is a refusal and
+    not a default.
+
+    Both halves are order facts about the body's own statement list plus a
+    transitive closure over this unit's own functions, which is why this is a
+    predicate rather than a whole-program analysis (`module_body_store_sites`):
+
+      * a read from another function is premature exactly when the module body
+        can reach THAT function before the store of this name — above it, or
+        through the store's own value, which runs before the store completes;
+      * a read from the body itself is `read_before_store`'s question and is
+        left to it. It already refuses it, with a message that quotes CPython's
+        `NameError`, and a second opinion here would be two rules about one
+        program.
+
+    Only a slot with NO static initializer is asked at all. A slot the image
+    already holds — a container literal, a folded literal — has its value before
+    the body runs, so no order can make a read of it premature, and asking would
+    refuse `NUMS = [1, 2]` read by a function the body calls first, which is a
+    real program with a real answer.
+
+    A slot with NO recorded site is refused rather than assumed, because a
+    body-written name this build could not place in the body's statements is
+    exactly the case where "assume it is fine" is a guess."""
+    if slot is None or not slot.filled_by_body or slot.init[0] != "unknown":
+        return True
+    if getattr(fn, "name", None) == MODULE_BODY_NAME:
+        return True
+    if slot.body_site is None:
+        return False
+    site = slot.body_site
+    name = getattr(fn, "name", None)
+    if site.opaque_above or site.opaque_self:
+        return False
+    return name not in site.earlier and name not in site.self_reaches
+
+
+def module_slot_unreadable_refusal(slot, fn) -> str:
+    """The refusal for a read that would see a `__DATA` slot before it is filled.
+
+    Names WHICH of the three ways the read got here ahead of the store, because
+    they have three different fixes, and says what the read would see instead —
+    "0" is not a diagnosis, since a program that prints 0 here is
+    indistinguishable from one that computed 0."""
+    who = f"{getattr(fn, 'name', None) or ''}: "
+    head = (f"{who}{slot.name!r} is one of the module-global slots in this "
+            f"image's `__DATA`, and it has no static initializer: the value is "
+            f"computed by the module's own top-level statements, which this "
+            f"path compiles into the synthetic function the startup stub enters. "
+            f"That function is the entry, so nothing runs before its first "
+            f"statement — but this read is reached before the store of "
+            f"{slot.name!r} completes, so the load would read the zero an "
+            f"unwritten slot gives. ")
+    site = slot.body_site
+    who_reads = f"Function {getattr(fn, 'name', None)!r} is"
+    if site is None:
+        why = ("This build could not place the module-level assignment in the "
+               "module body's own statement list, so it cannot say what runs "
+               "before it. ")
+    elif site.opaque_above:
+        why = (f"A statement above the assignment that fills {slot.name!r} calls "
+               f"something this path cannot follow — through a value rather "
+               f"than through a function of this unit — so it cannot show that "
+               f"{who_reads} reading it runs after the store. ")
+    elif site.opaque_self:
+        why = (f"The store of {slot.name!r} is a statement whose value calls "
+               f"something this path cannot follow, so it cannot show that "
+               f"{who_reads.lower()} reading it runs after the store. ")
+    elif getattr(fn, "name", None) in site.earlier:
+        why = (f"{who_reads} reachable above the assignment at statement "
+               f"{site.store_at + 1} that fills {slot.name!r} — something the "
+               f"module body calls first is a path to it, and that call runs "
+               f"before the store. A module-level global cannot be read by a "
+               f"function the body reaches above its own assignment. ")
+    else:
+        why = (f"{who_reads} reachable from the store of {slot.name!r} itself, "
+               f"which is what computes the value — so the call runs before "
+               f"the slot holds it. A module-level assignment cannot read, or "
+               f"call something that reads, the name it assigns. ")
+    return head + why + ("Make the value a literal and the build folds it at "
+                          "every read instead. bugs/FORMAL_module_state_no_storage.md"
+                          " records the design")
 
 
 def global_value_refusal(name: str, fn_name: str, why: str) -> str:
@@ -21272,7 +21776,14 @@ def global_slot_kind(name: str):
     that states no element kind, and `container_literal_elem_kind` answers None
     for it, which leaves the bare `LIST_PREFIX` — an honest "a container, and
     nothing here says what is in it" rather than a claim about a word that is
-    written at run time."""
+    written at run time.
+
+    A slot the MODULE BODY fills is the third source and answers from the CALL
+    the store makes (`_body_store_shape`), so `len(G)` and `print()` on a
+    computed global are the same question with the same answer as the same
+    expression bound to a local. Before, this returned None for such a slot
+    because `("unknown", …)` states no kind — and a `None` here is not a missing
+    optimization, it is `len()` refusing a length the image has."""
     slot = module_slot(name)
     if slot is None:
         return None
@@ -21281,7 +21792,7 @@ def global_slot_kind(name: str):
     if slot.init[0] == "blob":
         elem = container_literal_elem_kind(getattr(slot.site, "value", None))
         return list_kind(elem)
-    return None
+    return slot.kind
 
 
 def global_slot_is_dict(name: str) -> bool:
@@ -21296,9 +21807,20 @@ def global_slot_is_dict(name: str) -> bool:
     exited 1.
 
     Asked from the slot's own initializer, which is where the shape is recorded,
-    so the answer cannot disagree with the bytes the linker laid out."""
+    so the answer cannot disagree with the bytes the linker laid out — and from
+    the CALLEE for the slots the initializer says nothing about, which is the
+    same question asked of a different piece of evidence rather than a second
+    rule. `D = mk()` where `def mk() -> Dict[String, Int]` is the measured case
+    on this tree: a `__DATA` slot the module BODY fills, whose `("unknown", …)`
+    initializer names no layout, so the subscript was emitted as a SEQUENCE one
+    and the image exited 1 on both architectures with a green build. A kind
+    cannot carry the answer (all four container annotations are one word here —
+    see `_body_store_shape`), which is why this is a field of its own and not a
+    fifth `ValueKinds` constant."""
     slot = module_slot(name)
-    return slot is not None and slot.init[0] == "blob" and slot.init[1] == "dict"
+    return slot is not None and (
+        slot.is_dict
+        or (slot.init[0] == "blob" and slot.init[1] == "dict"))
 
 
 def global_slot_is_string(name: str) -> bool:
@@ -21309,9 +21831,14 @@ def global_slot_is_string(name: str) -> bool:
     address as a number and a `==` compares two addresses. Both were right for a
     LOCAL bound to a string literal because `_note_binding` saw the literal; a
     module global's literal is in the module's statement list, not in the
-    function being emitted."""
-    slot = module_slot(name)
-    return slot is not None and slot.init[0] == "str"
+    function being emitted.
+
+    Asked as the KIND rather than as a second predicate over `init`, so the two
+    readers of a slot cannot answer "what does this name hold" differently: for
+    the literal spellings `global_slot_kind` returns `STR_KIND` exactly when
+    `init[0] == "str"`, and for the one spelling it did not cover — a slot the
+    module body fills from a callee declared `-> String` — it is the answer."""
+    return global_slot_kind(name) == STR_KIND
 
 
 def global_slot_bytes(table: dict, base: int) -> bytes:

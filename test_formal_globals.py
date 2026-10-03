@@ -443,6 +443,218 @@ CASES = [
      "    printf(\"%d\", c)\n"
      "    return 0\n", "1"),
 
+    # ── the MODULE BODY as the writer ──
+    # `G = compute()` at file level is a STORE, not a value the linker can lay
+    # out: the call is not known before the program runs. Before this row the
+    # build refused it with "this path has no module-global storage for it",
+    # which by then was false in every clause — there IS a `__DATA` slot per
+    # name — and the real blocker was that nothing wrote the slot. What writes
+    # it is the module's own top level, which this path already compiles into
+    # the synthetic function the startup stub ENTERS.
+    #
+    # The trailing `main(0)` is not decoration and never has been on this file:
+    # the module body IS the entry, so it runs its own statements first and
+    # calls `main` only because the source says so — CPython's rule for a
+    # module-level call. Every container row above carries the same call for the
+    # same reason.
+    #
+    # Both spellings of the read are here — the bare name in `main` and a
+    # function's own read of it — because they reach the slot by different
+    # paths: the first through `main`'s prologue, the second through a frame the
+    # caller built. A slot that was filled but not re-checked on the second path
+    # would answer the zero an unwritten slot gives.
+    ("module_body_computes_the_global",
+     "def compute() -> Int:\n"
+     "    return 40 + 2\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = G\n"
+     "    b: Int = read_g()\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n42\n"),
+
+    # The interaction with the OTHER writer of the same slot. `G` now has two
+    # writers — the module body and `bump` — and one home, which is the whole
+    # of the single-home argument the storage capability rests on. 42 / 43 / 43
+    # and not 42 / 42 / 42 is what says the body's store is not overwritten by
+    # the prologue's lazy initializer when `bump` runs, and 42 first says the
+    # body's store survived into `main`.
+    ("module_body_then_a_function_writes_it",
+     "def compute() -> Int:\n"
+     "    return 40 + 2\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
+     "def bump() -> Int:\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = G\n"
+     "    b: Int = bump()\n"
+     "    c: Int = G\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "42\n43\n43\n"),
+
+    # The KIND of a body-filled slot, which is the third source of a value's
+    # kind beside a folded literal and a container literal. `len(G)` is the
+    # consumer that needs it and the one that was refused: `("unknown", …)`
+    # states no kind, and a slot whose kind is nothing is an unclassified word,
+    # so `len` said "the source does not say what this operand holds" about an
+    # operand the source annotates on the CALLEE's `-> List[Int]`.
+    #
+    # The two halves are here because they are two different questions and the
+    # fix answers both from one declaration: `len` needs to know the slot holds a
+    # blob, and `G == "hi"` needs to know it holds a `char *` — a word read as an
+    # int64 would make the second one compare two addresses, which is the
+    # documented failure of `global_slot_is_string`'s own row.
+    #
+    # `List[Int]` yields the BARE list prefix rather than `list:int`, because the
+    # annotation says what the container is and not what its elements are. That is
+    # the same answer a container literal of non-word elements gets, so the two
+    # spellings cannot disagree — and `print(G)` (the container itself) is still
+    # refused on this path, for a local exactly as for a global.
+    ("a_body_filled_slot_carries_the_callee_s_kind",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "def greet() -> String:\n"
+     "    return \"hi\"\n"
+     "\n"
+     "NUMS = make()\n"
+     "NAME = greet()\n"
+     "\n"
+     "def main(n):\n"
+     "    c: Int = 0\n"
+     "    if NAME == \"hi\":\n"
+     "        c = 1\n"
+     "    print(len(NUMS))\n"
+     "    print(c)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3\n1\n"),
+
+    # The DICT half of the same rule, and the one that is a fault rather than a
+    # refusal. A `ValueKinds` kind cannot carry it — `List[Int]`,
+    # `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are all one word here
+    # and all classify as the bare list prefix — so the dict-ness is a separate
+    # answer from the same annotation, and `global_slot_is_dict` asks it. Before
+    # this row `D["a"]` was emitted as a SEQUENCE subscript, so the interned
+    # address of `"a"` became an element offset, the bounds check failed and the
+    # image exited 1 with a green build, on BOTH architectures, where CPython
+    # answers 1. `read_dict_of_strings_by_key` above is the same question asked of
+    # a dict LITERAL, whose shape the initializer states; this one is asked of the
+    # only spelling the initializer says nothing about.
+    #
+    # `printf` and not `print` because `print()` of a subscript still cannot
+    # classify the element on this path (an unannotated dict comprehension's
+    # element kind is the separate row in `test_formal_value_model.py`), and a row
+    # that only checks the BUILD would not notice the fault — which is why this
+    # one executes.
+    ("a_body_filled_dict_global_subscripts_as_a_dict",
+     "def make() -> Dict[String, Int]:\n"
+     "    var d: Dict[String, Int] = {\"a\": 1, \"b\": 2}\n"
+     "    return d\n"
+     "\n"
+     "D = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    x: Int = D[\"a\"]\n"
+     "    y: Int = D[\"b\"]\n"
+     "    printf(\"%d\", x)\n"
+     "    printf(\"%d\", y)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "12"),
+
+    # THE CONTROL for the row above, and it is the half that makes the row mean
+    # something: the same CALLEE shape that says "dict" must not also say "dict"
+    # for a list. `L[1]` is 14 through an address computation over a
+    # `[count][e0][e1]…` blob; read as a pair blob it is a key SCAN that walks
+    # `[npairs][k0][v0]…` looking for the integer 14 as a key word, finds it in
+    # no pair, and exits 1. So one row marked "sequence" and one marked "dict" and
+    # one callee annotation each is the whole of the distinction — a fix that
+    # answered "container" for both would pass the first and fail this one.
+    ("a_body_filled_list_global_subscripts_as_a_sequence",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%d\", L[0])\n"
+     "    printf(\"%d\", L[1])\n"
+     "    printf(\"%d\", L[2])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3140"),
+
+    # A string global printed, not compared — the OTHER reader of the slot's
+    # shape. A `char *` classified as a plain word is an INT on this path, so a
+    # row that lost the shape would print a decimal ADDRESS rather than `hi`,
+    # which is why the expected value is text and why this uses `print` (the
+    # interpreter runs it, so the row has a reference answer and not only a
+    # hand-written one).
+    #
+    # This one PASSED before the dict fix: `print` classifies through
+    # `_expr_str_kind`, which falls back to the whole-function `ValueKinds` and
+    # so already reached `global_slot_kind`. It is here to pin the interaction —
+    # `global_slot_is_string` now asks that same function instead of
+    # re-deciding from the initializer, and the two spellings have to keep
+    # agreeing — rather than as the row that shows the fault. The row that shows
+    # the fault is the dict one above, because `_is_dict_subscript` reads the
+    # slot directly and has no such fallback.
+    ("a_body_filled_string_global_prints_as_text",
+     "def greet() -> String:\n"
+     "    return \"hi\"\n"
+     "\n"
+     "NAME = greet()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(NAME)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "hi\n"),
+
+    # The ELEMENT kind of a body-filled blob, and the third row of the same
+    # argument: `declared_type_kind` maps a blob annotation to a blob without
+    # reading its element, so `L = make()` was `list` with no element and
+    # `print(L[0])` was refused — while `l = make()` inside a function has always
+    # been `list:int` on this path, because both backends' `_callee_kind` reads
+    # the RETURN STATEMENTS for a blob annotation and `[3, 14, 0]` states its
+    # elements. Two spellings of one expression, one answer and one refusal, and
+    # which one you got depended on whether the binding was at file level.
+    #
+    # `print`, not `printf`, so the interpreter is the reference for the value
+    # rather than the row's own expectation: an address where `3` belongs is a
+    # decimal in the tens of trillions, and this row is about which of two kinds
+    # the subscript yields.
+    ("a_body_filled_slot_carries_the_callee_s_element_kind",
+     "def make() -> List[Int]:\n"
+     "    return [3, 14, 0]\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(L[0])\n"
+     "    print(L[2])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "3\n0\n"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is
@@ -738,6 +950,77 @@ REFUSALS = [
      "    print(v)\n"
      "    return 0\n",
      "does not fold to a compile-time constant"),
+
+    # ── a body-filled slot read BEFORE the body writes it ──
+    # These two rows are the other half of
+    # `module_body_computes_the_global`, and they exist because the capability
+    # that row tests opens a way to compute a plausible wrong number: the slot
+    # is eight bytes of zeros until the module's top level stores into it, and
+    # zero is an answer a program can print. `model.module_slot_readable_in` is
+    # what refuses, and these pin that it still does — identically on both
+    # architectures, because a value model the two disagree about is not one
+    # value model.
+    #
+    # The module body is the ENTRY, so no function runs before its first
+    # statement, and a read from another function is therefore only premature
+    # when a CALL above the store puts one there. Here the store is below
+    # `read_g()`.
+    ("body_global_read_before_the_body_stores_it_refused",
+     "def compute() -> Int:\n"
+     "    return 5\n"
+     "\n"
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "read_g()\n"
+     "G = compute()\n",
+     "module body calls first is a path to it, and that call runs before the "
+     "store"),
+
+    # The store's OWN value runs before the store completes, so `G = compute()`
+    # reads as "compute has not been called yet" for the duration of the call.
+    # This row is transitive on purpose — `read_g` is reached through
+    # `compute`, not called by it — because the direct case is the one a
+    # one-level check gets and the indirect one is the one it misses. Without
+    # the closure `read_g`'s load would read the zero and print 0.
+    ("body_global_read_from_the_computation_that_fills_it_refused",
+     "def read_g() -> Int:\n"
+     "    return G\n"
+     "\n"
+     "def compute() -> Int:\n"
+     "    return read_g() + 1\n"
+     "\n"
+     "G = compute()\n",
+     "is reachable from the store of 'G' itself"),
+
+    # THE GATE on the element kind, and the direction it has to fail in. A callee
+    # whose return statement is a CALL is a word here, because reading it
+    # precisely means recursing into that callee — which is what both backends'
+    # `_callee_kind` hook does and what the model's reading deliberately does not,
+    # because the answer this path must not give is a confident wrong one. So the
+    # slot falls back to the bare `LIST_PREFIX` and the subscript stays refused.
+    #
+    # `inner()` here returns a list of STRINGS and the outer annotation says
+    # `[Int]`, so a reading that trusted the annotation instead of the returns
+    # would print the interned address of `"a"` as a decimal. The row exists to
+    # keep that refusal: `len(L)` lowers on the same slot (the annotation is
+    # enough to say it is a container) while the element is refused, and those
+    # two answers are about two different questions.
+    ("body_filled_slot_with_an_unfollowable_element_kind_is_refused",
+     "def inner() -> List[String]:\n"
+     "    return [\"a\", \"b\"]\n"
+     "\n"
+     "def make() -> List[Int]:\n"
+     "    return inner()\n"
+     "\n"
+     "L = make()\n"
+     "\n"
+     "def main(n):\n"
+     "    print(L[0])\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n",
+     "print() cannot tell whether SubscriptExpr is a string or a number"),
 ]
 
 
