@@ -1130,6 +1130,44 @@ CASES = [
      "                                   1 if e <= f <= c <= d else 0,\n"
      "                                   1 if g <= f <= c <= d else 0))\n"
      "    return 0\n"),
+    # A NEGATIVE VALUE SPELLED WITH AN OPERATOR — the one that made a literal
+    # comparison decide UNSIGNED on BOTH machines, so it is here rather than in
+    # an arm64-only file even though it is not an x86-64 gap.
+    #
+    # `-4` is a UnaryOp and `0 - 4` is a BinaryOp.  `infer_expr` reported the
+    # first signed (the negated-literal arm, added with the arm64 signedness
+    # work) and the second typeless, because both of its operands are literals;
+    # `common_type(None, None)` is None, `cmp_signed(None)` is False, and the
+    # compare was emitted with unsigned condition codes.  So the same value
+    # answered 0 as `-4` and 1 as `0 - 4`:
+    #
+    #     0 < (51 - 55)    CPython 0    arm64 1    x86-64 1
+    #     17 <= (0 - 4)     CPython 0    arm64 1    x86-64 1
+    #     (0 - 4) < 0       CPython 1    arm64 0    x86-64 0
+    #
+    # Both spellings of each comparison are in the case, and the variable form
+    # (`a - b < c` with a variable) is the control: that one was already
+    # signed, which is why the defect needed arithmetic on LITERALS to show.
+    ("negative_literal_spelled_with_an_operator",
+     "def main():\n"
+     "    var a = 17\n"
+     "    var b = 4\n"
+     "    printf(\"%d %d %d %d %d %d\", 1 if 0 < (51 - 55) else 0,"
+     " 1 if 17 <= (0 - 4) else 0, 1 if (0 - 4) < 0 else 0,"
+     " 1 if 17 <= -4 else 0, 1 if -4 < 17 else 0, 1 if (a - b) < a else 0)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    a = 17\n"
+     "    b = 4\n"
+     "    sys.stdout.write(\"%d %d %d %d %d %d\" % (\n"
+     "        1 if 0 < (51 - 55) else 0,\n"
+     "        1 if 17 <= (0 - 4) else 0,\n"
+     "        1 if (0 - 4) < 0 else 0,\n"
+     "        1 if 17 <= -4 else 0,\n"
+     "        1 if -4 < 17 else 0,\n"
+     "        1 if (a - b) < a else 0))\n"
+     "    return 0\n"),
 ]
 
 
