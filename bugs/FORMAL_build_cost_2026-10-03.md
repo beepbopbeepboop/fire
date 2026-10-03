@@ -70,12 +70,19 @@ the wall clock only says which way.**
 
 ### 1.2 x86-64
 
-Not measured separately, and deliberately: the two costs fixed here are in
-`formal/build.py` and `formal/model.py`, which run BEFORE either backend's
-emitter is reached (`_prepare_functions` is the shared pipeline both front ends
-go through — `formal/build.py`'s module docstring), so one fix moves both
-architectures by construction. The x86-64 sweep is the evidence that it does,
-and §5 is where it is taken.
+The same 43 files, the same harness, `--backend=x86_64`:
+
+| | wall, all 43 | max peak RSS | `myinterpreter.py` |
+|---|---|---|---|
+| `base` | **119.4 s** | 115.2 MB | **38.1 s** |
+| `fix1` | **79.6 s** | 97.7 MB | **3.8 s** (10.0x) |
+
+Measured rather than argued, because the argument ("both backends share
+`_prepare_functions`") is a claim about the pipeline and the sweep is the only
+thing that can check it. The two architectures differ in the absolute numbers —
+arm64's `base` is 144.9 s against x86-64's 119.4 s, and 53.0 s against 38.1 s on
+the one file — which is the emitter and not this doc's subject; the SHAPE is the
+same, and so is the ceiling: 115.2 MB.
 
 ---
 
@@ -297,15 +304,18 @@ same source and the images `cmp`ed:
 
     # .tmp/bytecmp.sh — builds each case with this branch's formal/build.py and
     # formal/model.py, then with `git show HEAD:`'s, and compares artifact, exit
-    # code and full output (the one `-o` path token normalised out).
+    # code and full output (the one `-o` path token normalised out). ARCH picks
+    # the backend.
     python3 tools/memslot.py --gb 8 --label bytecmp -- \
         bash .tmp/bytecmp.sh spread $(cat .tmp/spread.txt)
+    ARCH=x86_64 python3 tools/memslot.py --gb 8 --label bcx86 -- \
+        bash .tmp/bytecmp.sh x86spread $(cat .tmp/spread.txt)
 
-Result over the whole 43-file spread and both architectures: **every row the
-build produces an image for is byte-identical, and every row's exit code and
-full diagnostic text is unchanged** — including the refused ones, where "the
-artifact" is the refusal and the refusal is compared verbatim. That is the
-dimension the loaded machine cannot make noisy.
+**Both architectures, all 43 files each: 23 rows produce an image and every one
+is byte-identical; the other 20 are refusals and every one's exit code and full
+diagnostic text is unchanged.** That is the dimension the loaded machine cannot
+make noisy — a wrong frame layout or a lost constant site would change an image
+or a message, not a timing.
 
 The largest image compared is 100 416 B (`std/collections/string/_unicode_lookups.mojo`,
 5 876 lines); the formal backends refuse most large real sources, so a larger
@@ -315,7 +325,33 @@ comparison, not one big image, is the primary evidence.
 ### 5.2 Narrow tests run
 
     python3 tools/memslot.py --gb 8 --label t -- python3 \
-        test_formal_bracketed_method_field_set.py      # 26 PASS / 0 FAIL
+        test_formal_bracketed_method_field_set.py     # PASS=26 FAIL=0
+    python3 tools/memslot.py --gb 8 --label tfrun -- python3 \
+        test_formal_run.py                            # PASS=803 FAIL=0
+    python3 tools/memslot.py --gb 8 --label tfimp -- python3 \
+        test_formal_imports.py                        # PASS=61  FAIL=0
+
+`test_formal_run.py` is the one that matters most for this change: it is the
+corpus of class-constant reads, enum accessor sites and frame layouts, which is
+exactly what a wrong `framed` / `enum_structs` table would break, and its
+`one_field_struct_field_read_is_correct_on_arm64` cases build and RUN both
+architectures rather than comparing them to each other.
+
+`test_formal_imports.py` carries `BOUNDED_BUILD_S = 120`, a wall-clock bound on
+`std/python/bindings.mojo` (1 997 lines, the deepest import closure in the
+sweep) per architecture — a build that used not to finish at all. Measured here
+directly, before and after, on both architectures: 2.71 → 2.81 s (arm64) and
+2.57 → 2.52 s (x86_64), with the multi-line refusal **byte-identical** on both.
+That file is refused early on an import, so it is corroboration and not a
+measurement of this change; it is quoted because it is the one file in the tree
+whose cost was already known to be pathological.
+
+**Not run by this pass** (light worker; the integrator owns them): `make gate`,
+`make check`, `compile_stdlib.py`, `build_stdlib_dylib.py`, the self-host steps
+— `formal/model.py` and `formal/build.py` are inside the self-hosted compile
+closure, so `mojoc` builds, the three `stage*` steps, `stdlib-dylib`'s
+`skip <module>:` count and `stdlib-syntax`'s unexpected count are owed for what
+landed here.
 
 ---
 
@@ -341,20 +377,61 @@ one level down, which is why it is written down rather than guessed at.
   **Not attempted in this pass**: it is another four signatures, and the win is
   ~2 s on one file against 53 s already taken off it.
 * **`struct_receiver_stores` walks every node of every method body to find
-  assignments** (2.4 s of the remaining 3.8 s, 2 416 derivations). A
-  statement-position walk finds exactly the same assignments over ~8x fewer
-  nodes — a statement is never reachable only through an EXPRESSION field — and
-  is sound by construction because it caches nothing. This is
-  `bugs/PERF_struct_field_split_asked_once_per_function.md`'s step 2, and it is
-  the right SECOND half of this fix: §3 made the question rare, this would make
-  it cheap, and together they mean a future asker cannot put the cost back. It
-  wants a differential test over the corpus comparing the two assignment sets
-  node for node.
-* **`unit_field_evidence` is asked 78 times per build** (2.3 s, and
-  `iter_struct_defs` 3 857 460 calls under it) — once per IMPORTED module from
-  `formal/imports.py`'s `collect`, each walking the whole statement list. Not
-  profiled to a conclusion here; it is the next entry in the profile and the
-  next thing to measure.
+  assignments** (2.05 s of the remaining 3.4 s, 2 245 derivations, 6 160 632
+  nodes visited for the few thousand assignments it finds). Two things were
+  measured about this rather than guessed, because the difference between them
+  is the whole of a 2 s question:
+
+  - **Hoisting the type test out of the walk buys nothing.** The obvious first
+    move — test `isinstance(node, (F.AssignStmt, F.AugAssignStmt,
+    F.MultiAssignStmt))` in the walk instead of calling `_assignment_targets`
+    once per node — measured **2.11 s → 2.05 s (3%)**, inside the run-to-run
+    noise, because the cost is not the call: it is the 6.16 M generator steps
+    themselves. Not landed, and the reason is in the numbers: a 3% win is not
+    worth a second reader of the assignment-shape list (the change needed a
+    named `_ASSIGNMENT_STMT_TYPES` tuple to stay DRY, so it was a real
+    maintenance cost for nothing).
+  - **The statement-position walk is the one that works, and its precondition
+    now has a MEASUREMENT.** A walk that descends only into list/tuple-valued
+    fields and stops at the first non-statement reaches the same assignments
+    over ~8x fewer nodes, provided that no statement is reachable only through a
+    scalar field. Checked over the corpus rather than assumed:
+
+        # .tmp/stmtcheck.py — walks every parsed statement tree and reports any
+        # node whose class name ends in `Stmt` reached through a non-list field
+        python3 tools/memslot.py --gb 8 --label stmt -- python3 .tmp/stmtcheck.py
+        # -> parsed 516 files; 58 node types seen
+        # -> statements reached through a SCALAR field: 0
+
+    **Zero counterexamples over 516 files and 58 node types** — but that is a
+    corpus result, not a proof, and the failure mode if a future node type
+    breaks it is a field set missing a store, i.e. two real fields aliased into
+    one slot, which is the outcome `struct_field_names`' own docstring calls
+    worse than a refusal. **So it wants a differential test over the same
+    516-file corpus comparing the two walks' assignment SETS, per struct, before
+    it lands** — the shape this doc's §3.1 harness already has. This is
+    `bugs/PERF_struct_field_split_asked_once_per_function.md`'s step 2, and it is
+    the right SECOND half of §3: §3 made the question rare, this would make it
+    cheap, and together they mean a future asker cannot put the cost back.
+* **`unit_field_evidence` is asked 78 times per build** (2.34 s of the 6.2 s
+  instrumented build, with `iter_struct_defs` at 3 857 460 calls under it), and
+  the shape is the same recomputation §3 and §4 removed:
+  `formal/imports.py`'s `_attach_declared_census(struct_def, declaring_path)`
+  runs `M.unit_field_evidence(module_statements(declaring_path))` **once per
+  struct declared in that module**, each call walking the whole statement list
+  of a module `module_statements` has already parsed and cached. So a module
+  declaring S structs pays S whole-module walks, and the answer is a function of
+  `(path, content)` — the exact key `module_statements` already caches on, and
+  the evidence tuple is immutable `(frozenset, bool)`, so one walk per module is
+  sound by construction rather than by an invalidation argument.
+  **NOT ATTEMPTED HERE, and it is a claim conflict rather than a difficulty:**
+  `formal/imports.py` is the host-module machinery, which
+  `tools/control.py claims` shows another worker holding (`sweep14:hostmods-more2`,
+  plus `module:platform+fnmatch+collections-rest` and
+  `bug:FORMAL_functools_is_unbuildable_as_a_host_module`), and the rule for a
+  light worker is to report an area another worker holds rather than edit it.
+  The next step is one memo in `_attach_declared_census` keyed the way
+  `module_statements` keys itself.
 
 ## 7. What this doc supersedes
 
