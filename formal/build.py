@@ -3467,47 +3467,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         callee_hstruct[callee] = \
                             list(hstruct[_fn_key(fn)][r[0]])
                         changed = grew = True
-                    # …and the ONE-WORD twin of that edge, which is the same
-                    # question with a plain word instead of a frame address, and
-                    # it is here because a struct of ONE field is invisible to
-                    # every table above: `struct_is_framed` is False for it, so
-                    # the holder fixpoint has nothing to say about the parameter
-                    # a caller hands it.
-                    #
-                    # The measurement that makes this an answer rather than a
-                    # coverage note — a one-field class whose `__eq__` returns
-                    # True, compared THROUGH a function boundary, both
-                    # architectures:
-                    #
-                    #     def eq(a, b):  return 1 if a == b else 0
-                    #     a = Tag(5); b = Tag(6)
-                    #     printf(eq(a, b), eq(a, a))    # CPython: 1 1
-                    #                                                 # here: 0 1
-                    #
-                    # and the second column is why the first is a bug rather
-                    # than a coincidence: `eq(a, a)` answers 1 by the ADDRESS
-                    # compare, which is CPython's INHERITED `__eq__`, so a
-                    # program printing `0 1` for a class whose method says True
-                    # reads as "it worked". With the comparison moved one line up
-                    # into `main` it dispatched correctly on both machines,
-                    # which is the whole of the diagnosis: the rewrite fired when
-                    # the operands were names THIS function bound from a
-                    # one-word construction and not when they arrived as
-                    # parameters.
-                    #
-                    # **The agreement rule is stricter than the frame edge's,
-                    # deliberately.** Two call sites handing the same parameter
-                    # two DIFFERENT one-word structs is the tombstone rule
-                    # `ValueKinds._ctor_calls` already states for the same
-                    # reason: the parameter would be dispatched to whichever
-                    # struct sorted last, and `==` would call the wrong `__eq__`
-                    # — a wrong answer with a method call in it. So a
-                    # disagreement writes an EMPTY candidate list, which every
-                    # reader of this table already treats as "no candidates"
-                    # (`_eq_dispatch_decide` refuses an empty side), and the
-                    # name stays out. The frame edge above can overwrite because
-                    # a frame address is a frame address; which STRUCT's layout
-                    # it is read through is the question that differs here.
+                    # …and the ONE-WORD twin of that edge: the same question
+                    # with a plain word instead of a frame address, asked over
+                    # the WHOLE body rather than over this one call node, because
+                    # a callee's parameter is claimed from every site that reaches
+                    # it and a disagreement has to be seen to be a disagreement.
+                    # Its docstring has the measurement, the three refusals and
+                    # why its agreement rule is stricter than this edge's.
                     _seed_one_word_call_edges(fn, one_word, holders,
                                               params_of, _name_defs)
             # The OTHER half of the same fixpoint: which functions RETURN a frame.
