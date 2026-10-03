@@ -1792,12 +1792,31 @@ dylib_exports: list = None, globals_base: int = None,
             if isinstance(stmt.target, F.MemberExpr):
                 name = _member_slot_key(stmt.target)
                 if name is None:
-                    # Non-named base (`obj[i].field = v`): formal has no
-                    # object model — evaluate both sides for effects, drop
-                    # the store (same as MemberExpr load reading 0).
-                    self._emit_expr(stmt.target.obj)
-                    self._emit_expr(stmt.value)
-                    return
+                    # REFUSED, not dropped. This used to evaluate both sides and
+                    # return, which is a SILENTLY DISCARDED STORE: the program
+                    # built, ran, and the write was simply not there
+                    # (`g().x = 1` and `a[i].x = 1` both lost it). x86-64's
+                    # arm here has refused since, with these words, so the same
+                    # source built on one architecture and was refused on the
+                    # other — the two-backends-disagree shape this pair may not
+                    # have. Measured on this tree before the change:
+                    # `--backend=arm64` built both stores and dropped them,
+                    # `--backend=x86_64` refused both with
+                    # `field_access_refusal`. Wave 5's rule at its most
+                    # literal: a missing branch here is a dropped store, not a
+                    # wrong value. The words are the shared model's, so both
+                    # arches print the same line, and they spell the BASE
+                    # (`a[0]`, not `…`) because that is the expression the
+                    # reader wrote and the one the message is about.
+                    #
+                    # The base is EMITTED first, which is what a base that is
+                    # itself unanswerable needs to say so rather than being
+                    # reported as an unclassifiable field — `model.
+                    # member_access_refusal`'s docstring is the argument, and
+                    # this line is what it is for.
+                    self._emit_expr(M.member_base_node(stmt.target))
+                    raise CodegenError(M.member_access_refusal(
+                        stmt.target, self.func_name, self._frame_holders))
             elif isinstance(stmt.target, F.IdentExpr):
                 name = stmt.target.name
             else:
@@ -2008,8 +2027,17 @@ dylib_exports: list = None, globals_base: int = None,
                 key = _member_slot_key(el)
                 if key is not None:
                     return key
-                # Non-named base: evaluate for effects, store nowhere.
-                return None
+                # Non-named base (`a[i].x, b = …`): REFUSED, with the words the
+                # single-assignment arm above uses for the same store. This used
+                # to "evaluate for effects, store nowhere", which is a SILENTLY
+                # DISCARDED STORE in a program that then runs and computes an
+                # answer nobody wrote — and x86-64's `_tuple_target_key` has
+                # refused this shape since, so the same source built on one
+                # architecture and was refused on the other. The base is emitted
+                # first for the reason `model.member_access_refusal` gives.
+                self._emit_expr(M.member_base_node(el))
+                raise CodegenError(M.member_access_refusal(
+                    el, self.func_name, self._frame_holders))
             if isinstance(el, F.TupleExpr):
                 # Nested target `(a, b), c = rhs` — handled by the
                 # recursive unpack below; this slot is a nested group.
@@ -2831,12 +2859,34 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_expr(expr.obj)
                     self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 8 * slot))
                     return
-            # Non-named base (call result, literal, …): evaluate the base
-            # for side effects; formal has no object model, so the field
-            # itself reads as 0.
-            self._emit_expr(expr.obj)
-            self.asm.emit(encode_movz_xd_imm(0, 0))
-            return
+            # A member read through a base this image cannot classify: REFUSED,
+            # not answered with the word 0.  This used to evaluate the base for
+            # its side effects and `mov x0, #0`, which is a plausible-looking
+            # number and not the program's: `(7).foo` and `C.A.value` both
+            # printed 0, `g().x` printed 0 where the source says the field's
+            # value, and `a[0].foo` printed 0 — none of which is an error
+            # anywhere, because CPython raises `AttributeError` for the first
+            # two and the other two are real Python that reads a real field.
+            # x86-64's arm at this same shape has refused with
+            # `model.field_access_refusal` since, so the source built on one
+            # architecture and was refused on the other from the same line;
+            # these are the shared model's words, so both arches now print the
+            # same thing.
+            #
+            # **The literal case is refused EARLIER**, by
+            # `build.refuse_member_reads_through_a_literal_base`, with a message
+            # that says what a literal is rather than what this path cannot
+            # classify — so this arm is the second line, for a construct that
+            # reached the emitter by a route the build pass does not model.
+            #
+            # The base is EMITTED first, for the reason the store arm above
+            # gives and `model.member_access_refusal` argues: a base that is
+            # itself unanswerable refuses with ITS message, which is the more
+            # specific of the two (`p.value().b` is a pointer-width question,
+            # not a field-layout one).
+            self._emit_expr(M.member_base_node(expr))
+            raise CodegenError(M.member_access_refusal(
+                expr, self.func_name, self._frame_holders))
 
         if isinstance(expr, (F.ListExpr, F.TupleExpr)):
             # TupleExpr and ListExpr have identical `elements` shape and

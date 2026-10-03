@@ -520,17 +520,28 @@ class TestSweepReach(unittest.TestCase):
 
 
 class TestSystemModuleCall(unittest.TestCase):
-    # `socket` and not `json`, and not `math`: `json` used to be the host module
-    # named here and `formal/hostmods/json.mojo` landed in 2026-09-30; then
-    # `math` was named here, on the same reasoning, and `formal/hostmods/math.
-    # mojo` landed too. A name in this slot is a CLAIM that it has no Mojo
-    # source, and the claim stops being true the day the module is written — at
-    # which point the name leaves HOST_MODULES entirely (it is not refused at
-    # all any more) and this test fails on the tool being right. The premise is
-    # therefore asserted below rather than trusted: a fixture that has quietly
-    # stopped being an example of anything is a silent hole in a suite whose
-    # whole subject is the difference between a fact about the target and a gap
-    # in the backend.
+    # `os`, `json`, `math` and `socket`, and WHY each is here: a host module
+    # stops being a target fact the moment it has a Mojo source, and three of
+    # these four used to be named by this class when they had none.
+    # `json` got `formal/hostmods/json.mojo` on 2026-09-30, `math` got one after
+    # that, and `os` has had one for most of the tree's life — so all three are
+    # kept as the NEGATIVE cases below rather than as the positive one, because
+    # "a `math.floor()` refusal is a target fact" stopped being true the day
+    # `formal/hostmods/math.mojo` landed and the sweep is RIGHT not to believe
+    # it: a refusal about a module that EXISTS is a refusal about a construct in
+    # a module this build can compile, which is `codegen`, not "not fixable
+    # here". `socket` is the positive case now, and it is checked against
+    # `HOST_MODULES` rather than against a list of its own, so the day
+    # `socket.mojo` lands this row goes red and says why.
+    #
+    # A name in the POSITIVE slot is a CLAIM that it has no Mojo source, and
+    # the claim stops being true the day the module is written — at which point
+    # the name leaves HOST_MODULES entirely (it is not refused at all any more)
+    # and this test fails on the tool being right. The premise is therefore
+    # asserted below rather than trusted: a fixture that has quietly stopped
+    # being an example of anything is a silent hole in a suite whose whole
+    # subject is the difference between a fact about the target and a gap in
+    # the backend.
     SRC = "import os\nimport socket\n\ndef main():\n    pass\n"
 
     def test_the_example_is_still_a_host_module_with_no_reach(self):
@@ -542,6 +553,28 @@ class TestSystemModuleCall(unittest.TestCase):
         self.assertIn("socket", HOST_MODULES)
         self.assertNotIn("socket", S.IN_REACH_HOST_MODULES)
         self.assertTrue(S._source_imports(self.SRC, "socket"))
+
+    def test_a_module_that_HAS_a_source_is_not_a_target_fact(self):
+        """The anti-rot for the row above, and the reason it changed hands.
+
+        `math` was this class's positive case while `formal/hostmods/math.mojo`
+        did not exist. It does now, so a refusal naming `math` is about a
+        construct in a module this backend compiles, and filing it as a target
+        fact would put real codegen findings in the bucket that is "not fixable
+        here" — which is the one class a coverage number must never grow. Its
+        own source, and NOT this class's `SRC`, which imports `socket`
+        deliberately because the positive case above needs a file that does.
+        """
+        from formal.imports import HOST_MODULES
+        self.assertNotIn("math", HOST_MODULES,
+                         "math.mojo exists, so math is no longer a host module "
+                         "this backend cannot compile; if it is back in the set, "
+                         "the positive row above is what to re-check")
+        self.assertEqual(
+            S._system_module_call(
+                "build: math.floor() cannot be lowered: math is not available "
+                "here", "import math\n\ndef main():\n    pass\n"),
+            "")
 
     def test_a_self_describing_message_is_a_target_fact(self):
         got = S._system_module_call(
@@ -603,6 +636,109 @@ class TestSystemModuleCall(unittest.TestCase):
         self.assertIn(S.CLASS_SYSCALL, S.CLASS_BLURB,
                       "every class in CLASS_ORDER needs a blurb; the report is "
                       "the tool's contract with a reader who has not read it")
+
+
+# ── 4b. a file with SEVERAL unresolvable imports, all named at once ─────────
+#
+# `formal/imports.py`'s `unresolvable_import_errors` reports every blocker in
+# one message, one indented line per module, instead of raising on whichever
+# came first in the statement list. The measurement that asked for it is
+# `bugs/FORMAL_admitted_contracts_sweep_measurement.md`, and the part of it that
+# matters to THIS file is that a per-module breakdown drawn from a diagnostic
+# naming one of a file's blockers is a sample of how the file's imports are
+# written: fixing `subprocess` on eight files moved them from "refused for
+# `subprocess`" to "refused for `tempfile`" without moving one file out of
+# `not-answerable/host-import`.
+#
+# So the property is ORDER-INDEPENDENCE of the class and the reason, and
+# COMPLETENESS of the reason — the two are separate assertions because the rule
+# below (`mods[-1]`) gets them wrong in separate ways: it drops the other names,
+# and in a shape whose last name is whatever sorted last it also lets the sort
+# order decide the class.
+_MULTI_HOST = (
+    "build: prog.mojo imports 2 modules this backend cannot build, and every "
+    "one of them is named here rather than only the first: fixing one moves "
+    "the file to the next\n"
+    "  prog.mojo imports 'glob', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile\n"
+    "  prog.mojo imports 'tempfile', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile")
+_MULTI_MIXED = (
+    "build: prog.mojo imports 2 modules this backend cannot build, and every "
+    "one of them is named here rather than only the first: fixing one moves "
+    "the file to the next\n"
+    "  prog.mojo imports 'nope_xyz', which is not a stdlib or sibling module, "
+    "and no such file exists\n"
+    "  prog.mojo imports 'tempfile', which is a host module (CPython standard "
+    "library), which has no Mojo source for this backend to compile")
+_MULTI_SRC = "import glob\nimport tempfile\n\ndef main():\n    return 1\n"
+
+
+class TestSeveralUnresolvableImports(unittest.TestCase):
+    def test_every_name_is_in_the_reason(self):
+        cls, reason = S.classify(False, _MULTI_HOST, source=_MULTI_SRC,
+                                 path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_HOST)
+        self.assertEqual(reason, "glob, tempfile",
+                         "the reason is the per-class breakdown's key, so a "
+                         "reason naming one of several blockers is a "
+                         "breakdown that measures import order")
+
+    def test_the_class_does_not_depend_on_which_name_is_last(self):
+        """The same set, lines swapped: same class, same reason.
+
+        This is the assertion that would fail if the rule were left as
+        `mods[-1]` over the whole message, since the two orderings disagree
+        about which name that is.
+        """
+        lines = _MULTI_HOST.splitlines()
+        swapped = "\n".join([lines[0], lines[2], lines[1]])
+        self.assertEqual(S.classify(False, _MULTI_HOST, source=_MULTI_SRC,
+                                    path="prog.mojo"),
+                         S.classify(False, swapped, source=_MULTI_SRC,
+                                    path="prog.mojo"))
+
+    def test_the_worst_reason_wins(self):
+        """A file importing a host module AND a module that does not exist is
+        blocked by the second, and filing it as host-import would file a
+        missing-module finding under "not fixable here"."""
+        cls, reason = S.classify(False, _MULTI_MIXED, source=_MULTI_SRC,
+                                 path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_UNRESOLVED)
+        self.assertIn("nope_xyz", reason)
+        self.assertIn("tempfile", reason)
+
+    def test_a_chain_is_still_the_innermost_one(self):
+        """The multi-module rule must not swallow the chain rule.
+
+        `mods[-1]` is RIGHT for a chain: the last `imports '…'` is the innermost
+        import, and naming the outer module instead would blame a module that
+        resolves perfectly well. So a message that is one import wrapping
+        another is still classified by the inner one, and by it alone.
+        """
+        cls, reason = S.classify(
+            False,
+            "build: a.mojo imports 'b', which cannot be built either: "
+            "b.mojo imports 're', which is a host module (CPython standard "
+            "library), which has no Mojo source for this backend to compile",
+            source="import b\n", path="a.mojo")
+        self.assertEqual(cls, S.CLASS_HOST)
+        self.assertEqual(reason, "re")
+
+    def test_a_single_module_keeps_the_single_sentence(self):
+        """The wording every needle in the tree is written against.
+
+        `formal/imports.py` gives a one-module file `unresolvable_import_error`
+        verbatim, so this message classifies exactly as it did before the
+        several-module shape existed.
+        """
+        cls, reason = S.classify(
+            False,
+            "build: prog.mojo imports 'nope_xyz', which is not a stdlib or "
+            "sibling module, and no such file exists",
+            source="import nope_xyz\n", path="prog.mojo")
+        self.assertEqual(cls, S.CLASS_UNRESOLVED)
+        self.assertEqual(reason, "nope_xyz")
 
 
 # ── 4. an interpreter that cannot import the backend ─────────────────────────

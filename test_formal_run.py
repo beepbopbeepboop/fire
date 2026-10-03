@@ -3800,6 +3800,56 @@ CROSS_MODULE_CASES = [
               "    p.b = 4\n"
               "    var r = bump(p, 5)\n"
               "    return p.a * 10 + p.b + r\n"}, 96, None),
+    # ── a FOLDED MODULE CONSTANT as a `memset` byte, INSIDE A MODULE DYLIB ──
+    #
+    # `folded_module_constant_as_a_memset_byte` above pins the property in a
+    # PROGRAM; this is the shape it does not have. `formal/hostmods/argparse.mojo`
+    # spells `memset(pat + i, PAT_DASH, 1)` in a file that is compiled as a
+    # DYLIB every time a program imports `argparse`, so a substitution that
+    # reached only the program path would leave the module refusing with
+    # "'PAT_DASH' has no home" — a diagnostic whose subject is a line in
+    # somebody else's module, reported against the program that merely imported
+    # it. `bugs/FORMAL_argparse_memset_constants_comment_is_stale.md` is the
+    # measurement, and its step 3 is this row: the reproducer had to be a module
+    # dylib because that is the shape in which it was found.
+    #
+    # `both`, because a byte folded to the wrong value is a value neither
+    # architecture's parser would notice on its own, and the reference buffer is
+    # written INLINE on the caller's side — so the folded name is the only thing
+    # under test and both machines have to agree it is 45 and then 65. 0 is
+    # `memcmp == 0` twice over, and a `memcmp` that compared nothing could not
+    # produce it: the buffers differ in every byte the fill wrote.
+    ("byref_folded_module_constant_as_a_memset_byte_in_a_dylib",
+     {"mod": "PAT_DASH = 45\n"
+             "PAT_A = 65\n"
+             "\n"
+             "def fill(pat, n):\n"
+             "    var i: Int = 0\n"
+             "    while i < n:\n"
+             "        memset(pat + i, PAT_DASH, 1)\n"
+             "        i = i + 1\n"
+             "    return 0\n"
+             "\n"
+             "def fill_a(pat, n):\n"
+             "    var i: Int = 0\n"
+             "    while i < n:\n"
+             "        memset(pat + i, PAT_A, 1)\n"
+             "        i = i + 1\n"
+             "    return 0\n",
+      "both": True,
+      "main": "from byref_xmod import fill, fill_a\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var got = malloc(64)\n"
+              "    var want = malloc(64)\n"
+              "    memset(want, 45, 4)\n"
+              "    fill(got, 4)\n"
+              "    var same = memcmp(got, want, 4)\n"
+              "    memset(got, 65, 2)\n"
+              "    memset(want, 65, 2)\n"
+              "    fill_a(got, 2)\n"
+              "    var same2 = memcmp(got, want, 2)\n"
+              "    return same * 10 + same2\n"}, 0, None),
     # The NEGATIVE half, and the one that makes the positive case above worth
     # anything: the same shape with the two modules declaring the same NUMBER of
     # fields in a different ORDER. `Q.v` is slot 0 and the caller's slot 0 is
@@ -4276,21 +4326,38 @@ def run_module_case(name, files, want_exit, want_stdout, tmpdir, verbose):
             print(f"      refused identically on both architectures: {needles!r}")
         return True, ""
 
-    out = os.path.join(tmpdir, name)
-    rc, text = build_formal(src, out)
-    if rc != 0:
-        return False, text.strip()[-300:]
-    if not os.path.isfile(out):
-        return False, "build reported success but wrote no binary"
-    run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT)
-    if run.returncode != want_exit:
-        return False, (f"exit status {run.returncode}, expected {want_exit}"
-                       + (f"; stderr: {run.stderr.strip()[:120]}"
-                          if run.stderr.strip() else ""))
-    if want_stdout is not None and want_stdout not in run.stdout:
-        return False, f"stdout {run.stdout[:120]!r} does not contain {want_stdout!r}"
-    if verbose:
-        print(f"      stdout={run.stdout[:60]!r} exit={run.returncode}")
+    # `both` in the file map builds and RUNS this case on BOTH architectures and
+    # requires the same answer from each, which the host-only build below cannot
+    # see. It is opt-in per case rather than the default because the other
+    # cases in this group were written for the host's architecture and doubling
+    # their builds would change eleven rows that have nothing to do with the
+    # boundary; the rows that are ABOUT the boundary's value handoff already
+    # say so in their own comments.
+    arches = ("arm64", "x86_64") if files.get("both") else (None,)
+    for arch in arches:
+        out = os.path.join(tmpdir, name if arch is None else f"{name}.{arch}")
+        rc, text = build_formal(src, out, backend=arch)
+        if rc != 0:
+            who = arch or "the host backend"
+            return False, (f"[{who}] build failed: {text.strip()[-300:]}")
+        if not os.path.isfile(out):
+            return False, (f"[{arch or 'host'}] build reported success and "
+                           f"wrote no binary")
+        argv = ["arch", "-x86_64", out] if arch == "x86_64" else [out]
+        run = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        who = arch or "the host backend"
+        if run.returncode != want_exit:
+            return False, (f"[{who}] exit status {run.returncode}, expected "
+                           f"{want_exit}"
+                           + (f"; stderr: {run.stderr.strip()[:120]}"
+                              if run.stderr.strip() else ""))
+        if want_stdout is not None and want_stdout not in run.stdout:
+            return False, (f"[{who}] stdout {run.stdout[:120]!r} does not "
+                           f"contain {want_stdout!r}")
+        if verbose:
+            print(f"      [{who}] stdout={run.stdout[:60]!r} "
+                  f"exit={run.returncode}")
     return True, ""
 
 # ── wave 4 (D2): a field's DECLARED type, used only when every binding agrees ──
@@ -10693,6 +10760,92 @@ WAVE6_NAME_CASES = [
      "    o.v = 4242\n"
      "    return raw(o)\n",
      "refuse:is a field access through 'h'", None),
+    # ── the same fall-through through a base that is not a NAME ──
+    # (`bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`)
+    #
+    # A name is only half of what can be a base, and the other half used to
+    # answer 0 on arm64 while x86-64 refused: `(7).foo` and `C.A.value` both
+    # printed `0`, `g().x` printed `0` where the source says the field's value,
+    # and CPython raises `AttributeError` for the first two.  A plausible-looking
+    # number and not the program's — the one direction a read must never take.
+    #
+    # The needle is the LITERAL half of the wording rather than the generic
+    # "is a field access through", because that is what distinguishes the fix
+    # from the generic refusal every other member case in this file pins: a
+    # literal has NO binding at all, so there is nothing to classify and nothing
+    # to guess, and the refusal says so.  Both architectures, because the
+    # refusal is raised in the SHARED build pass — one architecture refusing
+    # what the other answers is the defect, not a difference of opinion.
+    ("field_refuse_a_read_through_an_integer_literal",
+     "def main() -> Int:\n"
+     "    printf(\"%d\\n\", (7).foo)\n"
+     "    return 0\n",
+     "refuse:which is a LITERAL", None),
+    # A CLASS CONSTANT is the same read by another route, and it is here
+    # because the refusal for it is raised at a different depth than the case
+    # above: `C.A` is a MemberExpr over the class name when the pass runs, and
+    # only `_rewrite_class_constants` materializing it is what makes the base a
+    # literal.  A refusal asked before that rewrite classified the base as
+    # "unclassified" and printed the generic message about a shape the build
+    # knows exactly — so this case is also the anti-rot for the ORDERING.
+    ("field_refuse_a_read_through_a_class_constant",
+     "class C2:\n"
+     "    A = 7\n\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\\n\", C2.A.value)\n"
+     "    return 0\n",
+     "refuse:which is a LITERAL", None),
+    # The arm a literal needs that the number arm's sentence cannot cover: on a
+    # STRING the read is not an AttributeError, it is a BOUND METHOD, which is a
+    # real Python value this path has no representation for — there is no slot
+    # to read it out of and nothing to store it in.  It used to build and print
+    # `(null)`, which is a pointer-shaped answer to a question about a method.
+    ("field_refuse_a_bound_method_through_a_string_literal",
+     "def main() -> Int:\n"
+     "    f = \"ab\".upper\n"
+     "    return 0\n",
+     "refuse:is a METHOD REFERENCE on", None),
+    # The STORE half of the shape, on a base no analysis can classify: `a[0].x`
+    # used to evaluate both sides and RETURN, which is a silently discarded
+    # store — the program built, ran, and the write was simply not there.
+    # `main` returns 0 either way, so again the exit status cannot witness it
+    # and the assertion is the refusal.  The needle also pins that the message
+    # SPELLS THE BASE: it used to print `….x` through `…`, which names neither
+    # the expression the reader wrote nor the one the message is about.
+    ("field_refuse_a_store_through_a_subscript_base",
+     "def main() -> Int:\n"
+     "    var a = [1, 2, 3]\n"
+     "    a[0].x = 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'a[0]'", None),
+    # …and the same store through a call result, which is the shape the doc
+    # measured as the silently-dropped one (`g().x = 1`).  Its base is spelled
+    # `g(...)` in both halves of the sentence, so the needle checks the
+    # agreement between them.
+    ("field_refuse_a_store_through_a_call_result",
+     "struct P2:\n"
+     "    var x: Int\n\n"
+     "def g() -> P2:\n"
+     "    return P2()\n\n"
+     "def main() -> Int:\n"
+     "    g().x = 1\n"
+     "    return 0\n",
+     "refuse:is a field access through 'g(...)'", None),
+    # …and the same store inside a TUPLE target, which is a third arm rather
+    # than a variant of the second: `a, b = rhs` computes one slot per element
+    # and arm64's slot resolver had a line reading "Non-named base: evaluate for
+    # effects, store nowhere" — a silently discarded store, in a program that
+    # then runs. x86-64's `_tuple_target_key` has refused this shape since, so
+    # the same source built on one architecture and was refused on the other,
+    # and the case that could see it had to be written per architecture to do
+    # so. `b` is a real store on both sides of the test: what is refused is the
+    # element before it, not the tuple assignment.
+    ("field_refuse_a_tuple_target_through_a_subscript_base",
+     "def main() -> Int:\n"
+     "    var a = [1, 2, 3]\n"
+     "    a[0].x, b = 1, 2\n"
+     "    return 0\n",
+     "refuse:is a field access through 'a[0]'", None),
     # An MLIR dialect construct the TEMPLATE rules do not cover, so the name
     # check reached it and refused it as "no home" — a symptom of the register
     # fall-through, naming the allocator rather than the construct.  Real

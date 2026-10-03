@@ -170,6 +170,89 @@ def test_range_is_enforced():
     raise TestFailure("encode_b_cond accepted an offset past its imm19 range")
 
 
+def test_a_base_mnemonic_is_either_wired_or_named():
+    """An encoder's NAME has to say which mnemonic it covers.
+
+    `tools/arm64_insn_audit.py` maps an encoder to a base mnemonic by matching
+    the longest `FAMILIES` prefix, and an encoder that matches none becomes its
+    own base — a string no disassembler ever prints. `encode_blr_xn` matched
+    neither `bl` nor `br`, so its base was `blr_xn`, `blr` was reported as a GAP
+    the backend can in fact close, and the gap list is the thing somebody works
+    through next. Under-reporting coverage is the same defect as
+    over-reporting it, in the direction that hides a one-line fix.
+
+    So: every `encode_*` maps to a declared family. `blr` is in the table now,
+    and this test is what keeps the next one from being a silent gap — it does
+    NOT require the encoder to be wired, because landing an encoder before its
+    lowering is the ordinary order of work here (the `B.cond` case the survey
+    records is the encoder arriving first and the RELOCATION not following it).
+    That is a different failure with a different test
+    (`test_arm64_emission.py` asserts that no branch resolves to its own
+    address).
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "arm64_insn_audit", os.path.join(HERE, "tools", "arm64_insn_audit.py"))
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    unmapped = [n for n in audit.encoder_names()
+                if audit.base_of(n) == n[len("encode_"):]
+                and n[len("encode_"):] not in audit.FAMILIES]
+    check(not unmapped,
+          f"these encoders map to no declared base mnemonic, so every "
+          f"mnemonic they cover is reported as a gap by the survey: "
+          f"{unmapped}. Add the mnemonic to FAMILIES (or, if the name is not "
+          f"a mnemonic plus operands, rename the encoder)")
+
+
+def test_the_survey_does_not_count_an_encoder_nothing_emits():
+    """The survey's headline number must be about IMAGES, not about the table.
+
+    `bugs/FORMAL_arm64_instruction_coverage.md`'s own lesson is that byte-exact
+    encoders are not instructions: `Assembler.resolve()` had no `B.cond` case,
+    every conditional branch pointed at itself, and the whole encoder suite was
+    green. An encoder with no caller is that one step earlier — the bytes are
+    provably right and the instruction cannot occur in any image — and counting
+    those as coverage is how a survey reports 92% when 15 of the 75 encoders
+    are a table nobody calls.
+
+    The assertion is the DIRECTION, not a number: the bases the audit calls
+    covered must all come from an encoder some lowering references, and the
+    ones nothing references must be printed by name rather than dropped in a
+    filter. Pinning the exact set here would make this test a maintenance tax on
+    every encoder that lands before its lowering, which is the ordinary order of
+    work; pinning the direction makes it impossible for the number to go back to
+    reading the table.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "arm64_insn_audit", os.path.join(HERE, "tools", "arm64_insn_audit.py"))
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    covered, every, n_enc, unwired = audit.encoder_bases()
+    check(unwired == sorted(audit.unwired_encoders()),
+          "encoder_bases and unwired_encoders disagree about which encoders no "
+          "lowering emits, so the report and its own helper can tell two "
+          "different stories")
+    check(covered <= every,
+          f"the covered bases are not a subset of the bases in the table: "
+          f"{sorted(covered - every)}")
+    dead = every - covered
+    check(dead <= {audit.base_of(n) for n in unwired},
+          f"these bases are reported uncovered but have no unwired encoder to "
+          f"explain it: {sorted(dead - {audit.base_of(n) for n in unwired})}")
+    # The two that a survey of THIS tree must get right, in both directions:
+    # `blr` is an encoder nobody emits (so not covered, and printed), and
+    # `b.eq`-shaped conditionals are emitted (so covered). Pinned by name
+    # because they are the pair the defect produced.
+    check("blr" in dead,
+          "blr has an unwired encoder and must therefore be reported as NOT "
+          "covered; if it reads as covered again, encoder_bases is reading the "
+          "table instead of the callers")
+    check("b" in covered,
+          "B.cond is emitted by every conditional branch and must stay covered")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -198,12 +281,17 @@ def main():
                 failed += 1
                 print(f"  ERROR {text}: {type(e).__name__}: {e}")
 
-    try:
-        test_range_is_enforced()
-        passed += 1
-    except TestFailure as e:
-        failed += 1
-        print(f"  FAIL {e}")
+    for name, fn in (("out-of-range raises", test_range_is_enforced),
+                     ("every encoder names a base mnemonic",
+                      test_a_base_mnemonic_is_either_wired_or_named),
+                     ("the survey counts emitted encoders, not table entries",
+                      test_the_survey_does_not_count_an_encoder_nothing_emits)):
+        try:
+            fn()
+            passed += 1
+        except TestFailure as e:
+            failed += 1
+            print(f"  FAIL {name}: {e}")
 
     print(f"\narm64 encoders vs `as -arch arm64`: PASS={passed} FAIL={failed}")
     return 1 if failed else 0

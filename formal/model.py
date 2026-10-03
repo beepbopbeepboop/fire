@@ -24070,6 +24070,163 @@ def undeclared_linked_struct_refusal(struct_name: str, owners: list,
             f"{RE_DECLARE_IS_A_DIFFERENT_TYPE}")
 
 
+def member_base_node(expr):
+    """The innermost node of a `a.b.c` chain: the BASE, as an expression.
+
+    The emitter needs the node rather than the text because the base is
+    EMITTED before the refusal that follows it — see `member_access_refusal`
+    for why that ordering is the whole point."""
+    node = expr
+    while isinstance(node, F.MemberExpr):
+        node = node.obj
+    return node
+
+
+def member_base_text(expr) -> str:
+    """The BASE of a `a.b.c` chain, spelled the way the source spells it.
+
+    `member_chain_text` is the sibling that spells the whole PATH, and it
+    renders a base it cannot name as `…` — which is right for a path (`….x` says
+    "a field, somewhere") and useless in a sentence about the reader's own code,
+    because `field_access_refusal`'s whole subject IS the base: it says what
+    this path cannot say about it.
+
+    **`spelled`, not `receiver_shape_text`**, and the two disagreed about the
+    same base in one sentence when this was first written — `g(...).x` is a field
+    access through `g()` — because each has its own partial table for the shapes
+    a chain's root can be. `spelled` is the one that spells an arbitrary
+    expression (it is what the access itself is spelled with), so spelling the
+    base the same way is what makes the two halves of the sentence agree."""
+    return spelled(member_base_node(expr))
+
+
+def member_access_refusal(expr, fn_name, frame_holders) -> str:
+    """`field_access_refusal` for a MemberExpr, with the base spelled out.
+
+    **One function for the five sites that raise it**, which is the whole point
+    of this existing: the two backends' member fall-throughs each spelled the
+    chain themselves, in the same three lines, with `chain.split(".", 1)[0]` for
+    the root — so a base that is not a plain name (`a[0].x`, `g().x`, `C.A.x`)
+    printed `…` as BOTH the access and its base, and a reader could not tell
+    which expression the refusal was about. The ACCESS is `spelled(expr)` and the
+    BASE is `member_base_text(expr)`, the two spellings this module already has,
+    and they agree with what the old code produced for every chain rooted at a
+    name — so the messages every existing case pins (`is a field access through
+    'b'`) are unchanged, and a deep chain keeps every hop (`h.f.g`, not `h.g`).
+
+    `frame_holders` is the CALLER's frame-holder set, which is per-emission and
+    is the only thing that decides `holder` in the underlying message: a build
+    that DID recognise the root as a frame receiver and then refused is a
+    disagreement between two analyses, and that is a different sentence from
+    "this path cannot classify it".
+
+    **The caller emits the base FIRST, and that ordering is load-bearing.**
+    Emitting a base is how a base that is itself unanswerable says so:
+    `p.value().b` reaches this through a call the emitter would refuse with a
+    POINTER message ("a STRUCT, and a struct's value on this path is a frame
+    ADDRESS"), and emitting the base first is what surfaces that instead of this
+    one. It is also what the code did before the refusals existed — arm64's arm
+    evaluated the base "for its side effects" and then answered 0, so the base's
+    refusal came out of that evaluation — and dropping the evaluation when the
+    refusal was added replaced a specific message with a generic one. So
+    `member_base_node` is what each site emits, and this function is what it
+    raises once the base has had its say."""
+    return field_access_refusal(
+        spelled(expr), fn_name or "<module>", member_base_text(expr),
+        member_base_text(expr) in (frame_holders or ()))
+
+
+# ── A member read through a LITERAL base: no storage, so no field ────────────
+#
+# The one member base that needs no classification to rule out, and the two
+# recognisers that rule it out. `formal/build.py` refuses the access in the
+# SHARED pass and each backend's emitter refuses it again at the arm that used
+# to read 0, so a construct that arrives by a route the build pass does not
+# model is still stopped rather than answered; see
+# `bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`
+# for the measurement that made this a refusal on both architectures.
+
+
+#: Every literal node class, in ONE tuple, so the two recognisers below and
+#: every future reader agree on what "a literal" is. `StringLiteral` is in it
+#: and is the one member of the list whose attribute reads are NOT all
+#: AttributeErrors — `"ab".upper` is a bound method — which is why the message
+#: has an arm of its own rather than one sentence for the whole family.
+LITERAL_NODES = (F.IntLiteral, F.FloatLiteral, F.ImagLiteral, F.StringLiteral,
+                 F.TstringLiteral, F.BoolLiteral, F.EllipsisLiteral,
+                 F.NoneLiteral, F.DottedLiteral)
+
+
+def is_literal_base(expr) -> bool:
+    """True when `expr` is a literal, i.e. a base with no binding at all.
+
+    The narrowest possible answer to "what does this base hold", and the reason
+    it is worth its own recogniser: every OTHER unclassified base is genuinely
+    ambiguous here (a one-field struct's receiver IS its field, a multi-field
+    struct's receiver is a frame address, an ordinary word is an integer), so
+    the emitters cannot refuse those without refusing real programs. A literal
+    is not ambiguous — it is the base's own value, in the register or the
+    `__TEXT` slot it is spelled into — so there is no program this refusal
+    costs. Measured over the 610-file Mojo stdlib and this tree's own 118
+    `.mojo` files: exactly ONE value-position member read through a literal,
+    `std/_gpu/globals.mojo:111`'s `"nvvm.maxntid".value`, against 185 string
+    and 20 integer METHOD calls on a literal, which are calls and are not this
+    function's business (`_call_receivers`)."""
+    return isinstance(expr, LITERAL_NODES)
+
+
+def literal_base_member_refusal(base, member, fn_name) -> str:
+    """Why `<literal>.<member>` cannot be answered: two sentences, one per kind.
+
+    **The two arms are the whole of this function**, because "a literal has no
+    fields" is true and useless on its own: for a string literal the read is a
+    BOUND METHOD, which exists and is a real Python value this path has no
+    representation for, and for a number it is either an AttributeError or one
+    of the number's own properties (`(7).real`, `(7).denominator`,
+    `(7).bit_length`) — which are properties OF THE VALUE and not fields of an
+    object, and which this path lowers in neither direction. Measured on this
+    tree before the refusal: `(7).foo` and `C.A.value` both printed `0` on
+    arm64 while CPython raises `AttributeError` for both, and `f = "ab".upper`
+    printed `(null)`.
+
+    Shared because both backends read it, and because the alternative is what
+    this replaced: x86-64's emitter arm and arm64's said the same thing about
+    the same program in different words, and one of them said nothing at all.
+
+    **The chain is spelled HERE rather than passed in**, because the only base
+    this is ever called for is a literal, and the spelling of a literal is
+    exact: `member_chain_text` renders any base it cannot name as `…`, so the
+    caller's version of this sentence said `….foo` about `7.foo` — a message
+    that names neither the number nor the field it is about."""
+    who = f"{fn_name}: " if fn_name else ""
+    chain = f"{spelled(base)}.{member}"
+    if isinstance(base, (F.StringLiteral, F.TstringLiteral)):
+        return (
+            f"{who}{chain} is a METHOD REFERENCE on {spelled(base)} — "
+            f"{member!r} bound to a string — and a value-position method "
+            f"reference is a bound method, and a method is not a word: there is "
+            f"no slot to read it out of and nothing to store it in, so this path "
+            f"has no representation for it. Call it "
+            f"({spelled(base)}.{member}(...)), which is a receiver and a call "
+            f"— the method path, which decides what it can lower and refuses "
+            f"the rest — or write the operation out where it was used"
+        )
+    return (
+        f"{who}{chain} reads {member!r} through {spelled(base)}, which is a "
+        f"LITERAL: there is no object behind it, no storage and no fields, so "
+        f"there is no word here to read. Python's answer for a member a number "
+        f"does not have is an AttributeError, and the members it does have "
+        f"({spelled(base)}.real, {spelled(base)}.denominator, "
+        f"{spelled(base)}.bit_length, …) are properties OF THE VALUE rather "
+        f"than fields of an object, which this path lowers in neither "
+        f"direction — it has no attribute lowering for a number at all. This "
+        f"used to answer the word 0, which is a plausible-looking number and "
+        f"not the program's: put the value in a name and read the attribute "
+        f"from there, which is the same program where the attribute is a "
+        f"named thing rather than a silent zero"
+    )
+
+
 # ── How a call's arguments bind: the ONE shape, read by everything ─────────
 #
 # `FunctionDef.params` is a flat `[(name, type)]` list in which a variadic
