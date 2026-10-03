@@ -637,13 +637,60 @@ Do not spend a pass on this. The metric worth spending passes on is
 `tools/undef_import_census.py`: **96 sites / 51 names / 60 files**, with a
 fixed replay set.
 
-### What is left, ranked
+### `FormatStruct` (15 sites) — the overload suffix is NOT recoverable; this is not a naming change
 
-| item | sites | needs the gate? |
+A previous pass called this "one naming change" and attributed it to needing
+`GimpleGen`'s overload hasher. **The hasher is not the obstacle and the gate
+would not buy it.** `overload_suffix_for(c_param_types)`
+(`mojo/backend_gimple/emit_funcs.py:1562`) is a pure module-level function of a
+C parameter-type list — no `GimpleGen` instance, and its own docstring says it
+is shared with `reflect` precisely so both agree. So the suffix is callable
+from the elaborator. The problem is that the elaborator cannot compute the
+right INPUT.
+
+Measured on `struct FormatStruct[T: Writer, o: MutOrigin]`, which has two
+`fields` methods — `def fields[*Ts: Writable](self, *args: *Ts)` and
+`def fields(self, fields_fn: Some[def[T: Writer](mut T)])`. Its instantiation
+TU defines **three** symbols:
+
+```
+FormatStruct_String_MutOrigin_FormatStruct_String_MutOrigin_fields
+FormatStruct_String_MutOrigin_FormatStruct_String_MutOrigin_fields_6ca16d
+FormatStruct_String_MutOrigin_FormatStruct_String_MutOrigin_fields_93095a
+```
+
+while `_struct_layout_anns` reports exactly two, both as `('fields', 'void',
+['int64_t'])` — because `_mojo_type('*Ts')` and `_mojo_type('Some[def...]')`
+are both `int64_t`. And the suffix the caller CAN compute is wrong:
+
+```
+overload_suffix_for(['int64_t'])  ->  '_9f63a2'
+```
+
+which is none of `''`, `_6ca16d` or `_93095a`. So the two overloads are not
+merely ambiguous to the elaborator, they are **indistinguishable**: the erasure
+that makes them look identical is exactly the erasure that destroys the
+function the suffix is computed from. `overload_suffix_for` is a function of the
+C parameter types, and the elaborator's C parameter types are not the
+instantiation TU's — the TU infers them properly, the elaborator erases them.
+The information is gone in one direction and cannot be reconstructed.
+
+That is why the existing guard (a duplicate method name disqualifies the struct)
+is the only sound response available today rather than a cop-out: registering
+either suffix would declare a symbol nothing defines, which is what previously
+took `test/format/test_utils.mojo` to a hard `too many arguments to function`.
+The honest unblock is to give the elaborator the codegen's REAL parameter
+inference for the instantiated fragment — i.e. ask the instantiation TU what it
+named its methods — which is a much larger change than a rename and does not
+depend on the gate.
+
+### The 247 `RecursionError`s — DO NOT REPRODUCE (2026-10-01, re-measured)
+
+| item | sites | blocked on |
 |---|---|---|
-| `FormatStruct` | 15 | yes — `GimpleGen`'s overload hasher |
-| `alloc` | 10 | partly — `global_constant[T, value: T]()` is a comptime value parameter with no runtime argument, i.e. a parameter-passing model rather than a lookup |
-| `ThinAllocation` | 8 | no, but genuinely blocked: `T` is the *pointee*, load-bearing, and the argument's C type (`Foo *`) does not name a Mojo type |
+| `FormatStruct` | 15 | the instantiation TU's real parameter inference — NOT the gate, and not a rename (see above) |
+| `alloc` | 10 | partly a different model: `global_constant[T, value: T]()` is a comptime value parameter with no runtime argument |
+| `ThinAllocation` | 8 | genuinely blocked today: `T` is the *pointee*, load-bearing, and the argument's C type (`Foo *`) does not name a Mojo type |
 
 The earlier `explicit-failed` / `unbound` split no longer describes what is
 left: the two elaborator defects this doc names are fixed, and what remains is
