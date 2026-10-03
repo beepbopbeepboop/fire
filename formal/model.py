@@ -5265,6 +5265,31 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
             f"functions so each gets its own budget.")
 
 
+def set_union_refusal(left: str, right: str) -> str:
+    """Why `{left} | {right}` is not lowered on the backend that asks.
+
+    `|` between two containers is a SET UNION in Python: the right-hand
+    elements the left already holds are dropped. One backend here has a union
+    emitter and the other does not, and the second one used to lower the
+    operator as a plain CONCATENATION — which answers `[1, 2] | [2, 3]` with
+    `[1, 2, 2, 3]`, a list with a repeat in it, summing to 8 where CPython says
+    6. Measured on the pre-change tree: it built, it ran, it exited 0, and it
+    was wrong, which is the outcome this file exists to replace with a refusal.
+
+    The message lives here, beside the other refusal texts, so the two backends
+    cannot word it differently on the day the second one grows the emitter —
+    and it says which backend does lower it, because "this is not supported" is
+    the answer that sends a reader looking for a spec when the answer is an
+    emitter."""
+    return (
+        f"{left} | {right} is a SET UNION, and this backend lowers `|` on two "
+        f"containers as a concatenation: the result would keep every element "
+        f"of both sides, repeats included, which is not a set and answers a "
+        f"different program than the source writes. Use `+` if a "
+        f"concatenation is what you want, or build the union with an explicit "
+        f"membership test. arm64 lowers this operator correctly")
+
+
 def list_append_overflow_message(name: str, capacity: int) -> str:
     """The ONE text an over-capacity `xs.append(v)` writes to fd 2 before it
     stops the program — for BOTH backends, because two architectures printing
@@ -11121,6 +11146,20 @@ class ValueKinds:
             return _unify(self.kind_of(e.then_val), self.kind_of(e.else_val))
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(e.elements))
+        if isinstance(e, F.SliceExpr):
+            # A slice is a NEW BLOB holding the selected elements, so its kind
+            # is the sliced expression's kind narrowed to its element kind —
+            # and its element kind is the source's, so `xs[1:3]` over a list of
+            # ints is a list of ints and nothing has to be re-derived.
+            #
+            # There was no arm here, so a slice classified as NOTHING, and that
+            # is a refusal with two faces: `len(xs[1:3])` was refused for want of
+            # a shape the construct has exactly, and `var ys = xs[1:3]` bound
+            # `ys` to the "a word is an integer" default — which is the
+            # `infer_expr` lead the slice bug doc recorded, since `_value_kind`
+            # only keeps an unclassified value that `_is_container_literal`
+            # recognises and a slice is not a literal.
+            return list_kind(list_elem_kind(self.kind_of(e.obj)))
         if isinstance(e, F.DictExpr):
             # The VALUES, because that is what a subscript of a pair blob
             # yields — the same element the layout interleaves them in

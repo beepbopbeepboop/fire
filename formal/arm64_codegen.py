@@ -656,6 +656,16 @@ dylib_exports: list = None, globals_base: int = None,
         # RHS or an alias of one). Subscript on these is a key lookup, not
         # a list index. Reset per function.
         self._dict_vars = set()
+        # Names bound to a list/tuple/set blob.  This is what makes `a + b` on
+        # two LOCALS a concatenation: without it two bare idents are
+        # indistinguishable from two integers and the operator silently lowers
+        # to pointer arithmetic, so `var zs = xs + ys` answered with the sum of
+        # two addresses and every read of `zs` was whatever was mapped there.
+        # x86-64 has carried this table (and the `_is_container_expr` arm that
+        # reads it) for a long time; the two backends must not answer the same
+        # question differently, which is what made the operator architecture-
+        # dependent.  Reset per function, like the sets above.
+        self._blob_vars = set()
         # Names bound to a FILE DESCRIPTOR this function (the result of the
         # lowered `open`, or an alias of one). `write`/`close` lower to the C
         # library's `write(2)`/`close(2)`, so the receiver has to be one, and
@@ -1004,6 +1014,7 @@ dylib_exports: list = None, globals_base: int = None,
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
+        self._blob_vars = set()
         # …seeded with the module globals this function mentions, because the
         # literal that says what they hold is in the MODULE's statement list and
         # `_note_binding` only ever sees this function's. Seeded BEFORE the body
@@ -3316,18 +3327,28 @@ dylib_exports: list = None, globals_base: int = None,
         if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
-        elif isinstance(value, F.SetExpr) or (
-                isinstance(value, F.Comprehension)
-                and value.kind in ("set", "list", "generator")):
+            self._blob_vars.discard(name)
+        elif self._is_container_expr(value):
+            # A list/set/tuple literal, a comprehension, a SLICE and a `+`/`|`
+            # of blobs all bind a blob — `var ys = xs[1:3]` is the case that
+            # matters most, because a slice-bound name is the one a later `+`
+            # has to recognise and it is not a literal anywhere.
+            self._blob_vars.add(name)
             self._string_vars.discard(name)
             self._dict_vars.discard(name)
         elif isinstance(value, F.StringLiteral):
             self._string_vars.add(name)
             self._dict_vars.discard(name)
+            self._blob_vars.discard(name)
         elif isinstance(value, F.IdentExpr):
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
                 self._string_vars.discard(name)
+                self._blob_vars.discard(name)
+            elif value.name in self._blob_vars:
+                self._blob_vars.add(name)          # an alias keeps it: `b = a`
+                self._string_vars.discard(name)
+                self._dict_vars.discard(name)
             elif self._expr_str_kind(value) == M.STR_KIND:
                 # `value.name in self._string_vars` OR a `comptime` binding
                 # whose folded value is the text: `var t = OS` binds exactly the
@@ -3336,9 +3357,11 @@ dylib_exports: list = None, globals_base: int = None,
                 # from disagreeing about the same read.
                 self._string_vars.add(name)
                 self._dict_vars.discard(name)
+                self._blob_vars.discard(name)
             else:
                 self._string_vars.discard(name)
                 self._dict_vars.discard(name)
+                self._blob_vars.discard(name)
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
                 value, self._expr_str_kind(
                     value.func.obj if isinstance(value.func, F.MemberExpr)
@@ -3352,9 +3375,11 @@ dylib_exports: list = None, globals_base: int = None,
             # compared a pointer against an integer and said False.
             self._string_vars.add(name)
             self._dict_vars.discard(name)
+            self._blob_vars.discard(name)
         else:
             self._string_vars.discard(name)
             self._dict_vars.discard(name)
+            self._blob_vars.discard(name)
 
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer."""
@@ -7322,12 +7347,24 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_slice_parts(self, obj, start_e, stop_e, step_e) -> None:
         """`obj[start:stop:step]` → new list blob in X0.
 
-        Defaults: start=0, stop=count, step=1 (None nodes). Negative bounds
-        wrap against count then clamp to [0, count]. step==0 exits(1).
-        Negative step iterates i from stop-1 down while i >= start and
-        i >= 0 (Python's stop-default of -1 for reversed slices is mapped
-        to start=0 / stop=count via the None defaults when both are
-        omitted; explicit negative-step bounds follow the clamped rule).
+        Python's slice, with the four defaults that depend on the sign of
+        `step` — which is a RUN-TIME value on this path, so each default is
+        its own word on the stack and the loop picks between them:
+
+        |            | ascending (`step > 0`) | descending (`step < 0`) |
+        |------------|------------------------|------------------------|
+        | `i` starts at | `start`              | `start`                |
+        | while        | `i < stop`           | `i > stop`             |
+        | omitted start | 0                   | `count - 1`            |
+        | omitted stop  | `count`             | -1                     |
+
+        Both bounds are written once, wrapped (`-2` on a list of 6 is 4) and
+        then clamped into `[0, count]`, in Python's order. A step of 0 is a
+        `ValueError` in Python and `_exit(1)` here, because there is no
+        exception on this path to raise it as — and an exit that flushes
+        nothing, which is why the two loop defects below read for a long time
+        as "a blob nothing ever filled".
+
         Result capacity is a static upper bound (literal length or 64).
 
         A STRING base is refused before any of that, and the reason is the
@@ -7362,73 +7399,115 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_mov_imm("X10", 0)
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
 
-        self._emit_expr(obj)
-        self.asm.emit(encode_stp_sp_pre(0, 2))  # [SP+0]=src base
+        # ── the six words the loop reads, and WHERE they are.  Six 16-byte
+        # pushes, so every slot is a multiple of 16 and the offsets are named
+        # once here rather than spelled as bare numbers through the rest of the
+        # method — the previous version spelled them and had them drift out of
+        # step with the pushes by two slots.
+        #
+        #   [SP+ 0] step    [SP+16] stop_d   [SP+32] stop
+        #   [SP+48] start_d [SP+64] start     [SP+80] src
+        SLOT_STEP, SLOT_STOP_D, SLOT_STOP = 0, 16, 32
+        SLOT_START_D, SLOT_START, SLOT_SRC = 48, 64, 80
+
+        self._emit_expr(obj)                          # X0 = src base
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 0, 0))  # X9 = count
+        # Pushed BEFORE anything else is evaluated, because X0 is the only
+        # register that holds the source base and the bounds below overwrite
+        # it (`mov w0, #1`). Reading the count here rather than from the slot
+        # is what makes the omitted-start default (`count - 1`) possible before
+        # the pushes exist; the clamps re-read it from the slot afterwards,
+        # since evaluating a bound may clobber X9.
+        self.asm.emit(encode_stp_sp_pre(0, 2))        # src
+
+        # start, evaluated ONCE.  An explicit bound is pushed twice — the
+        # ascending word and the descending word — because the loop reads one or
+        # the other and cannot know which; an omitted one pushes 0 and
+        # `count - 1`, which is the whole reason the two exist.
+        if start_e is None:
+            self.asm.emit(encode_movz_xd_imm(4, 0))          # X4 = 0
+            self.asm.emit(encode_stp_sp_pre(4, 31))           # start
+            self.asm.emit(encode_mov_zr_xn(6, 9))
+            self.asm.emit(encode_sub_xd_xn_imm(6, 6, 1))      # count - 1
+            self.asm.emit(encode_stp_sp_pre(6, 31))           # start_d
+        else:
+            self._emit_expr_to(start_e, "X4")
+            self.asm.emit(encode_stp_sp_pre(4, 31))           # start
+            self.asm.emit(encode_add_xd_xn_imm(6, 4, 0))      # X6 = X4
+            self.asm.emit(encode_stp_sp_pre(6, 31))           # start_d
+        # stop, the same shape: `count` and -1 when omitted.
+        if stop_e is None:
+            self.asm.emit(encode_mov_zr_xn(5, 9))             # X5 = count
+            self.asm.emit(encode_stp_sp_pre(5, 31))           # stop
+            self.asm.emit(encode_movz_xd_imm(6, 1))
+            self.asm.emit(encode_neg_xd_xn(6, 6))             # X6 = -1
+            self.asm.emit(encode_stp_sp_pre(6, 31))           # stop_d
+        else:
+            self._emit_expr_to(stop_e, "X5")
+            self.asm.emit(encode_stp_sp_pre(5, 31))           # stop
+            self.asm.emit(encode_add_xd_xn_imm(6, 5, 0))      # X6 = X5
+            self.asm.emit(encode_stp_sp_pre(6, 31))           # stop_d
 
         if step_e is None:
             self.asm.emit(encode_movz_xd_imm(8, 1))
         else:
             self._emit_expr_to(step_e, "X8")
-        self.asm.emit(encode_stp_sp_pre(8, 31))  # push step
-        # SP+0=step, SP+16=src
+        self.asm.emit(encode_stp_sp_pre(8, 31))                # step
 
-        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        self.asm.emit(encode_ldr_xt_xn_imm(9, 9, 0))  # count
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, SLOT_SRC))
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 9, 0))          # X9 = count
 
-        if start_e is None:
-            self.asm.emit(encode_movz_xd_imm(4, 0))
-        else:
-            self._emit_expr_to(start_e, "X4")
-        self.asm.emit(encode_stp_sp_pre(4, 31))  # push start
-        # SP+0=start, SP+16=step, SP+32=src
-
-        if stop_e is None:
-            self.asm.emit(encode_mov_zr_xn(5, 9))
-        else:
-            self._emit_expr_to(stop_e, "X5")
-        self.asm.emit(encode_stp_sp_pre(5, 31))  # push stop
-        # SP+0=stop, SP+16=start, SP+32=step, SP+48=src
-
-        # Wrap negatives and clamp to [0, count].
-        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))
-        self.asm.emit(encode_cmp_xn_imm(4, 0))
-        self.asm.emit(encode_cset_xd_cond(0, "lt"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        w1 = f"{self.func_name}_slw{self._while_counter}a"
-        self.asm.emit_label_rel(w1, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_xm(4, 4, 9))
-        self.asm.emit(encode_str_xt_xn_imm(4, 31, 16))
-        self.asm.label(w1)
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
-        self.asm.emit(encode_cmp_xn_imm(5, 0))
-        self.asm.emit(encode_cset_xd_cond(0, "lt"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        w2 = f"{self.func_name}_slw{self._while_counter}b"
-        self.asm.emit_label_rel(w2, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_xm(5, 5, 9))
-        self.asm.emit(encode_str_xt_xn_imm(5, 31, 0))
-        self.asm.label(w2)
-        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))
-        self.asm.emit(encode_cmp_xn_xm(9, 4))
-        self.asm.emit(encode_cset_xd_cond(0, "hi"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        c1 = f"{self.func_name}_slk{self._while_counter}a"
-        self.asm.emit_label_rel(c1, here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 9))
-        self.asm.emit(encode_str_xt_xn_imm(4, 31, 16))
-        self.asm.label(c1)
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
-        self.asm.emit(encode_cmp_xn_xm(9, 5))
-        self.asm.emit(encode_cset_xd_cond(0, "hi"))
-        self.asm.emit(encode_cbz_xn(0, 0))
-        c2 = f"{self.func_name}_slk{self._while_counter}b"
-        self.asm.emit_label_rel(c2, here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(5, 9))
-        self.asm.emit(encode_str_xt_xn_imm(5, 31, 0))
-        self.asm.label(c2)
+        # Wrap negatives and clamp into [0, count] — Python's order, three
+        # steps per bound.  The two upper clamps compared the COUNT against the
+        # bound and wrote the count back when it was the larger of the two
+        # (`cmp x9, x4; cset hi` asks "count > bound?"), so every bound BELOW
+        # the count was raised to it: `xs[1:3]` became `xs[6:6]` and `xs[2:6]`
+        # became `xs[6:6]`, so every forward slice was an empty list while the
+        # blob it had just been given was full.  That is the "a consumer reads
+        # the result as EMPTY" symptom, and it was these two comparisons.  The
+        # lower clamp is new: without it `xs[-99:]` reads before the blob.
+        #
+        # An EXPLICIT bound clamps to ONE value for both directions, so its
+        # descending word is rewritten from the ascending one.  The DEFAULTS are
+        # not in [0, count] and must not be: `count - 1` and -1 are how
+        # `xs[::-1]` reaches index 0.
+        for reg, slot, other, expr, tag in (
+                (4, SLOT_START, SLOT_START_D, start_e, "a"),
+                (5, SLOT_STOP, SLOT_STOP_D, stop_e, "b")):
+            self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, slot))
+            self.asm.emit(encode_cmp_xn_imm(reg, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "lt"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            w = f"{self.func_name}_slw{self._while_counter}{tag}"
+            self.asm.emit_label_rel(w, here_offset=-4)
+            self.asm.emit(encode_add_xd_xn_xm(reg, reg, 9))
+            self.asm.emit(encode_str_xt_xn_imm(reg, 31, slot))
+            self.asm.label(w)
+            self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, slot))
+            self.asm.emit(encode_cmp_xn_xm(reg, 9))
+            self.asm.emit(encode_cset_xd_cond(0, "gt"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            c = f"{self.func_name}_slk{self._while_counter}{tag}"
+            self.asm.emit_label_rel(c, here_offset=-4)
+            self.asm.emit(encode_mov_zr_xn(reg, 9))
+            self.asm.emit(encode_str_xt_xn_imm(reg, 31, slot))
+            self.asm.label(c)
+            self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, slot))
+            self.asm.emit(encode_cmp_xn_imm(reg, 0))
+            self.asm.emit(encode_cset_xd_cond(0, "lt"))
+            self.asm.emit(encode_cbz_xn(0, 0))
+            f0 = f"{self.func_name}_sll{self._while_counter}{tag}"
+            self.asm.emit_label_rel(f0, here_offset=-4)
+            self.asm.emit(encode_movz_xd_imm(reg, 0))
+            self.asm.emit(encode_str_xt_xn_imm(reg, 31, slot))
+            self.asm.label(f0)
+            if expr is None:
+                continue
+            self.asm.emit(encode_ldr_xt_xn_imm(6, 31, slot))
+            self.asm.emit(encode_str_xt_xn_imm(6, 31, other))
 
         # step == 0 → exit 1 (cbnz skips the exit when step != 0)
-        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 32))
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, SLOT_STEP))
         self.asm.emit(encode_cmp_xn_imm(8, 0))
         zstep = f"{self.func_name}_slz{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 8))
@@ -7438,61 +7517,87 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_svc(0x80))
         self.asm.label(zstep)
 
-        # i → X6: start if step>0 else stop-1
-        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, 16))  # start
+        # i → X6, from the word the direction picks.
+        #
+        # The `cbz` below is the WHOLE of this conditional and its direction is
+        # load-bearing: `cset x0, lt` is 1 exactly when step < 0, so `cbz x0`
+        # fires when step >= 0 and must JUMP OVER the descending arm rather
+        # than into it.  It used to point at that arm — the relocation named the
+        # label the code fell through to — so every forward slice started at
+        # `stop - 1` and walked DOWN to the result blob's capacity check, which
+        # `_exit(1)`'d without printing anything.
         self.asm.emit(encode_cmp_xn_imm(8, 0))
         self.asm.emit(encode_cset_xd_cond(0, "lt"))
+        pos_init = f"{self.func_name}_slp{self._while_counter}"
         self.asm.emit(encode_cbz_xn(0, 0))
-        neg_init = f"{self.func_name}_sln{self._while_counter}"
-        self.asm.emit_label_rel(neg_init, here_offset=-4)
+        self.asm.emit_label_rel(pos_init, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, SLOT_START_D))
+        # …and BRANCH over the ascending load rather than falling into it: with
+        # both bounds omitted the two words are `count - 1` and 0, so falling
+        # through answered `xs[::-1]` with one element.
         self._emit_b_to(f"{self.func_name}_slm{self._while_counter}")
-        self.asm.label(neg_init)
-        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))
-        self.asm.emit(encode_sub_xd_xn_imm(6, 5, 1))
+        self.asm.label(pos_init)
+        self.asm.emit(encode_ldr_xt_xn_imm(6, 31, SLOT_START))
         self.asm.label(f"{self.func_name}_slm{self._while_counter}")
 
-        # Loop: determine signedness of step, then test against stop/start.
+        # Loop: the sign of step, then the bound that sign means.
         self._while_counter += 1
         wid = self._while_counter
         loop = f"{self.func_name}_slt{wid}"
         body = f"{self.func_name}_slb{wid}"
         step_lbl = f"{self.func_name}_sls{wid}"
         done = f"{self.func_name}_sld{wid}"
-        neg_body = f"{self.func_name}_sln{wid}"
+        pos_body = f"{self.func_name}_slq{wid}"
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_imm(8, 0))
         self.asm.emit(encode_cset_xd_cond(0, "lt"))  # 1 if step < 0
         self.asm.emit(encode_cbz_xn(0, 0))            # step >= 0 → positive
-        self.asm.emit_label_rel(neg_body, here_offset=-4)
-        # positive: body if i < stop else done
+        self.asm.emit_label_rel(pos_body, here_offset=-4)
+        # Descending: body while i > stop_d.  `start` is inclusive and `stop`
+        # exclusive, and an omitted stop is -1, which is what lets `xs[::-1]`
+        # reach index 0.  This arm used to test `i >= 0` and consult no bound
+        # the source wrote at all, so `xs[5:0:-1]` (which starts at 5) walked
+        # up from -1 and copied nothing, while `xs[::-1]` — the one input for
+        # which 0 is the right bound — was right by coincidence.
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, SLOT_STOP_D))
+        self.asm.emit(encode_cmp_xn_xm(6, 5))            # signed: i - stop_d
+        self.asm.emit(encode_cset_xd_cond(0, "gt"))
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(done, here_offset=-4)
         self._emit_b_to(body)
-        self.asm.label(neg_body)
-        # negative: body if i >= 0 else done
-        self.asm.emit(encode_cmp_xn_imm(6, 0))
-        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.label(pos_body)
+        # Ascending: body while i < stop.  This test DID NOT EXIST — the arm was
+        # an unconditional `b body` under a comment that described this one — so
+        # with step > 0 the loop ran until the capacity check stopped it,
+        # whatever `stop` said.  Each bound is re-read from the stack rather
+        # than kept in a register because the append below clobbers X0-X9 and
+        # the bound is the one value the loop cannot recompute.
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, SLOT_STOP))
+        self.asm.emit(encode_cmp_xn_xm(6, 5))            # signed: i - stop
+        self.asm.emit(encode_cset_xd_cond(0, "lt"))
         self.asm.emit(encode_cbz_xn(0, 0))
         self.asm.emit_label_rel(done, here_offset=-4)
         self._emit_b_to(body)
 
         self.asm.label(body)
         # append src[i]
-        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 48))  # src base
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, SLOT_SRC))
         self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 6))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
         self._compr_append_elem(offset, src_cap)
-        # append may clobber X6/X8 — reload step and update i from stack
-        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 32))  # step
-        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))  # start (keep live)
-        self.asm.emit(encode_add_xd_xn_xm(6, 6, 8))     # i += step
+        # X6 survives the append (it clobbers X0-X4 and X9); step does not, so
+        # it is re-read. X4's reload is the leftover of an earlier version that
+        # kept `start` live for a bound this loop no longer reads.
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, SLOT_STEP))
+        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, SLOT_START))
+        self.asm.emit(encode_add_xd_xn_xm(6, 6, 8))      # i += step
         self._emit_b_to(loop)
 
         self.asm.label(step_lbl)  # unused alias kept for label uniqueness
         self.asm.label(done)
-        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop stop
-        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop start
-        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop step
-        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop src (clobbers X0)
+        for _ in range(6):
+            self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
@@ -7546,14 +7651,18 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit_label_rel(w2, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_xm(5, 5, 2))
         self.asm.label(w2)
-        self.asm.emit(encode_cmp_xn_xm(2, 4))
+        # `start > count` is the question (the count is the SECOND operand, so
+        # the subtraction is start - count); the old order asked "count >
+        # start?" and clamped on THAT, which raised every in-range bound to the
+        # count and made the range empty.
+        self.asm.emit(encode_cmp_xn_xm(4, 2))
         self.asm.emit(encode_cset_xd_cond(0, "hi"))
         self.asm.emit(encode_cbz_xn(0, 0))
         c1 = f"{fn}_ssc{sid}1"
         self.asm.emit_label_rel(c1, here_offset=-4)
         self.asm.emit(encode_mov_zr_xn(4, 2))
         self.asm.label(c1)
-        self.asm.emit(encode_cmp_xn_xm(2, 5))
+        self.asm.emit(encode_cmp_xn_xm(5, 2))
         self.asm.emit(encode_cset_xd_cond(0, "hi"))
         self.asm.emit(encode_cbz_xn(0, 0))
         c2 = f"{fn}_ssc{sid}2"
@@ -7574,7 +7683,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.label(loop)
         self.asm.emit(encode_cmp_xn_xm(7, 6))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))           # i >= len → done
         self.asm.emit_label_rel(done_label, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_xm(10, 4, 7))
         self.asm.emit(encode_add_xd_xn_imm(11, 9, 8))
@@ -7920,6 +8029,8 @@ dylib_exports: list = None, globals_base: int = None,
         if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "or", "and"):
             return (self._is_container_expr(e.left)
                     or self._is_container_expr(e.right))
+        if isinstance(e, F.IdentExpr):
+            return e.name in self._blob_vars
         return False
 
     def _blob_est(self, e) -> int:
@@ -8003,9 +8114,14 @@ dylib_exports: list = None, globals_base: int = None,
         cl = f"{self.func_name}_lcl{self._while_counter}"
         cld = f"{self.func_name}_lcd{self._while_counter}"
         self.asm.label(cl)
+        # i >= nL leaves the loop, so the branch is on NON-zero.  `cbz` here
+        # left on the FIRST iteration for every input, and a copy loop that
+        # copies nothing is invisible from outside: the count word is written
+        # from nL + nR beforehand, so `len(a + b)` was right and every element
+        # of the result read 0 — `sum([1, 2] + [3])` answering 0.
         self.asm.emit(encode_cmp_xn_xm(5, 2))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(cld, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
@@ -8025,14 +8141,19 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.label(cr)
         self.asm.emit(encode_cmp_xn_xm(5, 3))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))
         self.asm.emit_label_rel(crd, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(0, 8, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
         self._emit_list_base(offset)
         self.asm.emit(encode_add_xd_xn_imm(6, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm(6, 6, 2))     # + nL
+        # + 8*nL, SCALED: the left loop wrote nL elements, so the right one
+        # starts nL ELEMENTS further on.  `add x6, x6, x2` added nL BYTES, and
+        # the first right-hand element landed six bytes into the left's last
+        # one — which is how a correct count and a correct-looking `len`
+        # still produced `sum([1, 2] + [3]) == 196609`.
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 2))  # + 8*nL
         self.asm.emit(encode_add_xd_xn_xm_lsl3(6, 6, 5))
         self.asm.emit(encode_str_xt_xn_imm(0, 6, 0))
         self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))
@@ -8089,7 +8210,7 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.label(ul)
         self.asm.emit(encode_cmp_xn_xm(5, 2))
         self.asm.emit(encode_cset_xd_cond(0, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit(encode_cbnz_xn(0, 0))          # i >= nL → done
         self.asm.emit_label_rel(uld, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 5))

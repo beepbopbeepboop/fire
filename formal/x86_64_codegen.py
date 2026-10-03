@@ -4689,10 +4689,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if op in ("+", "|") and (self._container_ctx > 0
                                  or self._is_container_expr(e.left)
                                  or self._is_container_expr(e.right)):
-            if op == "+":
-                self._emit_list_concat(e.left, e.right)
-            else:
-                self._emit_list_concat(e.left, e.right)
+            if op == "|":
+                # `|` on two containers is a SET UNION: the elements of the
+                # right that the left already has are dropped.  This backend
+                # has no union emitter, and lowering it as a concatenation
+                # answers `[1, 2] | [2, 3]` with `[1, 2, 2, 3]` — a list with
+                # a repeat, which is not a set and sums to 8 where CPython says
+                # 6.  Measured on the pre-change tree, exit 0 and the wrong
+                # number, so this was a wrong answer rather than a refusal.
+                # arm64's `_emit_set_union` does lower it; saying so here is
+                # what makes the refusal an answer rather than a shrug.
+                raise CodegenError(M.set_union_refusal(
+                    M.spelled(e.left), M.spelled(e.right)))
+            self._emit_list_concat(e.left, e.right)
             return
 
         if op in ("in", "not in"):
@@ -5396,7 +5405,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.emit(encode_mov_r64_r64(Reg.RDX, Reg.RAX))    # stop
         self._pop_slot(Reg.RCX)                                 # start
         # Clamp each bound into [0, n]; a negative one counts from the end.
-        for reg in (Reg.RCX, Reg.RDX):
+        #
+        # …EXCEPT the descending stop default, which is Python's sentinel for
+        # "one before the first element" and is not an index into the list at
+        # all. Wrapping it adds n, which makes it `n - 1` — the same word as
+        # the descending start default — so `xs[::-1]` and `xs[5::-1]`
+        # counted zero elements and read as empty lists. The count below is
+        # `|stop - start| / |step|` and it wants the sentinel as it stands.
+        wrap = ([Reg.RCX] if not ascending and stop is None
+                else [Reg.RCX, Reg.RDX])
+        for reg in wrap:
             tag = f"{self.func_name}_s{reg.value}"
             self.asm.emit(encode_cmp_r64_imm8(reg, 0))
             self._emit_jcc(COND_GE, f"{tag}a")
