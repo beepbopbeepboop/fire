@@ -9,6 +9,46 @@ no header, no tag, no lifetime. With the pointee recovered, `value()` /
 pointee's own width, and the one-byte `UInt8` load that D1 refused over is the
 one this emits.
 
+**§9 status, re-measured 2026-10-02** — of the eight items in "Also found, and
+NOT fixed", one is now FIXED and one is confirmed open with its next step
+unchanged; the rest are unchanged or in other lanes:
+
+* **The x86-64 one-field-struct field read is FIXED.** That was the only
+  SILENT WRONG ANSWER in the list (it returned 0 where the source said 4242, and
+  the doc says so), and it is the one item that was worth closing on its own.
+  Measured on this tree, `struct One: var v: Int64` with `raw(h) = Int(h.v)`,
+  `o.v = 4242`, built and RUN through `fire.py build --formal --no-prove`:
+
+      arm64    raw=4242
+      x86_64   raw=4242
+
+  §9 attributes the case going green to another agent's concurrent
+  `formal/build.py` work and declines to claim it as this change's, which
+  remains the right attribution: it is wave-4 D2's holder work, not the pointer
+  value model.
+* **The `p + k` offset scaling is OPEN, and the current behaviour is sharper
+  than §9 states.** Measured, both architectures:
+
+      def read_at(p: Pointer[UInt8], k: Int) -> Int:   var q = p + k; …
+        ANSWERED — `q`'s pointee is recovered through the `p + k` RHS and
+        width 1 is the identity scale (`_offset_scale` returns True before it
+        looks at the arithmetic at all), so the corpus's whole `p + k` is
+        answerable
+      def read_at(p: Pointer[Int64], k: Int) -> Int:  var q = p + k; …
+        REFUSED, by `_offset_scale`'s own sentence, which names the arithmetic,
+        the width and the `p + k * 8` workaround
+
+  So the refusal is where §9 says it is and the ANSWER side is real, which the
+  doc's two pinned cases already assert (`deref_offset_on_a_one_byte_pointee_is
+  _the_answer`, `deref_refuse_unscaled_offset`; both re-run green here, 18/18
+  across `POINTER_DEREF_CASES` and `POINTER_DEREF_REFUSALS`). The next step is
+  unchanged and still the one worth taking as its own change: scale in
+  `_emit_binop`, ~10 lines per backend, conditional on a KNOWN pointee of width
+  != 1 so that every other program's emitted code is byte-identical. It is not
+  done here because `_emit_binop` is the hottest site in both backends and it
+  deserves its own diff and its own gate rather than being folded into a branch
+  that already carries five unrelated fixes.
+
 Two results in this document are worth more than the lowering, and both are
 count corrections rather than features:
 

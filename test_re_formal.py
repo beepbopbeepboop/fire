@@ -313,25 +313,28 @@ def expected(pattern, subject, flags):
 
 
 def mojo_str(s):
-    """A Mojo string literal whose DECODED body is `s` — the inverse of
+    """A Mojo string literal whose DECODED bytes are `s` — the INVERSE of
     `fire_compiler.decode_c_escapes`.
 
     A string literal's body is decoded exactly once on the way in, and it is
-    CPython's decoder: `\b` is a backspace, `\x41` is `A`, `\n` is a newline
-    and `\\` is one backslash. So the body that delivers the bytes `s` holds
-    is `s` with every backslash DOUBLED, and one doubling is what makes the
-    byte that arrives the byte the Python string holds: `r"\\d+"` is written
+    CPython's decoder (`9023031b`, which gave the formal backends the shared
+    decoder): `\b` is a backspace, `\x41` is `A`, `\n` is a newline and `\\`
+    is one backslash. So the body that delivers the bytes `s` holds is `s`
+    with every backslash DOUBLED, and one doubling is what makes the byte that
+    arrives the byte the Python string holds: `r"\\d+"` is written
     `"\\\\d+"`, and `\\` is written `"\\\\\\\\"`.
 
     **This used to be the other way round and 14 checks were red because of
-    it.** The premise was that a literal is interned verbatim with its
-    escapes untouched, which was true until `9023031b` gave the formal
-    backends the shared decoder — and it was a wrong answer, not a refusal:
-    `\bfn\b` reached `re` as `<BS>fn<BS>`, so every `\b` in the corpus
-    matched nothing, and the seven cases that failed were all of them.
-    Measured on a built-and-run image, one program, the three shapes the
-    corpus uses (`\b`, `\\`, and a VERBOSE `#` comment whose `\n` must stay
-    two characters):
+    it.** The premise it replaces said "a literal is interned VERBATIM and its
+    escapes are NOT unescaped"; that was true when written and stopped being
+    true when the decode landed. It was a wrong answer, not a refusal:
+    `\bfn\b` reached `re` as `<BS>fn<BS>`, so every `\b` in the corpus matched
+    nothing — a pattern that means a word boundary silently meant a control
+    character, in the one area this file exists to be right about, and fourteen
+    checks of the `formal-re` gate suite were red on a tree that had been green
+    when the suite was written. Measured on a built-and-run image, one program,
+    the three shapes the corpus uses (`\b`, `\\`, and a VERBOSE `#` comment
+    whose `\n` must stay two characters):
 
         literal        len  bytes
         "\\b"           2  92 98      a word boundary
@@ -341,13 +344,22 @@ def mojo_str(s):
 
     So the doubling is not a spelling preference: without it the engine is
     handed bytes the pattern never contained. `re.mojo` itself is right —
-    given the right bytes it answers every one of those cases as CPython
-    does, which is why `bugs/FORMAL_re_word_boundary_never_matches.md` is
-    gone rather than acted on.
+    given the right bytes it answers every one of those cases as CPython does,
+    which is why `bugs/FORMAL_re_word_boundary_never_matches.md` is gone rather
+    than acted on. `test_mojo_str_round_trips_through_the_decoder` is what now
+    makes the un-doubled state impossible to reach again, and it costs no
+    build: it runs every string this file writes through the one decoder and
+    requires the exact bytes of the Python string back.
 
-    A real newline or tab is a CHARACTER here, not an escape, so it cannot
-    be doubled into one: it is spelled as two literals and a `memset`,
-    which is what `os/__init__.mojo` calls linesep.
+    Two things are deliberately NOT doubled, because they are not escapes:
+
+    * a REAL newline or tab. Those arrive as real characters, which a literal
+      cannot carry, so they keep the `mk2`/`mk3` spelling below — two literals
+      and a `memset`, which is what `os/__init__.mojo` calls linesep.
+    * an UNRECOGNIZED escape, of which the corpus has many (`\d`, `\w`, `\s`,
+      `\(`, `\[`, `\*`). Doubling those is still right, and is what
+      `decode_c_escapes`'s "an unknown escape keeps its backslash" rule needs:
+      the doubled `\\d` decodes to `\d`, which is what the pattern means.
     """
     for ch, code in (("\n", 10), ("\t", 9)):
         if ch in s:
@@ -362,6 +374,37 @@ def mojo_str(s):
                                                 mojo_str(parts[2]))
     assert '"' not in s, s
     return '"%s"' % s.replace("\\", "\\\\")
+
+
+# A `mojo_str` expression, read back the way the runtime builds it: the quoted
+# bodies and the byte values between them, in order.  A plain literal has one
+# body; `mk2`/`mk3` have two or three plus the separators a `memset` writes.
+# The `mk[23]\(` alternative is load-bearing: without it the `2` in `mk2` reads
+# as a separator byte and every two-part string comes back with a stray \x02 in
+# front of it.
+_MOJO_PIECE = re.compile(r'mk[23]\(|"((?:[^"\\]|\\.)*)"|(\d+)')
+
+
+def mojo_literal_bytes(expr):
+    """The bytes the runtime will hold for a `mojo_str` expression.
+
+    The literals go through `fire_compiler.decode_c_escapes` — THE decoder
+    every engine calls, and the one this file's encoder has to be the inverse
+    of — and a bare number between two literals is the separator `mk2`/`mk3`
+    write with `memset`, so `mk2("a", 10, "b")` reconstructs to `a` + newline
+    + `b`, which is the same three bytes the image gets.
+    """
+    import fire_compiler as _FC
+    out = bytearray()
+    pieces = list(_MOJO_PIECE.finditer(expr))
+    assert pieces, expr
+    for m in pieces:
+        if m.group(1) is not None:
+            out += _FC.decode_c_escapes(m.group(1)).encode(
+                "utf-8", "surrogateescape")
+        elif m.group(2) is not None:
+            out.append(int(m.group(2)))
+    return bytes(out)
 
 
 PRELUDE = '''MARK = 0 - 99
@@ -787,6 +830,51 @@ def test_unsupported_constructs_are_refused(tmpdir):
               (pat, why, want[0]), "got %s" % got)
 
 
+def test_mojo_str_round_trips_through_the_decoder(tmpdir=None):
+    """Every string this file writes survives the trip into a literal and back.
+
+    **The premise, made testable without a build.** `mojo_str` used to say "a
+    string literal is interned VERBATIM and its escapes are NOT unescaped",
+    which was true when it was written and stopped being true when
+    `fire_compiler.decode_c_escapes` became the one decoder every engine calls.
+    Fourteen checks in the `formal-re` gate suite were the consequence, and they
+    were the expensive kind of evidence to have to get: a whole corpus built
+    and run per backend to discover what one pure-Python function does to a
+    string. A pattern that means a word boundary reached `re` as a backspace,
+    in the one area a silent wrong answer is least affordable.
+
+    So the check is here instead: the expression `mojo_str` writes, run through
+    the one decoder, must give back the exact bytes of the Python string it was
+    given. It builds nothing and runs nothing, so it is red the moment the
+    encoder and the decoder disagree — which is the failure, stated in the one
+    place that causes it.
+
+    It covers every corpus pattern and subject, every refusal pattern, and the
+    DISCOVERED corpus patterns, whose values come out of `corpus_patterns` — so
+    that walk's decode and this round trip are checked against each other rather
+    than each being right by itself.
+    """
+    found, _dropped = corpus_patterns()
+    cases = []
+    for p, s, _f, _note in CASES:
+        cases.append(("the pattern of case %r" % p, p))
+        cases.append(("the subject of case %r" % p, s))
+    for pat, why in UNSUPPORTED:
+        cases.append(("the unsupported pattern %r (%s)" % (pat, why), pat))
+    for p in sorted(found):
+        cases.append(("the discovered corpus pattern %r" % p, p))
+    bad = []
+    for what, s in cases:
+        got = mojo_literal_bytes(mojo_str(s))
+        want = s.encode("utf-8", "surrogateescape")
+        if got != want:
+            bad.append("%s: %r arrives as %r" % (what, s, got))
+    check(not bad,
+          "every string this file writes reaches the image as the bytes the "
+          "oracle used (%d strings; offenders: %s)"
+          % (len(cases), "; ".join(bad[:3]) or "none"))
+
+
 def test_a_span_list_that_is_too_small_is_a_status_not_a_crash(tmpdir):
     """A caller's undersized list is reported, and the process survives.
 
@@ -869,8 +957,22 @@ def corpus_patterns():
     made explicit. What it must not be is SILENT, because a filter that quietly
     discards candidates is how a walk stops being a walk: hence `dropped`, and
     an assertion in the test that says how many were thrown away and why.
+
+    **The candidate is a literal's VALUE, not its source text**, and that is
+    load-bearing in both directions. The walk reads raw source, so a non-raw
+    literal arrives with its escapes still spelled (`"\\\\d"` is four characters
+    in the file and two in the string); compiling that as the pattern and then
+    handing the same text to `mojo_str` would ask the oracle one question and
+    the module another. So a candidate is decoded by the ONE decoder
+    (`fire_compiler.decode_c_escapes`) unless the prefix says `r`, which is
+    `fire_compiler.decoded_literal`'s own rule — and `mojo_str` then encodes it
+    again on the way into the generated program, so the byte that reaches `re`
+    is the byte CPython compiled. Every pattern the walk currently finds is a
+    raw string, so this changes nothing today; it is here because the walk is
+    DISCOVERED, and the day a non-raw pattern appears it must not be wrong.
     """
     import glob
+    import fire_compiler as _FC
     pat = re.compile(r"re\.(?:compile|search|match|fullmatch|split|sub|findall)"
                      r"\(\s*r?([rb]*)(['\"])(.*?)\2", re.S)
     out, dropped = {}, {}
@@ -884,7 +986,9 @@ def corpus_patterns():
         if "import re" not in text and "re.compile" not in text:
             continue
         for m in pat.finditer(text):
-            p = m.group(3)
+            prefix, p = m.group(1), m.group(3)
+            if "r" not in prefix:
+                p = _FC.decode_c_escapes(p)
             if len(p) > 8 and "{" in p and "\\w" in p:
                 where = os.path.basename(path)
                 try:
@@ -1234,6 +1338,7 @@ def main():
         test_module_resolves_and_host_modelled_is_gone,
         test_the_corpus_reaches_the_module_as_the_bytes_python_holds,
         test_no_signature_is_wider_than_the_smaller_abi,
+        test_mojo_str_round_trips_through_the_decoder,
         test_the_module_builds_as_a_dylib_on_both_backends,
         test_the_corpus_against_cpython,
         test_the_corpus_against_cpython_on_x86_64,

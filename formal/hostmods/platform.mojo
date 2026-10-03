@@ -49,15 +49,19 @@ libSystem and nothing else does not have. None of them is a missing line of
 code, and `test_formal_platform.py`'s `absent` group pins each one as a
 REFUSAL so an omission cannot read as an implementation.
 
-  * `platform()`, and it is STILL one composition away even though
-    `architecture()` is here: everything it composes (`uname`, `mac_ver`,
-    `system_alias`, `architecture`) answers, and what is left is CPython's
-    `_platform()` string join plus the `sys.executable` it passes to
-    `architecture` — a path this image does not know, which needs
-    `_NSGetExecutablePath`. The measurement, the two differences that are NOT
-    ours to fix (CPython's `uname -p` subprocess, which is `processor`), and the
-    exact next step are in
-    `bugs/FORMAL_platform_one_call_from_answered.md`.
+  * `sys.executable`, and `platform()` is the one absence it costs rather than
+    one this module can hide. Everything `platform()` composes answers —
+    `uname`, `mac_ver`, `system_alias`, `architecture` — and the string join is
+    `platform_string` below. What is left is the path `platform()` passes to
+    `architecture`, and there is NO WAY to discover it here: libSystem's
+    `_NSGetExecutablePath` FAULTS on this target (measured four ways — `clang
+    -O0`, `clang -O1`, a 64 KiB static buffer, and `ctypes` from CPython — all
+    SIGSEGV) and `getprogname()` returns a basename, not a path. So
+    `platform(exe, aliased, terse)` takes the path as a PARAMETER, which is why
+    it has three parameters where CPython's has two, and why the caller passes
+    `(0, 0)` for the two flags CPython defaults. The second difference is NOT
+    ours to fix and is CPython's own subprocess: `uname -p`, which is
+    `processor`. Both are at `platform`'s own docstring, with the measurements.
   * `libc_ver()`, `processor()` — `uname -p` and a readable C library, i.e. two
     subprocesses or a file. (CPython's own `_default_architecture` table would
     answer Darwin for `architecture` without `file(1)`, but only after `file` has
@@ -152,6 +156,7 @@ process's `arm64`. That is correct behaviour rather than a discrepancy, and
 
 from os._syscalls import uts_str, kern_str, str_cmp
 from os._syscalls import str_len, str_at, str_alloc, str_copy, str_build
+from os._syscalls import str_dup, str_trunc, str_strip, str_replace_all
 from os._syscalls import fs_free
 
 # Which fact `os._syscalls.fs_macho_field` is asked for, as the two NUMBERS it
@@ -694,6 +699,167 @@ def architecture_linkage(exe) -> str:
     if fs_macho_field(exe, MACHO_EXECUTABLE) == 1:
         return "Mach-O"
     return ""
+
+
+# ── the string CPython builds out of the pieces ───────────────────────────
+#
+# `_platform(*parts)` in CPython is a VARIADIC function over an arbitrary number
+# of strings, and a variadic Mojo function is refused on this path
+# (`model.variadic_call_refusal`). So the transcription here is SIX-PART, which
+# is exactly the number CPython's own `platform()` passes on macOS — two when
+# `terse`, six otherwise — and an absent part is the EMPTY STRING rather than a
+# missing argument, because `filter(len, args)` is what makes an empty part
+# disappear and it tests the length of the part BEFORE the strip. Six is also
+# the widest signature `formal/hostmods/re.mojo` uses, which
+# `test_formal_re_formal.py`'s ABI group still checks every signature against.
+#
+# Nothing is lost by fixing the arity and the two shapes a caller actually
+# needs are covered: a terse call passes two parts and four empties, and a full
+# call passes six.
+
+def platform_string(p0, p1, p2, p3, p4, p5) -> str:
+    """CPython's `platform._platform(*parts)`: the join, then eleven cleanups.
+
+    **The NAME is CPython's with the leading underscore removed, and that is
+    this path's export rule and nothing else.** `platform._platform` is private
+    in CPython by convention and reachable, because CPython has no cross-module
+    ABI to satisfy; here a name beginning with `_` is denied by
+    `doc/ABI.md`'s rule (`reflect.export_exclusions`'s `EXCL_PRIVATE`, measured
+    and settled in `bugs/FORMAL_known_limits.md` §1.1) with no opt-in, so a
+    caller cannot import it and the corner cases below could not be tested. One
+    public name rather than a private definition and a public alias, because two
+    names for one function is one implementation and one place to keep it right.
+
+    All eleven steps are transcribed, because the ones that cannot fire on this
+    host are exactly the ones a macOS-only transcription would get wrong: none
+    of `system()`, the product version, `machine()`, `architecture`'s two
+    answers or the empty `processor` contains a space, a slash, a colon or the
+    word `unknown`, so an implementation that only joined would be
+    INDISTINGUISHABLE from a correct one here — and wrong the moment a node name
+    or a release string carried one.
+
+    The three decisions worth naming, in the order CPython makes them:
+
+    * **`filter(len, …)` tests the part BEFORE the strip, and that is
+      observable.** `platform_string('', 'a')` is `'a'` and `platform_string('   ', 'a')` is
+      `'-a'` — measured on this host's CPython — because the second part is
+      non-empty, survives the filter, strips to nothing, and contributes an
+      EMPTY piece to the join. So the emptiness test and the strip are two
+      questions about two different strings, which is why they are two passes
+      here (the same reason `_int_ok`/`_int_value` are) rather than one.
+    * **`str_replace_all(s, 'unknown', '')` removes EVERY occurrence, anywhere,
+      including inside a word**, which is why this is a substring replace and
+      not a test for the word: `platform_string('unknown-x')` is `'-x'`, leading dash
+      and all, because only TRAILING dashes are stripped at the end.
+    * **the `--` fold is a fixed point, not a counted number of passes.** A part
+      that ENDS in `-` (`'5-'`) produces `'5--'`, which one pass folds to `'5-'`
+      — and which, before the trailing strip, is stable. CPython's own
+      `while True` with a comparison IS the loop; `str_cmp` is the comparison.
+
+    The caller owns the result. It is a fresh buffer on every path, including
+    when nothing was replaced: `str_replace_all` copies rather than returning
+    its argument when there are no hits, so `platform_free` is right for it.
+    """
+    var parts = [p0, p1, p2, p3, p4, p5]
+    var joined = ""
+    var first = 1
+    var i = 0
+    while i < 6:
+        var part = parts[i]
+        if str_len(part) > 0:
+            var piece = str_strip(part)
+            if first == 1:
+                joined = str_dup(piece)
+                first = 0
+            else:
+                joined = str_build(joined, "-", piece)
+        i = i + 1
+    # CPython's eight single-character replacements, in its order. Written out
+    # one per line rather than looped over a SET because they are a FIXED
+    # SEQUENCE: the order is CPython's and a set would assert that no output
+    # can be an input of another, which happens to be true here and is not a
+    # property a reader should have to check to trust the transcription.
+    var p = str_replace_all(joined, " ", "_")
+    p = str_replace_all(p, "/", "-")
+    p = str_replace_all(p, "\\", "-")
+    p = str_replace_all(p, ":", "-")
+    p = str_replace_all(p, ";", "-")
+    p = str_replace_all(p, "\"", "-")
+    p = str_replace_all(p, "(", "-")
+    p = str_replace_all(p, ")", "-")
+    p = str_replace_all(p, "unknown", "")
+    while 1:
+        var cleaned = str_replace_all(p, "--", "-")
+        if str_cmp(cleaned, p) == 0:
+            break
+        p = cleaned
+    var n = str_len(p)
+    while n > 0 and str_at(p, n - 1, "-") == 1:
+        n = n - 1
+    return str_trunc(p, n)
+
+
+def platform(exe, aliased, terse) -> str:
+    """CPython's `platform(aliased=…, terse=…)`, AND the executable path.
+
+    **CPython's own signature is two flags and this takes three.** The third is
+    `sys.executable`, which CPython reads from its own `argv[0]` and which this
+    image has no way to discover: libSystem's `_NSGetExecutablePath` is the
+    function that answers it and it FAULTS on this target — measured four ways,
+    `clang -O0`, `clang -O1`, a 64 KiB static buffer and `ctypes` from CPython,
+    all SIGSEGV, so it is the library call and not the caller — and
+    `getprogname()` returns a bare basename rather than a path. So the path is a
+    PARAMETER, exactly as it already is for `architecture_bits(exe)` and
+    `architecture_linkage(exe)` above, and the two flags have NO DEFAULTS
+    because a default argument is not applied across a dylib boundary
+    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`): a caller
+    writes `platform(exe, 0, 0)` where CPython would write `platform()`.
+
+    The flags are 1/0 like every flag on this path.
+
+    What is transcribed is the whole of CPython's body on THIS system: `uname`,
+    the `machine == processor` rule, `system_alias`, the Darwin branch that
+    turns `Darwin` + a kernel release into `macOS` + a product version, and then
+    the GENERIC handler. The Windows, Linux and Java arms are absent branches on
+    a kernel that reports `Darwin`, and the three functions they need
+    (`win32_ver`, `libc_ver`, `java_ver`) are absent from this module with the
+    capability behind each one named at its own docstring.
+
+    **The answer it can give is CPython's minus the `arm`.** CPython resolves
+    `uname().processor` by running `uname -p` and this path has no subprocess,
+    so `uname_processor()` answers `""` — which is CPython's OWN spelling of
+    "cannot be determined" (`_unknown_as_blank`), and is what
+    `test_formal_platform.py`'s `processor` group pins. On this host CPython's
+    `platform()` is `'macOS-26.6.2-arm64-arm-64bit-Mach-O'` and this is
+    `'macOS-26.6.2-arm64-64bit-Mach-O'`: the difference is exactly the one word
+    a subprocess produces. A test comparing the two strings directly would be
+    testing `uname -p`, so the oracle is CPython's `_platform` over this
+    module's own pieces.
+
+    The caller owns the result (`platform_free`), as it does for every string
+    this module allocates.
+    """
+    var sysname = system()
+    var rel = release()
+    var ver = version()
+    var mach = machine()
+    var proc = uname_processor()
+    if str_cmp(mach, proc) == 0:
+        proc = ""
+    if aliased != 0:
+        sysname = system_alias_system(sysname, rel, ver)
+        rel = system_alias_release(sysname, rel, ver)
+        ver = system_alias_version(sysname, rel, ver)
+    if str_cmp(sysname, "Darwin") == 0:
+        var macos_rel = mac_ver_release()
+        if str_len(macos_rel) > 0:
+            sysname = "macOS"
+            rel = macos_rel
+    if terse != 0:
+        return platform_string(sysname, rel, "", "", "", "")
+    var bits = architecture_bits(exe)
+    var linkage = architecture_linkage(exe)
+    return platform_string(sysname, rel, mach, proc, bits, linkage)
 
 
 # ── memory ────────────────────────────────────────────────────────────────

@@ -4292,22 +4292,37 @@ dylib_exports: list = None, globals_base: int = None,
                     self._one_word_candidates.get(name.name),
                     TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
-    def _refuse_printf_text_conversion(self, name, e: F.CallExpr) -> None:
-        """Raise when `e` hands a `%s` conversion something that is not text.
+    def _refuse_unusable_printf_format(self, name, e: F.CallExpr) -> None:
+        """Raise when `e`'s FORMAT cannot be used, for either of the two reasons.
 
         A no-op for every callee the model's set does not name, and for a call
-        whose format is not a LITERAL: the argument arithmetic needs the
-        conversions enumerated, and a format in a variable cannot be. Both are
-        the model's decision rather than this one's — it is asked with the
-        callee name and the arguments and answers for itself, so x86-64's copy
-        of this method is two lines of delegation and the two cannot come
-        apart.
+        whose format is not a LITERAL: a format in a variable cannot be scanned.
+        Both are the model's decision rather than this one's — it is asked with
+        the callee name, the format and the arguments and answers for itself, so
+        x86-64's copy of this method is two lines of delegation and the two
+        cannot come apart.
+
+        The two reasons are a `%s` conversion handed something that is not text,
+        and a conversion with no argument behind it; which one is reported when
+        both could apply is `printf_format_refusal`'s decision too.
+
+        **The format text handed over is the DECODED one**, and that is not a
+        tidiness: `fire_compiler.decoded_literal` is what `_intern_string` runs
+        on, so it is what the format bytes will be at the call — and a `%` can
+        ARRIVE from an escape. `printf("\\x25s", 5)` is `printf("%s", 5)` at run
+        time, and handing this check the raw body `\\x25s` finds no conversion in
+        it at all. The pre-existing `%s` refusal had that hole; the decode
+        closes it, and it is the same decode-then-transform order
+        `model.print_literal` states its own reason for.
         """
         args = list(e.args or [])
-        fmt = args[0] if args else None
-        reason = M.printf_text_conversion_refusal(
-            name, fmt.value if isinstance(fmt, F.StringLiteral) else None,
-            args[1:], self._printf_arg_is_text)
+        idx = M.printf_format_arg_index(name)
+        fmt = args[idx] if idx is not None and idx < len(args) else None
+        reason = M.printf_format_refusal(
+            name, F.decoded_literal(fmt) if isinstance(fmt, F.StringLiteral)
+            else None,
+            args[idx + 1:] if idx is not None else args[1:],
+            self._printf_arg_is_text)
         if reason is not None:
             raise CodegenError(reason)
 
@@ -6508,20 +6523,25 @@ dylib_exports: list = None, globals_base: int = None,
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
-        # `%s` OF SOMETHING THAT IS NOT TEXT, asked here for the same reason
-        # `print` is intercepted two lines above and not left to the extern
-        # path: the format string is the SOURCE's, and this is the last place
-        # both the format and the varargs are in hand together.  `print` builds
-        # its own format and so cannot get it wrong; `printf` takes one
-        # unchecked all the way to C, where `%s` walks bytes at the address it
-        # is handed looking for a NUL.  Measured with this refusal lifted, on
-        # both architectures: `a = 5; printf("[%s]", a)` builds, runs, prints
-        # nothing and dies of SIGSEGV, exit 139.  The decision and the message
-        # are `model.printf_text_conversion_refusal`, shared with x86-64; it
+        # A FORMAT STRING THIS CALL CANNOT USE — a `%s` conversion handed
+        # something that is not text, or a conversion with no argument behind
+        # it.  Asked here for the same reason `print` is intercepted two lines
+        # above and not left to the extern path: the format string is the
+        # SOURCE's, and this is the last place both the format and the varargs
+        # are in hand together.  `print` builds its own format and so cannot get
+        # it wrong; `printf` takes one unchecked all the way to C, where `%s`
+        # walks bytes at the address it is handed looking for a NUL and every
+        # conversion is a request for one more argument.  Measured with these
+        # refusals lifted, on both architectures: `a = 5; printf("[%s]", a)`
+        # builds, runs, prints nothing and dies of SIGSEGV, exit 139; and
+        # `printf("50% done")` prints `50 0one` here and `50143074168one` on
+        # x86-64, because `% d` is a conversion and the two machines disagree
+        # only about what was left where it reads.  The decisions and the
+        # messages are `model.printf_format_refusal`, shared with x86-64; it
         # gates on the resolved CALLEE rather than on `is_extern_call`, so
         # `external_call["printf", Int32](fmt, n)` — which reaches this same
         # line with `name == "printf"` — is asked the same question.
-        self._refuse_printf_text_conversion(name, e)
+        self._refuse_unusable_printf_format(name, e)
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
         # table below for two reasons, and both are about the RESULT rather than
         # about the receiver.  A dereference is an EXPRESSION: `return
