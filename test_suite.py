@@ -2944,6 +2944,17 @@ UNREGISTERED = {
     'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
     'test_formal_stat.py': _FORMAL_SUITE_REASON,
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
+    # The two hostmod suites added with the host-import row work of 2026-10-03
+    # (`formal/hostmods/{tempfile,textwrap}.mojo`), and they are this exact
+    # shape — build and RUN on both architectures against CPython, one table
+    # row per case — so the reason above is the reason for these and not a
+    # sentence written twice. `tempfile` is 4 groups over 128 differential
+    # cases and `textwrap` 31, and `bugs/FORMAL_subprocess_row_measured_b7.md`
+    # §7-§8 is where their measurements and what each module deliberately does
+    # not answer are recorded. The SAME commit that registers them properly is
+    # the one that deletes these two rows; nothing else will.
+    'test_formal_tempfile.py': _FORMAL_SUITE_REASON,
+    'test_formal_textwrap.py': _FORMAL_SUITE_REASON,
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
     'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
