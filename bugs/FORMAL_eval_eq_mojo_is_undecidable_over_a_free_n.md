@@ -19,15 +19,15 @@ python3 tools/memslot.py --gb 8 --label ppf-x86 -- \
 ```
 
 40 generated programs, `--mix plain`, 6 inputs each (the program's own, drawn
-from the seed, plus `0 1 3 7 32768`). 555 s wall, peak 6.8 GB. Ledger:
-`.tmp/ppf/x86-campaign/findings.json`.
+from the seed, plus `0 1 3 7 32768`). 555 s wall, peak 6.8 GB. Ledger (committed):
+`bugs/sweeps/proof_fuzz_2026-10-04_x86_64.jsonl`.
 
 ## What was seen
 
 | | n |
 |---|---|
 | `admitted` — proof typechecks at **2 holes**, this generator's designed floor | **33** |
-| `lean-rejected` — Lean did not accept the file | **7** |
+| `lean-rejected` — Lean did not accept the file | **7** (10 after the environment fix) |
 | `match` — image and CPython agreed at every input | **40** |
 | **`SOUNDNESS-MISMATCH` — Lean accepted the proof AND the image disagreed** | **0** |
 
@@ -108,11 +108,23 @@ counts as "reached the proof layer" and then does not typecheck, so a census
 that counts generation and a census that counts `pass` disagree by exactly these
 7.
 
-Note also that these 7 programs are NEW to the corpus, and only because of the
-2026-10-03 fix in the same area (`_cond_nodes` rendered every condition in
-`{param: param}`, so a program whose condition reads a local had no proof at
-all — it was a `proof-refused`). Widening the corpus moved them from "refused"
-to "rejected", which is progress on the count and a new cost on the wall clock.
+Two things about the class, both measurements rather than opinions.
+
+**These programs are NEW to the corpus, and only because of the 2026-10-03 fix
+in the same area.** `_cond_nodes` rendered every condition in `{param: param}`,
+so a program whose condition reads a local had no proof at all — it was a
+`proof-refused`. Widening the corpus moved it from "refused" to "rejected",
+which is progress on the count and a new cost on the wall clock.
+
+**It grew from 7 of 40 to 10 of 40 when the x86-64 environment fix landed, and
+that is the same trade again.** Ten of the forty are two-parameter entries, and
+for all ten the `eval_eq_mojo` bridge had been silently OMITTED (the file said
+"this function's shape (recursive/looping): the bridge is not closed yet", which
+is false of a straight-line program). The fix makes it EMITTED: seven of the ten
+then check at the generator's two-hole floor and three land here. So the fix
+removed ten holes and turned three quiet passes into reds — the right direction
+for a census whose argument is that a hole is not a pass, and the reason this
+doc exists rather than a `sorry`.
 
 ## The next step, and it is not a patch
 

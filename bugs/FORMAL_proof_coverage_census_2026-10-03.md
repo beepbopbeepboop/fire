@@ -211,23 +211,44 @@ python3 tools/memslot.py --gb 8 --label ppf-arm -- \
 ```
 
 `bugs/sweeps/proof_fuzz_2026-10-04_x86_64.jsonl` (40 programs) and
-`…_arm64.jsonl` (8). The x86-64 warm re-run is **52 s** for all 40 verdicts,
-because every Lean verdict is content-addressed (`formal/lean.py`'s CAS) and the
-rest is codegen — and it reproduced the cold run's classes exactly, which is the
-CAS doing its job and not a claim that the corpus is easy.
+`…_arm64.jsonl` (20 of a planned 24; the ledger is per program, so a run
+stopped part way still publishes what it measured). The x86-64 warm re-run is
+**52 s** for all 40 verdicts — every Lean verdict is content-addressed
+(`formal/lean.py`'s CAS) and the rest is codegen — and it reproduced the cold
+run's classes exactly, which is the CAS doing its job and not a claim that the
+corpus is easy. arm64 is `-j 1`: two Lean proofs BREACH the 8 GB reservation
+(the same measurement §0.1 records for this census), and arm64 is where the
+hole-free `pass` rows come from, so it is the half worth spending the memory on.
 
 | | x86-64 | arm64 |
 |---|---|---|
-| programs | 40 | 8 |
-| image runs compared against CPython | **228** | **48** |
-| `pass` — proof typechecks, **0 holes** | 0 | **4** |
-| `admitted` — typechecks, N holes | **33**, every one at **N = 2** | 0 |
-| `lean-rejected` | 7 | 1 |
-| `lean-memory-exceeded` (not a verdict — §0.3) | 0 | 3 |
+| programs | 40 | 20 |
+| image runs compared against CPython | **228** | **120** |
+| `pass` — proof typechecks, **0 holes** | 0 | **8** |
+| `admitted` — typechecks, N holes | **30**, every one at **N = 2** | 0 |
+| `lean-rejected` | 10 | 2 |
+| `lean-memory-exceeded` (not a verdict — §0.3) | 0 | 9 |
 | `proof-refused` / `codegen-refused` / `proof-crash` | 0 | 0 |
-| reached Lean at all | **40 of 40** | **8 of 8** |
-| `match` — image and CPython agreed at every input | **40** | **8** |
+| reached Lean at all | **40 of 40** | **20 of 20** |
+| `match` — image and CPython agreed at every input | **40** | **20** |
 | **`SOUNDNESS-MISMATCH`** | **0** | **0** |
+
+**The x86-64 row moved while this section was being written, and the movement is
+the point.** It read `admitted 33 / lean-rejected 7` when the first 40-program
+run finished. Then the x86-64 half of the environment fix below landed, and the
+same 40 programs read **30 / 10**. Ten of the forty are two-parameter entries,
+and for **all ten** the `eval_eq_mojo` bridge was silently OMITTED before
+(`AST bridge omitted: this function's shape (recursive/looping)` — a shape
+claim FALSE of a straight-line program) and is now EMITTED. Seven of the ten
+close with Lean; three now fail to elaborate, on the §0.4-tactic gap below. So
+the fix removed ten holes and turned three quiet passes into reds, which is the
+direction this census argues for throughout: **a hole is not a pass**, and
+`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` is where the three
+reds go to be finished.
+
+The one-argument half is unmoved (23 admitted / 7 rejected before and after),
+which is what "at arity one the two environments are the same single entry"
+predicts and is the reason `formal/examples` is byte-identical throughout.
 
 **What the zero is and is not.** It is 276 comparisons over 48 programs in which
 every image answered CPython, and every proof Lean accepted was therefore a proof
@@ -240,7 +261,7 @@ wrap-around oracle, and an oracle built from the same reading of the language as
 the model under test cannot catch that model). §6's `~x` row is outside this
 corpus by construction: it is in `formal/macho_linker.py`, not in a program.
 
-**The four `pass` rows are the ones worth having.** On arm64 those are proofs
+**The `pass` rows are the ones worth having** — 8 of them on arm64. Those are proofs
 with **no hole anywhere in the chain** — machine ≡ bytes ≡ AST ≡ `mojo` — for
 generated programs nobody wrote. On x86-64 a hole-free `pass` is not reachable at
 all (the generator's declared floor is exactly 2), so the tool's `--holes-below`
@@ -253,8 +274,11 @@ generator blocker: `_cond_nodes`/`_collect_conds_t` rendered every branch
 condition in `{param: param}` and folded no assignment into the environment, so
 any program whose `if` reads a local raised `model: 'b' is read here and this
 generator binds it to nothing` — a message false about the source, on 34 of 60
-generated programs. The rule was written out at five call sites and is now at two
-helpers (`_bind_one`, `_entry_env`). Before/after, programs generating a proof:
+generated programs. The rule was written out at FIVE call sites — two of them folding no assignment
+at all, one accepting an `env` argument and discarding it, and two mapping the
+entry's parameters the wrong way round — and is now at two helpers
+(`_bind_one`, `_entry_env`), which both backends call. Before/after, programs
+generating a proof:
 
 | | arm64 | x86-64 |
 |---|---|---|
@@ -263,8 +287,8 @@ helpers (`_bind_one`, `_entry_env`). Before/after, programs generating a proof:
 
 Two more findings, and both are coverage:
 
-* **`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`** — the 7 of 40
-  x86-64 rejections. `eval_eq_mojo`'s goal over a free `n` is not closed by
+* **`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`** — the x86-64
+  rejections, 7 of 40 before the environment fix and 10 of 40 after it. `eval_eq_mojo`'s goal over a free `n` is not closed by
   `simp`, and neither `simp (maxSteps …)` nor `bv_decide` recovers it, so it is
   not a fuel limit.
 * **A refusal that was a crash.** A program with two calls out of the image
