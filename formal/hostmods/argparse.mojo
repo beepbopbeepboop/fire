@@ -291,14 +291,29 @@ BUF_CAP = 8192
 # writers — so a newline cannot be written as a literal and every separator
 # below is a byte value written with `memset`/`memmove`.
 
-# A BYTE WRITTEN WITH `memset` IS SPELLED INLINE, and these names are only for
-# the places module-constant folding does reach (a call argument, a return). The
-# reason is measured and it is not a subtlety: `memset(pat + i, PAT_DASH, 1)`
-# is REFUSED with "'PAT_DASH' has no home: the register allocator collected no
-# home for it, so the emitter and the allocation walk disagree about this
-# function's locals", while the identical call with `45` written inline builds
-# and runs. A name that reads well is not worth a build that does not compile,
-# and every separator below is named in a comment at each use.
+# A BYTE WRITTEN WITH `memset` IS SPELLED INLINE unless the module already has
+# a NAME for the value it is — which the `PAT_` bytes in `_build_pat` are, and
+# which the separators below are not: NUL, newline and space are written dozens
+# of times each here and each carries the character in a comment at its use.
+#
+# **The reason this comment used to give was false, and the measurement that
+# replaces it is stronger than the one it quoted.** It said a named byte is
+# REFUSED with "'PAT_DASH' has no home: the register allocator collected no home
+# for it" — true when it was measured, and false since
+# `formal/build.py`'s `_substitute_module_constants` began substituting a module
+# constant at every read BEFORE any emitter runs. A folded name never reaches an
+# emitter, so it needs no register, no spill slot and no `__DATA` slot, and
+# there is nothing for the allocator to run out of.
+#
+# Measured on this tree, 2026-10-02, with `_build_pat`'s two bytes spelled
+# `PAT_A` and `PAT_DASH` and this module built as a DYLIB on both architectures
+# (`formal.imports.build_module_dylib` — the shape an importing program reaches
+# it by, which is not the shape a file built as a program of its own reaches it
+# by): both build, and `__TEXT` — code, constants and data — is BYTE-IDENTICAL
+# to the inline spelling on arm64 and on x86-64. The only bytes that differ in
+# either image are the install-name strings, which carry the content digest in
+# the filename. So the name costs nothing measurable, and what is left of the old
+# rule is the sentence above.
 SEP_FIELD = 59        # ';'
 SEP_KV = 61           # '='
 
@@ -2304,9 +2319,9 @@ def _build_pat(spec, argv, argc, pat):
     dseen = 0
     while i < argc:
         if dseen == 1:
-            memset(pat + i, 65, 1)      # 'A'
+            memset(pat + i, PAT_A, 1)
         elif strncmp(argv[i], "--", 3) == 0:
-            memset(pat + i, 45, 1)
+            memset(pat + i, PAT_DASH, 1)
             dseen = 1
         else:
             memset(pat + i, _classify(spec, argv[i]), 1)

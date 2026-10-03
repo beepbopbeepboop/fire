@@ -3697,6 +3697,56 @@ CROSS_MODULE_CASES = [
               "    p.b = 4\n"
               "    var r = bump(p, 5)\n"
               "    return p.a * 10 + p.b + r\n"}, 96, None),
+    # ── a FOLDED MODULE CONSTANT as a `memset` byte, INSIDE A MODULE DYLIB ──
+    #
+    # `folded_module_constant_as_a_memset_byte` above pins the property in a
+    # PROGRAM; this is the shape it does not have. `formal/hostmods/argparse.mojo`
+    # spells `memset(pat + i, PAT_DASH, 1)` in a file that is compiled as a
+    # DYLIB every time a program imports `argparse`, so a substitution that
+    # reached only the program path would leave the module refusing with
+    # "'PAT_DASH' has no home" — a diagnostic whose subject is a line in
+    # somebody else's module, reported against the program that merely imported
+    # it. `bugs/FORMAL_argparse_memset_constants_comment_is_stale.md` is the
+    # measurement, and its step 3 is this row: the reproducer had to be a module
+    # dylib because that is the shape in which it was found.
+    #
+    # `both`, because a byte folded to the wrong value is a value neither
+    # architecture's parser would notice on its own, and the reference buffer is
+    # written INLINE on the caller's side — so the folded name is the only thing
+    # under test and both machines have to agree it is 45 and then 65. 0 is
+    # `memcmp == 0` twice over, and a `memcmp` that compared nothing could not
+    # produce it: the buffers differ in every byte the fill wrote.
+    ("byref_folded_module_constant_as_a_memset_byte_in_a_dylib",
+     {"mod": "PAT_DASH = 45\n"
+             "PAT_A = 65\n"
+             "\n"
+             "def fill(pat, n):\n"
+             "    var i: Int = 0\n"
+             "    while i < n:\n"
+             "        memset(pat + i, PAT_DASH, 1)\n"
+             "        i = i + 1\n"
+             "    return 0\n"
+             "\n"
+             "def fill_a(pat, n):\n"
+             "    var i: Int = 0\n"
+             "    while i < n:\n"
+             "        memset(pat + i, PAT_A, 1)\n"
+             "        i = i + 1\n"
+             "    return 0\n",
+      "both": True,
+      "main": "from byref_xmod import fill, fill_a\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var got = malloc(64)\n"
+              "    var want = malloc(64)\n"
+              "    memset(want, 45, 4)\n"
+              "    fill(got, 4)\n"
+              "    var same = memcmp(got, want, 4)\n"
+              "    memset(got, 65, 2)\n"
+              "    memset(want, 65, 2)\n"
+              "    fill_a(got, 2)\n"
+              "    var same2 = memcmp(got, want, 2)\n"
+              "    return same * 10 + same2\n"}, 0, None),
     # The NEGATIVE half, and the one that makes the positive case above worth
     # anything: the same shape with the two modules declaring the same NUMBER of
     # fields in a different ORDER. `Q.v` is slot 0 and the caller's slot 0 is
@@ -4173,21 +4223,38 @@ def run_module_case(name, files, want_exit, want_stdout, tmpdir, verbose):
             print(f"      refused identically on both architectures: {needles!r}")
         return True, ""
 
-    out = os.path.join(tmpdir, name)
-    rc, text = build_formal(src, out)
-    if rc != 0:
-        return False, text.strip()[-300:]
-    if not os.path.isfile(out):
-        return False, "build reported success but wrote no binary"
-    run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT)
-    if run.returncode != want_exit:
-        return False, (f"exit status {run.returncode}, expected {want_exit}"
-                       + (f"; stderr: {run.stderr.strip()[:120]}"
-                          if run.stderr.strip() else ""))
-    if want_stdout is not None and want_stdout not in run.stdout:
-        return False, f"stdout {run.stdout[:120]!r} does not contain {want_stdout!r}"
-    if verbose:
-        print(f"      stdout={run.stdout[:60]!r} exit={run.returncode}")
+    # `both` in the file map builds and RUNS this case on BOTH architectures and
+    # requires the same answer from each, which the host-only build below cannot
+    # see. It is opt-in per case rather than the default because the other
+    # cases in this group were written for the host's architecture and doubling
+    # their builds would change eleven rows that have nothing to do with the
+    # boundary; the rows that are ABOUT the boundary's value handoff already
+    # say so in their own comments.
+    arches = ("arm64", "x86_64") if files.get("both") else (None,)
+    for arch in arches:
+        out = os.path.join(tmpdir, name if arch is None else f"{name}.{arch}")
+        rc, text = build_formal(src, out, backend=arch)
+        if rc != 0:
+            who = arch or "the host backend"
+            return False, (f"[{who}] build failed: {text.strip()[-300:]}")
+        if not os.path.isfile(out):
+            return False, (f"[{arch or 'host'}] build reported success and "
+                           f"wrote no binary")
+        argv = ["arch", "-x86_64", out] if arch == "x86_64" else [out]
+        run = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        who = arch or "the host backend"
+        if run.returncode != want_exit:
+            return False, (f"[{who}] exit status {run.returncode}, expected "
+                           f"{want_exit}"
+                           + (f"; stderr: {run.stderr.strip()[:120]}"
+                              if run.stderr.strip() else ""))
+        if want_stdout is not None and want_stdout not in run.stdout:
+            return False, (f"[{who}] stdout {run.stdout[:120]!r} does not "
+                           f"contain {want_stdout!r}")
+        if verbose:
+            print(f"      [{who}] stdout={run.stdout[:60]!r} "
+                  f"exit={run.returncode}")
     return True, ""
 
 # ── wave 4 (D2): a field's DECLARED type, used only when every binding agrees ──
