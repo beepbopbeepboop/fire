@@ -848,6 +848,11 @@ def check_finally_shape() -> list:
                     if b.stmts and type(b.stmts[0]).__name__ == "TryStmt")
         clause = set(c for c, _p in copies)
         for c, want_preds in copies:
+            if not 0 <= c < len(blocks):
+                bad.append(f"{name}: the graph has {len(blocks)} blocks and the "
+                           f"row names the clause's copy at {c}, so the shape "
+                           f"the rule builds is not the shape this row pins")
+                continue
             got = sorted(blocks[c].preds)
             if got != sorted(want_preds):
                 bad.append(f"{name}: the `finally` clause's copy at {c} is "
@@ -860,6 +865,8 @@ def check_finally_shape() -> list:
         body_first = next(b.index for b in blocks[head + 1:]
                           if b.preds == [head])
         for c in clause:
+            if not 0 <= c < len(blocks):
+                continue
             if body_first in blocks[c].preds:
                 bad.append(f"{name}: the `finally` clause's copy at {c} is "
                            f"entered from the body's FIRST block {body_first}, "
@@ -870,7 +877,8 @@ def check_finally_shape() -> list:
         # try follows, and `_emit_try` emits it only where the body falls
         # through. `dead` is the block that must therefore have no predecessor
         # at all when no path does.
-        fall = [c for c, _p in copies if blocks[c].succs]
+        fall = [c for c, _p in copies
+                if 0 <= c < len(blocks) and blocks[c].succs]
         if after is not None:
             reached = sorted({b.index for b in blocks
                               for c in fall if c in b.preds})
@@ -878,9 +886,9 @@ def check_finally_shape() -> list:
                 bad.append(f"{name}: the statement after the try is in "
                            f"{reached or 'no block'}, not {after} — only the "
                            f"fall-through copy of the clause is followed")
-        if dead is not None and blocks[dead].preds:
+        if dead is not None and (dead >= len(blocks) or blocks[dead].preds):
             bad.append(f"{name}: block {dead} follows the `finally` clause and "
-                       f"is reachable ({blocks[dead].preds}), but no body path "
+                       f"is reachable, but no body path "
                        f"falls through, so `_emit_try` suppresses the clause's "
                        f"fall-through and the code after the statement is dead")
     return bad
