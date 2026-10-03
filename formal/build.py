@@ -7665,12 +7665,25 @@ def _names_bound_in(fn) -> set:
     needs a reachability analysis over the allocator's own table, which is a
     change to the emitter's model and not to a name check. Recorded here
     rather than fixed, because fixing it here would make this check disagree
-    with the table it is checking."""
+    with the table it is checking.
+
+    **THIS IS NOT THE SHADOWING ANSWER, and one reader was treating it as one.**
+    A comprehension's `for … in` target is in this set — `bound_names_in_order`
+    reports it and the emitter gives that name a home — and it is NOT a local of
+    the enclosing function, because a comprehension is its own scope in Python
+    3. The two questions have different answers and different readers, so they
+    are two functions: this one is "what does this body write" (placement, the
+    allocator's table, the no-home refusal) and `_function_locals` is "does this
+    name shadow a module binding". Subtract here instead and ten comprehension
+    cases lose their home.
+    """
     from mojo.middle.boundnames import bound_names_in_order
     out = set()
+    params_out = set()
     for p in (getattr(fn, "params", None) or []):
         if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
-            out.add(p[0].lstrip("*"))
+            params_out.add(p[0].lstrip("*"))
+    out |= params_out
     try:
         out.update(n for n in bound_names_in_order(fn.body, fn.params)
                    if isinstance(n, str))
@@ -7683,6 +7696,68 @@ def _names_bound_in(fn) -> set:
             elif isinstance(t, F.IdentExpr):
                 out.add(t.name)
     return out
+
+
+def _function_locals(fn) -> set:
+    """The names that are LOCALS of `fn` for the SHADOWING question.
+
+    `_names_bound_in` is the reader of "what does this body write", and the
+    register allocator's answer to it has to include a comprehension's loop
+    variable — the emitter gives that name a home, so the placement checks that
+    read `_names_bound_in` (`placed |= _names_bound_in(fn)`) must keep seeing
+    it. The SHADOWING question is different and this is its reader: does this
+    name mean the module's binding inside this body, or the body's own? A
+    comprehension is its own scope in Python 3, so its `for … in` target is not
+    a local of the enclosing function at all.
+
+    Keeping the two apart is what made this fixable at all. Subtracting the
+    comprehension targets inside `_names_bound_in` removed a false refusal
+    **and** broke ten comprehension cases in `test_formal_run.py`, every one of
+    them a name with no home — measured, and the reason the subtraction lives
+    here rather than there.
+
+    Parameters are put back after the subtraction, so `def f(rows): [rows for
+    rows in rows]` leaves `rows` the parameter every other reader needs it to be.
+    """
+    params = set()
+    for p in (getattr(fn, "params", None) or []):
+        if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+            params.add(p[0].lstrip("*"))
+    return (_names_bound_in(fn) - _comprehension_scoped_names(fn)) | params
+
+
+def _comprehension_scoped_names(fn) -> set:
+    """The names a comprehension's `for … in` target binds and NOTHING else does.
+
+    "And nothing else does" is the whole of it, and it is why this walks rather
+    than collecting every target it meets: a name bound by an ordinary statement
+    as well is a local of the function, and `G = G + 1` beside `[G for G in
+    xs]` is the case the shadowing rule exists for.
+
+    A comprehension's interior is not descended into for the OUTER set — the
+    walk below stops at the `Comprehension` node — because every binding inside
+    one belongs to that scope.
+    """
+    inner, outer = set(), set()
+
+    def _names_of(target) -> set:
+        if isinstance(target, str):
+            return {target}
+        if isinstance(target, F.IdentExpr):
+            return {target.name}
+        if isinstance(target, (F.TupleExpr, F.ListExpr)):
+            return {e.name for e in (getattr(target, "elements", None) or [])
+                    if isinstance(e, F.IdentExpr)}
+        return set()
+
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.Comprehension):
+            for g in (getattr(node, "generators", None) or []):
+                inner |= _names_of(getattr(g, "target", None))
+            continue
+        for t in _write_targets(node):
+            outer |= _names_of(t)
+    return inner - outer
 
 
 def _write_targets(node) -> list:
@@ -7726,7 +7801,7 @@ def _substitute_module_constants(functions: list) -> int:
         return 0
     done = 0
     for fn in functions:
-        local = _names_bound_in(fn)
+        local = _function_locals(fn)
         mine = {n: lit for n, lit in sites.items() if n not in local}
         if not mine:
             continue
@@ -7786,7 +7861,7 @@ def _publish_imported_constants(functions: list, symbols: dict,
         _substitute_module_constants(functions)
     for fn in functions:
         _apply_imported_constant_sites(fn.body, tables,
-                                       _names_bound_in(fn))
+                                       _function_locals(fn))
     return merged
 
 
@@ -8018,7 +8093,21 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
     to be re-derived per consumer is exactly how they drift.
 
     A tuple has no assignable slots, so the walk RETURNS a new one for it and
-    the caller puts it back; a list is still rewritten in place."""
+    the caller puts it back; a list is still rewritten in place.
+
+    **A COMPREHENSION IS ITS OWN SCOPE, and this walk used to reach inside it.**
+    `out = [G for G in rows]` with `G` a module constant substitutes the
+    comprehension's ELEMENT — `[5 for G in rows]` — which answers a different
+    program, and it used to be masked rather than absent: `_names_bound_in`
+    counted the comprehension's target as a local of the function, so the
+    substitution never started. Fixing that (which is
+    `bugs/FORMAL_a_local_read_before_its_first_assignment.md`'s subject, and a
+    false refusal it removes) un-masks this one, so the two halves have to land
+    together and this is the half that makes the other half safe: the generator
+    targets come OFF the site table for the comprehension's own subtree, which
+    is what makes `[G for G in rows]` mean the loop variable and
+    `[G for x in rows]` mean the constant — two programs, one name, and the
+    difference is entirely in the target."""
     if isinstance(node, (list, tuple)):
         out_items = []
         for child in node:
@@ -8070,6 +8159,24 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         node.value = _rewrite_child(getattr(node, "value", None), sites,
                                     stores)
         return
+    if isinstance(node, F.Comprehension):
+        # The scope rule this walk was missing, applied at the ONE node that has
+        # a nested scope. See the docstring: the generator targets come off the
+        # table for this subtree, so the comprehension's own reads of them are
+        # reads of the LOOP VARIABLE and not of the module's constant.
+        shadowed = set()
+        for g in (getattr(node, "generators", None) or []):
+            target = getattr(g, "target", None)
+            if isinstance(target, str):
+                shadowed.add(target)
+            elif isinstance(target, F.IdentExpr):
+                shadowed.add(target.name)
+            elif isinstance(target, (F.TupleExpr, F.ListExpr)):
+                shadowed.update(e.name for e in
+                                (getattr(target, "elements", None) or [])
+                                if isinstance(e, F.IdentExpr))
+        if shadowed:
+            sites = {n: lit for n, lit in sites.items() if n not in shadowed}
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name,
                 _apply_module_constant_sites(getattr(node, name), sites,
@@ -9559,7 +9666,7 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     # base. `_names_bound_in` is the module's one reader of "what this function
     # writes", and intersecting with it is what makes `own` the set the
     # refusal's sentence is about.
-    own = (placed & (_names_bound_in(fn) | _comptime_bound_names(fn))
+    own = (placed & (_function_locals(fn) | _comptime_bound_names(fn))
            ) - params - set(frame_slots)
     if not own:
         return None
