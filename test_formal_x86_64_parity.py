@@ -771,6 +771,64 @@ CASES = [
     # the chain's length: `o.n.n.v` was computed as `o.n.v`, so the innermost
     # read either refused (`'n' is not a field of the holder's struct`, which
     # is true of the OUTER struct and false of the file) or read the wrong slot.
+    # A METHOD CALL on a nested receiver -- `o.n.put(7)`, which
+    # `formal/build.py`'s `_rewrite_nested_method_calls` turns into
+    # `In_put(o.n, 7)` so the ordinary call path applies.  The frame design's
+    # own "still not done" list named this as refused on both backends, which
+    # this row measured FALSE: it builds and answers `77` on both.  So it is
+    # here because a doc's open list is not a test, and the second half is the
+    # shape that matters -- the write goes through `In_put`'s OWN frame
+    # contract (`out self`, `FrameOk_except`), so a lowering that read the
+    # receiver's slot without going through the method would print the right
+    # `a` and the wrong `b`.
+    #
+    # `b` is 0 and that is the assertion: `Inner_put` writes slot 0 and must not
+    # disturb slot 1, so a copy-through would show `b=7`.
+    ("method_call_on_a_nested_frame_receiver",
+     "struct In:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def put(out self, v: Int) -> Int:\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "struct Out:\n"
+     "    var pad: Int\n"
+     "    var n: In\n"
+     "\n"
+     "def main(k):\n"
+     "    var o = Out()\n"
+     "    o.n.put(7)\n"
+     '    printf("%d %d %d", o.n.a, o.n.b, o.n.get() * 10 + o.n.a)\n'
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "\n"
+     "    def put(self, v):\n"
+     "        self.a = v\n"
+     "        return self.a\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.pad = 0\n"
+     "        self.n = In()\n"
+     "\n"
+     "import sys\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.n.put(7)\n"
+     '    sys.stdout.write("%d %d %d" % (o.n.a, o.n.b, o.n.get() * 10 + o.n.a))\n'
+     "    return 0\n"),
     ("nested_frame_chain_three_levels",
      "struct In:\n"
      "    var v: Int\n"

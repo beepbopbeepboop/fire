@@ -1874,15 +1874,43 @@ for the chains and a built binary for both refusals. Full parity 25/25;
 `test_formal_run.py` 656/0; `test_formal_read_before_store.py` 130/0;
 `test_refusal_taxonomy.py` 167/167; `test_formal_value_model.py` 32/0.
 
-**Still not done, and stated so rather than left to be found.** A METHOD CALL
+**~~Still not done, and stated so rather than left to be found.** A METHOD CALL
 on a nested receiver (`o.n.put(v)`) is still refused by name, on both
 backends, because neither backend lowers a method call on a value — the
 refusal says so and lists the methods that ARE lowered. That is the next wave
 and it is not this one: the frames are now placed and reachable at every level
-the bound allows, which is the precondition it needed.
+the bound allows, which is the precondition it needed.~~ **CLOSED 2026-10-03
+(`work/formal16-8`) — the sentence is FALSE on this tree, measured on both
+architectures:** `formal/build.py`'s `_rewrite_nested_method_calls` turns
+`o.n.put(v)` into `In_put(o.n, v)`, and `In_put`'s receiver is a PLACED NESTED
+FRAME, so the ordinary call path applies and the method's own contract
+(`out self`, `FrameOk_except`) governs the write. `Outer { pad: Int, n: In }`,
+`In { a, b }`, `In.put(out self, v)` writing only `self.a`, and a read of both
+fields plus the getter afterwards: `a=7 b=0` and `77` on arm64 AND on x86-64,
+against CPython. Pinned by `method_call_on_a_nested_frame_receiver` in
+`test_formal_x86_64_parity.py` (44/44 with it), with `b` as the load-bearing
+half: a lowering that read the receiver's slot without going through the method
+would print the right `a` and the wrong `b`.
+
+The reason the item was open is worth recording, because it is the same reason
+the frames took four waves to become reachable: the sentence was written when
+the frames were not yet placed at every level, and nothing has re-read it since.
+**A "still not done" list in a design document is a claim about a tree, and this
+one had gone stale without anything failing.**
+
+**The neighbouring shape is NOT closed, and it is a new finding rather than a
+correction:** a struct whose ONLY field is a typed-nested frame — `Outer { n:
+In }` with nothing else — is refused on both backends, with a message that names
+`o.a`, a field the source never writes (`formal/model.py`'s one-word-receiver
+rewrite collapses `o.n` into `o`, and then `o.a` is a one-hop field access
+through `o`, whose only slot holds a FRAME ADDRESS). Filed as
+`FORMAL_a_one_field_struct_whose_only_field_is_a_nested_frame.md`.
 
 **And this did not move the RETURNED-frame failures, which were already red.**
-`test_formal_returned_frame.py` is 22/13, `test_formal_receiver_position.py`
+(The three counts are stale as of 2026-10-03 and are corrected above; measured
+on this tree: `test_formal_returned_frame.py` 42/0 and
+`test_formal_receiver_position.py` 29/0.) `test_formal_returned_frame.py` is
+22/13, `test_formal_receiver_position.py`
 13/3 and `test_formal_specialization.py` 6/1 both before and after this change,
 with the same test names in all three lists — measured by reverting the four
 source files and re-running, not by reading the totals. Two of the thirteen do
