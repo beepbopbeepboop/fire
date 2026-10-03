@@ -925,6 +925,100 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
           f"every export with a derived spec should have a PROVED contract")
 
 
+def test_an_export_that_binds_a_local_still_gets_a_proved_contract(tmpdir, shared):
+    """The ceiling on proved contracts was SPEC DERIVATION, and it was wider
+    than the proof layer behind it.
+
+    `_dylib_spec_lean` required the body to be EXACTLY one `return` of
+    arithmetic over the parameter.  Measured over six one-`return` bodies,
+    `var m = n * 3` then `return m` is 17 instructions of straight-line code
+    that `_dylib_contract_proof` emits a complete `Block` and `BlockCert` for --
+    and it got NO contract, because the statement list had two entries.  So the
+    binding constraint was never `Refine.Block`: it was this function, and an
+    export that reads its argument into a local before computing with it (most
+    of them) was silently outside it.
+
+    The widened derivation accepts a chain of bindings to FRESH names ending in
+    the `return`, and refuses a name bound twice -- which is what makes the
+    substitution let-elimination rather than an interpretation of reassignment.
+    All three claims are checked here, and the first two by Lean:
+
+      * `one_local` and `two_locals` get PROVED contracts, and the proof checks
+        clean with no hole (`bv_decide` against the machine, so a derivation
+        that was subtly wrong would be a build failure rather than a claim);
+      * `rebound` -- `var m = n * 3` then `m = m + 1` -- gets NO spec and no
+        contract claim of any kind.  The `ifexp`/`and` shapes beside it in the
+        measurement also get nothing, for a different reason (their code
+        contains an `and` the machine model does not step), and this case does
+        not pretend otherwise: what it pins is that widening the derivation did
+        not widen it past a reassignment.
+    """
+    import re as _re
+    from formal.lean import find_lean
+    from formal.build import parse_module
+    from formal.arm64_proof_gen import _dylib_spec_lean, generate_dylib_proof
+    root = HERE
+    src = os.path.join(tmpdir, "locals.mojo")
+    with open(src, "w") as f:
+        f.write("def one_local(n):\n  var m = n * 3\n  return m\n\n\n"
+                "def two_locals(n):\n  var m = n * 3\n"
+                "  var k = m + 1\n  return k\n\n\n"
+                "def rebound(n):\n  var m = n * 3\n  m = m + 1\n  return m\n")
+    out = os.path.join(tmpdir, "locals.dylib")
+    from formal.build import compile_formal_dylib
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "one_local", 14) == 42
+          and call_exported_by_name(out, "two_locals", 14) == 43
+          and call_exported_by_name(out, "rebound", 14) == 43,
+          "the dylib does not compute the values the specs will claim, so the "
+          "obligations below would be false and this test would be measuring "
+          "the wrong thing")
+    # The derivation itself, before any Lean: what each body yields, and that
+    # the inlined value is the one the source computes (no leftover name, no
+    # `n` standing for a local).
+    specs = {fn.name: _dylib_spec_lean(fn) for fn in parse_module(
+        open(src).read())}
+    check(specs.get("one_local") == "(fun n => (n * (3 : UInt64)))",
+          f"one_local's spec is {specs.get('one_local')!r}, not the inlined "
+          f"value of its one binding")
+    check(specs.get("two_locals") == "(fun n => ((n * (3 : UInt64)) + (1 : UInt64)))",
+          f"two_locals' spec is {specs.get('two_locals')!r}: a chain of "
+          f"bindings must inline, not chain `let`s the block layer cannot read")
+    check(specs.get("rebound") is None,
+          f"a name bound twice got the spec {specs.get('rebound')!r}: the "
+          f"inlining assumes a fresh binding, and that assumption is the whole "
+          f"soundness argument")
+    specs = {k: v for k, v in specs.items() if v is not None}
+    path = os.path.join(tmpdir, "locals_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(built["code"], built["info"],
+                                     built["exports"], specs))
+    text = open(path).read()
+    for name in ("one_local", "two_locals"):
+        ident = ("dylib_export_%d_%s"
+                 % ([e["name"] for e in built["exports"]].index(name), name))
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
+              f"{name}'s contract is not proved, so widening the derivation "
+              f"did not reach the proof layer")
+    check(not _re.search(r"rebound\b.*_spec\b", text, _re.S)
+          or "agrees_of_body dylib_image dylib_export_2_rebound" not in text,
+          "the rebound export was given a contract anyway")
+    check("dylib_export_2_rebound" in text
+          and "NO SPEC DERIVED for dylib_export_2_rebound" in text,
+          "the rebound export is not marked as having no spec, so its silence "
+          "is indistinguishable from the emitter having forgotten it")
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof_cached
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, f"lean rejected the proof of a dylib whose exports bind locals: "
+              f"{detail[-400:]}")
+    check(n == 0, f"the proof admits {n} hole(s); both contracts should be "
+                  f"proved, not named")
+
+
 def test_a_wrong_spec_on_a_multi_export_image_is_rejected(tmpdir, shared):
     """The per-export contract has TEETH, for an export that is not the image.
 
@@ -1387,6 +1481,8 @@ TESTS = [
      test_a_wrong_spec_is_rejected_not_believed),
     ("several exports, and one with no derivable spec",
      test_several_exports_and_no_derivable_spec),
+    ("an export that binds a local still gets a proved contract",
+     test_an_export_that_binds_a_local_still_gets_a_proved_contract),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),

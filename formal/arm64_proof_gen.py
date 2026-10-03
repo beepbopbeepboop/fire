@@ -8500,25 +8500,48 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
 _DYLIB_SPEC_BINOPS = {"+": "+", "-": "-", "*": "*",
                       "/": "UInt64.div", "%": "UInt64.mod"}
 
+# How much Lean source a derived spec may be before the derivation gives up.
+# Substitution is let-elimination, so a chain of bindings COPIES each bound
+# expression into every use: a 30-binding body that binds one word from the
+# previous is exponential in the source and lands in `bv_decide` as a term too
+# large to decide.  A bound is the honest response, and it is checked rather
+# than felt -- a body past it returns None, which is "no claim", not a wrong one.
+_DYLIB_SPEC_MAX_CHARS = 20000
+
 
 def _dylib_spec_lean(fn) -> str:
     """A closed-form spec for a word-shaped export, derived from its SOURCE.
 
-    Returns Lean source for `fun n => <expr>`, or None when the body is not a
-    single `return` of pure arithmetic over the parameter. That fallback is the
-    point: an export whose spec cannot be derived must acquire NO contract claim
-    at all, because the only spec available without one is `fun n => n` and
-    that is false for every export in the tree which is not the identity.
+    Returns Lean source for `fun n => <expr>`, or None when the body is not
+    STRAIGHT-LINE arithmetic over the parameter. That fallback is the point: an
+    export whose spec cannot be derived must acquire NO contract claim at all,
+    because the only spec available without one is `fun n => n` and that is
+    false for every export in the tree which is not the identity.
 
-    **The body must be EXACTLY that one `return`**, and the check is on the
-    statement LIST, not on the returns found in it.  It used to be `len(rets)
-    == 1` over the top-level statements, which silently derived one ARM's spec
-    for a body with branches: `def pick(n): if n > 3: return 1 else: return 0`
-    has one top-level `return`, so the spec came out `(fun n => 0)` -- false
-    for `n = 7`, and checked against nothing, because there is no `Block` for a
-    body with a branch and the contract is refused before Lean ever sees it.
-    A spec is a claim about the source, so a body the emitter read only part of
-    is worse than no spec.
+    **The body may be a chain of bindings and a final `return`, and each binding
+    must be to a FRESH name.**  It used to require the body to be EXACTLY one
+    `return`, which was narrower than the proof layer behind it: measured over
+    six one-`return` bodies, `var m = n * 3` then `return m` is 17 instructions
+    of straight-line code that `_dylib_contract_proof` emits a full `Block` and
+    `BlockCert` for, and it got NO contract because the statement list had two
+    entries.  So the ceiling on proved contracts was this function, not the Lean
+    layer -- and an export that reads its argument into a local before computing
+    with it, which is most of them, was silently outside it.
+
+    Freshness is what makes the substitution sound: with no name bound twice,
+    every use of a local has the one value its binding gave it, so inlining is
+    let-elimination rather than an interpretation of reassignment. A second
+    binding of the same name, or any statement kind that is not a binding or
+    the final `return`, returns None.
+
+    **The statement LIST is what is checked**, not the returns found in it.  It
+    used to be `len(rets) == 1` over the top-level statements, which silently
+    derived one ARM's spec for a body with branches: `def pick(n): if n > 3:
+    return 1 else: return 0` has one top-level `return`, so the spec came out
+    `(fun n => 0)` -- false for `n = 7`, and checked against nothing, because
+    there is no `Block` for a body with a branch and the contract is refused
+    before Lean ever sees it. A spec is a claim about the source, so a body the
+    emitter read only part of is worse than no spec.
 
     Only the shapes the ABI's word-shaped entry points actually have are
     handled, and an unrecognised node yields None rather than a partial
@@ -8539,9 +8562,14 @@ def _dylib_spec_lean(fn) -> str:
     if not isinstance(pname, str) or not pname:
         return None
     body = list(getattr(fn, "body", None) or [])
-    if len(body) != 1 or type(body[0]).__name__ != "ReturnStmt":
+    if not body or type(body[-1]).__name__ != "ReturnStmt":
         return None
-    rets = [body[0]]
+
+    # `env` is the ONLY reading of "what this name holds": the parameter, and
+    # the locals bound so far.  It is threaded through `go` rather than
+    # substituted afterwards, so a local used inside a later binding resolves
+    # the same way it does at run time.
+    env = {pname: "n"}
 
     def go(node):
         kind = type(node).__name__
@@ -8557,7 +8585,7 @@ def _dylib_spec_lean(fn) -> str:
                     return None
             return f"({v} : UInt64)"
         if kind == "IdentExpr":
-            return "n" if getattr(node, "name", None) == pname else None
+            return env.get(getattr(node, "name", None))
         if kind == "UnaryOp":
             op = getattr(node, "op", None)
             if op not in ("-", "+", "~"):
@@ -8578,10 +8606,35 @@ def _dylib_spec_lean(fn) -> str:
             return f"({a} {sym} {b})"
         return None
 
-    expr = go(getattr(rets[0], "value", None))
+    for stmt in body[:-1]:
+        kind = type(stmt).__name__
+        if kind == "VarDecl":
+            target = getattr(stmt, "name", None)
+        elif kind == "AssignStmt":
+            lhs = getattr(stmt, "target", None)
+            target = (getattr(lhs, "name", None)
+                      if type(lhs).__name__ == "IdentExpr" else None)
+        else:
+            return None
+        if not isinstance(target, str) or not target:
+            return None
+        if target in env:
+            # A second binding of the same name: not a fresh local, and the
+            # value a use of it has is the one in force at THAT point, which a
+            # single substitution does not model.  Refuse rather than guess.
+            return None
+        value = go(getattr(stmt, "value", None))
+        if value is None:
+            return None
+        env[target] = value
+
+    expr = go(getattr(body[-1], "value", None))
     if expr is None:
         return None
-    return f"(fun n => {expr})"
+    out = f"(fun n => {expr})"
+    if len(out) > _DYLIB_SPEC_MAX_CHARS:
+        return None
+    return out
 
 
 def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
