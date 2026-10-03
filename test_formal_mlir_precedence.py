@@ -260,15 +260,33 @@ CLASSIFIED = [
      "    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen.cmp_pred<nonesuch>`](\n"
      "        a, a)\n",
      "`pop.cmp` is a dialect OPERATION whose value could be a word", None),
-    # `pop.select` is the row the previous census got wrong in the other
-    # direction: it said lowering `pop.select` is a table away, and that
-    # `_select.mojo` waits on it. It does not — its first argument is a BOOL,
-    # and this path has no BOOL kind distinct from an integer, so a select
-    # answered kind-blind would test a `char *` for non-zero and answer 1. The
-    # message says so, and `absent` pins that it does NOT claim the operand type
-    # is the only missing piece.
-    ("a_select_names_the_bool_kind_it_needs",
-     "def s(c: Bool, a: Int, b: Int) -> Int:\n"
+    # `pop.select` is STILL refused here, and why is the point of the pair with
+    # the GUARDED row below: this receiver declares nothing, so a select
+    # answered kind-blind would test a `char *` for non-zero and answer 1. It
+    # used to be refused for a DIFFERENT and partly false reason — "this path
+    # has no BOOL kind distinct from an integer", which is true of the KIND
+    # MODEL and not of this program, whose `condition` declares `Bool` and is
+    # therefore lowered. So the row now names the DECLARED TYPE, and the case
+    # beside it in `GUARDED` is that program.
+    #
+    # `absent` pins that it does NOT claim the operand type is the only missing
+    # piece — a name-keyed table that lowered `pop.select` for every operand
+    # would be wrong for 26 of the corpus's 38 elementwise sites, and this row is
+    # the one that says the guard is a fact about the operand.
+    ("a_select_names_the_declared_bool_it_needs",
+     "def s(c, a: Int, b: Int) -> Int:\n"
+     "    return __mlir_op.`pop.select`(c.__mlir_bool__(), a, b)\n",
+     "`pop.select` is a dialect OPERATION whose value could be a word",
+     "applied ELEMENTWISE"),
+    # The other side of that row, and the one that decides it is a capability:
+    # a receiver DECLARED `String` is still refused. `pick(1, 10, 20)` with a
+    # `Bool` builds and runs (`a_dialect_select_lowers_when_the_condition_
+    # declares_a_bool`, in `GUARDED`); this program differs only in the
+    # declaration, and lowering it would test a `char *` for non-zero. Without
+    # this row the pass that answers the first one is indistinguishable from a
+    # pass that ignores the declaration.
+    ("a_select_over_a_declared_pointer_is_still_refused",
+     "def s(c: String, a: Int, b: Int) -> Int:\n"
      "    return __mlir_op.`pop.select`(c.__mlir_bool__(), a, b)\n",
      "`pop.select` is a dialect OPERATION whose value could be a word",
      "applied ELEMENTWISE"),
@@ -311,6 +329,29 @@ CLASSIFIED = [
 # derives it from `fmt` the same way). It is therefore the SAME on both
 # architectures, which is why this case asserts one string for both.
 GUARDED = [
+    # `std/utils/_select.mojo` verbatim, minus its docstring: the ONE program
+    # the `pop.select` refusal existed for, and it now builds and RUNS on both
+    # architectures. `condition: Bool` is the whole of why — the lowering is
+    # `x != 0`, which is a Bool's value on this path, and the declaration is what
+    # makes it a Bool rather than a `char *`.
+    #
+    # The expected value is STATED rather than taken from an oracle because
+    # CPython cannot parse `__mlir_op.`pop.select``, and it is stated as a
+    # CASE rather than written down: 10/20 for `condition` 1 and 20/10 for 0 is
+    # the only thing a select can mean, and a case that could pass with the arms
+    # swapped would not be testing the select.
+    ("a_dialect_select_lowers_when_the_condition_declares_a_bool",
+     "def pick(condition: Bool, lhs: Int, rhs: Int) -> Int:\n"
+     "    return __mlir_op.`pop.select`(condition.__mlir_bool__(), lhs, rhs)\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"%d %d\\n\", pick(1, 10, 20), pick(0, 10, 20))\n"
+     "    return 0\n",
+     "10 20\n"),
+    # The same file with a `String`-declared receiver, and it must STILL be
+    # refused. This is the row that decides the other one is a capability rather
+    # than a blanket: without it, lowering `pop.select` for every operand is
+    # right here and wrong on every `char *`, and nothing would say so.
     ("a_target_query_is_not_pre_empted",
      "def main() -> Int32:\n"
      "    var os_name = __mlir_attr[\n"

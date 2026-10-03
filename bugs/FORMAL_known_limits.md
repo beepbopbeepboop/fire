@@ -700,7 +700,8 @@ exists but is unreachable fails. Measured:
                          mask=, ordering=, a variant discriminant)
      75  effect         no value at all — a store, a trap, an ownership marker
      34  unguarded      a named fact this path lacks (a predicate, a pointee
-                         width, a BOOL kind, a GEP scale, the Mojo version)
+                         width, a DECLARED `Bool`, a GEP scale, the Mojo
+                         version)
      24  elementwise    arithmetic whose word-or-vector answer is the OPERAND's
      13  vector         over !kgen.simd<N, D> — N lanes, never a word
 
@@ -724,11 +725,17 @@ the census doc:
     dialect sites in the whole stdlib, and the file's own terminal, measured by
     building it with the `_select` import removed, is `pop.cast_to_builtin` in
     `__init__` — a `_type=` that is a dialect type, a DIFFERENT missing fact from
-    `pop.select`'s BOOL kind. So **closing `_select.mojo` does not close
-    `simd_length.mojo`**, and this cause row shrinks by one file when the BOOL
-    kind lands rather than by two. It is also the natural first target for the
-    operand-type work, being reachable and mostly word-typed where
-    `std/simd.mojo` is 22 sites of pure vector.
+    `pop.select`'s condition. So **closing `_select.mojo` does not close
+    `simd_length.mojo`**, and this cause row shrinks by one file rather than by
+    two — which is what it did: `pop.select` and `__mlir_bool__()` are lowered
+    for a receiver whose DECLARED type says `Bool`
+    (`build._lower_dialect_select`), and `std/utils/_select.mojo` swept
+    `codegen -> pass` on 2026-10-03. It needed the DECLARATION rather than a
+    fifth kind, and
+    `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md`
+    records why the kind would have been the wrong tool. It is also the natural
+    first target for the operand-type work, being reachable and mostly word-typed
+    where `std/simd.mojo` is 22 sites of pure vector.
 
 `std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
 built out of exactly this construct, so it is refused, and the seventeen files

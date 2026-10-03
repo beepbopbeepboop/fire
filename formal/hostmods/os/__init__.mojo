@@ -385,13 +385,25 @@ def chmod(path, mode) -> int:
 # about a pointer. `listdir_len` and `listdir_get` ask them of the blob, which
 # IS the shape those operations are about.
 
-def listdir(path) -> int:
+def listdir(path) -> List[String]:
     """The entries of the directory `path`, or 0 when there is no such
     directory.
 
-    A BLOB, not a list: `listdir_len` says how many entries there are,
-    `listdir_get` hands back entry `i`, and `listdir_free` releases the whole
-    thing. The caller OWNS the result and every name in it.
+    A BLOB, and it now SAYS SO: the declared return type is `List[String]`,
+    which on this path is the annotation that means "one word pointing at
+    `[count][element]…`" — exactly the layout the body below builds. That
+    annotation is what lets a caller write `len(names)` and `for x in names`
+    and `names[i]` instead of the three accessors below, and it is what
+    `model.imported_callee_kind` reads across the dylib boundary a caller is
+    really behind (`bugs/FORMAL_listdir_no_run_time_sequence.md` item 1: the
+    representation was already right and the KIND was missing). It costs
+    nothing: the C signature is `int64_t` either way, because a list is one
+    word, so this is metadata and not an ABI change.
+
+    The three accessors REMAIN, because they are the honest spelling for a
+    caller that wants to free the blob, and `listdir_len`/`listdir_get` are
+    what the element-kind refusals read when a use site must decide. The caller
+    OWNS the result and every name in it.
 
     `.` and `..` are NOT in it, as in CPython. The order is the C library's
     `readdir` order, which is the filesystem's own and not sorted — CPython's
@@ -541,9 +553,14 @@ def listdir_free(names: Pointer[Int64]) -> int:
 # as an index over the blob because a list of a run-time length is what this
 # whole arrangement exists to avoid.
 
-def walk(root, maxdepth) -> int:
+def walk(root, maxdepth) -> List[String]:
     """Every directory at or below `root`, down to `maxdepth` levels, or 0 when
     `root` is not a directory.
+
+    `List[String]` for the reason `listdir` above says: the value is one word
+    pointing at a `[count][element]…` blob, so the annotation is what lets a
+    caller ask its length and iterate it, and it is metadata rather than an ABI
+    change.
 
     `maxdepth` is REQUIRED rather than defaulted, for the reason every
     parameter in this module is (see the note at the top of this file): a

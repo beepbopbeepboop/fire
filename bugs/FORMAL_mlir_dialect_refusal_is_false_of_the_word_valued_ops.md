@@ -12,6 +12,80 @@ have made the recommended implementation produce wrong answers, and it
 under-counted one of the five files. **The lowering table is still not built**;
 see "The next step".
 
+**Status (2026-10-03, `work/formal8-7-r2`): item 2 of "The next step" is DONE,
+and it did not need the BOOL kind that section recommended — it needed the
+DECLARATION, which the program already had.** `pop.select` and `__mlir_bool__()`
+are rewritten, in the shared pipeline, to the expressions they already denote on
+this path: `x != 0` and `a if c else b`. `std/utils/_select.mojo` swept
+`codegen -> pass` on both architectures, which is the one file this document's
+item 2 was worth.
+
+**Why the kind would have been the wrong tool, and this is the part worth
+keeping.** The premise behind item 2 is the sentence
+`MLIR_UNGUARDED_OPS["pop.select"]` carried:
+
+> this path has no BOOL kind distinct from an integer — an unannotated word IS
+> an integer — so a select answered kind-blind would test a `char *` for
+> non-zero
+
+Both clauses are true and NEITHER of them is about this program.
+`std/utils/_select.mojo:17` is
+`def _select_register_value[T: TrivialRegisterPassable](condition: Bool,
+lhs: T, rhs: T) -> T`, so `condition` is not an unannotated word: the source says
+it holds a `Bool`, and on this path a `Bool` is a word holding 0 or 1 — which is
+exactly what `x != 0` computes. The question that decides the lowering is not
+"can a kind tell a Bool from an `Int`" (it cannot, and does not need to —
+`_kind_of_simple` already classifies a `BoolLiteral` as `INT_KIND`, which is
+correct) but "does the source say this word is 0 or 1", and the source does.
+
+**So the fifth kind constant would have bought nothing here and cost a wrong
+answer somewhere else.** Every consumer of `INT_KIND` — `len`, a `%s` format, a
+sign test — would have to learn to accept a kind it does not recognise, and the
+two that must NOT (a format, a length) would gain a second opinion to keep
+consistent. `formal/types.py::BOOL_TYPE_NAMES` plus `model.annotation_is_bool`
+are the whole of what was needed: a vocabulary of the annotations that say
+"0 or 1", and one reader of it. `declared_type_kind` still maps `Bool` to
+`INT_KIND`, because that is what a `Bool` IS here.
+
+**The guard is decidable and it is the refusal that proves it.** A receiver the
+function does not declare a `Bool` is left alone, so `MLIR_BOOL_METHODS`'s own
+refusal fires and now says what is missing and what to do — annotate the
+receiver. Measured, both architectures, on the two programs that differ only in
+the declaration:
+
+    def pick(condition: Bool, lhs: Int, rhs: Int) -> Int:
+        return __mlir_op.`pop.select`(condition.__mlir_bool__(), lhs, rhs)
+    #   -> Built, and pick(1, 10, 20) = 10, pick(0, 10, 20) = 20
+
+    def pick(condition: String, lhs: Int, rhs: Int) -> Int:
+        return __mlir_op.`pop.select`(condition.__mlir_bool__(), lhs, rhs)
+    #   -> refused: "`pop.select` is a dialect OPERATION whose value could be a
+    #      word on this path, but it cannot be GUARDED here … The missing thing
+    #      is therefore the declaration and not a kind"
+
+**One deliberate non-widening.** A local bound to a COMPARISON (`c = n > 3`) is
+provably a `Bool` too, and this pass does not claim it: an annotation is what the
+SOURCE says about a NAME, while a comparison is a fact about a value's
+provenance, and widening from one to the other is the value model's question,
+not this one's. `test_formal_run.py`'s `recvkind_mlir_bool_needs_a_declared_bool`
+is that program and pins the refusal.
+
+**A rewrite in the shared pipeline rather than an emitter arm per architecture**,
+which is why "both architectures" is a statement about one code path and not
+about two implementations agreeing: `a if c else b` is an `F.TernaryExpr`, which
+arm64 already emits as one `CSEL` (`_emit_csel_ternary`) and x86-64 as a branch,
+so `pop.select` needed no new instruction selection at all. That is also the
+argument the document made in §Correction for why a NAME-keyed table is the
+wrong shape — a select's arms would have had to be re-decided per architecture
+for no gain.
+
+**Items 1 and 3 remain, unchanged and in that order.** The operand's DECLARED
+type is what every arithmetic arm needs and what the operation name cannot
+supply; `simd_length.mojo` is still the right first target for it (6 of the 9
+word-typed sites, reachable, its own terminal being a `_type=` rather than the
+vector-width question), and it is still not reached by this change —
+`bugs/FORMAL_known_limits.md` §2.2's correction now records that too.
+
 **What is worth keeping here is the census**, and the correction to it.
 
 ## What was run

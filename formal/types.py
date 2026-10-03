@@ -93,6 +93,26 @@ STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
 DICT_TYPE_NAMES = frozenset({"Dict", "dict"})
 
 
+# Annotations that name a BOOL, and why they are a SET rather than two rows of
+# `TYPE_NAMES`. A Bool's KIND on this path is an integer — a word holding 0 or
+# 1 — and `model._kind_of_simple` already says exactly that about a
+# `BoolLiteral`, so putting `Bool` in `TYPE_NAMES` would be true and useless:
+# every consumer of a kind would read it as the integer it is, and nothing could
+# tell a Bool from an Int afterwards. What the dialect `pop.select` lowering
+# needs is the narrower question "does this annotation say the word holds 0 or
+# 1", because that is what makes `x != 0` the right answer for `x.__mlir_bool__()`
+# rather than a `char *`'s "is this address non-zero". One vocabulary, read by
+# one predicate, so the two cannot drift apart — and so a Bool is NOT removed
+# from `TYPE_NAMES`' half of the story: `declared_type_kind` maps this set to
+# `INT_KIND`, which is correct, and this set is the extra fact on top.
+#
+# `bool` is here beside `Bool` for the same reason `STRING_TYPE_NAMES` carries
+# both `String` and `str` and `TYPE_NAMES` carries both `int` and `Int`: they are
+# two spellings of one declaration, and a table that recognised one of them is a
+# table that answers differently for two spellings of the same program.
+BOOL_TYPE_NAMES = frozenset({"Bool", "bool"})
+
+
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""
     if s is None:

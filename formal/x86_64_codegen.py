@@ -6978,11 +6978,19 @@ ctor_field_value=self._ctor_field_value_for(name),
             # the manifest entry says what it returns. Without this the result
             # was unclassified, and `print(mod.name())` formatted a `char *` as
             # an integer — the pointer's own value.
-            return M.dylib_export_return_kind(
+            # The callee's OWN DECLARATION first, then the signature: one
+            # word of C cannot say `-> List[Int]` from `-> Int`, and
+            # `model.imported_callee_kind` is the one place that decides which
+            # of the two answers a container return type gets. A library
+            # shipped without its sources has no declaration, and the same
+            # call then answers exactly what it answered before.
+            return M.imported_callee_kind(
                 M.dylib_callee_export(self._dylib_by_name,
                                       self._dylib_by_module,
                                       self._dylib_forwarded,
-                                      self._import_aliases, name))
+                                      self._import_aliases, name),
+                self._extern_decl_for(name),
+                int_names=TYPE_NAMES, string_names=STRING_TYPE_NAMES)
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:

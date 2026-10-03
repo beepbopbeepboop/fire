@@ -374,11 +374,16 @@ MLIR_UNGUARDED_OPS = {
                 "say which comparison it is, and that predicate is itself a "
                 "dialect attribute rather than a value"),
     "pop.select": ("its first argument is a BOOL (`condition.__mlir_bool__()`), "
-                   "and this path has no BOOL kind distinct from an integer — "
-                   "an unannotated word IS an integer — so a select answered "
-                   "kind-blind would test a `char *` for non-zero and answer "
-                   "1. The missing piece is a BOOL kind, which "
-                   "`MLIR_BOOL_METHODS` already names"),
+                   "and this path lowers that only when the receiver's "
+                   "DECLARED type says `Bool` — an unannotated word is an "
+                   "integer here, so a select answered kind-blind would test a "
+                   "`char *` for non-zero and answer 1. The missing thing is "
+                   "therefore the declaration and not a kind: "
+                   "`formal.types.BOOL_TYPE_NAMES` names the annotations that "
+                   "carry it and `annotation_is_bool` is the one reader of "
+                   "them. `std/utils/_select.mojo` declares `condition: Bool` "
+                   "and IS lowered, so this row is reached only by a program "
+                   "that does not say what its word holds"),
     "pop.load": ("its width is its POINTEE's, and nothing here states a pointee "
                  "type for this receiver"),
     "pop.offset": ("it is POINTER arithmetic, so its scale is the pointee's "
@@ -7230,7 +7235,8 @@ def _frame_slot_string_refusal(spelled: str, ann) -> str:
         f"which is the same program with a lifetime this analysis can see")
 
 
-def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
+def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
+                       bool_names=()):
     """The kind a DECLARED type annotation gives, or None for one we cannot map.
 
     The one question `struct_field_kind` and its callers ask, and it is
@@ -7243,6 +7249,16 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
     here, for the reason every other shared table in this file takes them from
     the caller: the two backends must not answer this question from two private
     lists, and a name is a string, not a representation.
+
+    `bool_names` is the THIRD vocabulary and it does not produce a kind of its
+    own: a `Bool` on this path is a word holding 0 or 1, so its kind IS
+    `INT_KIND` — which is what `_kind_of_simple` already says about a
+    `BoolLiteral`, and putting `Bool` in `int_names` would say the same thing
+    one line earlier. It is a separate argument because ONE caller needs the
+    narrower fact as well ("this word is 0 or 1, so `x != 0` is its value"),
+    and a kind cannot carry it: every consumer of `INT_KIND` would have to learn
+    to ask, and the ones that must not — a `%s` format, a `len` — would get a
+    second opinion to keep consistent. See `annotation_is_bool` for the reader.
 
     `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
     is what turns one declared type into `FRAME_KIND`: a slot annotated with a
@@ -7266,6 +7282,8 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
         return None
     if base in string_names:
         return STR_KIND
+    if base in bool_names:
+        return INT_KIND
     if base in int_names:
         return INT_KIND
     if decls is not None:
@@ -7305,6 +7323,28 @@ def declared_type_is_dict(ann, dict_names=("Dict", "dict")) -> bool:
         return False
     base = annotation_base_name(ann)
     return base is not None and base in dict_names
+
+
+
+def annotation_is_bool(ann, bool_names=()) -> bool:
+    """Does this declared type say the word holds 0 or 1?
+
+    NOT `declared_type_kind(ann) == INT_KIND` and deliberately not: a kind says
+    what a value IS, and both an `Int` and a `Bool` are `INT_KIND` on this path
+    (a Bool is a word holding 0 or 1, and `formal.types.BOOL_TYPE_NAMES`' own
+    comment is the argument). What `pop.select` needs is the narrower fact —
+    "is this 0 or 1" — because that is what makes `x != 0` the right lowering of
+    `x.__mlir_bool__()` rather than a `char *`'s "is this address non-zero", and
+    the two programs differ only in the declaration.
+
+    So the vocabulary is passed in for the reason `declared_type_kind` takes
+    its own from the caller: one reader of "what does this annotation mean",
+    so the two cannot answer differently about `condition: Bool`.
+    """
+    if not isinstance(ann, str) or not bool_names:
+        return False
+    base = annotation_base_name(ann)
+    return base is not None and base in bool_names
 
 
 def struct_field_kind(struct_def, name, int_names=(), string_names=(),
@@ -10079,15 +10119,20 @@ WRITER_METHODS = {
 # is a fifth kind constant threaded through ValueKinds and both backends'
 # kind oracles, where `_unify` would have to decide what a bool-and-an-int is.
 MLIR_BOOL_METHODS = {
-    "__mlir_bool__": "is a real builtin and is implementable as the same test "
-                     "`if` already does (a Bool is a word holding 0 or 1 on "
-                     "this path), but it is refused because it cannot be "
-                     "GUARDED here: the kind model has no bool distinct from "
-                     "int — an unannotated word is an int — so lowering it "
-                     "kind-blind would make it answer `(receiver != 0)` on a "
-                     "char * too, which is a plausible-looking 1 for a "
-                     "pointer. The fix is a BOOL kind, not a lowering of this "
-                     "call",
+    "__mlir_bool__": "is a real builtin and it is lowered as the same test `if` "
+                     "already does — a Bool is a word holding 0 or 1 on this "
+                     "path, so `x != 0` is its value — for every receiver "
+                     "whose DECLARED type says `Bool` (`build."
+                     "_lower_dialect_select`, in the shared pipeline, so both "
+                     "architectures get it by construction). This receiver is "
+                     "not one: the source states nothing about what this word "
+                     "holds, and an unannotated word is an integer here, so "
+                     "`(receiver != 0)` would answer 1 for a `char *` that "
+                     "happens to be non-null. The missing thing is the DECLARED "
+                     "TYPE and not a kind: `formal.types.BOOL_TYPE_NAMES` "
+                     "names the annotations that carry it and "
+                     "`model.annotation_is_bool` is the one reader of them. "
+                     "Annotate the receiver `Bool`",
 }
 
 
@@ -13045,10 +13090,18 @@ class ValueKinds:
             return
         self.locals[name] = kind
 
-    def _bind_value(self, name, value) -> None:
-        """Bind `name` to what `value` holds, defaulting an unclassified
-        non-container value to a word (see the note on kinds)."""
-        self._bind(name, self._value_kind(value), own=self._own_shape_of(value))
+    def _bind_value(self, name, value, ann=None) -> None:
+        """Bind `name` to what `value` holds — `_kind_with_ann` then `_bind`,
+        and record what the statement says about it on the DICT axis.
+
+        Two independent pieces of evidence about one binding, so two calls and
+        not one: the annotation reader can improve the KIND of a value that
+        classified to nothing, and it says nothing about dictness at all, while
+        `is_dict_value` reads the value's own shape and must keep doing so for
+        the names the annotation never touches.
+        """
+        kind, own = self._kind_with_ann(value, ann)
+        self._bind(name, kind, own=own)
         self._bind_dictness(name, self.is_dict_value(value))
 
     def _bind_dictness(self, name, answer) -> None:
@@ -13069,6 +13122,83 @@ class ValueKinds:
                 self._dict_conflicts.add(name)
             return
         self._dict_names[name] = bool(answer)
+
+    def _kind_with_ann(self, value, ann=None):
+        """`(kind, evidence)` for a binding, with the DECLARED type folded in.
+
+        `ann` is the `type_ann` of the statement doing the binding, and it is
+        read only to IMPROVE an answer the value could not give.  That is the
+        whole of the rule and it is one-directional on purpose: the value's own
+        shape is a direct statement about what flows into the name, while the
+        annotation is metadata about what the name is FOR — which is the reading
+        `formal/build.py`'s `AssignStmt` arm already takes ("type_ann is
+        metadata, not a storage decision").  So an annotation can replace a
+        DEFAULT and never a claim, and `var x: String = 5` still classifies as
+        the integer the literal says it is.
+
+        The case this exists for is the one where the default was the only thing
+        there was.  Measured, both architectures, before this reader:
+
+            from os.path import dirname, abspath
+
+            HERE = dirname(abspath(__file__))          # a module-global slot
+
+            def main(n):
+                s: String = HERE                       # annotated String
+                print(s)                               # -> 105553157226576
+
+        `HERE` is a module-level name holding a `char *`, so it is not a local
+        of `main` and `global_slot_kind` claims nothing about it (`_body_store_shape`
+        asks only of a bare-name callee, deliberately); `kind_of` then returned
+        None, `_value_kind` turned that into `INT_KIND` — this model's default
+        for a word — and `print` rendered the interned path as a DECIMAL.  A green
+        build, an exit status of 0, and an address printed as though it were the
+        string.  The declaration is in the source and says `String`; the reader
+        for it is `_annotation_kind`, which is the same vocabulary test
+        `_param_list`'s parameter seeding uses so a parameter and an annotated
+        assignment of the same spelling cannot answer differently.
+
+        BOTH statement forms are covered and that is not tidiness: `var d: T = x`
+        parses as a `VarDecl` while `d: T = x` — the same text without the
+        keyword, and the spelling this repository's own files use — parses as an
+        `AssignStmt` carrying a `type_ann`.  Only the `AssignStmt` arm reached
+        the reader at first, which is why the measurement above was still an
+        address after the first attempt.
+        """
+        own = self._own_shape_of(value)
+        kind = self._value_kind(value)
+        if own is None and ann is not None:
+            declared = self._annotation_kind(ann)
+            if declared is not None:
+                kind, own = declared, declared
+        return kind, own
+
+    def _annotation_kind(self, ann):
+        """What a declared type says a name holds, or None.
+
+        The vocabulary test `_param_list`'s parameter seeding uses — `int_names`
+        and `string_names` are the build's own annotation vocabularies, read
+        from `formal/types.py` by both backends — and it answers None for
+        everything else, which is the safe direction: a container annotation
+        (`List[Int]`), a `-> T` return type in a position that is not a
+        declared type, and a name that is not in either vocabulary leave the
+        value's own classification exactly as it was.
+
+        `String` is the only annotation that changes an answer, and that is not
+        an accident of this path: a string here is a `char *` and an integer
+        here is a word, so the two are indistinguishable except by a
+        declaration — which makes the declaration the only evidence there is,
+        and makes `None` for everything else the conservative answer rather than
+        the convenient one.
+        """
+        text = ann.strip() if isinstance(ann, str) else None
+        if not text:
+            return None
+        if text in self._string_names:
+            return STR_KIND
+        if text in self._int_names:
+            return INT_KIND
+        return None
 
     def _own_shape_of(self, value):
         """`kind_of(value)`, or None when that answer is a fallback.
@@ -13273,13 +13403,19 @@ class ValueKinds:
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
-                self._bind_target(s.target, self._value_kind(s.value),
-                                  own=self._own_shape_of(s.value))
+                # `d: String = x` is an `AssignStmt` with a `type_ann` and not a
+                # `VarDecl`, so the declared-type reader has to be asked here as
+                # well — see `_kind_with_ann`, whose docstring carries the
+                # measurement of what happens when only one of the two arms asks.
+                kind, own = self._kind_with_ann(s.value,
+                                                getattr(s, "type_ann", None))
+                self._bind_target(s.target, kind, own=own)
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
-                self._bind_value(s.name, s.value)
+                self._bind_value(s.name, s.value,
+                                 ann=getattr(s, "type_ann", None))
                 self._note_construction(s.name, s.value)
                 self._note_dict_init(s.name, s.value)
                 self._note_field_stores(s.name)
@@ -13373,13 +13509,33 @@ class ValueKinds:
         `_iterable_kind` answers INT_KIND for it because there is nothing else
         to answer.  That answer is a word, not an integer, so anything reading
         it as evidence that the source says "integer" refuses a correct
-        program; see `own_shape_kind`, which is what reads this."""
+        program; see `own_shape_kind`, which is what reads this.
+
+        **A NAME whose kind carries an ELEMENT is the fourth shape**, and it is
+        the one a returned blob needs: `for x in names: len(x)` over
+        `names = listdir(p)` — `-> List[String]`, so the name's kind is
+        `list:str` — refused with "an integer has no length" about a `char *`,
+        because nothing read the element off the one place that states it. The
+        answer is the element kind, and it is evidence for the same reason the
+        three above are: the annotation said what the loop yields.
+
+        It stays None for a name whose kind is the BARE list prefix, which is
+        every container this path cannot give an element type to (a parameter
+        annotated `List`, a nested container, a blob whose initializer claimed
+        nothing). That is the conservative direction and it is the measured one:
+        `for row in rows: row[0]` over an unannotated parameter must keep
+        working, and it does, because nothing claims an element.
+        """
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(iterable.elements))
         if isinstance(iterable, F.Comprehension):
             return list_kind(_kind_of_simple(iterable.element))
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
+        if isinstance(iterable, F.IdentExpr):
+            kind = self.name_kind(iterable.name)
+            if is_list_kind(kind or ""):
+                return list_elem_kind(kind)
         return None
 
     def _return_kind(self, fn) -> str | None:
@@ -14015,11 +14171,70 @@ def dylib_export_return_kind(entry) -> str | None:
     for it. Only a `char *` is a kind this model can be sure of from the
     signature, because only a `char *` is the one pointer whose pointee the
     emitters already know how to walk.
+
+    **A container return is NOT readable from the signature, and that is the
+    half `imported_callee_kind` adds.** `-> List[Int]` and `-> Int` are both
+    `int64_t` in the manifest, so the one-word signature cannot say which is
+    which — which is exactly why `len(t)` for `t = other_module.triple()`
+    refused with "an integer has no length" about a blob (`[3, 14, 0]`) the
+    callee built and the caller already reads by subscript.
     """
     if not entry:
         return None
     ret = signature_return_type(entry.get("signature") or "")
     return STR_KIND if ret.replace("const", "").strip() == "char *" else None
+
+
+def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
+                         decls=None) -> str | None:
+    """What a call ACROSS a dylib boundary produces, or None for "not known".
+
+    The declaration first, then the signature — in that order and with the
+    reason written down, because the two answer different questions and only one
+    of them can be right about a container.
+
+    A library's C signature is one word, so it can say `char *` (which is why
+    `dylib_export_return_kind` exists and why `print(mod.name())` stopped
+    formatting a string as a decimal) and it cannot say anything else:
+    `-> List[Int]`, `-> Int` and `-> Bool` are all `int64_t`. The callee's own
+    `-> T` can, and `declared_type_kind` is the one reader of a declared type in
+    this file, so the two backends cannot disagree about what `List[Box]` means.
+
+    **The container answer carries its ELEMENT kind**, because the two consumers
+    a returned blob has are a subscript and a `for`, and both ask what the blob
+    HOLDS rather than only that it is one: `for x in names: len(x)` refused with
+    "an integer has no length" about a `char *` when the annotation said
+    `List[String]` and the bare prefix `list` was all that was carried.
+    `annotation_type_arg_base` reads the element out of the brackets and
+    `declared_type_kind` classifies it — `List[String]` → `list:str`,
+    `List[Int]` → `list:int`, `List[Box]` → `list` (a struct of ANOTHER image
+    is not a kind this model has, and the bare prefix is the honest answer).
+
+    **Only a container answer is taken from the declaration.** An `-> Int` is
+    deliberately NOT claimed, even though the declaration states it, because
+    this path cannot tell an integer from a frame address and the unclassified
+    answer is the one that refuses rather than guessing; widening this to the
+    scalars is a decision with its own blast radius, and the measured gap this
+    closes is the container one (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s
+    item 1: `len()` of a value the callee's declaration says is a list).
+
+    `declaration` may be None — a library shipped without its sources, or one
+    whose manifest predates the contract — and then this is exactly
+    `dylib_export_return_kind`, which is the whole of what it could answer
+    before.
+    """
+    ann = getattr(declaration, "return_type", None) if declaration else None
+    if isinstance(ann, str):
+        kind = declared_type_kind(ann, int_names, string_names, decls)
+        if is_list_kind(kind or ""):
+            elem = declared_type_kind(
+                annotation_type_arg_base(ann, self_type=None),
+                int_names, string_names, decls)
+            # A scalar element is the answer a subscript and a loop target both
+            # ask for; a container element (`List[List[Int]]`) is not one this
+            # path can carry, and the bare prefix is the honest thing to leave.
+            return list_kind(elem) if elem and not is_list_kind(elem) else kind
+    return dylib_export_return_kind(entry)
 
 
 def abi_module_name(dotted: str) -> str:
@@ -14606,6 +14821,51 @@ def imported_constant(tables: dict, qualifier: str, name: str):
     different mistakes with two different repairs."""
     table = dylib_export_module(tables, qualifier)
     return table.get(name) if table else None
+
+
+def dylib_module_variables(dylib_exports: list) -> dict:
+    """`{module identity: [name, …]}` for the VARIABLES each library declares.
+
+    A module-level name this module's own functions write through `global` is
+    not a constant, and it is deliberately absent from `dylib_module_constants`
+    even when its module-level statement folded to a literal — the single-writer
+    premise a folded constant rests on is false for it, and publishing both
+    would let an importer materialize the value the module STARTED at. This
+    function is the other half of that decision, and it exists so a consumer can
+    NAME the shape instead of guessing it: `module_attribute_refusal` prints
+    "the module's own function writes it" for a name in here and "no storage
+    for a list, an object or a stream" for one that is not, and those are
+    different facts with different repairs.
+
+    Keyed by the same ABI identity the export and constant tables use, and it
+    takes the FIRST library on the link line for a module identity appearing
+    twice — the precedence `dylib_module_constants` already applies, so the two
+    tables cannot answer differently about one module.
+    """
+    out: dict = {}
+    for lib in (dylib_exports or []):
+        module = lib.get("module") or ""
+        if not module:
+            continue
+        names = lib.get("variables") or []
+        if not names:
+            continue
+        out.setdefault(module, [])
+        for name in names:
+            if name not in out[module]:
+                out[module].append(name)
+    return out
+
+
+def dylib_module_variable_names(dylib_exports: list, qualifier: str) -> set:
+    """The variable names the module `qualifier` names publishes, for one reader.
+
+    `dylib_export_module` is applied to the variable table so a consumer resolves
+    a qualifier exactly as it resolves the export and constant tables — both
+    ABI spellings, `os.path` and `os_path` — rather than matching a bare string
+    and answering differently from its two neighbours."""
+    table = dylib_export_module(dylib_module_variables(dylib_exports), qualifier)
+    return set(table or ())
 
 
 def constant_literal_node(value, line: int = 0, col: int = 0):
@@ -18005,6 +18265,115 @@ def _strip_type_args(text: str) -> str:
     return text if cut is None else text[:cut]
 
 
+def _split_type_args(text: str) -> list:
+    """The texts INSIDE the outermost `[...]` pair, top level split on commas.
+
+    The complement of `_strip_type_args`, and the reason `List[Box]` can say
+    which STRUCT its elements are where `List` alone cannot.  Splitting on top
+    level commas only: `List[Dict[String, Int]]` is ONE argument, and a naive
+    `split(",")` would hand back `Dict[String` and `Int]]`, neither of which
+    names a struct.
+    """
+    depth, cut, close = 0, None, None
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if depth == 0:
+                cut = i
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if cut is None or close is None:
+        return []
+    inner, args, start = text[cut + 1:close], [], 0
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(inner[start:i].strip())
+            start = i + 1
+    args.append(inner[start:].strip())
+    return [a for a in args if a]
+
+
+def _strip_type_decorations(text: str, self_type: str | None = None):
+    """`text` with every leading `_TYPE_DECORATIONS` marker removed, or None.
+
+    The loop `annotation_base_name` and `annotation_type_arg_base` both need,
+    and one copy of it because the two answer questions about the SAME
+    declaration: a decoration in front of a type does not change which type it
+    names, and a `self_type` supplied for `Self` means the same thing to both.
+
+    `None` for a marker with nothing after it (`out Self` reduced, a bare
+    `mut`), and for a function-typed declaration (`fn(x: Int) -> Int` names no
+    struct either way).  Both are the unagreed direction.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for deco in _TYPE_DECORATIONS:
+            if text == deco:
+                if deco == "Self" and self_type and self_type.isidentifier():
+                    return self_type
+                return None
+            if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
+                text = text[len(deco):].strip()
+                if text.startswith("["):
+                    depth, close = 0, None
+                    for i, ch in enumerate(text):
+                        if ch == "[":
+                            depth += 1
+                        elif ch == "]":
+                            depth -= 1
+                            if depth == 0:
+                                close = i
+                                break
+                    if close is None:
+                        return None
+                    text = text[1:close].strip()
+                changed = True
+    if "(" in text:
+        return None
+    return text
+
+
+def annotation_type_arg_base(ann, arg: int = 0,
+                             self_type: str | None = None) -> str | None:
+    """The bare name of the `arg`-th type ARGUMENT, or None.
+
+    `List[Box]` → `Box`, `StaticList[Box, 3]` → `Box`, `List` → None,
+    `List[Self.T]` → `T`, `Dict[String, Int]` → `Int` at `arg=1`.
+
+    This is the reader `annotation_base_name` cannot be, and the reason it is a
+    separate function rather than a flag: the base answers "is this a LIST",
+    which every `List[...]` agrees on, while this answers "of WHAT", and the
+    element type is the whole of what a subscript receiver's type is made of.
+    The measurement behind that split is the deleted
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md`: `def drain(vals:
+    List, …)` declares no element and no pass over the source can supply one,
+    while `def drain(vals: List[Box], …)` states it outright.
+
+    Every doubtful answer is None, in the same direction as its sibling: an
+    annotation with no brackets, an empty argument, one that does not reduce to
+    an identifier, and a qualified name that is not a `Self` type-parameter
+    access.  A caller that is handed None cannot claim a struct, which is the
+    only safe reading of "the source does not say".
+    """
+    text = _strip_type_decorations(ann.strip() if isinstance(ann, str) else "",
+                                   self_type)
+    if not text:
+        return None
+    args = _split_type_args(text)
+    if arg >= len(args):
+        return None
+    return annotation_base_name(args[arg], self_type=self_type)
+
+
 def annotation_base_name(ann, self_type: str | None = None) -> str | None:
     """The bare type name a declared type names, or None if it names nothing.
 
@@ -18054,39 +18423,13 @@ def annotation_base_name(ann, self_type: str | None = None) -> str | None:
     """
     if not isinstance(ann, str):
         return None
-    text = ann.strip()
-    # Leading markers, repeatedly: `unsafe mut Pointer`.  A marker followed by a
-    # BRACKET wraps the type rather than qualifying it — `ref[Inner]` is a
-    # reference TO an `Inner` — so the bracket's contents are what is left to
-    # reduce, and the loop continues on them so `ref[ref[Inner]]` works too.
-    changed = True
-    while changed:
-        changed = False
-        for deco in _TYPE_DECORATIONS:
-            if text == deco:
-                if deco == "Self" and self_type and self_type.isidentifier():
-                    return self_type
-                return None
-            if text.startswith(deco) and text[len(deco):len(deco) + 1] in (" ", "["):
-                text = text[len(deco):].strip()
-                if text.startswith("["):
-                    depth, close = 0, None
-                    for i, ch in enumerate(text):
-                        if ch == "[":
-                            depth += 1
-                        elif ch == "]":
-                            depth -= 1
-                            if depth == 0:
-                                close = i
-                                break
-                    if close is None:
-                        return None
-                    text = text[1:close].strip()
-                changed = True
+    text = _strip_type_decorations(ann.strip(), self_type)
+    if text is None:
+        return None
     # A CALLABLE type (`fn(x: Int) -> Int`) is a function pointer here and names
     # no struct, so it is the untyped direction rather than a base of `fn`.
-    if "(" in text:
-        return None
+    # (Decided inside `_strip_type_decorations`, so the sibling reader of a
+    # type's ARGUMENTS cannot answer "yes" where this one answers "no".)
     text = _strip_type_args(text)
     if not text or not (text[0].isalpha() or text[0] == "_"):
         return None
@@ -18144,6 +18487,218 @@ def parameter_declared_structs(fn, decls: dict, owner=None) -> dict:
         if st is not None:
             out[pname] = st
     return out
+
+
+# ── What STRUCT does an expression name ───────────────────────────────────
+#
+# Dispatch on this path is by NAME: a method call is lifted to `S_m(recv, …)`
+# from the method name alone, and a one-word struct's sole field IS its
+# receiver.  Both need the same missing fact — which struct a receiver
+# expression denotes — and there was no reader for it, so every consumer grew
+# its own recogniser and `formal/build.py`'s `_receiver_shape_refusal` was
+# left to refuse `bs[0].get()` with a message asking for a predicate nobody had
+# built — which is what `bugs/FORMAL_method_call_on_a_subscripted_receiver.md`
+# recorded, and which this function is the answer to, so that doc is deleted.
+#
+# The predicate is here, in the shared model, because it is asked by a build
+# pass (the lift), by the frame analysis (which must agree about when a
+# receiver's type is known, or the two refuse the same program for different
+# reasons) and by both backends.  ONE answer, and every doubtful case answers
+# None.
+
+CONTAINER_TYPE_NAMES = ("List", "list", "StaticList", "Tuple", "tuple",
+                        "Set", "set", "InlineStaticList", "Array", "array")
+
+
+def list_element_structs(fn, structs_by_name: dict, decls: dict,
+                         owner=None) -> dict:
+    """`{name: ONE-FIELD struct}` for every name in `fn` holding a LIST of them.
+
+    The SUBSCRIPT half of `receiver_struct`'s question — "which struct does
+    `bs[0]` hold" — for the two spellings that state it:
+
+      * a local bound to a container LITERAL of constructor calls, `var bs =
+        [Box(), Box()]`.  The element type is the constructor's own declaration,
+        and the calls must agree: a literal holding two different structs (or a
+        constructor and an integer) claims nothing, which is `_kind_of_elements`'s
+        unanimity rule applied to a stricter question — a name that could be two
+        things is not a type;
+      * a PARAMETER declared `List[Box]` — `annotation_type_arg_base` for the
+        element, against `CONTAINER_TYPE_NAMES` for the container.  `List` with
+        no argument declares no element and claims nothing, which is row 4 of
+        the doc's table and the shape no pass over the source can answer.
+
+    Only a ONE-FIELD struct is answered, and that restriction is what makes every
+    answer sound rather than merely likely: the receiver of a one-field struct
+    IS its field (`struct_fits_one_word`), so the element WORD of the blob is the
+    struct and `bs[0].get()` can be lifted to `Box_get(bs[0])` with the element
+    word as the receiver.  A multi-field struct in a container is a frame address
+    in a container with no layout for it, which is refused by name and loudly
+    (`wide_receiver_by_reference_refusal`), so answering it here would replace a
+    true refusal with a wrong answer.
+
+    The first spelling wins over the second: a local that is assigned two
+    different container literals claims nothing rather than taking whichever was
+    seen last, because `ValueKinds` is deliberately flow-insensitive for the same
+    reason and two readers of one set of bindings must not disagree.
+    """
+    out, seen_binding = {}, set()
+
+    def _one_kind(elems):
+        kinds = set()
+        for el in (elems or []):
+            if not isinstance(el, F.CallExpr) or not isinstance(el.func,
+                                                               F.IdentExpr):
+                return None
+            st = (structs_by_name or {}).get(el.func.name)
+            if st is None:
+                return None
+            kinds.add(st.name)
+        return kinds.pop() if len(kinds) == 1 else None
+
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = value = None
+        if isinstance(node, F.VarDecl):
+            target, value = node.name, node.value
+        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                           F.IdentExpr):
+            target, value = node.target.name, node.value
+        if not target or not isinstance(value, (F.ListExpr, F.TupleExpr,
+                                                F.SetExpr)):
+            continue
+        if target in seen_binding:
+            out.pop(target, None)
+            continue
+        seen_binding.add(target)
+        name = _one_kind(value.elements)
+        st = (structs_by_name or {}).get(name) if name else None
+        if st is not None:
+            out[target] = st
+    self_type = getattr(owner, "name", None) or None
+    shape = function_param_shape(fn)
+    starred = {n for n in (shape.vararg, shape.kwarg) if n}
+    for pname, ann in shape.fixed:
+        if not pname or pname in starred or pname in out \
+                or pname in seen_binding:
+            continue
+        if annotation_base_name(ann, self_type=self_type) \
+                not in CONTAINER_TYPE_NAMES:
+            continue
+        elem = annotation_type_arg_base(ann, self_type=self_type)
+        st = (structs_by_name or {}).get(elem) if elem else None
+        if st is not None:
+            out[pname] = st
+    return {name: st for name, st in out.items()
+            if struct_is_one_field(st)}
+
+
+def receiver_struct(expr, fn, structs_by_name: dict, owner=None,
+                    bound: dict = None, elems: dict = None, functions=None):
+    """The ONE-FIELD struct `expr` denotes, or None when nothing says which.
+
+    The receiver-type predicate, and it is ONE function for the reason
+    `struct_frame_slot_candidates` is: two consumers asking "which struct does
+    this receiver name" and answering differently is how the same program gets
+    two verdicts.  The build pass lifts the call and the frame analysis then
+    reads a parameter list it would not otherwise have had, so the two cannot
+    disagree by construction — but only if they ask the same question, and this
+    is where they ask it.
+
+    Four sources, which is the census the deleted
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` tabulated:
+
+      * a SUBSCRIPT — `bs[0]`, `messages[i]`.  The element type of `elems`, which
+        `list_element_structs` built from the two spellings that state one;
+      * a CALL — `S()`, or a call whose declared return type names a struct.  The
+        constructor's own declaration, and for the second the callee's `-> T` out
+        of `functions` read by `annotation_base_name`;
+      * a bare NAME — `self`, a parameter declared with a struct annotation, or a
+        name bound to a constructor call (`bound`, which the caller already
+        computed for the one-word field rewrite and passes in rather than
+        recomputing: two walks of one set of bindings is two recognisers);
+      * a FIELD — `self.mojo_value`, `Tensor.registry`.  The field's DECLARED
+        type, read by `struct_field_declared_type`, which is the one reader of a
+        declared type and so cannot answer differently from a field's own
+        analysis.
+
+    `bound` and `elems` are the caller's per-function tables; both default to
+    None, which means "no evidence in hand from the caller" and not "empty",
+    because the binding-derived sources have no other way to see the function's
+    statements.  A caller that has the tables passes them; a caller with nothing
+    gets the declaration-only sources, which are the ones that hold at every call
+    site whether or not this image contains one.
+
+    **The answer is a ONE-FIELD struct or nothing.**  `struct_is_one_field` is
+    the gate every source passes through, and it is what lets a caller use the
+    answer as a VALUE rather than as a name: the word `bs[0]` already holds is
+    the struct, so `Box_get(bs[0], …)` passes the receiver this path would have
+    passed for a local.  A multi-field struct's receiver is an address of a frame
+    that belongs to the function which created it, which is a different lifetime
+    and a different refusal, and this predicate does not speak for it.
+    """
+    st = _receiver_struct_source(expr, fn, structs_by_name, owner, bound,
+                                 elems, functions or {})
+    return st if st is not None and struct_is_one_field(st) else None
+
+
+def _receiver_struct_source(expr, fn, structs_by_name: dict, owner,
+                            bound: dict, elems: dict, functions: dict):
+    """The struct ONE source names, or None.  `receiver_struct`'s four rows."""
+    structs_by_name = structs_by_name or {}
+    bound = bound or {}
+    self_name = getattr(owner, "receiver", None) or "self"
+    if isinstance(expr, F.SubscriptExpr):
+        base = expr.obj
+        # `a.b[0]` — the element type of a field's value.  There is no table
+        # for that (a field's list is not a name), so it claims nothing.
+        return (elems or {}).get(base.name) if isinstance(base, F.IdentExpr) \
+            else None
+    if isinstance(expr, F.CallExpr):
+        if not isinstance(expr.func, F.IdentExpr):
+            return None
+        st = structs_by_name.get(expr.func.name)
+        if st is not None:
+            return st
+        callee = functions.get(expr.func.name)
+        ret = getattr(callee, "return_type", None)
+        base = annotation_base_name(ret, self_type=getattr(owner, "name", None))
+        return structs_by_name.get(base) if base else None
+    if isinstance(expr, F.IdentExpr):
+        st = bound.get(expr.name)
+        if st is not None:
+            return st
+        if owner is not None and expr.name == self_name:
+            return owner
+        return parameter_declared_structs(fn, structs_by_name,
+                                          owner).get(expr.name)
+    if isinstance(expr, F.MemberExpr):
+        holder, path = _single_field_chain(expr)
+        if path is None:
+            return None
+        st = bound.get(holder)
+        if st is None and owner is not None and holder == self_name:
+            st = owner
+        if st is None:
+            return None
+        base, _ann, _why, declared = struct_field_declared_type(st, path)
+        return structs_by_name.get(base) if (declared and base) else None
+    return None
+
+
+def _single_field_chain(expr) -> tuple:
+    """`(holder name, field)` for a ONE-LEVEL MemberExpr chain, else `("", None)`.
+
+    `x.f` is a field of a name and this can answer it.  `x.f.g` is a field of a
+    FIELD, whose holder is itself an expression with no declared type in reach,
+    so it claims nothing rather than pretending the leaf's holder is `x` — the
+    two would differ about a struct that nests one-field structs, which is the
+    chain `_one_word_sole_field_chain` already walks and which this predicate
+    does not duplicate.  A subscript anywhere in the chain claims nothing for
+    the same reason.
+    """
+    if not isinstance(expr.obj, F.IdentExpr):
+        return "", None
+    return expr.obj.name, expr.member
 
 
 def struct_field_declared_type(struct_def, name) -> tuple:
@@ -23304,8 +23859,8 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
     `frame_opaque_position_refusal`'s `callee_shape` arm instead.  Measured on
     this very program with the qualification added: refused with "The callee of
     this call is Box.run[3], which names no function this pass has a parameter
-    list for".  That is the fifth shape
-    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` records, and offering
+    list for".  That is the fifth shape the deleted
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` recorded, and offering
     it here would send the reader into a second refusal with the first one
     closed.  A rename is enough: with one `run` in the image the name
     dispatches, and the lift is the ordinary one.
@@ -23804,7 +24359,56 @@ def _comptime_statement(stmt) -> bool:
     return type(stmt).__name__ == "ComptimeVarStmt"
 
 
-def collect_module_symbols(stmts: list) -> dict:
+def builtin_module_constants(source_path: str) -> dict:
+    """`{name: value}` for the module-level names the BUILD can answer.
+
+    One name today, and the list is short on purpose: a name belongs here only
+    because the build was HANDED the fact, not because the source wrote it.
+
+    `__file__` is the path of the file being compiled.  It was refused by name
+    before this — `'__file__' has no home` — on the reasoning recorded in
+    `_UNRESOLVED_NAME_ALLOWED` ("module attributes, which are strings by the
+    language and **identical in every program this path can compile**"), which
+    is false of this one and only this one: every other name on that list has
+    the same value whatever file reads it, and `__file__` is a different string
+    in every file.  So it belongs here rather than there, and the honest way to
+    hold a value that differs per unit is the table a per-unit constant already
+    lives in: `collect_module_symbols` seeds it, the module-constant
+    substitution puts the literal at every read, and a dylib publishes it the
+    way it publishes every other folded constant.
+
+    Two properties make the value right rather than merely plausible:
+
+      * it is `abspath`, not the spelling the caller used.  CPython has made
+        `__file__` absolute for the entry script and for imported modules since
+        3.9, and the target here is 3.14, so a relative path would be a
+        well-formed wrong answer for `os.path.dirname(os.path.abspath(__file__))`
+        — the exact spelling `tools/bootstrap_verify.py` and
+        `tools/audit_selfhost_struct_fields.py` use;
+      * it is the SOURCE's path, which is the file the build was handed.  Mojo is
+        a Python superset and this path compiles `.py` directly, so for a `.py`
+        file it is that file's own path — the same value CPython would report for
+        the same file.  It is NOT resolved through symlinks, because CPython does
+        not do that either and a `realpath` would invent a difference.
+
+    A source binding of the same name WINS: the table is seeded before the
+    statement loop and the loop's own `table[name] = …` overwrites it, so
+    `__file__ = "x"` at file level is an ordinary module-level constant rather
+    than a conflict between the language and the build.
+
+    **What this is not:** it is not `sys.argv`.  `argv` is the process's command
+    line, which arrives in registers the entry stub overwrites before the first
+    statement runs, so there is nothing for the build to hold —
+    `bugs/FORMAL_module_state_no_storage.md` §(4) is right about that one and
+    this doc's author grouped `__file__` with it by shape rather than by cause.
+    A source the BUILD was handed is not a source that is gone.
+    """
+    if not source_path:
+        return {}
+    return {"__file__": os.path.abspath(source_path)}
+
+
+def collect_module_symbols(stmts: list, source_path: str = None) -> dict:
     """`{name: GlobalSymbol}` for every module-level binding in `stmts`.
 
     Walks the module's OWN statement list, in order, which is the only place a
@@ -23876,6 +24480,22 @@ def collect_module_symbols(stmts: list) -> dict:
     shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
     known: dict = {}
+    # The names the BUILD can answer, seeded FIRST so a source binding of the
+    # same name overwrites one rather than conflicting with it
+    # (`builtin_module_constants`). They are in `table` and not in `known`,
+    # deliberately: `known` is the resolution scope for a module-level
+    # initializer, and a name no statement in this file bound is not something
+    # an initializer here may read to fold against. The seeding is what makes
+    # them readable, and `_substitute_module_constants` is the reader.
+    for name, value in (builtin_module_constants(source_path) or {}).items():
+        # `site="builtin"` and not `"assigned"`: no statement in this file bound
+        # the name, and the two consumers that want to tell a source-declared
+        # module-level name from one the build supplied cannot answer that
+        # question from `site` if both spell it the same way. It is named in
+        # `_why_unplaced`'s "the table is empty" test, which is the consumer
+        # that broke: a module that declares nothing used to say so.
+        table[name] = GlobalSymbol(name, folded_literal_node(value, None),
+                                   "builtin", None, 0)
     # EVERY FunctionDef at any depth, not the top-level ones. A `global G`
     # inside a method is a write to the module's `G` exactly as one inside a
     # free function is — the module is the scope either way, and the method's
@@ -24757,7 +25377,7 @@ def function_value_refusal(name: str, fn_name: str = "") -> str:
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
-                             fn_name: str, published) -> str:
+                             fn_name: str, published, variables=()) -> str:
     """The diagnostic for reading `module.leaf` as a VALUE.
 
     A DIFFERENT fact from `module_global_refusal`'s "imported" arm, and the
@@ -24784,6 +25404,18 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     `bugs/FORMAL_module_state_no_storage.md` records that the command line is
     gone before the first statement runs, so there is nothing in it either.
 
+    **`variables` is the half that keeps the sentence true.** "A list, an
+    object or a stream has no representation as a word" is FALSE about a name
+    like `G` in `mylib.G` where `mylib` declares `G = 5` and also writes it
+    through `global` — an `Int` crosses fine, and what stops it is that its
+    value is not the same in both modules. So a leaf the module publishes as a
+    VARIABLE gets its own sentence, naming the reason and the repair: the
+    module's own accessor is the spelling, and that one WORKS (measured both
+    architectures — `mylib.setg(9)` then `mylib.get()` answers 9, where
+    `mylib.G` used to answer the folded 5). A refusal whose stated reason is
+    false about the name it names sends the reader after a capability the name
+    does not need, which is the defect this function was written to remove.
+
     `published` is the list of what the module DOES publish, so a reader can see
     in one line whether the name they wrote is one of the module's own or a
     capability it does not have. That is `dylib_extern_symbol`'s own device,
@@ -24796,6 +25428,21 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
         shown = ("nothing under a name a caller can bind — every name it "
                  "publishes is re-exported, and the modules it re-exports from "
                  "publish none of this one")
+    if leaf in set(variables or ()):
+        return (f"{who}{spelling} reads {leaf!r}, which is a module-level name "
+                f"of `{module}` that `{module}`'s OWN functions write through "
+                f"`global`, so its value is not known when the library was built "
+                f"and cannot be recorded the way a literal constant is. It is a "
+                f"VARIABLE and not a constant even though `{module}` also "
+                f"declares it at module level with a value the build could fold: "
+                f"a folded name's value crosses the boundary only because it has "
+                f"exactly one writer, and this one has a second. What `{module}` "
+                f"publishes: {shown} — give the module an accessor "
+                f"(`def get_{leaf}(): global {leaf}; return {leaf}`) and call "
+                f"that, which reads the same slot and lowers today. "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what it "
+                f"would take to publish the slot itself rather than a function "
+                f"that reads it")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
             f"`{module}`, and a module is not a value this path can place: "
             f"there is no register, frame slot or `__DATA` word for it because "
@@ -25904,6 +26551,31 @@ def _container_shape(value) -> str:
     return "dict" if isinstance(value, F.DictExpr) else "sequence"
 
 
+class StaticNestedBlob:
+    """The words of a NESTED container literal, standing in for one outer word.
+
+    One word holds a pointer to a blob, so `L = [[1, 2], [3]]` is a blob of two
+    words and each of those words is a pointer to a blob of its own. `int` and
+    `str` were the two word kinds a flat run carried and this is the third: a
+    word whose content is another `words` list, which `build_data_image` lays
+    out as its own blob in the same trailing area and points at with one more
+    entry in the same `fixups` list the outer blob already used.
+
+    A class rather than a bare nested list, because `int` and `str` are the other
+    two word kinds and the three are told apart by their type in exactly one
+    place (`_lay_out_blob_words`). A nested list would then be indistinguishable
+    from a word the build cannot compute — which is the answer that has to stay
+    reachable, and which `("unknown", …)` is how the refusal says so."""
+
+    __slots__ = ("words",)
+
+    def __init__(self, words):
+        self.words = words
+
+    def __repr__(self):
+        return f"StaticNestedBlob({self.words!r})"
+
+
 def _static_container_words(value):
     """The blob words a module-level container literal is, or None if not one.
 
@@ -25923,10 +26595,17 @@ def _static_container_words(value):
     elements — so its keys and values are read with their own accessor and
     interleaved, and asking one for the other is a silent wrong answer.
 
-    Anything else is refused rather than half-done: a nested container or a call
-    as an element is a word this cannot compute, and a container that is not
-    all-words has no initializer to write into the slot. That is said by name
-    from `static_initializer_refusal_reason`."""
+    A word may also be a `StaticNestedBlob`, which is this same function applied
+    one level down: a nested container element IS a word — a pointer to a blob —
+    and what was missing was never a word to put there but the second level of
+    fixups, which `build_data_image` now lays out beside the first. The recursion
+    terminates on the shape of the SOURCE rather than on a depth argument, since
+    a literal cannot contain itself.
+
+    Anything else is refused rather than half-done: an element computed by a call
+    is a word this cannot compute, and a container that is not all-words has no
+    initializer to write into the slot. That is said by name from
+    `static_initializer_refusal_reason`."""
     if isinstance(value, F.DictExpr):
         words = []
         pairs = [p for p in (value.pairs or []) if len(p) >= 2]
@@ -25953,12 +26632,13 @@ def _static_container_words(value):
 def _static_word(node):
     """The word a container ELEMENT (or a unary sign of one) is, else None.
 
-    An `int` for a number, the `str` itself for a string. The two are told
-    apart by their type rather than by a tag because a formal value is one word
-    and a word holds one of them; `int` is never a `str` here, so the test is
-    exact. A bytes literal is deliberately NOT a string element: it is a numeric
-    buffer rather than text, and nothing in this path reads one out of a
-    container as a NUL-terminated string."""
+    An `int` for a number, the `str` itself for a string, a `StaticNestedBlob`
+    for a container literal. The three are told apart by their type rather than
+    by a tag because a formal value is one word and a word holds one of them;
+    `int` is never a `str` here, so the test is exact. A bytes literal is
+    deliberately NOT a string element: it is a numeric buffer rather than text,
+    and nothing in this path reads one out of a container as a NUL-terminated
+    string."""
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0):
         return node.value
     if isinstance(node, F.BoolLiteral):
@@ -25967,9 +26647,12 @@ def _static_word(node):
         return _int_literal_value(node)
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
         n = _static_word(node.operand)
-        if isinstance(n, str):
+        if isinstance(n, (str, StaticNestedBlob)):
             return None
         return None if n is None else (-n if node.op == "-" else n)
+    if _is_container_literal(node):
+        words = _static_container_words(node)
+        return None if words is None else StaticNestedBlob(words)
     return None
 
 
@@ -25982,7 +26665,7 @@ def static_initializer_refusal_reason(slot) -> str:
     `("unknown", …)`, because they have different repairs: a value computed by a
     call needs the module-level sequence that would fill it, a name imported
     from another module needs that module's storage, and a container with an
-    element that is not a word needs a nested layout.
+    element computed by a call needs a value before the program runs.
 
     **A slot the MODULE BODY fills is the one `("unknown", …)` shape that is not
     a refusal**, and it is checked here rather than at the three callers so the
@@ -26001,7 +26684,7 @@ def static_initializer_refusal_reason(slot) -> str:
         return None
     node = getattr(slot.site, "value", None)
     if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
-        return "nested_element"
+        return "computed_element"
     if isinstance(node, F.CallExpr):
         return "computed"
     if isinstance(node, (F.ImportStmt, F.FromImportStmt)):
@@ -26112,14 +26795,15 @@ def global_value_refusal(name: str, fn_name: str, why: str) -> str:
     their program."""
     who = f"{fn_name}: " if fn_name else ""
     detail = {
-        "nested_element": (
-            "a container element is itself a container, or is computed by a "
-            "call, and a container is laid out here as a FLAT run of words — so "
-            "an element that is not itself a word has nothing to put in the "
-            "blob. An int element and a string element both do (the string as a "
-            "pointer the initializer fills in); a nested container would need "
-            "its own blob and a second level of fixups, which this does not "
-            "do yet"),
+        "computed_element": (
+            "one of its elements is computed by a call, and a container is laid "
+            "out here as a run of words — so an element that is not a word has "
+            "nothing to put in the blob. An int element, a string element and a "
+            "NESTED container of those three all do (the string as a pointer the "
+            "initializer fills in, the nested container as a blob of its own with "
+            "one more fixup for the word that points at it); a call's result is "
+            "not known before the program runs, and no arrangement of `__DATA` "
+            "changes that"),
         "computed": (
             "its module-level value is computed by a call, and a call's result "
             "is not known before the program runs. The storage is there and is "
@@ -26215,18 +26899,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
             offset = flag_offset + 2 * GLOBAL_SLOT_BYTES + len(tail)
-            for j, word in enumerate(slot.init[2]):
-                at_word = offset + GLOBAL_SLOT_BYTES * j
-                if isinstance(word, str):
-                    # Eight zero bytes until the initializer runs; the blob is
-                    # STATIC storage, so a word left unwritten is a pointer
-                    # nobody chose, and the lazy init writes it before the
-                    # flag says the globals are ready.
-                    tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
-                    string_cells.append((at_word, word))
-                    continue
-                tail.extend(int(word).to_bytes(GLOBAL_SLOT_BYTES, "little",
-                                               signed=True))
+            _lay_out_blob_words(slot.init[2], tail, fixups, string_cells,
+                                flag_offset + 2 * GLOBAL_SLOT_BYTES)
             blob[at:at + GLOBAL_SLOT_BYTES] = (base + offset).to_bytes(
                 GLOBAL_SLOT_BYTES, "little", signed=True)
             fixups.append((at, offset))
@@ -26240,6 +26914,71 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # fires (`model.STACK_FLOOR_BUDGET_BYTES`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
+
+
+def _lay_out_blob_words(words, tail, fixups, string_cells, tail_base) -> None:
+    """Append one container blob's `words` to `tail`, and record what it needs.
+
+    The three word kinds, and each one's reason for being here:
+
+      * an `int` — its own eight little-endian bytes, and nothing else. A blob
+        that is all integers needs no fixup at all, which is why the flat case
+        needed nothing from the initializer to be right.
+      * a `str` — eight ZERO bytes plus a `string_cells` entry, because the only
+        `char *` to these bytes on this path is the interned literal in `__TEXT`,
+        which is not in this image and which only the CODE can name
+        (`GlobalDataImage.string_cells`). The zero is overwritten before any read
+        can reach it: `initialization_is_lazy` is what makes the overwrite
+        ordered before the first read, and the flag is set last.
+      * a `StaticNestedBlob` — a reserved word of its own, and one more entry in
+        the same `fixups` list the outer blob already used.
+
+    **A blob's own words have to be CONTIGUOUS, and that is the whole of what is
+    easy to get wrong here.** Element `i` of a blob is the word at `8 * (i + 1)`,
+    so anything laid out between two of this blob's words shifts every later
+    element. Writing an inner blob out as its element word is reached interleaves
+    it, and `[[1, 2], [3, 4]][1][0]` then read the first inner blob's COUNT (2)
+    where element 1's pointer belongs, indexed 0 into it, and answered 2 from a
+    green build on both architectures — a wrong number that is also a plausible
+    one. Hence a WORKLIST rather than a recursion: one pass lays out every word
+    of one blob and queues its nested blobs, and the next pass lays out those.
+    A recursion that re-scans the shared queue is not a shorter way to write the
+    same thing, it is an infinite loop.
+
+    `tail_base` is the offset within the data image at which `tail` starts, so
+    every offset recorded here is in the same coordinates `fixups` and
+    `string_cells` have always used. It is passed rather than recomputed because
+    the queue has no other place to learn it from, and two places computing one
+    number is the shape of bug this file's layout comments are about.
+
+    Every appended chunk is a multiple of `GLOBAL_SLOT_BYTES`, so the alignment
+    loop only ever fires on the first blob; it is kept because `tail` starts empty
+    and its first blob still has to be word-aligned for the loaders to agree.
+    """
+    # `(offset of the word that points at this blob, the blob's words)`, and
+    # `None` for the outermost one, whose pointer word is the SLOT rather than a
+    # word of this run.
+    pending = [(None, words)]
+    at = 0
+    while at < len(pending):
+        at_pointer, blob_words = pending[at]
+        at += 1
+        if at_pointer is not None:
+            fixups.append((at_pointer, tail_base + len(tail)))
+        for word in blob_words:
+            while len(tail) % GLOBAL_SLOT_BYTES:
+                tail.append(0)
+            at_word = tail_base + len(tail)
+            if isinstance(word, StaticNestedBlob):
+                tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
+                pending.append((at_word, word.words))
+                continue
+            if isinstance(word, str):
+                tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
+                string_cells.append((at_word, word))
+                continue
+            tail.extend(int(word).to_bytes(GLOBAL_SLOT_BYTES, "little",
+                                           signed=True))
 
 
 # Published for the same reason `_MODULE_SYMBOLS` is: the consumers are a
@@ -26545,9 +27284,13 @@ def subscript_receiver_method_refusal(member: str, receiver_text: str,
             f"callee cannot be named. Declaring it is the same program with an "
             f"answer — give the receiver a local of a declared struct type, or "
             f"bind it to one (`var x = T()`, `def f(v: T)`) so the lift has a "
-            f"name to work from. The capability, and what a caller-spelled "
-            f"subscript receiver would need, is recorded in "
-            f"bugs/FORMAL_method_call_on_a_subscripted_receiver.md.")
+            f"name to work from. A caller-spelled subscript receiver is a "
+            f"narrower question than it looks: where the source states the "
+            f"element type — a list literal of `T()`, or a parameter declared "
+            f"`List[T]` — `receiver_struct` answers it and the lift runs "
+            f"(`formal/build.py::_subscript_receiver_target`). It is only the "
+            f"element type nothing in the source names that reaches this "
+            f"refusal.")
 
 
 def subscript_chain_text(expr) -> str:
