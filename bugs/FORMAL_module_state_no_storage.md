@@ -1,5 +1,37 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**`sys.executable` is DOWN TO A PROJECT, and the project is not storage — measured
+2026-10-03 (`work/formal16-5`), so nobody spends the storage half.** This table's
+`sys.executable` row says the missing thing is "a place to put a path", because
+libSystem's `_NSGetExecutablePath` answers it and writes into a CALLER-SUPPLIED
+buffer. Both halves of that are right and neither is the wall:
+
+  * **The call is refused on this path, by name.** `_NSGetExecutablePath` begins
+    with `_`, so it cannot be bound as a callee — the defect
+    `bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md` is about, and
+    `os/_syscalls.mojo`'s `fs_environ_vec` is how this tree gets round it:
+    `dlopen(0, 0)` and `dlsym` at RUN time. That spelling DEREFERENCES the symbol
+    (`environ` is a data symbol, so two loads answer it) and this is the only
+    use of it in the tree. Calling through what `dlsym` returns is a different
+    capability and it is refused: `formal/model.py`'s `FRAME_IDENTITY_CALLS`
+    refusal says "a function is not a value on this path … passing one as an
+    argument, storing one in a container, or returning one is refused rather than
+    answered with a number that means nothing".
+  * **Seeding it at BUILD time — the `__file__` route — collides with the dylib
+    CACHE.** `__file__` works because the path is a property of the file being
+    compiled, so the same source always wants the same literal. An executable's
+    output path is not: it is `-o` of the build in progress, and `sys` is a
+    DYSLIB whose bytes are content-addressed and shared
+    (`formal/build.py`: `out_dir = cas_dir()/formal-imports/<arch>`), so baking
+    one build's `-o` into `sys.mojo`'s data would put the output path in the
+    cache KEY for every image that links it.
+
+  `getprogname()` is bindable and needs neither, and is still not the answer: it
+  is `bx.a`, where CPython's `sys.executable` is the full path — a mirror that
+  returned it would be a well-formed wrong answer, which is worse than the
+  refusal. So the row's honest next step is a call-through-a-value capability (or
+  a per-image `sys` rather than a shared cached one), and both are projects.
+
 **Status (2026-10-03, `work/formal8-7-r2`): §(2)'s "a folded name crosses the
 boundary" is CORRECTED — a name the exporting module's own function WRITES is
 not a constant, and publishing it was a wrong answer, not a refusal. It is now
