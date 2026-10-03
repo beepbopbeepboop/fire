@@ -389,9 +389,11 @@ def _():
     # one the box answers) — mixing the two here would test that instead.
     # The set comprehension iterates a SET rather than a list because the
     # element type of a comprehension over an unannotated list PARAMETER is a
-    # separate, already-filed gap
-    # (bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md) and
-    # belongs to no case in this file.
+    # separate gap and belongs to no case in this file. (The DICT twin of
+    # that gap -- a dict's VALUE type not crossing the call boundary -- was
+    # fixed on 2026-10-02 with `_param_dict_val_types`, so a dict parameter
+    # would be a fair comparison here today; a list element type is a
+    # different table with different evidence and was not.)
     #
     # Both halves of the property are printed: the set survives the
     # reassignment, AND the un-reassigned parameter next to it (usage and
@@ -437,11 +439,11 @@ def _():
     # "compiles" — an element-type guess that made `next(iter(...))` disagree
     # with the loop over the same list would still be wrong here.
     #
-    # In one function, deliberately: a dict handed to a CALLEE does not carry
-    # its value type across the call boundary in this codegen (a separate,
-    # pre-existing gap that the `for` form shares — see
-    # bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md), so
-    # putting the pair read behind a call would test that instead of this.
+    # In one function, deliberately: putting the pair read behind a call
+    # would test the cross-call dict-value contract instead of this. That
+    # contract now exists (`_param_dict_val_types`, 2026-10-02), so this
+    # comment records the original reason rather than a standing gap — the
+    # `for` form's ELEMENT type is still per-function.
     return '''def main():
     d = {"alpha": "one", "beta": "two"}
     k, v = next(iter(d.items()))

@@ -1,11 +1,10 @@
 # A dict parameter that is only FORWARDED is declared `MojoList *`, so the forward hands the callee a list pointer as its dict
 
-Found 2026-10-02 while fixing
-`bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md` (doc
-deleted with that fix, same commit). NOT caused by it and not in its area: that
-fix types the dict's VALUE type at the callee's read site, and this is about
-the parameter's own C type at the DECLARATION — one layer up, and the fix
-cannot see it.
+Found 2026-10-02 while fixing the cross-call DICT-VALUE-type contract
+(`_param_dict_val_types`, whose doc is deleted with that fix, same commit).
+NOT caused by it and not in its area: that fix types the dict's VALUE type at
+the callee's READ site, and this is about the parameter's own C type at the
+DECLARATION — one layer up, and the fix cannot see it.
 
 ## What I ran
 

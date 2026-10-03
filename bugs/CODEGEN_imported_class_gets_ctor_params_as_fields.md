@@ -1,11 +1,10 @@
 # An IMPORTED class's `__init__` parameter names become struct FIELDS, so `getattr` answers for an attribute the class does not have
 
-Found 2026-10-02 while verifying
-`bugs/CODEGEN_user_class_named_Parser_merged_with_fire_compiler_Parser.md`
-(doc deleted with that verification, same commit). NOT the same bug: that one
-was a user's `Parser` merged with `fire_compiler.Parser`'s layout, and it no
-longer reproduces. This is what is left in the same registration path, and it
-has nothing to do with the name `Parser`.
+Found 2026-10-02 while verifying that a user's `Parser` is no longer merged
+with `fire_compiler.Parser`'s layout (it is not, and that doc is deleted with
+the verification, same commit). NOT the same bug: that one was the MERGE, and
+this is what is left in the same registration path — it has nothing to do
+with the name `Parser`.
 
 ## What I ran
 

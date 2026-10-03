@@ -67,10 +67,13 @@ before.
 always in the closure. See it for the full census.)**
 
 `Lib/enum.py:380` is itself a `for`-target/`self._member_names` list-length
-read on an `int64_t`-typed receiver — the boxed-value class. It is the same
-shape as `bugs/CODEGEN_unannotated_dict_param_value_type_not_propagated.md`
-(newly filed this session: a value whose real C type is known at the binding
-site but not at the use site), one indirection further in.
+read on an `int64_t`-typed receiver — the boxed-value class. It was the same
+shape as the dict-value-type gap this doc's 2026-10-01 entry cited (a value
+whose real C type is known at the binding site but not at the use site), one
+indirection further in; that dict half was FIXED on 2026-10-02 with
+`_param_dict_val_types` (a dict's value type now crosses the call boundary),
+so what is left here is the LIST-element-type axis of the same family, not
+the dict one.
 
 The 2026-09-30 entry's advice still stands and is still the right order:
 this file only becomes tractable when the individual gaps are fixed on their
