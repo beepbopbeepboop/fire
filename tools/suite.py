@@ -1896,10 +1896,43 @@ test('prooflib', [PY, '-c',
       desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
           'without this step')
 
+# The eight gate tests that typecheck generated Lean were `disabled=` against
+# `bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md` from 2026-10-02 to
+# 2026-10-03, and the markers are gone.  The doc named two conditions and both
+# are met:
+#
+#   1. ONE launcher bounding every Lean run in wall AND cpu, killing the
+#      process tree, and reporting a breach as its own verdict rather than a
+#      pass -- `formal/lean.py::run_lean`, `PROOF_WALL_S`/`PROOF_CPU_S` = 1500 s
+#      from the measured slowest legitimate proof (297.8 s / 219.2 s,
+#      `formal/examples/udivmod.mojo`).  `FORMAL.md` §12 is the policy.
+#   2. The looping obligation found.  It was the per-export dylib contract: a
+#      fourteen-fold nest of the runner's own `if pc = pc then .. else ..`
+#      around the whole composed `Arm64State`, which `bv_decide`'s internal
+#      normalisation cannot be configured out of
+#      (`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`, three
+#      budgets measured failing to fire).  `formal/arm64_proof_gen.py` now
+#      emits the `if` resolved for every step it knows moves no pc, and keeps
+#      it only for the closing `ret`, which `BlockCert` genuinely cannot
+#      resolve.  Measured on the generated `triple` proof: 9.0 s wall /
+#      14.4 s CPU / 1.63 GB peak, rc 0, 0 holes -- against "did not finish"
+#      (177 s CPU in 80 s wall before `RLIMIT_CPU` fired).
+#
+# What re-enabling them is NOT is a measurement of all eight by the change
+# author, and the honest split is worth keeping: `formal-dylib` is measured
+# (14 PASS / 0 FAIL, `python3 test_formal_dylib.py`, and it is the one test
+# the change can affect), `formal` and `formal-x86` are measured per example
+# by `FORMAL.md` §12 (8.6 s - 297.8 s each, 1.5-3.0 GB), and
+# `formal-call-proofgen`, `formal-imports`, `formal-sweep`,
+# `formal-x86-endtoend` and `formal-x86-model` were NOT re-measured -- a light
+# worker may not run `formal-sweep`, and `formal/x86_64_model_coverage_test.py`
+# and `formal/x86_64_endtoend_test.py` write outside this worktree.  Those five
+# run the same `run_lean` bounds as the 33 sibling tests in `proofs` that were
+# never disabled, which is the argument for expecting them green; it is not the
+# same as having seen them green.
 test('formal', [PY, 'test_formal.py'], j=True,
      deps=['preflight', 'prooflib'],
-     desc='every formal/examples/*.mojo typechecks its generated Lean proof',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
 # Module-global state. Its own file rather than more rows in `formal-run`
@@ -1940,16 +1973,21 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
             'lib/X86.lean', 'lib/work.lean'],
      desc='proof generation on programs that CALL: a call must not raise, the '
           'model must be the model of the call, and no declaration may be '
-          'vacuous',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+          'vacuous')
+# `mem='tiny'` (4 GB) from a MEASURED peak, not from the shape of the workload.
+# `test_formal_dylib.py` peaked at 1.7 GB across the process tree on
+# 2026-10-03 (`python3 tools/memslot.py --gb 8 -- python3
+# test_formal_dylib.py`, 14 PASS / 0 FAIL), of which the one Lean run is 1.63 GB
+# -- the same figure the generated `triple` proof reports through `run_lean`.
+# `small` was the unmeasured default, so this releases 4 GB of the machine's
+# 96 GB budget for every claim on the job.
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
-     desc='formal dylib emission, Mach-O re-read, dlopen, prove',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     mem='tiny',
+     desc='formal dylib emission, Mach-O re-read, dlopen, prove')
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'],
-     desc='formal import surface',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='formal import surface')
 # The hostmod claim: `ast` left HOST_MODELLED, and this is what says the module
 # behind it is CPython's tokenizer rather than a plausible one — every case run
 # through the built arm64 image AND through this process's `tokenize`, with the
@@ -1967,8 +2005,7 @@ test('formal-ast', [PY, 'test_ast_formal.py'],
 # parse -j, keeps it above.
 test('formal-sweep', [PY, 'test_formal_sweep.py'],
      deps=['preflight', 'prooflib'],
-     desc='the formal sweep',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='the formal sweep')
 # The two suites that pin the reach claims and the bind audit.  Unregistered
 # until now, and the second is the one standing between a real backend defect
 # and a `codegen` misclassification on the executable path, so its absence
@@ -2003,16 +2040,13 @@ test('formal-runtime-link', [PY, 'test_formal_runtime_link.py'],
 # they can share the machine with them.
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
      deps=['preflight', 'prooflib'],
-     desc='the x86-64 examples, built and proof-checked',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='the x86-64 examples, built and proof-checked')
 test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
      deps=['preflight', 'prooflib'],
-     desc='x86-64 whole run, every input, no sorry',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='x86-64 whole run, every input, no sorry')
 test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
      deps=['preflight', 'prooflib'],
-     desc='every byte the x86-64 emitter can produce is a step the model can step',
-     disabled='bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md')
+     desc='every byte the x86-64 emitter can produce is a step the model can step')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
 # Eight test files that build a formal image per case and RUN it, comparing the
