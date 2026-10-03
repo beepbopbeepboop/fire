@@ -75,6 +75,23 @@ TYPE_NAMES = {
 # segfault with a plausible-looking format.
 STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
 
+# Annotations that name a DICT, and the third member of the same vocabulary
+# beside the two above. Kept here rather than in `model.py` because the same
+# discipline applies: a name that means "a string" and a name that means "a
+# dict" are the only two answers a use site can act on differently, and two
+# hand-kept lists are two lists that drift.
+#
+# Why a dict needs its OWN set when `model.BLOB_TYPE_CTORS` already names
+# `Dict`: the blob set answers "is this a container at all", which is what
+# `declared_type_kind`'s kind is, and a kind cannot say WHICH container —
+# `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are all one
+# word on this path and all classify as the bare list prefix. A SUBSCRIPT is
+# the one consumer that must tell them apart, because a pair blob indexed with
+# a key is a SCAN and a sequence's is an address computation, and asking one
+# for the other is a load from a nonsense address rather than a refusal. See
+# `model.global_slot_is_dict`, whose own docstring carries the measurement.
+DICT_TYPE_NAMES = frozenset({"Dict", "dict"})
+
 
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""

@@ -636,6 +636,84 @@ is refused by name. The refusal is arch-free text in `formal/model.py`, asked
 through the one reader both backends use, so the two architectures cannot come to
 name different limits for one construct.
 
+### §2.2 corrected 2026-10-02: the rule above is keyed on the PREFIX, and for an
+### operation the property belongs to the OPERATION
+
+The sentence just above — "a name with the `__mlir_` prefix that no template rule
+covers has no representation in a 64-bit word" — is what this section still says
+and it is **false of a measurable subset of the operations**, because it asserts
+about the NAME a property that belongs to what the operation DENOTES. It was
+acceptable for a name no rule covers, because a bare name is by definition not a
+template; it stopped being true when `__mlir_op` was recognised as spelling a
+specific dialect operation and one sentence was kept for all of them.
+
+`formal/model.py`'s `mlir_dialect_op_refusal` now classifies the operation, and
+the measurement behind it is in
+`bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §Correction.
+In short, over the 259 sites / 104 operations in the stdlib: 14 operations / 76
+sites denote **no value at all** (an effect — a store, a trap, an ownership
+marker — where "no representation" remains a true statement), 12 operations /
+38 sites are **elementwise arithmetic**, and for those the operation NAME does not
+decide whether the result is a word; the **operand's type** does. 26 of those 38
+sites have a vector or mask operand, 9 have a word operand, 3 are pointer
+arithmetic.
+
+What did NOT change, and is the reason this section still reads CLOSED: every one
+of the 259 is still refused, on both architectures, with byte-identical text, and
+none of them links an image. What changed is that the refusal says **which**
+operation and **which** of those three facts is missing, instead of asserting a
+property of the target that was false of a quarter of the arithmetic sites. A
+lowering table keyed on the operation NAME is what that correction rules out:
+`pop.add(a, b)` → `a + b` is right for the 9 word-typed sites and WRONG for the
+26 vector-typed ones, where it would compute a scalar add of two vector-typed
+words — a plausible-looking number rather than a refusal. Pinned by the
+`CLASSIFIED` rows of `test_formal_mlir_precedence.py`, each of which asserts its
+own class's words on both backends and the ABSENCE of another class's.
+
+`formal/model.py`'s tables stay arch-free, so the two architectures cannot
+disagree about what an operation denotes; a per-emitter copy of them is the one
+way to make them, and there is none.
+
+The classification covers **all 259 sites over 104 operations**, with none left
+on the generic fallback, and `test_formal_mlir_precedence.py`'s
+`the_classification_covers_the_whole_corpus` re-measures that on every run —
+reading the class off the MESSAGE rather than off the tables, so a branch that
+exists but is unreachable fails. Measured:
+
+    113  typed-result   the RESULT TYPE is in the bracket (_type=, pred=, bin_op=,
+                         mask=, ordering=, a variant discriminant)
+     75  effect         no value at all — a store, a trap, an ownership marker
+     34  unguarded      a named fact this path lacks (a predicate, a pointee
+                         width, a BOOL kind, a GEP scale, the Mojo version)
+     24  elementwise    arithmetic whose word-or-vector answer is the OPERAND's
+     13  vector         over !kgen.simd<N, D> — N lanes, never a word
+
+Three of those classes have a MEMBERSHIP RULE that is measured rather than
+assembled by judgement, which is what keeps the tables from being a pile of
+opinions: **effect** is the 15 operations the corpus uses as a standalone
+statement at every one of their sites (and an operation absent from it is not
+thereby an effect — `pop.atomic.rmw` is read into `var res =` at
+`std/atomic/atomic.mojo:326`); **typed-result** is the 31 operations carrying a
+`_type=`/`pred=`/`bin_op=`/discriminant bracket at every site, a property of the
+spelling; **vector** is the `pop.simd.` prefix, which is structural in the name
+and is why `pop.add` is deliberately not in it.
+
+Two further corrections to the sweep row, both measured the same way and both in
+the census doc:
+
+  * **`std/builtin/simd_length.mojo` has 13 `__mlir_op` sites of its own**, not
+    the "1 of 1 `uses:`, nothing of its own" the row recorded — `uses:` counts
+    how many files a refusing module BLOCKS, not how much work it has. Six of
+    them (`index.add/sub/mul/and/divs/shrs`) are among the only **9 word-typed**
+    dialect sites in the whole stdlib, and the file's own terminal, measured by
+    building it with the `_select` import removed, is `pop.cast_to_builtin` in
+    `__init__` — a `_type=` that is a dialect type, a DIFFERENT missing fact from
+    `pop.select`'s BOOL kind. So **closing `_select.mojo` does not close
+    `simd_length.mojo`**, and this cause row shrinks by one file when the BOOL
+    kind lands rather than by two. It is also the natural first target for the
+    operand-type work, being reachable and mostly word-typed where
+    `std/simd.mojo` is 22 sites of pure vector.
+
 `std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
 built out of exactly this construct, so it is refused, and the seventeen files
 behind it are refused on it. **That is the correct end state for them, not a

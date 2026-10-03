@@ -1083,6 +1083,78 @@ CASES = [
       "refuse:o.LIMIT reads a class-level constant of S through 'o', and 'o' is "
       "built from more than one constructor in this function (S(1), T())", None),
 
+    # ── a FUNCTION is not a METHOD just because they share a name ──────────
+    #
+    # The class-constant census asks two questions and used to be handed the
+    # answer to the wrong one. "Which struct is this function a method of?" is
+    # keyed by the LIFTED name a rewritten call spells (`Parser_parse_module`)
+    # and its value is a StructDef; "who owns this method name?" is keyed by the
+    # BARE name a `MemberExpr`'s `.member` is and its value is the struct's
+    # NAME. Both are called "owners", they look alike, and
+    # `_prepare_functions` passed the second where `_frame_receivers` documents
+    # the first — so a module-level `def parse_module` was answered with the
+    # string `"Parser"` and the value reached `_overridden_comptime_names`,
+    # which asked it for `.name`. A traceback out of the compiler, on a program
+    # with nothing exotic in it.
+    #
+    # The `None` default is LOAD-BEARING and is here for a measured reason, not
+    # for coverage: `refuse_none_comparisons` opens with
+    # `if not none_names and not none_consts: return`, so without a class-level
+    # `None` somewhere in the unit the census never runs and this case would
+    # pass with the defect still in it. Two of the struct's fields make it
+    # framed, which is the other half — `_frame_receivers` returns before its
+    # own census when no struct in the unit holds a frame. Both halves are the
+    # reason the shape is `Parser` and not a one-field helper.
+    #
+    # The corpus case in `test_dataclasses_formal.py` found the same crash on
+    # `formal/build.py`, which has a module-level `parse_module` colliding with
+    # `fire_compiler.Parser.parse_module` and nothing else unusual about it.
+    # That is a `formal/build.py` test wearing a generic name; this is the
+    # construct, so a regression here does not need the repository's own source
+    # to keep its shape.
+    ("class_constant_census_survives_a_function_named_like_a_method",
+     "struct Parser:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    var MISSING: Int = None\n"
+     "\n"
+     "    def parse_module(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def parse_module(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Parser()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return parse_module(1) + p.parse_module()\n",
+     5, None),
+    # The `None` read is still a `None` read through this same receiver, so the
+    # census that the case above has to survive still REFUSES where the language
+    # says it must. Without it, "the crash is gone" and "the check was dropped"
+    # would be the same green: this is the row that separates them.
+    ("class_constant_none_through_a_receiver_is_still_refused_when_a_function_shares_its_name",
+     "struct Parser:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    var MISSING: Int = None\n"
+     "\n"
+     "    def parse_module(self) -> Int:\n"
+     "        return 1\n"
+     "\n"
+     "def parse_module(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Parser()\n"
+     "    if p.MISSING == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+
     # ── methods on a string ──────────────────────────────────────────────
     #
     # A string here is a bare `char *`: no header, no length, just bytes to a
@@ -4738,6 +4810,31 @@ BOTH_ARCH_CASES = [
      "def main() -> int:\n"
      "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
      "    return 0\n", 0, "wide=107"),
+    # TWENTY-FOUR arguments, which is `_MAX_INCOMING_ARGS` on both backends and
+    # the one width where SysV's callee stops being able to read its own stack
+    # arguments in ONE byte of displacement.  The prologue's loads are
+    # `mov r11, [rbp + 16 + 8k]`, `_rm_disp` picks the narrowest encoding, and
+    # 16 + 8k crosses 127 at k = 14: argument index 19 is `4c 8b 5d 78` and
+    # argument index 20 is `4c 8b 9d 80 00 00 00` (measured).  So this row is the
+    # only one that executes the four-byte form, and `a23` is the parameter whose
+    # home is the widest of them.
+    #
+    # 241 is 24 + 21*10 + 7 — a23, a20 and a6, read from the last stack slot, a
+    # middle disp32 slot and arm64's last REGISTER argument respectively, so no
+    # single shifted index produces it.  Sixteen, the row above, is the largest
+    # count whose stack slots are all disp8; this is the rung that would have
+    # caught a call site writing the outgoing area with the disp8 encoder.
+    ("both_arch_twenty_four_arguments_arrive",
+     "def wide24(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "              a6: int, a7: int, a8: int, a9: int, a10: int, a11: int,\n"
+     "              a12: int, a13: int, a14: int, a15: int, a16: int,\n"
+     "              a17: int, a18: int, a19: int, a20: int, a21: int,\n"
+     "              a22: int, a23: int) -> int:\n"
+     "    return a23 + a20 * 10 + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"w24=%d\", wide24(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,\n"
+     "                          13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24))\n"
+     "    return 0\n", 0, "w24=241"),
     # The stack argument arriving from a CALLER'S PARAMETER rather than from a
     # literal, which is the direction a compiler can get wrong by FOLDING, and a
     # NESTED CALL in the ninth position, which is the direction it can get wrong
@@ -6354,6 +6451,38 @@ ONE_WORD_FIELD_METHOD_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var b = Box()\n"
      "    b.n = 3\n"
+     "    return b.go()\n",
+     "refuse:is a method call on a value", None),
+    # The same boundary one step along, and it is the boundary of
+    # `model.one_word_field_struct`'s PARAMETER row rather than of the
+    # declared-type row above: the field has no class-body declaration at all,
+    # only `__init__`'s annotated parameter, and the annotation names a type
+    # that is not a struct of this image — so there is no word to continue the
+    # chain with and the call stays refused.  A parameter row that ignored
+    # whether the annotation names a struct of this module would read `Int` as
+    # a chain step and lift `self._inner.total()` onto `self`, which is the
+    # wrong receiver for a total.
+    ("one_word_field_assigned_from_a_parameter_of_an_unknown_type_is_still_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Box:\n"
+     "    def __init__(out self, inner: Int):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        return self._inner.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(3)\n"
      "    return b.go()\n",
      "refuse:is a method call on a value", None),
 ]
@@ -9342,27 +9471,41 @@ WAVE6_NAME_CASES = [
      "    return read_first() + helper()\n", 11, None),
     # The half that needs STORAGE.  `G = compute()` is a real global: its
     # value is not known before the program runs, so it has to live somewhere
-    # that outlives every frame, and every value a formal program can name
-    # lives in a function's own stack scratch.  Refused BY NAME, and for THAT
-    # reason — on the pre-change tree it read whatever register was left.
-    ("modsym_refuse_a_global_the_build_cannot_fold",
-     "G = compute()\n\n"
+    # that outlives every frame.  Refused BY NAME until the module BODY's store
+    # was recognised as the module's own write — on the tree before this it read
+    # whatever register was left.  The trailing `main()` is what makes the
+    # answer 10 rather than 0: a module body IS the entry (`entry_function`
+    # rule 1) and it calls `main` only if the source says so, which is
+    # CPython's own rule for a module-level call.
+    ("modsym_a_global_the_module_body_computes",
      "def compute() -> Int:\n"
-     "    return 5\n\n"
+     "    return 5\n"
+     "\n"
+     "G = compute()\n"
+     "\n"
      "def read_g() -> Int:\n"
-     "    return G\n\n"
+     "    return G\n"
+     "\n"
      "def main() -> Int:\n"
-     "    return read_g() * 2\n",
-     "refuse:is bound at module level, and this path has no module-global storage", None),
+     "    printf(\"%d\", read_g() * 2)\n"
+     "    return 0\n"
+     "\n"
+     "main()\n", 0, "10"),
     # The other storage shape: an AUGMENTED assignment at module level.  The
     # value is `5 + 2` only after the program has started, so folding it would
-    # be a guess about the order of two statements.
-    ("modsym_refuse_a_module_level_augmented_assignment",
+    # be a guess about the order of two statements.  7 and not 2 is the whole
+    # point: `G = 5` is a FOLDED constant the body would normally drop, and it
+    # is kept only because the body rebinds the name (`module_body`'s `rebound`
+    # rule).  A slot that starts at the zero an unwritten slot gives would
+    # answer 2 — a plausible number, and the wrong one.
+    ("modsym_a_module_level_augmented_assignment",
      "G = 5\n"
      "G += 2\n\n"
      "def main() -> Int:\n"
-     "    return G\n",
-     "refuse:is bound at module level, and this path has no module-global storage", None),
+     "    printf(\"%d\", G)\n"
+     "    return 0\n"
+     "\n"
+     "main()\n", 0, "7"),
     # A module-level `comptime` that does not fold.  `comptime` inside a
     # FUNCTION is a compile-time value the backend materializes at its read,
     # and this is a guard for that (`limit_comptime_over_a_runtime_parameter`
@@ -9505,12 +9648,20 @@ WAVE6_NAME_CASES = [
     # fall-through, naming the allocator rather than the construct.  Real
     # stdlib source spells it exactly this way (`std/builtin/value.mojo:203`,
     # `std/sys/debug.mojo:20`).
+    #
+    # The needle is the classified operation wording rather than the old fixed
+    # sentence, because `mlir_dialect_op_refusal` now says what the OPERATION
+    # denotes — this one is `lit.materialize_into`, which is in no table, so it
+    # takes the honest fallback branch and names itself. What the row is about
+    # is unchanged: the construct is refused BY NAME, and both architectures say
+    # the same thing, which is the property `test_formal_mlir_precedence.py`
+    # pins at the level of a whole construct.
     ("mlir_dialect_name_is_refused_by_construct",
      "def materialize(value) -> Int:\n"
      "    return __mlir_op.`lit.materialize_into`[value=value](value)\n\n"
      "def main() -> Int:\n"
      "    return materialize(1)\n",
-     "refuse:is an MLIR dialect construct", None),
+     "refuse:is a dialect OPERATION", None),
 ]
 
 
@@ -10789,26 +10940,35 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration.  It USED to expect a refusal here — "there is no
-    # storage a write could outlive a frame in", which was true and which both
-    # emitters enforced by treating the declaration as a no-op, so CPython
-    # answered 6 and 6 where this path answered 10601485 and 5 on arm64 and 11
-    # and 5 on x86-64.  That sentence stopped being true when
-    # `formal-module-globals` gave a written module-level name a `__DATA` slot,
-    # and the row was left asserting a refusal the backend no longer owes —
-    # red on `master` as well as on the branch that found it.  That was recorded
-    # in a `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
-    # doc, now deleted with the row it was about; the decision and its
-    # measurement are in `bugs/FORMAL_module_state_no_storage.md`'s "Re-measured
-    # 2026-10-02" section, which named this doc's owner as the decider.  Option 1
-    # of that doc's two, and the one the tree's behaviour already implements:
-    # the program is RIGHT, so the row asserts the number.
+    # `global` declaration.  It is the one row in this file that used to expect
+    # a refusal, and it is CPython's answer now: the module-global SLOT landed
+    # (`formal-module-globals`), so there is somewhere for a write to outlive the
+    # frame that made it.  Both emitters used to treat the declaration as a
+    # no-op, so CPython answered 6 and 6 where this path answered 10601485 and 5
+    # on arm64 and 11 and 5 on x86-64.  That sentence stopped being true, and
+    # the row was left asserting a refusal the backend no longer owed — red on
+    # `master` as well as on the branch that found it, which is what
+    # `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # recorded before it was deleted with the row it was about.  The decision and
+    # its measurement are in `bugs/FORMAL_module_state_no_storage.md`'s
+    # "Re-measured 2026-10-02" section, which named that doc's owner as the
+    # decider: option 1 of its two, and the one the tree's behaviour already
+    # implements — the program is RIGHT, so the row asserts the number.  (Those
+    # old numbers and the refusal message are history, kept where they are still
+    # readable, in `mutated_module_global_refusal`'s docstring.)
+    #
+    # `formal/build.py`'s `_collect_shadowed_global_reads` is what makes the
+    # refusal disappear: it gates the finding on `declared_globals & assigned -
+    # set(M.module_slots() or ())`, so a name WITH a slot is not a finding.
     #
     # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
     # backends on this tree, and the same number from `python3`.  The exit
     # status is the assertion and the empty stdout is the other half of it —
     # `main` RETURNS the sum rather than printing it, so an image that printed
-    # something and exited 0 would not pass.
+    # something and exited 0 would not pass.  The shape is a `return` OF the
+    # global rather than the bare increment `test_formal_globals.py`'s
+    # `write_int_through_global` already pins, so the two files are the same
+    # fact on two shapes.
     ("a_mutated_module_global_is_read_back_from_its_slot",
      "G = 5\n"
      "def bump():\n"
@@ -10819,7 +10979,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     12, ""),
+     12, None),
 ]
 
 
@@ -11659,6 +11819,84 @@ REFUSAL_CASES = [
      "        printf(\"p=%d\", p)\n"
      "    return 0\n",
      0, "p=11"),
+    # ── a `finally` is emitted at every point the body LEAVES EARLY ──────────
+    #
+    # `_flush_pending_finally` walks the pending frames and emits a clause's
+    # statements AT the `return`/`raise`/`break`/`continue` site, so the clause
+    # reads the frame as it stood THERE. `formal/model.py`'s CFG gives the clause
+    # that set of predecessors; it used to be "the arms' fall-through, or the
+    # body's FIRST block", on the reasoning that "the body may have raised" —
+    # and these backends have no unwinder to raise into it (`_emit_try` skips
+    # the handler arms outright and `RaiseStmt` flushes and then `exit(1)`s).
+    #
+    # The program below is one CPython REJECTS — `UnboundLocalError` for
+    # `n > 0`, which is the value the startup stub passes — and BOTH backends
+    # used to build it and RUN it:
+    #
+    #     $ ./finally.arm64
+    #     8432255232          # sink's argument: a word nobody wrote
+    #     exit 100            # CPython: UnboundLocalError, exit 1
+    #
+    # which is the failure mode no exit code reports: right-looking, status 0,
+    # and a number that changes with the build. It is a `refuse:` case rather
+    # than an expected answer because there is no answer to expect.
+    ("finally_runs_where_the_body_leaves_early_not_at_its_end",
+     "def sink(v):\n"
+     "    printf(\"v=%d\", v)\n"
+     "    return 0\n\n"
+     "def f(n):\n"
+     "    try:\n"
+     "        if n > 0:\n"
+     "            return 100\n"
+     "        v = 7\n"
+     "    finally:\n"
+     "        sink(v)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     "refuse:'v' is read at line 11 before anything in this function stores it",
+     None),
+    # …and the CONTROL, which is the direction a fix like that gets wrong: the
+    # same clause, with the store before every early exit. `n` is 10, so the
+    # `return 100` is the path taken, the clause is emitted there, and `v` is 7.
+    # Without this row the `refuse:` above is satisfied by a rule that refuses
+    # every `finally` that reads anything.
+    ("finally_after_every_early_exit_reads_the_stored_value",
+     "def sink(v):\n"
+     "    printf(\"v=%d\", v)\n"
+     "    return 0\n\n"
+     "def f(n):\n"
+     "    try:\n"
+     "        v = 7\n"
+     "        if n > 0:\n"
+     "            return 100\n"
+     "    finally:\n"
+     "        sink(v)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     100, "v=7"),
+    # …and the dead code after an always-terminating body: `_emit_try`
+    # suppresses the clause's own fall-through once an early exit has flushed
+    # the frame (`need_fallthrough = False`), so nothing follows the statement.
+    # The old rule judged the unreachable `printf` on the state at the body's
+    # FIRST block, which refused `try: … total = … / finally: cleanup` then
+    # `print(total)` — the single most common reason to write a `finally` at
+    # all — on seven files of this repository.
+    ("dead_code_after_a_finally_is_not_judged_on_the_bodys_state",
+     "def f(n):\n"
+     "    try:\n"
+     "        total = 1\n"
+     "        if n > 0:\n"
+     "            total = 2\n"
+     "        return 0\n"
+     "    finally:\n"
+     "        printf(\"done=%d\", total)\n"
+     "    printf(\"total=%d\", total)\n"
+     "    return 0\n\n"
+     "def main(n):\n"
+     "    return f(n)\n",
+     0, "done=2"),
     # A `for` target STAYS bound after its loop, because the target is a
     # definition in the loop's HEADER and the join is reached from the header's
     # exit edge — so `range(0, 100)` with an immediate break is legal and

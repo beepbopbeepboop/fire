@@ -175,11 +175,29 @@ CAUSES = (
     # (`std/_gpu/_utils.mojo`, `std/builtin/{_coroutine,enum_like,type_aliases}
     # .mojo`, `std/sys/info.mojo`), and the label already named `__mlir_type`,
     # so the row claimed a construct it could not see.
+    # A FIFTH wording, and the one that needs the most care: `formal/model.py`'s
+    # `mlir_dialect_op_refusal` used to answer every `__mlir_op` with ONE
+    # sentence, and it named the `__mlir_` PREFIX rather than the operation. It
+    # now classifies the OPERATION by what it denotes — an effect, an
+    # elementwise arithmetic result, or a value that needs a fact this path
+    # lacks — so four different messages carry the word "dialect OPERATION" and
+    # one carries the old prefix wording for a caller with no operation in hand.
+    #
+    # Both spellings are listed, because a marker is a CONTRACT WITH A MESSAGE
+    # THAT CAN BE REWORDED and breaking it is invisible from here: every cause
+    # keyed on the old wording silently drops to zero and its files fall into
+    # `other refusal`. `test_formal_sweep.py` asserts every marker matches a
+    # refusal the sweep actually produced, by building the message from
+    # `formal/`'s own text rather than from a copy in the test, so a reword that
+    # broke a marker fails a test rather than quietly moving a column — but only
+    # for a marker a sample exercises, which is why there is a sample per
+    # wording below rather than one for the row.
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      (("is initialized from an MLIR attribute template",),
       ("is initialized from an MLIR type template",),
       ("__mlir_attr[",),
-      ("__mlir_op is an MLIR dialect construct",))),
+      ("__mlir_op is an MLIR dialect construct",),
+      ("is a dialect OPERATION",))),
     ("inlined_assembly (a gimple-C runtime construct)",
      (("inlined_assembly:",),)),
     # ABOVE the broad `has no representation` cause below, and it has to be:
@@ -454,6 +472,28 @@ CAUSES = (
     # the program runs. 3 files (2 on x86-64), in-file on all of them.
     ("a module-global container has storage but no initializer",
      (("has no initializer",),)),
+    # The ORDER half of the same capability, and it is a separate cause because
+    # the two have different repairs. The row above is a name whose value the
+    # build cannot compute at all; this one is a name it CAN compute, in a
+    # `__DATA` slot the module's own top-level statements fill, read before that
+    # fill happens. Before the storage question existed the two were
+    # indistinguishable — one message for both — and giving the slot to every
+    # name the module body writes turned the second into its own refusal, which
+    # is what makes the distinction visible here rather than in the reader's
+    # head.
+    #
+    # Placed here, NEXT TO `a module-global container has storage but no
+    # initializer`, and keyed on a clause only this message carries. The two
+    # messages name the same thing — a `__DATA` slot with no value in it yet —
+    # and the sibling one says so with `has no initializer`; the marker here is
+    # the sentence about the MODULE BODY, which that one cannot contain. Keyed on
+    # the shared part instead, this row would swallow the sibling's files, which
+    # `test_refusal_taxonomy.py` caught by building both messages out of
+    # `formal/`'s own text and asking which cause each lands in.
+    ("a module global the module BODY fills, read before it fills it",
+     (("is one of the module-global slots in this image's",),
+      ("which this path compiles into the synthetic function the startup stub "
+       "enters",))),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the

@@ -882,10 +882,19 @@ class TestReport(unittest.TestCase):
     """
 
     def _main(self, rows, prev=None, cas_state=(3, 2), argv=None):
-        """rows: [(rel, ok, detail, cause)]. Returns (stdout, exit, ledger)."""
+        """rows: `[(rel, ok, detail, cause)]`, plus an OPTIONAL fifth element
+        which is the path `classify` is given.
+
+        Returns `(stdout, exit, ledger)`.  The fifth element exists because
+        `built-with-admitted-contracts` is decided from a file's import closure and
+        not from anything the build said: a harness that passes no path classifies
+        every file as a plain `pass` and cannot exercise the class at all.
+        """
         import formal_sweep as mod
-        files = [os.path.join(mod.REPO, r) for r, _ok, _d, _c in rows]
-        by_path = {os.path.join(mod.REPO, r): (ok, d, c) for r, ok, d, c in rows}
+        files = [os.path.join(mod.REPO, row[0]) for row in rows]
+        by_path = {}
+        for row in rows:
+            by_path[os.path.join(mod.REPO, row[0])] = (row[1], row[2], row[3])
         saved = {n: getattr(mod, n) for n in
                  ("run_one", "load_ledger", "publish_ledger", "find_source_files",
                   "_claim_arch")}
@@ -894,10 +903,22 @@ class TestReport(unittest.TestCase):
         # no build here. Accepting it is the point — run_one grew this parameter
         # when the per-file ceiling landed, and a stub with the old signature
         # would fail on arity and read as a defect in the sweep.
+        # A row's optional FIFTH element is the path handed to `classify`.  It
+        # has to exist at all, because `built-with-admitted-contracts` is decided
+        # from the file's IMPORT CLOSURE and not from anything the build said —
+        # so a harness that passes no path classifies every file as a plain
+        # `pass` and cannot exercise the class at all.  The default keeps every
+        # existing row's meaning.
+        by_classify_path = {}
+        for row in rows:
+            if len(row) > 4 and row[4]:
+                by_classify_path[os.path.join(mod.REPO, row[0])] = row[4]
+
         def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
             ok, detail, cause = by_path[path]
             return mod.Verdict(ok, detail, cause, True,
-                               *mod.classify(ok, detail, cause, "import os\n"))
+                               *mod.classify(ok, detail, cause, "import os\n",
+                                             path=by_classify_path.get(path)))
 
         def fake_publish(arch, f, v, partial=False):
             published.update(v)
@@ -951,6 +972,84 @@ class TestReport(unittest.TestCase):
                                      "e.py": S.CLASS_EXTERN,
                                      "f.py": S.CLASS_TOOL})
 
+    def test_a_file_that_builds_on_an_admitted_contract_is_its_own_class(self):
+        """The trust boundary is a CLASS, and it is not a `pass`.
+
+        Three things have to hold at once, and this is the assertion for all
+        three because each one on its own is a way to lose the boundary quietly:
+        the file is not reported as `pass`; it is not dropped out of the
+        denominator either, because it DID build and the backend did answer its
+        constructs; and the summary says so in a sentence rather than leaving a
+        reader to work it out from a count.
+        """
+        admitted = self._admitted_file()
+        clean = self._clean_file()
+        cls, reason = S.classify(True, "", None, "", admitted)
+        self.assertEqual(cls, S.CLASS_ADMITTED)
+        self.assertIn("subprocess", reason)
+        self.assertNotEqual(cls, S.CLASS_PASS)
+        self.assertIn(S.CLASS_ADMITTED, S.ANSWERABLE,
+                      "a file that BUILT belongs in the denominator")
+        # …and a file with no admitted import is a plain pass, which is the
+        # direction that matters: the class must not fire on a file that trusted
+        # nothing.
+        self.assertEqual(S.classify(True, "", None, "", clean)[0],
+                         S.CLASS_PASS)
+        out, code, ledger = self._main(
+            [("admitted.py", True, "", None, admitted),
+             ("clean.py", True, "", None, clean)])
+        self.assertEqual(ledger["admitted.py"], S.CLASS_ADMITTED)
+        self.assertEqual(ledger["clean.py"], S.CLASS_PASS)
+        self.assertIn("1 pass + 1 built-with-admitted-contracts", out)
+        self.assertIn("codegen coverage: 1/2", out)
+        self.assertIn("NOT in the numerator", out)
+        # An admitted file is printed like every other non-pass, and with its
+        # REASON: its `detail` is the build's, which is empty for a successful
+        # build, so printing only that prints a line with nothing in it.
+        self.assertIn("BUILT-WITH-ADMITTED-CONTRACTS: admitted.py", out)
+        self.assertIn("subprocess", out)
+        # …and it does NOT make the run dirty: the backend did answer this
+        # file's constructs, and a build that rests on a declared contract is not
+        # a finding about the source.
+        self.assertEqual(code, 0)
+
+    def test_every_class_the_tool_can_produce_has_a_blurb(self):
+        """A class with no blurb prints a bare count and no meaning.
+
+        The rule `tools/suite.py` applies to the runner's statuses, applied here
+        because this file has its own: `CLASS_ADMITTED` was added and the report
+        is the tool's contract with a reader who has not read the tool.
+        """
+        missing = [c for c in S.CLASS_ORDER if c not in S.CLASS_BLURB]
+        self.assertEqual(missing, [], f"classes with no blurb: {missing}")
+        extra = [c for c in S.CLASS_BLURB if c not in S.CLASS_ORDER]
+        self.assertEqual(extra, [], f"blurbs for classes never produced: {extra}")
+
+    def _temp_source(self, text):
+        """A temp source file, in the repo root so `resolve_module_path` can
+        resolve its imports from it.
+
+        The DIRECTORY is the point and the first version of this got it wrong: it
+        passed `dir=HERE/.tmp` and `HERE` was not even bound in this module, so
+        the helper raised `NameError` and the test errored instead of failing.
+        The repo root is where `formal_sweep.REPO` is, which is where the sweep
+        resolves a module from -- a temp file in `/tmp` would not find
+        `formal/hostmods/` at all, and the class would not fire for a reason that
+        has nothing to do with the class.
+        """
+        fd, path = tempfile.mkstemp(suffix=".mojo", dir=S.REPO)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return path
+
+    def _admitted_file(self):
+        return self._temp_source("import subprocess\n\ndef main() -> int:\n"
+                                 "    return subprocess.run(\"ls\")\n")
+
+    def _clean_file(self):
+        return self._temp_source("def main() -> int:\n    return 0\n")
+
     def test_headline_excludes_not_answerable_and_says_so(self):
         rows = ([("p%d.py" % i, True, "", None) for i in range(7)]
                 + [("h%d.py" % i, False, HOST_MSG, None) for i in range(15)]
@@ -960,7 +1059,12 @@ class TestReport(unittest.TestCase):
         # The denominator is stated in words, not just as a number.
         self.assertIn("denominator: the 8 swept file(s) whose build could have "
                       "answered", out)
-        self.assertIn("7 pass + 1 codegen + 0 codegen/dependency = 8", out)
+        # The admitted-contracts term is in the denominator and is the point of
+        # this assertion: a file that builds on a DECLARED contract is neither a
+        # pass nor out of scope, and the summary has to say so or the rate reads
+        # as though admitting trust moved it.
+        self.assertIn("7 pass + 0 built-with-admitted-contracts + 1 codegen"
+                      " + 0 codegen/dependency = 8", out)
         self.assertIn("the 15 in a not-answerable", out)
         self.assertIn("host-import by module: os x15", out)
         # And the old all-in-one number is gone: nothing reports PASS/total.
@@ -976,7 +1080,8 @@ class TestReport(unittest.TestCase):
                 + [("c.py", False, CODEGEN_MSG, None)])
         out, code, _pub = self._main(rows, cas_state=(len(rows), 0))
         self.assertIn("codegen coverage: 7/12 = 58.3%", out)
-        self.assertIn("7 pass + 1 codegen + 4 codegen/dependency = 12", out)
+        self.assertIn("7 pass + 0 built-with-admitted-contracts + 1 codegen"
+                      " + 4 codegen/dependency = 12", out)
         self.assertIn(f"{S.CLASS_CODEGEN_DEP} by family: binary_heap.mojo: "
                       "module exports nothing x4", out)
         self.assertIn(f"{S.CLASS_CODEGEN} by family: value with no "
@@ -1155,7 +1260,7 @@ class TestCacheContract(unittest.TestCase):
         # and the crash stays a miss.
         import formal_sweep as mod
         err = "build: 'X' object has no attribute 'y'\n" + TB_BACKEND
-        proc = mod.BuildRun(1, "", err, False, None)
+        proc = mod.BuildRun(1, "", err, False, None, False)
         published = []
         # `_run_build` itself, not `subprocess.run` under it: how the sweep
         # spawns a build (and kills its tree on a timeout) is the sweep's
@@ -1306,7 +1411,7 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
             S._run_build = lambda *a, **k: S.BuildRun(
                 125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
                      "memcap: peak observed before the kill: 4.1 GB\n", "",
-                True, 4.1)
+                True, 4.1, False)
             try:
                 v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
             finally:
@@ -1325,7 +1430,7 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
         S._run_build = lambda *a, **k: S.BuildRun(
             125, "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
                  "memcap: peak observed before the kill: 4.1 GB\n",
-            "build: some.construct cannot be lowered: ...", True, 4.1)
+            "build: some.construct cannot be lowered: ...", True, 4.1, False)
         try:
             with tempfile.TemporaryDirectory() as td:
                 path = os.path.join(td, "big.mojo")
@@ -1337,6 +1442,124 @@ class TestPerFileMemoryCeiling(unittest.TestCase):
         self.assertEqual(v.cls, S.CLASS_TOOL)
         self.assertEqual(v.cause, S.CAUSE_MEMORY)
         self.assertNotIn("cannot be lowered", v.detail)
+
+
+class TestWrapperDied(unittest.TestCase):
+    """A build whose per-file wrapper never reported is not a finding.
+
+    2026-10-02: six files per architecture in the b6 sweep carried memcap's
+    BANNER as their `codegen` "refusal" — the class whose count is a gap in the
+    backend, the class that fails a run — and were PUBLISHED to the CAS, so a
+    machine fact outlived the run that observed it. The files are not memory
+    hogs: `bit/mask.mojo`, one of the six, builds in 0.1 GB and is refused for a
+    real reason. `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+    """
+
+    BANNER = ("memcap: big.mojo -- ceiling 4.0 GB across the process tree\n")
+
+    def _run_with(self, buildrun, tag="x"):
+        """run_one() against a forced _run_build, the way the breach tests do.
+
+        Two things this has to get right or it tests nothing. `cas.publish` is
+        stubbed, because a verdict reached through a forced _run_build is an
+        artefact of the test and must not reach the store. And the source
+        carries `tag`, because `cas.formal_build_key` takes the path only
+        through the source it names — two tests with the same bytes share a key,
+        so the second one gets the first one's CACHED verdict and never reaches
+        the branch under test. (That is not hypothetical: the first draft of
+        this class asserted on a detail and got the previous test's.)
+        """
+        saved_run, saved_pub = S._run_build, S.cas.publish
+        S._run_build = lambda *a, **k: buildrun
+        S.cas.publish = lambda *a, **k: None
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                path = os.path.join(td, "big.mojo")
+                with open(path, "w") as f:
+                    f.write(f"# {tag}\ndef f():\n    return 1\n")
+                return S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+        finally:
+            S._run_build, S.cas.publish = saved_run, saved_pub
+
+    def test_a_wrapper_that_never_reported_is_no_verdict(self):
+        v = self._run_with(S.BuildRun(-9, self.BANNER, "", False, None, True),
+                          tag="no-verdict")
+        self.assertEqual(v.cls, S.CLASS_TOOL)
+        self.assertEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertIn(S.CLASS_TOOL, S.DIRTY,
+                      "a file nobody answered for fails the run")
+        # NOT the memory wording, and that is the point of a separate label:
+        # nothing was measured against the ceiling, so a reader told "killed at
+        # the 4 GB ceiling" goes looking for a memory bug that is not there.
+        self.assertNotIn("killed at", v.detail)
+        self.assertNotIn("memcap:", v.detail)
+
+    def test_a_wrapper_that_never_reported_is_not_published(self):
+        # The same reason a timeout and a breach are not: the wrapper's death is
+        # a fact about this run's machine, and a verdict published under this
+        # key would pin the file here until the key changed.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "big.mojo")
+            # A distinct source for the reason _run_with's docstring gives: the
+            # key takes the path only through the source, so a shared body would
+            # let another test's verdict answer this one from the cache.
+            with open(path, "w") as f:
+                f.write("# not-published\ndef f():\n    return 1\n")
+            published = []
+            saved_pub, saved_run = S.cas.publish, S._run_build
+            S.cas.publish = lambda *a, **k: published.append(a)
+            S._run_build = lambda *a, **k: S.BuildRun(
+                -9, self.BANNER, "", False, None, True)
+            try:
+                v = S.run_one(path, 30, S.build_flags("arm64"), mem_gb=4.0)
+            finally:
+                S.cas.publish, S._run_build = saved_pub, saved_run
+        self.assertEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertEqual(published, [],
+                         "a machine fact must not become a cached verdict")
+
+    def test_the_builds_own_message_still_wins(self):
+        # The wrapper being silent is only a fact when the build said nothing
+        # too. A build that refused a construct and then had its wrapper killed
+        # has still refused it, and losing that would trade one misfiling for
+        # another.
+        v = self._run_with(S.BuildRun(
+            -9, self.BANNER, "build: some.construct cannot be lowered: ...\n",
+            False, None, True), tag="build-spoke")
+        self.assertNotEqual(v.cause, S.CAUSE_WRAPPER_DIED)
+        self.assertIn("cannot be lowered", v.detail)
+
+    def test_a_wrapper_death_is_told_apart_from_a_breach_by_evidence(self):
+        # memcap prints its banner before it starts anything and exactly one
+        # outcome line afterwards, so "banner and no outcome" is the whole
+        # discriminator. A breach, a clean finish and an interrupted watchdog
+        # all report, and none of them is a wrapper death.
+        self.assertTrue(procrun.memcap_wrapper_died(self.BANNER))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            self.BANNER + "memcap: BREACH  4.1 GB > 4.0 GB ceiling\n"
+            "memcap: peak observed before the kill: 4.1 GB\n"))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            self.BANNER + "memcap: done, peak 0.1 GB across up to 1 procs "
+            "(ceiling 4.0 GB), child exit 0\n"))
+        self.assertFalse(procrun.memcap_wrapper_died(
+            "build: some.construct cannot be lowered: ...\n"),
+            "no memcap line at all means the ceiling was off (-M 0)")
+
+    def test_memcap_accounting_is_never_the_files_own_refusal(self):
+        # A build that printed NOTHING leaves memcap's `done ... child exit -9`
+        # as the last line of the captured text. The namedtuple's docstring
+        # promises nothing downstream can match a `memcap:` line as if the build
+        # had printed it; this is the line that promise is about. The CLASS is
+        # left alone on purpose — the silent-death fallback is a documented
+        # choice (a refusal whose message went to stdout is common), and this
+        # test is about not putting the wrapper's bookkeeping in the file's
+        # mouth, not about overruling that.
+        v = self._run_with(S.BuildRun(
+            -9, self.BANNER + "memcap: done, peak 0.2 GB across up to 1 procs "
+            "(ceiling 4.0 GB), child exit -9\n", "", False, 0.2, False),
+            tag="silent")
+        self.assertNotIn("memcap:", v.detail)
+        self.assertEqual(v.detail, "exit -9")
 
 
 class TestResultsSurviveAnInterruptedRun(unittest.TestCase):

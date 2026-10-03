@@ -321,6 +321,24 @@ def _range_bounds(rargs: list):
     raise ValueError(f"range() takes 1-3 arguments, got {len(rargs)}")
 
 
+class _Scope(dict):
+    """The model generator's name scope, carrying the ADMITTED contracts.
+
+    A `dict` subclass rather than a second parameter threaded through
+    `_call_go`, `_expr_go`, `_cmp_go`, `_truth_go` and their callers, because
+    `scope` is ALREADY the one piece of context every one of those takes, and
+    adding a second to a dozen signatures would be a change spread over a
+    dozen call sites for a value that is present in almost none of them.
+    `admitted` is empty on every program that reaches no admitted contract, so
+    every existing path behaves exactly as it did — which is what keeps the
+    cached proofs in `~/.gmojo` describing the same files.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.admitted = {}
+
+
 def _call_go(e, param: str, env: dict, scope, render) -> str:
     """The model term for a call expression `f(a, b, …)`.
 
@@ -338,23 +356,55 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
     a `f_go` that was never defined — a Lean error about an unknown
     identifier, hundreds of lines downstream of the call that caused it.
 
-    A callee with no model is **refused**, not guessed at.  An extern's return
-    value is not a term this model can invent, and inventing one is precisely
-    the fabrication the model exists to avoid; a refusal costs this program a
-    proof and buys it a correct one.
+    A callee with no model is **refused**, not guessed at — UNLESS it is an
+    admitted contract, in which case the contract IS its model and is named in
+    the term.  Those are the two cases `formal/admitted.py` exists to tell
+    apart.  Refusing is right for an extern: an extern's return value is not a
+    term this model can invent, and inventing one is precisely the fabrication
+    the model exists to avoid.  It is wrong for a callee whose return value is
+    a declared external contract, because the declaration is already the
+    answer: rendering the call as an application of the `sorry`-proved
+    `admitted_<module>_<name>` makes the model's value the contract's, which is
+    what the proof then says about the machine — and leaves the trust named,
+    counted and locatable instead of turning a program with a declared
+    dependency into one with no proof at all.
     """
     sym = _call_name(e)
-    if scope is None or sym not in scope:
-        raise NotImplementedError(
-            f"model: call to `{sym or '?'}` has no model in this image (an "
-            f"extern, or a function this generator emits no `_go` for); "
-            f"refusing rather than inventing its return value")
-    # SPACE-separated, not comma-separated: Lean reads `(f_go a, b)` as the PAIR
-    # `(f_go a, b)`, so a comma here silently gives the model the wrong TYPE for
-    # every multi-argument call -- and the programs that have one are refused
-    # before Lean is reached, so nothing downstream would have said so.
-    args = " ".join(render(a, param, env) for a in e.args)
-    return f"({sym}_go{'' if not args else ' ' + args})"
+    if scope is not None and sym in scope:
+        args = " ".join(render(a, param, env) for a in e.args)
+        # SPACE-separated, not comma-separated: Lean reads `(f_go a, b)` as the
+        # PAIR `(f_go a, b)`, so a comma here silently gives the model the wrong
+        # TYPE for every multi-argument call -- and the programs that have one
+        # are refused before Lean is reached, so nothing downstream would have
+        # said so.
+        return f"({sym}_go{'' if not args else ' ' + args})"
+    admitted = getattr(scope, "admitted", None) or {}
+    lean = admitted.get(sym)
+    if lean:
+        # ONE argument, and a call with any other number is refused rather than
+        # padded.  The arity is not a free choice: `MojoExpr.call` in
+        # `lib/ProofLib.lean` carries a single `UInt64` argument, so the AST
+        # layer of this same proof can only evaluate a call with one, and an
+        # admission applied to two arguments here and one there would make
+        # `eval_eq_mojo` — the statement that the two layers are the same
+        # function — false rather than merely unproved.  A hostmod's admitted
+        # operations are therefore written with ONE parameter (see
+        # `formal/hostmods/subprocess.mojo`), and a call that disagrees says so
+        # here, where the reader can see which call it was.
+        if len(e.args) != 1:
+            raise NotImplementedError(
+                f"model: `{sym}` is an ADMITTED contract and is declared over "
+                f"ONE word — the argument is the request, and a value on this "
+                f"path is one 64-bit word — but this call passes "
+                f"{len(e.args)}. Split the call so the admitted operation takes "
+                f"the request alone; the contract cannot be applied to a shape "
+                f"the model cannot carry, and applying it to the first "
+                f"argument alone would silently drop the rest.")
+        return f"({lean} {render(e.args[0], param, env)})"
+    raise NotImplementedError(
+        f"model: call to `{sym or '?'}` has no model in this image (an "
+        f"extern, or a function this generator emits no `_go` for); "
+        f"refusing rather than inventing its return value")
 
 
 def _cmp_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
@@ -1445,8 +1495,14 @@ def _go_defs_for(prog, fn, tc: dict) -> list:
     fns = {g.name: g for g in (getattr(prog, "functions", None) or [])}
     if fn is not None:
         fns.setdefault(fn.name, fn)
-    scope = {n: g for n, g in fns.items()
-             if n in set(_reachable(fns, fn.name if fn else ""))}
+    scope = _Scope({n: g for n, g in fns.items()
+                    if n in set(_reachable(fns, fn.name if fn else ""))})
+    # The admitted contracts, keyed by the SPELLING a call site uses.  Read off
+    # `prog` because `formal/build.py` already resolved them through
+    # `formal/imports.py`'s `import_bindings` — the same binding the emitted call
+    # uses, so the model cannot substitute one contract for the callee the code
+    # actually calls.
+    scope.admitted = dict(getattr(prog, "admitted_calls", None) or {})
     tc = dict(tc or {})
     tc["fns"] = scope
     out = []
@@ -6461,7 +6517,9 @@ def _gen_code_defs(name: str, code: bytes, base: int, test_input: int) -> str:
     )
 
 
-def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entry: int) -> str:
+def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
+                   func_entry: int, admitted_model: bool = False,
+                   admitted_names: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
     Appends a RET sentinel after the code and executes the whole program
@@ -6474,13 +6532,27 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entr
     exit_addr = base + len(code)
     init = (f"{{ (Arm64State.init {test_input} {base}) "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
+    _tac = _decide_or_admit(admitted_model)
+    # The admission note goes on the FIRST block only, and every docstring here
+    # keeps HEAD's text when there is nothing to admit.  Both halves are the same
+    # requirement: a file that reaches no admitted contract must generate a
+    # byte-identical proof, which is what says this change is inert everywhere it
+    # does not apply.  Repeating the note on all five blocks would put five
+    # copies of a paragraph in every generated proof that does admit something.
+    _first_note = ("" if not admitted_model
+                   else "\n    " + _admitted_model_note(admitted_names or [])
+                   + " -/")
+    _rest_note = "" if admitted_model else " -/"
     blocks = [
+        f"/-- Concrete verification: running the compiled binary on input "
+        f"{test_input} leaves mojo {test_input} in x0.{_first_note}"
+        if admitted_model else
         f"/-- Concrete verification: running the compiled binary on input "
         f"{test_input} leaves mojo {test_input} in x0. -/\n"
         f"theorem {name}_runs_test :\n"
         f"  run_result_exit {init} {name}_code {exit_addr} 200000 "
         f"= mojo {test_input} := by\n"
-        f"  native_decide"
+        f"{_tac}"
     ]
     for v in [0, 1, 2, 5]:
         if v == test_input:
@@ -6488,17 +6560,20 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entr
         ventry = (f"{{ (Arm64State.init {v} {func_entry}) "
                   f"with x30 := UInt64.ofNat {exit_addr} }}")
         blocks.append(
-            f"/-- Concrete verification for input {v}, run from the function entry. -/\n"
+            f"/-- Concrete verification for input {v}, run from the function "
+            f"entry.{_rest_note}\n"
             f"theorem {name}_runs_{v} :\n"
             f"  run_result_exit {ventry} {name}_code {exit_addr} 200000 "
             f"= mojo {v} := by\n"
-            f"  native_decide"
+            f"{_tac}"
         )
     return "\n\n".join(blocks)
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
-                     extern_calls: list, externs: list, fn) -> tuple:
+                     extern_calls: list, externs: list, fn,
+                     admitted_model: bool = False,
+                     admitted_names: list = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -6631,8 +6706,13 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                 f"  run_result_exit {{ {name}_pre_{len(extern_calls) - 1} "
                 f"with pc := {last_bl + 4} }} "
                 f"{name}_code {exit_addr} 200000 = mojo {test_input} := by\n"
-                f"  native_decide"
+                f"{_decide_or_admit(admitted_model)}"
             )
+            if admitted_model:
+                blocks[-1] = blocks[-1].replace(
+                    "   which is why the name says what this one is for. -/",
+                    "   which is why the name says what this one is for.\n"
+                    f"   {_admitted_model_note(admitted_names or [])} -/")
     return "\n\n".join(blocks), "\n\n".join(step_blocks)
 
 
@@ -6918,6 +6998,156 @@ def check_step_conds(lean_path=None):
             % (len(missing), _fmt(missing), len(extra), _fmt(extra)))
 
 
+def _decide_or_admit(admitted_model: bool) -> str:
+    """`"  native_decide"` or `"  sorry"`, for a theorem whose value is the MODEL.
+
+    One function, because the choice is the same decision in four places and the
+    reason it is a decision at all is that `native_decide` EXECUTES the model:
+    when the model's value reaches an admitted contract, evaluating it walks into
+    `sorryAx`, and Lean answers
+
+        cannot evaluate code because 'admitted_subprocess_run' uses 'sorry'
+
+    which is not a proof failure but a refusal to evaluate.  So a theorem that
+    depends on the trust has to be ADMITTED rather than decided, and saying so
+    in the file is the honest outcome: the theorem is exactly as true as the
+    contract it rests on, and the census now counts it.
+
+    The alternative — leaving `native_decide` and letting the build fail — makes
+    every file that uses an admitted contract unbuildable with proofs on, which
+    would mean the admission is declared and then never usable.  The other
+    alternative, keeping `native_decide` and hoping the axiom is inhabited, is
+    the one this exists to prevent: it is a proof that would be reporting
+    agreement it never checked.
+    """
+    return "  sorry" if admitted_model else "  native_decide"
+
+
+def _admitted_model_note(contracts: list) -> str:
+    """The `/-- … -/` line that says WHY a theorem is admitted, and by what."""
+    names = ", ".join(f"`{c}`" for c in contracts)
+    return (f"GIVEN the admitted host contract(s) {names} above: this is a "
+            f"claim of TRUST, not a proof.  The model's value at this call is "
+            f"the contract's, so the statement cannot be decided by executing "
+            f"the model, and it is admitted rather than checked.  Everything "
+            f"else in this file keeps its normal proof.")
+
+
+def _call_func_lean(func_name: str, admitted: dict = None,
+                    wrap: bool = True) -> str:
+    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
+
+    ONE function for what five call sites used to spell out.  They agreed
+    because they were copies, and a copy that has to be edited in five places
+    when the function it builds gains a case is a copy that will be edited in
+    four of them: `formal/x86_64_proof_gen.py` had a sixth, and `eval_eq_mojo`,
+    `eval_eq_mojo_0` and `eval_eq_mojo_test` are three statements that must
+    agree about what a call MEANS or they disagree about whether the AST model
+    and the source model are the same function.
+
+    The ADMITTED cases are the reason this is factored rather than pasted.  An
+    admitted callee's value is its contract, so `evalFunc` has to evaluate such
+    a call by the contract and not by `0` — `MojoExpr.call` in `lib/ProofLib.lean`
+    falls through to `callFunc` for a name it does not know, and a `0` there
+    would make `eval_eq_mojo` a claim that the model's value is zero.  So each
+    admitted spelling gets its own branch, in the order `formal/build.py` gave
+    them.
+
+    `admitted` maps the spelling a call site uses to the contract's Lean name;
+    it is the same `prog.admitted_calls` the `_go` model uses, so both layers of
+    the proof resolve one call to one contract.
+    """
+    if not admitted:
+        # The spelling each of the six call sites used to write out, byte for
+        # byte, chosen by `wrap`.  A change that is supposed to be
+        # behaviour-preserving has to be byte-identical on a program that reaches
+        # no admitted contract, and this is the whole of it: the alternative
+        # would re-wrap part of every generated proof in the tree and invalidate
+        # every verdict in `~/.gmojo` for a whitespace change.  `wrap=False` is
+        # the one site that had it on one line (`fib`'s tree-recursion `hunf`);
+        # measured against HEAD over all 43 files in `formal/examples/`, both
+        # arms are needed to make all of them identical.
+        return ((f'(fun name arg =>\n'
+                 f'    if name = "{func_name}" then mojo arg else 0)') if wrap else
+                (f'(fun name arg => if name = "{func_name}" then mojo arg else 0)'))
+    arms = "\n  ".join(
+        f'if name = "{spelling}" then {lean} arg else'
+        for spelling, lean in sorted(admitted.items()) if lean)
+    return (f'(fun name arg =>\n  {arms}\n'
+            f'  if name = "{func_name}" then mojo arg else 0)')
+
+
+def _admitted_lean(admitted) -> str:
+    """The Lean block carrying a program's ADMITTED HOST CONTRACTS.
+
+    THE ONE IMPLEMENTATION, and `formal/x86_64_proof_gen.py` calls this rather
+    than writing its own: two copies of "how a claim of trust is written into a
+    generated proof" is exactly the pair that agrees until the day it does not,
+    and the disagreement would be one backend emitting an `axiom` the other does
+    not, which the census cannot see because it only counts what Lean reports.
+
+    The contracts arrive as the plain dicts `formal/build.py`'s
+    `_admitted_summary` produces — `{name, assumes, lean_name, source, line}` —
+    rather than as `formal/admitted.py` `Contract` objects, because the value
+    crosses a process boundary here (the sweep reads a stored verdict; the proof
+    generator is a later run).  `_admitted_lean` therefore renders from the dict
+    and calls `formal/admitted.py` for the SHAPE of the text, so the declaration
+    text and the docstring text have one author.
+
+    Empty for a file that reaches none, and empty is not an omission: a proof
+    with no admission must be byte-identical to what it was before this existed,
+    or every cached verdict in `~/.gmojo` would be measuring a different file.
+    """
+    if not admitted:
+        return ""
+    from formal import admitted as A
+
+    class _C:
+        __slots__ = ("module", "name", "assumes", "source", "line")
+
+        def __init__(self, d):
+            mod, _, fn = str(d.get("name", "?")).partition(".")
+            self.module = mod
+            self.name = fn or mod
+            self.assumes = d.get("assumes") or ""
+            self.source = d.get("source") or "?"
+            self.line = d.get("line") or 0
+
+        @property
+        def qualified(self):
+            return f"{self.module}.{self.name}" if self.name != self.module \
+                else self.module
+
+        @property
+        def lean_name(self):
+            return A.Contract(self.module, self.name, self.assumes,
+                              self.source, self.line).lean_name
+
+        def docstring(self):
+            return A.Contract(self.module, self.name, self.assumes,
+                              self.source, self.line).docstring()
+
+    contracts = [_C(d) for d in admitted]
+    # A contract whose assumption grew past what the scope rule allows is
+    # REFUSED here rather than emitted, and the refusal names the text.  A `sorry`
+    # over a claim about the host's BEHAVIOUR is not a narrower admission than a
+    # `sorry` over a claim about its answer; it is a different and much larger
+    # claim wearing the same marker, and emitting it silently would put that
+    # claim into every proof generated from here on.
+    for c in contracts:
+        why = A.contract_text_is_scoped(A.Contract(c.module, c.name, c.assumes,
+                                                  c.source, c.line))
+        if why:
+            raise NotImplementedError(f"admitted contract: {why}")
+    clash = A.contract_texts_are_unique(
+        [A.Contract(c.module, c.name, c.assumes, c.source, c.line)
+         for c in contracts])
+    if clash:
+        raise NotImplementedError(f"admitted contract: {clash}")
+    return "\n" + A.lean_trust_header(contracts) + "\n\n" + \
+        A.lean_declarations(contracts) + "\n"
+
+
 def generate_arm64_proof(prog, code, info) -> str:
     """Generate a Lean 4 proof file for an ARM64-compiled program."""
     check_step_conds()
@@ -6925,6 +7155,21 @@ def generate_arm64_proof(prog, code, info) -> str:
     base_addr = info["base_addr"]
     test_input = info.get("test_input", 10)
     code = code or b""
+
+    # The ADMITTED HOST CONTRACTS this program rests on, from `prog`.  See
+    # `formal/admitted.py` for what an admitted contract is and why it is a
+    # `sorry` rather than an `axiom`.  Read off `prog` rather than recomputed
+    # from the source, because `formal/build.py` is the one place that already
+    # walked the import closure — a second walk here would be free to resolve a
+    # different closure than the one the build linked against, and the proof
+    # would then carry admissions for modules the image does not link and none
+    # for modules it does.
+    admitted = list(getattr(prog, "admitted", None) or [])
+    admitted_section = _admitted_lean(admitted)
+    # The `callFunc` the AST layer is given, which has to know the admitted
+    # spellings as well as the proved function — see `_call_func_lean`.
+    _admitted_calls_map = dict(getattr(prog, "admitted_calls", None) or {})
+    _cf_text = _call_func_lean(func_name, _admitted_calls_map)
 
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
@@ -6936,6 +7181,26 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+
+    # Which of those this program ACTUALLY calls, walked with `_callees_of` —
+    # the same walk that builds the `_go` dependency graph, so it cannot call a
+    # name the model does not also try to resolve.  `admitted_model` is what
+    # makes the value-dependent theorems admitted rather than decided, and it is
+    # deliberately about CALLS rather than about the contracts being present: a
+    # file that imports `subprocess` and never calls it links a library with six
+    # contracts in it and its own proof is decidable, so admitting its theorems
+    # would over-report by exactly the files that trusted least.
+    _allfns = {g.name: g for g in (getattr(prog, "functions", None) or [])}
+    if fn is not None:
+        _allfns.setdefault(fn.name, fn)
+    _called = set()
+    for _n in _reachable(_allfns, fn.name if fn else ""):
+        _called.update(_callees_of(_allfns[_n]))
+    _admitted_used_names = sorted(
+        c["name"] for k, c in
+        ((k, c) for c in admitted for k in (c.get("name"),))
+        if k and any(sp == k or sp == k.split(".")[-1] for sp in _called))
+    _admitted_model = bool(_admitted_used_names)
 
     # Typed (fixed-width int) context.  A function is "typed" when any variable
     # or the return type is not the default UInt64 (Int64 counts: signed cmps).
@@ -7000,9 +7265,13 @@ def generate_arm64_proof(prog, code, info) -> str:
         # tree recursion (`fib`): `mojo` is the structural model, so the AST
         # evaluation unfolds to the same `n<=1 / n-1 / n-2` recurrence and
         # `fib_model_lt2`/`_ge2` close it directly (no induction needed).
-        _cf = (f"fun name arg => if name = \"{func_name}\" then mojo arg else 0")
+        _cf = _call_func_lean(func_name, _admitted_calls_map, wrap=False)
+        # This site writes its own parentheses around the callFunc, so the
+        # one-line arm must not carry a second pair -- otherwise `fib`'s proof
+        # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
+        _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf}) n =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) n =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
             f"    simp only [ast, evalFunc, evalBody, evalBodyEnv, evalExpr]\n"
             f"    by_cases h : n ≤ (1 : UInt64) <;> simp [h]\n"
@@ -7074,8 +7343,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast (fun name arg =>\n"
-            f"    if name = \"{func_name}\" then mojo arg else 0) n = mojo n := by\n"
+            f"  evalFunc ast {_cf_text} n = mojo n := by\n"
             f"  {eval_eq_mojo_proof}"
         )
     if _range_loop_pattern(fn) is not None:
@@ -7090,12 +7358,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     externs = list(getattr(prog, "externs", []) or [])
     step_tests = ""
     if extern_calls:
-        run_test, step_tests = _gen_extern_test(func_name, code, base_addr,
-                                                test_input, extern_calls,
-                                                externs, fn)
+        run_test, step_tests = _gen_extern_test(
+            func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            admitted_model=_admitted_model,
+            admitted_names=_admitted_used_names)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
-                                  info["labels"].get(func_name, base_addr))
+                                  info["labels"].get(func_name, base_addr),
+                                  admitted_model=_admitted_model,
+                                  admitted_names=_admitted_used_names)
     else:
         # externs declared but no call sites recorded (codegen gap): admit
         exit_addr = base_addr + len(code)
@@ -7124,24 +7395,30 @@ def generate_arm64_proof(prog, code, info) -> str:
     # no-return fall-through, and it skips while loops entirely, so those
     # programs would not satisfy the equality).
     eval_test_block = ""
+    _tac_eval = _decide_or_admit(_admitted_model)
     if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
         eval_tests = []
+        if _admitted_model:
+            # A `/- -/` block and NOT a docstring: the section header in the
+            # template already carries one docstring on the declaration that
+            # follows, and Lean takes one docstring per declaration -- a second
+            # is a parse error at the token, naming no docstrings.
+            eval_tests.append(
+                f"/- {_admitted_model_note(_admitted_used_names)} -/\n")
         for v in [0, 1, 2, 5, test_input]:
             if v == test_input:
                 continue
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
-                f"  evalFunc ast (fun name arg =>\n"
-                f"    if name = \"{func_name}\" then mojo arg else 0) "
+                f"  evalFunc ast {_cf_text} "
                 f"(UInt64.ofNat {v}) = mojo (UInt64.ofNat {v}) := by\n"
-                f"  native_decide"
+                f"{_tac_eval}"
             )
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
-            f"  evalFunc ast (fun name arg =>\n"
-            f"    if name = \"{func_name}\" then mojo arg else 0) "
+            f"  evalFunc ast {_cf_text} "
             f"(UInt64.ofNat {test_input}) = mojo (UInt64.ofNat {test_input}) := by\n"
-            f"  native_decide"
+            f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)
 
@@ -7259,7 +7536,7 @@ set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false
-{trunc_defs_section}
+{trunc_defs_section}{admitted_section}
 /-- Mojo semantics: direct Lean model of the source code. -/
 {go_defs}
 

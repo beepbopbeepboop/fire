@@ -289,7 +289,7 @@ def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
     return hyp
 
 
-def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne):
+def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne, dst=None, sib=False):
     """Hypotheses for a `REX.W <opcode> /r` MEMORY form, concretised.
 
     The memory forms carry what the register ones do not: the ModRM `mod` is the
@@ -305,9 +305,31 @@ def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne):
     encoding disagree -- which is exactly what `lea r11, [rbx+64]` did: 64 fits
     in a signed byte, so the encoder emitted a disp8 and the disp32 lemma's
     `mod = 2` hypothesis did not hold.
+
+    `dst` is the CONCRETE destination register for the forms whose successor is
+    a register WRITE -- every `mov r64, [...]` and every `lea` -- and it is
+    emitted together with the `dst < 16` that `x86_set_reg` is a `match` on, so
+    both halves of what the load's hypothesis list actually says are checked.
+    Passing it is what makes this a transcription of the LEMMA's statement: both
+    hypotheses were absent here before, so a load whose destination index was
+    computed wrongly would have satisfied every hypothesis in this list and
+    proved nothing about where the value lands.
+
+    `sib` adds the two facts a SIB operand carries and a `[rbp + disp]` one does
+    not: the SIB byte itself, which sits BETWEEN the ModRM and the displacement
+    (so the displacement is at `m + 4` and not `m + 3`), and `REX.B = 0`, which is
+    what makes the SIB's base field `4` mean RSP rather than R12.  Neither is
+    derivable from the other three byte facts, so a row for a SIB form without
+    them would check the wrong displacement offset.
     """
     hyps = _rex_mod3_hyps(addr, rex, modrm, opcode,
-                          reg=(modrm >> 3) & 7, mode=mode)
+                          reg=(modrm >> 3) & 7, mode=mode, dst=dst)
+    if sib:
+        hyps.append("code %d = %d" % (addr + 3, 0x24))
+    if dst is not None:
+        hyps.append("%d < 16" % dst)
+    if sib:
+        hyps.append("x86_rex_b %d = 0" % rex)
     for r in rm_ne:
         hyps.append("%d ≠ %d" % (modrm & 7, r))
     return hyps
@@ -398,47 +420,111 @@ def step_lemmas():
          "code %d = %d" % (BASE + 16 * len(out) + 1, cqo[1]),
          "x86_is_rex %d = true" % cqo[0],
          "x86_rex_w %d = true" % cqo[0]]))
-    for lemma, label, enc in _memory_samples():
+    for lemma, label, enc, dst, sib in _memory_samples():
+        # `rm ≠ 4` is the "no SIB byte follows" exclusion, so a SIB row is the one
+        # shape where it must NOT be asserted -- rm=4 is what SELECTS the SIB.
+        # Asserting it anyway gives `4 ≠ 4`, and this check is what said so:
+        # "hypothesis 12 `4 ≠ 4` does not hold at 48 89 44 24 08 -- the lemma is
+        # vacuous there", which named the row and the bytes.  A vacuous
+        # hypothesis is worse than a missing one: the lemma would still prove.
         out.append(Lemma(
             lemma, label, enc,
             _rex_mem_hyps(BASE + 16 * len(out), enc[0], enc[2], enc[1],
-                          (enc[2] >> 6) & 3, (4,))))
+                          (enc[2] >> 6) & 3, () if sib else (4,), dst, sib)))
     return out
 
 
 def _memory_samples():
-    """`(lemma, label, encoding)` for the memory-operand shapes, both directions.
+    """`(lemma, label, encoding, dst, sib)` for the memory-operand shapes, both
+    directions.
 
     Read back out of the encoder rather than spelled as byte strings, because a
     hand-written encoding here is a third place for a typo to live and the only
     thing the check needs from it is that it is a real one.
+
+    `dst` is the concrete destination for the forms whose successor writes a
+    register, and `None` for the stores, which have none; `sib` marks the rows
+    whose encoding carries a SIB byte.  Both are read off the row rather than
+    derived, because they are transcriptions of what the LEMMA says and a
+    derived one is the fourth derivation this file exists to avoid.
     """
     R = X.Reg
+
+    def load(lemma, label, enc):
+        """A memory form whose successor WRITES a register, so its lemma takes the
+        concrete destination -- read out of the encoding here, which is where the
+        check is supposed to get its facts from."""
+        return (lemma, label, enc, ((enc[2] >> 3) & 7) + (8 if enc[0] & 4 else 0),
+                False)
+
+    def store(lemma, label, enc):
+        """A memory form whose successor writes MEMORY, so its lemma has no `dst`
+        at all and passing one would be a hypothesis the lemma does not have."""
+        return (lemma, label, enc, None, False)
+
+    def sib_store(lemma, label, enc):
+        """A store through a SIB operand: `Reg.RSP` as the base is what makes the
+        encoder emit one, so these rows are read back out of that path rather
+        than spelled."""
+        return (lemma, label, enc, None, True)
+
     return [
-        ("x86_step_mov_rm64_mem_disp8", "mov rax, [rbp+8]",
-         X.encode_mov_r64_rm64(R.RAX, R.RBP, 8)),
-        ("x86_step_mov_rm64_mem_disp8", "mov r12, [rbp-8]",
-         X.encode_mov_r64_rm64(R.R12, R.RBP, -8)),
-        ("x86_step_mov_rm64_mem_nodisp", "mov r8, [rbx]",
-         X.encode_mov_r64_rm64(R.R8, R.RBX, 0)),
-        ("x86_step_mov_mem_disp8", "mov [rbp+8], rax",
-         X.encode_mov_rm64_r64(R.RBP, 8, R.RAX)),
-        ("x86_step_mov_mem_disp8", "mov [rbx+8], r12",
-         X.encode_mov_rm64_r64(R.RBX, 8, R.R12)),
-        ("x86_step_mov_mem_nodisp", "mov [rdx], r11",
-         X.encode_mov_rm64_r64(R.RDX, 0, R.R11)),
-        ("x86_step_mov_mem_disp32", "mov [rbp-0x410], rax",
-         X.encode_mov_rm64_r64(R.RBP, -0x410, R.RAX)),
-        ("x86_step_mov_mem_disp32", "mov [rbx+4096], r9",
-         X.encode_mov_rm64_r64(R.RBX, 4096, R.R9)),
-        ("x86_step_lea_rm64_disp32", "lea rax, [rbp-0x410]",
-         X.encode_lea_r64_rm64(R.RAX, R.RBP, -0x410)),
+        load("x86_step_mov_rm64_mem_disp8", "mov rax, [rbp+8]",
+             X.encode_mov_r64_rm64(R.RAX, R.RBP, 8)),
+        load("x86_step_mov_rm64_mem_disp8", "mov r12, [rbp-8]",
+             X.encode_mov_r64_rm64(R.R12, R.RBP, -8)),
+        load("x86_step_mov_rm64_mem_nodisp", "mov r8, [rbx]",
+             X.encode_mov_r64_rm64(R.R8, R.RBX, 0)),
+        store("x86_step_mov_mem_disp8", "mov [rbp+8], rax",
+              X.encode_mov_rm64_r64(R.RBP, 8, R.RAX)),
+        store("x86_step_mov_mem_disp8", "mov [rbx+8], r12",
+              X.encode_mov_rm64_r64(R.RBX, 8, R.R12)),
+        store("x86_step_mov_mem_nodisp", "mov [rdx], r11",
+              X.encode_mov_rm64_r64(R.RDX, 0, R.R11)),
+        store("x86_step_mov_mem_disp32", "mov [rbp-0x410], rax",
+              X.encode_mov_rm64_r64(R.RBP, -0x410, R.RAX)),
+        store("x86_step_mov_mem_disp32", "mov [rbx+4096], r9",
+              X.encode_mov_rm64_r64(R.RBX, 4096, R.R9)),
+        load("x86_step_lea_rm64_disp32", "lea rax, [rbp-0x410]",
+             X.encode_lea_r64_rm64(R.RAX, R.RBP, -0x410)),
         # 64 would encode as a disp8 -- `_rm_disp` picks the narrowest form --
         # and this row is here to pin the disp32 one.
-        ("x86_step_lea_rm64_disp32", "lea r11, [rbx+4096]",
-         X.encode_lea_r64_rm64(R.R11, R.RBX, 4096)),
+        load("x86_step_lea_rm64_disp32", "lea r11, [rbx+4096]",
+             X.encode_lea_r64_rm64(R.R11, R.RBX, 4096)),
+        # The disp32 LOAD, which is what a stack argument past the twentieth
+        # encodes to: `_load_home_from_stack` reads `mov r11, [rbp + 16 + 8k]`
+        # and `16 + 8k` crosses 127 at k = 14, so argument index 20 is the first
+        # one with a four-byte displacement.  128 is therefore the SMALLEST
+        # displacement that reaches this encoding, and a row at 120 would be a
+        # disp8 row wearing this lemma's name -- the `lea r11, [rbx+64]` trap in
+        # the one place it has not happened yet.
+        load("x86_step_mov_rm64_mem_disp32", "mov r11, [rbp+128]",
+             X.encode_mov_r64_rm64(R.R11, R.RBP, 128)),
+        # And the negative side, because the displacement is SIGNED: a lemma
+        # that read its four bytes unsigned would put a `mov r11, [rbp-0x410]`
+        # about 4 GB away, and every other hypothesis in this list would still
+        # hold, because the sign of the displacement is not one of them.
+        load("x86_step_mov_rm64_mem_disp32", "mov r11, [rbp-0x410]",
+             X.encode_mov_r64_rm64(R.R11, R.RBP, -0x410)),
+        # The two SIB stores a call site emits for every argument past the
+        # register file.  `[rsp + disp]` has NO non-SIB encoding (at mod=0 rm=5 is
+        # RIP-relative), so these are not a variant of the `mov_rm64_r64_disp8`
+        # rows above but a different instruction, and the whole
+        # stack-argument convention on the CALLER side is made of them.  128 is
+        # the first displacement that needs four bytes, for the same reason the
+        # load above is at 128: `_rm_disp` picks the narrowest form, and a row at
+        # 120 would be a disp8 row wearing the disp32 lemma's name.
+        sib_store("x86_step_mov_mem_sib_disp8", "mov [rsp+8], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 8, R.RAX)),
+        sib_store("x86_step_mov_mem_sib_disp32", "mov [rsp+128], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 128, R.RAX)),
+        # And with a high source register, which is the `4c` prefix the two
+        # lemmas are general over -- `x86_step_mov_mem_sib_rsp` pins `0x48`, and a
+        # row at `0x48` only would leave every argument the compiler keeps in
+        # r8..r15 unchecked.
+        sib_store("x86_step_mov_mem_sib_disp8", "mov [rsp+8], r12",
+                  X.encode_mov_rm64_r64(R.RSP, 8, R.R12)),
     ]
-    return out
 
 
 def lemma_lean_source(lems):

@@ -118,7 +118,15 @@ facts. So every verdict now carries a class:
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
-                                    reached at all
+                                    reached at all. Also the two ways a file
+                                    is killed by THIS TOOL's per-file memory
+                                    ceiling rather than by its source:
+                                    `memory-killed` (memcap reported a breach,
+                                    with the measured peak) and `wrapper-died`
+                                    (memcap itself was killed before it
+                                    reported anything, so the build's own
+                                    verdict was never observed — see
+                                    CAUSE_WRAPPER_DIED)
   unknown                           a message shape this tool does not
                                     recognise. Deliberately its own bucket
                                     rather than a fallback into `codegen`:
@@ -427,6 +435,18 @@ def _imports_digest(path: str) -> str:
 # under a class the current rules would not assign it, because the current
 # rules are what assign it.
 CLASS_PASS = "pass"
+# BUILT, and it rests on ADMITTED HOST CONTRACTS.  A separate class from
+# `pass` because a `pass` is a claim this backend can make on its own -- the
+# image built and every symbol it binds is on its own link line -- and a file
+# that also needed a second process, a thread or a dynamic loader has not had
+# that claim made for it.  Counting it as a `pass` would make the headline rate
+# a measure of how much the sweep was willing to believe.
+#
+# It IS in ANSWERABLE, deliberately: the backend got to look at the file's
+# constructs and answered them.  What it is NOT is in the numerator, so the
+# rate can only go DOWN as more of the tree is admitted against, which is the
+# direction a rate about provability has to move in.
+CLASS_ADMITTED = "built-with-admitted-contracts"
 CLASS_CODEGEN = "codegen"
 CLASS_CODEGEN_DEP = "codegen/dependency"
 CLASS_HOST = "not-answerable/host-import"
@@ -440,9 +460,9 @@ CLASS_UNKNOWN = "unknown"
 
 # Report order: the findings first, then the reasons there is none, then the
 # buckets that mean the tool itself did not finish the job.
-CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
-               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_SYSCALL,
-               CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
+CLASS_ORDER = (CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN, CLASS_CODEGEN_DEP,
+               CLASS_HOST, CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET,
+               CLASS_SYSCALL, CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
 # ANSWERABLE = the classes in which the backend got to look at the file's
 # constructs and returned a verdict about them. `codegen/dependency` is in it
 # deliberately (see the position taken in the module docstring): a file whose
@@ -453,7 +473,8 @@ CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
 # the construct it was looking at, and letting it into the denominator would
 # report a compiler bug as a coverage gap (B4's 74-file sweep, in which every
 # one was a mid-edit artefact of another agent's work).
-ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP))
+ANSWERABLE = frozenset((CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN,
+                        CLASS_CODEGEN_DEP))
 # Classes that make the run exit non-zero. A codegen finding (in this file or
 # in a dependency it needs) is real; CLASS_CRASH is real too and is counted and
 # printed like any other finding, because a crash that is allowed to pass
@@ -484,6 +505,21 @@ CAUSE_TOOL_ERROR = "tool-error"
 # killed, classified, and the sweep continues — `TestPerFileMemoryCeiling`
 # in `test_formal_sweep.py`.
 CAUSE_MEMORY = "memory-killed"
+# The per-file ceiling's WRAPPER died before it reported an outcome: memcap
+# printed its banner and nothing else, so the build's own verdict was never
+# observed. A machine fact, in `tool` for the same reason a timeout is, and its
+# own label because the two are told apart by evidence rather than by shape: a
+# breach is memcap saying the ceiling fired, this is memcap not saying anything,
+# and a reader who is told "killed at the ceiling" about a build that was never
+# measured against it will go and look for a memory bug that is not there.
+#
+# 2026-10-02: six files per architecture in the b6 sweep carried memcap's
+# banner as their `codegen` "refusal" — the class whose count is a gap in the
+# backend — and were PUBLISHED to the CAS, so a machine fact survived the run
+# that observed it. The files are not memory hogs: `bit/mask.mojo`, one of the
+# six, builds in 0.1 GB and is refused for a real reason in three minutes.
+# bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md.
+CAUSE_WRAPPER_DIED = "wrapper-died"
 # The image BUILDS, but this host cannot check whether its imports resolve.
 # Not a finding about the image and not a fact about the target: it is a gap in
 # the RUN. Its own label because the neighbouring classes give the opposite
@@ -722,8 +758,19 @@ _REFUSAL_FAMILIES = (
     ("unsupported call target", "unsupported node"),
     # MLIR. Three different wordings reach this bucket: the attribute template
     # itself, the dialect operation, and the bare builtin spelling.
+    #
+    # The dialect operation marker is `dialect OPERATION`, not the old "MLIR
+    # dialect construct": `formal/model.py`'s `mlir_dialect_op_refusal` now
+    # classifies the operation by what it DENOTES (an effect, an elementwise
+    # arithmetic result, or a value needing a fact this path lacks), so its
+    # messages name the operation and no longer contain that phrase. The OLD
+    # marker is kept because it is still reachable — a call site that knows only
+    # the `__mlir_` name and no operation still emits it — and because a marker
+    # list that drops the wording it is currently matching is how a family
+    # silently empties. `test_refusal_taxonomy.py` has a sample per wording.
     ("MLIR attribute template", "MLIR construct"),
     ("MLIR dialect construct", "MLIR construct"),
+    ("dialect OPERATION", "MLIR construct"),
     ("__mlir_", "MLIR construct"),
     # The two halves of an MLIR TEMPLATE that name something with no value here
     # rather than a dialect attribute: a `__mlir_type` is a TYPE, and the
@@ -882,6 +929,24 @@ def _in_reach_from_authority() -> frozenset:
 IN_REACH_HOST_MODULES = _in_reach_from_authority()
 
 
+def _admitted_host_modules() -> frozenset:
+    """Every host module that ANSWERS under a declared contract.
+
+    A third bucket, read from `formal/imports.py`'s own `host_module_tier`, and
+    separate because the two existing ones could not describe these: `subprocess`
+    is not a gap with an owner (it has a model) and it is not unreachable (it
+    builds), so a two-way split called it one or the other and both were false.
+    The reach line below reads it so a file that moved out of `host-import`
+    because its host module now answers is not silently missing from the report.
+    """
+    try:
+        from formal import imports as I
+        return frozenset(n for n in I.HOST_MODULES
+                         if I.host_module_tier(n) == 'admitted')
+    except Exception:
+        return frozenset()
+
+
 def _host_tiers() -> tuple:
     """(in_reach, unreachable, where) — the split, and which file said so.
 
@@ -897,8 +962,15 @@ def _host_tiers() -> tuple:
         return set(), set(), None
     try:
         from formal import imports as I
-        unreachable = frozenset(n for n in I.HOST_MODULES
-                                if I.host_module_tier(n) == 'unreachable')
+        unreachable = frozenset(
+            n for n in I.HOST_MODULES
+            if I.host_module_tier(n) == 'unreachable'
+            # An ADMITTED module is not unreachable: it has a model and it
+            # builds.  Counting it here would put it in the "permanent fact about
+            # the target" bucket of the reach line, which is the claim that made
+            # the sweep's largest bucket look unfixable, and it would be false of
+            # every one of the five.
+            and I.host_module_tier(n) != 'admitted')
     except Exception:
         unreachable = frozenset()
     return set(in_reach), set(unreachable), "formal/imports.py"
@@ -1186,6 +1258,57 @@ def _crash_cause(err: str):
             else CAUSE_DRIVER_CRASH)
 
 
+def _admitted_reason(path):
+    """Why this file is `built-with-admitted-contracts`, or '' if it is not.
+
+    The contracts are the BUILD's, read through the build's own walk:
+    `formal/imports.py`'s `admitted_contracts`, which is the same function
+    `formal/build.py` calls to fill `result["admitted"]` and the same one
+    `fire.py`'s `trust:` line renders.  Reading them here rather than computing a
+    second answer is the whole reason the three agree: a classifier that walked the
+    closure a second time could classify a file as trusting nothing while the
+    build's own line named six contracts, and the sweep is the one a reader would
+    believe over the build.
+
+    THE REASON WHY THE TRUST BOUNDARY IS A CLASS AT ALL, and not a note on the
+    `pass` line: a `pass` is this tool's claim that the image built and every
+    symbol it binds is on its own link line.  A file that also asked a second
+    process to answer a question has not had that claim made for it, and the
+    report's job is to say which of its rows rest on what.  The alternative --
+    folding these into `pass` and mentioning the contracts in prose -- is exactly
+    how a file that cannot be proved at all becomes indistinguishable from one
+    that can, which is the confusion `FORMAL_known_limits.md` records as "a false
+    PASS, the worst outcome this project has".
+
+    NOT CACHED with the verdict, and that is deliberate in the same direction.
+    `run_one`'s `.result` blob records `(ok, detail)` and `classify` re-derives
+    the class on every run INCLUDING a cache hit -- the rules are applied after
+    the cache, never inside it (the comment above `CLASS_PASS` says why).  So a
+    verdict recorded before this class existed is still classified correctly the
+    first time it is read, with no key change and no re-run.
+
+    A failure to walk is NOT a pass.  It returns '' and the caller falls through to
+    `CLASS_PASS`, which is the wrong answer, and it is the wrong answer the tool
+    already makes elsewhere when it cannot read a file (`CAUSE_UNREADABLE`).
+    Reading the build's OWN answer is what avoids that: a build that succeeded
+    published its `trust:` line, and this re-derivation can only disagree with it
+    if `formal/imports.py` changed, in which case `cas.formal_fingerprint()` has
+    moved and every `.result` is a miss anyway.
+    """
+    if not path:
+        return ''
+    try:
+        from formal import imports as I
+        contracts = I.admitted_contracts(path)
+    except Exception:                            # noqa: BLE001
+        return ''
+    if not contracts:
+        return ''
+    mods = sorted({c.module for c in contracts})
+    return (f"{len(contracts)} admitted host contract(s) from "
+            f"{', '.join(mods)}")
+
+
 def classify(ok: bool, detail: str, cause=None, source=None,
              path=None) -> tuple:
     """(class, reason) for one build outcome. Message matching is pure; the
@@ -1222,6 +1345,9 @@ def classify(ok: bool, detail: str, cause=None, source=None,
         dropping them from every rate is what made 204 files invisible.
     """
     if ok:
+        admitted = _admitted_reason(path)
+        if admitted:
+            return CLASS_ADMITTED, admitted
         return CLASS_PASS, ""
     if cause == CAUSE_BACKEND_CRASH:
         # Not `codegen`, and the difference is not cosmetic. A refusal is a
@@ -2126,7 +2252,7 @@ Verdict = collections.namedtuple(
 # accounting is read off them in _run_build and not passed on, so nothing
 # downstream can match a `memcap:` line as if the build had printed it.
 BuildRun = collections.namedtuple(
-    "BuildRun", "returncode stdout stderr mem_killed peak_gb")
+    "BuildRun", "returncode stdout stderr mem_killed peak_gb wrapper_died")
 
 
 # ── Per-file memory ceiling ──────────────────────────────────────────────────
@@ -2239,7 +2365,7 @@ def _run_build(path, out, flags, timeout, mem_gb):
         raise subprocess.TimeoutExpired(
             argv, timeout, output=stdout or _as_text(e.output),
             stderr=stderr or _as_text(e.stderr)) from None
-    mem_killed, peak = False, None
+    mem_killed, peak, wrapper_died = False, None, False
     if mem_gb and mem_gb > 0:
         # memcap's own accounting goes to stdout, where it would otherwise be
         # mistaken for the build's message. It is read here, off the CHILD's
@@ -2248,7 +2374,10 @@ def _run_build(path, out, flags, timeout, mem_gb):
         # refusal, and the build's real message is the one it should read.
         mem_killed, peak = procrun.memcap_verdict(
             (stdout or "") + (stderr or ""))
-    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak)
+        wrapper_died = procrun.memcap_wrapper_died(
+            (stdout or "") + (stderr or ""))
+    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak,
+                    wrapper_died)
 
 
 def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
@@ -2398,13 +2527,41 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
+            # …but memcap's own accounting is not the build's message, and the
+            # namedtuple's docstring above promises nothing downstream can
+            # match one. It is separated here rather than only in the branch
+            # below, because a build that printed NOTHING leaves the wrapper's
+            # `done, … child exit -9` line as the last line there, and that is
+            # how "the ceiling wrapper's bookkeeping" becomes a file's alleged
+            # refusal. `build_lines` is empty exactly when the build said
+            # nothing at all.
+            build_lines = [ln for ln in lines
+                           if not ln.startswith("memcap: ")]
+            if proc.wrapper_died and not build_lines:
+                # The wrapper started the build and never reported how it
+                # ended, so there is no verdict about the source to report —
+                # not a refusal, and not a memory kill either, since nothing was
+                # measured against the ceiling. Not published, for the reason a
+                # timeout and a memory kill are not: it is a fact about this
+                # run's machine, and a verdict published under this key would
+                # pin the file here until the key changed.
+                return verdict(
+                    False,
+                    f"the {mem_gb:g} GB per-file wrapper (tools/memcap.py) died "
+                    f"before it reported an outcome — its banner is in the "
+                    f"output and no breach and no completion, so this build's "
+                    f"own verdict was never observed. A fact about this run's "
+                    f"machine, not about the source; not cached, so re-running "
+                    f"re-measures it",
+                    CAUSE_WRAPPER_DIED, False)
             # No message at all still counts as the build's own verdict: with
             # no traceback there is no evidence of a crash, and a silent death
             # is far more often a refusal whose message went to stdout. The
             # fallback is deliberately the finding side (a codegen row: exit 1,
             # printed, in the denominator) — a crash we cannot see must not be
             # able to hide, and a false FAIL only sends someone to look.
-            detail = lines[-1] if lines else f"exit {proc.returncode}"
+            detail = (build_lines[-1] if build_lines
+                      else f"exit {proc.returncode}")
             ok = False
             cause = _crash_cause(err)
             if cause == CAUSE_BACKEND_CRASH:
@@ -2556,6 +2713,12 @@ CLASS_BLURB = {
                 "loading that library where this host can, and by reading its "
                 "export trie (what dyld resolves against) where it cannot; the "
                 "summary below counts the ones read rather than loaded",
+    CLASS_ADMITTED: "built, and it ALSO rests on declared assumptions about a "
+                    "host this image does not have -- a second process, a "
+                    "thread, a dynamic loader for foreign code -- each named in "
+                    "its own `trust:` line and counted as a `sorry` in its "
+                    "proof. In the denominator, NOT in the numerator: a pass is a "
+                    "claim this backend made on its own",
     CLASS_CODEGEN: "THE FINDING: the backend refused a construct IN THIS FILE",
     CLASS_CODEGEN_DEP: "the backend refused a construct in a module this file "
                        "imports, so this file did not build either — a failure "
@@ -2642,8 +2805,14 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                                 CAUSE_TOOL_ERROR)
                 results[path] = v
                 if v.cls != CLASS_PASS:
-                    print(f"{v.cls.upper()}: {rel(path)}  ({v.detail})",
-                          flush=True)
+                    # `v.detail or v.reason`, because a class whose diagnosis is
+                    # not a build MESSAGE has an empty detail: `built-with-
+                    # admitted-contracts` is decided from the file's import
+                    # closure rather than from anything the build said, so
+                    # printing only the detail would print a line with nothing
+                    # in it for every admitted file.
+                    print(f"{v.cls.upper()}: {rel(path)}  "
+                          f"({v.detail or v.reason})", flush=True)
                 if stop.is_set():
                     return True
     finally:
@@ -2678,6 +2847,12 @@ def _report_partial(arch, files, results) -> None:
         print(f"  of the {counts[CLASS_TOOL]} in `tool`, "
               f"{sum(1 for p in done if results[p].cause == CAUSE_MEMORY)} "
               f"hit this tool's per-file memory ceiling", file=sys.stderr)
+        wrapper_deaths = sum(1 for p in done
+                             if results[p].cause == CAUSE_WRAPPER_DIED)
+        if wrapper_deaths:
+            print(f"  of the {counts[CLASS_TOOL]} in `tool`, {wrapper_deaths} "
+                  f"had this tool's memory wrapper die before it reported an "
+                  f"outcome", file=sys.stderr)
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -2776,7 +2951,11 @@ def main():
                          f"'{CAUSE_MEMORY}' with the measured peak, and the "
                          "sweep CONTINUES — one file's build cannot take the "
                          "run down with it. Not cached: a memory kill is a "
-                         "property of this run's ceiling, not of the source")
+                         "property of this run's ceiling, not of the source. "
+                         "If the wrapper itself is killed, the file is "
+                         f"classified '{CAUSE_WRAPPER_DIED}' — also `tool`, and "
+                         "also not cached, because it too is a fact about this "
+                         "run's machine rather than about the source")
     ap.add_argument("--allow-concurrent", action="store_true",
                     help="sweep even if another sweep of the SAME architecture "
                          "is running. They share the formal module-dylib "
@@ -2925,9 +3104,10 @@ def main():
             rows.append((rel(path), v.cls, v.reason, v.detail))
     total = len(files)
     passed = counts[CLASS_PASS]
+    admitted = counts[CLASS_ADMITTED]
     codegen = counts[CLASS_CODEGEN]
     codegen_dep = counts[CLASS_CODEGEN_DEP]
-    answerable = passed + codegen + codegen_dep
+    answerable = passed + admitted + codegen + codegen_dep
 
     # Every file that did not pass was already printed, one line each under its
     # class, by _stream_results as it was classified — so this block only
@@ -3000,6 +3180,20 @@ def main():
         if reach_files:
             print(f"    in reach, and therefore WORK rather than a permanent "
                   f"fact: {', '.join(reach_files)}")
+        admitted_mods = sorted(_admitted_host_modules())
+        if admitted_mods:
+            # Named here because the OTHER two halves of this line went quiet
+            # when these five modules got models: a file that used to be reported
+            # here stopped being reported anywhere, and a reader comparing two
+            # runs would see the bucket shrink with nothing to say where the
+            # files went.  They are not in `host-import` (they are not refused)
+            # and they are not in `in reach` (nothing is left to write), so this
+            # line is the only place their absence is explained.
+            print(f"    neither, and not in this count at all: "
+                  f"{', '.join(admitted_mods)} now have a formal/hostmods model "
+                  f"and answer under DECLARED CONTRACTS -- files importing them "
+                  f"are no longer refused, and a file that builds on one is "
+                  f"counted as `{CLASS_ADMITTED}`, never as a pass")
         # The two names that used to be hardcoded here, and why neither is any
         # more: they were a standing editorial claim that `os` and `sys` were
         # "most of it", which is a statement about the WORK and goes stale the
@@ -3098,12 +3292,24 @@ def main():
         print("codegen coverage: no file could be answered by this backend")
     print(f"  denominator: the {answerable} swept file(s) whose build could "
           f"have answered")
-    print(f"  ({passed} pass + {codegen} codegen + {codegen_dep} "
+    print(f"  ({passed} pass + {admitted} built-with-admitted-contracts + "
+          f"{codegen} codegen + {codegen_dep} "
           f"codegen/dependency = {answerable}), i.e. every "
           f"swept file EXCEPT the {una} in a not-answerable or tool class "
           f"[{una_parts}].")
     print("  A not-answerable file is a fact about the target, not a gap in "
           "the backend, so it neither raises nor lowers this number.")
+    if admitted:
+        # The line that makes the class cost something.  Without it the headline
+        # would read as though admitting trust were free, and it is not: these
+        # files are in the denominator and not in the numerator, so every one of
+        # them LOWERS the rate rather than raising it.
+        print(f"  {admitted} of those {answerable} BUILT but rest on declared "
+              f"assumptions about a host this image does not have, so they are "
+              f"counted here and NOT as passes. Each file's `trust:` line names "
+              f"them and each is a `sorry` in its proof; a file that builds with "
+              f"no such admission is a `pass` and a file that does not build at "
+              f"all is not in this denominator either.")
 
     # CAS accounting, complete: every input file lands in exactly one bucket.
     hits, misses = cas.stats["hits"], cas.stats["misses"]
@@ -3137,6 +3343,17 @@ def main():
               f"cannot take the run down; each is a real cost finding about "
               f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
               f"NOT cached, so re-running re-measures it")
+    wrapper_died = sum(1 for p in files
+                       if results[p].cause == CAUSE_WRAPPER_DIED)
+    if wrapper_died:
+        # Its own line because the two machine causes in that bucket are told
+        # apart by EVIDENCE, and lumping them would tell a reader to go looking
+        # for a memory bug in a build that was never measured against the
+        # ceiling.
+        print(f"  of those, {wrapper_died} were killed with this tool's "
+              f"per-file wrapper itself dying before it reported an outcome — "
+              f"no breach was measured, so this is not a memory finding; each "
+              f"is a machine fact, is NOT cached, and re-running re-measures it")
     foreign_arch = sum(1 for p in files
                        if results[p].cause == CAUSE_FOREIGN_ARCH)
     if foreign_arch:

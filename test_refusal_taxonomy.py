@@ -104,9 +104,25 @@ SAMPLES = [
     # the old fixed word called an attribute, false of every `__mlir_type`
     # binding in the stdlib including `std/sys/info.mojo`'s `_TargetType`, the
     # module that heads this family.
+    #
+    # The OPERATION sample is quoted from the message that REPLACED one fixed
+    # sentence for all 104 dialect operations: `mlir_dialect_op_refusal` names
+    # the operation and what it denotes rather than asserting that "an MLIR
+    # operation has no representation in a 64-bit word", which was false of the
+    # elementwise arithmetic subset. It is a separate row rather than a variant
+    # because the family here is about SHAPE and the three operation wordings
+    # share it — and because the old wording is still live for a caller with no
+    # operation in hand, which is the fourth sample.
     ("MLIR construct",
-     "materialize: __mlir_op is an MLIR dialect construct. This path has no "
-     "MLIR: it lowers a Mojo program to a Mach-O image"),
+     "materialize: `pop.add` is a dialect OPERATION applied ELEMENTWISE, so "
+     "whether it denotes one 64-bit word"),
+    # The PREFIX wording, which is what a call site that knows only the
+    # `__mlir_` name says. Kept because it is still reachable and still a true
+    # statement about what is missing for the family, and because a sample that
+    # quotes only the classified wordings would let the prefix row rot silently.
+    ("MLIR construct",
+     "materialize: __mlir_op is an MLIR dialect construct: this path has no "
+     "MLIR, so it lowers a Mojo program to a Mach-O image"),
     ("MLIR construct",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
      "MLIR attribute template: __mlir_attr[`#kgen.param_list.size<:`,"),
@@ -229,6 +245,28 @@ CAUSE_SAMPLES = [
      "the module-level comptime binding '_dtype_to_llvm_type_f8' is initialized "
      "from an MLIR type template: __mlir_type.`i8` names an MLIR TYPE, not a "
      "value"),
+    # The OPERATION wording, which replaced the one fixed sentence that named
+    # the `__mlir_` PREFIX. `formal/model.py`'s `mlir_dialect_op_refusal` now
+    # classifies the operation by what it DENOTES — an effect, an elementwise
+    # arithmetic result, or a value needing a fact this path lacks — so three
+    # different messages carry this clause and each needs its own sample for the
+    # reason the type spelling above does: `classify_message` sees only the
+    # message, so one sample is one proof its marker matches.
+    #
+    # The first is the EFFECT (`std/sys/debug.mojo:20`, verbatim), the second is
+    # ELEMENTWISE arithmetic (`std/simd.mojo:1082`), and the third is a value
+    # that cannot be GUARDED without its bracketed predicate (`std/simd.mojo:
+    # 1546`). All three are quoted from the live text, so a later reword of any
+    # of them fails this row rather than silently emptying the cause.
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "_select_register_value: `pop.add` is a dialect OPERATION applied "
+     "ELEMENTWISE, so whether it denotes one 64-bit word"),
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "debugtrap: `llvm.intr.debugtrap` is a dialect OPERATION and denotes NO "
+     "VALUE: it is an EFFECT"),
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "eq: `pop.cmp` is a dialect OPERATION whose value could be a word on this "
+     "path, but it cannot be GUARDED here"),
     ("inlined_assembly (a gimple-C runtime construct)",
      "inlined_assembly: 'NoneType' has no home: this module declares no "
      "module-level name by that spelling"),
@@ -245,6 +283,23 @@ CAUSE_SAMPLES = [
     ("a module-global name has no storage",
      "encode_sxtb_wd_wn: '_SXT_BASES' is bound at module level, and this path "
      "has no module-global storage for it"),
+    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
+    # than from a sweep log, because the shape it refuses did not exist as a
+    # distinct message until a module body was recognised as the module's own
+    # writer — before that, a name whose value a call computes and a name read
+    # before its slot was filled were the same refusal, and this sample would
+    # have been indistinguishable from the row above.
+    ("a module global the module BODY fills, read before it fills it",
+     "read_g: 'G' is one of the module-global slots in this image's `__DATA`, "
+     "and it has no static initializer: the value is computed by the module's "
+     "own top-level statements, which this path compiles into the synthetic "
+     "function the startup stub enters. That function is the entry, so nothing "
+     "runs before its first statement — but this read is reached before the "
+     "store of 'G' completes, so the load would read the zero an unwritten slot "
+     "gives. The module body calls something at its statement 1, before it "
+     "reaches the assignment at statement 2 that fills 'G'. Move the assignment "
+     "above the first top-level statement that calls anything. Make the value a "
+     "literal and the build folds it at every read instead"),
     ("a module-level name of ANOTHER module is not exported as a word",
      "main: 'sys' is imported from `sys`, and it is a module-level name of "
      "another module. This path compiles an import into a dylib"),

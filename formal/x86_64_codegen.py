@@ -1132,17 +1132,20 @@ class X86_64Codegen:
         parameter's home can never land on the argument it is being loaded from
         — the same property arm64 gets from `[X29 + 16 + 8k]`.
 
-        R11 is the address scratch `_store_var` uses on the spill path, so the
+R11 is the address scratch `_store_var` uses on the spill path, so the
         load goes into R11 and the home assignment follows; it never borrows the
-        scratch for the address itself, which would overwrite the value before
-        the store.  The displacement grows at 8 bytes per argument and crosses
+        scratch for the address itself, which would overwrite the value before the
+        store.  The displacement grows at 8 bytes per argument and crosses
         127 at the FIFTEENTH stack argument — parameter index 20, measured:
         index 19 encodes `4c 8b 5d 78` and index 20 `4c 8b 9d 80 00 00 00` —
         so `formal/x86_64.py`'s `_rm_disp` emits a disp32 for the last four
         parameters a 24-argument function can have, and needs no change to do
-        it.  Nothing HERE has a step lemma for that load;
-        `bugs/FORMAL_x86_64_stack_argument_past_the_twentieth_needs_a_disp32_
-        lemma.md` is the gap and the instruction it affects.
+        it.  The disp32 LOAD that produces is `x86_step_mov_rm64_mem_disp32` in
+        `lib/X86.lean` (measured applicable at a real encoding by
+        `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
+        reachable by a generated end-to-end proof yet, because the path through
+        a call this wide does not close —
+        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
@@ -4615,6 +4618,23 @@ class X86_64Codegen:
             self._emit_expr(expr.operand)
             self.asm.emit(encode_not_r64(Reg.RAX))
             self._emit_trunc(self._ttype(expr.operand))
+            return
+        if M.is_ownership_transfer(expr):
+            # `x^` — see formal/model.py: a compile-time-only marker, so the
+            # value flows straight through on every formal path. This branch is
+            # what made `^` a REFUSAL on x86-64 for an integer: the arm64
+            # `_emit_expr` has had one since wave 5, this file did not, so the
+            # two backends answered `var t = a^` differently (arm64 emitted the
+            # value, x86-64 raised `unsupported unary operator '^' on the formal
+            # x86-64 path`) for a construct with one meaning. It refused correct
+            # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
+            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
+            # "x86-64-side work of a sitting" since. It is the same shape as the
+            # `~` case above, and for the same reason: the ARM side names both
+            # operators it lowers rather than falling through to a refusal.
+            # `x^` on a STRING is refused above, before this, by the same
+            # `string_unary_refusal` the other operators ask.
+            self._emit_expr(expr.operand)
             return
         raise CodegenError(
             f"unsupported unary operator {expr.op!r} on the formal x86-64 "

@@ -74,6 +74,22 @@ def neg(n):
 """
 
 
+REC = "@@"
+RUN_TIMEOUT = 300
+
+
+class Failure(Exception):
+    """The exception `build_and_run` raises.
+
+    Distinct from `TestFailure` below on purpose: `TestFailure` is a FAILED
+    ASSERTION about this file's subject and the suite counts it, while `Failure`
+    is this file refusing to produce an answer at all — a build that failed, an
+    image that crashed, a record count that does not line up. A caller of
+    `build_and_run` converts it into whatever its own harness reports, and
+    conflating the two would make a build failure look like a wrong answer.
+    """
+
+
 class TestFailure(Exception):
     pass
 
@@ -259,6 +275,112 @@ def call_exported(path, symbol, *args):
     fn.restype = ctypes.c_int64
     fn.argtypes = [ctypes.c_int64] * len(args)
     return fn(*args)
+
+
+BACKENDS = ("arm64", "x86_64")
+
+
+def host_machine():
+    """`True` when this host can BUILD a formal image at all.
+
+    arm64 is the only architecture `fire.py build --formal` emits by default and
+    the only one every other formal suite in the tree assumes, so a host that is
+    neither arm64 nor aarch64 skips those suites rather than failing them. This
+    is the shared spelling of that rule, because three hostmod test files now ask
+    it and three copies of it would be three places to keep true.
+    """
+    return platform.machine() in ("arm64", "aarch64")
+
+
+def rosetta():
+    """`True` when this host can also RUN an x86-64 image.
+
+    Rosetta 2 exists on Apple Silicon and nowhere else, so the x86-64 half of a
+    hostmod suite is skipped on any other host — with the reason printed, which
+    is the half that matters, because a silent skip reads as a pass. The reason
+    is a string here rather than a bare `False` so no caller can skip without
+    saying why.
+    """
+    if host_machine():
+        return True, ""
+    return False, (f"host is {platform.machine()}; an x86-64 image needs "
+                   f"Rosetta 2, which only Apple Silicon has")
+
+
+def build_and_run(src, name, tmpdir, compare, backends=None, cross=None,
+                  env=None, cwd=None):
+    """Build `src` on every backend, run it, and hand `compare(arch, records)` each.
+
+    The two-architecture machinery for a `formal/hostmods` suite, in ONE place,
+    because the second copy of it is a second thing to keep true:
+
+      * `compare(arch, records)` is called once per architecture and raises on a
+        disagreement, so no group can accidentally run on one architecture — and
+        it is told WHICH one, so a message can name it.
+      * the records of the two architectures are then compared with EACH OTHER,
+        so a module that lowers differently on the two is caught even when both
+        answers happen to agree with CPython on the corpus at hand. `cross` is an
+        optional filter for that comparison, for the one case where two
+        architectures cannot be compared (a float-valued `printf` operand, where
+        x86-64 reads `XMM0`; see
+        `bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`).
+
+    Records are the `@@`-separated fields of the image's stdout, which is the
+    convention every hostmod test in this tree uses: a Mojo string
+    literal's BACKSLASH-N is NOT unescaped on this path, so an image
+    prints the two characters backslash and `n` and a
+    record-structured program has to choose its own terminator.
+
+    `cwd` is where the image RUNS, and it defaults to `tmpdir` because a hostmod
+    suite that puts a program anywhere but its own scratch directory is asking
+    for a test that depends on the repository's contents. It is a parameter
+    because `test_formal_shutil.py` runs inside the tree it is mutating, and
+    that tree is per-group: `rmtree` and `move` destroy theirs, so the second
+    architecture cannot run in the directory the first one emptied.
+
+    Returns the first architecture's records.
+    """
+    if backends is None:
+        backends = BACKENDS
+    got = {}
+    for arch in backends:
+        path = os.path.join(tmpdir, name + ".mojo")
+        with open(path, "w") as f:
+            f.write(src)
+        out = os.path.join(tmpdir, name + "." + arch)
+        r = run_fire(["build", "--formal", "--no-prove", "--backend=" + arch,
+                      "-o", out, path], env=env)
+        if r.returncode != 0 or not os.path.isfile(out):
+            raise Failure(f"[{arch}] build failed: "
+                          f"{(r.stderr or r.stdout or '').strip()[-400:]}")
+        argv = ["arch", "-x86_64", out] if arch == "x86_64" else [out]
+        p = subprocess.run(argv, capture_output=True, timeout=RUN_TIMEOUT,
+                           cwd=cwd or tmpdir)
+        if p.returncode != 0:
+            raise Failure(
+                f"[{arch}] image exited {p.returncode}: "
+                f"{p.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+        recs = [rec for rec in p.stdout.decode("latin-1").split(REC) if rec]
+        compare(arch, recs)
+        got[arch] = recs
+    if len(got) == 2:
+        a, b = backends
+        keep = cross or (lambda recs: recs)
+        ra, rb = keep(got[a]), keep(got[b])
+        if len(ra) != len(rb):
+            raise Failure(f"{a} reported {len(ra)} records and {b} reported "
+                          f"{len(rb)}, so the two architectures are not even "
+                          f"running the same program")
+        diff = [(x, y) for x, y in zip(ra, rb) if x != y]
+        if diff:
+            raise Failure(
+                f"{len(diff)} of {len(ra)} records differ between {a} and {b}. "
+                f"A host module is pure work over values the model already "
+                f"represents, so a disagreement here is a two-architecture "
+                f"lowering bug with nothing in the module to blame. First "
+                f"three:\n      " +
+                "\n      ".join(f"{a} {x!r}, {b} {y!r}" for x, y in diff[:3]))
+    return got[backends[0]]
 
 
 # ── the tests ───────────────────────────────────────────────────────────────

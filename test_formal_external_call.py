@@ -127,7 +127,49 @@ CASES = [
      "    return 1\n",
      0, "null"),
 
+    # A NULLABLE POINTER return, which is what `std/os/env.mojo`'s `getenv` and
+    # `std/pwd/*.mojo`'s `getpwuid` declare: `OptionalPointer[…]` and
+    # `OpaquePointer[…]` are `std/memory/pointer.mojo`'s names for
+    # `Optional[Pointer[…]]`, so at a C BOUNDARY the register holds one address
+    # and the C ABI says a null pointer IS the absent answer. Both were refused
+    # — "this path has no value of that kind to put in the return register" —
+    # which is a claim about the WIDTH of a pointer, and false.
+    #
+    # It is one table of its own (`model.NULLABLE_POINTER_ALIASES`) and NOT three
+    # more entries in `POINTER_TYPE_CTORS`, because the two questions are
+    # different and only one of them has an answer here. As a value a MOJO
+    # function built, an `Optional`'s tag lives a second frame away from its
+    # one-word payload, so `if not ptr:` is not answerable from the word and
+    # `Some(null)` is not `None` — `bugs/FORMAL_stdlib_optional_needs_a_
+    # representation.md`, and the reason reading through one stays refused.
+    # `external_call_return_kind` asks the C ABI's question, so it is the one
+    # reader that may answer, and it is the only one that does.
+    #
+    # **The spelling here is deliberately argument-free, and that is a
+    # limitation rather than a style choice.** Every spelling a real source
+    # writes for these two aliases carries two or more type arguments
+    # (`OptionalPointer[UInt8, ImmUntrackedOrigin]`, `OpaquePointer[mut=False]`),
+    # and a multi-parameter generic application is currently refused EARLIER, as
+    # a subscript whose index is a tuple — which is
+    # `bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, owned
+    # by another lane, and the same wall `env_round_trip` below is sitting on. So
+    # this row pins the classification the moment that wall comes down, and until
+    # then it is the only spelling of a nullable pointer this path can be asked
+    # about at all. It is a real build-and-run row, not a unit test of the model:
+    # a misclassification would leave the register holding whatever was in it,
+    # which is a plausible non-zero answer rather than a failure.
+    ("opaque_pointer_return_is_one_word",
+     "def main() -> Int32:\n"
+     "    var p = external_call[\"getenv\", OpaquePointer](\"" + ABSENT + "\")\n"
+     "    if not p:\n"
+     "        print(\"null\")\n"
+     "        return 0\n"
+     "    print(\"not null\")\n"
+     "    return 1\n",
+     0, "null"),
+
     # ── 2. the C symbol is the C symbol, even when the image says otherwise ──
+
     # `env.mojo` declares Mojo functions called `getenv`, `setenv` and
     # `unsetenv` and calls the C symbols of the same names inside them. Before
     # the extern path was forced, the bare name was found in the image's own
@@ -590,11 +632,18 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
-    # The same type under the name `std/os/env.mojo` spells it NOW (measured
-    # 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s `std/`), and
-    # the alias family around it. All of them are `= Pointer[…]` or
-    # `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`, so the return
-    # register is the address in every case and the answer is one word.
+    # THE SAME C FUNCTION, SPELLED THE WAY `std/os/env.mojo:78` SPELLS IT NOW
+    # (measured 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s
+    # `std/`), and the alias family around it.  Each of those names is
+    # `= Pointer[…]` or `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`
+    # and is a `comptime` type ALIAS this path reads by NAME rather than
+    # resolving — a declared return type is a type EXPRESSION and the alias is a
+    # module-level `comptime` binding, so the name is the whole of the evidence.
+    # `getenv` returns `char *`, which is one word with 0 meaning None (the same
+    # answer `_CPointer` already gave for it), and `env.mojo`'s own `if not ptr:`
+    # is what reads it; `external_call_return_kind`'s own docstring says a
+    # pointer "is an address, so `word`, and it needs no pointee", so the return
+    # register is the address in every case.
     for spelling in ("OptionalPointer[UInt8, ImmUntrackedOrigin]",
                      "MutPointer[UInt8, MutUntrackedOrigin]",
                      "ImmPointer[UInt8, ImmUntrackedOrigin]",
@@ -606,6 +655,19 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # …and the LOAD half, which would be a WRONG ANSWER rather than a refusal if
+    # the alias's parameter order were read wrongly: the `//` in the alias
+    # declaration separates the keyword-only `mut` from the positional `T`, so
+    # the pointee is the first POSITIONAL type argument.  The four call sites in
+    # the tree agree, and the second and third spellings are
+    # `std/memory/memory.mojo:477` and `std/pwd/_linux.mojo:48`.
+    out.append(("optional_pointer_pointee_is_the_first_positional_arg",
+                M.pointee_args("OptionalPointer[UInt8, ImmUntrackedOrigin]"),
+                ["UInt8", "ImmUntrackedOrigin"]))
+    out.append(("optional_pointer_keyword_mut_is_not_the_pointee",
+                M.pointee_args("OptionalPointer[mut=True, NoneType, "
+                               "MutAnyOrigin]"),
+                ["NoneType", "MutAnyOrigin"]))
     out.append(("spec_void",
                 spec('def f():\n    external_call["abort", NoneType]()\n'),
                 ("abort", M.EXTERN_RETURN_VOID, None)))
