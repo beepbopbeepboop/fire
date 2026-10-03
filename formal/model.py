@@ -7966,6 +7966,45 @@ def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
     return rows[0][2]
 
 
+def frame_slot_field_is_dict(candidates, name, dict_names=(), decls=None):
+    """Whether a FRAME SLOT's field is declared a DICT, agreed over candidates.
+
+    The dict-ness TWIN of `frame_slot_field_kind`, and it is a separate function
+    for the reason `global_slot_is_dict` is a separate function from
+    `global_slot_kind`: on this path all four container annotations are ONE word
+    — `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are a
+    pointer to a blob with an 8-byte count header — so the kind answers "how wide
+    is an element" and cannot answer "does a subscript with a string index mean
+    a key lookup". Carrying it on the kind would make one of the two answers
+    wrong.
+
+    Same agree-or-refuse, same reader: `frame_slot_declared_annotation` over the
+    candidates and `declared_type_is_dict` over the agreed annotation, so a
+    holder two candidate structs disagree about is None rather than a pick.
+
+    **What it deliberately does NOT carry is `struct_field_kind`'s VALUE gate,
+    and the difference is a decision rather than an omission.** That gate exists
+    because `len(self.xs)` on a field whose slot nothing established is a load
+    from address 0 — and the gate's own docstring records that with the gate
+    lifted the program BUILT on both architectures and died of SIGSEGV. The same
+    hazard is real here, and the caller is what makes it decidable: a dict
+    subscript is only a key scan when the INDEX is a string, and the emitter's
+    dict dispatch asks that first
+    (`bugs/FORMAL_a_dict_subscript_has_no_value_kind.md`'s per-key gate, which
+    this doc's taker is told to reuse rather than re-derive). So the shape that
+    is refused on the value axis is `len`, and the shape that is refused here is
+    `d[0]` — an integer index against a field declared `Dict`, which is a blob
+    element read and always was.
+
+    A field with no DECLARED type, or one whose candidates disagree, is None:
+    that is "this path cannot say", which every reader of a dict-ness boolean
+    must keep as its own answer rather than reading as False."""
+    ann = frame_slot_declared_annotation(candidates, name, decls)
+    if ann is None:
+        return None
+    return declared_type_is_dict(ann, dict_names)
+
+
 def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
                           decls=None):
     """The kind a FRAME SLOT's field holds, agreed over the holder's candidates.
@@ -13829,18 +13868,31 @@ class ValueKinds:
         with "print() cannot tell whether MemberExpr is a string or a number".
         `None` leaves every existing decision exactly where it was, which is
         why this is consulted after `declared_kind` and not instead of it.
+      * `declared_is_dict(expr)` — whether a FRAME SLOT's field is declared a
+        DICT.  `declared_kind`'s twin on the axis a kind cannot carry (all four
+        container annotations are one word here), for the same reason
+        `callee_is_dict` is separate from `func_kind`: `self.seen[k]` on a field
+        declared `Dict[String, Int]` was refused with "the INDEX is a string and
+        nothing in the source says what `self.seen` holds" — false about a
+        declaration that is right there on the struct.  Asked only where the
+        binding evidence has said nothing, and a `None` leaves every existing
+        decision exactly where it was.  See `frame_slot_field_is_dict` for why
+        this carries no value gate and `is_dict_value` for where it is read.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
-                 param_kind=None):
+                 param_kind=None, declared_is_dict=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
+        # The dict-ness twin of the line above, and consulted only where
+        # `_dict_names` has nothing to say — see the hook's own paragraph.
+        self._declared_is_dict = declared_is_dict or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
             lambda struct_name, call, field: None)
         # The SIXTH hook, and the one the KIND axis cannot express: whether a
@@ -14556,7 +14608,16 @@ class ValueKinds:
             key = self._slot_key(e)
             if key is not None and key in self._dict_conflicts:
                 return None
-            return self._dict_names.get(key) if key is not None else None
+            if key is not None and key in self._dict_names:
+                return self._dict_names[key]
+            # Nothing this function bound says, so the DECLARATION is what is
+            # left: `self.seen` is a frame slot, and its field's annotation is
+            # the only statement anywhere about what the slot holds. Asked after
+            # `_dict_names` and not instead of it, so a binding statement keeps
+            # its precedence over a declaration — the same order
+            # `declared_kind` is consulted in.
+            answer = self._declared_is_dict(e)
+            return None if answer is None else bool(answer)
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e) or subscript_callee_name(e)
             if callee is None:

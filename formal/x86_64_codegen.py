@@ -6920,6 +6920,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
+            declared_is_dict=self._declared_is_dict_for(name),
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
@@ -6927,6 +6928,35 @@ ctor_field_value=self._ctor_field_value_for(name),
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
+
+    def _declared_is_dict_for(self, fn_name):
+        """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.
+
+        arm64's `_declared_is_dict_for` over the same shared function, and the
+        same three shapes: a method's receiver is the struct whose field
+        `self.<f>` is (`model.method_owner_struct` from the lifted name), a frame
+        slot's candidates are `self._frame_candidates`, and `None` is "this path
+        cannot say" everywhere else. One reader per architecture is the point —
+        a dict-ness answer that differed between them would be a program that
+        reads a key on one machine and an element offset on the other.
+        """
+        owner = M.method_owner_struct(self._structs, fn_name)
+        frame_candidates = dict(self._frame_candidates)
+        structs = self._structs
+
+        def slot_candidates(expr):
+            """The structs whose FIELD `expr.member` is, or None."""
+            if not isinstance(expr, F.MemberExpr) \
+                    or not isinstance(expr.obj, F.IdentExpr):
+                return None
+            root = expr.obj.name
+            if owner is not None and root in M.struct_receivers(owner):
+                return [owner]
+            return frame_candidates.get(root)
+
+        return lambda expr: M.frame_slot_field_is_dict(
+            slot_candidates(expr), getattr(expr, "member", None),
+            DICT_TYPE_NAMES, structs)
 
     def _declared_kind_for(self, fn_name):
         """`_declared_kind` bound to the function `fn_name`, for `ValueKinds`.

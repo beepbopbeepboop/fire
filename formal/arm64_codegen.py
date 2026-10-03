@@ -3356,6 +3356,7 @@ dylib_exports: list = None, globals_base: int = None,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
+            declared_is_dict=self._declared_is_dict_for(name),
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
@@ -3430,6 +3431,38 @@ ctor_field_value=self._ctor_field_value_for(name),
             return None
 
         return kind_of_slot
+
+    def _declared_is_dict_for(self, fn_name):
+        """`declared_is_dict` bound to the function `fn_name`, for `ValueKinds`.
+
+        The dict-ness twin of `_declared_kind_for`, over the same three shapes
+        and the same `model.method_owner_struct` lookup, because the question
+        "which struct's field is `self.seen`" must have one answer in this
+        emitter: `self` is the receiver of `fn_name`'s method, and the frame-slot
+        tables have already settled which candidates a local holder has.
+
+        `None` — "this path cannot say" — is the answer for every other case,
+        and it is what leaves the emitter's dict dispatch exactly where it was:
+        an unannotated field, a field two candidates disagree about, and a base
+        that is not a frame slot all read None, and `is_dict_value`'s binding
+        evidence still wins where both exist."""
+        owner = M.method_owner_struct(self._structs, fn_name)
+        frame_candidates = dict(self._frame_candidates)
+        structs = self._structs
+
+        def slot_candidates(expr):
+            """The structs whose FIELD `expr.member` is, or None."""
+            if not isinstance(expr, F.MemberExpr) \
+                    or not isinstance(expr.obj, F.IdentExpr):
+                return None
+            root = expr.obj.name
+            if owner is not None and root in M.struct_receivers(owner):
+                return [owner]
+            return frame_candidates.get(root)
+
+        return lambda expr: M.frame_slot_field_is_dict(
+            slot_candidates(expr), getattr(expr, "member", None),
+            DICT_TYPE_NAMES, structs)
 
     def _ctor_field_value_for(self, fn_name):
         """`ctor_field_value` bound to `fn_name`, for `ValueKinds`.
