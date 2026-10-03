@@ -4272,22 +4272,38 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `[count][e0…]` blob whose count matches the target's arity; a mismatch
         exits(1), the same signal `a, b = rhs` gives.
 
-        An entry of `targets` is either a STORE KEY — a name, or a `h.<field>`
-        slot key, which `_store_var` dispatches on — or a NESTED GROUP, a list of
-        entries, which is a second unpack against the element at that position.
-        Both are needed for one construct: arm64's `_tup_slot` answers the same
-        question with `("nested", …)` against a name, and a flattening — which is
-        what this used to do, counting a nested group's elements into the OUTER
-        arity check — made `a, (b, c) = 1, (2, 3)` compare the blob's count of 2
+        An entry of `targets` is one of three things: a STORE KEY — a name, or a
+        `h.<field>` slot key, which `_store_var` dispatches on; a NESTED GROUP, a
+        list of entries, which is a second unpack against the element at that
+        position; or a `("sub", el)` TAG, a subscript element target whose
+        address is computed rather than named.  The first two are needed for one
+        construct: arm64's `_tup_slot` answers the same question with
+        `("nested", …)` against a name, and a flattening — which is what this
+        used to do, counting a nested group's elements into the OUTER arity
+        check — made `a, (b, c) = 1, (2, 3)` compare the blob's count of 2
         against a target count of 3 and exit(1) with nothing printed, where arm64
-        and CPython both answer a=1 b=2 c=3.
+        and CPython both answer a=1 b=2 c=3.  The third is arm64's `("sub", el)`,
+        which this backend used to refuse by node type.
 
-        R10 is the blob base across the loop, and the two things that could
-        disturb it are both handled rather than assumed: a NESTED group is
-        emitted between a `push`/`pop` of R10 because the recursive call takes
-        R10 for its own base, and a STORE KEY cannot disturb it — every arm of
-        `_store_var` with `src == RAX` writes RAX, R11 or memory and never R10
-        (the one arm that does, `src == Reg.R11`, is not reachable from here).
+        R10 is the blob base across the loop, and all three arms are handled
+        rather than assumed about it: a NESTED group is emitted between a
+        push/pop of R10 because the recursive call takes R10 for its own base; a
+        `("sub", …)` tag is emitted between a push/pop of R10 because
+        `_emit_subscript_addr` uses R10 for its own element arithmetic; and a
+        STORE KEY cannot disturb R10 at all — every arm of `_store_var` with
+        `src == RAX` writes RAX, R11 or memory and never R10 (the one arm that
+        does, `src == Reg.R11`, is not reachable from here).
+
+        Both push/pops are 16-byte SLOTS, not bare `push`/`pop`.  The subscript's
+        BASE and INDEX are arbitrary expressions and either may contain a call,
+        and the System V requirement is 16-byte alignment of RSP at a CALL (see
+        `_SLOT`) — an 8-byte push around code that can call puts RSP at 8 mod 16
+        there, which `otool -tvV` shows directly on a nested group containing a
+        subscript target.  Whether a given callee faults on it is up to the
+        callee (nothing measured here did, including `printf` with a `%s`), which
+        is exactly why it is worth not emitting.  The nested-group arm had the
+        same exposure with no way to reach it; both are the same fix for the same
+        reason.
         """
         fn = self.func_name
         self.asm.emit(encode_mov_r64_r64(Reg.R10, blob_reg))
@@ -4305,9 +4321,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         for i, target in enumerate(targets):
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R10, 8 * (i + 1)))
             if isinstance(target, list):
-                self.asm.emit(encode_push_r64(Reg.R10))
+                self._push_slot(Reg.R10)
                 self._emit_for_unpack(target, Reg.RAX, f"{tag}_n{i}")
-                self.asm.emit(encode_pop_r64(Reg.R10))
+                self._pop_slot(Reg.R10)
+            elif isinstance(target, tuple):
+                self._push_slot(Reg.R10)
+                self._emit_subscript_store_reg(target[1], Reg.RAX)
+                self._pop_slot(Reg.R10)
             else:
                 self._store_var(target, Reg.RAX)
 
@@ -5162,8 +5182,30 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         The index expression is evaluated exactly once (it can contain calls),
         and the value after it, so the two evaluate in source order."""
-        self._emit_expr(value)
-        self._push_slot(Reg.RAX)                   # value
+        self._emit_expr(value)                     # RAX = value
+        self._emit_subscript_store_reg(target, Reg.RAX)
+
+    def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
+                                  src: Reg) -> None:
+        """Store the value already in `src` into `target[index]`.
+
+        Split out of `_emit_subscript_store` so a caller that already HAS the
+        value in a register — the tuple unpack, which loads each element out of
+        the RHS blob and stores it straight into its target — does not have to
+        invent an AST node to carry it. It is arm64's `_emit_subscript_store_reg`
+        and its `_store_tup_slot`'s `("sub", …)` arm under one name, because the
+        two questions ("what is the address" and "which register holds the
+        value") are the same on both machines and a second answer is a second
+        thing to keep right.
+
+        `src` is spilled across the address computation in a 16-byte slot rather
+        than left in place, because `_emit_subscript_addr` builds its answer in
+        RAX out of RAX, R10 and R11 — with `src == RAX`, which is the only value
+        both callers pass, the value is destroyed before the store and the
+        ADDRESS is what gets written. That failure is invisible in any program
+        that does not read the element back.
+        """
+        self._push_slot(src)                       # value
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         if self._sub_width == 1:
@@ -5288,6 +5330,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `_store_var` and fallen through into a register nobody allocated (the
         `mov x19, src` the single-assignment branch's comment records), so
         refusing here is the SHARED answer and not an x86-64-only one.
+
+        A `SubscriptExpr` is the FOURTH shape, and it is the one that is not a
+        `_store_var` key at all: an element of a blob has no frame home to name,
+        its address is computed.  So it becomes a `("sub", el)` tag — the one
+        entry of this table that is a tuple rather than a string — and
+        `_emit_for_unpack` routes it to `_emit_subscript_store_reg`, the same
+        bounds-checked store `a[i] = v` emits, reached with the value already in
+        a register.  That is arm64's `("sub", el)` and its `_store_tup_slot`,
+        under the same names, so `a[0], b = 1, 2` is lowered rather than refused
+        by node type on one architecture and answered on the other — and, as on
+        arm64, an out-of-range index in a tuple target exits(1) exactly as it
+        does in a plain store, because it is the same store.
         """
         if isinstance(el, F.IdentExpr):
             return el.name
@@ -5303,6 +5357,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return key
         if isinstance(el, (F.ListExpr, F.TupleExpr)):
             return [self._tuple_target_key(e) for e in el.elements]
+        if isinstance(el, F.SubscriptExpr):
+            return ("sub", el)
         raise CodegenError(
             "tuple assignment targets must be plain names or fields on the "
             f"formal x86-64 path (got {type(el).__name__})")
@@ -5330,6 +5386,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         check then counted, so `a, (b, c) = 1, (2, 3)` compared a blob count of
         2 against a target count of 3 and exited(1) with nothing printed, while
         arm64 answered `a=1 b=2 c=3` and CPython agrees with arm64.
+
+        A SUBSCRIPT target (`a[0], b = 1, 2`) is the fourth shape and the one
+        that is not a `_store_var` key, which is why `_tuple_target_key` used to
+        reach its `raise` for it and refuse the whole statement: it builds the
+        list of keys here, and a node it could not name stopped the statement
+        before a single instruction was emitted.  It now becomes a
+        `("sub", el)` tag and lands in the same `a[i] = v` store, so this
+        construct is lowered on both architectures and its out-of-range index
+        exits(1) on both.
         """
         keys = []
         for el in stmt.target.elements:

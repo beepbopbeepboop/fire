@@ -312,6 +312,15 @@ CASES = [
 # whatever `_store_var` can store into — the same store, through the same
 # function, so a tuple unpack and a plain `h.x = v` cannot disagree about where a
 # field's value lands.
+#
+# The fourth shape is a SUBSCRIPT element (`a[0], b = 1, 2`), and it is the one
+# that is not a `_store_var` key at all: an element of a blob has no frame home to
+# name.  x86-64 refused it by node type (`got SubscriptExpr`) while arm64 routed
+# it to its own `_emit_subscript_store_reg`, so one machine answered the program
+# and the other declined it — and nothing in the suite exercised the shape, which
+# is why it survived every merge that touched either half of the table.  It is
+# now the same `("sub", el)` tag and the same store on both, so the tuple target's
+# out-of-range index also exits(1) on both.
 TUPLE_STORE_CASES = [
     # A receiver-relative field target OUTSIDE any constructor, which is the
     # reproducer the filing used and the shape `_store_var`'s frame-slot arm is
@@ -396,6 +405,57 @@ TUPLE_STORE_CASES = [
      "    printf(\"a=%d b=%d c=%d\", a, b, c)\n"
      "    return 0\n",
      "a=1 b=2 c=3"),
+    # A SUBSCRIPT element target, the FOURTH shape and the one this backend used
+    # to refuse by node type (`got SubscriptExpr`) while arm64 lowered it.  Two
+    # targets on purpose, and in this order: the subscript store computes an
+    # address through R10, which is the register this loop is walking the RHS
+    # blob with, so `b` — read from `R10 + 8` AFTER the subscript store — is the
+    # assertion that R10 survived it.  A version that stored the subscript
+    # element's ADDRESS (the value-clobbering bug `_emit_subscript_store_reg`
+    # exists for) still prints `a0=0`; a version that let the address
+    # computation take R10 prints `b` as something else entirely.
+    ("tuple_store_to_a_subscript_element_and_a_name",
+     "def main(n):\n"
+     "    var a = [0]\n"
+     "    var b = 0\n"
+     "    a[0], b = 1, 2\n"
+     "    printf(\"a0=%d b=%d\", a[0], b)\n"
+     "    return 0\n",
+     "a0=1 b=2"),
+    # Two subscript targets in ONE statement, out of order, with a plain name
+    # after them: the second store's address computation reads a second base and
+    # writes a second element, and the name after it is still read out of the
+    # same blob — so this pins that the target loop's bookkeeping is per-element
+    # and not per-statement, and that a swap is a swap (`a[1], a[0], b = 1, 2, 3`
+    # leaves the list REVERSED, which is what CPython's parallel assignment
+    # does and what a store that read the index first would not).
+    ("tuple_store_to_two_subscript_elements_out_of_order",
+     "def main(n):\n"
+     "    var a = [0, 0]\n"
+     "    var b = 0\n"
+     "    a[1], a[0], b = 1, 2, 3\n"
+     "    printf(\"a0=%d a1=%d b=%d\", a[0], a[1], b)\n"
+     "    return 0\n",
+     "a0=2 a1=1 b=3"),
+    # A subscript target INSIDE a nested group, with a CALL in the index.  Both
+    # halves are there for a reason: the group makes the outer unpack recurse,
+    # and the recursion is the arm that has to save R10 across code that can
+    # call — so this is the case that catches a bare `push %r10` there (RSP at 8
+    # mod 16 at the call, which `otool -tvV` shows and no callee measured here
+    # faulted on) as well as a store that loses either the value or the blob base.
+    ("tuple_store_subscript_target_inside_a_nested_group",
+     "def pick():\n"
+     "    return 1\n"
+     "def main(n):\n"
+     "    var a = [0, 0]\n"
+     "    var b = 0\n"
+     "    var c = 0\n"
+     "    var d = 0\n"
+     "    a[pick()], (b, c) = 7, (2, 3)\n"
+     "    d = 4\n"
+     "    printf(\"a0=%d a1=%d b=%d c=%d d=%d\", a[0], a[1], b, c, d)\n"
+     "    return 0\n",
+     "a0=0 a1=7 b=2 c=3 d=4"),
 ]
 
 # ── the GUARD for a refusal that is about a name, not about a construct ──

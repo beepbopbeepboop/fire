@@ -5625,11 +5625,13 @@ INIT_FIELD_TYPE_CASES = [
      "        return 50 + o2.inner.total()\n"
      "    return 0\n", 0, None),
     # THE TUPLE FORM is a PROPERTY OF THE STATEMENT LOWERING rather than of
-    # this evidence source, so the four shapes of it are checked against CPython
-    # on BOTH backends in `test_formal_value_model.py`'s `TUPLE_STORE_CASES`
-    # (which is where the x86-64 half of it was fixed).  These cases are written
-    # with separate assignments only so that they mean the same thing on both
-    # architectures as the model reads them, which is what the comment on
+    # this evidence source, so the target shapes of it are checked against
+    # CPython on BOTH backends in `test_formal_value_model.py`'s
+    # `TUPLE_STORE_CASES` (which is where the x86-64 half of it was fixed: the
+    # `MemberExpr` frame-slot target, and later the `SubscriptExpr` element
+    # target).  These cases are written with separate assignments only so that
+    # they mean the same thing on both architectures as the model reads them,
+    # which is what the comment on
     # `init_assigned_scalar_fields_stay_plain` records.
     ("init_assigned_scalar_fields_stay_plain",
      "class Tail:\n"
