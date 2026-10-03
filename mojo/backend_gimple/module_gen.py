@@ -4190,7 +4190,44 @@ def gen_module_impl(self, stmts):
                     fn = _as_str(_nf_k)
                     ft = _as_str(new_fields[_nf_k])
                     existing_ft = self.struct_field_types[s.name].get(fn)
-                    can_override = (existing_ft == 'int' and ft.endswith(' *'))
+                    # Two "we did not know" answers may be REPLACED by this
+                    # pass's evidence, and both are exactly as contentless:
+                    #   * `'int'` — the struct emitter's own placeholder for a
+                    #     field with no annotation, so a pointer answer is
+                    #     strictly more information (the rule's own words).
+                    #   * `f"{s.name} *"` — what the `s.fields` VarDecl walk
+                    #     above writes when a field has neither annotation,
+                    #     inherited type, nor readable default ("we don't know
+                    #     what this field holds"). It is NOT a weaker spelling
+                    #     of the same ignorance, and letting it win is what
+                    #     typed a self-host field with a POINTER TO THE
+                    #     RECEIVER'S OWN STRUCT: that walk runs FIRST for each
+                    #     struct, so by the time a `self.X = <expr>`
+                    #     assignment is examined here the placeholder is
+                    #     already the field's declared type and the `can_override`
+                    #     test below let it stand. Measured, six hard gcc
+                    #     errors in the self-host closure, all one answer:
+                    #     `MojoFunction._interp`, `MojoOverloadSet._interp`
+                    #     (an UNANNOTATED `__init__` parameter, so the honest
+                    #     answer is the box) and `Parser._comptime_rhs_failures`
+                    #     (ANNOTATED `list`, so `MojoList *`) came out as
+                    #     `MojoFunction *` / `MojoOverloadSet *` / `Parser *`.
+                    #     It only reaches those three because the field's
+                    #     evidence lives in ANOTHER module's compile: the
+                    #     `VarDecl` placeholder this walk finds in `s.fields`
+                    #     was appended by the pass below while a SIBLING
+                    #     module was compiled, so the outer gen's own
+                    #     `struct_field_types` has no entry to protect — the
+                    #     two tables are per-gen while `StructDef.fields` is
+                    #     shared, which is why the placeholder is the only
+                    #     thing that survives.
+                    # `ft != existing_ft` keeps a field whose real type IS the
+                    # receiver's own struct (`self.next = other`, `self.parent
+                    # = owner`) exactly where it is: both sides answer the same
+                    # and nothing changes.
+                    can_override = ((existing_ft == 'int' and ft.endswith(' *'))
+                                    or (existing_ft == s.name + ' *'
+                                        and ft != existing_ft))
                     if fn not in self.struct_field_types[s.name] or can_override:
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
