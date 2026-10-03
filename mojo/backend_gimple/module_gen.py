@@ -1365,6 +1365,39 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
+def _gmi_declare_table_global(gen, gname, global_decls) -> bool:
+    """Declare the module global `gname` with the C type
+    `dispatch_table_global_ctype` gives it, and record that type in BOTH of
+    `gen`'s global tables. Returns False — declaring nothing — for an ordinary
+    global, so the caller falls through to its own RHS-derived conclusion.
+
+    ONE place, called at the TOP of both module-global declaration scans, and
+    the reason it is at the top rather than per-RHS-shape is that the answer
+    has to be the same whichever scan reaches the name first. The home module's
+    own scan and every importer's re-declaration of the same name have to agree
+    about the field's C type, because a bare read of a dispatch global is
+    emitted as a direct `_<mod>_globals.NAME` load typed from
+    `_global_var_types` — so a home that boxes the field while an importer
+    declares it bare is a hard
+    "assignment to 'MojoSet *' from 'int64_t' makes pointer from integer
+    without a cast", once per read.
+
+    That is what consulting the table only from the DictExpr/ListExpr/SetExpr
+    rows did: `module_loader.py`'s `_C_KEYWORDS = frozenset({...})` is a CALL,
+    so its own scan never reached one of those rows, fell to the generic
+    int64_t fallback, and declared `int64_t _C_KEYWORDS` in
+    `_module_loader_toplev` while `gimple_codegen`/`module_gen`/`module_shared`
+    all declared the same name `MojoSet *`.
+    """
+    _forced = dispatch_table_global_ctype(gname)
+    if _forced is None:
+        return False
+    global_decls.append(f"{_forced} {gname};")
+    gen._global_var_types[gname] = _forced
+    gen._global_c_decl_types[gname] = _forced
+    return True
+
+
 # The container C types a constructor argument is allowed to resolve a
 # struct field to. A field is pinned to exactly ONE ctype
 # (`struct_field_types[struct][field]`), which is why the constructor-argument
@@ -9287,8 +9320,16 @@ def gen_module_impl(self, stmts):
     if our_mod != "root":
         all_modules_to_declare["root"] = True
 
-    for _mgk in self._module_globals:
-        all_modules_to_declare[_as_str(_mgk)] = True
+    # `_mgmod`, NOT `_mgk`: the latter is this function's own
+    # `self._multi_kind_globals` local (`_mgk: set = set()`, above), and on the
+    # self-hosted compiled path a `for` target REBINDS the slot rather than
+    # introducing a new one — so this loop assigned a `char *` module name into
+    # a slot the type table had declared `MojoSet *`, and every module of the
+    # self-host closure whose globals struct was declared after this point
+    # failed gcc with "assignment to 'MojoSet *' from incompatible pointer type
+    # 'char *'".
+    for _mgmod in self._module_globals:
+        all_modules_to_declare[_as_str(_mgmod)] = True
 
     # Scan `stmts`/`imported_stmts` for `import`/`from ... import` targets
     # through the hoisted `_gmi_scan_import_modules` helper, NOT
@@ -9589,28 +9630,36 @@ def gen_module_impl(self, stmts):
                 for check_name in _check_names:
                     _forced = dispatch_table_global_ctype(check_name)
                     if _forced is not None and check_name not in _declared_globals:
-                        # The SEEDED type wins over the table's, and the
-                        # table's is only the fallback — the same preference as
-                        # before, with a correct fallback instead of a blanket
-                        # `MojoDict *`. A seeded `MojoSet *` for a name that
-                        # looks like a dict table is the owner's own conclusion
-                        # and outranks this site's guess; what was wrong was the
-                        # guess, not the preference.
+                        # THE TABLE is the answer, by the same helper both
+                        # declaration scans use.
                         #
-                        # Both halves matter. That blanket fallback declared a
+                        # The blanket `MojoDict *` this replaced declared a
                         # frozenset global (`_C_KEYWORDS`, `_C_RESERVED_FUNCS`)
-                        # as a dict whenever nothing was seeded, and because the
-                        # answer lands in the SHARED bare-name-keyed
-                        # `_global_c_decl_types`, `_own_overlay_global_ctype`'s
-                        # rule 1 then made that FOREIGN answer beat the owning
-                        # module's own correct `MojoSet *` — "cannot coerce
-                        # MojoSet * to MojoDict * (incompatible container
-                        # kinds)" for four modules of the self-host closure.
-                        _dct = self._global_var_types.get(check_name) or _forced
-                        global_decls.append(f"{_dct} {check_name};")
+                        # as a dict, and because the answer lands in the SHARED
+                        # bare-name-keyed `_global_c_decl_types`,
+                        # `_own_overlay_global_ctype`'s rule 1 then made that
+                        # FOREIGN answer beat the owning module's own correct
+                        # `MojoSet *` — "cannot coerce MojoSet * to MojoDict *
+                        # (incompatible container kinds)" for four modules of
+                        # the self-host closure.
+                        #
+                        # THE TABLE, not `_global_var_types`, is the second half
+                        # of the same fix: this loop runs BEFORE the
+                        # AssignStmt/VarDecl scans below, so whatever it writes
+                        # into `_declared_globals` stops them from re-deriving
+                        # the name. Preferring the seeded `_global_var_types`
+                        # here therefore decided the FIELD for the whole module
+                        # — and for an alias RHS (`_BIN_OPS = _GD_BIN_OPS`) the
+                        # seeded value is the useless `int64_t` the Phase-1.7
+                        # scan could not resolve, so `_mojo_middle_types_toplev`
+                        # and `_gimple_codegen_toplev` both declared
+                        # `int64_t _BIN_OPS` where the toplevel body then stored
+                        # the accessor's real `MojoDict *` ("assignment to
+                        # 'int64_t' from 'MojoDict *'", 5 sites). One helper
+                        # across this site, the two declaration scans and the
+                        # early-cdecl seed is what makes them one answer.
                         _declared_globals[check_name] = True
-                        self._global_c_decl_types[check_name] = _dct
-                        self._global_var_types[check_name] = _dct
+                        _gmi_declare_table_global(self, check_name, global_decls)
         elif isinstance(stmt, ImportStmt):
             for local_name in gimple_ctypes._import_local_names(stmt):
                 if local_name not in _declared_globals:
@@ -9693,13 +9742,13 @@ def gen_module_impl(self, stmts):
         next line's slice of the same name was typed as a string."""
         if gname in getattr(self, '_multi_kind_globals', ()):
             return
+        # The dispatch/type-table globals answer from the ONE table, before
+        # any RHS-shape row below — see `_gmi_declare_table_global`.
+        if _gmi_declare_table_global(self, gname, global_decls):
+            return
         if isinstance(value, DictExpr):
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoDict * {gname};")
-                self._global_c_decl_types[gname] = 'MojoDict *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoDict * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoDict * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoDict *'
         elif isinstance(value, ListExpr) or isinstance(value, TupleExpr):
             # `isinstance(v, ListExpr) or isinstance(v, TupleExpr)`, NOT a
@@ -9709,20 +9758,12 @@ def gen_module_impl(self, stmts):
             # `int64_t`; the field-freeze loop's fallback then declared it
             # a bare `MojoList *` (array_ops_jit stage1-vs-stage2 parity
             # under MOJO_NO_SHIM=1).
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoList * {gname};")
-                self._global_c_decl_types[gname] = 'MojoList *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoList * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoList *'
         elif isinstance(value, SetExpr):
-            if _is_dispatch_name(gname):
-                global_decls.append(f"MojoSet * {gname};")
-                self._global_c_decl_types[gname] = 'MojoSet *'
-            else:
-                global_decls.append(f"int64_t {gname};  /* MojoSet * */")
-                self._global_c_decl_types[gname] = 'int64_t'
+            global_decls.append(f"int64_t {gname};  /* MojoSet * */")
+            self._global_c_decl_types[gname] = 'int64_t'
             self._global_var_types[gname] = 'MojoSet *'
         elif isinstance(value, IntLiteral) or isinstance(value, BoolLiteral):
             global_decls.append(f"int {gname};")
@@ -9851,41 +9892,30 @@ def gen_module_impl(self, stmts):
                 self._global_var_types[gname] = 'int64_t'
                 self._global_c_decl_types[gname] = 'int64_t'
         else:
-            # A hardcoded dispatch-table global assigned from a non-literal
-            # RHS (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from
-            # generated_dispatch import ... as ...` aliases) must KEEP its
-            # real container ctype, exactly like the DictExpr/ListExpr/
-            # SetExpr branches above do via `_is_dispatch_name`. Without
-            # this the generic `_quick_type` fallback rewrote
-            # `_global_c_decl_types[gname]` to the boxed `int64_t` — after
-            # this function's own earlier reconcile loop had correctly
-            # seeded `MojoDict *` — so `_own_overlay_global_ctype`'s
-            # container rule could not return it and the struct field came
-            # out `int64_t _BIN_OPS` where the shim emits `MojoDict *`.
-            if _is_dispatch_name(gname):
-                # The table's REAL type, not `_CMP_OPS`-versus-everything-else:
-                # ten other names here are sets too, and this branch used to
-                # declare all ten of them `MojoDict *`.
-                _dt = dispatch_table_global_ctype(gname)
-                global_decls.append(f"{_dt} {gname};")
-                self._global_var_types[gname] = _dt
-                self._global_c_decl_types[gname] = _dt
+            # A dispatch-table global assigned from a non-literal RHS
+            # (`_BIN_OPS = _GD_BIN_OPS`, where `_GD_*` are `from
+            # generated_dispatch import ... as ...` aliases) was answered at
+            # the TOP of this function from the one table, so there is
+            # nothing left to special-case here: what remains is the generic
+            # `_quick_type` fallback, and it must not see a table name at all
+            # (it would rewrite `_global_c_decl_types[gname]` to the boxed
+            # `int64_t` that `module_loader`'s `int64_t _C_KEYWORDS` used to
+            # disagree with every importer's `MojoSet *`).
+            qt = self._quick_type(value) or 'int64_t'
+            if qt.endswith(' *') or qt == 'char *':
+                global_decls.append(f"{qt} {gname};")
+                self._global_var_types[gname] = qt
+                self._global_c_decl_types[gname] = (
+                    'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                    else qt)
+            elif qt == '_Bool':
+                global_decls.append(f"int {gname};")
+                self._global_var_types[gname] = 'int'
+                self._global_c_decl_types[gname] = 'int'
             else:
-                qt = self._quick_type(value) or 'int64_t'
-                if qt.endswith(' *') or qt == 'char *':
-                    global_decls.append(f"{qt} {gname};")
-                    self._global_var_types[gname] = qt
-                    self._global_c_decl_types[gname] = (
-                        'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                        else qt)
-                elif qt == '_Bool':
-                    global_decls.append(f"int {gname};")
-                    self._global_var_types[gname] = 'int'
-                    self._global_c_decl_types[gname] = 'int'
-                else:
-                    global_decls.append(f"int64_t {gname};")
-                    self._global_var_types[gname] = 'int64_t'
-                    self._global_c_decl_types[gname] = 'int64_t'
+                global_decls.append(f"int64_t {gname};")
+                self._global_var_types[gname] = 'int64_t'
+                self._global_c_decl_types[gname] = 'int64_t'
 
     # `{gname: init_code}` captured at declaration time — the later
     # field-order loop's re-scan for the matching AssignStmt
@@ -9902,6 +9932,13 @@ def gen_module_impl(self, stmts):
             _declared_globals[gname] = True
             if stmt.value is not None:
                 _declared_global_inits[gname] = _gmi_global_init_code(stmt.value)
+            # The second of the two declaration scans, and the same table
+            # answers here — `funcs_shared.py`'s `_SELFHOST_EXTRA_FIELD_CACHE:
+            # dict = {}` is a VarDecl, so a guard only in `_gscan_declare_global`
+            # would box its home field `int64_t` while every importer declared
+            # the same name `MojoDict *`.
+            if _gmi_declare_table_global(self, gname, global_decls):
+                continue
             if stmt.type_ann and stmt.value is None:
                 _resolved = self._resolve_type(stmt.type_ann)
                 self._global_var_types[gname] = _resolved

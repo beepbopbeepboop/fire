@@ -604,7 +604,49 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
     if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod or _owned_here) and \
             (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
-        gtype = gen._global_var_types[name]
+        # WHICH module's `_<mod>_globals.<name>` field this read must load:
+        # this one's own struct whenever this module declares the name (the
+        # routing argument just above), and the OWNING module's struct
+        # otherwise. `_module_global_field_type` is the authoritative test
+        # because `_module_globals[mod]` is the exact list the typedef, the
+        # initializer and the accessor were all generated from — the same
+        # reasoning `_lower_MemberExpr`'s `submod.GLOBAL` branch already rests
+        # on.
+        #
+        # It is also the whole difference between compiling and not compiling
+        # for every FROM-IMPORTED global read bare. `build_stdlib_dylib.py` has
+        # `from module_loader import load_module, STDLIB_PATH,
+        # module_name_for_path` at module level and reads `STDLIB_PATH` bare
+        # inside a function; `build_stdlib_dylib_toplev` declares no such
+        # field (only the module's OWN top-level assignments become fields),
+        # so the read emitted `_build_stdlib_dylib_globals.STDLIB_PATH` —
+        # "'struct _build_stdlib_dylib_toplev' has no member named
+        # 'STDLIB_PATH'". Same for `TEST_PATH` in build_config,
+        # `_BUILTIN_RET_CTYPES` in module_shared/resolve_shared, and the
+        # sibling-alias rewrite's `_BIN_OPS`/`_TYPE_MAP`/
+        # `_FIXED_ARRAY_ANN_RE` (see `_lower_MemberExpr`'s own comment:
+        # `gimple_ctypes._BIN_OPS` is deliberately lowered as a BARE `_BIN_OPS`,
+        # in a module that reached `mojo.middle.types` with
+        # `import ... as gimple_ctypes` and so never ran the from-import
+        # declaration site at all).
+        #
+        # Strictly additive: a module that declares the name keeps reading its
+        # own field, and a name nobody declares (owner None) is untouched, so
+        # both cost one dict-free `is None` comparison and nothing else.
+        _read_mod = gen._current_module_ctx or "root"
+        _read_types = None
+        _owner_s = _as_str(_global_owner_mod) if _global_owner_mod is not None else ''
+        if _owner_s and _owner_s != _read_mod \
+                and gen._module_global_field_type(_read_mod, name) is None:
+            _read_types = gen._module_global_field_type(_owner_s, name)
+            if _read_types is not None:
+                _read_mod = _owner_s
+        if _read_types is not None:
+            gtype = _read_types[1]
+            c_decl_from_owner = _read_types[0]
+        else:
+            gtype = gen._global_var_types[name]
+            c_decl_from_owner = None
         # Globals are stored at C level as int64_t (boxed pointers) except
         # for char * and simple int globals whose C type matches the Mojo type.
         if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -668,7 +710,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # load emitted a bare `int64_t t = MojoDict * field;`
         # -Wint-conversion error).
         c_decl_type = gen._own_overlay_global_ctype(name)
-        if c_decl_type is None:
+        if c_decl_from_owner is not None:
+            # Routed to the OWNING module's field above, so the field's OWN
+            # declared type is the answer — a shared bare-name-keyed dict cannot
+            # be, since that is exactly the table whose "first module to claim
+            # this name wins" entry pointed us here.
+            c_decl_type = c_decl_from_owner
+        elif c_decl_type is None:
             c_decl_type = gen._global_c_decl_types.get(name, ctype)
         # Access global from THIS module's own struct — the same routing the
         # WRITE side already uses, deliberately, at every one of its sites
@@ -699,9 +747,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # with the field it read: 4 x "assignment to 'int64_t' from 'char
         # *' makes integer from pointer without a cast" plus 6 x "non-trivial
         # conversion in 'component_ref'" (bugs/COMPILE_FAIL_Tools_c-analyzer_
-        # c_analyzer_info.md). With the write already pinned to this module,
+        # c_analyzer/info.md). With the write already pinned to this module,
         # making the read agree is what closes the pair.
-        safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
+        #
+        # `_read_mod`, not `gen._current_module_ctx` unconditionally: the one
+        # case where "this module's own struct" has no such field is a
+        # FROM-IMPORTED global, and for that one the owner's field is the only
+        # storage there is (see the routing note at the top of this branch).
+        safe_module = gimple_ctypes._c_field_name(_read_mod)
         field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.

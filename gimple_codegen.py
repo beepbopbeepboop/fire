@@ -521,8 +521,18 @@ _SELFHOST_SIGS = {
     # the definition side, and every call passes a real list.
     '_merge_struct_inheritance': (
         'void', ['MojoList *'], None),
+    # A DICT, so `MojoDict *` and not the `int64_t` this table used to claim:
+    # `mojo/middle/types.py`'s definition builds and returns
+    # `descendants = {name: {name} for name in by_name}` and the codegen's own
+    # inference agrees (`MojoDict * _compute_exc_descendants (MojoList *)`).
+    # A stale `int64_t` here is not a coercion imprecision like the rest of the
+    # table — the auto-stub path EMITS it as a declaration, and this free
+    # function's `_NO_OVERLOAD_MANGLE` bare C name is what every self-host
+    # fragment calls, so "conflicting types for '_compute_exc_descendants';
+    # have 'MojoDict *(MojoList *)'" is a hard self-host build failure (two
+    # declarations of one symbol in one translation unit).
     '_compute_exc_descendants': (
-        'int64_t', ['MojoList *'], None),
+        'MojoDict *', ['MojoList *'], None),
     # Interpreter (myinterpreter.py)
     'Interpreter___init__': (
         'void', ['Interpreter *', 'char *', 'MojoList *'], 'myinterpreter'),
