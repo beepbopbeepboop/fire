@@ -2548,7 +2548,7 @@ class _Block:
     and `-1` for the `return`/`raise` case, which leaves unconditionally."""
 
     __slots__ = ("index", "stmts", "succs", "preds", "defs", "kills", "seed",
-                 "leaves", "breaks_at")
+                 "leaves", "breaks_at", "intro", "false_from")
 
     def __init__(self, index, stmts):
         self.index = index
@@ -2560,6 +2560,23 @@ class _Block:
         self.seed: set = set()
         self.leaves = False
         self.breaks_at = -1
+        # `intro` is the CONDITION FACTS this block's entry establishes: the
+        # canonical form of a test and whether it held, introduced by the one
+        # branch that knows (`if c:` then `c` is true). A separate field from
+        # `seed` for the same reason `seed` is one — these are facts about the
+        # PATH, not names, and the fixpoint intersects them at a join rather
+        # than unioning. See `_guard_facts` and `_cond_key`.
+        self.intro: dict = {}
+        # `false_from` is `{predecessor index: the condition whose FALSE edge
+        # that is}`, and it exists because the CFG has no way to say a fact
+        # about an EDGE. An `if` with no `else` reaches the join straight from
+        # its own header, and on that one edge the condition is known to have
+        # failed — which is what makes the guarded-names meet work, since a
+        # predecessor that knows the condition failed imposes nothing. The
+        # alternative was an empty block per `if` to carry the fact, and that
+        # would renumber every block, which is what the graph-shape tables in
+        # `test_formal_read_before_store.py` pin.
+        self.false_from: dict = {}
 
     def __repr__(self):
         return (f"<block {self.index}: {len(self.stmts)} stmt(s), "
@@ -2613,6 +2630,111 @@ def _cfg_block_defs(stmts) -> tuple:
             # not "the target is stored by the body").
             defs |= _store_names(getattr(s, "target", None))
     return defs, kills
+
+
+# ── CONDITION FACTS ─────────────────────────────────────────────────────────
+#
+# `read_before_store` answers a DOMINANCE question — is the name stored on every
+# path to this read — and the graph it walks has no way to say "every path that
+# reaches here passed the same test". So the shape below is refused:
+#
+#     is_tuple = var.startswith('(') and var.endswith(')')
+#     if is_tuple:
+#         var_names = gen._split_top_level_comma(inner)     # stores
+#         …
+#     if is_tuple:
+#         emit(gen._cname(var_names[0]))                    # reads
+#
+# The join after the first `if` intersects the arm that stores with the arm that
+# does not, so `var_names` drops out — and the second `if` is exactly where the
+# name is read. The program is correct: the condition is assigned once and never
+# reassigned, so every path that reaches the second test passed the first.
+#
+# What closes it is a fact environment alongside the stored-names one: each
+# branch seeds the fact "this condition held" (or "did not"), a join intersects
+# the facts, and any block that WRITES a name the condition mentions kills them.
+# A read is then allowed when the name is stored outright OR when some fact that
+# holds at this point implies it. See `_guard_facts` for the implication half.
+
+# The nodes a condition may be built from for its value to be TRACKABLE: a name,
+# a literal, and the operators over them. Everything else — a call, an attribute
+# read, a subscript, a comprehension — can answer differently the second time it
+# is evaluated, and a fact keyed on one of those would license a read CPython
+# refuses, which is the one direction this analysis must never move.
+_TRACKABLE_COND = (F.IdentExpr, F.BinaryOp, F.UnaryOp, F.CompareChain,
+                   F.IntLiteral, F.FloatLiteral, F.StringLiteral,
+                   F.BoolLiteral, F.NoneLiteral)
+
+
+def _cond_key(e, depth: int = 0) -> str:
+    """`e`'s canonical form, or `''` when its value is not trackable.
+
+    A key is the condition's SHAPE, read structurally rather than off the source
+    text: two syntactically identical conditions in one function have the same
+    value, which is the whole mechanism — a fact keyed on one holds at the other.
+
+    `not` is part of the key rather than a polarity, so `if c:` and `if not c:`
+    are two conditions and neither implies the other. That is a real loss (an
+    early-return guard written `if not ok: return` does not license a read in a
+    later `if ok:` arm) and it is the safe direction: the fix is to state the
+    polarity, and until someone does, a program that needs the implication is
+    refused as it is today.
+
+    `depth` bounds the recursion. The key is only ever compared with another
+    key, so a deep or cyclic expression wants a coarse key rather than a hang,
+    and `''` — "not trackable" — is the answer that cannot refuse anything.
+    """
+    if e is None or depth > 12:
+        return ""
+    if isinstance(e, F.IdentExpr):
+        return "N:" + e.name
+    if not isinstance(e, _TRACKABLE_COND):
+        return ""
+    if isinstance(e, F.BinaryOp):
+        left = _cond_key(e.left, depth + 1)
+        right = _cond_key(e.right, depth + 1)
+        return "" if not left or not right else "(%s %s %s)" % (left, e.op,
+                                                                right)
+    if isinstance(e, F.UnaryOp):
+        inner = _cond_key(e.operand, depth + 1)
+        return "" if not inner else "(%s %s)" % (e.op, inner)
+    if isinstance(e, F.CompareChain):
+        parts: list = []
+        for i, op in enumerate(e.ops):
+            left = _cond_key(e.operands[i], depth + 1)
+            right = _cond_key(e.operands[i + 1], depth + 1)
+            if not left or not right:
+                return ""
+            parts.append("%s %s %s" % (left, op, right))
+        return "(&%s)" % " ".join(parts)
+    # A literal, by value: `if 3:` twice is the same fact twice.
+    return "L:%s(%r)" % (type(e).__name__, getattr(e, "value", None))
+
+
+def _cond_names(e) -> set:
+    """Every name a condition READS, which is what invalidates its fact.
+
+    `_expr_reads` with an empty `bound`, so a name mentioned anywhere in the
+    expression counts — including inside a comparison's operands — and a fact
+    about `a > b` dies when either `a` or `b` is written. That is the safe
+    direction: killing a fact the value did not depend on only refuses more.
+    """
+    return set(_expr_reads(e, set()).keys())
+
+
+def _facts_merge(left: dict, right) -> dict:
+    """Two fact dicts unioned, or `None` when either is empty.
+
+    Used for an `elif` arm, which knows both that the `if`'s condition FAILED
+    and that its own HELD.
+    """
+    if not left:
+        return dict(right) if right else None
+    if not right:
+        return dict(left)
+    out = dict(left)
+    out.update(right)
+    return out
 
 
 def _case_is_wildcard(case) -> bool:
@@ -2830,7 +2952,14 @@ def _loop_body_always_runs(s) -> bool:
 
 
 def _build_cfg(body) -> tuple:
-    """`(blocks, entry index)` for a function body.
+    """`(blocks, entry index, condition names)` for a function body.
+
+    `condition names` is `{canonical condition: the names it reads}`, collected
+    as the branches are emitted. It is returned rather than recomputed by the
+    fixpoint because the fixpoint needs it to know which fact a WRITE kills,
+    and re-deriving the key from the statement would be a second reader of
+    "what is this condition's canonical form" — which is how the two come to
+    disagree about which facts exist.
 
     **The builder's shape, and why it needs two pieces of state rather than
     one.** A control-flow statement's arms converge on what follows, so the
@@ -2863,6 +2992,25 @@ def _build_cfg(body) -> tuple:
     then makes safe.
     """
     blocks: list = []
+    cond_names: dict = {}
+    # `{header block index: the condition whose FALSE edge leaves it}`, consumed
+    # by `open_block` as it wires each pending exit to its predecessor. See
+    # `_Block.false_from`.
+    false_exits: dict = {}
+
+    def note_cond(expr) -> str:
+        """The canonical form of a condition, remembering the names it reads.
+
+        One reader for both, because the fixpoint kills a fact by asking
+        "which names does this condition mention" and the two answers have to
+        be about the SAME conditions — a key recorded without its names, or
+        names recorded under a key the fixpoint never sees, is a fact that
+        outlives the store that should have killed it.
+        """
+        key = _cond_key(expr)
+        if key:
+            cond_names.setdefault(key, _cond_names(expr))
+        return key
 
     def new(stmts) -> _Block:
         b = _Block(len(blocks), list(stmts or []))
@@ -2870,7 +3018,7 @@ def _build_cfg(body) -> tuple:
         blocks.append(b)
         return b
 
-    def open_block(stmts, pending: list, seed=None) -> _Block:
+    def open_block(stmts, pending: list, seed=None, facts=None) -> _Block:
         """Open a block for `stmts` and make every `pending` exit reach it.
 
         `seed` is `_Block.seed`: names this block's IN set has for a reason
@@ -2881,16 +3029,25 @@ def _build_cfg(body) -> tuple:
         `take()`), and a seed that only some of them applied would be a rule
         that fires on some `match` arms and not others — which
         `FORMAL_read_before_store_dominating_store.md` names as the specific
-        way a partial rule is worse than none."""
+        way a partial rule is worse than none.
+
+        `facts` is `_Block.intro` for the same reason and with the same
+        requirement: the CONDITION FACTS this block's entry establishes, which
+        only the branch that knows them can state."""
         b = new(stmts)
         if seed:
             b.seed |= set(seed)
+        if facts:
+            b.intro.update(facts)
         for p in pending:
             if p is not None and 0 <= p < len(blocks):
                 blocks[p].succs.append(b.index)
+                key = false_exits.get(p)
+                if key:
+                    b.false_from[p] = key
         return b
 
-    def run(stmts, loops: list, pending: list, seed=None) -> list:
+    def run(stmts, loops: list, pending: list, seed=None, facts=None) -> list:
         """Emit `stmts`, returning the indices that fall through to the end.
 
         `pending` holds the exits that reach the FIRST statement here; the
@@ -2901,7 +3058,8 @@ def _build_cfg(body) -> tuple:
 
         `seed` names are put on the FIRST block this run opens and nowhere
         else, so the whole arm's subtree inherits them and the block after the
-        statement does not."""
+        statement does not. `facts` is the same contract for the CONDITION
+        FACTS."""
         if not pending:
             # A run nothing can reach. It still gets a block, so an
             # unreachable region cannot leave a hole in the index space the
@@ -2910,12 +3068,15 @@ def _build_cfg(body) -> tuple:
             pending = [b.index]
         cur = None
         seed_left = set(seed) if seed else None
+        facts_left = dict(facts) if facts else None
 
         def first(stmts, pending: list) -> _Block:
-            """`open_block` for the first block of this run, taking the seed."""
-            nonlocal seed_left
-            b = open_block(stmts, pending, seed_left)
+            """`open_block` for the first block of this run, taking the seed
+            and the facts."""
+            nonlocal seed_left, facts_left
+            b = open_block(stmts, pending, seed_left, facts_left)
             seed_left = None
+            facts_left = None
             return b
 
         def take() -> _Block:
@@ -2933,16 +3094,31 @@ def _build_cfg(body) -> tuple:
                 cond = first([s], pending)
                 pending = [cond.index]
                 cur = None
-                arms = [getattr(s, "then_body", None) or []]
-                arms += [b for _c, b in (getattr(s, "elifs", None) or [])]
+                # The CONDITION FACTS each arm enters with: the then-arm knows
+                # the test held, an `elif` arm knows the earlier ones failed and
+                # its own held, and the `else` arm (and the statement's own fall
+                # through, which carries none) knows the test failed. Every arm
+                # is opened from the header alone, so a fact stated here is true
+                # on every path into it.
+                key = note_cond(getattr(s, "condition", None))
+                held = {key: True} if key else None
+                failed = {key: False} if key else None
+                arms = [(getattr(s, "then_body", None) or [], held)]
+                for elif_cond, elif_body in (getattr(s, "elifs", None) or []):
+                    ekey = note_cond(elif_cond)
+                    arms.append((elif_body,
+                                 _facts_merge(failed,
+                                              {ekey: True} if ekey else None)))
                 has_else = getattr(s, "else_body", None) is not None
                 if has_else:
-                    arms.append(s.else_body)
+                    arms.append((s.else_body, failed))
                 arm_exits: list = []
-                for body in arms:
-                    arm_exits += run(body, loops, [cond.index])
+                for body, arm_facts in arms:
+                    arm_exits += run(body, loops, [cond.index], facts=arm_facts)
                 if not has_else:
                     arm_exits.append(cond.index)      # the false edge
+                    if key:
+                        false_exits[cond.index] = key
                 pending = arm_exits
                 continue
             if kind in ("WhileStmt", "ForStmt", "ComptimeForStmt"):
@@ -2950,6 +3126,15 @@ def _build_cfg(body) -> tuple:
                 pending = [head.index]
                 cur = None
                 loop_body = getattr(s, "body", None) or []
+                # A `while`'s body runs only when the condition held, and its
+                # `else` clause only when the condition failed — the two facts
+                # the arms can carry. A `for` has no condition to key on (its
+                # iterable is evaluated once, in the header), so it carries none
+                # and its body keeps whatever the enclosing path knew.
+                loop_key = note_cond(getattr(s, "condition", None)) \
+                    if kind == "WhileStmt" else ""
+                loop_held = {loop_key: True} if loop_key else None
+                loop_failed = {loop_key: False} if loop_key else None
                 # `first` is the block the body opens with, which is the node
                 # the back edge returns to: the condition is re-read at the
                 # TOP of the body, not in the preheader, so routing the back
@@ -2961,7 +3146,8 @@ def _build_cfg(body) -> tuple:
                 frame = {"head": head.index, "exits": [], "continues": [],
                          "first": len(blocks) if loop_body else None}
                 loops.append(frame)
-                body_exits = run(loop_body, loops, [head.index])
+                body_exits = run(loop_body, loops, [head.index],
+                                 facts=loop_held)
                 loops.pop()
                 # The LATCH is the node the loop is in only because its body
                 # ran at least once, and it is what keeps "the condition failed
@@ -2987,9 +3173,14 @@ def _build_cfg(body) -> tuple:
                 exit_from = [latch.index]
                 if not _loop_body_always_runs(s):
                     exit_from.append(head.index)
+                    # The header's exit edge IS "the condition failed", the same
+                    # fact the `else` clause carries and for the same reason.
+                    if loop_key:
+                        false_exits.setdefault(head.index, loop_key)
                 else_body = getattr(s, "else_body", None)
                 if else_body:
-                    pending = run(else_body, loops, exit_from)
+                    pending = run(else_body, loops, exit_from,
+                                  facts=loop_failed)
                 else:
                     pending = exit_from
                 # A `break` in the BODY also reaches the join, and that is what
@@ -3427,7 +3618,7 @@ def _build_cfg(body) -> tuple:
         for d in b.succs:
             if d is not None and 0 <= d < len(blocks):
                 blocks[d].preds.append(b.index)
-    return blocks, entry.index
+    return blocks, entry.index, cond_names
 
 
 def _leaves_early(blocks: list, start: int, end: int, outer_loops: int) -> list:
@@ -3456,10 +3647,12 @@ def _leaves_early(blocks: list, start: int, end: int, outer_loops: int) -> list:
             if b.leaves and b.breaks_at < outer_loops]
 
 
-def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
-    """`{block index: names every path to that block stores}` — the fixpoint.
+def _definitely_stored(blocks: list, entry: int, seed: set,
+                       cond_names: dict = None) -> tuple:
+    """`(stored_in, facts_in, guarded)` — the three domains of this question.
 
-    The standard "definitely assigned" dataflow: a name is in a block's IN set
+    **1. `stored_in`: `{block: names every path to that block stores}`.** The
+    standard "definitely assigned" dataflow: a name is in a block's IN set
     when it is in EVERY predecessor's OUT set, and a block's OUT set is its IN
     set plus what it defines. Seeded at the entry with `seed` (the parameter
     names, which the CALLER stores), and iterated to a fixpoint because a loop
@@ -3480,7 +3673,53 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
     the defect — and `if c: p = 1 else: p = 2` then `print(p)` does not,
     because both arms store it. The second case is the one that says the
     analysis is a fixpoint and not a heuristic: the two shapes are the same
-    graph with different arm sets."""
+    graph with different arm sets.
+
+    **2. `facts_in`: `{block: {condition key: whether it held on every path}}`.**
+    The same lattice one level up: a fact survives a join only when EVERY
+    predecessor agrees, a branch introduces its own (and an `elif` arm carries
+    both its own and the ones it failed), and a block that WRITES a name its
+    condition mentions kills it — `is_tuple = f()` kills the fact about
+    `is_tuple`, which is the whole invalidation rule and the reason
+    `_cond_names` exists. A fact the inherited set and the block's own `intro`
+    DISAGREE about is dropped rather than either value winning, because the
+    disagreement is a path the analysis cannot describe (an `if c:` inside the
+    `else:` of another `if c:`) and a fact there would be a claim about
+    unreachable code.
+
+    **3. `guarded_in` / `guarded_out`: `{block: {condition key: names stored
+    WHENEVER that condition held}}`** — the implication the first two cannot
+    express, and the one that closes the correlated-condition shape:
+
+        is_tuple = var.startswith('(') and var.endswith(')')
+        if is_tuple:
+            var_names = gen._split_top_level_comma(inner)     # stores
+        if is_tuple:
+            emit(gen._cname(var_names[0]))                    # reads
+
+    At the join after the first `if`, `var_names` is in
+    `guarded_out[join][is_tuple]` and not in `stored_in[join]`: the arm that
+    stores it knows the condition held, and the arm that does not knows it did
+    NOT — so the implication is vacuously satisfied on the second path and
+    holds on the first. The second `if` then re-establishes the fact, and the
+    read is licensed. **Skipping the vacuous predecessor is the whole
+    mechanism**: counting it as a claim intersects the implication away at the
+    join and leaves the analysis exactly where it was, which is what the first
+    version of this did.
+
+    The claim is computed at a block's EXIT and read at its ENTRY, and the two
+    are separate because a read consults the entry form: the block's own
+    definitions run after any statement above them, so a claim carrying them
+    would license a read of a name the block stores LATER. And it is
+    initialised from the TOP and narrowed, like the other two, because a
+    narrowing iteration over a loop-carried claim is the only way to get one:
+    the loop body's paths all pass the header that established the fact, which
+    no single forward pass sees.
+
+    All three run in ONE loop because they narrow together and the third needs
+    the first two: a separate function per domain would mean passing the
+    universe and the fact map between them for nothing.
+    """
     everything = set()
     for b in blocks:
         everything |= b.defs
@@ -3493,15 +3732,35 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
     universe = everything | set(seed)
     out: dict = {b.index: (set(seed) if b.index == entry else set(universe))
                  for b in blocks}
+    keys = sorted(cond_names or {})
+    facts: dict = {b.index: {} for b in blocks}
+    for b in blocks:
+        facts[b.index] = {k: v for k, v in b.intro.items()}
+    # `guarded_out` is the working array and `guarded_in` is what the caller
+    # reads: a name is available at a READ POINT only if the implication held
+    # when the block was ENTERED, so the block's own definitions — which run
+    # after any statement above them — must not be in the value a read consults.
+    # `universe` is this domain's top: "no claim", which is what a block the
+    # condition says nothing about contributes, and which narrowing from
+    # removes. It is the opposite choice from the stored-names domain above for
+    # a reason that is the whole difference between the two: "every name is
+    # stored" is a safe top for a fixpoint that narrows towards a refusal,
+    # while "if this condition held, EVERY name is stored" is a claim, and a
+    # block reached before the test has no such claim to make.
+    guarded_out: dict = {b.index: {k: frozenset(universe) for k in keys}
+                         for b in blocks}
+    guarded_in: dict = {b.index: {k: frozenset(universe) for k in keys}
+                        for b in blocks}
     changed = True
     rounds = 0
     while changed:
         changed = False
         rounds += 1
         for b in blocks:
-            if not b.preds:
+            if not b.preds and b.index != entry:
                 continue
             merged = None
+            merged_facts = None
             for p in b.preds:
                 # `(IN | defs) - kills`, and the order is the point: inside one
                 # block the statements run in order, so a `del` after a store
@@ -3510,22 +3769,108 @@ def _definitely_stored(blocks: list, entry: int, seed: set) -> dict:
                 # case `kills` exists for.
                 p_out = (out[p] | blocks[p].defs) - blocks[p].kills
                 merged = set(p_out) if merged is None else (merged & p_out)
-            if merged is not None:
+                pf = facts[p]
+                merged_facts = (
+                    dict(pf) if merged_facts is None
+                    else {k: v for k, v in merged_facts.items()
+                          if pf.get(k, v) is v})
+            if merged is None:
+                # The entry block has no predecessors: its IN set is the seed
+                # and its facts are whatever it introduces.
+                merged = set(seed)
+                merged_facts = {}
+            else:
                 # A `seed` is not reachable from any predecessor and the
                 # intersection cannot restore it, so it is added AFTER it —
                 # which is the whole reason it is a field of its own rather
                 # than a def of this block (that would leak into successors
                 # outside the arm). See `_match_case_binds`.
                 merged |= b.seed
-            if merged is not None and merged != out[b.index]:
+            for k, v in b.intro.items():
+                if merged_facts.get(k, v) is not v:
+                    del merged_facts[k]       # a contradiction is no fact
+                else:
+                    merged_facts[k] = v
+            # A write to any name the condition mentions kills that fact.
+            written_here = b.defs | b.kills
+            if written_here and merged_facts:
+                merged_facts = {
+                    k: v for k, v in merged_facts.items()
+                    if not ((cond_names or {}).get(k) or set()) & written_here}
+            if merged != out[b.index]:
                 out[b.index] = merged
+                changed = True
+            if merged_facts != facts[b.index]:
+                facts[b.index] = merged_facts
+                changed = True
+            # The implication, per condition: "if this condition held, these names are
+            # stored". It is computed for EVERY block, not only the ones whose
+            # facts say the condition holds, because the block between the two
+            # tests does not know the condition's value and is exactly where the
+            # claim has to survive:
+            #
+            #     if c:            # the arm stores, and knows c held
+            #         t = 1
+            #     if c:            # THIS header does not know c's value
+            #         print(t)     # …and this arm does, and reads
+            #
+            # `guarded_out[b][K]` is the claim at b's EXIT and `guarded_in[b][K]`
+            # the claim at its ENTRY, and they are separate because a read
+            # consults the entry form: the block's own definitions run after any
+            # statement above them, so a claim carrying them would license a
+            # read of a name the block stores LATER.
+            #
+            # The meet skips a predecessor that reaches this block only by the
+            # condition having FAILED — it is vacuous there, and `false_from` is
+            # how an edge says so when the predecessor itself does not know.
+            # **Skipping it is the whole mechanism**: with the false edge
+            # counted as a claim, the join after the first `if` intersects a
+            # name only the true arm stores against a predecessor that never
+            # stored it, and the claim is gone before the second `if` can use it.
+            merged_in: dict = {}
+            merged_out: dict = {}
+            for k in keys:
+                if written_here & ((cond_names or {}).get(k) or set()):
+                    # The condition's own value moved in this block, so an
+                    # implication carried from an EARLIER test of it says
+                    # nothing about here — the fact is dead and the claim that
+                    # rode on it dies with it. `is_tuple = f()` between two
+                    # `if is_tuple:` arms is the shape, and dropping only the
+                    # fact would leave the claim to license the very read the
+                    # fact existed to justify.
+                    merged_in[k] = frozenset()
+                    merged_out[k] = frozenset()
+                    continue
+                acc_in = None
+                for p in b.preds:
+                    if (b.false_from or {}).get(p) == k:
+                        continue
+                    if facts[p].get(k) is False:
+                        continue
+                    cand = set(guarded_out[p].get(k) or ())
+                    acc_in = cand if acc_in is None else (acc_in & cand)
+                # A block nothing reaches claims nothing, and the entry block's
+                # claim is its own definitions: those ran on every path, so
+                # every condition implies them and nothing else does yet.
+                claim = frozenset() if acc_in is None else frozenset(acc_in)
+                merged_in[k] = claim
+                merged_out[k] = frozenset((set(claim) | b.defs) - b.kills)
+            if merged_in != guarded_in[b.index]:
+                guarded_in[b.index] = merged_in
+                changed = True
+            if merged_out != guarded_out[b.index]:
+                guarded_out[b.index] = merged_out
                 changed = True
         # A pathological CFG cannot loop forever (the sets only shrink and
         # there are finitely many), but the bound makes a cycle in the builder
-        # a wrong answer rather than a hang.
+        # a wrong answer rather than a hang. It is `len(blocks) + 2` because
+        # that is what the stored-names pass has always used on this graph and
+        # all three domains narrow along the same edges in the same rounds; the
+        # implication pass cannot need more rounds than the pass whose answer it
+        # reads.
         if rounds > len(blocks) + 2:
             break
-    return out
+    return out, facts, guarded_in
 
 
 def read_before_store(fn, params: set = None, placed: set = None):
@@ -3582,7 +3927,24 @@ def read_before_store(fn, params: set = None, placed: set = None):
     A statement shape the builder does not recognise becomes a leaf statement
     in its block, so it contributes no edge and no definition: an unknown shape
     is a silence rather than a wrong answer, and the direction is the safe one
-    because the fixpoint is initialized from the top."""
+    because the fixpoint is initialized from the top.
+
+    **And a third domain, for the shape dominance alone cannot see.** A name
+    read under a condition that an EARLIER test of the same condition already
+    decided:
+
+        is_tuple = var.startswith('(') and var.endswith(')')
+        if is_tuple:
+            var_names = gen._split_top_level_comma(inner)     # stores
+        if is_tuple:
+            emit(gen._cname(var_names[0]))                    # reads
+
+    Every path reaching the second test passed the first, so the name is
+    stored, and the CFG cannot say so: the join intersects the arm that stores
+    with the arm that does not. `read_before_store` therefore also accepts a
+    name that a CONDITION FACT holding at this point IMPLIES — see
+    `_definitely_stored`'s third domain and `_cond_key` for what a fact may be
+    keyed on and why a call is not one."""
     params = set(params if params is not None
                  else (getattr(fn, "params", None) or ()))
     params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
@@ -3746,8 +4108,9 @@ def read_before_store(fn, params: set = None, placed: set = None):
                 else:
                     walk_expr(v, live)
 
-    blocks, entry = _build_cfg(getattr(fn, "body", None) or [])
-    stored_in = _definitely_stored(blocks, entry, params)
+    blocks, entry, cond_names = _build_cfg(getattr(fn, "body", None) or [])
+    stored_in, facts_in, guarded_in = _definitely_stored(blocks, entry, params,
+                                                         cond_names)
     # Blocks in index order, so the finding is the FIRST in SOURCE order rather
     # than whatever order the builder happened to finish them in — a diagnostic
     # that names a later line when an earlier one is the same defect sends the
@@ -3755,7 +4118,18 @@ def read_before_store(fn, params: set = None, placed: set = None):
     for b in sorted(blocks, key=lambda x: x.index):
         if b.index == entry:
             continue
-        walk_stmts(b.stmts, stored_in.get(b.index, set()))
+        live = set(stored_in.get(b.index, set()))
+        # A name a fact that HOLDS HERE implies is stored here. This is the
+        # correlated-condition half: `if c:` stores, then `if c:` reads, and the
+        # two tests are the same test because nothing wrote the condition. The
+        # implication is only consulted for a fact this block's IN set says is
+        # TRUE, which is what keeps the rule from licensing a read in the
+        # `else` arm of the very `if` that established it.
+        here = guarded_in.get(b.index) or {}
+        for key, holds in (facts_in.get(b.index) or {}).items():
+            if holds is True:
+                live |= set(here.get(key) or ())
+        walk_stmts(b.stmts, live)
         if found:
             break
     return found[0] if found else None
