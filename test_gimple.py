@@ -9609,7 +9609,7 @@ print(sorted(e({'k': 1}).items()))
         one the loop just yielded.
 
         `it = iter(<list>)` lowers to a shared list plus an int64_t cursor
-        (`_try_bind_list_iter`), and both the `for` lowering and the
+        (`_try_bind_iter_cursor`), and both the `for` lowering and the
         `next()` lowering read `mojo_list_get(lst, cur)` and then advance
         `cur`. Each is right alone; together they were an off-by-one,
         because the `for` advance happened in its post block AFTER the
@@ -9752,6 +9752,237 @@ strings(['a', 'b'])
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_iterator_cursor_len_is_remaining_and_dunder_next_advances():
+        """`len(<cursor>)` is what is LEFT, and `it.__next__()` is `next(it)`.
+
+        Both were wrong on the LIST cursor that already existed, and both
+        wrong SILENTLY — exit 0, plausible numbers.
+
+        `len()` dispatched on the local's storage type, so `len(it)` read
+        `mojo_list_len(it)`: the container's TOTAL length, untouched by every
+        `next()` that had already run. Draining `[1,2,3,4,5]` and then asking
+        `len(it)` answered 5.
+
+        `it.__next__()` matched no receiver branch at all and fell through to
+        the stub that answers 0 for an unrecognised method call — so a caller
+        draining an iterator with the explicit spelling read 0 and advanced
+        NOTHING, and a `for` loop after it replayed the whole container.
+        Python spells the same operation both ways, so it is now the SAME
+        lowering (`_lower_next_iter_cursor`), not a second implementation of
+        the cursor, and exhaustion raises StopIteration exactly as `next(it)`
+        does rather than yielding a default.
+
+        Split into two programs because `len(<iterator>)` is Mojo, not Python
+        — CPython raises TypeError on it, so there is no oracle for the
+        remaining-count half and the expectation is written out. The first
+        program therefore pins only what CPython can answer (`__next__` as a
+        statement, as an expression, interleaved with `next()`, the 2-arg
+        `next(it, default)`, and a `for` resuming afterwards), and the second
+        pins `len()` at each point of a drain."""
+        global _PASS, _FAIL
+        name = "iterator_cursor_len_is_remaining_and_dunder_next_advances"
+        cpython_src = '''\
+def dunder_next(items):
+    it = iter(items)
+    out = []
+    out.append(next(it))
+    it.__next__()
+    out.append(next(it))
+    it.__next__()
+    for v in it:
+        out.append(v)
+    print('|'.join([str(v) for v in out]))
+
+
+def with_default(items):
+    it = iter(items)
+    out = []
+    while True:
+        v = next(it, -1)
+        if v == -1:
+            break
+        out.append(v)
+    print('|'.join([str(v) for v in out]))
+
+
+def strings(items):
+    it = iter(items)
+    it.__next__()
+    print('|'.join([str(v) for v in it]))
+
+
+dunder_next([1, 2, 3, 4, 5])
+with_default([7, 8])
+strings(['a', 'b', 'c'])
+'''
+        # 5 before anything, 4 after `next(it)`, 3 after the bare
+        # `it.__next__()`, then the value the expression form returned (3), 2
+        # after it, the `for`'s two remaining elements, and 0 once drained.
+        mojo_src = '''\
+def report():
+    it = iter([1, 2, 3, 4, 5])
+    print(len(it))
+    print(next(it))
+    print(len(it))
+    it.__next__()
+    print(len(it))
+    print(it.__next__())
+    print(len(it))
+    for v in it:
+        print(v)
+    print(len(it))
+
+
+report()
+'''
+        mojo_want = '5\n1\n4\n3\n3\n2\n4\n5\n0\n'
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'cur_len.py')
+            with open(entry, 'w') as fh:
+                fh.write(cpython_src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            cases = [('cpython', cpython_src, py.stdout),
+                     ('mojo-only', mojo_src, mojo_want)]
+            results = []
+            for tag, src, want in cases:
+                for mode in ('single-TU', 'link-mode'):
+                    try:
+                        c_src = gimple_codegen._run_pipeline(
+                            src, filename=entry,
+                            **({'do_imports': True} if mode == 'single-TU'
+                               else {'link_mode': True}))[0]
+                    except Exception as e:
+                        print(f"FAIL  {name} [{tag}/{mode}]: the compiler "
+                              f"raised {type(e).__name__}: {e}")
+                        _FAIL += 1
+                        return
+                    c_file = os.path.join(td, f'cl_{tag}_{mode}.c')
+                    exe = os.path.join(td, f'cl_{tag}_{mode}.exe')
+                    with open(c_file, 'w') as fh:
+                        fh.write(c_src)
+                    cc = subprocess.run(
+                        [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe,
+                         c_file,
+                         os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                        capture_output=True, text=True, timeout=300)
+                    if cc.returncode != 0:
+                        errs = [ln for ln in cc.stderr.splitlines()
+                                if ' error:' in ln]
+                        print(f"FAIL  {name} [{tag}/{mode}]: gcc -fgimple "
+                              f"failed:\n" + "\n".join(errs[:6]))
+                        _FAIL += 1
+                        return
+                    run = subprocess.run([exe], capture_output=True,
+                                         text=True, timeout=30)
+                    results.append((f'{tag}/{mode}', run.stdout, want))
+            bad = [t for t, out, want in results if out != want]
+            if bad:
+                _t, out, want = [(t, o, w) for t, o, w in results
+                                 if t == bad[0]][0]
+                print(f"FAIL  {name}: {', '.join(bad)} printed {out!r}, "
+                      f"expected {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_span_cursor_reads_the_span_and_len_tracks_the_cursor():
+        """`iter(<span>)` binds a real cursor, and `Span(<list>)` is a real view.
+
+        This is the shape that took `test/collections/test_span.mojo` out of
+        `compile_stdlib.py`'s EXPECTED_FAILURES, and it needed three fixes, all
+        in the same family and all silent before:
+
+        * the cursor binding (`_try_bind_iter_cursor`, then
+          `_try_bind_list_iter`) gated on `MojoList *`, so a `Span *` — which
+          IS a sequence with a real `_len` — got no cursor at all, `next(it)`
+          had no receiver to dispatch on, and the file was a declared red.
+          The gate is now the tree's own `_struct_data_field` + `_len` test,
+          the same predicate `_lower_subscript` uses to read `span[i]`, so the
+          two cannot disagree about what a Span is.
+        * `Span(<list>)` stored the list POINTER in `_data` and left `_len`
+          unset — `len(span)` answered whatever the fresh allocation held and
+          `span[i]` read the list's own header.
+        * `span[i]`'s tracked-element branch required the element type to be a
+          known STRUCT, so every numeric span fell to the byte-oriented
+          fallback and read ONE byte where the element is eight.
+
+        There is deliberately NO CPython comparison: `Span` is Mojo-only, so
+        the same text under CPython is a NameError. The expectation is written
+        out instead, and it is the value a correct implementation must produce
+        — `3`/`5` then the eight lines `test_iter` in that file asserts."""
+        global _PASS, _FAIL
+        name = "span_cursor_reads_the_span_and_len_tracks_the_cursor"
+        want = '3\n5\n5\n1\n4\n2\n3\n4\n5\n0\n'
+        src = '''\
+def walk_span():
+    var data = [1, 2, 3, 4, 5]
+    var span = Span(data)
+    print(span[2])
+    print(len(span))
+    var it = iter(span)
+    print(len(it))
+    print(next(it))
+    print(len(it))
+    for v in it:
+        print(v)
+    print(len(it))
+
+
+walk_span()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'span_cur.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'sc_{mode}.c')
+                exe = os.path.join(td, f'sc_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                _m, out = [(m, o) for m, o in results if m == bad[0]][0]
+                print(f"FAIL  {name}: {', '.join(bad)} printed {out!r}, "
+                      f"expected {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_program_written_inside_the_checkout_is_not_the_compiler():
         """A user program's LOCATION must not change its generated C.
 
@@ -9870,6 +10101,8 @@ print(run('x/y.txt'))
     test_dict_union_right_operand_is_converted_at_runtime()
     test_dict_literal_star_star_pair_merges_instead_of_storing()
     test_next_inside_for_over_same_iterator_is_one_ahead()
+    test_iterator_cursor_len_is_remaining_and_dunder_next_advances()
+    test_span_cursor_reads_the_span_and_len_tracks_the_cursor()
     test_a_program_written_inside_the_checkout_is_not_the_compiler()
     test_struct_unpack_computed_format_compiles()
     test_struct_unpack_computed_format_keeps_literal_half()

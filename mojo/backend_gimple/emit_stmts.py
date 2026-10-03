@@ -34,6 +34,7 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -212,8 +213,8 @@ def _gen_stmt_PassStmt(gen, node):
 
 
 
-def _try_bind_list_iter(gen, name, value):
-    """`it = iter(<list-expr>)` — bind `it` to the underlying list plus a
+def _try_bind_iter_cursor(gen, name, value):
+    """`it = iter(<container-expr>)` — bind `it` to the container plus a
     companion int64_t cursor temp so `next(it)` advances a genuine position
     and a following `for x in it:` resumes from it (single-pass Python
     iterator semantics), rather than modelling `iter()` as a bare identity
@@ -221,7 +222,27 @@ def _try_bind_list_iter(gen, name, value):
     real lowering at all). Mirrors gimple_cpp_core.py's `_cpp_list_iter_
     cursor` for the old cpp coroutine path; here it also covers an A3
     stack-switch generator body, whose statements go through this ordinary
-    codegen. Returns True iff it claimed the assignment."""
+    codegen. Returns True iff it claimed the assignment.
+
+    Two container kinds, and the admission test for the second is the tree's
+    own `_struct_data_field` rather than a hardcoded `Span`:
+    `emit_calls._lower_subscript`'s struct-pointer arm already treats "a
+    struct pointer with a `_data`/`data` field AND a `_len`" as an indexable
+    buffer and reads it through `_mojo_at_<T>`. `iter()` on such a value is the
+    same container viewed as a sequence, so admitting it here makes
+    `next(iter(span))` agree with `span[i]` by construction instead of by a
+    second list of type names. That is what `test/collections/test_span.mojo`'s
+    `var it = iter(span); next(it)` needs, and it was refused for exactly the
+    reason ROUND 4 (a) of
+    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    records: the cursor mechanism gated on `MojoList *`, so a `Span *` — which
+    IS a real sequence with a real length — got no cursor, and `next()` then
+    had no receiver to dispatch on.
+
+    The element type comes from `_elem_types`, the side-table the Span
+    constructor already populates; an untracked element (a raw byte buffer) is
+    int64_t, which is what every consumer assumed before.
+    """
     if not (isinstance(name, str) and name and ',' not in name
             and isinstance(value, CallExpr)
             and isinstance(value.func, IdentExpr)
@@ -233,22 +254,42 @@ def _try_bind_list_iter(gen, name, value):
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
+    data = None
     if at == 'MojoList *':
-        list_val = av
+        kind = 'list'
     elif at in ('int', 'int64_t', 'void *'):
-        list_val = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(at, av))
+        kind = 'list'
+        av = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(at, av))
+        at = 'MojoList *'
     else:
-        return False
+        fname, ftype = gen._struct_data_field(at)
+        sname = gimple_exprtypes._struct_name_of(at) if fname else ''
+        if not fname or '_len' not in gen.struct_field_types.get(sname, {}):
+            return False
+        kind = 'span'
+        data = (fname, ftype)
     elem = gen._elem_of(av)
-    gen._declare_var(name, 'MojoList *')
-    gen._emit(f"  {gen._write_dest(name)} = {list_val};")
+    gen._declare_var(name, at)
+    gen._emit(f"  {gen._write_dest(name)} = {av};")
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')
     gen._emit(f"  {cur} = (int64_t)0;")
-    gen._list_iter_cursor[cname] = {'list': cname, 'cursor': cur, 'elem': elem}
+    # The TOTAL length, read once here rather than at each use: see
+    # mojo/middle/itcursor.py's `remaining` for why re-reading it per
+    # condition is a different program.
+    if kind == 'span':
+        full = gen._new_val('int64_t', f"{av}->_len")
+    else:
+        full = gen._call_expr('int64_t', 'mojo_list_len', [(at, av)])
+    rec = {'kind': kind, 'src': cname, 'cursor': cur, 'full': full,
+           'elem': elem, 'vct': itc.slot_ctype(elem)}
+    if data is not None:
+        rec['data'] = data
+    gen._list_iter_cursor[cname] = rec
     if elem and elem != 'int64_t':
         gen._elem_types[cname] = elem
     return True
+
 
 
 
@@ -309,7 +350,7 @@ def _record_bool_valued(gen, name: str, value) -> None:
 
 
 def _gen_stmt_VarDecl(gen, node):
-    if node.value is not None and _try_bind_list_iter(gen, node.name, node.value):
+    if node.value is not None and _try_bind_iter_cursor(gen, node.name, node.value):
         return
     # `var name = value` where `name` is heap-boxed (some nested
     # closure captures it BY REFERENCE -- see _seed_mut_captured_
@@ -769,7 +810,7 @@ def _gen_stmt_AssignStmt(gen, node):
         _record_bool_valued(gen, node.target.name, node.value)
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None
-            and _try_bind_list_iter(gen, node.target.name, node.value)):
+            and _try_bind_iter_cursor(gen, node.target.name, node.value)):
         return
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None

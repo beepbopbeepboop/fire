@@ -225,17 +225,37 @@ EXPECTED_FAILURES = {
     # `assert_equal`/`assert_raises`, which this driver does not compile), the
     # binary exits 0. `once(10)` and `repeat(42, times=3)` needed no
     # inference at all — the type argument is the literal's own exact Mojo
-    # type. The other 19 stay: they need either overload selection on a trait
+    # type. The other 18 stay: they need either overload selection on a trait
     # bound (`peekable`'s `Some[Iterable]` vs `Some[IterableOwned]`), a
     # dependent return type through `Self.IteratorOwnedType`, or an overload
     # OUTSIDE the iteration protocol (`_TakeWhileIterator.__init__`,
     # `List.__getitem__`), which in-TU provably cannot yet carry. See
     # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
+    #
+    # `test/collections/test_span.mojo` is out of this list as of 2026-10-03,
+    # and it is the one removal in this family that needed no inference at
+    # all: its receiver was a REAL `Span *`, not a boxed integer, so nothing
+    # about the callee's type had to be inferred. Three defects stood between
+    # the cursor and that receiver, all now fixed:
+    #   * `iter(<span>)` was refused by `_try_bind_iter_cursor` (then
+    #     `_try_bind_list_iter`), which gated on `MojoList *` — so a Span,
+    #     which IS a sequence with a real length, got no cursor at all and
+    #     `next(it)` had no receiver to dispatch on. The gate is now the tree's
+    #     own `_struct_data_field` + `_len` test, so `span[i]` and
+    #     `iter(span)` agree by construction, and the cursor's accessors all
+    #     live in `mojo/middle/itcursor.py` so `next(it)`, `it.__next__()`,
+    #     `for x in it:` and `len(it)` cannot drift apart.
+    #   * `len(<cursor>)` answered the CONTAINER's total length, unchanged by
+    #     every `next()` — wrong for a partially consumed iterator on the list
+    #     cursor too, and silently so.
+    #   * `Span(<list>)` stored the list POINTER in `_data` and left `_len`
+    #     unset, so `len(span)` was whatever the fresh allocation happened to
+    #     hold and `span[i]` read the list's own header. Both silent, both
+    #     exit 0.
     'std/collections/string/iterators.mojo': _NEXT_ON_STRUCT,
     'std/itertools/itertools.mojo': _NEXT_ON_STRUCT,
     'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
     'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
-    'test/collections/test_span.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_enumerate.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_map.mojo': _NEXT_ON_STRUCT,

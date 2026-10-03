@@ -2579,7 +2579,7 @@ def main():
 
     # A generator body that calls `next(it)` from INSIDE `for x in it:` over
     # the same cursor. An A3 stack-switch body goes through the ordinary
-    # codegen's `_gen_for_list_iter_cursor`, whose cursor is the index of the
+    # codegen's `_gen_for_iter_cursor`, whose cursor is the index of the
     # next UNCONSUMED element (the advance is part of reading the element, not
     # a post-body step) — so `next(it)` in the body reads the FOLLOWING
     # element, as CPython's `list_iterator.__next__` does, and all four

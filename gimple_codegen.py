@@ -4899,6 +4899,9 @@ class GimpleGen:
         return ginf._compr_range_loop(self, node, gen0, res, res_type)
     def _compr_list_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_list_loop(self, node, gen0, res, res_type, it_val)
+
+    def _compr_cursor_loop(self, node, gen0, res, res_type, rec):
+        return ginf._compr_cursor_loop(self, node, gen0, res, res_type, rec)
     def _compr_generator_loop(self, node, gen0, res, res_type, it_val):
         return ginf._compr_generator_loop(self, node, gen0, res, res_type, it_val)
     def _compr_dict_loop(self, node, gen0, res, res_type, it_val):

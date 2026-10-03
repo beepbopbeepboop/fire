@@ -5674,7 +5674,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}int64_t {target};")
         # The advance goes at the TOP of the body, not in the for-increment.
         # Same Python invariant as the GIMPLE lowering's
-        # `_gen_for_list_iter_cursor`: `cur` is the index of the next
+        # `_gen_for_iter_cursor`: `cur` is the index of the next
         # UNCONSUMED element, so `next(it)` inside the body must read the
         # element AFTER the one the loop just yielded, which is only true if
         # the cursor has already moved by the time the body runs. With the

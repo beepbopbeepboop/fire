@@ -69,6 +69,7 @@ from mojo.middle.infra_infer import (
 # f-string route (`_stringify_value`, below), so the two spellings of "ask
 # this object to describe itself" cannot disagree about which dunder wins.
 from mojo.middle.calls_shared import user_dunder_repr_call
+import mojo.middle.itcursor as itc
 from mojo.middle.stmts_shared import _annotation_container_elem_type
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
@@ -4032,6 +4033,60 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     gen._emit(f"  {tgt_c} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+
+
+def _compr_cursor_loop(gen, node, gen0, res, res_type, rec):
+    """`[... for x in it]` where `it` is a resumable iterator local.
+
+    Every other comprehension arm walked `mojo_list_len`/`mojo_list_get_*` from
+    index 0, so a comprehension over a PARTIALLY CONSUMED cursor replayed the
+    whole container: `it = iter([7,8,9]); next(it); print([x for x in it])`
+    printed `[7, 8, 9]` where `[8, 9]` is the answer. Silent, exit 0 — and
+    invisible while `it.__next__()` was still a stub that advanced nothing, so
+    the only way to reach it was a `next(it)` the comprehension's author did
+    not know about.
+
+    Mirrors `_gen_for_iter_cursor` (the `for`-statement arm) element for
+    element — read at the cursor, advance the cursor, leave it exhausted — and
+    asks `mojo/middle/itcursor.py` for the element type and the read, so this
+    and that arm cannot disagree about what the cursor means. The advance goes
+    to the SHARED cursor temp, not a private index, so a `next(it)` or `for`
+    AFTER the comprehension resumes where the comprehension stopped.
+
+    Only the single-target form. A tuple target (`[a for a, b in pairs]`) is
+    not claimed here and falls through to the container arms, exactly as
+    `_gen_for_iter_cursor`'s call site declines the tuple target for the
+    `for`-statement form — the two refusals are deliberately the same shape.
+    """
+    rec_cur = rec['cursor']
+    elem = itc.element_ctype(rec)
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), elem)
+    _tgt = gen._cname(_as_str(gen0.target))
+    n64 = gen._new_val('int64_t', rec['full'])
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    cond_t = gen._new_val('_Bool', f"{rec_cur} < {n64}")
+    gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+    gen._emit_label(bb_body)
+    _evct, ev = itc.read_at(gen, rec, rec_cur)
+    # `_safe_coerce_emit`, not a bare assignment: the loop variable may have
+    # been first declared elsewhere in this function with a different C type
+    # (`_declare_var` is first-decl-wins), which is the same hazard
+    # `_compr_list_loop`'s single-target arm spells out at length.
+    gen._safe_coerce_emit(_evct, gen._type_of(_as_str(gen0.target)), ev, _tgt)
+    gen._gen_compr_append(node, gen0, res, res_type, bb_post)
+    gen._emit(f"  goto {bb_post};")
+    gen._emit_label(bb_post)
+    # `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple OPERAND,
+    # which `_compr_list_loop`'s own tuple arm records.
+    one64 = gen._new_val('int64_t', "1LL")
+    st = gen._new_val('int64_t', f"{rec_cur} + {one64}")
+    gen._emit(f"  {rec_cur} = {st};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
