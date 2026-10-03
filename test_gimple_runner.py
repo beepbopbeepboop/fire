@@ -810,6 +810,48 @@ def main():
 main()
 """, expected_return=0)
 
+    # The same three capture kinds with the factory DEFINED INSIDE a function,
+    # which is where the env was already right and the callable's RETURN TYPE
+    # was not: `_return_callable_ret_types` is recorded by the return site
+    # under `gen.current_func_name`, and for a nested `def` that is the LIFTED
+    # symbol (`main_outer_str`), while the call site spells the bare
+    # `outer_str`. The lookup found nothing, so the call went through the
+    # homogenized `mojo_fnptr_call_0` and `sprintf("%ld", ...)` rendered a
+    # `char *` as its own decimal address. The `double` row then needed the
+    # runtime half as well — `mojo_fnptr_call_dN`'s bound-method arm called
+    # through the `int64_t` signature and so read the garbage register a
+    # double return leaves behind — which is why this is a `matches_cpython`
+    # over all three kinds and not an int-only case.
+    #
+    # `use(<callable>)` is deliberately NOT here: routing the callable through
+    # an unannotated parameter loses the return type one hop further out,
+    # which is bugs/CODEGEN_callable_return_type_lost_at_more_hops.md and is
+    # what `gimple_capturing_lambda_nested_def_ptr_kinds_build` above still
+    # pins for buildability only.
+    test_gimple_matches_cpython("gimple_nested_def_capturing_lambda_call_is_typed", """\
+def main():
+    def outer_int():
+        s = 9
+        return (lambda: s)
+
+    def outer_str():
+        t = 'x'
+        return (lambda: t)
+
+    def outer_dbl():
+        u = 9.5
+        return (lambda: u)
+
+    def outer_nocapture():
+        return (lambda: 3)
+
+    print(outer_int()())
+    print(outer_str()())
+    print(outer_dbl()())
+    print(outer_nocapture()())
+main()
+""")
+
     # Two arguments through a slot that may hold a string: the discriminator
     # arm used to print its own answer immediately and `continue` WITHOUT
     # appending to the resolved-argument list, so the pair came out SWAPPED

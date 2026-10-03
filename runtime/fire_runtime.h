@@ -191,6 +191,35 @@ static inline int64_t mojo_bound_method_call_8(MojoBoundMethod *bm, int64_t _a0,
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
 }
 
+/* The `double`-returning twin of each `mojo_bound_method_call_N`, for the
+ * same reason `mojo_fnptr_call_dN` exists (see its own comment above): a
+ * callee whose real return type is `double` comes back in an SSE register,
+ * so calling it through the `int64_t` signature above reads whatever the ABI
+ * left in the general-purpose one. `mojo_fnptr_call_dN`'s bound-method arm
+ * used to call `mojo_bound_method_call_N` and cast the result, so it read
+ * that same garbage register while the plain-function arm beside it — the one
+ * the comment there describes measuring and fixing — was exact. A CAPTURING
+ * lambda is a bound method by construction (its `mojo_bound_method_new`
+ * materialization is the only producer), so `def outer(): s = 9.5; return
+ * (lambda: s)` then `outer()()` printed a pointer-shaped decimal where the
+ * same factory at module scope, whose lambda is a bare `_funcptr_` and so
+ * took the plain arm, printed `9.5`. */
+static inline double mojo_bound_method_call_d0(MojoBoundMethod *bm) {
+    return ((double (*)(void *))bm->fn)(bm->self);
+}
+static inline double mojo_bound_method_call_d1(MojoBoundMethod *bm, int64_t a) {
+    return ((double (*)(void *, int64_t))bm->fn)(bm->self, a);
+}
+static inline double mojo_bound_method_call_d2(MojoBoundMethod *bm, int64_t a, int64_t b) {
+    return ((double (*)(void *, int64_t, int64_t))bm->fn)(bm->self, a, b);
+}
+static inline double mojo_bound_method_call_d3(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c) {
+    return ((double (*)(void *, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c);
+}
+static inline double mojo_bound_method_call_d4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
+    return ((double (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
+}
+
 
 
 
@@ -332,23 +361,23 @@ static inline int64_t mojo_fnptr_call_kw_8(void *fp, void *kw, int64_t _a0, int6
  * The codegen picks them only when it knows the callee returns a double —
  * see `_lower_fnptr_call_value`. */
 static inline double mojo_fnptr_call_d0(void *fp) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d0((MojoBoundMethod *)fp);
     return ((double (*)(void))fp)();
 }
 static inline double mojo_fnptr_call_d1(void *fp, int64_t a) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d1((MojoBoundMethod *)fp, a);
     return ((double (*)(int64_t))fp)(a);
 }
 static inline double mojo_fnptr_call_d2(void *fp, int64_t a, int64_t b) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d2((MojoBoundMethod *)fp, a, b);
     return ((double (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline double mojo_fnptr_call_d3(void *fp, int64_t a, int64_t b, int64_t c) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d3((MojoBoundMethod *)fp, a, b, c);
     return ((double (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline double mojo_fnptr_call_d4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
-    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_d4((MojoBoundMethod *)fp, a, b, c, d);
     return ((double (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 

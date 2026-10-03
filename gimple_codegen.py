@@ -4532,8 +4532,26 @@ class GimpleGen:
         # for the `mk()(...)` callee branch in `_lower_call` to read. The
         # value-keyed `_callable_ret_types` cannot serve there: the result is
         # cast into a fresh temp before the outer call sees it.
+        #
+        # The table is keyed by the name the DEF's body was generated under,
+        # and for a NESTED `def` that is the LIFTED symbol
+        # `f'{current_func_name}_{fname}'` — `gen.current_func_name` is
+        # `main_outer_str` while a `def outer_str` inside `main` is being
+        # generated — while the call site spells the bare `outer_str`. So the
+        # bare lookup alone silently loses the answer for every factory
+        # defined inside a function, and the second lookup uses
+        # `_lower_closure_call`'s OWN composition, which is the string the
+        # call it precedes goes on to emit. Measured: `def main(): def
+        # outer(): s = 'x'; return (lambda: s)` then `outer()()` printed the
+        # `char *`'s own decimal address where the identical factory at
+        # MODULE scope printed `x` — nothing about the nested scope's codegen
+        # differs except this key.
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
-            _frt = self._return_callable_ret_types.get(node.func.name)
+            _fname = _as_str(node.func.name)
+            _frt = self._return_callable_ret_types.get(_fname)
+            if _frt is None and _fname in getattr(self, '_closure_envs', ()):
+                _frt = self._return_callable_ret_types.get(
+                    f'{self.current_func_name}_{_fname}')
             if _frt:
                 node._callable_ret = _frt
         return _lt, _lv
