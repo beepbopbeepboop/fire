@@ -990,8 +990,56 @@ def test_frame_params_are_published_not_empty(tmpdir, shared):
           f"contract must name P as a frame holder; published {contract!r}")
 
 
+def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
+    """The check on the direction that used to be unchecked, both ways.
+
+    `_audit_bound_symbols` asks whether every name an image BINDS has a
+    provider, and it has asked it on both paths since it was factored out. The
+    other direction — a library whose MANIFEST advertises a symbol its export
+    trie does not contain — was never asked, and it is the one that reaches
+    another build: the consumer's bind audit reads the name out of the manifest,
+    so it is satisfied, the image links cleanly, and dyld fails at load. The
+    honest fix is the `nm`-style verification `build_stdlib_dylib.py` has for
+    the gimple path, reading the file back with an independent parser
+    (`formal/build.py`'s `_advertised_but_absent` over `macho_dylib_exports`)
+    rather than asking the writer.
+
+    Both directions are asserted here, and the negative one is manufactured by
+    ADDING an entry to a real export list — the shape of the defect is "the two
+    lists disagree", so the test has to make them disagree, and it cannot do
+    that by making the emitter drop code (that would need a codegen bug to
+    exist first, which is the whole reason the check is wanted).
+
+    The positive half is not decoration: this is the check every dylib build in
+    the tree now runs, so a library whose real exports are not all in its own
+    trie would fail this case on the shared fixture.
+    """
+    from formal import build as B
+    out = shared["dylib"]
+    exports = list(manifest_exports(out).values())
+    check(exports, "precondition: the shared dylib advertises something")
+    check(B._advertised_but_absent(out, exports) == [],
+          "a library advertises exports its own image does not define, and "
+          "the build did not notice")
+
+    fabricated = {"name": "not_emitted", "symbol": "libmath_not_emitted",
+                  "module": "libmath", "arity": 1, "kind": None,
+                  "signature": "not_emitted", "frame_params": []}
+    missing = B._advertised_but_absent(out, exports + [fabricated])
+    check(missing == ["libmath_not_emitted"],
+          f"the check reported {missing!r} for one advertised symbol the "
+          f"image does not define; it must name that one and only that one")
+    report = B._advertised_absent_report("libmath.mojo", missing)
+    check("libmath_not_emitted" in report,
+          f"the report does not name the symbol: {report}")
+    check("manifest" in report and "dyld" in report,
+          f"the report does not say which side is wrong: {report}")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
+    ("the manifest offers nothing the image does not define",
+     test_the_manifest_offers_nothing_the_image_does_not_define),
     ("exported functions execute", test_exported_functions_execute),
     ("a symbol that prefixes another is still exported",
      test_a_symbol_that_prefixes_another_is_still_exported),

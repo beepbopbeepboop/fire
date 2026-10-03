@@ -926,6 +926,65 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
             f"causes share. (Provider check: {_libsystem_probe_status()}.)")
 
 
+def _advertised_but_absent(path: str, exports: list) -> list:
+    """Every export in a library's manifest that the library's own image lacks.
+
+    The OTHER direction of the same boundary, and the one that was unchecked.
+    `_audit_bound_symbols` asks "does every name this image BINDS have a
+    provider?" — a dylib's manifest advertises names to its CONSUMERS, so a
+    library whose manifest lists a symbol its export trie does not contain
+    passes that check and then fails at the consumer's `dlopen`, with a symbol
+    the consumer's own bind audit believed was provided.
+
+    The set is structurally a subset of the compiled set — `_formal_exports`
+    emits an entry only for `fn in ordered` — so nothing in the tree has ever
+    hit this. "Structurally" is not "verified", though: `_struct_methods` lifts
+    a method into `ordered`, and what the emitter then does with a lifted
+    function is not something the export list re-reads. `build_stdlib_dylib.py`
+    has the `nm`-style verification for the gimple path; this is the formal
+    path's version of it, and it reads the FILE with `macho_dylib_exports` —
+    an independent parser of the load commands and the trie dyld consults —
+    rather than asking the writer, so a writer's bug cannot hide here.
+
+    Returns the missing SYMBOLS, in manifest order, and the caller refuses.
+    An empty trie with exports advertised is the degenerate case and comes back
+    as every symbol missing, which is what it is: dyld would bind each of them
+    to nothing.
+    """
+    advertised = [e.get("symbol") or e.get("name") for e in (exports or [])]
+    advertised = [s for s in advertised if s]
+    if not advertised:
+        return []
+    try:
+        defined = macho_dylib_exports(path)
+    except FormalBuildError as e:
+        # The export surface could not be read at all, so none of the advertised
+        # names can be shown to be there. Reported as what it is rather than
+        # swallowed: a library whose manifest is a list a consumer will bind
+        # against is the thing that matters, and its image is unreadable.
+        return advertised + [f"(the export trie could not be read: {e})"]
+    # A Mach-O name is its C name with dyld's leading underscore, which is what
+    # `_c_export_name` takes back off in the other direction.
+    return [s for s in advertised if f"_{s}" not in defined]
+
+
+def _advertised_absent_report(source_path: str, missing: list) -> str:
+    """The one wording for "this library advertises what it does not define"."""
+    named = [m for m in missing if not m.startswith("(")]
+    return (f"{os.path.basename(source_path)}: this library's manifest "
+            f"advertises {len(missing)} export(s) its own image does not "
+            f"define: {', '.join(named[:8])}"
+            f"{' …' if len(named) > 8 else ''}. A consumer that binds one of "
+            f"these dies in dyld at load, and its own bind audit cannot catch "
+            f"it: the name comes from a manifest, so it reads as provided. The "
+            f"advertised set is computed from the compiled function list "
+            f"(`formal/build.py`'s `_formal_exports`) and the trie is read back "
+            f"out of the file (`macho_dylib_exports`), so this is the point "
+            f"where the two are known to agree."
+            + (f" {' '.join(m for m in missing if m.startswith('('))}"
+               if len(named) != len(missing) else ""))
+
+
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
                       structs: list = None, source_path: str = None,
@@ -12680,6 +12739,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # believes, and a dyld failure at load rather than a refusal here
     # (`bugs/FORMAL_frame_receiver_handoff.md`, "A dylib advertises exports
     # without checking the emitter produced them").
+    absent = _advertised_but_absent(output, exports)
+    if absent:
+        raise FormalBuildError(
+            _advertised_absent_report(source_paths[0], absent))
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
         source=source_paths[0],

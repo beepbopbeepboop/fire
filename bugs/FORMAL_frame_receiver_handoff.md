@@ -390,6 +390,23 @@ justification. The arity refusal stays for a genuine mismatch.
   verification on the formal path the way `build_stdlib_dylib.py` has for the
   gimple one. A method that is lifted and then dropped by the emitter would
   advertise a symbol nothing defines.
+  **DONE (2026-10-02)** — `formal/build.py`'s `_advertised_but_absent`, run on
+  every `dylib --formal` between writing the image and writing its manifest,
+  reads the export trie back out of the FILE with `macho_dylib_exports` (an
+  independent parser of the load commands and the trie dyld consults, so a
+  writer's bug cannot vouch for itself) and refuses a library whose manifest
+  advertises a symbol the trie does not contain. It is the direction the bind
+  audit cannot cover, and the reason it matters is that the failure lands in
+  ANOTHER build: `_audit_bound_symbols` reads the consumer's names out of this
+  manifest, so a name here reads as provided there and the consumer links
+  cleanly and dies in dyld at load. An unreadable trie is reported as every
+  advertised symbol missing rather than swallowed, which is what it is.
+  Pinned both ways by `test_formal_dylib.py`'s `the manifest offers nothing the
+  image does not define` — the positive half on the shared fixture (so every
+  real library in the tree is checked by the suite as well as by the build), and
+  the negative half by adding one fabricated entry to a real export list, which
+  is the only way to make "the two lists disagree" true without first having the
+  codegen bug the check exists to catch.
 * **`__get_mvalue_as_litref`** (five stdlib files) is a comptime reflection
   intrinsic with no representation on this path. The new message says "a name
   with no definition in hand", which is true and unhelpful; the useful message
