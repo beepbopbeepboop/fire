@@ -239,6 +239,14 @@ MIXES = {
     "lists": (("assign", 2), ("list_build", 3), ("list_read", 3),
               ("list_write", 2), ("list_len", 2), ("if", 3), ("while", 2),
               ("list_in_loop", 2)),
+    # A struct spelled as a `class`, because that spelling is valid in BOTH
+    # engines (`test_formal_x86_64_parity.py`'s `aug_division_through_a_frame_
+    # slot` is the same construct) and it is the only way this generator can
+    # reach the frame-receiver machinery: a receiver that is a frame ADDRESS
+    # rather than a value, whose fields live in the callee's own slots.
+    "classes": (("obj_new", 3), ("field_read", 3), ("field_write", 3),
+                ("method_call", 5), ("method_call_in_arg", 3),
+                ("assign", 2), ("if", 3), ("while", 1), ("augassign", 2)),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is
@@ -249,8 +257,9 @@ MIXES = {
 GROWTH_MASK = {"+=": "0xF", "-=": "0xF", "*=": "0xF", "<<=": "3"}
 
 #: How many helper functions one program may define, including the ones its
-#: helpers define (see `define_function`).
+#: helpers define (see `define_function`), and how many classes it may define.
 MAX_FUNCS = 5
+MAX_CLASSES = 2
 
 
 class Gen:
@@ -271,6 +280,9 @@ class Gen:
         self.smalls = []      # signed, small
         self.strings = []     # String locals
         self.lists = []       # (name, length) list locals of ints
+        self.classes = []     # (name, fields, methods) definitions
+        self.objs = []        # (var, class name, fields, methods) instances
+        self.fields = []      # field names, inside a method body
         self.funcs = []       # (name, [parameter names])
         self.decls = []       # (name, initial value text) for the preamble
         self.defs = []        # module-level function definitions
@@ -452,7 +464,8 @@ class Gen:
             "while", "for", "div", "pow", "break", "cond_expr", "call",
             "nested_call", "recursion", "arg_expr", "str_assign", "str_print",
             "str_len", "str_cmp", "list_build", "list_read", "list_write",
-            "list_len", "list_in_loop")
+            "list_len", "list_in_loop", "obj_new", "field_read", "field_write",
+            "method_call", "method_call_in_arg")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
                                     "list_in_loop"):
@@ -514,6 +527,9 @@ class Gen:
             self.arg_expr_stmt(indent)
         elif kind in ("str_assign", "str_print", "str_len", "str_cmp"):
             self.string_stmt(indent, kind)
+        elif kind in ("obj_new", "field_read", "field_write", "method_call",
+                      "method_call_in_arg"):
+            self.object_stmt(indent, kind)
         else:
             self.list_stmt(indent, kind)
 
@@ -661,7 +677,11 @@ class Gen:
         name = self.fresh("f")
         nargs = self.rng.randint(0, 3)
         params = [self.fresh("p") for _ in range(nargs)]
-        body = Gen(self.rng, self.mix_name)
+        # A helper of a CLASS program is generated from the `core` mix: a
+        # function body that defines a class would emit it after the classes
+        # that call it, which CPython resolves at call time and this path does
+        # not have to care about but the text would no longer be one program.
+        body = Gen(self.rng, "core" if "classes" in self.mix else self.mix_name)
         body.counter = self.counter
         body.defined = self.defined
         body.decls = []
@@ -840,11 +860,121 @@ class Gen:
             self.emit(indent + 1, f"print({name}[{i}])")
             self.loop_depth -= 1
 
+    # ── a class, and the frame receiver it makes ──
+    #
+    # Spelled `class`, not `struct`, and with TWO fields minimum: a one-field
+    # struct's receiver IS its field rather than a frame address
+    # (`model.struct_fits_one_word` says the same), and an oracle that used one
+    # would be measuring that documented shape rather than the one it means to.
+    # Fields are ASSIGNED in `__init__` rather than declared, which is the
+    # spelling both engines accept without a `var` — and `var` is a keyword
+    # CPython cannot parse, so a generator that emitted it would need two
+    # different programs and could no longer claim they are the same text.
+    def define_class(self):
+        if len(self.classes) >= MAX_CLASSES:
+            return None
+        name = self.fresh("C")
+        fields = [self.fresh("f") for _ in range(self.rng.randint(2, 3))]
+        lines = [f"class {name}:", "    def __init__(self):"]
+        for f in fields:
+            lines.append(f"        self.{f} = {self.rng.randint(-30, 60)}")
+        methods = []
+        for _ in range(self.rng.randint(1, 3)):
+            mname = self.fresh("m")
+            params = [self.fresh("q") for _ in range(self.rng.randint(0, 2))]
+            sig = ", ".join(["self"] + params)
+            body = Gen(self.rng, "core")
+            body.counter = self.counter
+            body.defined = MAX_FUNCS        # a method body defines no functions
+            body.decls = []
+            body.defs = []
+            body.out = []
+            body.smalls = []                # fields are read through `self.`
+            body.words = [f"self.{f}" for f in fields]
+            for _ in range(self.rng.randint(1, 3)):
+                field = self.rng.choice(fields)
+                if self.rng.random() < 0.6:
+                    # A method MUTATES a field through `self.x = …`, which is
+                    # the store into the callee's OWN frame slot — the path a
+                    # value receiver never takes, and the one a two-field
+                    # struct exists to reach.
+                    body.emit(0, f"self.{field} = (self.{field} "
+                                 f"{self.rng.choice(['+', '-'])} "
+                                 f"{self.rng.randint(1, 9)}) & 0xFFFF")
+                else:
+                    body.emit(0, f"print(self.{field})")
+            if params:
+                body.emit(0, f"return (self.{self.rng.choice(fields)} "
+                             f"{self.rng.choice(['+', '-'])} "
+                             f"{params[0]}) & 0xFFFF")
+            else:
+                body.emit(0, f"return (self.{self.rng.choice(fields)}) "
+                             f"& 0xFFFF")
+            self.counter = body.counter
+            lines.append(f"    def {mname}({sig}):")
+            lines.extend("        " + line for line in body.out)
+            methods.append((mname, params))
+        self.defs.extend(lines)
+        self.classes.append((name, fields, methods))
+        return name, fields, methods
+
+    def object_stmt(self, indent, kind):
+        if not self.classes:
+            self.define_class()
+        if kind == "obj_new" or not self.objs:
+            name, fields, methods = self.rng.choice(self.classes)
+            var = self.fresh("o")
+            # `declare` with the CONSTRUCTOR call as the initialiser, so the
+            # preamble and the first assignment agree — an object the program
+            # only sometimes constructs is an AttributeError in CPython and
+            # whatever the slot held on this path.
+            self.declare(var, f"{name}()")
+            self.emit(indent, f"{var} = {name}()")
+            self.objs.append((var, name, fields, methods))
+            return
+        var, _cname, fields, methods = self.rng.choice(self.objs)
+        if kind == "field_read":
+            self.emit(indent, f"print({var}.{self.rng.choice(fields)})")
+            return
+        if kind == "field_write":
+            self.emit(indent, f"{var}.{self.rng.choice(fields)} = "
+                              f"({self.word_expr(1)}) & 0xFFFF")
+            return
+        if not methods:
+            self.emit(indent, f"print({var}.{self.rng.choice(fields)})")
+            return
+        mname, params = self.rng.choice(methods)
+        if kind == "method_call_in_arg" and params and self.objs:
+            # A method call in ARGUMENT position: two frame receivers live at
+            # once, which is the shape that finds a parameter read out of the
+            # wrong slot.
+            inner_var, _c, _f, inner_methods = self.rng.choice(self.objs)
+            # Same ARITY, or the outer call is made with the wrong number of
+            # arguments — a TypeError on the reference and nothing a compiler
+            # could be blamed for.
+            arity = [m for m in inner_methods if len(m[1]) == len(params)]
+            if arity:
+                om, oparams = self.rng.choice(arity)
+                # A LIST of expressions, joined here: `call_args` returns one,
+                # and formatting that list straight into the call spelled it
+                # `m11(['expr'])` — which CPython answers with a TypeError on
+                # `int - list` and which no compiler would ever be blamed for.
+                args = ", ".join(self.call_args(om, oparams))
+            else:
+                args = ", ".join(f"{var}.{self.rng.choice(fields)}"
+                                 for _ in params)
+        else:
+            args = ", ".join(self.int_expr(1) for _ in params)
+        self.emit(indent, f"print({var}.{mname}({args}))")
+
     # ── the program ──
     def program(self):
         if "calls" in self.mix:
             for _ in range(self.rng.randint(1, 3)):
                 self.define_function()
+        if "classes" in self.mix:
+            for _ in range(self.rng.randint(1, 2)):
+                self.define_class()
         saved, self.out = self.out, []
         for _ in range(self.rng.randint(2, 4)):
             self.new_small(1)
