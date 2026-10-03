@@ -4423,14 +4423,17 @@ def main():
     print(f"\n{_PASS} passed, {_FAIL} failed")
 
 
+# ONE entry point. This file used to carry TWO `if __name__ == '__main__':`
+# blocks — the first ran `run_tests()`, printed the tally and exited 1 on a
+# failure, and the second ran `run_tests()` again. Because `SystemExit`
+# propagates, the second block only ever ran when the file was GREEN, so the
+# job compiled and ran all 190 cases twice on every passing gate: 380 passed in
+# the 2026-10-03 run where the case count is 190, and roughly double the wall
+# clock of a 738 s job. `run_tests` does not reset `_PASS`/`_FAIL`, so the
+# doubling is visible in the tally rather than being a harmless re-run.
 if __name__ == '__main__':
     run_tests()
 
-    if _FAIL:
-        print(f"\n{_PASS} passed, {_FAIL} failed")
-        raise SystemExit(1)
     print(f"\n{_PASS} passed, {_FAIL} failed")
-
-
-if __name__ == '__main__':
-    run_tests()
+    if _FAIL:
+        raise SystemExit(1)
