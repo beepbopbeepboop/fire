@@ -4128,10 +4128,16 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
             dflt_expr, dflt_ct = gen._to_int64(dflt_ty, _reified), 'int64_t'
         else:
             dflt_expr, dflt_ct = gen._to_int64(dflt_ty, dflt_val), 'int64_t'
-        if _container_vt:
-            # A container slot is a boxed pointer, so `pop` reads the word and
-            # the cast restores the type — the same shape the `get` arm and
-            # `d[k]` both use for a container-valued dict.
+        _rt = _DICT_POP_RT.get(val_type)
+        if _rt is None:
+            # Not one of the three SCALAR value domains: a container, or a
+            # struct pointer (`self._owner[fn.name] = fn` — `d.pop(k)` on a
+            # `dict[str, FunctionDef *]` reaches here, and a plain
+            # `_DICT_POP_RT[val_type]` raised `KeyError: 'FunctionDef *'`).
+            # A dict slot is one raw int64_t either way, so pop the WORD and
+            # cast it back — the same shape the `get` arm and `d[k]` both use
+            # for a non-scalar-valued dict, and the only one that can carry a
+            # container or a struct pointer.
             raw = gen._call_expr(
                 'int64_t', f'mojo_dict_pop{_sfx}_int',
                 [('MojoDict *', ov), (key_type, key_val), ('int64_t', dflt_expr)])
@@ -4144,7 +4150,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
                     gen._elem_types[t] = _nd
             return val_type, t
         return val_type, gen._call_expr(
-            _DICT_POP_RT[val_type][1], f'mojo_dict_pop{_sfx}_{_DICT_POP_RT[val_type][0]}',
+            _rt[1], f'mojo_dict_pop{_sfx}_{_rt[0]}',
             [('MojoDict *', ov), (key_type, key_val), (dflt_ct, dflt_expr)])
     if method in ('copy',):
         return 'MojoDict *', gen._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
