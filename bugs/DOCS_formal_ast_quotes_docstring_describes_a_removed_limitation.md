@@ -31,14 +31,39 @@ concludes the byte-by-byte construction is load-bearing.
 
 ## What I ran
 
-`grep -n "escape" formal/hostmods/*.mojo` — this is the only remaining place in
-`formal/` that describes a string literal's escapes as undecoded. The other two
-(`formal/arm64_codegen.py`, `formal/arm64_codegen.py:7789`) already record the
-fix and cite the deleted doc.
+`grep -rn "escapes are NOT\|escapes are not decoded\|interned verbatim" formal/ test_formal_*.py doc/*.md`
+on the merge of `work/formal14-hostmods-more2` (2026-10-03).
 
-Not changed here: `formal/**` is the busiest area in the tree, and this is a
-comment in a host module that goes into real formal images. It is a two-line
-edit for whoever is in there.
+**This doc's own census was wrong, and that merge is what made it wrong.** It
+said `ast.mojo` was "the only remaining place in `formal/`" describing a string
+literal's escapes as undecoded, and named the two places it meant to exempt —
+both of them `formal/arm64_codegen.py`. There were three HOSTMOD sites, plus three
+more since fixed:
+
+| site | state |
+|---|---|
+| `formal/hostmods/ast.mojo` `_quotes()` | **this doc's subject** — still to do |
+| `formal/hostmods/argparse.mojo:1761` (`_ws_set`'s own docstring) | **still to do**, and the cheapest: see below |
+| `formal/hostmods/platform.mojo:336` (`_int_is_space`'s docstring) | **still to do** — and `formal/hostmods/platform.mojo` is claimed by `hostmods-platform` (`module:platform+fnmatch+collections-rest`), so it is not the merger of `formal14-hostmods-more2`'s to edit |
+| `formal/hostmods/textwrap.mojo` module docstring | FIXED on that merge; it carried the same false claim and cited the deleted doc |
+| `test_formal_html.py` header | FIXED on that merge, same |
+| `test_formal_textwrap.py`'s `mask` comment | FIXED on that merge, same |
+
+`argparse.mojo` contradicts ITSELF, which is what makes it the cheapest of the
+three: the comment at `argparse.mojo:317-327` already carries the corrected
+reason ("That reason is CURRENT. The reason this file used to give ... is NOT,
+and had stopped being true at `9023031b`"), while `_ws_set`'s docstring fourteen
+hundred lines below still states the false premise. The replacement text is
+already in the file; the fix is to move it.
+
+The emitters already record the fix and cite the deleted doc AS DELETED
+(`formal/arm64_codegen.py:3480`, `:9769`, `formal/x86_64_codegen.py:3873`), and
+`formal/hostmods/re.mojo:2430` says so in prose — those are the two this doc's
+census meant to name, and it named one of them twice.
+
+Not changed here: `formal/**` is the busiest area in the tree, and these are
+comments in host modules that go into real formal images. Each is a two-line edit
+for whoever is in there.
 
 ## Next step
 
@@ -48,3 +73,13 @@ CPython does), and either keep the byte-by-byte construction with that reason
 or simplify it to a literal and say why the measurement was dropped.
 `test_formal_sys.py`'s `string escapes are interpreted as CPython does` is the
 test that keeps the underlying behaviour pinned either way.
+
+Three sites, and the reason each still matters is the same: it is the reason a
+reader would give for NOT simplifying a construction that is no longer
+necessary, and a stated reason that is false sends them the wrong way. The
+wording to use is already in the tree twice — `formal/hostmods/argparse.mojo:317-327`
+and, as of the `formal14-hostmods-more2` merge, `formal/hostmods/textwrap.mojo`'s
+"THE BYTE SETS ARE BUILT WITH `memset`, and here is the CURRENT reason" section,
+which also records why the `memset` idiom SURVIVES the fix: these separators are
+written at a computed offset, and one of them is a NUL-terminated `strspn`
+accept-set at a length a literal cannot spell.
