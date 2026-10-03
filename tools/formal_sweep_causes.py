@@ -433,6 +433,22 @@ CAUSES = (
      (("is a REPETITION",),)),
     ("len() of a value that has no length",
      (("is len() of a value classified as",),)),
+    # A `with` whose CONTEXT this build cannot type. `formal/model.py`'s
+    # `refuse_unlowerable_with` names the protocol it cannot honour, and one of
+    # its three arms is "the expression is not a construction of a struct this
+    # image compiles" — which is where `with open(path, "r") as f:` lands, once
+    # per file, and `with open(` is in 192 of this repository's own files.
+    #
+    # It needs a row because it was in `other refusal`, and this row's marker is
+    # the clause only this message carries (`refuse_unlowerable_with`'s other
+    # two arms are a struct that is not framed and a struct that declares no
+    # `__enter__`, and both of those sentences are about a type this build DOES
+    # know). Measured 2026-10-03 on the b9 sweep: 20 files at the `module_
+    # loader.py` chain alone, and 47 of the corpus's classified files contain
+    # the `with` this message refuses — the upper bound, since most of them are
+    # refused earlier for something else.
+    ("a `with` over a value this build cannot type",
+     (("is CPython's CONTEXT-MANAGER PROTOCOL",),)),
     ("write(2) receiver is not a file descriptor",
      (("lowers to the C library's write(2)",),)),
     ("a method on a multi-field struct where a descriptor is meant",

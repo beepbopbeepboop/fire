@@ -14097,20 +14097,64 @@ def _rewrite_with_statements(fn, structs_by_name: dict) -> None:
 
 
 def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name):
-    """One `with` item, wrapped around `body`. Raises CodegenError if it cannot."""
+    """One `with` item, wrapped around `body`. Raises CodegenError if it cannot.
+
+    Two protocols and one order.  CPython's is `__enter__` binds the name and
+    `__exit__` runs on the way out; a struct this image compiles gets its own
+    two methods, which is the arm below.  A call to a RESOURCE builtin
+    (`model.resource_context_manager_exit`, i.e. `open`) gets the same two
+    positions filled by the facts that builtin's value model already states:
+    `__enter__` IS the value, and `__exit__` is the builtin in that table.  The
+    third arm is the refusal, and it is unchanged — a `with` whose context is a
+    name, a field read, or a call to a function this image cannot resolve still
+    has no type, and `refuse_unlowerable_with` still says so by name.
+    """
     struct = M.with_expr_struct(item.expr, structs_by_name)
+    resource_exit = M.resource_context_manager_exit(item.expr)
     if struct is None or not M.struct_is_context_manager(struct):
-        raise CodegenError(
-            M.refuse_unlowerable_with(fn, item, item.expr, struct,
-                                      structs_by_name))
+        if resource_exit is None:
+            raise CodegenError(
+                M.refuse_unlowerable_with(fn, item, item.expr, struct,
+                                          structs_by_name))
+        # `tmp = open(…)` once, then `NAME = tmp`: a descriptor's `__enter__`
+        # returns the descriptor, and the alias holds the word `f.write(…)`
+        # and `f.close()` already lower on.  The `close` is the named builtin's
+        # own lowering (`BUILTIN_FUNCTIONS['close'] == 'file_close'`), so
+        # neither emitter is touched by this and the two architectures cannot
+        # disagree about it.
+        tmp = fresh_name()
+        return _with_protocol(
+            item, body,
+            F.VarDecl(tmp, None, item.expr),
+            F.IdentExpr(tmp),
+            F.CallExpr(func=F.IdentExpr(resource_exit),
+                       args=[F.IdentExpr(tmp)], kwargs=[]),
+            fn)
     tmp = fresh_name()
-    enter = F.CallExpr(
-        func=F.IdentExpr(M.method_function_name(struct.name,
-                                               M.CONTEXT_ENTER)),
-        args=[F.IdentExpr(tmp)], kwargs=[])
-    exit_ = F.CallExpr(
-        func=F.IdentExpr(M.method_function_name(struct.name, M.CONTEXT_EXIT)),
-        args=[F.IdentExpr(tmp)], kwargs=[])
+    return _with_protocol(
+        item, body,
+        F.VarDecl(tmp, None, item.expr),
+        F.CallExpr(
+            func=F.IdentExpr(M.method_function_name(struct.name,
+                                                   M.CONTEXT_ENTER)),
+            args=[F.IdentExpr(tmp)], kwargs=[]),
+        F.CallExpr(
+            func=F.IdentExpr(M.method_function_name(struct.name,
+                                                   M.CONTEXT_EXIT)),
+            args=[F.IdentExpr(tmp)], kwargs=[]),
+        fn)
+
+
+def _with_protocol(item, body, opened_tmp, enter, exit_, fn):
+    """`<tmp> = EXPR`, then `try: TARGET = enter(<tmp>); body finally: exit(<tmp>)`.
+
+    The alias handling and the `try`/`finally` shape are here rather than in the
+    two callers because they are ONE protocol: `with EXPR as NAME` binds `NAME`
+    to whatever `__enter__` returned, whether that is a struct method's word or
+    the descriptor itself, and the exit call runs on every way out of the body
+    either way.  Two copies of this would be two places to forget the
+    `finally`.
+    """
     # `WithItem.alias` is typed `object` and is a bare STRING on this front end
     # (and an `IdentExpr` where the self-hosted one boxes it), which is why
     # `mojo/middle/boundnames.py` has a helper that asks the node case
@@ -14128,11 +14172,13 @@ def _one_with_item(fn, item, body: list, structs_by_name: dict, fresh_name):
         # `with EXPR as (a, b)` and `with EXPR as obj.attr` are two shapes this
         # path does not lower, and the alias is where the protocol's result
         # goes, so it is refused rather than dropped: dropping it is a `with`
-        # whose contract is the exit call alone, with nothing bound.
-        raise CodegenError(M.refuse_unlowerable_with(
-            fn, item, item.expr, struct, structs_by_name))
+        # whose contract is the exit call alone, with nothing bound.  The
+        # message names the ALIAS rather than the expression, because the
+        # expression is answerable on both paths that reach here and a reader
+        # sent to look at `open(…)` would find nothing wrong with it.
+        raise CodegenError(M.refuse_unlowerable_with_alias(fn, item))
     return [
-        F.VarDecl(tmp, None, item.expr),
+        opened_tmp,
         F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
                   finally_body=[F.ExprStmt(exit_)]),
     ]
