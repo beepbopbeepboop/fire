@@ -2399,6 +2399,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         the function returns."""
         self.asm.emit(encode_lea_r64_rm64(reg, Reg.RBP, offset))
 
+    def _emit_ctor_receiver(self, node) -> None:
+        """RAX = the block the inlined `__init__` is constructing, or its slot.
+
+        The x86-64 twin of arm64's `_emit_ctor_receiver`, over the same two
+        shared nodes: `model.struct_constructor_sites` gives the same site and
+        `_emit_blob_base` the same `RBP + offset` address, so the address the
+        method receives is the block the store loop is writing into on both
+        architectures rather than one address computed here and another there.
+
+        RAX rather than another register because this is reached through
+        `_emit_expr`, which leaves a value in RAX, and a field read is the same
+        `[RBP + base + 8k]` load `_emit_block_store` performs.
+        """
+        site = self._frame_sites.get(id(node.call))
+        if site is None:
+            raise CodegenError(
+                f"a read of the receiver of a constructor at a site this "
+                f"function did not reserve a receiver frame for — the frame "
+                f"layout and the body disagree, which is a compiler bug, not a "
+                f"program error")
+        base = self._blob_base + site[1]
+        self._emit_blob_base(base, Reg.RAX)
+        if isinstance(node, M.CtorField):
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 8 * node.slot))
+
     def _emit_empty_blob(self) -> None:
         """The empty container: eight bytes with a zero count, base in RAX.
 
@@ -4491,6 +4516,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         why = M.ellipsis_refusal(expr)
         if why is not None:
             raise CodegenError(why)
+        # The RECEIVER of an inlined `__init__`, and the FIELD of one.  Neither
+        # is in the source: they are what `model.init_receiver_rewrite` turned
+        # `self` into once the body's stores were decided to run at the
+        # construction site, because the block that object is being built in is
+        # THIS call site's and its address is what `self` meant.  Asked here, at
+        # the top of the walk, so that everything downstream — the argument
+        # binder, the outgoing-argument area, the callee's frame-holder contract
+        # — is the code a method call has always run on this backend too.
+        if isinstance(expr, (M.CtorReceiver, M.CtorField)):
+            self._emit_ctor_receiver(expr)
+            return
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm(Reg.RAX, expr.value)
             return

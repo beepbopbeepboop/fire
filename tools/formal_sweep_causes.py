@@ -502,9 +502,13 @@ CAUSES = (
      (("calls F once per instance",),)),
     # A constructor called WITH arguments, whose body is not a bare sequence
     # of `self.<field> = …` assignments. The inlining this path does can
-    # store the assignments at the construction site; a body that READS `self`
-    # (or branches, loops, or calls a method) needs the block's address
-    # threaded through, which has no lowering here. 2 files, in-file.
+    # store the assignments at the construction site; what it can now also do
+    # is resolve a read of the RECEIVER against the block that construction
+    # reserved — a method call is lifted to a real call with that address as
+    # its receiver, and a one-level field read is a load at `block + 8·slot`
+    # (`model.init_receiver_rewrite`). What is still refused here is a body
+    # that BRANCHES or loops, binds a local, or reads the receiver in a shape
+    # with no address to compute from. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
     # A module whose API IS its top-level statements, imported by another
