@@ -678,6 +678,38 @@ CASES = [
     # honest about the other half: it IS only ever read, so it is a constant,
     # and this tree measures one field where the pre-rule tree measured two
     # and refused.
+    # A class-level constant whose VALUE is another class's constant — the enum
+    # idiom (`origin: TypeOrigin = TypeOrigin.DEFAULT`), and this repository's
+    # `type_system.py`. The rewrite already answers a read of `Origin.B` from a
+    # function body (the `pyclass_constant_table_only` rows above), so the gap
+    # was narrower than it looked: the OUTER site consumes the whole node, so
+    # the inner reference was never reached, and the value was reported as "not
+    # a literal". Both halves of the resolution are here — the read at the top
+    # level and a constant whose own value is a THIRD class's constant, so a
+    # recogniser that resolved one hop would fail this row.
+    #
+    # The recogniser is `S.NAME` and nothing else, and the boundary is the
+    # BARE name: `C = B` in a class body is also how a module-level name is
+    # read, and this path has no scope at an initializer that could tell the
+    # two apart. That spelling is still refused, with the value quoted, which
+    # is the refusal a reader can act on.
+    ("pyclass_constant_whose_value_is_another_constant",
+     "class Inner:\n"
+     "    B = 2\n"
+     "\n"
+     "class Origin:\n"
+     "    C = Inner.B\n"
+     "\n"
+     "struct Holder:\n"
+     "    v: Int = Origin.C\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return Origin.C\n"
+     "\n"
+     "def main(n):\n"
+     "    h = Holder()\n"
+     "    printf(\"%d %d\\n\", get(), h.v)\n"
+     "    return 0\n", 0, "2 2"),
     ("pyclass_name_read_bare_and_written",
      "class Cell:\n"
      "    N = 7\n"
@@ -916,6 +948,21 @@ CASES = [
     # The `refuse:` sibling above with the needle this tree raises: it quotes the
     # VALUE, which is what sends a reader to the class body rather than to the
     # read, where the generic "is a class-level constant of Table" did not.
+    # The BOUNDARY of the reference resolution, and it is what keeps the
+    # resolution from being "resolve anything": `Missing` is not a class this
+    # image declares, so there is no declaration to read the value out of and
+    # the read is refused with the value quoted — the same sentence, and the
+    # same clause of it, as the container value two rows below.
+    ("class_constant_naming_a_class_this_image_does_not_declare_is_refused",
+     "struct Holder:\n"
+     "    v: Int = Missing.WHAT\n"
+     "\n"
+     "def main(n):\n"
+     "    var h = Holder()\n"
+     "    printf(\"%d\\n\", h.v)\n"
+     "    return 0\n",
+     "refuse:reads a class-level constant of Holder, whose value is "
+     "`Missing.WHAT`", None),
     ("class_constant_with_a_container_value_quotes_the_value",
      "struct Table:\n"
      "    NAMES = ['a', 'b']\n\n"
@@ -11503,6 +11550,242 @@ CTOR_RECEIVER_CASES = [
 ]
 
 
+
+# ── REPETITION: `xs * n`, which was not a construct on this path at all ─────
+#
+# It reached the integer ALU with both operands still holding blob ADDRESSES,
+# so `[7] * 4` was `7 * 4 * 8` — the address of nothing — and every read
+# through it walked a count at that address. Measured on both architectures
+# before the change, on this one program per architecture:
+#
+#     def main():
+#         C = [7] * 4
+#         n = 0
+#         for x in C:
+#             n = n + 1
+#         printf("n=%d", n)
+#
+# built, ran, and died with SIGSEGV (exit 139) on arm64 and on x86-64 alike,
+# where CPython counts 4. A build that succeeds and then crashes is the worst of
+# the three answers this backend can give, and the kind half made it worse: a
+# list of ints has kind `list:int`, and `_unify` compared that against the bare
+# `LIST_PREFIX` only, so `[1, 2] * 3` did not unify with the `int` on its other
+# side and the name was bound to the "a word is an integer" default — which is
+# also why `len()` of one was refused as "len() of a value classified as
+# 'int'" and why `print` of one said it could not tell a SubscriptExpr from a
+# string or a number.
+#
+# So these are CPython PAIRS for the reason the slice group above gives: a
+# constant written by the same hand as the lowering is worth nothing.
+# The two shapes a repetition CANNOT have, and both of them used to build.
+# A dynamic count and a container-times-container both reached the integer ALU
+# as address arithmetic, so the cases below are the direction the fix has to
+# keep: a named refusal on BOTH architectures, never a build.
+REPEAT_REFUSALS = [
+    # A COUNT THIS PATH CANNOT READ. The reservation is made before anything
+    # runs and there is no heap to grow into, so a repetition of unknown length
+    # has nowhere to put its elements — and the alternative (reserve a guess,
+    # check at run time) turns `[0.0] * (m * k)` into a program that builds and
+    # then dies, which is the outcome this backend exists to prevent. The needle
+    # is the CONSTRUCT, so a refusal about anything else fails the case.
+    ("repeat_refuses_a_count_it_cannot_read",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    var ys = xs * n\n"
+     "    return len(ys)\n",
+     "refuse:is a REPETITION, and this path can only lower one whose count it "
+     "can read while emitting", None),
+    # TWO CONTAINERS. Python raises a TypeError for every such pair, so there is
+    # no program here to answer — and the multiply of two blob addresses is a
+    # number nowhere near either blob.
+    ("repeat_refuses_two_containers",
+     "def main() -> Int:\n"
+     "    var a = [1] * [2]\n"
+     "    return a[0]\n",
+     "refuse:multiplies two containers", None),
+]
+
+
+REPEAT_CASES = [
+    # The reproducer, verbatim. Counting is the one read that cannot be a
+    # wrong number: it walks the count word the emitter wrote.
+    ("repeat_counts_the_elements",
+     "def main() -> Int:\n"
+     "    var C = [7] * 4\n"
+     "    var n = 0\n"
+     "    for x in C:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d\\n\", n)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    C = [7] * 4\n"
+     "    n = 0\n"
+     "    for x in C:\n"
+     "        n = n + 1\n"
+     "    print(\"n=%d\" % n)\n"),
+    # The ELEMENTS, which the count cannot vouch for: the count word is
+    # computed from nL*count, so it is right even when the copy wrote nothing —
+    # the shape both concat copy loops had, where `len` was right and `sum` was
+    # 0. A multi-element source is what makes the repetition's own copy loop
+    # observable at all.
+    ("repeat_copies_the_elements",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2] * 3\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d e0=%d e5=%d\\n\", s, len(xs), xs[0], xs[5])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2] * 3\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d e0=%d e5=%d\" % (s, len(xs), xs[0], xs[5]))\n"),
+    # `len()` OF THE REPETITION, and a SUBSCRIPT of it: the kind half of the
+    # change is what makes these answerable at all — `list:int` against `int`
+    # did not unify, so the name was an integer and `len` refused with "an
+    # integer has no length".
+    ("repeat_len_and_subscript",
+     "def main() -> Int:\n"
+     "    var xs = [3, 4] * 2\n"
+     "    printf(\"len=%d e0=%d e1=%d e3=%d\\n\",\n"
+     "           len(xs), xs[0], xs[1], xs[3])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [3, 4] * 2\n"
+     "    print(\"len=%d e0=%d e1=%d e3=%d\" %\n"
+     "          (len(xs), xs[0], xs[1], xs[3]))\n"),
+    # THE COUNT ON THE LEFT, which is the same repetition spelled the other way
+    # round and a separate branch in the emitter (which operand is the blob).
+    ("count_on_the_left_repeats_too",
+     "def main() -> Int:\n"
+     "    var xs = 2 * [5]\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(xs))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = 2 * [5]\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(xs)))\n"),
+    # A NAME on the left, where the source length is a fact about the BLOB
+    # rather than about the syntax: `xs * 3` has to copy what `xs` holds at run
+    # time, which a static element count cannot answer.
+    ("repeat_of_a_name",
+     "def main() -> Int:\n"
+     "    var xs = [1, 2]\n"
+     "    var ys = xs * 3\n"
+     "    var s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(ys))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [1, 2]\n"
+     "    ys = xs * 3\n"
+     "    s = 0\n"
+     "    for v in ys:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(ys)))\n"),
+    # A COUNT OF ZERO, and a NEGATIVE one: CPython's answer is the empty list
+    # for both (`[7] * 0` and `[7] * -1` are `[]`), so the loop bound must be
+    # clamped rather than left to run with a negative trip count — which is a
+    # walk off the front of the blob area, and silent.
+    ("repeat_of_zero_and_of_a_negative_count",
+     "def main() -> Int:\n"
+     "    var a = [9] * 0\n"
+     "    var b = [9] * -1\n"
+     "    var n = 0\n"
+     "    for v in a:\n"
+     "        n = n + 1\n"
+     "    for v in b:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d len_a=%d len_b=%d\\n\", n, len(a), len(b))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = [9] * 0\n"
+     "    b = [9] * -1\n"
+     "    n = 0\n"
+     "    for v in a:\n"
+     "        n = n + 1\n"
+     "    for v in b:\n"
+     "        n = n + 1\n"
+     "    print(\"n=%d len_a=%d len_b=%d\" % (n, len(a), len(b)))\n"),
+    # A STORE INTO THE RESULT, and a CONCATENATION with it: the result is an
+    # ordinary frame blob, so both neighbouring operations have to work on it
+    # — and `[1, 2] * 2 + [7]` puts the new emitter
+    # and the old one next to each other.
+    ("repeat_then_store_and_concat",
+     "def main() -> Int:\n"
+     "    var a = [1, 2] * 2\n"
+     "    a[0] = 9\n"
+     "    var b = a + [7]\n"
+     "    var s = 0\n"
+     "    for v in b:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d e0=%d\\n\", s, len(b), a[0])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    a = [1, 2] * 2\n"
+     "    a[0] = 9\n"
+     "    b = a + [7]\n"
+     "    s = 0\n"
+     "    for v in b:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d e0=%d\" % (s, len(b), a[0]))\n"),
+    # A NESTED REPETITION, `([5] * 2) * 3`: the source of the outer copy is the
+    # inner RESULT, so the count the emitter reserves for the outer one is a
+    # product of two of them, and the copy reads a blob whose count word was
+    # itself just written.
+    ("repeat_of_a_repeat",
+     "def main() -> Int:\n"
+     "    var xs = ([5] * 2) * 3\n"
+     "    var s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d len=%d\\n\", s, len(xs))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = ([5] * 2) * 3\n"
+     "    s = 0\n"
+     "    for v in xs:\n"
+     "        s += v\n"
+     "    print(\"sum=%d len=%d\" % (s, len(xs)))\n"),
+    # A COMPREHENSION on the left, and a FOR over the result with no name in
+    # between: the repetition as an EXPRESSION rather than as a bound temporary,
+    # which is the shape the reproducer's `for x in C` has and the one a
+    # reservation made only for a bound name would miss.
+    ("repeat_of_a_comprehension_iterated_directly",
+     "def main() -> Int:\n"
+     "    var s = 0\n"
+     "    for v in [i * 2 for i in range(3)] * 2:\n"
+     "        s += v\n"
+     "    printf(\"sum=%d\\n\", s)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    s = 0\n"
+     "    for v in [i * 2 for i in range(3)] * 2:\n"
+     "        s += v\n"
+     "    print(\"sum=%d\" % s)\n"),
+    # A STRING element, where the copied word is a `char *` rather than a
+    # number: the copy is a word copy either way, and a program that only ever
+    # summed its repetitions would not notice a receiver kind that made `*` a
+    # string operation.
+    ("repeat_of_a_list_of_strings",
+     "def main() -> Int:\n"
+     "    var xs = [\"ab\"] * 2\n"
+     "    printf(\"n=%d first=%s second=%s\\n\", len(xs), xs[0], xs[1])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    xs = [\"ab\"] * 2\n"
+     "    print(\"n=%d first=%s second=%s\" % (len(xs), xs[0], xs[1]))\n"),
+]
+
+
 # `|` on two containers is a SET UNION (`{1,2} | {2,3}` in CPython — a LIST
 # pair is a TypeError there, so the operands below are set literals), and the
 # two backends now DISAGREE
@@ -16005,6 +16288,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
+                  + REPEAT_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
@@ -16042,6 +16326,7 @@ def main():
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
+                  | {c[0] for c in REPEAT_CASES}
                   | {c[0] for c in SET_UNION_CASES}
                   | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
@@ -16050,7 +16335,8 @@ def main():
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
-                     + SET_UNION_CASES + CTOR_RECEIVER_CASES
+                     + REPEAT_CASES + SET_UNION_CASES
+                     + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and

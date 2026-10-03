@@ -584,10 +584,49 @@ def main(n):
     return 0
 """
 
+# A field default that NAMES another class's constant — the enum idiom, and
+# this repository's `type_system.py`, whose `Type.origin` is
+# `origin: TypeOrigin = TypeOrigin.DEFAULT` and which is the 668-file sweep's
+# `codegen` row for "a class-level default that is not a value this build can
+# materialize".
+#
+# It was refused in BOTH places the construct appears, for the same reason: the
+# class-constant rewrite materializes a constant where it is READ, and it could
+# only materialize a LITERAL. `model.class_constant_word_in` resolves the
+# reference through the other constant's own declaration, so this row is the
+# dataclass half of `test_formal_run.py`'s
+# `pyclass_constant_whose_value_is_another_constant`, and the two cannot
+# disagree about what is knowable — `field_refusal` asks the same function the
+# substitution performs.
+#
+# `T(7, "x")` is in the program so the row is about the DEFAULT rather than
+# about a constructor that ignores it: CPython fills `origin` from the
+# declaration, and so must this path.
+CONSTANT_REFERENCE_DEFAULT = """
+from dataclasses import dataclass
+
+class Origin:
+    ANNOTATED = "annotated"
+    DEFAULT = "default"
+
+@dataclass
+class T:
+    x: int
+    origin: str = Origin.DEFAULT
+
+def main(n):
+    a = T(7)
+    b = T(7, "elsewhere")
+    printf("%s %s", a.origin, b.origin)
+    return 0
+"""
+
 EXEC_CASES = [
     ("bare_decorator_constructs_in_declaration_order", BARE_CONSTRUCT),
     ("dotted_dataclasses_decorator_spelling", DOTTED_DECORATOR),
     ("field_default_is_lowered_to_its_literal", FIELD_DEFAULT),
+    ("a_field_default_naming_another_classs_constant",
+     CONSTANT_REFERENCE_DEFAULT),
     ("a_prefix_of_the_fields_fills_from_their_defaults", PARTIAL_CONSTRUCTION),
     ("dataclass_equality_is_field_wise", EQUALITY),
     ("dataclass_equality_through_a_call_boundary", EQUALITY_ACROSS_CALL),

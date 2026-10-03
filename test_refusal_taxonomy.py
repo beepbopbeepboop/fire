@@ -413,6 +413,15 @@ CAUSE_SAMPLES = [
     ("print() cannot classify the argument's type",
      "print() cannot tell whether SubscriptExpr is a string or a number on "
      "this path"),
+    # A REAL message, not a constructed one: `test_llm/dumb_gemm.mojo` is
+    # `[0.0] * (m * k)` three times over, and it is the file whose
+    # "print() cannot classify" row this replaced. Pinned here so a rewording
+    # of the repetition refusal cannot quietly move it back into
+    # `other refusal`, which is what the marker in
+    # `tools/formal_sweep_causes.py` exists to prevent.
+    ("a repetition whose count this path cannot read",
+     "[FloatLiteral] * m * k is a REPETITION, and this path can only lower "
+     "one whose count it can read while emitting"),
     ("len() of a value that has no length",
      "len(s) is len() of a value classified as 'int', and an integer has no "
      "length"),

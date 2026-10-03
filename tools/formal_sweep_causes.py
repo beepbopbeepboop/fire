@@ -420,6 +420,17 @@ CAUSES = (
      (("compares two values this path can only call numbers",),)),
     ("print() cannot classify the argument's type",
      (("cannot tell whether",),)),
+    # A REPETITION whose count this path cannot read at compile time. It is its
+    # own row and not `other refusal` for the reason the `==` row above gives:
+    # `xs * n` is a construct this backend now LOWERS (both architectures, a
+    # copy loop and a count word — `test_formal_run.py`'s `REPEAT_CASES`), and
+    # the one thing it will not do is guess a count, so a file refused here is
+    # refused by a decision with a stated remedy. It needs a marker because
+    # without one every file written as `[0.0] * (m * k)` — which is how a
+    # GEMM allocates its buffers, and `test_llm/dumb_gemm.mojo` is that file —
+    # lands in the unclassified bucket.
+    ("a repetition whose count this path cannot read",
+     (("is a REPETITION",),)),
     ("len() of a value that has no length",
      (("is len() of a value classified as",),)),
     ("write(2) receiver is not a file descriptor",
