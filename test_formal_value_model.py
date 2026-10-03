@@ -706,6 +706,23 @@ REFUSALS = [
      "    printf(\"[%s]\", a)\n"
      "    return 0\n",
      "conversion in printf's format string reads"),
+    # `%s` OF A ONE-FIELD STRUCT, the same fault through the one shape that has
+    # no frame for a frame check to refuse. `P(7)` binds a word that IS `P`'s
+    # only field, so `%s` walked bytes at address 7: SIGSEGV, exit 139, on both
+    # architectures from a green build. The needle is the DECLARATION the
+    # refusal quotes rather than the generic clause, because the evidence here
+    # is a declaration and not a statement — `model.one_word_value_text_evidence`
+    # — and a needle the two evidences share would let one of them regress into
+    # the other's message.
+    ("a_percent_s_of_a_one_field_struct_is_refused",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%s]\", c)\n"
+     "    return 0\n",
+     "struct of ONE field has no frame at all"),
     # ORDERING A FRAME ADDRESS, and the reason a wrong BRANCH belongs in the
     # oracle's file rather than only in the suite:  `x < y` on two multi-field
     # structs reached the flag-setting compare of two ADDRESSES, so which way it

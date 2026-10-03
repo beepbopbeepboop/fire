@@ -940,6 +940,12 @@ class X86_64Codegen:
         # recognising the source, and two recognitions could disagree.
         self._frame_candidates = dict(
             getattr(f, "_frame_candidates", None) or {})
+        # `{name: [StructDef, …]}` — the ONE-WORD mirror, published for the same
+        # reason and read by the same consumer as arm64's: a struct of one field
+        # has no block, so the name holds a plain word that IS its only field
+        # and no frame table has anything to say about it.
+        self._one_word_candidates = dict(
+            getattr(f, "_one_word_candidates", None) or {})
         # The x86-64 twin of arm64's, from the same function table: a
         # construction argument has to be told apart from a container returned
         # by a callee, and the declared return type is the only evidence there
@@ -2619,28 +2625,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(reason)
 
     def _printf_arg_is_text(self, arg):
-        """True / False / None: does this `printf` vararg hold text.
+        """True / evidence / None: does this `printf` vararg hold text.
 
-        The three-way answer `model.printf_text_conversion_refusal` is written
-        against.  arm64's copy of this method is the authority on why each arm
-        is what it is; what is shared is the EVIDENCE, which is
-        `ValueKinds.own_shape_kind` — the same predicate that answers "is this
-        name a container element", so one test carries two families and the two
-        architectures cannot disagree about which names it fires for.
-
-        `None` — the source does not say — is the permissive direction and
-        covers the unannotated parameter, which is a word this build cannot
-        classify; refusing it would refuse every function that takes a string
-        it was never told about, and those work today.
+        Delegation, like `_refuse_printf_text_conversion` below:
+        `model.printf_arg_text_evidence` is the decision and arm64's copy of
+        this method is the same three lines, so the two architectures cannot
+        disagree about which arguments a `%s` conversion may be handed.
         """
-        if isinstance(arg, F.StringLiteral):
-            return True
-        if M.string_operand_is_string(self._expr_str_kind(arg)):
-            return True
-        if (isinstance(arg, F.IdentExpr)
-                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
-            return False
-        return None
+        return M.printf_arg_text_evidence(
+            arg, self._vkinds,
+            is_text=lambda e: M.string_operand_is_string(self._expr_str_kind(e)),
+            one_word_text=lambda name: (
+                None if name.name in self._frame_holders else
+                M.one_word_value_text_evidence(
+                    self._one_word_candidates.get(name.name),
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
     def _refuse_printf_text_conversion(self, name, e) -> None:
         """Raise when `e` hands a `%s` conversion something that is not text.

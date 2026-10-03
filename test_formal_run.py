@@ -8404,6 +8404,82 @@ PRINTF_TEXT_CASES = [
      "def main(n):\n"
      "    printf(\"100%% [%*d] [%s] [%s] %s\", 4, 7, \"a\", \"b\", \"c\")\n"
      "    return 0\n", 0, "100% [   7] [a] [b] c"),
+    # A ONE-FIELD STRUCT is the last shape `%s` walked off the end of, and it
+    # got past every check because there was nothing to check: a struct of one
+    # field has no frame, so `_check_frame_escapes` has no frame ADDRESS to
+    # refuse, and the statement that binds the name is a CONSTRUCTION, which
+    # `ValueKinds._own_shape_of` counts as no evidence at all. Measured before
+    # this case existed, on BOTH architectures from a GREEN build: nothing
+    # printed, SIGSEGV, exit 139 — `%s` walking bytes at address 7 looking for
+    # a NUL. `model.one_word_value_text_evidence` is what closes it, on the
+    # DECLARATION rather than on the integer default.
+    ("printf_s_of_a_one_field_struct_is_refused",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%s]\", c)\n"
+     "    return 0\n",
+     "refuse:struct of ONE field has no frame at all", None),
+    # The GUARDS, and they are why the fix is not "a name in the one-word table
+    # is False for a `%s` conversion".  A one-field struct whose field is a
+    # STRING is text, and it worked before this change and works now: `w` IS
+    # the `char *`.  And a conversion that does not DEREFERENCE renders the word
+    # whatever it is, so `%d` of a one-field Int struct is `7` — which is the
+    # same convention `str(c)` and `print(c)` already follow.
+    ("printf_s_of_a_one_field_struct_holding_a_string_still_prints",
+     "struct W:\n"
+     "    var s: String\n"
+     "\n"
+     "def main(n):\n"
+     "    var w = W(\"hi\")\n"
+     "    printf(\"[%s]\", w)\n"
+     "    return 0\n", 0, "[hi]"),
+    ("printf_d_of_a_one_field_struct_renders_the_field",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%d]\", c)\n"
+     "    return 0\n", 0, "[7]"),
+    # The rest of the family, and it is one family: `%s` is the one conversion
+    # that DEREFERENCES its argument, so every shape whose word is a number is a
+    # walk off the end of it.  Measured on both architectures, from GREEN
+    # builds, before this decision existed — SIGSEGV exit 139 in every case:
+    #   printf("[%s]", 42)              bytes at address 42
+    #   printf("[%s]", 2 + 4)           bytes at address 6
+    #   printf("[%s]", str(42))         the word `str()` moved, unchanged
+    # `str()` and `String()` are word-for-word IDENTITY conversions here
+    # (`printf("[%d]", String(7))` prints 7), so the call's kind table entry —
+    # which claims a string — is a claim about the CONVERSION rather than about
+    # its operand, and `printf_text_conversion_refusal` asks the operand
+    # instead: `model.identity_conversion_operand` + `printf_arg_text_evidence`.
+    ("printf_s_of_a_literal_a_binop_and_a_conversion_are_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", 42)\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    ("printf_s_of_an_arithmetic_expression_is_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", 2 + 4)\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    ("printf_s_of_a_conversion_of_a_number_is_refused",
+     "def main(n):\n"
+     "    printf(\"[%s]\", str(42))\n"
+     "    return 0\n",
+     "refuse:an EXPRESSION whose own shape holds a number", None),
+    # And the GUARD for that unwrapping: a conversion of TEXT is text, and the
+    # unwrapping must not cost that.  Without the guard, "a conversion is its
+    # operand" would read as "a conversion is never text", and every
+    # `String(s)` in the corpus would be refused.
+    ("printf_s_of_a_conversion_of_a_string_still_prints",
+     "def main(n):\n"
+     "    var s = \"abc\"\n"
+     "    printf(\"[%s][%s][%s]\", String(s), str(s), String(\"lit\"))\n"
+     "    return 0\n", 0, "[abc][abc][lit]"),
 ]
 
 

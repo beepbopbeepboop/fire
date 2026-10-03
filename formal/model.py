@@ -4808,8 +4808,15 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     | `text_of` | meaning | refused |
     |---|---|---|
     | `True` | this argument is text | no |
-    | `False` | this argument is NOT text, and the source says so | yes |
+    | `False` | this argument is NOT text | yes, and the message says "a value this function bound to an integer on that statement's own shape" |
+    | a `str` | NOT text, and this is the evidence | yes, and the message quotes the evidence |
     | `None` | the source does not say | no |
+
+    The `str` row exists because there is more than one KIND of positive
+    evidence, and a message that asserted the integer default about all of them
+    would be false about the one that is not: `one_word_value_text_evidence`
+    refuses on a DECLARATION instead. One answer shape, two sentences, and the
+    caller picks the evidence by what it knows.
 
     `None` is the permissive direction on purpose. An UNANNOTATED PARAMETER is
     a word this build cannot classify, and `def show(s): printf("[%s]", s)`
@@ -4834,11 +4841,11 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     A FRAME ADDRESS does not reach here: `_check_frame_escapes` has already
     refused a frame receiver in a call position — `frame_receiver_escape_refusal`'s
     `FRAME_C_VALUE_CALLS` branch, whose own measured consequence is a `%d` of a
-    frame printing its address and exiting 0. What is NOT refused there and is
-    NOT caught here is a struct of ONE field, whose receiver is that field
-    rather than an address, so `printf("[%s]", one_field_int_struct)` still
-    faults. `bugs/FORMAL_struct_receiver_as_a_printf_string.md` records why,
-    and the table that would close it is another worker's.
+    frame printing its address and exiting 0. A struct of ONE field has no frame
+    address to be refused on, and that is what `one_word_value_text_evidence`
+    below is for: the last of the three shapes `%s` walks off the end of was a
+    one-field struct's value, and it is closed on a declaration rather than on
+    the integer default.
     """
     if callee not in PRINTF_TEXT_CONVERSIONS_CALLEES:
         return None
@@ -4848,12 +4855,16 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
     for j, conv in enumerate(convs):
         if conv != "s" or j >= len(args):
             continue
-        if text_of(args[j]) is not False:
+        answer = text_of(args[j])
+        if answer is None or answer is True:
             continue
+        evidence = (answer if isinstance(answer, str)
+                    else "a value this function bound to an integer on that "
+                         "statement's own shape")
         return (
             f"the `%s` conversion in {callee}'s format string reads "
-            f"`{spelled(args[j])}` as text, and `{spelled(args[j])}` is a value "
-            f"this function bound to an integer. A string on this path is a "
+            f"`{spelled(args[j])}` as text, and `{spelled(args[j])}` is "
+            f"{evidence}. A string on this path is a "
             f"bare `char *` and an integer is a NUMBER, and `%s` is the one "
             f"conversion that DEREFERENCES what it is handed — it walks bytes "
             f"at the address until it finds a NUL. Measured on BOTH "
@@ -4868,6 +4879,176 @@ def printf_text_conversion_refusal(callee: str, fmt_text, args: list,
             f"itself"
         )
     return None
+
+
+def identity_conversion_operand(expr):
+    """The operand of a word-for-word CONVERSION of `expr`, or None.
+
+    `type_constructor_kind`'s `("identity", …)` row, asked of an EXPRESSION
+    rather than of a name: `String`, `str`, `StringLiteral`, `StringSlice`,
+    `Pointer`, `UnsafePointer` and `CPointer` all move the operand's word and
+    change nothing else about it on this path, so a question about the call's
+    result is the same question asked about its operand — and a diagnostic that
+    only understands the call spelling misses the operand spelling of one
+    defect.
+
+    Measured, both architectures, and both directions are the reason it is asked
+    rather than assumed: `printf("[%d]", str(42))` prints `42` and
+    `printf("[%d]", int("42"))` prints the POINTER, so the conversion moves the
+    word and does not convert it — while `printf("[%s]", int("42"))` prints
+    `42` and `printf("[%s]", str(42))` dies of SIGSEGV, exit 139. A `%s` of such
+    a call is therefore decided entirely by its operand, which is what this
+    function hands back.
+
+    `None` for anything else — a conversion with no operand, with more than
+    one, or one that is not this row — and None is the permissive direction for
+    a caller: the question then falls to whatever the call's own spelling says.
+    """
+    if not isinstance(expr, F.CallExpr) or not isinstance(expr.func, F.IdentExpr):
+        return None
+    args = list(getattr(expr, "args", None) or [])
+    if len(args) != 1 or getattr(expr, "kwargs", None):
+        return None
+    tk = type_constructor_kind(expr.func.name)
+    if tk is None or tk[0] != "identity":
+        return None
+    return args[0]
+
+
+def printf_arg_text_evidence(expr, vk, is_text=None, one_word_text=None):
+    """`True` / an evidence string / `None`: does this `printf` vararg hold text.
+
+    THE decision, in one function, asked with the three facts only an emitter
+    knows and a model function cannot derive: `vk` is this function's
+    `ValueKinds`, `is_text(expr)` is the emitter's FLOW-SENSITIVE kind (its
+    `_string_vars` map, which knows what this very function's emission has bound
+    so far), and `one_word_text(name)` is `one_word_value_text_evidence` over the
+    one-field candidates `formal/build.py` published for the name. Any of the
+    three may be None, and a None hook leaves that source of evidence unasked —
+    which is what makes `printf_text_conversion_refusal`'s `text_of` contract
+    and this function the same contract.
+
+    The shape of it, in order, and each step is there because the step before it
+    cannot see what it is asking about:
+
+      1. **A CONVERSION is its operand.** `String(x)`, `str(x)`, `int(x)`,
+         `Pointer(x)` and their relatives move the word and change nothing else
+         on this path — measured: `%d` of `String(7)` prints 7, and `%s` of
+         `String(42)` dies of SIGSEGV — so the question about the call is the
+         question about its operand, and asking it one level in is what lets one
+         decision cover both spellings. (`identity_conversion_operand`, looped
+         so a conversion of a conversion is one question too.)
+      2. **A STRING LITERAL, or anything `is_text` calls text.** Unchanged.
+      3. **A NAME, from the two positive-evidence sources**: a statement of this
+         function bound it to an integer on that statement's own shape, or a
+         one-field struct's declaration says what its only field holds. Both
+         are evidence about a NAME, because a name is the one thing whose kind
+         can come from a default rather than from the source — `ValueKinds`'
+         own note on `INT_KIND` is the whole of why.
+      4. **A CALL, or nothing.** `kind_of` answers `INT_KIND` for a callee it
+         does not know, because a word is an integer everywhere else, and
+         `printf("%%s", platform_name())` is a program that prints `darwin`.
+         Reading that default as evidence would refuse every extern's result,
+         so a call's kind is never evidence here — which is the same rule
+         `_own_shape_of` applies and for the same reason.
+      5. **Anything ELSE, from its own shape.** A literal, an arithmetic
+         expression, a subscript, a field read: none of them can be seeded by a
+         default, so `kind_of`'s `INT_KIND` here is the expression's own shape
+         and `printf("[%s]", 42)` — which walks bytes at address 42 looking for
+         a NUL — is the same defect the two tables above exist for.
+    """
+    arg = expr
+    for _ in range(4):
+        inner = identity_conversion_operand(arg)
+        if inner is None:
+            break
+        arg = inner
+    if isinstance(arg, F.StringLiteral):
+        return True
+    if is_text is not None and is_text(arg):
+        return True
+    if isinstance(arg, F.IdentExpr):
+        if vk is not None and vk.own_shape_kind(arg.name) == INT_KIND:
+            return ("a value this function bound to an integer on that "
+                    "statement's own shape")
+        return one_word_text(arg) if one_word_text is not None else None
+    if isinstance(arg, F.CallExpr) or vk is None:
+        return None
+    if vk.kind_of(arg) == INT_KIND:
+        return ("an EXPRESSION whose own shape holds a number — a literal, an "
+                "arithmetic result, a subscript, or a conversion that moves "
+                "its operand's word — and not a name, so none of it came from "
+                "the default an unclassified name gets")
+    return None
+
+
+def one_word_value_text_evidence(candidates, int_names=(), string_names=(),
+                                 decls=None):
+    """`True` / `None` / an evidence string: is a ONE-FIELD struct's value text?
+
+    The second piece of POSITIVE evidence `printf_text_conversion_refusal`
+    accepts, and the last hole in the `%s` family: a struct of one field has no
+    frame, so its receiver is not an address there is a frame check for — it IS
+    the field — and `ValueKinds.own_shape_kind` cannot see it, because the
+    statement that binds the name is a CONSTRUCTION and `_own_shape_of` counts a
+    call as no evidence at all. So `printf("[%s]", c)` for `struct One: var x:
+    Int` reached C with the integer in hand, and `%s` walked bytes at address 7
+    looking for a NUL: SIGSEGV, exit 139, on BOTH architectures, from a green
+    build. `formal/build.py`'s `_one_word_constructor_bindings` is the table
+    that says the word IS such a struct, and it is the mirror of
+    `_constructor_bindings` for the case where there is no block.
+
+    The answer is the field's DECLARED type, and deliberately not
+    `struct_field_kind`'s "materialized default" gate: that gate is about a FRAME
+    slot, whose word is whatever the constructor stored, while a one-field
+    struct's value is a plain word the call site supplied — `One(7)` and `One()`
+    both put a non-pointer in it and both fault under `%s`, so the declared type
+    is what decides and there is no default to consult.
+
+    `True` when the declaration says a string, which is a WORKING case and is
+    the reason this is not "a name in the one-word table is False for `%s`":
+    `struct W: var s: String` makes `printf("[%s]", w)` print the bytes, and it
+    did so before this function existed, on both architectures. Refusing it
+    would be a working program traded for a diagnostic.
+
+    `None` when the candidates do not agree, when one of them has no field kind
+    this path can map, or when a candidate is not a one-field struct at all —
+    the permissive direction `printf_text_conversion_refusal` argues for at
+    length, and it is also what an UNANNOTATED parameter answers, so the two are
+    the same hole rather than two.
+
+    The string is the EVIDENCE, and it is returned rather than `False` so the
+    refusal can name the declaration that made the call instead of asserting the
+    integer default, which would be false about a name bound from a
+    construction.
+    """
+    kinds = {}
+    for st in (candidates or ()):
+        if st is None or not struct_is_one_field(st):
+            return None
+        only = struct_sole_field_name(st)
+        if only is None:
+            return None
+        ann = frame_slot_declared_annotation([st], only, decls)
+        kind = declared_type_kind(ann, int_names, string_names, decls)
+        if kind is None:
+            return None
+        ann_txt = f"`{ann.strip()}`" if isinstance(ann, str) else "nothing"
+        kinds.setdefault(kind, []).append(f"{st.name}.{only} ({ann_txt})")
+    if len(kinds) != 1:
+        # Two one-field structs bound to one name whose fields hold different
+        # things: there is no one answer, and picking one would be a claim
+        # about whichever candidate was reached first.
+        return None
+    kind, (spelling, *_rest) = next(iter(kinds.items()))
+    if string_operand_is_string(kind):
+        return True
+    return (
+        f"a `{next(iter(candidates)).name}` receiver, whose whole value IS its "
+        f"one field {spelling} — a struct of ONE field has no frame at all, so "
+        f"there is no address here for any of the frame checks to look at, and "
+        f"the declaration says that field holds no text"
+    )
 
 
 def _is_zero_literal(e) -> bool:
@@ -6259,6 +6440,13 @@ def spelled(expr) -> str:
         # a shape `__init__`'s inline refuses by name, so the refusal quotes it,
         # and `UnaryOp` tells the reader nothing they can act on.
         return f"{expr.op}{spelled(getattr(expr, 'operand', None))}"
+    if isinstance(expr, F.BinaryOp):
+        # `a + b`, not `BinaryOp`.  The same defect as the arm above and for the
+        # same reason: an arithmetic expression is the shape a `%s` conversion is
+        # most often handed by accident (`printf("[%s]", 2 + 4)`), so the
+        # diagnostic that refuses it has to show the expression.
+        return (f"{spelled(getattr(expr, 'left', None))} {expr.op} "
+                f"{spelled(getattr(expr, 'right', None))}")
     return type(expr).__name__
 
 

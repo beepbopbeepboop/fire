@@ -980,6 +980,15 @@ dylib_exports: list = None, globals_base: int = None,
         # same table rather than from two walkers that could disagree.
         self._frame_candidates = dict(
             getattr(f, "_frame_candidates", None) or {})
+        # `{name: [StructDef, …]}` — the ONE-WORD mirror of the above, and the
+        # second thing a word can be that is not an integer and not a frame: a
+        # struct of exactly one field has no block, so `P(7)` binds a plain word
+        # that IS `P`'s only field and every frame table is silent about it.
+        # Published for the same reason the frame one is — a consumer that has
+        # to know what a word is asks the table the analysis already built
+        # rather than re-deriving the recognition (see `_printf_arg_is_text`).
+        self._one_word_candidates = dict(
+            getattr(f, "_one_word_candidates", None) or {})
         # `{name: declared return annotation}` — the evidence a construction
         # argument needs to be told apart from a container returned by a
         # callee.  Read once per function from the same function table the
@@ -4148,33 +4157,26 @@ dylib_exports: list = None, globals_base: int = None,
         return frags, operands
 
     def _printf_arg_is_text(self, arg):
-        """True / False / None: does this `printf` vararg hold text.
+        """True / evidence / None: does this `printf` vararg hold text.
 
-        The three-way answer `model.printf_text_conversion_refusal` is written
-        against, and the distinction is the whole of the narrowing. A STRING
-        LITERAL is text without any question asked. A name `_expr_str_kind`
-        classifies `STR_KIND` is text for the reason that classification exists.
-        A bare name a statement of THIS function bound to an INTEGER on that
-        statement's own shape is NOT text — that is `ValueKinds.own_shape_kind`,
-        the same predicate the container-element refusal asks, so one evidence
-        test answers "is this an element address" and "is this a string" and the
-        two architectures cannot disagree about which names carry it.
-
-        Everything else is `None` — the source does not say. That includes an
-        UNANNOTATED PARAMETER, which is a word this build cannot classify, and
-        refusing it would refuse `def show(s): printf("[%s]", s)` for every
-        caller that passes a string: measured working, both architectures, exit
-        0 and `[abc]`. `None` is the permissive direction by design and
-        `printf_text_conversion_refusal`'s docstring says why at length.
+        Delegation, and nothing else: `model.printf_arg_text_evidence` is the
+        decision, so x86-64's copy of this method cannot come to disagree with
+        this one about what a format string means. What is passed in is the
+        three facts only an emitter has — this function's `ValueKinds`, the
+        flow-sensitive `_expr_str_kind`, and the one-field candidates
+        `formal/build.py` published for the function (`None` for a name the FRAME
+        table owns, which is the precedence `_seed_one_word_bindings` states:
+        a name in both tables is a name with two layouts and the frame one is
+        the truth).
         """
-        if isinstance(arg, F.StringLiteral):
-            return True
-        if M.string_operand_is_string(self._expr_str_kind(arg)):
-            return True
-        if (isinstance(arg, F.IdentExpr)
-                and self._vkinds.own_shape_kind(arg.name) == M.INT_KIND):
-            return False
-        return None
+        return M.printf_arg_text_evidence(
+            arg, self._vkinds,
+            is_text=lambda e: M.string_operand_is_string(self._expr_str_kind(e)),
+            one_word_text=lambda name: (
+                None if name.name in self._frame_holders else
+                M.one_word_value_text_evidence(
+                    self._one_word_candidates.get(name.name),
+                    TYPE_NAMES, STRING_TYPE_NAMES, self._structs)))
 
     def _refuse_printf_text_conversion(self, name, e: F.CallExpr) -> None:
         """Raise when `e` hands a `%s` conversion something that is not text.
