@@ -176,8 +176,9 @@ useless for the coverage rate.
 
 The `-j 8 -t 600` run is the one whose logs are at
 `bugs/sweeps/sweep-{arm,x86}-6.txt`. Both arms were stopped with `SIGTERM` after
-1 h 38 m, having classified **154 files each** and reached `std/os/` — stdlib
-file ~175 of 252. **Neither arm printed its summary**, and the reason is a defect
+1 h 38 m, having classified **154 files each** out of the **187** of the 652-file
+scope they reached (stdlib files 1-171 plus the in-flight tail; **none of this
+repository's own 400 files**). **Neither arm printed its summary**, and the reason is a defect
 in the tool, filed as
 `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`: every file is submitted
 to the pool up front, so `ThreadPoolExecutor.shutdown(wait=True)` on the way out
@@ -195,19 +196,23 @@ nothing for a pass):
 | codegen/dependency | 124 | 124 |
 | tool — no verdict (all `-t 600` timeouts) | 20 | 19 |
 | **classified non-pass, total** | **154** | **154** |
-| pass | **<= 33** (see below) | **<= 33** |
-| **files never reached** | **498** | **498** |
+| pass — reached, and printed nothing | **<= 33** (see below) | **<= 33** |
+| **files never reached at all** | **465** | **465** |
 
 **The pass count is not recoverable from this run, and the bound is the honest
 way to say it.** The tool prints a line per NON-pass file and nothing else, so
 the only place a run's passes exist is the summary and the ledger — and this run
-lost both to the drain defect above (the summary is printed by the handler that
-the defect makes unreachable, and the partial ledger is published by the same
-one). What *is* known: the sweep reached the first ~187 files of the sorted
-scope and printed 154 non-pass verdicts, so **at most 33 of the 187 passed**. For
-scale, the `-5` baseline's answered files passed at 116/283 = 41 %, which would
-put the real number near 16; that is an extrapolation from a different run on a
-different tree and is not offered as this run's figure.
+lost both to the drain defect above (the summary is printed by the handler the
+defect makes unreachable, and the partial ledger is published by the same one).
+What *is* known, from the log and the sorted scope: the last file either arm
+printed a verdict for is `std/os/path/__init__.mojo`, **file 171 of the stdlib's
+252**, and 8 builds per arm were in flight, so the run got through **187 of the
+652** and never touched the other 465 — which includes **every one of this
+repository's own 400 files**, because absolute paths sort `.../new-modular` before
+`.../work-249`. Of those 187 reached files, 154 printed a line, so **at most 33
+passed**. For scale, the `-5` baseline's answered files passed at 116/283 = 41 %,
+which would put the real number near 16; that is an extrapolation from a
+different run on a different tree and is not offered as this run's figure.
 
 **The two arms are the same sweep with one file different.** Comparing the two
 logs path-for-path, three lines differ in the whole 154:
