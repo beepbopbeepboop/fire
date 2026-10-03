@@ -5027,6 +5027,252 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var s = Scale(3, 7)\n"
      "    return s.total()\n", 51, None),
+    # ── THE SCALAR STORE IN A ZERO-ARGUMENT `__init__` OF A ONE-FIELD STRUCT ──
+    #
+    # The three rows above store through a TUPLE target or with a constructor
+    # that HAS a parameter, and all three worked; this row is the shape that did
+    # not, and it is here rather than in `CASES` because both backends answered
+    # it with the SAME wrong number (0), which is the failure no parity suite,
+    # no `refuse:` row and no engine diff can see.
+    #
+    # WHY 0, and why only for one field: a struct's field is lowered three ways
+    # and which applies is decided by the BINDING of the base, not by a type
+    # (bugs/FORMAL_method_param_field_access.md). A ONE-FIELD struct's receiver
+    # IS its field — there is no storage of its own to point at — so for
+    # `One20()` the one-word path evaluated the construction's value. Both
+    # backends asked `model.struct_construction_plan` only when the call carried
+    # an ARGUMENT (`if e.args or e.kwargs:`), so a construction with no argument
+    # never asked and answered a fresh zero word without asking anyone: the
+    # constructor body was DROPPED at the site. Nothing was refused, the exit
+    # status was a plausible small integer, and the two machines agreed.
+    #
+    # The three classes are in ONE program so no single-row special case can
+    # pass it, and their answers are deliberately different from each other and
+    # from 0:
+    #   One20   ONE field, `__init__(self)` with no parameter   -> 20 (was 0)
+    #   Two203  TWO fields, the same zero-arg `__init__`         -> 20*10+3 = 203
+    #   Arg20   one field, `__init__(self, k: Int)`              -> 20
+    # `Two203` is the row that was already right and had to stay right — a fix
+    # that de-inlined the constructor to make `One20` work would trade a wrong
+    # answer for a wall of refusals — and `Arg20` is the other already-right
+    # neighbour. `direct` reads the field from `main` without a method at all,
+    # because the SAME construction feeds both halves and the method call is not
+    # what loses the store.
+    #
+    # MEASURED: reverting the fix (both emitters, `model.one_word_construction`)
+    # prints `c=0 d=203 e=20 direct=0` on arm64 AND on x86-64; with it,
+    # `c=20 d=203 e=20 direct=20` on both. The method names differ per class
+    # because dispatch on this path is by BARE method name, and three classes
+    # declaring `total` make `d.total()` a call on a value (refused by name).
+    ("both_arch_zero_arg_init_stores_a_one_field_scalar",
+     "class One20:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "    def one_total(self):\n"
+     "        return self.n\n"
+     "\n"
+     "class Two203:\n"
+     "    def __init__(self):\n"
+     "        self.n = 20\n"
+     "        self.m = 3\n"
+     "    def two_total(self):\n"
+     "        return self.n * 10 + self.m\n"
+     "\n"
+     "class Arg20:\n"
+     "    def __init__(self, k: Int):\n"
+     "        self.n = k\n"
+     "    def arg_total(self):\n"
+     "        return self.n\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var c = One20()\n"
+     "    var d = Two203()\n"
+     "    var e = Arg20(20)\n"
+     "    var x = c.one_total()\n"
+     "    var y = d.two_total()\n"
+     "    var z = e.arg_total()\n"
+     "    var w = c.n\n"
+     "    printf(\"c=%d d=%d e=%d direct=%d\", x, y, z, w)\n"
+     "    return 0\n", 0, "c=20 d=203 e=20 direct=20"),
+    # ── A METHOD CALL THROUGH A ONE-WORD STRUCT'S OWN FIELD ───────────────────
+    #
+    # `o.inner.get()` where `Outer` declares ONE field and `Inner` is a framed
+    # two-field struct. The identity this path relies on everywhere is that a
+    # one-word struct's field and its receiver are the SAME storage, so
+    # `_rewrite_self_fields` turns `o.inner` into `o`. That is right for a READ
+    # and it is unbounded recursion for a CALL RECEIVER: the rewrite keeps the
+    # method NAME and throws away the struct that name was looked up in, so
+    # `Inner.get(o)` became `Outer.get(o)` — a call to a different function that
+    # calls itself.
+    #
+    # Nothing caught it except a check that reads the tree AFTER the rewrite and
+    # so reports an expression the source never spells ("`self.write_to` is not
+    # a field of StridedSlice … so in Python this expression is the bound
+    # method"), and a check that reads it BEFORE. Both had to be right about a
+    # shape neither could see, and the one that reads before is what fixes it:
+    # `_rewrite_one_word_field_method_calls` lifts `recv.f.m(x)` to `F_m(recv.f,
+    # x)` while `f`'s DECLARED type can still be read, and only when the field's
+    # struct actually DECLARES `m`. The lift must come BEFORE the collapse, and
+    # the argument it passes (`o.inner`) is the collapse's own output (`o`) —
+    # which is correct, because at that point `o`'s word IS the `Inner` frame
+    # address: `o.inner = Inner()` has itself collapsed to `o = Inner()`.
+    #
+    # So this row is two rewrites in an order, and each alone is wrong in a
+    # different direction: the lift without the collapse is an unresolved
+    # symbol, and the collapse without the lift is infinite recursion. 42 is
+    # `20 + 22`, so a collapse that recursed would exit on a signal instead of
+    # answering, and a lift that named the wrong struct would answer something
+    # else. MEASURED: with `_rewrite_one_word_field_method_calls` removed this
+    # refuses on BOTH architectures ("o.get() is a method call on a value …").
+    #
+    # `o.inner = Inner()` before the field writes is not decoration: it is the
+    # placement the program needs, and a row that omitted it is refused by
+    # `field_access_refusal` for a different reason and would pass for the wrong
+    # one.
+    ("both_arch_one_word_struct_method_call_through_its_field",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.inner = Inner()\n"
+     "    o.inner.a = 20\n"
+     "    o.inner.b = 22\n"
+     "    return o.inner.get()\n", 42, None),
+    # ── AN AMBIGUOUS METHOD NAME, SETTLED BY THE RECEIVER'S OWN BINDING ──────
+    #
+    # `get` is declared by BOTH structs here, which is the ordinary situation in
+    # a module of any size: dispatch on this path is by BARE NAME, and
+    # `_method_owners` pops every ambiguous name precisely so
+    # `_rewrite_method_calls` cannot pick one. The refusal that follows is
+    # "`o.get()` is a method call on a value … 'get' is not one of those methods
+    # of those receivers" — a diagnostic about a C library, for a call that is
+    # plainly `Outer2.get`.
+    #
+    # TWO rewrites, and neither alone is enough, which is why this row is here
+    # rather than a paragraph in a commit message:
+    #
+    #   * the receiver is a LOCAL. `var o = Outer2()` is the binding, and
+    #     `_constructor_bindings` already computes it — as a LIST, because `x =
+    #     A()` on one path and `x = B()` on another is one name with two
+    #     layouts. So the lift reads that table and fires only when the
+    #     candidates AGREE (`_bound_receiver_structs`).
+    #   * the receiver is a FIELD of the holder, inside the holder's own
+    #     method: `self.inner.get()` is a depth-2 chain, where the fact that
+    #     settles it is the field's DECLARED type rather than the binding
+    #     (`_owner_from_receiver_type`). `self`'s own binding settles the first
+    #     hop and `self.inner`'s declared `Inner` settles the second.
+    #
+    # The order matters and it is the order the code is in: a lift that put the
+    # name back to the OUTER struct would be unbounded recursion (this program's
+    # `Outer2.get` calls `self.inner.get()`), and one that put it back to the
+    # INNER struct for `o.get()` would compute on the wrong layout. 42 is
+    # `20 + 22`, so neither of those answers 42.
+    #
+    # MEASURED: without both rewrites this refuses on arm64 and on x86-64
+    # ("`o.get()` is a method call on a value …"), and with only the local one
+    # it gets one line further and refuses on `self.inner.get()` instead — which
+    # is why the row covers both halves rather than one.
+    ("both_arch_ambiguous_method_name_settled_by_the_receiver",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Outer2:\n"
+     "    var pad: Int\n"
+     "    var inner: Inner\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.get()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer2()\n"
+     "    o.inner.a = 20\n"
+     "    o.inner.b = 22\n"
+     "    return o.get()\n", 42, None),
+    # ── A ONE-FIELD STRUCT WHOSE SOLE FIELD IS A FRAME ────────────────────────
+    #
+    # `Box` declares ONE field, `inner`, whose declared type is the framed
+    # `Opt`. So `Box`'s receiver IS its field's storage, and that storage is an
+    # ADDRESS — `self.inner.v` is one load at `self + 8*slot(v)` for Opt's
+    # layout, not two. The frame analysis had no case for a word that is both a
+    # receiver and an address: `Box` is not framed, so nothing seeded `self` as
+    # a holder, and the read half was refused by
+    # `_check_method_receiver_types` with a message about `Box`'s layout that
+    # the callee does not use.
+    #
+    # The seeding and the refusal below it are ONE change, and the row that
+    # proves it is the next one: with only the seeding, a method that STORES
+    # its sole field (`self.inner = o`, which the identity rewrites to
+    # `self = o`) overwrites the frame address the CALLER still holds, so the
+    # store never reaches the caller and every later `self.v` in the method
+    # reads the caller's object — measured as SIGSEGV on both architectures.
+    # `_collect_receiver_rebinds` withdraws its one-field exemption for exactly
+    # these owners, and both halves read `model.one_word_sole_field_frame`, so
+    # they cannot disagree about which receivers are addresses.
+    #
+    # 155 is `41 * 10 + 1`, and `two_field_holder_reads_its_nested_frame_through
+    # _a_method` — the control, immediately below — computes the SAME number by
+    # the other route, so a lowering that read the wrong slot, or read through
+    # the holder's own layout instead of `Opt`'s, would have to be wrong in
+    # exactly the way both agree on to pass. The two rows differ by one `var pad:
+    # Int` and nothing else, which is the whole of the boundary: a two-field
+    # struct has storage of its own, so its receiver is an address and the
+    # analysis already had a case for it; a one-field struct has none.
+    ("one_word_holder_of_a_frame_reads_through_its_method",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.inner.v = 41\n"
+     "    b.inner.has = 1\n"
+"    return b.get()\n", 155, None),
+    # THE CONTROL, and it is what makes the row above an assertion about a
+    # boundary rather than about a program: `Box` here declares TWO fields, so
+    # `Box`'s receiver is the ADDRESS of a frame of its own and `b.get()` was
+    # always answerable. The bodies, the nested writes and the expected 155 are
+    # identical, and the only variable is the `var pad: Int`. A change that had
+    # answered the one-field case by making the analysis permissive about frame
+    # receivers generally would move this row's number too, and a change that had
+    # special-cased "one field" would leave it green and prove nothing about the
+    # case it was written for.
+    ("two_field_holder_reads_its_nested_frame_through_a_method",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.inner.v = 41\n"
+     "    b.inner.has = 1\n"
+     "    return b.get()\n", 155, None),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
@@ -12946,6 +13192,49 @@ REFUSAL_CASES = [
      "    p.b = 4\n"
      "    return p.zz + n\n",
      "refuse:is a host module (CPython standard library)", None),
+    # THE WRITE HALF of the one-word-holder-of-a-frame pair. The read half is
+    # `BOTH_ARCH_CASES`'s `one_word_holder_of_a_frame_reads_through_its_method`
+    # and it builds and answers 155, because a method handed `b`'s frame
+    # address may READ `self.inner.v` as one load at `self + 8*slot(v)`. What it
+    # may not do is STORE it: `self.inner = o` is `self = o` after the identity
+    # a one-word struct's field and receiver share, so the method overwrites the
+    # address the CALLER still holds — the caller's `b` keeps pointing at the
+    # original frame, every later `self.v` in the method reads the caller's
+    # object, and the program answers a number no source wrote. Measured as
+    # exit 139 on BOTH architectures in the window between the two halves.
+    #
+    # So it is here and not in the answered group: the assertion is that it does
+    # not build, and a positive row cannot say that. `_collect_receiver_rebinds`
+    # is where the refusal comes from, and it is the same check whose one-field
+    # EXEMPTION has to be withdrawn for these owners —
+    # `refuse_a_one_field_mutator_that_also_returns_a_value` in
+    # `test_formal_bracketed_method_field_set.py` is the exemption still being
+    # right for a one-word struct whose field is a plain value, so the two rows
+    # together are the whole rule rather than one half of it.
+    ("refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def mk(k: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = k\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(self, o: Opt) -> Int:\n"
+     "        self.inner = o\n"
+     "        return self.inner.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.set(mk(41))\n"
+     "    return b.inner.v\n",
+     "refuse:self is assigned o in Box_set()", None),
     # The CONTROL, and it is the half that makes the case above mean something:
     # the SAME program without the import is refused by the frame clause, on
     # both architectures. Without this row a change that deleted the frame

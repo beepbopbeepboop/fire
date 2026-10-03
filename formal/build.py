@@ -827,7 +827,8 @@ def _container_family(path: str) -> str:
     return "unknown"
 
 
-def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
+def _audit_link_line_containers(linked, fmt: str, where: str,
+                              arch: str = None) -> None:
     """Every library on this link line must be in the image's OWN container.
 
     The gap this closes is the one that let an ELF image import a module for
@@ -848,6 +849,18 @@ def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
     and nothing about the host decides which way it goes: `fmt` is chosen by
     the caller, so a caller can ask for one container while the libraries on
     the line are in the other.
+
+    **What it says when it fires changed with the ELF emitter.** It used to
+    close with "this path emits {want} module libraries only", which was true
+    while there was no ELF emitter and false the moment there was one. The
+    refusal is now the ordinary cross-container mismatch rather than a
+    capability limit, and the reason a mismatch is still POSSIBLE is worth
+    stating because it is not a bug: `formal/imports.py::build_module_dylib`
+    builds a library in `default_format(arch)` — the HOST's container — while
+    `compile_formal`'s `fmt` is the CALLER's. On Linux the two agree and this
+    never fires; on macOS, asking for an ELF image on a Mach-O host builds the
+    module as a Mach-O and this says so, which is the honest answer (the file
+    to rebuild is named) rather than a refusal about a gap that is gone.
     """
     want = "macho" if fmt == "macho" else "elf"
     for d in linked or []:
@@ -862,8 +875,9 @@ def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
                 f"{got}: {article} {want} loader cannot open {article} {got} "
                 f"library, so every symbol it exports is unresolvable at "
                 f"load. The library's container is what has to match, not the "
-                f"symbol names — rebuild the dependency for {fmt!r}. This "
-                f"path emits {want} module libraries only.")
+                f"symbol names — module libraries are built in "
+                f"{default_format(arch)!r}, the HOST's container, while this "
+                f"image was asked for {fmt!r}.")
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,
                           dylib_exports=None) -> list:
     """Every extern must be accounted for: a C library, or a linked dependency.
@@ -1030,23 +1044,36 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # BEFORE any codegen pass: a library the loader cannot open makes every
     # symbol it exports unresolvable, so there is nothing worth compiling and
     # the diagnostic is better before the image exists.
-    _audit_link_line_containers(dylibs, fmt, "image")
+    _audit_link_line_containers(dylibs, fmt, "image", arch)
     if fmt == "elf":
-        from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
-                                 compute_got_addrs)
+        from formal import elf
+        # ONE `DT_NEEDED` per library on the link line, plus libc when there is
+        # an extern to bind. This is what the ELF half of the module-import
+        # path needs and what it did not have: the image carries the module's
+        # exported symbol in `.dynstr`, and before `build_elf_dylib` there was
+        # nothing that could be named as providing it, so the module was built,
+        # audited (`provided`) and then put NOWHERE. The symbol audit could not
+        # see it because it asks "does something on this line DECLARE this
+        # name" and the question that mattered was "will the loader OPEN that
+        # library" -- which is what
+        # `_audit_link_line_containers` above answers, four bytes of magic from
+        # each file.
+        elf_deps = [os.path.basename(d["install_name"]) for d in dylibs]
+        needed = elf.elf_needed(elf_deps, True)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                 comptime_hook, dylib_exports, import_aliases,
                                 extern_decls)
         try:
-            code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
+            code, info = codegen.compile(ordered, base_addr=elf.DEFAULT_BASE,
                                          structs=structs)
         except CodegenError as e:
             raise FormalBuildError(str(e))
         external_syms = info.get("external_syms") or []
+        needed = elf.elf_needed(elf_deps, bool(external_syms))
         if external_syms:
-            got = compute_got_addrs(len(code), external_syms,
-                                    vaddr=info["base_addr"],
-                                    lib_name=DEFAULT_LIBC)
+            got = elf.compute_got_addrs(len(code), external_syms,
+                                         vaddr=info["base_addr"],
+                                         needed=needed)
             codegen.asm.resolve_extern(got)
             code = bytes(codegen.asm.sections["text"])
         unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
@@ -1055,10 +1082,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             raise FormalBuildError(
                 _unaccounted_report(source_path or "<program>", unaccounted,
                                     "image"))
-        binary = build_elf(code, entry=info["base_addr"],
-                           vaddr=info["base_addr"],
-                           external_syms=external_syms, lib_name=DEFAULT_LIBC,
-                           globals_image=globals_image(fmt))
+        binary = elf.build_elf(code, entry=info["base_addr"],
+                               vaddr=info["base_addr"],
+                               external_syms=external_syms,
+                               deps=needed,
+                               globals_image=globals_image(fmt))
         return code, info, external_syms, binary
 
     # The extern entry offset depends on the linked dylibs: each adds a load
@@ -1423,37 +1451,6 @@ def compile_formal(source_path: str, output: str = None,
         # launch with "Symbol not found" for a function the source plainly
         # imports.
         raise FormalBuildError(str(e))
-    if fmt != "macho" and import_dylibs:
-        # An ELF image with a module dependency, refused rather than emitted.
-        #
-        # `formal/imports.py` builds module libraries with
-        # `build_macho_dylib`, so `import_dylibs` here is a list of Mach-O
-        # shared objects — and `formal/elf.py`'s `build_elf` carries ONE
-        # `lib_name` (`libc.so.6`) and writes exactly one `DT_NEEDED`, with no
-        # `.dynamic` entry for anything else. The libraries are therefore built,
-        # audited (their symbols are `provided`, so `_audit_bound_symbols`
-        # passes) and then put NOWHERE: the image's `.dynstr` carries
-        # `ANY_add1_9f63a2` while the only `DT_NEEDED` is libc.
-        #
-        # That is the worst shape this can take, because the audit is what
-        # makes it look right. The image builds, the audit passes, and the
-        # program dies at load with an unresolved symbol for a function its
-        # own source imports. This is the ELF half of the container gap named
-        # in bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md: `arch`
-        # selects the code generator and is honoured, but there is no ELF
-        # shared-object emitter, so a program that imports a module has no
-        # target-shaped library to link.
-        from formal.elf import DEFAULT_LIBC
-        raise FormalBuildError(
-            f"{os.path.basename(source_path)} imports {len(import_dylibs)} "
-            f"module(s) and cannot be built for {fmt!r}: module libraries are "
-            f"Mach-O on this path (formal/macho_linker.py's build_macho_dylib "
-            f"is the only emitter) and {fmt} has no shared-object form here — "
-            f"formal/elf.py writes one DT_NEEDED ({DEFAULT_LIBC!r}) and no "
-            f".dynamic entry for anything else, so the image would carry the "
-            f"module's symbols in .dynstr with nothing providing them. The "
-            f"code generator does honour arch; the container is the missing "
-            f"half. Build for macho, or lower the module into this image.")
     # THE PARKED REFUSAL, and the ORDER is the whole fix: the import diagnosis
     # above has had its say, and so has the ELF-container check above this, and
     # both are facts about whether this file can be built HERE at all — which
@@ -3118,6 +3115,29 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             for recv in M.struct_receivers(owner):
                 holders[_fn_key(fn)].add(recv)
                 hstruct[_fn_key(fn)][recv] = [owner]
+        # A one-word struct's receiver IS its field, so the branch above skips
+        # it — and the field can be a FRAME, which makes the receiver an address
+        # after all. `self.v` is then one load at `self + 8*slot(v)`, and the
+        # holder table is what says so: without this the analysis has no case
+        # for a word that is both a receiver and an address, and the read half
+        # is refused by name about an expression the source never spells.
+        #
+        # Only the READ half becomes answerable, and that is a property of what
+        # is being asked rather than of the order: the WRITE half
+        # (`self.<sole> = x`, which is `self = x` after the identity) overwrites
+        # the frame address the caller still holds, so
+        # `_collect_receiver_rebinds` withdraws its one-field exemption for
+        # exactly these owners — which is the other half of this pair and the
+        # reason the seeding cannot land without it. Both read the same
+        # `model.one_word_sole_field_frame`, so they cannot disagree about which
+        # receivers are addresses.
+        elif owner is not None and M.struct_is_one_field(owner) \
+                and M.method_receiver_name(fn) is not None:
+            inner = M.one_word_sole_field_frame(owner, structs_by_name)
+            if inner is not None:
+                for recv in M.struct_receivers(owner):
+                    holders[_fn_key(fn)].add(recv)
+                    hstruct[_fn_key(fn)][recv] = [inner]
         # Every parameter of every function, not only a method's: a free
         # function's `def f(r: S)` is the same construct as `def __eq__(self,
         # other: Self)`, the declaration is the same kind of evidence, and
@@ -3616,10 +3636,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # `method_owners` is keyed by the LIFTED name
                 # `<Struct>_<method>`, and this is the BARE name the source
                 # spells, so the lookup is `by_method`.  A name two structs declare is genuinely
-                # ambiguous, and `_rewrite_method_calls` already refused to
-                # rewrite it, so there is nothing to say about it here that it
-                # has not said — hence the `== 1` and not a pick.
-                declared = by_method.get(node.member) or ()
+                # ambiguous on the SPELLING, and `_rewrite_method_calls`
+                # already refused to rewrite it — but the RECEIVER is not
+                # spelled, it is bound, and a binding that names one struct of
+                # the two settles it. `_owner_from_receiver_type` is that
+                # question; asking it before the `== 1` is what stops a
+                # depth-2 chain from needing the name to be unique when the
+                # field's declared type already says who the callee is.
+                declared = _owner_from_receiver_type(
+                    by_method.get(node.member) or (), base, chain, depth,
+                    cands, structs_by_name)
                 if len(declared) == 1:
                     ost = declared[0]
                     if depth > 1:
@@ -4357,7 +4383,18 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
         # everywhere else.  Decided by `struct_is_one_field`, the same predicate
         # the rewrite that makes `self.<field>` mean `self` is decided by, so
         # the two cannot disagree about which receivers are values.
-        if M.struct_is_one_field(owner):
+        #
+        # **…unless that one field is a FRAME.**  A one-word struct's receiver
+        # is its field's storage, and that storage can be an address; `self =
+        # <a word>` then overwrites the frame address the CALLER still holds, so
+        # the method's store does not reach its caller and every later `self.v`
+        # in the method reads the caller's object instead. Measured on both
+        # architectures as a SIGSEGV, and with the read half seeded by
+        # `_frame_receivers` it is reachable at all — which is why the two halves
+        # of `model.one_word_sole_field_frame` have to land together, and why
+        # they read it from one place.
+        if M.struct_is_one_field(owner) \
+                and M.one_word_sole_field_frame(owner, structs_by_name) is None:
             continue
         receivers = M.struct_receivers(owner)
         # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
@@ -5399,6 +5436,53 @@ def _type_rows(cands, name, decls=None):
     first, and a refusal that misreports why it fired is worse than one that
     does not report at all."""
     return M.field_type_rows(cands, name, decls)
+
+
+def _owner_from_receiver_type(declared, base, chain, depth, cands,
+                              structs_by_name):
+    """The structs among `declared` that the RECEIVER's own type names.
+
+    **The narrow form of `model`'s rule that "a field is lowered three ways and
+    which one applies is decided by the BINDING of the base, not by a type",
+    applied to a METHOD NAME rather than to a field access.**  `recv.m(x)`
+    carries no type on this path, which is why `by_method` is a
+    `{bare name: [struct, …]}` and why the loop above reads `len(declared) ==
+    1` — for a depth-1 receiver, a name two structs declare is genuinely
+    ambiguous and refusing is right.  It is not right for a depth-2 chain: the
+    receiver is a FIELD, and a field's declared type names the struct the word
+    in the slot belongs to.
+
+    Two depths, because they are two different facts:
+
+      * depth 1 — the receiver IS the frame the base holds, so the candidate
+        structs are the ones `hstruct` already agreed for `base`;
+      * depth > 1 — the receiver is the word in slot `outer`, so the fact is
+        `model.frame_field_type_candidates`, the SAME reader
+        `_typed_nested_frame` uses, and a disagreement is `_NOT_TYPED`'s answer
+        here too.
+
+    Only ever NARROWS.  A name nothing narrows, a type that does not settle it,
+    a field with two candidates that disagree, and a candidate set that does
+    not contain the type's struct all return `declared` unchanged — so the
+    `== 1` in the caller is still the gate and this can never turn an
+    ambiguous name into a chosen one on its own.  That is the property that
+    makes it safe to run on every call receiver rather than only on the ones
+    measured here.
+    """
+    declared = tuple(declared)
+    if len(declared) <= 1:
+        return declared
+    if depth > 1:
+        outer = chain.split(".")[-2]
+        nested, (disagree, _rows) = M.frame_field_type_candidates(
+            cands, outer, structs_by_name)
+        if disagree or nested is None:
+            return declared
+        names = {nested.name}
+    else:
+        names = {st.name for st in (cands or ())}
+    kept = tuple(st for st in declared if st.name in names)
+    return kept if len(kept) == 1 else declared
 
 
 def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
@@ -6508,6 +6592,21 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
     is only known once the fixpoint has run, which is after the rewrite.  So
     the check reads the REWRITTEN call: a `S_m` whose first argument is a
     holder of a struct that is not `S`.
+
+    **…except when `S` is ONE FIELD and its field is a frame, because then the
+    callee was not compiled to believe its receiver is an `S` at all.**  A
+    one-word struct's receiver IS its field, so `_frame_receivers` seeds the
+    method's receiver as a holder of whatever frame that field holds, and the
+    layout the callee writes through is that frame's.  `b.get()` where `b` is
+    an `Opt` frame and `Box`'s sole field is an `Opt` is therefore the one call
+    this check must not refuse, and refusing it named an expression the source
+    does not contain ("`Box_get()` writes its own struct's fields at `base +
+    8k` for Box's layout") about a program that is about to compute the right
+    answer.  So the comparison is against what the CALLEE was compiled to
+    believe — `model.one_word_sole_field_frame`, the same function that seeded
+    it — and not against the callee's own struct name.  It is a generalization
+    rather than an exception: for every other callee the two are the same
+    struct, so nothing that is accepted here was accepted before.
     """
     for node in M.iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.CallExpr) or not node.args:
@@ -6526,9 +6625,13 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
         recv = node.args[0]
         if not isinstance(recv, F.IdentExpr) or recv.name not in holders:
             continue
-        cands = [st.name for st in (by_name.get(recv.name) or [])]
-        if not cands or owner in cands:
+        # What the CALLEE writes through, which is its own layout for every
+        # callee but a ONE-FIELD one — see the docstring's last paragraph.
+        want = M.one_word_sole_field_frame(st, structs_by_name) or st
+        cands = [s.name for s in (by_name.get(recv.name) or [])]
+        if not cands or want.name in cands:
             continue
+        owner = want.name
         raise CodegenError(
             f"{recv.name}.{named[1]}() is dispatched to {owner}.{named[1]}() by "
             f"method NAME, and the receiver is a "
@@ -7489,9 +7592,62 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
+def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> dict:
+    """`{name: struct}` for a local whose construction bindings all AGREE.
+
+    **The same evidence `_one_word_field_map` reads, without the one-word
+    filter, and reduced to the case where it is unambiguous.** Both are read
+    from the binding rather than inferred — a local initialised from `S()`
+    holds an `S`, and nothing else on this path produces such a value — and
+    `_one_word_field_map` keeps the last struct while this keeps the LIST and
+    then throws the name away unless there is exactly one. That asymmetry is
+    deliberate and it is `_constructor_bindings`' reason restated for the one
+    question this table answers: `x = A()` on one path and `x = B()` on another
+    is one name with two layouts, and lifting `x.m()` to either one of them is a
+    wrong answer chosen by ordering.
+
+    `_constructor_bindings` is the implementation rather than a second walk of
+    the same bindings, and it is called with a `framed` map derived from
+    `structs_by_name` so the list it returns is over exactly the constructions
+    it was written for. The `type_constructor_kind` guard and the
+    `call_lowers_as_framed_construction` guard are therefore both this table's,
+    not re-derived — a call the emitters route to a type CONVERSION produces a
+    plain word that is not an `S`, and naming it one would lift `x.m()` to a
+    method of a struct `x` does not hold.
+
+    `owner` adds the method's own receiver, under whatever SPELLING that struct
+    uses (`M.struct_receivers`, because the receiver set is not the literal
+    `self` — a table that hard-coded one spelling would answer for `this` on the
+    strength of the other). It is the same fact by a different route: a method's
+    receiver IS its owner's struct, declared rather than bound. A ONE-field
+    owner is left out because `one_word` already carries it and holds it as a
+    plain word rather than as a frame, so a name in both is a name whose two
+    meanings would disagree — the same precedence `_seed_one_word_bindings`
+    states when a name appears in both of its tables.
+
+    `_one_word_field_map` is not merged into this, and the reason is that its
+    one-word filter and this table's agreement test answer different questions:
+    a one-word struct cannot be on a frame table at all
+    (`_one_word_constructor_bindings`' docstring says so), so a name this table
+    drops for two layouts is still a name that table records, and folding them
+    together would make the older table's verdict depend on this one's
+    conservatism.
+    """
+    framed = {name: st for name, st in (structs_by_name or {}).items()
+              if M.struct_is_framed(st)}
+    out = {name: cands[0]
+           for name, cands in _constructor_bindings(
+               fn, framed, functions).items()
+           if len(cands) == 1}
+    if owner is not None and M.struct_is_framed(owner):
+        for recv in M.struct_receivers(owner):
+            out.setdefault(recv, owner)
+    return out
+
+
 def _rewrite_one_word_field_method_calls(node, one_word: dict,
                                          structs_by_name: dict,
-                                         receiverless=()) -> None:
+                                         receiverless=(), bound=None) -> None:
     """`recv.f.m(x)` -> `F_m(recv.f, x)`, where `recv.f` is a ONE-WORD field.
 
     **This runs before `_rewrite_self_fields`, and it has to.** That rewrite is
@@ -7567,12 +7723,13 @@ def _rewrite_one_word_field_method_calls(node, one_word: dict,
         lambda n: None if (isinstance(n, F.CallExpr)
                            and isinstance(n.func, F.MemberExpr)
                            and _lift_one_word_field_method(
-                               n, one_word, structs_by_name, receiverless))
+                               n, one_word, structs_by_name, receiverless,
+                               bound))
         else n)
 
 
 def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
-                                receiverless) -> bool:
+                                receiverless, bound=None) -> bool:
     """The one call `_rewrite_one_word_field_method_calls` lifts. True if it did.
 
     Split out so the walk above stays a walk: the conditions are five facts about
@@ -7610,7 +7767,20 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     func = call.func
     obj = func.obj
     if isinstance(obj, F.IdentExpr):
-        st = one_word.get(obj.name)
+        # `one_word` FIRST: it is the more specific of the two, and a name in
+        # both is a name whose field IS the receiver, which is a different
+        # identity from the one that made the binding (`_seed_one_word_bindings`
+        # reads `holders` for the same reason).
+        #
+        # `bound` is the bare-receiver half and it only ever answers a name
+        # `_rewrite_method_calls` DECLINED, which is what makes it safe: this
+        # runs after that pass, so a call it could lift has already been lifted
+        # and its callee is an `IdentExpr` rather than a `MemberExpr`.
+        # Reaching here therefore means the name-only path had no single owner —
+        # i.e. the name is declared by two structs of this image or by none. The
+        # first is answerable from the binding and the second is not, because
+        # the `struct_methods` test below is what rejects it.
+        st = one_word.get(obj.name) or (bound or {}).get(obj.name)
         if st is None or not any(m.name == func.member
                                  for m in M.struct_methods(st)):
             return False
@@ -11258,8 +11428,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # (`_rewrite_one_word_field_method_calls` has the three refusals and the
         # measurement; `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the
         # source of the shape).
-        _rewrite_one_word_field_method_calls(fn.body, one_word,
-                                             structs_by_name, receiverless)
+        #
+        # `bound` is the same lift asked of a BARE receiver whose binding names
+        # the owner, which is the one case `one_word` cannot answer because the
+        # struct is a frame rather than a one-word word. Dispatch here is by NAME
+        # and `_method_owners` pops every ambiguous name precisely so
+        # `_rewrite_method_calls` cannot pick one — but every lowering decision
+        # on this path is made from the BINDING of a base rather than from its
+        # type (`model`'s own rule for a field), and `var o = Outer2()` names
+        # the owner of `o.get()` as plainly as the source spells it.
+        _rewrite_one_word_field_method_calls(
+            fn.body, one_word, structs_by_name, receiverless,
+            _bound_receiver_structs(fn, structs_by_name,
+                                    [f.name for f in functions], st))
         mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
                    for name, one in one_word.items()}
         _rewrite_self_fields(fn.body, mapping)
@@ -13063,7 +13244,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
                        constants: dict = None, traits: list = None,
-                       source: str = None) -> dict:
+                       source: str = None, fmt: str = "macho") -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
@@ -13167,13 +13348,29 @@ def _namespace_library(output: str, install_name: str, arch: str,
             f"doc/ABI.md keeps out of the boundary — and not something this "
             f"backend can paper over: emitting a link line with no definition "
             f"behind it turns a build error into a wrong answer at run time.")
-    binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
-        install_name, False, dep_install), [], install_name, arch=arch,
-        deps=dep_install or None)
+    if fmt == "elf":
+        # The EMPTY export table is the design here (see the docstring), so this
+        # is the one caller that says so: `build_elf_dylib` refuses an empty
+        # table by default because for anything else it means the build lost the
+        # module's API.
+        from formal import elf
+        binary = elf.build_elf_dylib(
+            b"", elf.DYLIB_BASE, [], os.path.basename(output),
+            external_syms=None,
+            deps=[os.path.basename(name) for name in dep_install],
+            namespace=True)
+    else:
+        binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
+            install_name, False, dep_install), [], install_name, arch=arch,
+            deps=dep_install or None)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
-    _ad_hoc_sign(output)
+    if fmt != "elf":
+        # An ELF image carries no code signature and none is expected; the Mach-O
+        # half still needs one, and `codesign -v` is what
+        # `test_formal_x86_64_dylib.py` asserts of it.
+        _ad_hoc_sign(output)
     manifest_path = write_dylib_manifest(output, install_name, [], source=source,
                                          module=module, constants=constants)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
@@ -13188,7 +13385,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
         "exports": [],
         "reexports": reexports,
         "traits": list(traits or []),
-        "backend": f"{arch}/macho-dylib-namespace",
+        "backend": f"{arch}/{fmt}-dylib-namespace",
     }
 
 
@@ -13318,13 +13515,22 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # and does not is worse than a hardcoded literal: the caller gets an
     # artifact it did not ask for and no diagnostic. Refusing says the gap is
     # the container, which is where the work is.
-    if fmt != "macho":
+    if fmt not in ("macho", "elf"):
         raise FormalBuildError(
-            f"a formal dylib is a Mach-O container; {fmt!r} was asked for and "
-            f"this path has no {fmt} dylib emitter (formal/elf.py builds "
-            f"executables only — no .dynamic/.dynsym/.dynstr/.hash). The code "
-            f"generator is selected by arch={arch!r} and does honour it; the "
-            f"container is the missing half.")
+            f"unknown dylib container {fmt!r} (expected macho|elf)")
+    # `fmt` selects the CONTAINER and the CODEGEN, and both are real for both
+    # values now. The previous condition was `not fmt_wants_macho(arch) and fmt !=
+    # "macho"`, which on a Mach-O host is `False and …` for EVERY `fmt` — so
+    # `fmt="elf"` on macOS was accepted, ignored, and returned a Mach-O labelled
+    # by the caller's own argument. An argument that reads like it is doing
+    # something and does not is worse than a hardcoded literal: the caller gets
+    # an artifact it did not ask for and no diagnostic.
+    #
+    # `formal/elf.py::build_elf_dylib` is the ELF emitter, and it is the SAME
+    # export information `build_macho_dylib` writes into its trie — a name and an
+    # address per export — so what the two differ on is the container and not the
+    # analysis. See that function for why there is no `.plt` and one
+    # `R_X86_64_GLOB_DAT` per extern instead.
     reexports = dict(reexports or {})
 
     # The libraries THIS library links. Their export spellings decide how a
@@ -13441,7 +13647,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.
-    _audit_link_line_containers(linked, fmt, "library")
+    _audit_link_line_containers(linked, fmt, "library", arch)
     dylib_syms = {}
     for d in linked:
         for bare, mangled in (d.get("map") or {}).items():
@@ -13511,7 +13717,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 f", whose libraries are on this one's link line.")
         return _namespace_library(
             output, install_name, arch, reexports, dylib_syms, dep_install,
-            linked,
+            linked, fmt=fmt,
             source=source_paths[0],
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
@@ -13543,6 +13749,79 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # `model.STACK_FLOOR_BUDGET_BYTES`. A library with no module globals has the
     # same two reserved words every other image has.
     has_globals = True
+    if fmt == "elf":
+        # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
+        # code starts after a load-command list whose SIZE depends on whether
+        # there are externs and on how many dependencies there are, so the
+        # first pass has to discover the externs before the base address can be
+        # chosen. An ELF image's headers are a fixed size and its code starts
+        # immediately after them, so the base is known before anything is
+        # emitted and only the GOT addresses — which need `len(code)` — come
+        # second. Same `resolve_extern` call the executable ELF path makes.
+        from formal import elf
+        elf_soname = os.path.basename(output)
+        elf_deps = [os.path.basename(name) for name in dep_install]
+        codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                                dylib_exports=dylib_exports)
+        try:
+            code, info = codegen.compile(ordered, base_addr=elf.DYLIB_BASE,
+                                         emit_startup=False,
+                                         structs=library_structs)
+        except CodegenError as e:
+            raise FormalBuildError(str(e))
+        external_syms = info.get("external_syms") or []
+        unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
+                                           "library", dylib_exports)
+        if unaccounted:
+            raise FormalBuildError(
+                _unaccounted_report(source_paths[0], unaccounted, "library"))
+        exports = _formal_exports(source_paths, ordered, info, module_prefixes,
+                                  _method_exports(source_paths, structs_by_file,
+                                                  module_prefixes))
+        if not exports:
+            raise FormalBuildError("formal dylib has no public functions")
+        if external_syms:
+            got = elf.compute_got_addrs(
+                len(code), external_syms, vaddr=elf.DYLIB_BASE,
+                soname=elf_soname, exports=exports,
+                needed=elf.elf_needed(elf_deps, True))
+            codegen.asm.resolve_extern(got)
+            code = bytes(codegen.asm.sections["text"])
+        binary = elf.build_elf_dylib(
+            code, elf.DYLIB_BASE, exports, elf_soname,
+            external_syms=external_syms,
+            deps=elf.elf_needed(elf_deps, bool(external_syms)),
+            globals_image=globals_image(fmt))
+        with open(output, "wb") as f:
+            f.write(binary)
+        os.chmod(output, 0o755)
+        # NO `_ad_hoc_sign`: an ELF image carries no code signature and none is
+        # expected — `codesign` is a Mach-O container's business, and its absence
+        # is what makes the file readable by `ld` at all.
+        manifest_path = write_dylib_manifest(
+            output, install_name, exports, source=source_paths[0],
+            module=(module_prefixes or {}).get(source_paths[0])
+            or _module_prefix(source_paths[0]),
+            constants=constants)
+        if linked:
+            _record_link_deps(manifest_path, linked)
+        result = {
+            "manifest_path": manifest_path,
+            "path": output,
+            "code": code,
+            "binary": binary,
+            "info": info,
+            "exports": exports,
+            "backend": f"{arch}/elf-dylib",
+            # Same field, same meaning, same shape as the program path's and the
+            # Mach-O library's: a module dylib whose source declares `@admitted`
+            # contracts is the library half of an admission.
+            "admitted": _admitted_summary(source_paths[0]),
+        }
+        if prove:
+            _prove_dylib_result(result, code, info, exports, ordered, output,
+                                check)
+        return result
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
@@ -13643,34 +13922,49 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     }
 
     if prove:
-        from formal.arm64_proof_gen import generate_dylib_proof, _dylib_spec_lean
-        # The spec comes from the export's SOURCE, and the proof checks the
-        # machine against it (`bv_decide`), so a wrong spec is a build failure
-        # rather than a believed claim.  An export whose body is not a single
-        # `return` of pure arithmetic over its parameter gets no spec, and the
-        # proof keeps naming that export's contract as an open obligation
-        # instead of guessing one.
-        specs = {}
-        for fn in ordered:
-            spec = _dylib_spec_lean(fn)
-            if spec is not None:
-                specs[fn.name] = spec
-        proof = generate_dylib_proof(code, info, exports, specs)
-        proof_path = os.path.splitext(output)[0] + "_proof.lean"
-        if os.path.exists(proof_path):
-            os.chmod(proof_path, 0o644)
-        with open(proof_path, "w") as f:
-            f.write(proof)
-        os.chmod(proof_path, 0o444)
-        result["proof_path"] = proof_path
-        if check:
-            from formal.lean import check_proof_cached
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            ok, detail, cached, n_sorries = check_proof_cached(
-                proof_path, repo_root=repo_root)
-            result["proof_checked"] = ok
-            result["proof_cached"] = cached
-            result["proof_sorries"] = n_sorries
-            if not ok:
-                raise FormalBuildError(f"proof check failed: {detail}")
+        _prove_dylib_result(result, code, info, exports, ordered, output, check)
     return result
+
+
+def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
+                        ordered: list, output: str, check: bool) -> None:
+    """Emit and (optionally) typecheck a library's proof. Mutates `result`.
+
+    Shared by the two containers rather than repeated, because the proof is a
+    property of the CODE and not of the container: it takes `code` and `info`
+    and knows nothing about Mach-O or ELF, and a second copy for the ELF
+    library is a second place for the spec set to differ between two libraries
+    built from one source — which is exactly what `bugs/FORMAL_opus_dylib
+    _termination_handoff.md` §OPUS-2 records an equality check already being
+    unable to distinguish.
+    """
+    from formal.arm64_proof_gen import generate_dylib_proof, _dylib_spec_lean
+    # The spec comes from the export's SOURCE, and the proof checks the
+    # machine against it (`bv_decide`), so a wrong spec is a build failure
+    # rather than a believed claim.  An export whose body is not a single
+    # `return` of pure arithmetic over its parameter gets no spec, and the
+    # proof keeps naming that export's contract as an open obligation
+    # instead of guessing one.
+    specs = {}
+    for fn in ordered:
+        spec = _dylib_spec_lean(fn)
+        if spec is not None:
+            specs[fn.name] = spec
+    proof = generate_dylib_proof(code, info, exports, specs)
+    proof_path = os.path.splitext(output)[0] + "_proof.lean"
+    if os.path.exists(proof_path):
+        os.chmod(proof_path, 0o644)
+    with open(proof_path, "w") as f:
+        f.write(proof)
+    os.chmod(proof_path, 0o444)
+    result["proof_path"] = proof_path
+    if check:
+        from formal.lean import check_proof_cached
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ok, detail, cached, n_sorries = check_proof_cached(
+            proof_path, repo_root=repo_root)
+        result["proof_checked"] = ok
+        result["proof_cached"] = cached
+        result["proof_sorries"] = n_sorries
+        if not ok:
+            raise FormalBuildError(f"proof check failed: {detail}")

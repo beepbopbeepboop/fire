@@ -17072,6 +17072,53 @@ def field_type_one_word_struct(structs, name, decls: dict):
     return st
 
 
+def one_word_sole_field_frame(struct_def, decls: dict):
+    """The FRAMED struct a ONE-FIELD struct's sole field holds, or None.
+
+    **The one fact two callers need for opposite reasons, and neither of them
+    can derive it.**
+
+    A one-word struct's receiver IS its field: `struct_is_framed` is False, so
+    every frame table in the tree skips it and the word the caller hands it is
+    that field's storage. That storage can be a FRAME ADDRESS rather than a
+    value, and the two consequences pull opposite ways:
+
+      * `formal/build.py::_frame_receivers` seeds a method of such a struct as a
+        HOLDER of that frame. Without it, `self.v` has no home: the receiver is
+        not in the holder set, the field analysis has no case for a word that is
+        both a receiver and an address, and the emitter reports
+        `field_access_refusal` about an expression the source never spells.
+      * `formal/build.py::_collect_receiver_rebinds` must NOT grant its
+        one-field exemption there, because `self = <a word>` overwrites the
+        frame address the CALLER still holds. The method's own later reads then
+        read the caller's object and its store never reaches its caller, which
+        is a wrong answer on both machines rather than a crash.
+
+    So the answer is read ONCE, here, and both callers' predicates are opposites
+    of each other: `struct_is_one_field(owner) and this is None` is a plain
+    word, `not None` is an address. Two copies of the question would be two
+    places for them to disagree about which kind of receiver a struct has, and
+    that disagreement is a segfault rather than a wrong message.
+
+    Read off the DECLARED type through `frame_field_type_candidates` — the same
+    agree-or-refuse reader every other declared-type question on this path goes
+    through — so a field two candidates annotate differently answers None rather
+    than a pick. None is also the answer for a sole field that is a value, for
+    a field whose type names no struct of this module, and for an owner that is
+    not one field at all; the caller that needs the "agreed and a value" case
+    apart from the "disagreed" one asks `field_type_is_value`, as
+    `frame_field_type_candidates`' own docstring says its callers should.
+    """
+    if not struct_is_one_field(struct_def):
+        return None
+    sole = struct_sole_field_name(struct_def)
+    if sole is None:
+        return None
+    nested, (disagree, _rows) = frame_field_type_candidates([struct_def], sole,
+                                                            decls)
+    return None if disagree else nested
+
+
 def one_word_nested_sole_field_refusal(slot: str, st) -> str:
     """`slot.f` where `f` is not the one field of the one-word struct in `slot`.
 
@@ -18949,6 +18996,78 @@ def struct_construction_plan(struct_def, call, decls: dict,
     return ((CONSTRUCTION_INIT,
              [(field, struct_frame_slot(struct_def, field), arg)
               for field, arg in bound.items() if arg is not None]), None)
+
+
+def one_word_construction(struct_def, call, decls: dict, candidates: dict,
+                          rets=None) -> tuple:
+    """`(value, refusal)` — the ONE WORD a construction of a zero-or-one-field
+    struct evaluates to at the site, or why there is not one.
+
+    `value` is an AST node for the emitter to evaluate, or None for "a fresh
+    word" — the zero a construction that stores nothing evaluates to.  The two
+    are kept apart because None is also what a REFUSAL returns, and a refusal
+    must never lower to a zero: that is the shape of wrong answer this whole
+    path exists to prevent, and a caller that read the refusal as the value
+    would produce exactly one, silently.
+
+    **THE decision, in the shared model, because it was in two emitters and one
+    of them was wrong.**  Both backends asked `struct_construction_plan` only
+    when the call carried an ARGUMENT, and answered `S()` — no argument at all
+    — with a fresh zero word without asking.  So a one-field struct whose
+    `__init__` takes no required parameter had its constructor body DROPPED at
+    the construction site:
+
+        class C:
+            def __init__(self):
+                self.n = 20
+            def get(self):
+                return self.n
+
+        def main(n: Int) -> Int:
+            var c = C()
+            return c.get()
+
+    built, ran, and returned 0 on both architectures, where CPython returns 20.
+    Nothing was refused, nothing was printed, the exit status was a plausible
+    small integer, and the two machines AGREED — so no parity row, no
+    `refuse:` row and no engine diff could see it.  A two-field struct with the
+    same constructor answered 203, because the framed emitter has always asked
+    the plan for every shape; the difference was never about `__init__`, it was
+    about which emitter the construction reached.
+
+    Reading the plan for EVERY shape is also what makes the argument-less
+    constructions that already worked here stop being special cases.  `S()`
+    against a struct with no constructor is `CONSTRUCTION_DEFAULT` with no
+    stores, and a constructor that assigns nothing is `CONSTRUCTION_INIT` with
+    no stores: both are None here, which is the fresh word they always were. A
+    constructor the caller left an argument to defaults on is `CONSTRUCTION_INIT`
+    with that default's expression in it, which is a store the previous gate
+    could not see.  And a constructor that REQUIRES a parameter is now the
+    arity refusal the plan has always described ("`Bag4()` against
+    `def __init__(out self, n, m)` is a `TypeError`") instead of a silent zero,
+    which is the same refusal the framed emitter and the build pass have always
+    raised for it.
+
+    The rule that turns a plan into a word is the one `struct_construction_plan`
+    already states for a one-word struct: there is nowhere to STORE the
+    constructor's value — the receiver IS the field — so the LAST of the inlined
+    body's stores is the whole result.  A one-field struct has at most one such
+    store, so "last" is the only one; saying it this way keeps the emitters from
+    having to know that, and keeps a future multi-store body on the same
+    sentence rather than on an assumption about field counts."""
+    plan, refusal = struct_construction_plan(struct_def, call, decls, candidates,
+                                             rets)
+    if refusal is not None:
+        return (None, refusal)
+    # `CONSTRUCTION_DEFAULT` carries NO payload at all (it is the one-element
+    # `(CONSTRUCTION_DEFAULT,)`), so the payload is read by arity and not by
+    # indexing: the emitters' old `plan[1]` was a shape that would have raised
+    # the moment a partial construction came back as DEFAULT, and the fix for a
+    # wrong answer is not a second wrong answer wearing an IndexError.
+    payload = plan[1] if len(plan) > 1 else ()
+    if plan[0] in (CONSTRUCTION_INIT, CONSTRUCTION_DEFAULT):
+        return (payload[-1][2] if payload else None, None)
+    return (construction_supplied_argument(call), None)
 
 
 def construction_supplied_argument(call):

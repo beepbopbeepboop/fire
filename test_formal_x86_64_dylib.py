@@ -49,6 +49,7 @@ FIRE = os.path.join(HERE, "fire.py")
 MH_MAGIC_64 = 0xFEEDFACF
 CPU_TYPE_X86_64 = 0x01000007
 MH_DYLIB = 0x6
+ET_DYN = 3
 LC_SEGMENT_64 = 0x19
 S_ATTR_PURE_INSTRUCTIONS = 0x80000000
 S_ATTR_SOME_INSTRUCTIONS = 0x00000400
@@ -188,42 +189,44 @@ def test_x86_64_dylib_passes_strict_validation(tmpdir, shared):
 
 
 def test_the_dylib_container_is_what_the_caller_asked_for(tmpdir, shared):
-    """A Mach-O container is what this path has, and `fmt` says so out loud.
+    """Both containers are real now, so `fmt` names what comes out.
 
     `compile_formal_dylib(fmt="elf")` used to be accepted on a Mach-O host and
-    produce a Mach-O anyway — the refusal was conditioned on
+    produce a Mach-O anyway -- the refusal was conditioned on
     `not fmt_wants_macho(arch)`, which on this host is false for every `fmt`.
-    An argument that is accepted and ignored is worse than a hardcoded
-    literal: the caller gets an artifact it did not ask for and no
-    diagnostic, three steps before dyld reports a container mismatch.
+    An argument that is accepted and ignored is worse than a hardcoded literal:
+    the caller gets an artifact it did not ask for and no diagnostic, three
+    steps before dyld reports a container mismatch.
+
+    So the same refusal became a real emitter (`formal/elf.py::build_elf_dylib`)
+    and the assertion became the one the argument always implied: the FILE
+    carries the container that was asked for. Both are read from the file rather
+    than from the result dict, because a result dict is a claim and a file is
+    the artifact.
 
     The container assertion is also the check the `arch` case in
     `test_formal_dylib.py` was missing: it asserted the ARCHITECTURE, which a
     Mach-O labelled `x86_64` passes, and so could not see the wrong container.
     """
-    from formal.build import compile_formal_dylib, FormalBuildError
+    from formal.build import compile_formal_dylib
     src = os.path.join(tmpdir, "anyfmt.mojo")
     with open(src, "w") as f:
         f.write("def add1(x):\n  return x + 1\n")
     out = os.path.join(tmpdir, "anyfmt.dylib")
-    try:
-        compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
-                             prove=False, check=False)
-    except FormalBuildError as e:
-        msg = str(e)
-        check("elf" in msg,
-              f"the refusal does not name the format it cannot honour: {msg!r}")
-        check("mach-o" in msg.lower(),
-              f"the refusal does not say what the container IS, so a reader "
-              f"cannot tell whether the gap is the code or the container: "
-              f"{msg!r}")
-    else:
-        raise TestFailure(
-            "compile_formal_dylib(fmt='elf') returned an image: this path "
-            "has no ELF dylib emitter, so it is handing the caller a Mach-O "
-            "under the name of the format it did not ask for")
 
-    # And the format it CAN honour produces the container it names.
+    compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
+                         prove=False, check=False)
+    with open(out, "rb") as f:
+        head = f.read(64)
+    check(head[:4] == b"\x7fELF",
+          f"fmt='elf' did not produce an ELF container: {head[:4]!r}")
+    # e_type is ET_DYN and not ET_EXEC: a shared OBJECT. An ELF executable on a
+    # module library is the mirror image of the defect this row is about -- a
+    # container the caller did not ask for -- and it loads as nothing at all.
+    check(struct.unpack_from("<H", head, 16)[0] == ET_DYN,
+          "fmt='elf' produced an ELF image that is not ET_DYN")
+
+    # And the format it can always honour still produces the container it names.
     compile_formal_dylib([src], output=out, arch="x86_64", fmt="macho",
                          prove=False, check=False)
     with open(out, "rb") as f:
@@ -232,56 +235,269 @@ def test_the_dylib_container_is_what_the_caller_asked_for(tmpdir, shared):
           "fmt='macho' did not produce a 64-bit Mach-O container")
 
 
-def test_an_elf_image_with_a_module_import_is_refused(tmpdir, shared):
-    """`fmt="elf"` plus an import is refused, not emitted as a broken image.
+def test_an_elf_module_dylib_is_a_loadable_object(tmpdir, shared):
+    """The ELF library's three things an `ET_EXEC` does not have.
 
-    This was the worst shape the container gap took. `formal/imports.py` builds
-    module libraries with `build_macho_dylib`, so on an ELF build they are Mach-O
-    — and `formal/elf.py`'s `build_elf` carries ONE `lib_name`
-    (`libc.so.6`) and writes exactly one `DT_NEEDED`, with no `.dynamic` entry
-    for anything else. The libraries were built, audited (so their symbols
-    counted as `provided` and `_audit_bound_symbols` passed) and then put
-    nowhere.
+    The whole gap this file's ELF half is about was that `fmt="elf"` had no
+    shared-object emitter, so the "fix" was a refusal. These are the three
+    pieces a library needs and an executable does not, asserted from the FILE
+    through a reader that finds `.dynsym` and `.hash` by their `DT_*` VIRTUAL
+    addresses -- so a table that is present but not MAPPED cannot pass, which is
+    the failure a reader that remembered its own offsets would not see.
 
-    Measured before the fix, on this exact program:
+      * a `DT_SONAME` naming the library, which is what a consumer puts in its
+        own `DT_NEEDED` and what the loader records as what it opened;
+      * a `.hash`, because the loader looks an exported name up by HASHING it
+        and a library with no table exports nothing a dynamic linker can find;
+      * the exported symbols themselves, with the addresses the manifest says.
 
-        external_syms    ['ANY_add1_9f63a2', 'printf']
-        DT_NEEDED count  1        (libc.so.6)
-        .dynstr          ANY_add1_9f63a2, printf, libc.so.6
-
-    so the image built, passed the audit that exists to catch exactly this,
-    and would die at load on a symbol its own source imports. The audit passes
-    because the library's manifest says the symbol is provided — which is true,
-    and irrelevant, since no ELF loader will ever open that Mach-O.
-
-    An ELF image with NO import still builds; that is the assertion that the
-    refusal is about the import and not about the format.
+    And the export table is read with `formal.elf.elf_dylib_exports`, which is
+    the ELF counterpart of the `macho_dylib_exports` used two tests above --
+    both read the ARTIFACT, and neither takes the build's word for what it
+    wrote.
     """
-    from formal.build import compile_formal, FormalBuildError
-    lib = os.path.join(tmpdir, "elfmod.mojo")
+    from formal import elf
+    from formal.build import compile_formal_dylib
+    src = os.path.join(tmpdir, "elfmod.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n\ndef twice(x):\n  return x * 2\n")
+    out = os.path.join(tmpdir, "elfmod.so")
+    result = compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
+                                  prove=False, check=False)
+    check(result["backend"] == "x86_64/elf-dylib",
+          f"the library reported backend {result['backend']!r}")
+    with open(out, "rb") as f:
+        data = f.read()
+
+    head = elf._read_header(data, out)
+    dyn = elf._dyn_entries(data, head)
+    tags = [t for t, _v in dyn]
+    check(elf.DT_SONAME in tags,
+          f"the library carries no DT_SONAME, so a consumer has nothing to "
+          f"name in its own DT_NEEDED: tags {[hex(t) for t in tags]}")
+    check(elf.DT_HASH in tags,
+          f"the library carries no DT_HASH, so a loader cannot FIND an export "
+          f"however many `.dynsym` entries it has: tags {[hex(t) for t in tags]}")
+
+    strings = elf._at_vaddr(data, head, elf.dyn_tag(dyn, elf.DT_STRTAB),
+                            elf.dyn_tag(dyn, elf.DT_STRSZ))
+    soname = elf._st_name(strings, elf.dyn_tag(dyn, elf.DT_SONAME))
+    check(soname == os.path.basename(out),
+          f"DT_SONAME is {soname!r} and the file is "
+          f"{os.path.basename(out)!r}; those are the two names that have to "
+          f"agree")
+
+    # Every exported name is in the `.hash` chain, which is the property a
+    # loader depends on and the one a table of plausible numbers would not have.
+    # EVERY `.dynsym` entry is reachable by walking the chains, which is what a
+    # loader does: it hashes the NAME, takes the bucket head, and follows the
+    # chain comparing names. A table whose heads are in range and whose chains
+    # omit a symbol is indistinguishable from a correct one until the lookup
+    # misses, and then the library exports nothing at all.
+    hash_vaddr = elf.dyn_tag(dyn, elf.DT_HASH)
+    nbucket, nchain = struct.unpack_from(
+        "<II", elf._at_vaddr(data, head, hash_vaddr, 8), 0)
+    check(nbucket >= 1 and nchain >= 2,
+          f"a DT_HASH table with {nbucket} bucket(s) and {nchain} chain(s) is "
+          f"not one a loader can walk")
+    table = elf._at_vaddr(data, head, hash_vaddr,
+                          (2 + nbucket + nchain - 1) * 4)
+    _nb, _nc = struct.unpack_from("<II", table, 0)
+    heads = struct.unpack_from(f"<{nbucket}I", table, 8)
+    links = struct.unpack_from(f"<{nchain - 1}I", table, 8 + nbucket * 4)
+    reachable = set()
+    for h in heads:
+        i = h
+        while i:
+            check(i not in reachable,
+                  f"the hash chain for bucket {heads.index(h)} revisits index "
+                  f"{i}; a loader would loop rather than stop")
+            reachable.add(i)
+            i = links[i - 1]
+    found = elf.elf_dylib_exports(out)
+    wanted = {e["symbol"] for e in result["exports"]}
+    missing = sorted(n for n in wanted if n not in found)
+    check(not missing,
+          f"these exports are not in the `.dynsym` a consumer would read: "
+          f"{missing}")
+    # The chain stores `.dynsym` INDICES and `.dynsym` stores `.dynstr`
+    # OFFSETS, so the walk is over indices -- and `_dynsym_entries` INCLUDES
+    # index 0, the mandatory undefined symbol, so entry k of that list IS
+    # index k. Getting that off by one makes a correct table look half
+    # unreachable.
+    unreachable = sorted(
+        _st_name_at(strings, off)
+        for i, (off, _info, shndx, _v) in
+        enumerate(elf._dynsym_entries(data, head))
+        if shndx != 0 and i not in reachable)
+    check(not unreachable,
+          f"these symbols are in `.dynsym` but no hash chain reaches them, so "
+          f"a loader cannot find them by name: {unreachable}")
+
+    # The addresses come back as the ones the build recorded, which is the
+    # whole point of reading the artifact rather than the manifest.
+    for e in result["exports"]:
+        check(found.get(e["symbol"]) == e["entry"],
+              f"{e['symbol']} reads back at "
+              f"{found.get(e['symbol']) and hex(found[e['symbol']])} and was "
+              f"written at {hex(e['entry'])}")
+
+    # …and the segments cover the whole BODY, with no gap and nothing past the
+    # end. Stated as an interval rather than as "every byte" because the ELF
+    # header and the program headers belong to no segment by design, and the
+    # tail padded up to `p_align` belongs to none either; what has to hold is
+    # that every byte from the end of the headers to the end of the last
+    # `PT_LOAD` is inside some `PT_LOAD`. A gap there is a region the loader
+    # cannot read, and `DT_RELA` was the one this caught: before the fix
+    # `build_elf` stopped the first segment at `.globals`, leaving
+    # `.rela.dyn` claimed by nothing.
+    covered = []
+    for p_type, _f, p_offset, _v, p_filesz, _m in \
+            elf._program_headers(data, head):   # the ELF half's own reader
+        if p_type == 1:
+            covered.append((p_offset, p_offset + p_filesz))
+    e_phoff, = struct.unpack_from("<Q", data, 32)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    body_start = e_phoff + e_phnum * e_phentsize
+    body_end = max(e for _s, e in covered)
+    gaps = []
+    cursor = body_start
+    for start, end in sorted(covered):
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    check(not gaps and cursor == body_end,
+          f"the image's segments do not tile its body: gaps {gaps}, they end "
+          f"at {cursor}, and the last segment claims up to {body_end}")
+    # What is past the last segment is page padding to `p_align`, and padding
+    # is zeros: a byte of slack the emitter was going to write into is the
+    # Mach-O defect this file's own `every byte of the dylib is claimed by a
+    # segment` row is about, in the container where there is no `codesign` to
+    # complain about it.
+    tail = data[body_end:]
+    check(not any(tail),
+          f"{sum(1 for b in tail if b)} non-zero byte(s) past the last "
+          f"segment's {len(tail)}-byte tail")
+    check(len(data) % 0x1000 == 0,
+          f"the image is {len(data)} bytes, which is not a page multiple, so "
+          f"the padding is not what the PT_LOAD's p_align says it is")
+
+
+def _st_name_at(strings, offset):
+    """The name at a `.dynstr` offset, or "" past the end.
+
+    Offset-based rather than a search, because the walk above is over `.dynsym`
+    indices and the question each one asks is "what name does the loader read
+    here" — the same question, answered by the same arithmetic the loader uses.
+    """
+    end = strings.find(b"\0", offset)
+    return "" if end < 0 else strings[offset:end].decode("utf-8", "replace")
+
+
+def test_the_elf_dylib_refuses_what_it_cannot_represent(tmpdir, shared):
+    """Two refusals, and they are refusals rather than images on purpose.
+
+    A shared object with an empty export table and no `DT_SONAME` is a file
+    that loads and provides nothing, which is the one outcome worse than
+    refusing -- it moves the failure to run time and to a message about a
+    symbol. `formal/elf.py::build_elf_dylib` says so at the point where the
+    omission is visible.
+
+    The namespace library is the one caller whose empty export table IS the
+    design (`formal/build.py::_namespace_library`: a package `__init__` whose
+    whole API is re-exported from libraries already on the link line), so it
+    passes `namespace=True` and the check has to distinguish "deliberately
+    empty" from "accidentally empty" rather than refusing both.
+    """
+    from formal import elf
+    src = os.path.join(tmpdir, "empty.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n")
+    for kwargs, needle in (
+            ({"exports": [], "soname": "x.so"},
+             "no exported symbols"),
+            ({"exports": [{"symbol": "a", "entry": 0x400000}], "soname": None},
+             "DT_SONAME")):
+        try:
+            elf.build_elf_dylib(b"\x90" * 8, **kwargs)
+        except ValueError as e:
+            check(needle in str(e),
+                  f"the refusal does not say what is missing: {str(e)!r} "
+                  f"(looked for {needle!r})")
+        else:
+            raise TestFailure(
+                f"build_elf_dylib({kwargs!r}) returned an image: a shared "
+                f"object that provides nothing is a file that loads and binds "
+                f"no name")
+
+    # …and the deliberate one is accepted, so the refusal above is about the
+    # omission and not about an empty table being impossible.
+    blob = elf.build_elf_dylib(b"", exports=[], soname="ns.so",
+                               namespace=True)
+    check(blob[:4] == b"\x7fELF" and len(blob) > 0,
+          "a namespace library did not build")
+
+
+def test_an_elf_image_with_a_macho_module_is_refused(tmpdir, shared):
+    """The cross-container refusal is still the answer, for a different reason.
+
+    `formal/imports.py::build_module_dylib` builds a library in
+    `default_format(arch)` -- the HOST's container -- while `compile_formal`'s
+    `fmt` is the CALLER's. On Linux the two agree and there is nothing to say;
+    on a Mach-O host, asking for an ELF image builds the module as a Mach-O,
+    and `_audit_link_line_containers` refuses with the mismatch. That is the
+    honest answer and it names the file to rebuild.
+
+    What this row is NOT is the old test's assertion that an ELF image with an
+    import is refused because there is no ELF emitter. That was true while
+    there was no emitter; the emitter is now `formal/elf.py::build_elf_dylib`
+    and `compile_formal_dylib(fmt="elf")` returns a real object (the test
+    above). So the refusal that remains is about the LINK LINE, and it has to
+    say so -- a reader who was told "this path has no ELF dylib emitter" would
+    go looking for an emitter that is right there.
+
+    An ELF image with NO import still builds either way, and that is the
+    assertion that the refusal is about the link line and not the format.
+    """
+    from formal.build import compile_formal, FormalBuildError, default_format
+    lib = os.path.join(tmpdir, "elfmod2.mojo")
     with open(lib, "w") as f:
         f.write("def add1(x):\n  return x + 1\n")
-    prog = os.path.join(tmpdir, "elfimp.mojo")
+    prog = os.path.join(tmpdir, "elfimp2.mojo")
     with open(prog, "w") as f:
-        f.write("import elfmod\n\ndef main():\n  return elfmod.add1(41)\n")
+        f.write("import elfmod2\n\ndef main():\n  return elfmod2.add1(41)\n")
+
+    if default_format("x86_64") == "elf":
+        # A host whose native container IS elf: the module is built as an ELF
+        # shared object and the image links it. Nothing is refused, and the
+        # program is the first end-to-end ELF module link in the tree.
+        result = compile_formal(prog, output=os.path.join(tmpdir, "e.elf"),
+                                arch="x86_64", fmt="elf", prove=False,
+                                check=False)
+        check(result["backend"] == "x86_64/elf",
+              f"an ELF module link reported backend {result['backend']!r}")
+        return
 
     try:
-        compile_formal(prog, output=os.path.join(tmpdir, "elfimp.elf"),
+        compile_formal(prog, output=os.path.join(tmpdir, "elfimp2.elf"),
                        arch="x86_64", fmt="elf", prove=False, check=False)
     except FormalBuildError as e:
         msg = str(e)
         check("elf" in msg,
               f"the refusal does not name the format: {msg!r}")
-        check("mach-o" in msg.lower(),
-              f"the refusal does not say the module libraries are Mach-O, so "
-              f"a reader cannot tell which half is missing: {msg!r}")
+        check("macho" in msg.lower(),
+              f"the refusal does not say which container the library is in, "
+              f"so a reader cannot tell WHICH FILE is wrong: {msg!r}")
+        check("no elf dylib emitter" not in msg.lower(),
+              f"the refusal still claims there is no ELF dylib emitter, and "
+              f"there is one (`formal/elf.py::build_elf_dylib`): {msg!r}")
     else:
         raise TestFailure(
-            "an ELF image importing a module was emitted: the module's "
-            "library is a Mach-O that no ELF loader will open, so the image "
-            "carries the symbol with nothing providing it")
+            "an ELF image linked a MACH-O module library: no ELF loader will "
+            "ever open that Mach-O, so the image carries the symbol with "
+            "nothing providing it")
 
-    # The format itself is fine — it is the module link line it cannot carry.
+    # The format itself is fine -- it is the module link line it cannot carry.
     lone = os.path.join(tmpdir, "elfsolo.mojo")
     with open(lone, "w") as f:
         f.write("def main():\n  printf(\"%d\", 42)\n  return 0\n")
@@ -473,8 +689,12 @@ TESTS = [
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
      test_the_dylib_container_is_what_the_caller_asked_for),
+    ("an ELF module dylib is a loadable object",
+     test_an_elf_module_dylib_is_a_loadable_object),
+    ("the ELF dylib refuses what it cannot represent",
+     test_the_elf_dylib_refuses_what_it_cannot_represent),
     ("an ELF image with a module import is refused",
-     test_an_elf_image_with_a_module_import_is_refused),
+     test_an_elf_image_with_a_macho_module_is_refused),
     ("the link line containers must agree",
      test_the_link_line_containers_must_agree),
     ("every byte of the x86-64 dylib is claimed by a segment",

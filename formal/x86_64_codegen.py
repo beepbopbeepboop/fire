@@ -7244,42 +7244,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"image built and then failed to load). The by-reference "
                 f"receiver that gives one is switched off "
                 f"({M.WIDE_RECEIVER_ENV}=0)")
-        if e.args or e.kwargs:
-            # A ONE-FIELD struct with an argument: the receiver IS the field, so
-            # the argument is not stored, it is the result.  What is refused is
-            # what the shared DECISION refuses, by name — see
-            # `model.struct_construction_plan`, which is the same function
-            # arm64 calls, so the two architectures cannot disagree about which
-            # of the shapes this is or about why one of them is refused.
-            #
-            # A struct that DECLARES an `__init__` is the one case where the
-            # result is not simply the argument: the constructor's body decides
-            # what lands in the field, and a body this path inlines gives a
-            # list of stores whose LAST one is the field's final value.  The
-            # same word for the same reason — the receiver IS the field, so
-            # there is nothing to store it into.
-            plan, refusal = M.struct_construction_plan(
-                st, e, self._structs, self._frame_candidates,
-                self._return_types)
-            if refusal is not None:
-                raise CodegenError(refusal)
-            if plan[0] in (M.CONSTRUCTION_INIT, M.CONSTRUCTION_DEFAULT):
-                # One word, so nothing is stored anywhere: the receiver IS the
-                # field and the LAST value is the whole result.
-                #
-                # `CONSTRUCTION_DEFAULT` is here for the case where every
-                # argument a partial construction carried was one the plan
-                # consumed against a field that already carries its own
-                # declared default, so nothing is left to store and the result
-                # is the class-level one.
-                if plan[1]:
-                    self._emit_expr(plan[1][-1][2])
-                    return
-                self._emit_fresh_one_word(name, st)
-                return
-            self._emit_expr(M.construction_supplied_argument(e))
+        # `S()`, `S(a, b)` and `S(x)`: ONE decision, asked for EVERY shape, and
+        # the same one arm64 asks (`model.one_word_construction`).  The gate
+        # this replaced (`if e.args or e.kwargs:`) meant a zero-argument
+        # construction never asked, so a one-field struct whose `__init__` takes
+        # no required parameter had its body dropped at the site and `C()` was a
+        # fresh zero word — wrong on this machine and on arm64, identically,
+        # which is what kept it invisible.
+        value, refusal = M.one_word_construction(
+            st, e, self._structs, self._frame_candidates, self._return_types)
+        if refusal is not None:
+            raise CodegenError(refusal)
+        if value is None:
+            self._emit_fresh_one_word(name, st)
             return
-        self._emit_fresh_one_word(name, st)
+        self._emit_expr(value)
 
     def _emit_frame_return(self, value) -> None:
         """`return <frame>` in a function the convention applies to.

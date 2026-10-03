@@ -2156,7 +2156,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     if os.path.abspath(source_path) in _stack:
         return None            # cycle: the caller links us, we link them
 
-    from formal.build import compile_formal_dylib, FormalBuildError
+    from formal.build import (compile_formal_dylib, default_format,
+                              FormalBuildError)
     from formal.arm64_codegen import CodegenError
 
     # This module's own identity, which is also what a RELATIVE import of
@@ -2256,6 +2257,18 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     with open(source_path, "rb") as f:
         src_digest = cas.hash_parts(f.read())[:12]
     out = os.path.join(out_dir, f"{prefix}.{src_digest}.{arch}.dylib")
+    # The CONTAINER is `default_format(arch)`, not `fmt="macho"`. It used
+    # to be hardcoded, which meant a Linux host built Mach-O module
+    # libraries that no ELF loader can open: the module was compiled,
+    # audited (its symbols are `provided`, so `_audit_bound_symbols`
+    # passes) and then put NOWHERE, and the program died at load with an
+    # unresolved symbol for a function its own source imports -- a
+    # finding the symbol audit could not see, because the audit asks "does
+    # something on this link line DECLARE this name" and the question that
+    # mattered was "will the loader OPEN that library". Both emitters exist
+    # now (`formal.macho_linker.build_macho_dylib` and
+    # `formal.elf.build_elf_dylib`) and both are handed the same export
+    # table, so the container is the host's and nothing else.
     # Serialise the write to this exact path.
     #
     # The digest above already separates two builds whose SOURCES differ, so
@@ -2277,7 +2290,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             result = compile_formal_dylib(
                 [source_path], output=out, prove=False, check=False,
                 module_prefixes={source_path: prefix},
-                link_dylibs=dep_dylibs, arch=arch, fmt="macho",
+                link_dylibs=dep_dylibs, arch=arch,
+                fmt=default_format(arch),
                 reexports=_qualified_reexports(
                     reexported_names(
                         stmts, {m: declared_kinds(p) for m, p in depends}),
