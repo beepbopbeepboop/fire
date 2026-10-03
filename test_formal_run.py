@@ -9781,6 +9781,21 @@ WAVE6_NAME_CASES = [
      "    g().x = 1\n"
      "    return 0\n",
      "refuse:is a field access through 'g(...)'", None),
+    # …and the same store inside a TUPLE target, which is a third arm rather
+    # than a variant of the second: `a, b = rhs` computes one slot per element
+    # and arm64's slot resolver had a line reading "Non-named base: evaluate for
+    # effects, store nowhere" — a silently discarded store, in a program that
+    # then runs. x86-64's `_tuple_target_key` has refused this shape since, so
+    # the same source built on one architecture and was refused on the other,
+    # and the case that could see it had to be written per architecture to do
+    # so. `b` is a real store on both sides of the test: what is refused is the
+    # element before it, not the tuple assignment.
+    ("field_refuse_a_tuple_target_through_a_subscript_base",
+     "def main() -> Int:\n"
+     "    var a = [1, 2, 3]\n"
+     "    a[0].x, b = 1, 2\n"
+     "    return 0\n",
+     "refuse:is a field access through 'a[0]'", None),
     # An MLIR dialect construct the TEMPLATE rules do not cover, so the name
     # check reached it and refused it as "no home" — a symptom of the register
     # fall-through, naming the allocator rather than the construct.  Real

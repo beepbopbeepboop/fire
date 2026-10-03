@@ -1625,6 +1625,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     # shared model's, so both arches print the same line — and
                     # both spell the BASE (`a[0]`, not `…`), because the base is
                     # what the sentence is about.
+                    #
+                    # The base is EMITTED first, which is what a base that is
+                    # itself unanswerable needs to say so rather than being
+                    # reported as an unclassifiable field; arm64's arm at the
+                    # same shape gives the reason in full
+                    # (`model.member_access_refusal`).
+                    self._emit_expr(M.member_base_node(stmt.target))
                     raise CodegenError(M.member_access_refusal(
                         stmt.target, self.func_name, self._frame_holders))
                 raise CodegenError(
@@ -4568,6 +4575,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # are the shared model's, so both arches print the same line — and
             # both spell the BASE (`a[0]`, not `…`), because the base is what
             # the sentence is about.
+            #
+            # The base is EMITTED first, for the reason the store arm above
+            # gives and `model.member_access_refusal` argues.
+            self._emit_expr(M.member_base_node(expr))
             raise CodegenError(M.member_access_refusal(
                 expr, self.func_name, self._frame_holders))
 

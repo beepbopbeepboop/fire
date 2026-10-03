@@ -22151,6 +22151,18 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"methods use would not be it")
 
 
+def member_base_node(expr):
+    """The innermost node of a `a.b.c` chain: the BASE, as an expression.
+
+    The emitter needs the node rather than the text because the base is
+    EMITTED before the refusal that follows it — see `member_access_refusal`
+    for why that ordering is the whole point."""
+    node = expr
+    while isinstance(node, F.MemberExpr):
+        node = node.obj
+    return node
+
+
 def member_base_text(expr) -> str:
     """The BASE of a `a.b.c` chain, spelled the way the source spells it.
 
@@ -22166,10 +22178,7 @@ def member_base_text(expr) -> str:
     a chain's root can be. `spelled` is the one that spells an arbitrary
     expression (it is what the access itself is spelled with), so spelling the
     base the same way is what makes the two halves of the sentence agree."""
-    node = expr
-    while isinstance(node, F.MemberExpr):
-        node = node.obj
-    return spelled(node)
+    return spelled(member_base_node(expr))
 
 
 def member_access_refusal(expr, fn_name, frame_holders) -> str:
@@ -22190,7 +22199,19 @@ def member_access_refusal(expr, fn_name, frame_holders) -> str:
     is the only thing that decides `holder` in the underlying message: a build
     that DID recognise the root as a frame receiver and then refused is a
     disagreement between two analyses, and that is a different sentence from
-    "this path cannot classify it"."""
+    "this path cannot classify it".
+
+    **The caller emits the base FIRST, and that ordering is load-bearing.**
+    Emitting a base is how a base that is itself unanswerable says so:
+    `p.value().b` reaches this through a call the emitter would refuse with a
+    POINTER message ("a STRUCT, and a struct's value on this path is a frame
+    ADDRESS"), and emitting the base first is what surfaces that instead of this
+    one. It is also what the code did before the refusals existed — arm64's arm
+    evaluated the base "for its side effects" and then answered 0, so the base's
+    refusal came out of that evaluation — and dropping the evaluation when the
+    refusal was added replaced a specific message with a generic one. So
+    `member_base_node` is what each site emits, and this function is what it
+    raises once the base has had its say."""
     return field_access_refusal(
         spelled(expr), fn_name or "<module>", member_base_text(expr),
         member_base_text(expr) in (frame_holders or ()))

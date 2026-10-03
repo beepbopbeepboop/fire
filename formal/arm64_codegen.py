@@ -1785,6 +1785,13 @@ dylib_exports: list = None, globals_base: int = None,
                     # arches print the same line, and they spell the BASE
                     # (`a[0]`, not `…`) because that is the expression the
                     # reader wrote and the one the message is about.
+                    #
+                    # The base is EMITTED first, which is what a base that is
+                    # itself unanswerable needs to say so rather than being
+                    # reported as an unclassifiable field — `model.
+                    # member_access_refusal`'s docstring is the argument, and
+                    # this line is what it is for.
+                    self._emit_expr(M.member_base_node(stmt.target))
                     raise CodegenError(M.member_access_refusal(
                         stmt.target, self.func_name, self._frame_holders))
             elif isinstance(stmt.target, F.IdentExpr):
@@ -1997,8 +2004,17 @@ dylib_exports: list = None, globals_base: int = None,
                 key = _member_slot_key(el)
                 if key is not None:
                     return key
-                # Non-named base: evaluate for effects, store nowhere.
-                return None
+                # Non-named base (`a[i].x, b = …`): REFUSED, with the words the
+                # single-assignment arm above uses for the same store. This used
+                # to "evaluate for effects, store nowhere", which is a SILENTLY
+                # DISCARDED STORE in a program that then runs and computes an
+                # answer nobody wrote — and x86-64's `_tuple_target_key` has
+                # refused this shape since, so the same source built on one
+                # architecture and was refused on the other. The base is emitted
+                # first for the reason `model.member_access_refusal` gives.
+                self._emit_expr(M.member_base_node(el))
+                raise CodegenError(M.member_access_refusal(
+                    el, self.func_name, self._frame_holders))
             if isinstance(el, F.TupleExpr):
                 # Nested target `(a, b), c = rhs` — handled by the
                 # recursive unpack below; this slot is a nested group.
@@ -2827,6 +2843,13 @@ dylib_exports: list = None, globals_base: int = None,
             # that says what a literal is rather than what this path cannot
             # classify — so this arm is the second line, for a construct that
             # reached the emitter by a route the build pass does not model.
+            #
+            # The base is EMITTED first, for the reason the store arm above
+            # gives and `model.member_access_refusal` argues: a base that is
+            # itself unanswerable refuses with ITS message, which is the more
+            # specific of the two (`p.value().b` is a pointer-width question,
+            # not a field-layout one).
+            self._emit_expr(M.member_base_node(expr))
             raise CodegenError(M.member_access_refusal(
                 expr, self.func_name, self._frame_holders))
 
