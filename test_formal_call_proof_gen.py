@@ -291,7 +291,8 @@ class TestGeneratorSource(unittest.TestCase):
 
         The limit is gone because everything that read `mojo` as
         `UInt64 -> UInt64` now reads it at the ENTRY's arity:
-        `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` §"step 3".
+        `model.entry_arity` and `_entry_binders` / `_entry_arg_list` /
+        `_apply_args`, which are the whole of it.
         So the case worth pinning is the one that is left: a model whose arity
         disagrees with the theorem it is the model of is a GENERATOR bug, and it
         has to be refused by name rather than applied to whatever binder is
@@ -722,8 +723,7 @@ class TestLean(unittest.TestCase):
 class TestEntryArity(unittest.TestCase):
     """A TWO-PARAMETER ENTRY POINT, end to end, on both architectures.
 
-    `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is the filing,
-    and it is closed by this class: `mojo`, `eval_eq_mojo`, every run test, the
+    This class is what closed it: `mojo`, `eval_eq_mojo`, every run test, the
     universal theorem's entry state and the startup stub are all stated at the
     ENTRY's parameter count, which is the source's
     (`formal/model.py::entry_arity`).  Before, a `def main(n: Int, m: Int)`

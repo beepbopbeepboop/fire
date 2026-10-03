@@ -264,8 +264,9 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     # One env entry per SOURCE parameter, each bound to the theorem's binder at
     # the same POSITION.  `{param: param}` bound the first and left every later
     # one unbound, and an unbound name is `0` in `MojoEnv` -- the same
-    # first-parameter-only defect `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
-    # records, and `AP._entry_arg_names` is the reader both backends use.
+    # first-parameter-only defect this closes, and `AP._entry_arg_names` is the
+    # reader both backends use -- so the two cannot bind a different number of
+    # parameters than the entry has.
     _sp = [p[0] for p in (fn.params or [])]
     _en = AP._entry_arg_names(arity)
     env = ({_en[i]: _sp[i] for i in range(len(_sp))} if _sp else {})

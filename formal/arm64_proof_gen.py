@@ -1433,10 +1433,12 @@ def _param_list_lean(fn) -> str:
     The whole list, and not `params[0][0]`: `MojoFunc.mk` carries the source's
     parameter names and `evalFunc` the model's argument values, so a function
     of two parameters has to put BOTH names in the AST or the second one is
-    unbound and evaluates to 0 -- which is the defect
-    `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` names.  A
+    unbound and evaluates to 0 -- which was the defect, and `MojoEnv` answers
+    0 for a name no argument binds, so the two halves have to agree.  A
     function with no parameters gets `[]` rather than the old `""`, which is
-    the same empty binding list spelled as a list.
+    the same empty binding list spelled as a list.  Pinned by
+    `test_formal_eval_eq_mojo_bridge.py`'s
+    `test_the_ast_value_names_every_parameter`.
 
     One reader for both backends: `formal/x86_64_proof_gen.py` imports it, so
     the two cannot disagree about what the AST says a function takes.
@@ -1575,10 +1577,12 @@ def _go_apply(go_defs: str, fname: str, args=None) -> str:
 
     for `def f(a0, a1): return a0 + a1`, three definitions away from the line
     that is wrong.  (A two-parameter ENTRY POINT used to be refused outright
-    instead, by the same argument-count worry; `mojo`, the run tests and the
-    driver's `test_input` are now all at the model's arity, which is what
-    `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` asked for, and
-    the refusal here is left for the case it is actually good at.)
+    instead, by the same argument-count worry; `mojo`, the run tests, the entry
+    state and the driver's `test_input` are all at the ENTRY's arity now --
+    `model.entry_arity` is the one reader of it, and
+    `test_formal_call_proof_gen.py::TestEntryArity` drives both generators and
+    both built binaries -- so the refusal here is left for the case it is
+    actually good at.)
 
     Each argument is converted to the type the binder it lands in wants, from
     `_model_shape`'s `ptypes`, because a model's binders need not agree: a
@@ -7924,9 +7928,8 @@ def generate_arm64_proof(prog, code, info) -> str:
         # binder at the same POSITION -- `n0` for the first, `n1` for the
         # second.  `{param: param}` bound the first and left every later one
         # unbound, and an unbound name is `0` in `MojoEnv`, so the model of
-        # `def f(a, b): return a + b` came out as `f_go n0 + 0`: a function of
-        # the right arity and the wrong value, which is the shape
-        # `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is about.
+        # `def f(a, b): return a + b` came out as `f_go n + 0`: a function of
+        # the right arity and the wrong value.
         _sp = [p[0] for p in (fn.params or [])]
         env = ({n: _sp[i] if _sp[i] == _sp[0] else n
                 for i, n in enumerate(enames[:len(_sp)])} if _sp else {})

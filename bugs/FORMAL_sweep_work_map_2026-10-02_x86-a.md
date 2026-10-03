@@ -218,10 +218,11 @@ that the next reader does not re-derive the attribution.
    `_load_home_from_stack` is the x86-64 half), so `fnmatch.mojo` and
    `pathlib.mojo` build on x86-64 and the two `KNOWN_X86_64_ONLY` rows in
    `test_formal_hostmods_census.py` are deleted. The marginal effect really was
-   1 file in this scope, as measured above. What is left of it is
-   `lib/ProofLib.lean`'s one-parameter `MojoFunc`
-   (`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`), which is not an
-   x86-64 item at all: it is one limit on both machines.
+   1 file in this scope, as measured above. What was left of it —
+   `lib/ProofLib.lean`'s one-parameter `MojoFunc`, and then the one-input `mojo`
+   and run tests around it — was one limit on both machines and is gone as of
+   2026-10-03: `formal/model.py::entry_arity` is the one reader of the entry's
+   parameter count and both generators use it, so this is no longer a row.
 3. **module-global storage and `sys.argv`** (6 files in-file) —
    `FORMAL_module_state_no_storage` (claim `formal3-5`), which states that the
    storage half landed and what is left is the three things a `__DATA` slot

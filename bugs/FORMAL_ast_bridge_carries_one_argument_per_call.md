@@ -71,13 +71,15 @@ calls its own multi-parameter entry by name — the same refusal, reached throug
 the same mechanism, for a callee that used to be "resolvable".  A one-argument
 entry is unchanged, byte for byte.
 
-**Sibling, not duplicate, of `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`.**
-That one is about a function's own PARAMETER LIST: `MojoFunc.mk`'s single
-`param`, `evalFunc`'s single `arg`, and the generator reading `binders[0]`. This
-one is about the arguments of a CALL, which is a different declaration and a
-different place in the evaluator, and it is not on that doc's list of steps — so
-closing that one does not close this. Both have to be closed before a
-seven-argument function is provable, which is why both are here.
+**Sibling, not duplicate, and the sibling is now closed.** The other one was
+about a function's own PARAMETER LIST: `MojoFunc.mk`'s single `param`,
+`evalFunc`'s single `arg`, and the generator reading `binders[0`. That is gone
+(2026-10-03) — `MojoEnv` binds every parameter by position, and `mojo`,
+`eval_eq_mojo`, the run tests, the entry state and the startup stub are at the
+ENTRY's arity through `formal/model.py::entry_arity`. This one is about the
+arguments of a CALL: a different declaration and a different place in the
+evaluator, and untouched by that. Both have to be closed before a
+seven-argument function is provable, which is why this file exists alone now.
 
 ## The smallest reproduction
 
@@ -281,9 +283,7 @@ the closing paragraph below still holds.
 2. Therefore also: the generated `eval_eq_mojo` cannot be stated for a program
    with a call until `callFunc` is the model's own function table rather than the
    `if name = "main"` stub. `_gen_go` already emits `f_go`; what is missing is
-   wiring it into the bridge, and that is the same "the model is right and
-   everything that APPLIES it is wrong" that
-   `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is about.
+   wiring it into the bridge.
 3. Then a test: a program whose `main` returns a two-argument call's value, built
    with `--formal` on both backends, asserting the proof file typechecks. It
    cannot be written before step 2, which is why the fix is a fix and not a
