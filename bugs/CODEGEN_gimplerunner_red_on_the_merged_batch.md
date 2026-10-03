@@ -96,20 +96,33 @@ $ time python3 test_silent_noop_iter.py
 real  18m45.547s
 ```
 
+and on my own tree, alone, at the end of the branch:
+
+```
+$ time python3 test_silent_noop_iter.py
+23 passed, 0 failed
+real  18m42.649s
+```
+
+**1125 s vs 1123 s — my changes cost nothing measurable here** (the work is 23
+compile-and-run cases and the CPU figures are 4m36s user / 2m20s sys against
+5m05s / 2m27s, i.e. it is a WAITING-bound job either way). So the timeout is
+purely pre-existing, and 900 s is simply the wrong number for it.
+
 The content passes; only the clock fails, and per CLAUDE.md a hang "is a
 failure in its own class" — so this is a real red that the merged batch carries,
-in the same shape as the seven `gimplerunner` cases above. **I did not measure
-my own tree's time**, so I cannot say whether my changes made it worse; the
-integrator should, and the number to compare is 1125 s.
+in the same shape as the seven `gimplerunner` cases above.
 
 The two next steps for it, both a decision rather than an implementation:
 either the TIMEOUT is wrong for a 19-minute job (and should be raised, with the
-measured number recorded at its registration — the same rule the memclass
+measured 1125 s recorded at its registration — the same rule the memclass
 ledger follows), or the test is doing work it does not need. `23 passed` with
-`user 4m36s / sys 2m20s` in an 18m45s wall says it is almost entirely WAITING,
-not computing: 4.6 min of user CPU inside 18.8 min of wall is 24% of one core,
-so the time is in subprocesses (gcc, the compiled binaries) or in sleep, and
-which one is the question to answer before raising anything.
+4m36s of user CPU inside 18m45s of wall says it is almost entirely WAITING, not
+computing: that is 24% of one core, so the time is in subprocesses (gcc, the
+compiled binaries) or in sleep, and which one is the question to answer before
+raising anything. **If it is gcc, `checked_run.py`'s content-addressed cache
+may simply not be covering this test** — worth checking first, because a cached
+replay would take seconds and the measured numbers say it never gets one.
 
 ## The exact next step
 
