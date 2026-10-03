@@ -17000,6 +17000,94 @@ def struct_class_constants(struct_def) -> list:
     return list(split[1]) if split is not None else []
 
 
+def comptime_binding_reads_a_field(struct_def, value) -> list:
+    """The field names a class-level initializer reads, in source order.
+
+    A struct PARAMETER is a field here, and that is the whole reason this
+    function exists: `_parse_struct_params_as_fields` puts `keys: List[T]` in
+    `StructDef.fields`, so `struct Box[T, keys: List[T]]` has a field named
+    `keys` and a class body may read `keys` or `Self.keys` for it. What the
+    parameter IS — a value supplied per instantiation — is not in the tree
+    anywhere, which is the fact `struct_parameter_not_bound_refusal` exists to
+    say.
+
+    Both spellings, because the class body uses both and the difference is
+    which node carries the name: a bare read is an `IdentExpr`, and `Self.keys`
+    is a `MemberExpr` whose `member` is a STRING and whose `obj` is the
+    receiver spelling. `iter_nodes` has no parent, so the walk asks each node
+    what it can answer about itself and nothing needs one.
+
+    Only `Self` / `self` / `cls` / `this` bases count, so `other.FIELD` — a
+    read of some OTHER class — is not reported as this struct's parameter."""
+    if value is None or struct_def is None:
+        return []
+    fields = set(struct_field_names(struct_def) or ())
+    if not fields:
+        return []
+    bases = set(struct_receivers(struct_def) or ()) | {"Self", "cls", "this"}
+    out = []
+    for node in iter_nodes(value):
+        name = None
+        if isinstance(node, F.IdentExpr):
+            name = node.name
+        elif isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr) \
+                and node.obj.name in bases:
+            name = node.member
+        if name in fields and name not in out:
+            out.append(name)
+    return out
+
+
+def struct_parameter_not_bound_refusal(struct_name: str, spelling: str,
+                                       value, fields) -> str:
+    """The diagnostic for a class-level binding whose value reads a struct
+    PARAMETER.
+
+    A different refusal from the one about a non-literal `comptime` value, and
+    the difference is the whole of it: that one is about the VALUE ("a `comptime`
+    binding's value is … a CALL or a COMPUTATION rather than a literal, and this
+    path has no comptime evaluator to run one"), and its repair — "write the
+    value at the use site (a literal, or an assignment the compiler can see)" —
+    is IMPOSSIBLE for this shape, because there is no value in the class body to
+    write anywhere else. Measured on both architectures:
+
+        struct Box[T: AnyType, keys: List[T]]:
+            comptime length = len(keys)      # refused as "no comptime evaluator"
+
+    The use site is `Box[Int, [1,2,3]]`, so the values ARE at the use site and
+    are not literals there either — they are arguments to an instantiation this
+    path does not perform. So the sentence a reader is given ("make it a
+    literal") describes an edit that cannot be made, which is a refusal sending
+    them to a line that does not exist.
+
+    What is actually missing is narrower and nameable: a struct parameter's
+    value is a property of the INSTANTIATION, and this path compiles a generic
+    struct as one image for every instantiation (`doc/ABI.md` §Generics: a
+    generic is not one boundary symbol; each instantiation is, and there is no
+    monomorphizer here). So at the class body there is no instantiation, and
+    `Self.<param>` names a slot nothing has filled — in the class body there is
+    not even a receiver.
+
+    `fields` is what the initializer actually reads, so the reader is sent to
+    the parameter rather than to the binding."""
+    shown = ", ".join(repr(f) for f in (fields or ())[:4])
+    spelled = expr_spelling(value) if value is not None else "nothing at all"
+    return (f"{spelling} reads a `comptime` class attribute of {struct_name}, "
+            f"whose value is `{spelled}` — and what it reads is {shown}, a "
+            f"PARAMETER of {struct_name}. A parameter's value belongs to an "
+            f"INSTANTIATION: the use site supplies it as an argument "
+            f"(`{struct_name}[…, <value>, …]`), and that argument is a value, "
+            f"not a literal written in this class body, so there is nothing here "
+            f"to write somewhere else. This path compiles one image for every "
+            f"instantiation — `doc/ABI.md` §Generics makes each instantiation a "
+            f"separate boundary symbol and there is no monomorphizer here — so "
+            f"at the class body there is no instantiation, and `Self.{fields[0]}` "
+            f"names a parameter nothing has supplied. That is a different fact "
+            f"from a value this path cannot compute, and the two have different "
+            f"next steps: this one is closed by binding the parameter values at "
+            f"the instantiation site, not by editing the expression")
+
+
 def struct_field_names(struct_def) -> list:
     """Every INSTANCE field name this struct has, in a stable order.
 

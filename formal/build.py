@@ -11705,6 +11705,22 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None,
                           f"storage to read it back out of")
                 spelled = (M.expr_spelling(default)
                            if default is not None else "nothing at all")
+                # A PARAMETER read is a different fact with a different next
+                # step, and it is asked BEFORE the value's own shape because the
+                # value's repair cannot be carried out here: the sentence below
+                # tells the reader to "write the value at the use site (a
+                # literal…)", and for a parameter there is no value in this class
+                # body to write anywhere — the use site supplies it as an
+                # argument to an instantiation this path does not perform.
+                # Measured on both architectures, `std/collections/type_dict.mojo`
+                # (`comptime _index[key: Self.T] = Self.keys.try_index(key)`) was
+                # refused by the sentence below, which describes an edit that
+                # cannot be made.
+                param_fields = M.comptime_binding_reads_a_field(st, default)
+                if param_fields:
+                    raise CodegenError(
+                        M.struct_parameter_not_bound_refusal(
+                            st.name, spelling, default, param_fields))
                 raise CodegenError(
                     f"{spelling} reads {declared} of {st.name}, whose value is "
                     f"`{spelled}` — and a formal value is one 64-bit word with "
