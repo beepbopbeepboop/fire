@@ -687,6 +687,39 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
     return "\n".join(out) + "\n"
 
 
+def _placeholder_model(func_name, fn) -> str:
+    """The documented fallback `<fn>_go`, at the SOURCE's arity.
+
+    Emitted when the shared model generator refuses this shape, in place of a
+    model: the rest of the file (the AST, the bytes, the certificates) is still
+    real and the end-to-end theorem is `sorry` regardless, so nothing false is
+    claimed — this is a stated gap, not a crash.
+
+    The ARITY is the whole of what this used to get wrong. It was written
+    `(n : UInt64)` unconditionally, so a two-parameter entry got a
+    one-parameter model and the shared `_go_apply` — which reads the arity back
+    OUT of the emitted model rather than predicting it, deliberately, so the two
+    cannot drift — refused the file three definitions later with
+
+        model: main_go takes 1 argument(s) but the theorem it is the model of
+        has 2 (n, n1).
+
+    So the fallback's promise ("rather than failing the build") did not hold for
+    any entry wider than one argument, and it held for exactly the arity every
+    program in `formal/examples` has. Measured by
+    `tools/formal_proof_fuzz.py --mix ternary`: 9 of 60 programs refused this
+    way, every one of them a two-parameter entry.
+
+    ONE definition for both fallback sites (the refused shape, and the model that
+    refers to a `<name>_go` it never defines), because they were two copies of
+    the same sentence and this is the defect that let them disagree with the
+    arity checker three hundred lines away.
+    """
+    names = [p[0] for p in (getattr(fn, "params", None) or [])] or ["n"]
+    sig = " ".join(f"({n} : UInt64)" for n in names)
+    return f"def {func_name}_go {sig} : UInt64 :=\n  {names[0]}\n"
+
+
 def generate_x86_64_proof(prog, code, info) -> str:
     """Generate a Lean 4 proof file for an x86-64-compiled program.
 
@@ -754,8 +787,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # failing the build, emit a trivial model and say so: the rest of the
         # file (AST, bytes, certificates) is still real, and the end-to-end
         # theorem is `sorry` regardless, so nothing false is claimed.
-        go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
-                   f"  n\n")
+        go_defs = _placeholder_model(func_name, fn)
         model_placeholder = True
         go_lemma_names = []
         model_note = (f"/- NOTE: the shared model generator does not cover "
@@ -784,8 +816,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
                 f"which the shared generator does not define, so the semantic "
                 f"model below is the identity and nothing downstream of it is "
                 f"claimed. -/\n")
-            go_defs = (f"def {func_name}_go (n : UInt64) : UInt64 :=\n"
-                       f"  n\n")
+            go_defs = _placeholder_model(func_name, fn)
             go_lemma_names = []
 
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
