@@ -1,11 +1,66 @@
 # FORMAL_host_import_row_5_measured: what is left of the `not-answerable/host-import` row after `stat`, `math`, `shutil` and `fcntl`, and what each remaining module is worth
 
 **Status: the row is CLOSED for four modules and DECIDED for the other five.
-Written 2026-10-02 on the `sweep5:hostmods-more` claim, which covered the whole
+The one premise the five rest on was MEASURED FALSE on 2026-10-02 and is
+corrected below: a keyword argument to a host module is NOT refused, and four of
+the five numbers change with it. Written 2026-10-02 on the
+`sweep5:hostmods-more` claim, which covered the whole
 `.tmp/sweep-arm-5.txt` row. Everything below is measured on this tree or is a
 reference to a measurement that already exists; the "worth" column is the number
 that decides each one and it is stated before the reasoning, because the
 reasoning is easier to argue with than the number is.**
+
+## §CORRECTION (2026-10-02): the keyword-argument blocker is not a blocker
+
+**"A keyword argument to a host module is REFUSED" is false on this tree, and
+four of the five "worth" numbers below were derived from it.** The capability
+exists and is complete, on both architectures:
+
+    # a cross-module callee, keywords in declaration order, REVERSED, mixed
+    # with a positional, and with an omitted parameter's default filled
+    printf("%d %d %d %d %d\n", need_two(a=1, b=77), need_two(b=77, a=1),
+           need_two(a=1), need_two(1, b=77), need_one(a=5))
+    ->  77  77  511  77  5              CPython: the same
+
+    # a HOST module, keywords written in reverse declaration order
+    printf("%d %d %d\n", match_path(bn=4, b="*.py", an=4, a="x.py"),
+           match_path(bn=1, b="*", an=4, a="x.py"),
+           match_path(bn=4, b="*.md", an=4, a="x.py"))
+    ->  1 1 0        identical on arm64 and x86-64, and identical to the
+                     POSITIONAL spelling of the same three calls
+
+    # a callee whose SOURCE is unreadable — the manifest alone
+    two(b=2, a=1)  ->  12          two(nope=2) -> refused by name
+
+**Why the original measurement found a refusal.** The program it measured was
+`match(path="/x.py", pattern="*.py")`, and `formal/hostmods/pathlib.mojo`'s
+`match` declares `(p, pat)` — so `path` and `pattern` name no parameter, and
+`model.bind_call_arguments` correctly applied the language's rule. That call is
+also not a CPython spelling: `pathlib.match` exists in CPython as the METHOD
+`PurePosixPath.match(pattern)`, not as a module-level function taking two
+named parameters. **The refusal was true, the conclusion drawn from it was not.**
+
+**The mechanism, so nobody re-derives it.** `bind_call_arguments`
+(`formal/model.py`) is the ONE implementation of "which argument lands on which
+parameter" and both backends call it. For a callee in another image the
+declaration comes from `_extern_decls`, keyed by the SYMBOL the call binds, and
+the manifest's `call.positional` carries the parameter NAMES — which is why the
+last measurement above works with the source gone and why the second row of the
+table's own "what this costs" argument does not survive contact with it.
+
+**What the numbers become.** `subprocess` and `glob` were the two verdicts
+argued from the keyword refusal, and each keeps a reason of its own that was
+never about keywords — `TimeoutExpired` being an exception, and `**` needing a
+recursive walk — so both are unchanged in verdict and changed in reason. The
+other three (`copy`, `ctypes`, `concurrent.futures`) never depended on it.
+**The row's file counts and the census are the original document's, and are not
+re-measured here.**
+
+**Pinned by** four rows in `test_formal_cross_module.py`, all compared against
+CPython on the same text where CPython has the spelling at all: the keyword
+binding itself, the unknown-name refusal, the positional-and-keyword double
+binding refusal, the host-module reverse-order call, and the manifest-only
+binding. 30/30.
 
 ## What landed from this claim
 
@@ -42,11 +97,15 @@ arithmetic `bugs/FORMAL_platform_reachable_row_measured.md` §2 performs on the
 
 | module | files | what it is worth | why |
 |---|---|---|---|
-| `subprocess` | 30 | **0** | measured below: every caller spells `capture_output=True`, and a keyword argument to a host module is REFUSED |
+| `subprocess` | 30 | **0** | measured below: every caller spells `capture_output=True`, and `TimeoutExpired` is an EXCEPTION this path has no answer for |
 | `glob` | 7 | **0 to PASS, 4 into `codegen`** | the listing exists, the blob API would work, and the callers iterate the result as a list |
 | `copy` | 1 | **0** | the one file imports `copy` and never uses it |
 | `ctypes` | 1 | **0** | a dynamic loader for foreign code |
 | `concurrent.futures` | 4 | **0** | threads |
+
+(The `subprocess` row's reason is the one the §CORRECTION replaces: it read
+"and a keyword argument to a host module is REFUSED", which is false. The
+verdict is unchanged and the sentence now names the reason that survives.)
 
 ---
 
@@ -59,13 +118,15 @@ libSystem and nothing else, and there is no child to spawn" — is **false**, an
 a reader who stopped there would conclude the module is unwritable when it is
 merely unwritten.
 
-**The blocker is the CALLERS, and it is measured.** All 30 files use
-`subprocess.run`, and every one of them passes at least one KEYWORD argument —
-`capture_output` in **29 of the 30**, `text=True` in 27, `timeout=` in 27,
-`cwd=` in 25, `env=` in 6, plus `stdout=subprocess.PIPE`
-(`tools/tu_grind.py:41`) and `input=source_code`
-(`tools/analyze_stdlib_errors.py:31`). And **a keyword argument to a host module
-is refused**:
+**The blocker was the CALLERS, and half of that measurement was wrong.**
+All 30 files use `subprocess.run`, and every one of them passes at least one
+KEYWORD argument — `capture_output` in **29 of the 30**, `text=True` in 27,
+`timeout=` in 27, `cwd=` in 25, `env=` in 6, plus
+`stdout=subprocess.PIPE` (`tools/tu_grind.py:41`) and
+`input=source_code` (`tools/analyze_stdlib_errors.py:31`). Those keyword
+arguments are NOT a blocker: §CORRECTION measures them binding into a host
+module's callee out of declaration order, on both architectures, and a module
+author chooses the declaration. The measurement this section used to quote —
 
 ```
 $ cat .tmp/w/kw.mojo
@@ -77,12 +138,14 @@ $ python3 fire.py build --formal --no-prove -o .tmp/w/kw2 .tmp/w/kw2.mojo
 build: call match(): unexpected keyword argument 'path'
 ```
 
-(the positional spelling of the same call builds and runs, printing `a=1`.)
+— refused `pathlib.match(path=…, pattern=…)` because `match` declares `(p,
+pat)`, and that call is not a CPython spelling either.
 
-So **no `subprocess` module written in `formal/hostmods/` could be called by any
-of the 30 files**, however complete it was. The yield is 0 by a mechanism that
-no amount of implementation removes, and that is a different statement from the
-usual "worth zero because they are test drivers".
+**What survives is one item of the sized list: `TimeoutExpired`.** It is an
+EXCEPTION and `tools/tu_grind.py:43` catches it, so a `timeout=` needs a
+deadline poll and a second failure answer, and this path has neither
+(`FORMAL.md` phase 7). 27 of the 30 files pass `timeout=`, so that is not a
+detail of the module's surface — it is most of what it would be for.
 
 ### What the minimal honest subset WOULD be, sized
 
@@ -99,21 +162,15 @@ the table above is not a guess:
     loop and two out-parameters, and the caller owns the buffer.**
   * `TimeoutExpired` is an EXCEPTION, and `tools/tu_grind.py:43` catches it. So
     a `timeout=` needs a deadline poll and a second failure answer, and this path
-    has neither (`FORMAL.md` phase 7).
+    has neither (`FORMAL.md` phase 7). **This is the whole of the remainder.**
   * `env=` (`cwd=` is fine — `chdir` exists) needs `environ`, a `char **` walk, which
     `formal/hostmods/os/__init__.mojo` names as absent for the same reason it
-    names for `listdir` before `listdir` landed.
+    names for `listdir` before `listdir` landed. 6 of the 30 files.
 
 **Recommendation: do not write it.** The honest subset is a day's work, moves
-zero files, and adds a keyword-argument refusal to every one of the 30 instead of
-a resolution. **The thing worth doing instead** is the capability behind the
-refusal: a call across a dylib boundary that ACCEPTS keyword arguments and
-applies the callee's defaults. That is the same capability
-`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md` is about from the
-callee's side, and it is the one that would make `subprocess`, `shutil`'s
-`copytree` flags, `glob`'s `recursive=True` and `re`'s flags all reachable at
-once — **four of this row's modules and several others are blocked on one
-compiler change, and that is the highest-value thing in this document.**
+zero files, and its one missing capability is an EXCEPTION rather than an
+argument-binding rule. The argument-binding half of the original recommendation
+is done and measured; what remains is `FORMAL.md` phase 7.
 
 ## `glob` — writable now, and worth 4 findings rather than a module
 
@@ -144,9 +201,12 @@ does-`*`-cross-`/` flag, which `pathlib.match_seg` already calls). So both halve
     redesign, but it is a day.
   * `recursive=True` is a KEYWORD (`checked_run.py:213`,
     `tools/audit_selfhost_ast.py:57`,
-    `test_no_new_container_casts.py:157`) — **so those three files could not call
-    it either**, by the same refusal as `subprocess`. `glob.glob(pat,
-    recursive=True)` is the whole of `checked_run.py`'s use.
+    `test_no_new_container_casts.py:157`), and `checked_run.py`'s whole use is
+    `glob.glob(pat, recursive=True)`. **§CORRECTION changes what that costs and
+    not what it blocks**: a keyword binds across the boundary into a declared
+    parameter, so a `glob(pattern, recursive=0)` module makes all three of those
+    lines callable, and the author of the module chooses the declaration. What is
+    left of `glob` is the `**` walk above and nothing else.
   * `iglob` is a generator and `escape`/`translate` need a consumer; both absent
     the way `fnmatch`'s are.
 
@@ -155,8 +215,9 @@ does-`*`-cross-`/` flag, which `pathlib.match_seg` already calls). So both halve
 to land on refusals in themselves, and the rest want `subprocess` or a keyword
 argument. So a day for four findings and no pass — which is the `fnmatch`
 arithmetic in `FORMAL_platform_reachable_row_measured.md` §5, arrived at again
-from the other side. **Recommendation: after the keyword-argument capability, not
-before.**
+from the other side. **The one dependency this row had — the keyword-argument
+capability — is measured and pinned as already present (§CORRECTION), so
+`glob` is no longer waiting on a compiler change and is waiting only on `**`.**
 
 ## `copy` — 1 file, which imports it and does not use it
 
@@ -206,11 +267,20 @@ one"). **Recommendation: no module, no doc.**
 
 ## The one line to take from this document
 
-**Four of the five remaining modules, and a fifth (`glob`) beside them, are
-blocked on ONE compiler capability: a call across a dylib boundary that accepts
-keyword arguments.** That is worth more than all nine host modules together, it
-is the only item here that is not a module, and it is
-`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md` seen from the
-caller's side. It is the next step I would take, and I have deliberately not
-taken it here: it is a change to how a call is lowered in both backends, which is
-outside what a host-module claim owns.
+**There is no compiler capability standing between this row and its five
+modules.** The one that used to be named here — a call across a dylib boundary
+that accepts keyword arguments — was measured on 2026-10-02 to exist, to work
+out of declaration order, to work through the manifest with the callee's source
+gone, and to refuse an unknown name on every one of those paths; §CORRECTION has
+the programs and `test_formal_cross_module.py` has the rows. What each of the
+five now waits on is its own work: `**` for `glob`, an EXCEPTION for
+`subprocess`'s `timeout=`, `environ` for `env=`, threads for
+`concurrent.futures`, a clone for `copy`, a dynamic loader for `ctypes`.
+
+**And the remaining blocker is worth more than all five: every caller passes
+`capture_output=True` / `text=True` / `timeout=` / `cwd=` / `env=` / `recursive=`
+as a KEYWORD, so a module that declares those names is callable today, and one
+that does not is refused by name.** That is the language's rule rather than a
+gap — but it is a rule a reader of this document spent a day assuming was a gap,
+and the correction is the reason the rest of the row's arithmetic can be
+re-derived without re-measuring it.
