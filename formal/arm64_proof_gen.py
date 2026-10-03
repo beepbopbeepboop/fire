@@ -6339,8 +6339,17 @@ def _gen_step_result_lemmas(name: str, code: bytes, base: int) -> str:
         if idx == 51:  # B.cond branches on the flags, not a register
             tactics.append(f"unfold arm64_step")
             tactics.append(f"simp [h, hinsn, {fact_names}, hb]")
-            tactics.append(f"by_cases hp : arm64_matches_condition {w & 0xf} s.nzcv = true")
-            tactics.append(f"all_goals simp [hp]")
+            # `all_goals` around the split, for the reason the comment above
+            # this chain gives: the `simp` can CLOSE the goal on its own —
+            # `arm64_step s code = some (if <cond> then … else …)` has a
+            # `some` on either arm, so for some condition codes the split is
+            # decidable and nothing is left to split — and a `by_cases` on a
+            # closed goal is the same "No goals to be solved" error the chain
+            # is already arranged to avoid one line earlier. Measured on the
+            # stack-floor guard's `B.HS`, whose condition `simp` does decide.
+            tactics.append(f"all_goals (by_cases hp : "
+                           f"arm64_matches_condition {w & 0xf} s.nzcv = true "
+                           f"<;> simp [hp])")
         elif idx in (16, 17):  # CBZ / CBNZ branch on arm64_reg rn s = 0
             rn = w & 0x1f
             tactics.append(f"unfold arm64_step")

@@ -628,6 +628,12 @@ class X86_64Codegen:
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
         # `cond_branches` key, as formal/arm64_codegen.py).
         self._cond_branch_pcs = []
+        # The functions whose prologue carries the stack-floor guard, filled by
+        # `compile()` once the whole image's call graph is known — see
+        # `model.recursive_function_names`. The x86-64 twin of arm64's, from the
+        # same shared function, so the two machines cannot disagree about which
+        # prologues are guarded.
+        self._recursive_names: set = set()
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # The x86-64 twin of arm64's, over the SAME shared layout
         # (`formal/model.py`'s `struct_constructor_sites` / `struct_frame_bytes`),
@@ -760,6 +766,12 @@ class X86_64Codegen:
             # has no event loop / iterator protocol, so `await` is identity
             # and `yield` leaves its value in RAX (compile-only fidelity).
             self._functions[f.name] = f
+        # Which prologues carry the stack-floor guard, settled ONCE for the
+        # whole image before any function is emitted (the guard is decided per
+        # function, so it cannot be answered while a prologue is being written).
+        # The x86-64 twin of arm64's, from the same shared function.
+        self._recursive_names = M.recursive_function_names(
+            self._functions.values(), self._structs)
 
         self.asm.org(base_addr)
 
@@ -999,6 +1011,11 @@ class X86_64Codegen:
         self.asm.emit(encode_push_r64(Reg.RBP))
         self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
         self.asm.emit(encode_sub_r64_imm32(Reg.RSP, self._frame_bytes))
+        # The stack-floor guard, immediately after the subtraction it guards, and
+        # only in a function a call chain can re-enter: see
+        # `model.recursive_function_names` for why the cycle is the set.
+        if self.func_name in self._recursive_names:
+            self._emit_stack_floor_guard()
         # The module-global initializer, LAZILY — the x86-64 twin of arm64's,
         # emitted at the same point in the prologue for the same reason. See
         # `_emit_global_init` and `model.initialization_is_lazy`.
@@ -1256,6 +1273,88 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             name, self.func_name or "<module>",
             "the register allocator collected no home for it, so the emitter "
             "and the allocation walk disagree about this function's locals")
+
+    def _emit_stack_floor_guard(self) -> None:
+        """Refuse instead of dying when the frame just taken crosses the floor.
+
+        The x86-64 twin of arm64's `_emit_stack_floor_guard`, and the same
+        sequence: the sequence and every decision in it are
+        `model.stack_floor_address`'s, so neither backend can spell the guard
+        twice and the two machines cannot come to disagree about when a stack
+        overflow is. What differs is only the instruction selection, because
+        the two machines have different ones:
+
+            LEA R11, [rip+&floor] ; MOV R10, [R11]   the floor word
+            TEST R10, R10 ; JNE done                 already stored
+            MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
+        done:
+            MOV R11, RSP ; CMP R11, R10
+            JAE ok                                    SP >= floor: carry clear
+            exit(2)                                   SP < floor
+        ok:
+
+        Two things about this backend's half that are worth stating rather than
+        leaving to the reader:
+
+        * **`encode_cmp_r64_r64(a, b)` computes `a - b`**, not `b - a`. That is
+          the encoder's own docstring and the shape `_alu_rr` gives it, and it
+          is the opposite of the Intel-syntax reading of `cmp a, b`, so the
+          operand order here is `CMP sp, floor` — the same subtraction the arm64
+          half makes, and the reason both arms then use a "below" branch.
+        * **RSP is a first-class register in the model** (index 4 is `s.rsp` in
+          `lib/X86.lean`), so `MOV R10, RSP` needs no workaround here. It is
+          still a separate instruction rather than a memory operand because the
+          compare is register-to-register: the model has no `CMP r/m64, r64`
+          case, and an instruction the model cannot decode is one the per-
+          instruction certificates in `x86_64_proof_gen.py` would have nothing
+          to say about.
+
+        R10 and R11 are the pair `_emit_global_init` and the frame paths already
+        use, so nothing here borrows a register.
+        """
+        if self._globals_base is None:
+            # No `__DATA`, so no word to keep the floor in. `formal/build.py`
+            # always hands a base over — the data segment is unconditional
+            # since the floor word landed — so this is the `_emit_global_init`
+            # shape rather than a live case.
+            return
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        done_label = f"{fn}_sf{sid}_done"
+        trap_label = f"{fn}_sf{sid}_trap"
+        ok_label = f"{fn}_sf{sid}_ok"
+        floor = M.stack_floor_address(self._globals_base)
+        self._lea_abs(Reg.R11, floor)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        # `test` is load-bearing for the same reason `_emit_global_init`'s is:
+        # `mov` does not set flags, so without it the `jne` would read whatever
+        # the CALLER last compared — the push/mov/sub above touch none.
+        self.asm.emit(encode_test_r64_r64(Reg.R10, Reg.R10))
+        self.asm.emit(encode_jne_rel32(0))
+        self.asm.emit_label_rel32(done_label, here_offset=-4)
+        self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RSP))
+        # BUDGET fits an imm32, so this is one instruction where arm64 needed
+        # the shifted pair.
+        self.asm.emit(encode_sub_r64_imm32(Reg.R10, M.STACK_FLOOR_BUDGET_BYTES))
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self.asm.label(done_label)
+        # RSP into R11 and the same `SP - floor` the arm64 half computes. The
+        # stack grows DOWN, so having spent the budget is `SP < floor`, which is
+        # the subtraction BORROWING and so carry SET; `JAE` is the complement,
+        # and it branches OVER the trap so the trap is the fall-through and the
+        # body's first instruction is the branch target — the same shape as
+        # arm64's `B.HS` above and the same shape as the divide-by-zero arm's.
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RSP))
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R10))
+        self.asm.emit(encode_jcc_rel32(COND_AE, 0))
+        self.asm.emit_label_rel32(ok_label, here_offset=-4)
+        self.asm.label(trap_label)
+        self._emit_call_exit(M.STACK_TRAP_STATUS)
+        # `label`, not `emit_label_rel32`: this DEFINES where the branch above
+        # goes, and it lands on the first instruction of the BODY. Recording a
+        # relocation here would be a second branch to a label nothing defines.
+        self.asm.label(ok_label)
 
     def _emit_global_init(self, skip_label: str = None) -> None:
         """Fill every address-valued module-global slot, and set the flag.

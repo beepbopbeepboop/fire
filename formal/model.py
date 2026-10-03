@@ -21577,6 +21577,171 @@ class GlobalDataImage:
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
+# THE STATUS A STACK OVERFLOW LEAVES, beside the one a shift leaves. The
+# argument for a second number and against reusing `SHIFT_TRAP_STATUS` is the
+# argument every status on this path makes: "this program could not be answered"
+# is one answer, and a caller that has to tell a stack overflow from a negative
+# shift amount is being handed a distinction nobody downstream wanted. But they
+# are not the same event, and the diagnostic value of naming which one happened
+# is real: an overflow is a statement about the program RECURING and an operand
+# being a negative amount is a statement about one line. 1 is taken by the
+# divide-by-zero arm of each backend's shift/div emitter (`SHIFT_TRAP_STATUS`),
+# so this is 2, and both backends read the constant rather than the literal —
+# the same reason that one is a constant.
+STACK_TRAP_STATUS = 2
+
+
+def stack_floor_address(base: int, table: dict = None) -> int:
+    """Where this unit's stack-floor WORD is, as an absolute address.
+
+    The one computation of it, for both backends and for every prologue in the
+    image, because the failure this guards against has a second copy of this
+    answer in it: `GlobalDataImage.stack_floor_offset` already refuses to be a
+    second field kept equal to `init_flag_offset + GLOBAL_SLOT_BYTES`, and a
+    backend that added `init_flag_offset + 16` here would be the third answer
+    to one question about an image's layout. The offset is read out of the image
+    the linker is writing, not recomputed from the table, so the code cannot
+    address a word the bytes do not contain.
+
+    `table` defaults to the published slot table; both callers pass
+    `module_slots()` explicitly today, and the default exists so a caller that
+    has not published yet gets the empty-table image (two reserved words) rather
+    than a `None`.
+    """
+    return base + build_data_image(
+        module_slots() if table is None else table, base).stack_floor_offset
+
+
+def recursive_function_names(functions, structs: dict = None) -> set:
+    """The functions of one image a call chain can RE-ENTER, by name.
+
+    This is the set the stack-floor guard is emitted for, and the rule is
+    "on a call-graph cycle" rather than "in the image" for a reason that is
+    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
+    distinct functions has a finite depth, and it is the return to a function
+    already on the stack that makes the depth a function of the PROGRAM rather
+    than of its shape. So a cycle's members are where a runaway recursion is
+    stopped, and a program that recurses cannot get past one.
+
+    **And the narrower set costs nothing anywhere else, which is what makes it
+    the rule rather than a compromise.** The per-export contract proof
+    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
+    export whose body contains ANY conditional branch — `Refine.Block.step` is one
+    function of one state — and every RECURSIVE function contains a branch (a
+    branch-free body that calls itself does not return, so it is not a program
+    this backend can be asked about). So guarding the cycles adds no branch to
+    any export that still had a proved contract, and removes none: the export
+    contracts that exist today are exactly the straight-line, non-recursive
+    ones, and they are byte-identical with this in place. Widening the rule to
+    "every function" would therefore trade proved contracts for nothing.
+
+    What it does leave open, and what is stated rather than hidden: a chain of
+    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
+    depth is finite and knowable, and the budget this guards against
+    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
+    function the chain passes through, which by construction it is not.
+
+    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
+    a missed edge here means a missed cycle and an unguarded recursion:
+    `call_callee_name` answers the two spellings that name a function of this
+    image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
+    EVERY struct in the image that declares an `m` — which is the symbol the
+    method-call rewriting emits, and over-approximating the owner is the safe
+    direction because it can only add an edge. A call out of the image
+    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
+    into it, so it cannot close a cycle here.
+    """
+    names = {f.name for f in functions}
+    method_owners: dict = {}
+    for st in (structs or {}).values():
+        for m in struct_methods(st):
+            method_owners.setdefault(m.name, []).append(st.name)
+    edges: dict = {f.name: set() for f in functions}
+    for f in functions:
+        body = getattr(f, "body", None)
+        if body is None:
+            # A StructDef, or anything else that is not a function. Both
+            # backends pass their `_functions` table, which is FunctionDefs
+            # only, so this is the guard against a caller that hands over the
+            # module's whole statement list — and skipping is the right answer
+            # rather than an error, because a struct has no calls of its own.
+            continue
+        for node in iter_nodes(body):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = call_callee_name(node.func)
+            if callee is not None:
+                edges[f.name].add(callee)
+                continue
+            func = node.func
+            if isinstance(func, F.SubscriptExpr):
+                func = func.obj
+            if not isinstance(func, F.MemberExpr):
+                continue
+            for owner in method_owners.get(func.member, ()):
+                edges[f.name].add(f"{owner}_{func.member}")
+
+    def reaches_self(start: str) -> bool:
+        seen, stack = set(), [start]
+        while stack:
+            cur = stack.pop()
+            for nxt in edges.get(cur, ()):
+                if nxt == start:
+                    return True
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    return {name for name in names if reaches_self(name)}
+
+
+# THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
+#
+# **Which prologues get it** is `recursive_function_names` above, and that is
+# the only decision here that is not the sequence: the sequence is the same in
+# every prologue it appears in, and a prologue it does not appear in is
+# unchanged code.
+#
+# Both prologues subtract a fixed frame and then do this, and the order is
+# load-bearing on both machines:
+#
+#     <floor> = the word at `stack_floor_address(...)`
+#     if <floor> == 0:  <floor> = SP - BUDGET ; store it back
+#     compare SP against <floor> and EXIT(STACK_TRAP_STATUS) if SP is below it
+#
+# Four decisions, each of which had more than one available answer:
+#
+# * **The floor is stored LAZILY, in every prologue, and not from the
+#   executable's entry stub.** A stub would do it once per process for an
+#   executable, and a dylib has no entry stub (`emit_startup=False`), so that
+#   answer is one mechanism for one container kind and a hole in the other —
+#   the shape `initialization_is_lazy` below already refuses for the same
+#   reason. The store is a `cbnz`/`jne` over four instructions and runs once
+#   per process; the alternative saves those four instructions per call and
+#   costs a second code path that a library image cannot take.
+# * **Zero means "not stored yet", and that is SAFE, not a hole.** The compare
+#   is an UNSIGNED lower test, and a stack pointer is never below zero, so an
+#   unset floor cannot fire — the guard is silent rather than wrong, which is
+#   exactly today's behaviour and the state the word starts in. This is why the
+#   floor needs no initialization ORDER relative to the first prologue: the
+#   store and the compare are in the same prologue, store first.
+# * **The budget is subtracted from the SP the frame subtraction LEFT**, not
+#   from the caller's SP. The difference is this function's own frame, which is
+#   charged against the budget rather than added to it, and that is the
+#   conservative direction.
+# * **The compare reads SP into a scratch register first on arm64** rather than
+#   using `CMP SP, Xm`. Both spell the same instruction to the hardware, but
+#   `lib/ProofLib.lean`'s `arm64_reg` answers 0 for index 31, so the
+#   shifted-register `SUBS` that `CMP SP, Xm` decodes to would be proved about
+#   `0 - Xm` — a proof of a different instruction
+#   (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`). `ADD Xd, SP, #0`
+#   is one of the forms the model already reads as `s.sp`, and the `CMP` that
+#   follows then names two ordinary registers. The bug doc for the guard
+#   concluded that the arm64 model gap BLOCKED it; this is the way round that,
+#   and it is why the sequence is written down here rather than left to two
+#   emitters.
+
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
 #

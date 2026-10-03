@@ -5202,6 +5202,56 @@ BOTH_ARCH_CASES = [
      "    r.zero()\n"
      "    printf(\"a=%d b=%d\", r.a, r.b)\n"
      "    return 0\n", 0, "a=0 b=0"),
+    # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
+    # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
+    #
+    # A runaway recursion used to be a SIGSEGV on both backends: no output and
+    # no status a caller could read, above 61 frames on arm64 and above ~470 on
+    # x86-64. These three rows are the whole of the fix's observable behaviour,
+    # and each fails if the guard is absent, if it misfires, or if the cycle
+    # detection misses a shape:
+    #
+    #   * `stack_floor_deep_recursion_is_a_status` — the defect. `deep(5000)` is
+    #     far past either backend's ceiling and the answer is the exit status
+    #     `STACK_TRAP_STATUS`. `want_stdout=None` because `printf` is inside
+    #     `main` and the trap fires before it.
+    #   * `stack_floor_shallow_recursion_still_answers` — the other direction,
+    #     and the one a guard that fired unconditionally would fail: 30 deep is
+    #     nowhere near the budget and must still print 30.
+    #   * `stack_floor_mutual_recursion_is_a_status` — the cycle detection, not
+    #     the guard. `ping`/`pong` are only a cycle TOGETHER, so a rule that
+    #     looked for a function calling ITSELF would guard neither and this row
+    #     would be a SIGSEGV again.
+    ("stack_floor_deep_recursion_is_a_status",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return deep(5000)\n", 2, None),
+    ("stack_floor_shallow_recursion_still_answers",
+     "def deep(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return deep(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d\\n\", deep(30))\n"
+     "    return 0\n", 0, "30"),
+    ("stack_floor_mutual_recursion_is_a_status",
+     "def pong(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return ping(n - 1)\n"
+     "\n"
+     "def ping(n: Int) -> Int:\n"
+     "    if n <= 0:\n"
+     "        return 0\n"
+     "    return pong(n - 1) + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return ping(5000)\n", 2, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -13620,6 +13670,110 @@ def check_emitter_builtin_agreement():
     return failures
 
 
+# WHICH PROLOGUES CARRY THE STACK-FLOOR GUARD, asked of
+# `model.recursive_function_names` and nothing else — the decision the three
+# `stack_floor_*` rows above can only observe indirectly, and the half of it they
+# cannot see at all.
+#
+# They can see that a cycle is guarded (the trap fires) and that a shallow
+# recursion is not disturbed. They CANNOT see that an acyclic function is left
+# alone, because leaving it alone and guarding it differ only in bytes, and
+# guarding it would cost the per-export contract proof — see
+# `recursive_function_names`'s docstring for why that is a cost and not a
+# detail. So the "not guarded" rows are asked directly, here, which is the level
+# at which the answer is the honest one.
+_STACK_FLOOR_PROBES = [
+    # (name, source, want — the set of guarded function names)
+    ("self_recursion", "def deep(n):\n    return deep(n - 1)\n"
+     "def main(n):\n    return deep(n)\n", {"deep"}),
+    # The shape a "does it call itself" rule gets wrong: neither function is
+    # recursive alone.
+    ("mutual_recursion", "def a(n):\n    return b(n - 1)\n"
+     "def b(n):\n    return a(n - 1)\n"
+     "def main(n):\n    return a(n)\n", {"a", "b"}),
+    # A three-function cycle, and the two functions that merely CALL it: they
+    # are on no cycle, so they are not guarded. The frames that accumulate
+    # while `b` runs are `b`'s to notice.
+    ("three_cycle_and_its_callers",
+     "def c(n):\n    return a(n - 1)\n"
+     "def b(n):\n    return c(n - 1)\n"
+     "def a(n):\n    return b(n - 1)\n"
+     "def caller(n):\n    return a(n)\n"
+     "def main(n):\n    return caller(n)\n", {"a", "b", "c"}),
+    # The shape that must NOT be guarded, twice: no self-call, and a call that
+    # goes out of the image (an unknown name) cannot close a cycle here.
+    ("acyclic_chain", "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n    return leaf(n)\n"
+     "def main(n):\n    return mid(n)\n", set()),
+    ("out_of_image_call", "def f(n):\n    return g(n - 1)\n"
+     "def main(n):\n    return f(n)\n", set()),
+    # A call inside a comprehension and inside an `elif`: the walk has to reach
+    # both, and `iter_nodes` is what reaches them — `iter_nodes`'s own docstring
+    # records a walker that descended every `if` body and stopped at the first
+    # `elif`, losing a third of the conditionals in a module.
+    ("cycle_through_a_comprehension",
+     "def f(n):\n    return [y for y in range(n)] and f(n - 1)\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    ("cycle_through_an_elif",
+     "def f(n):\n"
+     "    if n > 0:\n        return 1\n"
+     "    elif n < 0:\n        return f(n + 1)\n"
+     "    return 0\n"
+     "def main(n):\n    return f(n)\n", {"f"}),
+    # A METHOD call is the symbol `Struct_method`, not `method`, so a rule that
+    # read the member name would find no edge here and guard neither — and a
+    # struct that ping-pongs through two of its own methods is an ordinary
+    # recursive descent, not a shape invented for this test.
+    ("cycle_through_two_methods",
+     "struct R:\n"
+     "    def ping(self) -> Int:\n        return self.pong()\n"
+     "    def pong(self) -> Int:\n        return self.ping()\n"
+     "def main(n):\n    var r = R()\n    return r.ping()\n",
+     {"R_ping", "R_pong"}),
+]
+
+
+def check_stack_floor_decision(verbose=False):
+    """`model.recursive_function_names` on seven parsed modules.
+
+    Returns `(passed, failures)`; a probe's last element is the guarded set it
+    must answer, read off the source rather than off an image."""
+    build = __import__("formal.build", fromlist=["build"])
+    from formal import model as M
+    passed, failures = 0, []
+    for probe in _STACK_FLOOR_PROBES:
+        name, source, want = probe
+        stmts = build.parse_module(source, "<stack-floor>")
+        # The function list the EMITTER sees: `formal/build.py` lifts every
+        # struct method into the function table as `Struct_method` before
+        # codegen runs, and the guard reads that table — so a probe that passed
+        # only the module's top-level `def`s would ask about a graph the emitter
+        # never builds.
+        structs = {st.name: st for st in stmts
+                   if type(st).__name__ == "StructDef"}
+        # `_struct_methods` (formal/build.py) lifts each method into a COPY
+        # named by `model.method_function_name`, and it is that name a lifted
+        # `self.ping()` call carries — so the probe applies the same rename
+        # through the same function, rather than inventing the spelling. Without
+        # it the graph has `ping` calling `ping` on one side and `R_ping` on the
+        # other and finds no edge.
+        import copy as _copy
+        fns = [st for st in stmts if type(st).__name__ == "FunctionDef"]
+        for st in structs.values():
+            for mth in M.struct_methods(st):
+                lifted = _copy.deepcopy(mth)
+                lifted.name = M.method_function_name(st.name, mth.name)
+                fns.append(lifted)
+        got = M.recursive_function_names(fns, structs)
+        if got != want:
+            failures.append(f"{name}: {sorted(got)} (want {sorted(want)})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: {name}")
+    return passed, failures
+
+
 # The four rules `model.struct_init_field_types` is, asked of `formal.model` and
 # nothing else, and they are here as well as end to end: the evidence shape,
 # `self.<f> = T()` for a `T` of this unit whose receiver is a frame, is now
@@ -14047,6 +14201,13 @@ def main():
           f"FAIL={len(at_failures)}")
     passed += at_passed
     failed += len(at_failures)
+    sf_passed, sf_failures = check_stack_floor_decision(args.verbose)
+    for detail in sf_failures:
+        print(f"  FAIL  stack-floor-decision: {detail}")
+    print(f"formal run: stack-floor-decision PASS={sf_passed} "
+          f"FAIL={len(sf_failures)}")
+    passed += sf_passed
+    failed += len(sf_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")

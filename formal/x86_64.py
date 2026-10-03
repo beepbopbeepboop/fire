@@ -810,7 +810,17 @@ class Assembler:
 
     def emit_label_rel8(self, label_name: str, here_offset: int = 0):
         """Record a rel8 branch fixup whose displacement byte is at the
-        current position (biased by `here_offset`)."""
+        current position (biased by `here_offset`).
+
+        The SAME convention as `emit_label_rel32` below, and it is stated here
+        because `resolve` does not enforce it: the recorded address is the
+        displacement BYTE, not the instruction, and a rel8 branch is two bytes
+        long, so a caller back-patching the `jcc rel8` it just emitted passes
+        `here_offset=-1`. Passing the rel32 form's `-4` writes four bytes too
+        early, which overwrites the opcode of the branch and the two bytes
+        before it — a silently misdecoded instruction stream rather than a
+        rejected encoding. (Measured while landing the stack-floor guard, which
+        is the first caller of this method.)"""
         self.relocs.append(
             ("j8", label_name,
              self._org + len(self.sections["text"]) + here_offset))

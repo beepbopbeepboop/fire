@@ -591,6 +591,12 @@ dylib_exports: list = None, globals_base: int = None,
         # `and`/`or`'s by opcode alone -- it has to be told.  See
         # `generate_arm64_proof`'s `_cond_branches` consumer.
         self._cond_branch_pcs = []
+        # The functions whose prologue carries the stack-floor guard, filled by
+        # `compile()` once the whole image's call graph is known — see
+        # `model.recursive_function_names`. `compile()` is the only construction
+        # path (`formal/build.py` is the only caller), so it always overwrites
+        # this before a prologue is emitted.
+        self._recursive_names: set = set()
         self._blob_cap = _SCRATCH
         # ── A multi-field receiver, BY REFERENCE ──────────────────────────
         # `_frame_sites` is this function's `{id(call): (struct, offset)}` from
@@ -785,6 +791,14 @@ dylib_exports: list = None, globals_base: int = None,
             # has no event loop / iterator protocol, so `await` is identity
             # and `yield` leaves its value in X0 (compile-only fidelity).
             self._functions[f.name] = f
+        # Which prologues carry the stack-floor guard, settled ONCE for the
+        # whole image before any function is emitted (the guard is decided per
+        # function, so it cannot be answered while a prologue is being written).
+        # `values(self._functions.values())`, not `functions`: the guard reads
+        # the same set of FunctionDefs either way, and this is the table the
+        # emitters dispatch on.
+        self._recursive_names = M.recursive_function_names(
+            self._functions.values(), self._structs)
 
         self.asm.org(base_addr)
 
@@ -1149,6 +1163,12 @@ dylib_exports: list = None, globals_base: int = None,
                        f"and there is no argument register left for it")
             self._load_home_from_reg(_SRET_LOCAL, sret_arg)
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
+        # The stack-floor guard, immediately after the subtraction it guards,
+        # and only in a function a call chain can re-enter: see
+        # `model.recursive_function_names` for why the cycle is the set, and
+        # `model.stack_floor_address` for the sequence itself.
+        if self.func_name in self._recursive_names:
+            self._emit_stack_floor_guard()
 
         for stmt in f.body:
             self._emit_stmt(stmt)
@@ -1262,6 +1282,104 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_mov_imm(f"X{dst}", tag)
             return
         raise CodegenError(self._no_home(name))
+
+    def _emit_stack_floor_guard(self) -> None:
+        """Refuse instead of dying when the frame just taken crosses the floor.
+
+        Every function on this path subtracts a FIXED 128 KiB frame and nothing
+        checked the result, so the reachable recursion depth was `8 MiB /
+        128 KiB` and crossing it was a SIGSEGV with no output and no status —
+        measured on this tree: `deep(61)` answers, `deep(62)` dies with exit
+        139. This converts that into `exit(STACK_TRAP_STATUS)`, which is the
+        one outcome this backend already has an idiom for and the one a caller
+        can read.
+
+        The sequence and every decision in it are `model.stack_floor_address`'s
+        and are written down there; what is here is its instruction selection:
+
+            ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
+            CBNZ X16, done                             already stored
+            ADD X16, SP, #0 ; SUB X16, X16, #BUDGET    the first caller sets it
+            STR X16, [X17]
+        done:
+            ADD X17, SP, #0 ; CMP X17, X16
+            B.HS ok                                    SP >= floor: carry set
+            movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
+        ok:
+
+        **Every one of those forms is one `lib/ProofLib.lean` already reads.**
+        That is not luck and it is the reason the sequence is shaped this way
+        rather than as the shorter `CMP SP, X16`: `arm64_reg` answers 0 for
+        index 31, so a `CMP SP, Xm` decodes to the shifted-register `SUBS
+        XZR, X31, X16` whose modelled operands are `0` and `X16`
+        (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`), and a proof
+        generated over it would be a proof about a different instruction. `ADD
+        Xd, SP, #imm` is one of the handful of forms whose `Rn = 31` case the
+        model spells as `s.sp`, and the `CMP` that follows names two ordinary
+        registers, so both steps are the instructions the machine executes.
+
+        X16 and X17: the intra-procedure scratch pair `_emit_global_init` and
+        the spill addressing already use. Neither holds anything across a
+        prologue — AAPCS delivers arguments 0..7 in X0..X7 and every incoming
+        argument has been moved to its home above this point.
+        """
+        if self._globals_base is None:
+            # No `__DATA`, so no word to keep the floor in, so nothing to
+            # compare against. `formal/build.py` always hands a base over — the
+            # data segment is unconditional since the floor word landed — so
+            # this is the `_emit_global_init` shape rather than a live case.
+            return
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        done_label = f"{fn}_sf{sid}_done"
+        trap_label = f"{fn}_sf{sid}_trap"
+        ok_label = f"{fn}_sf{sid}_ok"
+        floor = M.stack_floor_address(self._globals_base)
+        # X17 = the address of the floor word, X16 = the floor itself. The
+        # same ADRP/ADD pair and the same LDR the lazy global initializer uses,
+        # for the same reason: it is the addressing this backend already proves
+        # against a real dyld rather than a new one.
+        self._adrp_add_abs(17, floor)
+        self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
+        self.asm.emit(encode_cbnz_xn(0, 16))
+        self.asm.emit_label_rel(done_label, here_offset=-4)
+        # SP - BUDGET, through `_emit_sub_imm` rather than a bare immediate:
+        # the budget is 7.5 MiB and an imm12 tops out at 4095, so this is the
+        # same two-instruction shift the frame subtraction itself is.
+        self.asm.emit(encode_add_xd_xn_imm(16, 31, 0))
+        _emit_sub_imm(self.asm, 16, 16, M.STACK_FLOOR_BUDGET_BYTES)
+        self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        self.asm.label(done_label)
+        # SP into X17, then `SP - floor`. The stack grows DOWN, so having spent
+        # the budget is `SP < floor`, which is the subtraction BORROWING and so
+        # carry CLEAR. `B.HS` is the complement of that — "carry set", i.e.
+        # `SP >= floor` — and it branches OVER the trap, so the trap is the
+        # fall-through and the body's first instruction is the branch target.
+        self.asm.emit(encode_add_xd_xn_imm(17, 31, 0))
+        self.asm.emit(encode_cmp_xn_xm(17, 16))
+        self.asm.emit(encode_b_cond("hs", 12))
+        self.asm.emit_label_rel(ok_label, here_offset=-4)
+        # The trap is three instructions: `movz x0, <status>; movz x16, 1; svc
+        # #0x80` is Darwin arm64 `exit(status)`, and it is the same sequence
+        # with the same shape as the divide-by-zero arm of `_emit_div_shift_pow`.
+        self.asm.label(trap_label)
+        self.asm.emit(encode_movz_xd_imm(0, M.STACK_TRAP_STATUS))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        # `label`, not `emit_label_rel`: this DEFINES where the branch above
+        # goes, and it lands on the first instruction of the BODY because the
+        # trap is the fall-through. Branching OVER the trap rather than TO it
+        # is the layout the divide-by-zero arm already uses
+        # (`_emit_div_shift_pow`), and keeping the two the same shape is what
+        # keeps the basic-block structure of a prologue the same as the one the
+        # proof generator already walks: a branch to a three-instruction trap
+        # block whose successor is the next thing to do. The alternative — a
+        # `b` over the trap — adds a basic block that is nothing but an
+        # unconditional branch, and a block with no instructions to run breaks
+        # `formal/arm64_proof_gen.py`'s syntactic fuel chain (measured: `rw`
+        # fails on `fuel - 0`).
+        self.asm.label(ok_label)
 
     def _emit_global_init(self, skip_label: str = None) -> None:
         """Fill every address-valued module-global slot, and set the flag.
