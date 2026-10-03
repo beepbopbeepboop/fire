@@ -792,10 +792,10 @@ def main(n):
 BLOB_STORE_PROGRAM = """\
 from os import listdir, listdir_len, listdir_free
 
-# The defect `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`
-# measured: the build was silent on both architectures and the program died in the
-# module's own `free` with SIGABRT, because word 1 of a `listdir` blob is entry
-# 0's POINTER and `listdir_free` calls `free` on whatever word it finds there.
+# The defect `d9874a93` fixed: the build was silent on both architectures and the
+# program died in the module's own `free` with SIGABRT, because word 1 of a
+# `listdir` blob is entry 0's POINTER and `listdir_free` calls `free` on whatever
+# word it finds there.
 def main() -> Int:
     var names = listdir("{dirpath}")
     printf("before=%d", listdir_len(names))

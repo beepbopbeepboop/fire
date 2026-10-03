@@ -6515,9 +6515,9 @@ def check_imported_blob_stores(functions, link_line) -> None:
     `HOST_OWNED_BLOBS`), and this is where the two halves meet: a local bound
     from a call whose export returns such a blob is one of those blobs, and a
     subscript store through it is the defect
-    `bugs/FORMAL_a_blob_is_two_conventions_and_a_store_into_one_aborts.md`
-    measured — a silent build, then SIGABRT inside the module's own `free`,
-    with the count word still saying how many entries there were.
+    fixed in `d9874a93`, where it was measured — a silent build,
+    then SIGABRT inside the module's own `free`, with the count word still saying
+    how many entries there were.
 
     **THREE PHASES, and the order is load-bearing.** Which names hold a blob is
     answered for the WHOLE image before any store is looked at, because the
@@ -8062,7 +8062,8 @@ def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict) -> None:
 
     which is true of the node they held and useless to the reader, who wrote
     `c.f`: `c` is not the problem, and finding that out costs a build
-    (`bugs/FORMAL_a_call_through_a_one_words_field_calls_the_receiver.md`).
+    (`d9874a93`'s neighbour `82c22a48`, which is where the
+    measurement behind this paragraph is).
     Two things changed here and neither is optional on its own. The rewrite
     no longer touches a node in callee position — `id()` of the callee,
     because `rewrite_tree` hands the visitor a node and no parent, the same

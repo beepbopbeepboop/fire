@@ -1231,8 +1231,8 @@ CASES = [
     # cannot be allowed to disagree, so they are written as a pair: the first is
     # the value model making a program answerable, the second is the value model
     # refusing the one construct the word cannot express.  The bug doc is
-    # `bugs/FORMAL_an_enum_member_is_not_a_value_any_default_position_can_hold.md`
-    # and it asked for the question to be decided rather than patched.
+    # `3b733724` decided it, and it asked for the question to be decided rather
+    # than patched.
     #
     # THE REFUSAL, and it is a wrong answer this closes.  A member read
     # materializes to its value (`printf("%d", Reg.A)` prints 7 for `A = 7`), so
@@ -15142,7 +15142,7 @@ COMPTIME_ATTRIBUTE_CASES = [
     # the word, so `.value` on it is a method reference on a string and is
     # refused.  That is the trade this value model makes and the reason the
     # message of the next line is a different question — see
-    # `bugs/FORMAL_an_enum_member_is_not_a_value_any_default_position_can_hold.md`.
+    # `3b733724`.
     ("a_member_as_a_field_default_materializes_to_its_value",
      "from dataclasses import dataclass\n"
      "from enum import Enum\n"
@@ -15264,10 +15264,9 @@ MUTATING_RECEIVER_REFUSALS = [
 #     `c` is a call through a VALUE rather than through a function of this unit
 #
 # which is true of the node they held and useless to the reader, who wrote
-# `c.f`.  `bugs/FORMAL_a_call_through_a_one_words_field_calls_the_receiver.md`
-# is the doc; the refusal now happens at the rewrite, by name, on both
-# architectures and in the same words (`formal/model.py`'s
-# `sole_field_call_refusal`).
+# `c.f`.  The refusal happens at the rewrite, by name, on both architectures and
+# in the same words (`formal/model.py`'s `sole_field_call_refusal`); the
+# measurement it answers is in `82c22a48`.
 #
 # The pair is the assertion: a field READ and a METHOD CALL on the same struct
 # must both still build and compute, so a fix that refused every member access on

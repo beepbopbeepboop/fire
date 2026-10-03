@@ -394,8 +394,10 @@ def chmod(path, mode) -> int:
 # needs an annotation" but "this declaration claimed the value was not one", and
 # the two are fixed by different things: the declaration is now true, and an
 # unannotated binding of a cross-image POINTER is REFUSED by name rather than
-# silently computing `[word + 8i]` (see
-# `bugs/FORMAL_a_blob_is_two_conventions.md`).
+# silently computing `[word + 8i]` — `formal/build.py`'s
+# `check_subscript_through_an_unclassified_import`, which is also why the
+# `listdir_free`/`listdir_len`/`listdir_get` accessors below are the way to READ
+# this blob and a bare `names[i]` is not.
 
 def listdir(path) -> Pointer[Int64]:
     """The entries of the directory `path`, or 0 when there is no such
