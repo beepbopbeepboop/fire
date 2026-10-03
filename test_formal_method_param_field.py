@@ -716,6 +716,24 @@ CASES = [
     # Both spellings of the same source are given, so neither case can pass by
     # agreeing with a wrong expectation — and the transcriptions are oracles,
     # not tables.
+    #
+    # **WHICH refusal answers `Box(o)`, and why the needle is the receiver's.**
+    # It was `constructing Box with argument 'o' as field 'inner'` — the
+    # construction-argument rule — when this row was written, and it is still
+    # the sentence for every OTHER holder. `Box` here has exactly ONE field, so
+    # `_rewrite_self_fields` collapses `self.inner` onto `self`; and
+    # `model.one_word_sole_field_frame` (7632c881, on master before this merge)
+    # withdrew `_collect_receiver_rebinds`'s one-field exemption for exactly
+    # these owners, because `self = o` overwrites the frame address the caller
+    # still holds. That rule now pre-empts the construction one, so this row
+    # pins the receiver refusal. BOTH are true of the program and neither builds
+    # it; which one SHOULD answer a CONSTRUCTOR's store is open, and
+    # `bugs/FORMAL_a_one_word_frame_holder_constructor_is_answered_by_the_
+    # receiver_rule.md` carries the measurement and the next step. The refusal
+    # and its promise are still what this row is for — the pair below is the
+    # half that has to keep working — and the second program here is the
+    # workaround the first refusal names, whether that is this message or the
+    # other one.
     ("refuse_a_struct_field_initialised_from_a_constructor_argument",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -749,7 +767,7 @@ CASES = [
      "b = Box(o)\n"
      "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
      None, None,
-     "constructing Box with argument 'o' as field 'inner'"),
+     "self is assigned o in Box___init__"),
     ("a_struct_field_assigned_after_construction_is_the_same_program",
      "struct Opt:\n"
      "    var v: Int\n"
