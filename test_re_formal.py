@@ -313,7 +313,7 @@ def expected(pattern, subject, flags):
 
 
 def mojo_str(s):
-    """A Mojo string literal whose DECODED bytes are `s` — the INVERSE of
+    r"""A Mojo string literal whose DECODED bytes are `s` — the INVERSE of
     `fire_compiler.decode_c_escapes`.
 
     A string literal's body is decoded exactly once on the way in, and it is
@@ -321,7 +321,7 @@ def mojo_str(s):
     decoder): `\b` is a backspace, `\x41` is `A`, `\n` is a newline and `\\`
     is one backslash. So the body that delivers the bytes `s` holds is `s`
     with every backslash DOUBLED, and one doubling is what makes the byte that
-    arrives the byte the Python string holds: `r"\\d+"` is written
+    arrives the byte the Python string holds: `r"\d+"` is written
     `"\\\\d+"`, and `\\` is written `"\\\\\\\\"`.
 
     **This used to be the other way round and 14 checks were red because of
@@ -337,10 +337,10 @@ def mojo_str(s):
     whose `\n` must stay two characters):
 
         literal        len  bytes
-        "\\b"           2  92 98      a word boundary
-        "\\b"           1  8          a BACKSPACE, which is what this wrote
-        "\\\\"          2  92 92      an escaped backslash
-        "\\\\"          1  92         an incomplete atom, refused
+        "\b"            2  92 98      a word boundary
+        "\b"            1  8          a BACKSPACE, which is what this wrote
+        "\\"           2  92 92      an escaped backslash
+        "\\"           1  92         an incomplete atom, refused
 
     So the doubling is not a spelling preference: without it the engine is
     handed bytes the pattern never contained. `re.mojo` itself is right —
