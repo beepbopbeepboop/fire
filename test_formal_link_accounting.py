@@ -324,6 +324,15 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     # FILE OBJECT is more than one 64-bit word — which is what
     # `bugs/FORMAL_tempfile_context_manager_needs_a_way_out_of_a_with.md` is.
     "tempfile": "test_formal_tempfile.py",
+    # `textwrap` left `HOST_MODELLED` the way `stat` and `math` did, and for the
+    # same reason: `dedent` and `indent` are pure string computation over the
+    # `str_len`/`str_lead`/`str_find`/`str_cmp` that
+    # `formal/hostmods/os/_syscalls.mojo` already had, so nothing about them was
+    # out of reach and the tier entry said "the work has not been done". What is
+    # still true, and is at the top of the module, is that `wrap`, `fill` and
+    # `shorten` are absent — a rendering WIDTH is the subject and no file in this
+    # repository asks for one.
+    "textwrap": "test_formal_textwrap.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot
