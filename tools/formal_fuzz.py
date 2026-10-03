@@ -139,13 +139,36 @@ disagreement reported here is re-reportable from the seed and the index alone.
 `--print-program N` prints one program's source and exits, which is how a
 reported index becomes something you can read and minimise by hand.
 
-WHAT IS NOT COVERED, so the next reader does not have to measure it
------------------------------------------------------------------
-`--mix` names the construct families: `core` (arithmetic, comparisons, loops,
+WHAT IS COVERED, AND WHAT IS NOT, so the next reader does not have to measure it
+-----------------------------------------------------------------------------
+`--mix` names the construct families, and the list is the CORPUS's, not the
+backend's: a family is here because the corpus can produce it and a case
+somebody thought of cannot. Two groups.
+
+The arithmetic and control half: `core` (arithmetic, comparisons, loops,
 augmented assignment), `signed` (division with two signed operands, which is
 where the floor/truncate disagreement lives), `calls` (module-level helpers,
-nested calls, tail recursion), `strings`, `lists`, `classes` (a `class` with
-fields, so the frame receiver). Deliberately absent, each for a stated reason:
+nested calls, tail recursion), `classes` (a `class` with fields and methods, so
+the frame receiver), `globals` (module-level `__DATA` slots, read through a
+local and written by a helper through its own `global`), `generics` (`def
+f[T](x: T, …)` called at more than one type, which is what monomorphisation
+acts on), `environ` (`os.getenv` against a FIXED process environment,
+`FIXED_ENV`).
+
+The value-model half: `strings` (binding, `len`, comparison, the byte
+subscript), `strmeth` (the five methods this path lowers — `count`, `find`,
+`startswith`, `endswith`, `lstrip`), `lists`, `containers` (dict pair blobs,
+tuples, and `append`).
+
+Every one of the last five was added because a DIFFERENTIAL SWEEP found
+something in it, and the ledger is `bugs/FORMAL_fuzz_ledger.md`: `containers`
+because `for k in d` read `k0, v0, k1` on BOTH architectures (exit 0) and
+because a membership test's bound was its own needle on x86-64;
+`generics`/`globals`/`strmeth`/`environ` because they were newly lowered and
+had no coverage at all, which is the state in which a bug is cheapest to
+introduce and most expensive to find.
+
+Deliberately absent, each for a stated reason:
 
   * `struct` with DECLARED fields (`var a: int`) — `var` is a keyword CPython
     cannot parse, so the two engines would stop running the same text. `class`
@@ -155,13 +178,31 @@ fields, so the frame receiver). Deliberately absent, each for a stated reason:
   * floats — this path is int-only (a float literal truncates), so a `double`
     is a word and a fuzz oracle built on one would be testing the model, not
     the lowering.
+  * STRING CONCATENATION and the length-dependent methods — refused, with the
+    measurement in the refusal (`model.string_concat_refusal`): a string is a
+    bare `char *` and `+` is integer addition of two addresses, which printed
+    `[]` on arm64 and segfaulted on x86-64. `strmeth` is the surface that IS
+    lowered, so the corpus spends its string budget where answers exist.
+  * GROWING a container — `d[k] = v` for a key the table does not have is a
+    key scan that misses, and the miss signal on this path is `exit(1)` with
+    nothing printed; `xs.append(v)` inside a loop overflows the blob's
+    capacity, which is the number of append SITES in the function that built
+    it. Both are limits with a diagnostic rather than defects, and both are
+    measured: `bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`.
   * a variadic `printf` with more than five operands — arm64 refuses a variadic
     call whose arguments pass the register file, so a program with more than
     seven of them is not a two-architecture case at all. The stack-argument
     convention is covered by `test_formal_run.py`'s `BOTH_ARCH_CASES` ladder.
-  * file descriptors, dylibs, imports, `comptime` — the families the module
-    suites own; a fuzz program that opened a file would make the comparison
-    depend on the filesystem.
+  * file descriptors, dylibs, `comptime` — the families the module suites own;
+    a fuzz program that opened a file would make the comparison depend on the
+    filesystem. (`import` IS generated, for `os.getenv` only.)
+
+THE COST OF A MIX, because it decides how large a sweep of it is worth running:
+`core` and `calls` run at about 1.9 programs/second at `-j 2`, `containers` and
+`globals` at 0.7-1.1, and `environ` at 0.14 — a program that imports `os` pays
+for the host module's dylib on every build, which no cache in this tool covers.
+A sweep of `environ` is therefore a tenth the size of a sweep of `core` for the
+same number of builds.
 """
 import argparse
 import json
@@ -290,13 +331,20 @@ def run(path, backend, timeout=RUN_TIMEOUT):
     host `arch -x86_64 <an arm64 image>` is "Bad CPU type in executable", which
     is a failure that reads as the host's fault and is really the harness
     asking the wrong machine to run the program.
+
+    Under `FIXED_ENV`, like the CPython reference (`cpython_answer`), and for
+    the reason `FIXED_ENV` gives: a program that reads the environment reads
+    the PROCESS, so an inherited block makes the comparison depend on the shell
+    that started the sweep. `arch` passes the environment through, so both
+    architectures still see the same one.
     """
     argv = [path]
     if (backend == "x86_64" and platform.machine() in ("arm64", "aarch64")
             and sys.platform == "darwin"):
         argv = ["arch", "-x86_64", path]
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           env=dict(FIXED_ENV))
     except subprocess.TimeoutExpired:
         return None, f"RUN TIMEOUT after {timeout}s"
     return (p.returncode, p.stdout), p.stderr
@@ -342,7 +390,7 @@ def cpython_answer(text, tmpdir, name):
         f.write(PY_DRIVER.replace("@PROGRAM@", text).replace("@TAG@", _RC_TAG))
     try:
         p = subprocess.run([sys.executable, py], capture_output=True, text=True,
-                           timeout=PY_TIMEOUT)
+                           timeout=PY_TIMEOUT, env=dict(FIXED_ENV))
     except subprocess.TimeoutExpired:
         return None, "CPYTHON TIMEOUT"
     m = _RC_RE.search(p.stderr or "")
@@ -447,6 +495,27 @@ def run_on(backend, text, tmpdir, name):
 
 STRINGS = ["ab", "cd", "ef", "gh", "", "a", "xyz", "pqrs"]
 
+#: The process environment every engine — and CPython — is RUN with, for the
+#: `environ` mix. A FIXED one, and it replaces the inherited block rather than
+#: adding to it, because an inherited environment cannot answer a differential
+#: test at all: a shell adds `_` to a child's block and cannot add it to a parent
+#: that has already started, so the same text under two parents sees two blocks
+#: and a disagreement is undecidable. `test_formal_os_backing.py` §7 makes the
+#: same argument for the same object and puts `__CF_USER_TEXT_ENCODING` in its
+#: fixed dict for a second reason: an x86-64 image run through Rosetta is
+#: launched with that variable whether the parent put it there or not, so
+#: declaring it is what makes the two architectures compare the SAME block.
+FIXED_ENV = {
+    "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
+    "FORMAL_FUZZ_PLAIN": "one",
+    "FORMAL_FUZZ_TWO": "two words",
+    # A value containing `=`: the split is at the FIRST `=`, so this is key
+    # `FORMAL_FUZZ_EQUALS` and value `a=b=c`. It is in the table because a
+    # second `=` is the one place a hand-rolled split answers something
+    # plausible and wrong.
+    "FORMAL_FUZZ_EQUALS": "a=b=c",
+}
+
 # Which construct families appear, with weights.  `core` is the
 # arithmetic/control/comparison half — signedness, loop counters, augmented
 # assignment; `calls` adds user functions and nesting; `strings` and `lists`
@@ -485,6 +554,41 @@ MIXES = {
                 ("field_write", 3), ("method_call", 5),
                 ("method_call_in_arg", 3), ("assign", 2), ("if", 3),
                 ("while", 1), ("augassign", 2)),
+    # The PAIR blob and the blob beside it.  This mix exists because the `lists`
+    # half above walks a `[count][e0][e1]…` at one stride and every walk over a
+    # dict is the SAME walk at a different one — and `for k in d` reading
+    # `k0, v0, k1` (both architectures, exit 0) is exactly the class of defect a
+    # corpus that cannot produce a dict cannot notice.  Membership is here for
+    # the same reason: it is the same walk with a needle and it had its own two.
+    "containers": (("assign", 2), ("dict_build", 3), ("dict_read", 3),
+                   ("dict_write", 2), ("dict_len", 2), ("dict_in", 3),
+                   ("dict_iter", 4), ("dict_comp_count", 2),
+                   ("tuple_build", 2), ("tuple_read", 2), ("tuple_len", 2),
+                   ("tuple_iter", 2), ("list_build", 2), ("list_read", 2),
+                   ("list_write", 1), ("list_append", 2),
+                   ("if", 3), ("while", 1), ("for", 2)),
+    # Module-level state: a `__DATA` slot rather than a frame slot, which is a
+    # different owner, a different lifetime and a different store from every
+    # other local in this generator.
+    "globals": (("assign", 2), ("global_read", 4), ("global_write", 3),
+                ("global_bump", 4), ("global_container", 2), ("if", 3),
+                ("while", 1), ("for", 2), ("augassign", 2), ("print", 2)),
+    # The five string METHODS this path lowers, which is the whole of what a
+    # string can do here: `+` and the length-dependent methods are refused (see
+    # `strmeth_stmt`), so `count`/`find`/`startswith`/`endswith`/`lstrip` plus
+    # `len` is the surface, and it was entirely uncovered.
+    "strmeth": (("str_bind", 3), ("str_count", 3), ("str_find", 3),
+                ("str_startswith", 3), ("str_endswith", 3), ("str_lstrip", 2),
+                ("str_meth_len", 2), ("if", 3), ("call", 2), ("print", 2)),
+    # Monomorphisation.  One generic definition called at more than one type is
+    # the whole subject (`formal/monomorph.py`), and a corpus whose every call
+    # site agrees cannot tell a monomorphising backend from one that ignores
+    # the argument's type entirely.
+    "generics": (("generic_define", 3), ("generic_call", 5), ("assign", 2),
+                 ("if", 3), ("while", 1), ("for", 2), ("augassign", 2)),
+    # The process environment, against a FIXED one (`FIXED_ENV`).
+    "environ": (("environ_get", 4), ("environ_len", 3), ("environ_cmp", 3),
+                ("if", 2), ("assign", 2), ("augassign", 2)),
 }
 
 # The growing augmented operators, and the bound each one's RIGHT-HAND side is
@@ -525,7 +629,13 @@ class Gen:
         self.words = []       # masked, 0..0xFFFF
         self.smalls = []      # signed, small
         self.strings = []     # String locals
+        self.strings_text = {}  # String local -> the literal it was bound to
         self.lists = []       # (name, length) list locals of ints
+        self.dicts = []       # (name, key kind, keys, values) dict locals
+        self.tuples = []      # (name, length) tuple locals of ints
+        self.globals = []     # (name, initial value) module-level INT names
+        self.global_containers = []   # (name, length) module-level list names
+        self.generics = []    # (name, arity, returns a String) generic defs
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
         self.fields = []      # field names, inside a method body
@@ -533,6 +643,8 @@ class Gen:
         self.decls = []       # (name, initial value text) for the preamble
         self.defs = []        # module-level function definitions
         self.out = []         # the body being emitted
+        self.toplevel = []    # module-level statements, outside every body
+        self.main_globals = []   # names `main` declares `global`, in order
         self.loop_depth = 0
         self.counter = 0
         self.defined = 0      # functions defined SO FAR, shared with children
@@ -544,6 +656,16 @@ class Gen:
 
     def emit(self, indent, text):
         self.out.append("    " * indent + text)
+
+    def emit_top(self, text):
+        """A MODULE-level statement, outside every function body.
+
+        `self.out` is `main`'s body while the body is being emitted, and a
+        module-level binding emitted into it would land inside `main` — where
+        CPython reads it as a local and the backends read it as a frame slot,
+        which is precisely the difference the globals family exists to measure.
+        """
+        self.toplevel.append(text)
 
     def pick(self, *kinds):
         """One construct family, by weight, restricted to this mix."""
@@ -732,10 +854,23 @@ class Gen:
             "str_len", "str_cmp", "str_subscript", "list_build", "list_read",
             "list_write", "list_len", "list_in_loop", "obj_new", "field_read",
             "field_cmp", "field_write", "method_call", "method_call_in_arg",
-            "div_signed", "mod_signed", "print")
+            "div_signed", "mod_signed", "print",
+            "dict_build", "dict_read", "dict_write", "dict_len", "dict_in",
+            "dict_iter", "dict_comp_count", "tuple_build", "tuple_read",
+            "tuple_len", "tuple_iter", "list_append",
+            "str_bind", "str_count", "str_find", "str_startswith",
+            "str_endswith", "str_lstrip", "str_meth_len",
+            "global_build", "global_read", "global_write", "global_bump",
+            "global_container", "generic_define", "generic_call",
+            "environ_get", "environ_len", "environ_cmp")
         if budget <= 0 and kind in ("if", "while", "for", "call",
                                     "nested_call", "recursion",
-                                    "list_in_loop"):
+                                    "list_in_loop", "dict_iter",
+                                    "tuple_iter"):
+            # A walk is a LOOP: it is what `budget` exists to bound, since a
+            # nest of them is a nest of stack frames rather than a nest of
+            # branches. Folding one into an assignment keeps the depth of the
+            # generated control flow inside what the corpus means to measure.
             kind = "assign"
         if kind in ("assign", "arith", "cmp", "logic", "cond_expr"):
             self.assign_stmt(indent)
@@ -799,6 +934,23 @@ class Gen:
             self.signed_div_stmt(indent, kind)
         elif kind == "print":
             self.print_stmt(indent)
+        elif kind in ("dict_build", "dict_read", "dict_write", "dict_len",
+                      "dict_in", "dict_iter", "dict_comp_count"):
+            self.dict_stmt(indent, kind)
+        elif kind in ("tuple_build", "tuple_read", "tuple_len", "tuple_iter"):
+            self.tuple_stmt(indent, kind)
+        elif kind == "list_append":
+            self.list_append_stmt(indent)
+        elif kind in ("str_bind", "str_count", "str_find", "str_startswith",
+                      "str_endswith", "str_lstrip", "str_meth_len"):
+            self.strmeth_stmt(indent, kind)
+        elif kind in ("global_build", "global_read", "global_write",
+                      "global_bump", "global_container"):
+            self.global_stmt(indent, kind)
+        elif kind in ("generic_define", "generic_call"):
+            self.generic_stmt(indent, kind)
+        elif kind in ("environ_get", "environ_len", "environ_cmp"):
+            self.environ_stmt(indent, kind)
         elif kind in ("obj_new", "field_read", "field_cmp", "field_write",
                       "method_call", "method_call_in_arg"):
             self.object_stmt(indent, kind)
@@ -912,8 +1064,23 @@ class Gen:
             self.new_small(indent)
 
     def block(self, indent, budget):
+        """One to three statements, and never ZERO of them.
+
+        An empty block is an `IndentationError` in CPython and a syntax error in
+        the parser, so a construct that can decline to emit — `define_generic`
+        and `define_class` both return None when their budget of definitions is
+        spent, and a `global_write` inside a loop-nested branch is the same
+        shape — must not be the only statement in a block. `pass` is the
+        fallback because it is the one statement that lowers on both backends
+        and changes no value (measured: an `if`/`else` of two `pass` statements
+        builds and runs on both), and because it cannot perturb the comparison
+        the way a synthesised assignment could.
+        """
+        before = len(self.out)
         for _ in range(self.rng.randint(1, 3)):
             self.stmt(indent, budget)
+        if len(self.out) == before:
+            self.emit(indent, "pass")
 
     def while_loop(self, indent, budget):
         """A `while` whose trip count is bounded BY CONSTRUCTION.
@@ -1102,6 +1269,7 @@ class Gen:
         if kind == "str_assign" or not self.strings:
             name = self.declare(self.fresh("t"), '"ab"')
             self.strings.append(name)
+            self.strings_text[name] = "ab"
             if self.rng.random() < 0.4:
                 self.emit(indent, f"{name}: String = {self.str_expr()}")
             else:
@@ -1132,6 +1300,7 @@ class Gen:
             word = self.rng.choice(STRINGS) or "a"
             name = self.declare(self.fresh("t"), f'"{word}"')
             self.strings.append(name)
+            self.strings_text[name] = word
             self.emit(indent, f'{name} = "{word}"')
             self.emit(indent, f"print({name}[{self.rng.randrange(len(word))}])")
             return
@@ -1145,6 +1314,484 @@ class Gen:
         if self.strings and self.rng.random() < 0.6:
             return self.rng.choice(self.strings)
         return repr(self.rng.choice(STRINGS))
+
+    # ── dicts and tuples: the PAIR blob, and the blob beside it ──
+    #
+    # A dict is `[count][k0][v0][k1][v1]…` and a tuple is `[count][e0][e1]…`,
+    # so both are "one thing per count" containers with different strides —
+    # which is the whole of what a walk over them has to get right, and the
+    # reason they are one family here rather than two.
+    #
+    # Three disciplines, each of them a measured refusal rather than tidiness:
+    #
+    #   * a SUBSCRIPT is read into a local and the local is printed.
+    #     `print(d["a"])` is refused on both backends — "print() cannot tell
+    #     whether SubscriptExpr is a string or a number" — and a family that is
+    #     95% refused is a family that finds nothing.
+    #   * a STORE names a key the LITERAL wrote. A key the table does not
+    #     contain is a key scan that misses, and the miss signal on this path is
+    #     `exit(1)` with nothing printed: measured on both architectures for
+    #     `d = {"a": 1}; d["b"] = 2; print(len(d))`, which CPython answers 2 and
+    #     both images answer by dying. That is the grow-a-dict limit
+    #     (`bugs/FORMAL_a_dict_store_of_a_new_key_is_a_run_time_miss.md`), so the
+    #     corpus stays on the half that works.
+    #   * a dict with MIXED key kinds claims nothing, so a table here has one
+    #     kind of key throughout — a string-keyed table and an integer-keyed
+    #     one, never both. See `model.dict_literal_key_kind`'s gate.
+    def dict_stmt(self, indent, kind):
+        if kind == "dict_build" or not self.dicts:
+            self.build_dict()
+            return
+        var, key_kind, keys, values = self.rng.choice(self.dicts)
+        if kind == "dict_read":
+            # Through a local, and the local joins `words` so later statements
+            # can compare against it — a subscripted value is an ordinary word
+            # once it is in hand.
+            tmp = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{tmp} = {var}[{self.rng.choice(keys)}]")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
+            return
+        if kind == "dict_write":
+            self.emit(indent, f"{var}[{self.rng.choice(keys)}] = "
+                              f"{self.rng.randint(0, 40)}")
+            return
+        if kind == "dict_len":
+            self.emit(indent, f"print(len({var}))")
+            return
+        if kind == "dict_in":
+            # A key that is IN the table and a key that is NOT, because the two
+            # exits of the scan are the two ways it can be wrong: a scan bounded
+            # by the wrong thing never reaches the "not found" exit at all.
+            key = (self.rng.choice(keys) if self.rng.random() < 0.6
+                   else self.absent_key(key_kind))
+            self.emit(indent, f"print(1 if {key} in {var} else 0)")
+            return
+        if kind == "dict_comp_count":
+            # A dict COMPREHENSION: the pair blob built at RUN time, so nothing
+            # in the source states its keys. Iteration and `len` are the only
+            # readers of it that work — a subscript of one has no initializer to
+            # take a kind from, and is refused. The trip COUNT is still a real
+            # observation: it is the number of pairs the comprehension built.
+            name = self.fresh("D")
+            self.emit(indent, f"{name} = {{10 + i: 100 + i "
+                              f"for i in range({self.rng.randint(1, 4)})}}")
+            self.emit(indent, f"print(len({name}))")
+            guard = self.declare(self.fresh("g"), "0")
+            self.emit(indent, f"{guard} = 0")
+            self.emit(indent, f"for kk in {name}:")
+            self.emit(indent + 1, f"{guard} = {guard} + 1")
+            self.emit(indent, f"print({guard})")
+            # Deliberately NOT in `self.dicts`: it has no literal keys, so every
+            # statement that subscripts or tests membership needs one would have
+            # nothing to name.  It is observed through `len` and through the
+            # trip count, which are the two readers a run-time-built pair blob
+            # has.
+            return
+        # dict_iter: the walk itself, observed two ways.
+        target = self.fresh("dk")
+        self.emit(indent, f"for {target} in {var}:")
+        self.loop_depth += 1
+        if key_kind == "str":
+            # A string key through `len`, which is the observation that needs
+            # the loop target's KIND to be a string: `print(k)` would answer a
+            # `char *` formatted as a word, and `len(k)` refuses rather than
+            # guessing, so it is the stronger of the two.
+            self.emit(indent + 1, f"print(len({target}))")
+        else:
+            acc = self.declare(self.fresh("w"), "0")
+            self.emit(indent + 1, f"{acc} = ({acc} + {target}) & 0xFFFF")
+            self.loop_depth -= 1
+            self.emit(indent, f"print({acc})")
+            self.words.append(acc)
+            return
+        self.loop_depth -= 1
+
+    def build_dict(self):
+        """One dict local, string-keyed or integer-keyed, never mixed.
+
+        The keys are the SPELLINGS the rest of the generator uses to subscript,
+        test and store, and they are collected as such: a table whose key list
+        disagrees with its own text is a program that reads a key the table does
+        not have, which is a run-time miss on this path and a KeyError in
+        CPython — an oracle failure, not a finding.
+        """
+        name = self.fresh("D")
+        key_kind = self.rng.choice(["str", "int"])
+        n = self.rng.randint(1, 3)
+        keys, values = [], []
+        for _ in range(n):
+            if key_kind == "str":
+                # Distinct, NON-EMPTY literals: a table that spells one key twice
+                # states two values for one word and the model's unanimity gate
+                # then claims nothing about either (see `REFUSALS` in
+                # `test_formal_value_model.py`), and an empty key is a string
+                # whose every method answers about nothing.
+                key = repr(self.rng.choice(
+                    [w for w in STRINGS if w and repr(w) not in keys]
+                    or ["ab"]))
+            else:
+                key = str(self.rng.choice(
+                    [v for v in range(1, 40) if str(v) not in keys]))
+            keys.append(key)
+            values.append(self.rng.randint(0, 40))
+        literal = "{" + ", ".join(f"{k}: {v}" for k, v in zip(keys, values)) + "}"
+        # Bound ONCE, in the preamble, and never rebound by the body — which is
+        # the one asymmetry with `list_stmt`, and it is a MODEL rule rather than
+        # a stylistic one. `model._note_dict_init` keeps the dict literal a name
+        # was bound to, and a SECOND literal for the same name retracts it: a
+        # name with two tables has two homes and a kind read off either is a
+        # claim about one instruction. So a program that spelled the same table
+        # twice — which is what a preamble copy plus a rebinding statement is —
+        # has no answerable key kind, and `for k in d: print(len(k))` inside it
+        # is refused as "len() of a value classified as 'int'" about a string.
+        # Measured on both architectures; it cost 15 of 40 programs in the first
+        # sweep of this mix before the rebinding statement went.
+        #
+        # The preamble is also where every other binding in this generator goes,
+        # so the cost is that a `dict_build` inside a branch is hoisted: the
+        # table exists from the first statement of `main` whichever way the
+        # branch went. That is the conservative direction for an oracle, and the
+        # refusal stays visible in the tally rather than being generated.
+        self.declare(name, literal)
+        self.dicts.append((name, key_kind, keys, values))
+        return name
+
+    def absent_key(self, key_kind):
+        """A key spelling of `key_kind` that no table in this program wrote.
+
+        Half of `dict_in`'s cases, and the half that reaches the scan's
+        "not found" exit. The literal is derived from the key SPACE rather than
+        drawn at random, because a random string is absent from every table and
+        a random integer could be a key of one — which is the same oracle
+        mistake as an unguarded divisor.
+        """
+        if key_kind == "int":
+            return str(self.rng.randint(41, 99))
+        written = {k for _v, kind, keys, _vals in self.dicts if kind == "str"
+                   for k in keys}
+        pool = [repr(w) for w in STRINGS if w and repr(w) not in written]
+        return self.rng.choice(pool or ["'zz'"])
+
+    def tuple_stmt(self, indent, kind):
+        if kind == "tuple_build" or not self.tuples:
+            name = self.fresh("T")
+            n = self.rng.randint(1, 4)
+            items = ", ".join(str(self.rng.randint(0, 40)) for _ in range(n))
+            # Same LENGTH in the preamble, for the reason `list_build` gives, and
+            # a TRAILING COMMA when there is one element: `(10)` is the integer
+            # 10 in CPython, not a one-element tuple, so `len(T)` and
+            # `for x in T` then fail in the ORACLE — a generator error, not a
+            # finding, and one that cost six of forty programs before the comma
+            # was here.
+            comma = "," if n == 1 else ""
+            self.declare(name, "(" + ", ".join(["0"] * n) + comma + ")")
+            self.emit(indent, f"{name} = ({items}{comma})")
+            self.tuples.append((name, n))
+            return
+        name, n = self.rng.choice(self.tuples)
+        if kind == "tuple_len":
+            self.emit(indent, f"print(len({name}))")
+            return
+        if kind == "tuple_iter":
+            target = self.fresh("tk")
+            acc = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"for {target} in {name}:")
+            self.loop_depth += 1
+            self.emit(indent + 1, f"{acc} = ({acc} + {target}) & 0xFFFF")
+            self.loop_depth -= 1
+            self.emit(indent, f"print({acc})")
+            self.words.append(acc)
+            return
+        idx = self.rng.randrange(n)
+        tmp = self.declare(self.fresh("w"), "0")
+        self.emit(indent, f"{tmp} = {name}[{idx}]")
+        self.emit(indent, f"print({tmp})")
+        self.words.append(tmp)
+
+    def list_append_stmt(self, indent):
+        """`xs.append(v)` — STRAIGHT LINE only.
+
+        The capacity of a list blob is the number of append SITES in the
+        function that built it, and every EXECUTION of a site counts against it,
+        so an append inside a loop overflows on the second trip: measured on
+        both architectures, `xs = [1]; for i in range(3): xs.append(i)` exits
+        with "list.append overflowed 'xs': its capacity is 2". Keeping appends
+        out of loops is what keeps this family measuring the append and not the
+        overflow diagnostic.
+        """
+        if self.loop_depth or not self.lists:
+            self.list_stmt(indent, "list_build" if not self.lists else "list_len")
+            return
+        name, n = self.rng.choice(self.lists)
+        self.emit(indent, f"{name}.append({self.rng.randint(0, 40)})")
+
+    # ── the lowered string METHODS, which are not string arithmetic ──
+    #
+    # `count`, `endswith`, `find`, `lstrip` and `startswith` are the five this
+    # path lowers (the refusal for a sixth names them), and they are the whole
+    # of what a string can DO here: `+` is refused because a string is a bare
+    # `char *` and concatenation needs a buffer nothing here has
+    # (`model.string_concat_refusal`), and so are `upper`, `replace` and `join`.
+    #
+    # Two disciplines. Every method here returns either an INTEGER or a BOOL,
+    # and a bool is a word on this path: `print(s == "ab")` prints `1` where
+    # CPython prints `True` (`model.print_format` says why), so a boolean result
+    # is always routed through `1 if … else 0` — the same rule `word_expr`'s
+    # `cond` arm follows. And the needle is a LITERAL: `find`/`count` compare
+    # raw 64-bit words, so a needle built at run time is a comparison against a
+    # word the source never wrote.
+    def strmeth_stmt(self, indent, kind):
+        if kind == "str_bind" or not self.strings:
+            name = self.declare(self.fresh("t"), '"ab"')
+            word = self.rng.choice([w for w in STRINGS if w] or ["ab"])
+            self.strings.append(name)
+            self.strings_text[name] = word
+            self.emit(indent, f'{name} = "{word}"')
+            return
+        recv = self.rng.choice(self.strings)
+        if kind == "str_count":
+            self.emit(indent, f'print({recv}.count("{self.needle(recv)}"))')
+            return
+        if kind == "str_find":
+            self.emit(indent, f'print({recv}.find("{self.needle(recv)}"))')
+            return
+        if kind == "str_startswith":
+            self.emit(indent, f'print(1 if {recv}.startswith('
+                              f'"{self.needle(recv)}") else 0)')
+            return
+        if kind == "str_endswith":
+            self.emit(indent, f'print(1 if {recv}.endswith('
+                              f'"{self.needle(recv)}") else 0)')
+            return
+        if kind == "str_lstrip":
+            self.emit(indent, f"print({recv}.lstrip())")
+            return
+        self.emit(indent, f"print(len({recv}))")
+
+    def needle(self, recv):
+        """A substring of the literal `recv` was bound to, or a non-matching one.
+
+        A needle that is present and one that is ABSENT are both generated,
+        because `find` answers `-1` for the second and a method that always
+        answered a position would pass a corpus that only ever found things.
+        The substring is cut from the receiver's own text so the two agree
+        about what the string is.
+        """
+        text = self.strings_text.get(recv) or "ab"
+        if self.rng.random() < 0.5:
+            i = self.rng.randrange(len(text))
+            j = self.rng.randint(i + 1, len(text))
+            return text[i:j]
+        return self.rng.choice(["zz", "qq", " "])
+
+    # ── module-level state ──
+    #
+    # A module-level name is a `__DATA` slot rather than a frame slot, and every
+    # question about it is a different question from the local one: who owns the
+    # slot, how long it lives, and what a function that both reads and writes it
+    # sees. Two shapes are generated, because they are two different paths:
+    #
+    #   * an int global, read into a local and printed (a bare `print(g)` is
+    #     refused — "print() cannot tell whether IdentExpr is a string or a
+    #     number"), written from `main` through its own `global`, and mutated by
+    #     a helper that declares `global`;
+    #   * a module-level LIST mutated by index from a helper, which is a store
+    #     through a pointer into another frame's blob rather than a store into
+    #     one of this frame's slots.
+    #
+    # The `global` statement is spelled in BOTH engines and is required by
+    # CPython: a function that assigns a module-level name without it creates a
+    # LOCAL, and the reference would then disagree with an image for a reason
+    # that has nothing to do with codegen.
+    def global_stmt(self, indent, kind):
+        """One module-level binding, and one read/write of it.
+
+        INT globals and CONTAINER globals are kept in separate tables, and the
+        reason is the oracle rather than the model: `global_bump` writes
+        `(GL + 3) & 0xFFFF` into whatever name it is handed, so a name bound to
+        a list is a `TypeError` in CPython — "can only concatenate list (not
+        \"int\")" — while the images would have gone on to add a word to a blob's
+        header. Every other statement in this generator keeps the two families
+        apart for the same reason (`words` versus `lists`), and a global is just
+        another binding with a different owner.
+        """
+        if kind == "global_container" or (kind == "global_build"
+                                         and self.rng.random() < 0.3):
+            name = self.fresh("GL")
+            n = self.rng.randint(1, 3)
+            items = ", ".join(str(self.rng.randint(0, 40)) for _ in range(n))
+            self.emit_top(f"{name} = [{items}]")
+            self.emit(indent, f"print(len({name}))")
+            # Written through a helper, which is the store into ANOTHER frame's
+            # blob rather than into one of this frame's slots — measured working
+            # on both architectures before this family existed.
+            if self.rng.random() < 0.6:
+                fn = self.fresh("bump")
+                param = self.fresh("p")
+                self.defs.append(f"def {fn}({param}: Int32) -> Int32:")
+                self.defs.append(f"    {name}[{param} % {n}] = "
+                                 f"{name}[{param} % {n}] + 1")
+                self.defs.append(f"    return {name}[{param} % {n}]")
+                self.emit(indent, f"print({fn}({self.rng.randrange(6)}))")
+            self.global_containers.append((name, n))
+            return
+        if kind == "global_build" or not self.globals:
+            name = self.fresh("G")
+            value = self.rng.randint(0, 60)
+            self.globals.append((name, value))
+            self.emit_top(f"{name} = {value}")
+            return
+        name, value = self.rng.choice(self.globals)
+        if kind == "global_read":
+            # Through a local: `print(g)` is refused on both backends ("print()
+            # cannot tell whether IdentExpr is a string or a number"), so the
+            # read goes through a slot whose kind the preamble already stated.
+            tmp = self.declare(self.fresh("w"), str(value))
+            self.emit(indent, f"{tmp} = {name}")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
+            return
+        if kind == "global_write":
+            # The DECLARATION goes at the top of `main`'s body, not here, and
+            # that is CPython's rule rather than a style choice: `global x` must
+            # precede every use of `x` in the function, so a `global_read` above
+            # this line makes the program a SyntaxError — "name 'G7' is used
+            # prior to global declaration". `program()` writes them out, in the
+            # order the names were first written, above the body.
+            if name not in self.main_globals:
+                self.main_globals.append(name)
+            self.emit(indent, f"{name} = {self.rng.randint(0, 60)}")
+            return
+        fn = self.fresh("bump")
+        param = self.fresh("p")
+        self.defs.append(f"def {fn}({param}: Int32) -> Int32:")
+        self.defs.append(f"    global {name}")
+        self.defs.append(f"    {name} = ({name} + {param}) & 0xFFFF")
+        self.defs.append(f"    return {name}")
+        self.emit(indent, f"print({fn}({self.rng.randint(0, 9)}))")
+
+    # ── a generic function, monomorphised at the call site ──
+    #
+    # `def f[T](x: T) …` is PEP 695, so CPython 3.12+ parses and RUNS the same
+    # text — which is what makes a generic a differential case here rather than
+    # a Mojo-only construct. What the backend does with it is monomorphisation
+    # (`formal/monomorph.py`), so the interesting programs are the ones with
+    # more than one specialisation of one definition: the same `f` called with
+    # an integer and with a string.
+    #
+    # `T` is NOT used arithmetically, and that is the measured shape rather than
+    # a timidity: `T` is a type parameter, so a use of it is classified by what
+    # the PARAMETER is, not by what the argument was — measured on both
+    # architectures, `len(f("ab", "cde"))` for `def f[T](x: T, y: T) -> T` is
+    # refused as "len() of a value classified as 'int', and an integer has no
+    # length" and `List[T]` is refused the same way. So the body works on a
+    # second, ORDINARY parameter and the type parameter is carried by the
+    # signature, which is what makes one definition serve two specialisations.
+    def generic_stmt(self, indent, kind):
+        if kind == "generic_define" or not self.generics:
+            self.define_generic()
+            return
+        name, arity, ret_string = self.rng.choice(self.generics)
+        args = []
+        for i in range(arity):
+            # Only the TYPE-PARAMETER position may take a string or a list: the
+            # body adds the OTHER parameter to an integer, so passing it a blob
+            # is `TypeError: unsupported operand type(s) for +: 'int' and
+            # 'list'` in CPython — the oracle's own traceback, and half of this
+            # mix's corpus before the two positions were told apart.
+            args.append(self.generic_arg(i == 0))
+        joined = ", ".join(args)
+        if ret_string:
+            self.emit(indent, f'print({name}({joined}))')
+        else:
+            tmp = self.declare(self.fresh("w"), "0")
+            self.emit(indent, f"{tmp} = {name}({joined})")
+            self.emit(indent, f"print({tmp})")
+            self.words.append(tmp)
+
+    def define_generic(self):
+        """One `def f[T](…)`, and the table of what may be passed for `T`.
+
+        Two return shapes, because they reach different lowering: one returns an
+        `Int32` (so the call's value is a word and can be printed, compared and
+        accumulated) and one returns a `String` (so the call's value is a
+        `char *`, and a fix that lost the specialisation's return type would
+        print an address).
+        """
+        if self.defined >= MAX_FUNCS:
+            return None
+        self.defined += 1
+        name = self.fresh("gen")
+        ret_string = self.rng.random() < 0.4
+        params = [self.fresh("q") for _ in range(2)]
+        # The FIRST parameter is the one whose type is `T`, so the signature
+        # carries the type parameter on a real parameter: `def f[T](x: T, y)`.
+        # Spelled `(T, y)` — a parameter with no name — CPython raises
+        # `TypeError: function definition argument name must be a string`, so
+        # the oracle cannot even import it.
+        sig = ", ".join([f"{params[0]}: T"] + params[1:])
+        lines = [f"def {name}[T]({sig}) -> {'String' if ret_string else 'Int32'}:",
+                 f"    acc = {self.rng.randint(1, 9)}",
+                 f"    acc = (acc + {params[-1]}) & 0xFFFF"]
+        # Two parameters, always, and the reason is the one above in the other
+        # direction: the body's arithmetic is on the SECOND parameter, so a one
+        # parameter definition would have to do it on the `T` one — where the
+        # operand may be a string at a call site, which is `TypeError` in CPython
+        # and a refusal here.  The `T` parameter is carried by the SIGNATURE and
+        # by the specialisation, which is what monomorphisation acts on.
+        if ret_string:
+            words = [w for w in STRINGS if w] or ["ab"]
+            lines.append(f"    return {self.rng.choice(words)!r}")
+        else:
+            lines.append("    return acc")
+        self.defs.extend(lines)
+        self.generics.append((name, len(params), ret_string))
+        return name
+
+    def generic_arg(self, is_t_position):
+        """An argument for one parameter of a generic.
+
+        `is_t_position` marks the TYPE-PARAMETER position, and only there does
+        anything but an integer appear: at least one call passes something else,
+        because one specialisation is not monomorphisation and a corpus whose
+        every call site agrees cannot tell a monomorphising backend from one
+        that ignores the argument's type entirely. A string is the interesting
+        second type here — it is a `char *` where an integer is a word, so a
+        specialisation that lost its return type prints an ADDRESS.
+        """
+        if is_t_position and self.rng.random() < 0.45:
+            return repr(self.rng.choice([w for w in STRINGS if w] or ["ab"]))
+        if self.rng.random() < 0.5:
+            return str(self.rng.randint(0, 60))
+        if not (self.words or self.smalls):
+            return "0"
+        return f"(({self.int_expr(0)}) & 0xFFFF)"
+
+    # ── the process environment, against a FIXED one ──
+    #
+    # `os.getenv(k)` is a call into the C library's environment, so the answer is
+    # a fact about the PROCESS rather than about the program — and an inherited
+    # environment cannot answer a differential test: a shell adds `_` to a
+    # child's block, so the same text under two parents sees two blocks. So the
+    # harness runs every engine (and CPython) with `env=FIXED_ENV`
+    # (`run`/`cpython_answer`), which is what makes this family reproducible at
+    # all, and the generator reads only keys `FIXED_ENV` declares.
+    #
+    # A key that is ABSENT is not generated: `os.getenv` is `getenv(3)`, which
+    # cannot tell an unset variable from an empty one, so CPython prints `None`
+    # where this path prints `""`. That is a documented difference
+    # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
+    # generating it would report the model, not a lowering.
+    def environ_stmt(self, indent, kind):
+        key = self.rng.choice(sorted(FIXED_ENV))
+        if kind == "environ_len":
+            self.emit(indent, f"print(len(os.getenv({key!r})))")
+            return
+        if kind == "environ_cmp":
+            self.emit(indent, f"print(1 if os.getenv({key!r}) != \"\" else 0)")
+            return
+        self.emit(indent, f"print(os.getenv({key!r}))")
 
     def list_stmt(self, indent, kind):
         if kind == "list_build" or not self.lists:
@@ -1323,6 +1970,21 @@ class Gen:
         if "classes" in self.mix:
             for _ in range(self.rng.randint(1, 2)):
                 self.define_class()
+        # The two families that need a module-level binding BEFORE `main` runs,
+        # emitted here rather than by the body: a dict comprehension and a
+        # `import` the body will use, and a first global so `global_read` has
+        # something to read even in a program whose statements are all in
+        # branches.  `environ` needs the import whether or not the body reached
+        # its own `environ_get`, because an unused import is cheaper than a
+        # program that references `os` with nothing in scope.
+        if "global_build" in self.mix:
+            self.global_stmt(0, "global_build")
+        if "environ_get" in self.mix:
+            # `self.mix` is the set of construct FAMILIES, so the mix NAME is
+            # not in it — `environ_get` is, and asking for the name here found
+            # out the hard way: every generated program referenced `os` with
+            # nothing in scope, and CPython answered `NameError` on all of them.
+            self.emit_top("import os")
         saved, self.out = self.out, []
         for _ in range(self.rng.randint(2, 4)):
             self.new_small(1)
@@ -1340,8 +2002,19 @@ class Gen:
             if chunk:
                 self.emit(1, "print(" + ", ".join(chunk) + ")")
         body, self.out = self.out, saved
-        lines = list(self.defs)
+        # `defs` before `toplevel`: a helper's body may use a global the body
+        # binds, and CPython resolves a global at RUN time, so either order
+        # works there — but the backends fold a module-level name to a slot when
+        # they see the binding, and keeping the definitions first is the order
+        # the stdlib itself is written in.
+        lines = list(self.defs) + list(self.toplevel)
         lines.append("def main() -> Int32:")
+        # Above the preamble: a `global` declaration has to precede every use of
+        # the name in the function, and the preamble's initialisers are uses of
+        # the same locals the body goes on to assign, so the two orders that
+        # could collide are both real and only this one is legal.
+        for gname in self.main_globals:
+            lines.append(f"    global {gname}")
         for dname, dval in self.decls:
             lines.append(f"    {dname} = {dval}")
         lines.extend(body)

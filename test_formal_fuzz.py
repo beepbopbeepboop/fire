@@ -20,6 +20,14 @@ like a clean backend:
   construct `KNOWN_DIVERGENCES` names or reported as unexplained, and the second
   of those is a failure here.
 
+* **a construct family that has quietly become refusable** — a mix whose
+  programs are all REFUSED still parses, still runs on CPython, still counts
+  towards a run's totals and reports nothing about the backend, so it is
+  indistinguishable from a clean one. `check_mix_builds` requires every mix to
+  produce at least one ANSWER on one architecture. This is the check that would
+  have caught `objects`' `field_read` on the day `print(obj.field)` started
+  being refused — 284 of 300 generated class programs were that one refusal.
+
     python3 test_formal_fuzz.py [-v] [--count N] [--arch both|arm64|x86_64]
                                 [--mix MIX]
 
@@ -233,6 +241,81 @@ def _counts(out):
     return counts
 
 
+#: How many pinned programs each mix is RUN for in `check_mix_builds`, and on
+#: which architecture. Two programs is the smallest number that can distinguish
+#: "this family builds" from "this family is refused", and ONE architecture is
+#: enough because the question is about the FAMILY — the two are checked against
+#: each other by the sweep, and every case in the other half of this file is
+#: already run on both.
+MIX_BUILD_INDEXES = 2
+MIX_BUILD_ARCH = "x86_64"
+
+#: Mixes whose constructs are NOT supposed to lower, so "no answer" is the
+#: expected outcome for them and requiring one would be requiring a bug. There
+#: are none today, and the empty table is the point: a family added to `MIXES`
+#: is a family whose construct the backend lowers, so a mix that cannot produce
+#: an answer is a mix that cannot find anything. The `field_read` row in
+#: `tools/formal_fuzz.py` is why this check exists at all — 284 of 300 generated
+#: class programs were ONE refusal, which is a family that measures nothing and
+#: a suite that reported numbers.
+MIXES_NOT_LOWERED = ()
+
+
+def check_mix_builds(mix, indexes, verbose):
+    """Every mix produces at least one ANSWER, not only refusals.
+
+    The generator half above proves the text is a valid differential program and
+    the run half proves the verdicts are verdicts; neither can see that a whole
+    construct family has quietly become refusable. A refused program still
+    parses, still runs on CPython, still counts towards the run's totals, and
+    reports nothing about the backend — so a mix that is 95% refused is a mix
+    that finds nothing and looks exactly like a clean one.
+
+    `generator-error` counts as a FAILURE here rather than as "not an answer":
+    it is the generator's own failure (CPython rejected the text), which
+    `check_generator` cannot see because it only compiles.
+    """
+    if mix in MIXES_NOT_LOWERED:
+        return 0
+    work = os.path.join(ROOT, "build", "formal-fuzz", f"builds-{mix}")
+    argv = [sys.executable, os.path.join(ROOT, "tools", "formal_fuzz.py"),
+            "--seed", "suite", "--arch", MIX_BUILD_ARCH, "--mix", mix,
+            "--seeds", f"0-{indexes - 1}", "-j", str(indexes),
+            "--work", work, "--quiet"]
+    proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+    out = proc.stdout or ""
+    counts = _counts(out)
+    # An ANSWER is any verdict that means an image ran and said something. A
+    # `KNOWN:…` disagreement counts, because the images answered and the
+    # disagreement is a documented one — `strings` is mostly those, and a check
+    # that required `match` would report the family that carries a known
+    # divergence as a family that cannot build. A `trapped` counts too: the guard
+    # stopped the program on purpose, which is an answer about the program. A
+    # `refusal`, a `generator-error`, a `timeout` and a `codegen-crash` do not:
+    # none of them is the backend saying what the program computes.
+    answers = sum(n for k, n in counts.items()
+                  if k == "match" or k == "trapped"
+                  or k.startswith(("KNOWN:", "MISMATCH", "ARM64-")))
+    failures = 0
+    if counts.get("generator-error"):
+        failures += _fail(
+            f"{mix}_has_generator_errors",
+            f"{counts['generator-error']} program(s) CPython will not run; the "
+            f"generator half compiles nothing so this is where it shows",
+            verbose)
+    if not answers:
+        failures += _fail(
+            f"{mix}_produced_no_answer",
+            f"{counts.get('refusal', 0)} refusal(s) and nothing else — a "
+            f"family that is always refused measures nothing and reports "
+            f"numbers anyway", verbose)
+    print(f"formal fuzz: builds   {mix:9} "
+          f"{'PASS' if not failures else 'FAIL'} "
+          f"answers={answers}/{indexes} (1 arch, {counts.get('refusal', 0)} "
+          f"refused)")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -246,6 +329,9 @@ def main():
     ap.add_argument("--mix", default=None, choices=sorted(F.MIXES),
                     help="one mix only; default is every mix")
     ap.add_argument("-j", "--jobs", type=int, default=2)
+    ap.add_argument("--no-build-check", action="store_true",
+                    help="skip the per-mix 'does this family BUILD' half, "
+                         "which builds two programs per mix")
     args = ap.parse_args()
 
     print("=" * 68)
@@ -255,6 +341,9 @@ def main():
     failures = 0
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
+    if not args.no_build_check:
+        for mix in mixes:
+            failures += check_mix_builds(mix, MIX_BUILD_INDEXES, args.verbose)
     arches = ("arm64", "x86_64") if args.arch == "both" else (args.arch,)
     for arch in arches:
         failures += check_run(arch, args.count, args.jobs, args.verbose)
