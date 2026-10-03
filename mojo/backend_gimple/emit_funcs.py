@@ -831,9 +831,26 @@ def _gen_stmt_ComptimeForStmt(gen, node):
         if unrolled and step != 0:
             if node.target not in gen.var_types:
                 gen._declare_var(node.target, 'int64_t')
+            # The induction variable's own ctype is whatever the loop target
+            # resolved to (int64_t unless something already declared it
+            # otherwise) — do NOT assume it here, and do NOT emit a bare
+            # decimal into it either. A raw `i = 0;` into an `int64_t` is
+            # `non-trivial conversion in 'integer_cst'` under -fgimple (an
+            # unadorned integer literal has C type `int`, and GIMPLE's
+            # verifier rejects the widening rather than inserting the
+            # conversion the C front end would), which is exactly how the
+            # `comptime for idx in range(2)` inside std/utils/index.mojo's
+            # `IndexList.__init__` failed to compile as its own
+            # instantiation TU. Route it through the same coercion
+            # chokepoint every other store uses (`_sce_simple_emit`'s
+            # literal-to-int64_t branch), so the emitted form is decided by
+            # the destination type rather than re-derived per call site.
+            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
+            # nothing_defines.md.
+            dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
-                gen._emit(f"  {node.target} = {i};")
+                gen._safe_coerce_emit('int', dst, str(i), node.target)
                 for s in node.body:
                     gen.gen_stmt(s)
                 i += step

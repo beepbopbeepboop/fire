@@ -2962,7 +2962,20 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
     # pointer from integer without a cast", with no correct answer anywhere
     # in the output.
     iter_fn = gen._struct_method_csym(base, '__iter__', '')
-    if iter_fn in gen.func_return_types:
+    # `__iter__` is the ONE method here that may be dispatched through its bare
+    # name, because the `else` branch below (keep the receiver's own type) is
+    # its correct answer when it is absent. But a struct that OVERLOADS
+    # `__iter__` defines neither `_0120be` nor `_0120be_2` under the bare name,
+    # so taking this branch would emit a call to a symbol nothing defines —
+    # measured, `test/itertools/test_repeat.mojo` linked with `Undefined
+    # symbols: __RepeatIterator_11_ElementType_5_Int64___iter__`, called from
+    # both of its `for` loops. Every iterator in `std/iter` overloads `__iter__`
+    # on `var self` and on `ref self`, so this is the whole family, and the
+    # `else` branch is right for all of them: `__iter__` returns
+    # `Self.IteratorOwnedType`, and `comptime IteratorOwnedType: Iterator =
+    # Self`.
+    if (iter_fn in gen.func_return_types
+            and (base, '__iter__') not in gen._ambiguous_struct_methods):
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
         gen._emit(f"  {iter_var} = {iter_fn} ({obj_val});")
