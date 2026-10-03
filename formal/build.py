@@ -4411,6 +4411,40 @@ def _collect_one_field_receiver_rebinds(fn, owner, structs_by_name) -> None:
         return
 
 
+def _collect_one_field_dropped_stores(fn, owner, structs_by_name) -> None:
+    """PARK a ONE-FIELD struct's method that stores its own field with no
+    write-back to deliver it.
+
+    **Also before `_rewrite_self_fields`, for the same reason
+    `_collect_one_field_receiver_rebinds` is**: that rewrite collapses
+    `recv.<sole field>` onto `recv`, so after it a store and a rebinding of the
+    receiver are the same text, and this question is about the SPELLING.
+
+    The question itself is `model.one_field_dropped_receiver_stores` — asked
+    there rather than re-derived here, so the rule and the refusal that quotes it
+    cannot come to disagree about which methods are at risk.
+
+    **A one-field struct whose sole field holds a FRAME is somebody else's
+    refusal**, and this one stands aside for it. `self.inner = o` is `self = o`
+    there, `_collect_receiver_rebinds` refuses exactly that, and its message says
+    what the store destroys (the frame address the caller still holds) where this
+    one can only say that the word is not handed back — `one_word_sole_field_frame`
+    is the predicate it already exempts on, and
+    `refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver` pins that
+    wording. Two refusals for one construct is one too many, and the second one
+    would be the worse-worded of the pair.
+    """
+    if M.one_word_sole_field_frame(owner, structs_by_name or {}) is not None:
+        return
+    sites = M.one_field_dropped_receiver_stores(fn, owner)
+    if not sites:
+        return
+    field, convention = sites[0]
+    fn._one_field_dropped_store = (
+        field, convention,
+        getattr(owner, "name", None), M.method_member_name(owner, fn))
+
+
 def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
     """PARK every method that rebinds its own receiver to something that is not
     a construction of its own struct.
@@ -4528,13 +4562,22 @@ def check_receiver_rebinds(functions) -> None:
     construct identically — a receiver's meaning is a property of the by-
     reference design, not of an instruction either backend chose.
 
-    TWO findings, and the one-field one is raised first because it is the one
-    only a pre-rewrite pass can see: `_collect_one_field_receiver_rebinds` runs
+    THREE findings, and the two one-field ones are raised first because they are
+    the ones only a pre-rewrite pass can see: a field store and a rebinding are
+    the same text once `_rewrite_self_fields` has run. The dropped store is
+    raised before the rebinding because it is the finding CPython disagrees
+    with; the rebinding is the one whose answer is already right. `_collect_one_field_receiver_rebinds` runs
     before `_rewrite_self_fields` collapses `recv.<field>` onto `recv`, so by
     the time anything else asks, a field store and a rebinding are the same
     text. A method that has both would otherwise be reported as the multi-field
     defect it is not.
     """
+    for fn in functions:
+        dropped = getattr(fn, "_one_field_dropped_store", None)
+        if dropped:
+            field, convention, owner_name, member = dropped
+            raise CodegenError(M.dropped_receiver_store_refusal(
+                owner_name or "this struct", member, field, convention))
     for fn in functions:
         parked = getattr(fn, "_one_field_receiver_rebind", None)
         if parked:
@@ -12097,6 +12140,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # shape is unanswerable anywhere later in the pipeline.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
                                             structs_by_name)
+        # …and its sibling: a one-field method that stores its own field through
+        # a receiver no write-back will hand back, so the store is computed and
+        # dropped. Asked at the same point for the same reason — after
+        # `_rewrite_self_fields` the store and a rebinding are the same text.
+        _collect_one_field_dropped_stores(fn, method_owners.get(fn.name),
+                                          structs_by_name)
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
         # The two tables the receiver-position rewrites read, built HERE and

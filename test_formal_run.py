@@ -2582,6 +2582,74 @@ CASES = [
      " 1 << 32, 1 << 40, (1 << 32) >> 32, 1024 >> 5, 1 >> 32)\n"
      "    return 0\n",
      0, "128 256 4294967296 1099511627776 1 32 0"),
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # The two ANSWERED rows of this group are `BOTH_ARCH_CASES`
+    # (`both_arch_two_field_store_through_a_plain_receiver_still_reaches_it`
+    # and the `__init__` guard beside it); these two are here because a
+    # `refuse:` expectation is what `run_case` dispatches on both backends.
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    ("refuse_a_one_field_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
+    # The `+=` spelling is a separate AST node (`AugAssignStmt`), so the rule
+    # reads it explicitly and a fix that only walked `AssignStmt` would pass the
+    # row above and miss this one — which is the shape every in-place operator
+    # in the stdlib is written with.
+    ("refuse_a_one_field_augmented_store_through_a_plain_receiver",
+     "class C:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a += 5\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.bump()\n"
+     "    printf(\"a=%d\", c.get())\n"
+     "    return 0\n",
+     "refuse:is not a receiver this path hands back", None),
 ]
 
 # ── what a method on a VALUE means, per RECEIVER KIND ──────────────────────
@@ -6008,6 +6076,71 @@ BOTH_ARCH_CASES = [
      "    x.peek(y)\n"
      "    printf(\"a=%d\", x.a)\n"
      "    return 0\n", 0, "a=1"),
+    # ── the store a one-field receiver CANNOT deliver ───────────────────────
+    #
+    # Found by `tools/formal_fuzz.py`, and the shape above is why the two rows
+    # before it did not catch it: they are about a REBINDING of the receiver,
+    # which CPython also does not deliver, so leaving it alone is right. This is
+    # a store to the FIELD, which CPython DOES deliver — into the object the
+    # caller holds — and which this path computed and dropped:
+    #
+    #     class C:
+    #         def __init__(self): self.a = 2
+    #         def bump(self):     self.a = 7
+    #         def get(self):      return self.a
+    #     c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+    #
+    # Builds, ran, exited 0, and printed the constructor's value on BOTH
+    # architectures. `model.one_field_dropped_receiver_stores` is the rule and
+    # `receiver_writeback_name` is the mechanism it is about: the write-back
+    # needs the receiver declared `out`/`inout`/`mut`, and a plain `self` is
+    # never handed back. Refused rather than delivered, because the one return
+    # word is the receiver and delivering the store would cost the method's own
+    # value — the same ABI reason `mutating_receiver_return_refusal` gives.
+    #
+    # The needle is the LOAD-BEARING half of the message: it says the receiver
+    # is not handed back. A message that only said "one-field receiver" would be
+    # indistinguishable from a one-field READER, which builds.
+    # …and the WIDTH is the whole rule, so the two-field spelling of the same
+    # program is the guard: its receiver is a frame address the caller still
+    # owns, so the store lands and CPython's answer is already this path's.
+    ("both_arch_two_field_store_through_a_plain_receiver_still_reaches_it",
+     "class D:\n"
+     "    def __init__(self):\n"
+     "        self.a = 2\n"
+     "        self.b = 5\n"
+     "\n"
+     "    def bump(self):\n"
+     "        self.a = 7\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "def main(n):\n"
+     "    d = D()\n"
+     "    d.bump()\n"
+     "    printf(\"a=%d\", d.get())\n"
+     "    return 0\n", 0, "a=12"),
+    # And the CONSTRUCTOR is not refused, because it is not a call: its stores
+    # are inlined into the construction site, which is where CPython runs them.
+    # `one_field_reader_is_not_a_mutator` and `both_arch_zero_arg_init_stores_a
+    # _one_field_scalar` cover the read and the zero-argument spelling; this row
+    # is the one where a plain receiver's `__init__` takes a PARAMETER and stores
+    # it, so the refusal cannot be "plain receivers are refused" by accident.
+    ("both_arch_one_field_init_stores_its_parameter_through_a_plain_receiver",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(self, v: Int):\n"
+     "        self.a = v\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = T(9)\n"
+     "    printf(\"a=%d\", t.get())\n"
+     "    return 0\n", 0, "a=9"),
     # ── the STACK FLOOR (`formal/model.py`: `recursive_function_names`,
     # `STACK_FLOOR_BUDGET_BYTES`, `STACK_TRAP_STATUS`) ──
     #

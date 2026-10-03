@@ -98,6 +98,19 @@ BUILD_TIMEOUT = 120
 RUN_TIMEOUT = 20
 CPY_TIMEOUT = 20
 
+# The status the formal runtime exits with when a recursive call chain runs off
+# the stack floor the prologue guards (`formal/model.py`'s `STACK_TRAP_STATUS`).
+# CPython has no such bound, so a generated
+# program that recurses a few hundred deep runs there and stops here. It is a
+# verdict about the program rather than a verdict about a bug, and it is counted
+# as its own status so a sweep's numbers stay readable — a deep recursion is a
+# documented limit of this path, not a silent wrong answer.
+#
+# Reading it off the exit status is sound for THIS generator because `main`
+# always `return 0`: the entry function's return value IS the process exit
+# status, so 2 cannot be an answer the program computed.
+STACK_TRAP_STATUS = 2
+
 # The largest number of live int locals a generated function keeps. The backend
 # puts locals in registers and refuses past a frame's word count (there are
 # cases either side of 15 in `test_formal_run.py`), so an unbounded generator
@@ -125,9 +138,6 @@ KNOWN_DIVERGENCES = {
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
         "FORMAL_string_value_model.md)"),
-    "one_field_plain_store": (
-        "a method of a ONE-FIELD class that stores its own field through a "
-        "receiver not declared `out` drops the store"),
 }
 
 # The constructs that make a feature marker true. Checked against the reduced
@@ -138,7 +148,6 @@ FEATURE_PATTERNS = {
     "modulo": (r"%",),
     "truediv": (r"(?<![/*])/(?![/*=])",),
     "print_bool": (r"\bprint\(\s*[^\n()]*\s(?:==|!=|<|>|<=|>=)\s",),
-    "one_field_plain_store": (r"self\.\w+\s*=[^=]",),
     # Decided by `features_of`, not by a pattern: a subscript is correct on a
     # list and wrong on a string, and only the binding says which. An empty
     # pattern tuple is how this table says "handled specially", and keeping the
@@ -511,19 +520,32 @@ class Gen:
     def class_chunk(self):
         """A class with one or two int fields, a reader and a mutator.
 
-        Both widths are generated on purpose. Two fields is the case that works
-        and one field is the case with the dropped store, so a corpus with only
-        the working width would report that bug fixed the moment someone deleted
-        the one-field rows.
+        Both widths are generated on purpose, and the one-field width is the
+        MINORITY for a reason worth stating: it is a program this backend now
+        refuses (a plain receiver cannot deliver a one-field struct's store), so
+        generating it in half of the seeds would spend half the run measuring a
+        refusal. Three quarters two-field keeps the answered path dominant while
+        the refusal stays exercised.
         """
         rng = self.rng
         name = self.fresh().capitalize()
-        one = rng.random() < 0.5
+        one = rng.random() < 0.25
         fields = ["a"] if one else ["a", "b"]
         lines = [f"class {name}:", "    def __init__(self):"]
         lines += [f"        self.{f} = {rng.randint(-5, 9)}" for f in fields]
         lines += ["", "    def get(self):",
                   "        return " + " + ".join(f"self.{f}" for f in fields)]
+        # A PLAIN receiver, and never `out self`, because `out self` is not valid
+        # Python and one source has to be both engines' input — the corpus would
+        # stop being differential. So the one-field width below is a program the
+        # backend REFUSES (a one-field struct's receiver IS its field, so a
+        # plain receiver's store is dropped and `formal/model.py`'s
+        # `one_field_dropped_receiver_stores` names it), which is a measured
+        # refusal rather than a wasted seed; the write-back spelling that DOES
+        # answer is covered by `test_formal_run.py`'s
+        # `one_field_mutator_*` and `both_arch_one_field_stores_through_the_
+        # receiver_still_reach_the_caller` rows, which cannot be generated here
+        # for the same reason.
         lines += ["", "    def bump(self):",
                   f"        self.{fields[0]} = self.{fields[0]} + "
                   f"{rng.randint(1, 5)}"]
@@ -651,6 +673,13 @@ def _check_uncached(source, arch, workdir):
     if mojo_out is None:
         return Verdict(-1, "ERROR", "the built program timed out")
     os.remove(out)
+
+    if mojo_rc == STACK_TRAP_STATUS:
+        return Verdict(-1, "TRAPPED",
+                       f"the stack-floor guard stopped it (exit "
+                       f"{STACK_TRAP_STATUS}); CPython ran it",
+                       cp_stdout=cp_out, cp_rc=cp_rc, mojo_rc=mojo_rc,
+                       mojo_stdout=mojo_out)
 
     if mojo_out == cp_out and mojo_rc == cp_rc:
         return Verdict(-1, "AGREE")
@@ -826,7 +855,6 @@ NEUTRALISERS = {
     "modulo": [(r"(?<![\w)])%(?![a-zA-Z_(])", "+")],
     "print_bool": [(r"print\(([^\n]*?)\)", r"print(1 if (\1) else 0)")],
     "str_subscript": [(r"print\((\w+)\[\d+\]\)", r"print(1)")],
-    "one_field_plain_store": [(r"^ *\w+\.bump\(\)\n", "")],
 }
 
 
@@ -845,28 +873,52 @@ def neutralise(program, feature):
 
 
 def blame(program, arch, workdir, memo):
-    """Which known construct, if any, actually explains this divergence.
+    """The smallest SET of known constructs that explains this divergence.
 
-    Each known construct the reduced program uses is neutralised in turn and the
-    result rebuilt. If the program then AGREES with CPython, that construct was
-    the cause and the divergence is not a new finding. If it still DIVERGES, the
-    construct is not the cause and the program is reported anyway — a known bug
-    being present in a reproducer is not a reason to miss a different one
-    alongside it, and a tool that reported only the first would be hiding the
-    second behind the first.
+    Neutralise them all, rebuild, and ask: does the program now agree with
+    CPython? If it does, shrink the set one construct at a time and keep the
+    result, so what the summary prints is a MINIMAL explanation rather than
+    "every known bug in the file" — a program with two truncating divisions in
+    it is explained by the divisions, and saying so is more useful than naming
+    both plus a third thing that had nothing to do with it.
 
-    `None` means unexplained, which is the only answer that makes the run's exit
-    status non-zero.
+    The shrink is what keeps this from being a dismissal. If removing all of
+    them does NOT make the program agree, nothing is blamed and the divergence
+    is reported; and the minimal set is what gets printed, so a reader can see
+    what was set aside and check the reproducers, which are written either way.
+
+    Returns a tuple of feature names, or `None` — which is the only answer that
+    makes the run's exit status non-zero.
     """
-    present = features_of(program.source())
-    for name in sorted(present):
-        cand = neutralise(program, name)
-        if cand is None or not _has_body(cand):
+    present = sorted(features_of(program.source()))
+    if not present:
+        return None
+    kept = present
+    if check_program(_neutralise_all(program, present), arch, workdir,
+                     memo).status != "AGREE":
+        return None
+    for name in list(kept):
+        smaller = [f for f in kept if f != name]
+        if not smaller:
             continue
-        v = check_program(cand, arch, workdir, memo)
-        if v.status == "AGREE":
-            return name
-    return None
+        if check_program(_neutralise_all(program, smaller), arch, workdir,
+                         memo).status == "AGREE":
+            kept = smaller
+    return tuple(kept)
+
+
+def _neutralise_all(program, features):
+    """`program` with every one of `features` swapped out, or None if nothing
+    changed — which means the construct is present by pattern but not in a form
+    the neutraliser can reach, and the honest answer is that it cannot be
+    blamed rather than that it was ruled out."""
+    out = program
+    for name in features:
+        nxt = neutralise(out, name) if out is not None else None
+        if nxt is None:
+            return None
+        out = nxt
+    return out
 
 
 # ── the run ───────────────────────────────────────────────────────────────────
@@ -935,7 +987,8 @@ def main(argv=None):
                                                args.arch)
     os.makedirs(repro_dir, exist_ok=True)
 
-    counts = {"AGREE": 0, "REFUSED": 0, "DIVERGED": 0, "ERROR": 0}
+    counts = {"AGREE": 0, "REFUSED": 0, "TRAPPED": 0, "DIVERGED": 0,
+              "ERROR": 0}
     known = {}
     refusals = {}
     findings = []
@@ -953,11 +1006,12 @@ def main(argv=None):
             elif v.status == "DIVERGED":
                 got = getattr(v, "blame", None)
                 if got:
-                    known[got] = known.get(got, 0) + 1
-                    if known[got] == 1:
-                        _write_repro(repro_dir, v, args.arch, suffix=f".{got}")
+                    key = "+".join(got)
+                    known[key] = known.get(key, 0) + 1
+                    if known[key] == 1:
+                        _write_repro(repro_dir, v, args.arch, suffix=f".{key}")
                     if args.verbose:
-                        print(f"KNOWN seed {v.seed}: {got} — {v.detail}")
+                        print(f"KNOWN seed {v.seed}: {key} — {v.detail}")
                 else:
                     findings.append(v)
                     _write_repro(repro_dir, v, args.arch)
@@ -973,11 +1027,15 @@ def main(argv=None):
     print(f"  diverged    {counts['DIVERGED']}  "
           f"({sum(known.values())} attributed to a known construct, "
           f"{len(findings)} unexplained)")
+    if counts["TRAPPED"]:
+        print(f"  trapped     {counts['TRAPPED']}  (the stack-floor guard; CPython "
+              f"ran these — see `formal/model.py`'s `STACK_TRAP_STATUS`)")
     print(f"  errors      {counts['ERROR']}")
     if known:
-        print("  known constructs blamed:")
-        for name, n in sorted(known.items(), key=lambda kv: -kv[1]):
-            print(f"    {n:5d}  {name}: {KNOWN_DIVERGENCES.get(name, '')}")
+        print("  known constructs blamed (the MINIMAL set that explains each):")
+        for key, n in sorted(known.items(), key=lambda kv: -kv[1]):
+            why = "; ".join(KNOWN_DIVERGENCES.get(part, part) for part in key.split("+"))
+            print(f"    {n:5d}  {key}: {why}")
     if refusals:
         print("  most-refused constructs:")
         for key, n in sorted(refusals.items(), key=lambda kv: -kv[1])[:12]:

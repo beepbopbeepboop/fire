@@ -17186,10 +17186,20 @@ def struct_is_one_field(struct_def) -> bool:
 
 
 # The argument conventions that say "this method may change the object its
-# receiver names". `out` and `inout` are the two the corpus writes; `mut` is the
-# third spelling, and the list is a tuple because adding one is a decision about
-# the language's surface syntax rather than a detail of the walk below.
-MUTATING_RECEIVER_CONVENTIONS = ("out", "inout", "mut")
+# receiver names", as `param_convs` actually spells them.
+#
+# **NOT the surface syntax, and the difference is load-bearing.** The parser
+# folds `inout self` to `mut`, so the string `"inout"` never reaches
+# `param_convs` and an entry for it can never match; it was here until
+# 2026-10-03 and is a lie about the parser's vocabulary rather than a safety
+# net. `var self` and `owned self` fold to `"owned"`, which is deliberately NOT
+# in the list: 195 of the 196 methods in the corpus that declare a non-mutating
+# convention are readers, where `owned` is right, and the one that is a writer is
+# a question about the language's argument model rather than about this path —
+# `bugs/FORMAL_a_var_self_receiver_on_a_one_field_struct_drops_its_store.md`,
+# which also carries the measurement. Kept as a tuple because adding an entry is
+# a decision about the language's conventions, not a detail of the walk below.
+MUTATING_RECEIVER_CONVENTIONS = ("out", "mut")
 
 
 def receiver_writeback_name(fn) -> object:
@@ -17236,6 +17246,74 @@ def receiver_writeback_name(fn) -> object:
 # call site joins on the KEY and reads only the receiver, while a refusal has to
 # name the construct — and re-deriving the owner from the key at refusal time
 # would be a second lookup that can disagree with the first.
+def one_field_dropped_receiver_stores(fn, owner):
+    """Where `fn` stores a ONE-FIELD struct's own field and the store is DROPPED.
+
+    A one-field struct's receiver IS its field — `struct_is_one_field` is what
+    says so, and `_rewrite_self_fields` is what acts on it — so `self.f = v` in
+    the callee writes the callee's own copy of one word and the caller's object
+    keeps whatever it had. `receiver_writeback_name` is the mechanism that makes
+    such a store reach the caller, and it needs the receiver declared `out` /
+    `inout` / `mut`; with any other convention the method is never handed back
+    and the store is computed and thrown away.
+
+    Measured on both architectures, 2026-10-03 (found by `tools/formal_fuzz.py`):
+
+        class C:
+            def __init__(self): self.a = 2
+            def bump(self):     self.a = 7
+            def get(self):      return self.a
+
+        c = C(); c.bump(); print(c.get())      # CPython 7, this path 2
+
+    which builds, runs and exits 0. The TWO-FIELD spelling of the same program
+    is right (`self.a` is a slot in a frame the caller owns), which is why the
+    rule is asked about width and not about stores.
+
+    `__init__` is deliberately not in the answer: a constructor is not a call. Its
+    stores are INLINED into the construction site (`init_receiver_rewrite`), so
+    they run in the frame the object is being built in — which is where CPython
+    runs them, and the reason the same source is correct there.
+
+    Returns `[(field, convention)]` — the field stored and the receiver's
+    convention as the source spelled it, `None` for a plain `self` — or `[]` when
+    the method is not at risk.
+    """
+    if owner is None or not struct_is_one_field(owner):
+        return []
+    recv = method_receiver_name(fn)
+    receivers = struct_receivers(owner)
+    if recv is None or recv not in receivers:
+        return []
+    conv = (getattr(fn, "param_convs", None) or {}).get(recv)
+    if (conv or "") in MUTATING_RECEIVER_CONVENTIONS:
+        return []                      # the write-back delivers the store
+    if method_member_name(owner, fn) == "__init__":
+        return []                      # inlined at the construction site
+    field = struct_sole_field_name(owner)
+    if field is None:
+        return []
+    out = []
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        target = getattr(node, "target", None) if isinstance(
+            node, (F.AssignStmt, F.AugAssignStmt)) else None
+        if not isinstance(target, F.MemberExpr) or target.member != field:
+            continue
+        base = getattr(target, "obj", None)
+        if isinstance(base, F.IdentExpr) and base.name == recv:
+            out.append((field, conv))
+    return out
+
+
+# A `var self` / `owned self` receiver is a SPELLING question this rule does not
+# decide: the parser folds both to the `owned` convention, and `owned` is not in
+# `MUTATING_RECEIVER_CONVENTIONS`. One corpus site is written that way
+# (`std/python/python_object.mojo`'s `PythonObject.steal_data`), and whether it
+# should join the list is a question about the language's argument conventions
+# rather than about this path, so the refusal below NAMES it instead of guessing.
+RECEIVER_CONVENTION_NAMES = {None: "`self`", "owned": "`var self`",
+                             "read": "`borrowed self`", "ref": "`ref self`"}
+
 ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
                                            "receiver owner member")
 ReceiverWriteback.__doc__ = (
@@ -17277,6 +17355,40 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
         member = method_member_name(st, fn)
         out[fn.name] = ReceiverWriteback(recv, st.name, member)
     return out
+
+
+def dropped_receiver_store_refusal(owner: str, member: str, field: str,
+                                   convention) -> str:
+    """The diagnostic for a store a one-field struct's receiver cannot deliver.
+
+    The backend's rule is that a construct with no representation on this path
+    says so rather than computing the wrong answer, and this is that rule for the
+    one-field receiver: the receiver IS the field, so the callee stores into its
+    own copy of one word and the caller's object is unchanged — a program that
+    builds, runs, exits 0 and prints the value the constructor put there. Both
+    ways out are the language's own, and the message gives both because a reader
+    who has only met the two-field spelling of this program does not know either:
+
+    * declare the receiver `out` / `inout` / `mut`, which is what makes
+      `receiver_writeback_name` hand it back so the call site stores the new word
+      over the object; or
+    * split the method into one that changes the receiver and returns nothing,
+      and one that reads it and returns the value — which is what a constructor
+      already is, and why `__init__` is not refused.
+    """
+    spelled = RECEIVER_CONVENTION_NAMES.get(convention, "this receiver")
+    return (
+        f"{owner}.{member}() stores `{field}`, the one field its receiver IS, "
+        f"and {spelled} is not a receiver this path hands back, so the store "
+        f"cannot reach "
+        f"the caller: on this path a one-field struct's receiver is its single "
+        f"word rather than an address, so the method would compute the new value "
+        f"and drop it, and the object the caller holds would keep the old one. "
+        f"Declare the receiver `out self` (or `inout self` / `mut self`) so it is "
+        f"handed back, or split the method into one that changes the receiver "
+        f"and returns nothing and one that reads it. (The rule is "
+        f"`formal/model.py`'s `one_field_dropped_receiver_stores`; "
+        f"`receiver_writeback_name` is the mechanism it is about.)")
 
 
 def mutating_receiver_return_refusal(owner: str, member: str) -> str:
