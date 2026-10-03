@@ -1494,8 +1494,7 @@ def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
     `_lower_IdentExpr` loads `_<current module>_globals.NAME`, and for a
     `from b import K` that struct has no such member — gcc's "'struct
     _root_toplev' has no member named 'K'", one error per read site. The
-    self-host closure had 26 distinct such names in 15 modules
-    (bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md). The qualified
+    self-host closure had 26 distinct such names in 15 modules. The qualified
     `b.K` spelling of the same value never had the problem, because
     `_lower_MemberExpr` resolves the field through the owning module's own
     `_module_global_field_type(bound_module, member)` triple; this is the

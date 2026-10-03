@@ -6,11 +6,13 @@ closure's three `gcc` errors in `mojo/middle/offload.py` (that work is
 done; see `git log --oneline e3779dba..HEAD`).** Pre-existing: nothing in
 that branch touched `mojo/middle/solvers.py`, struct-method emission, or
 link mode, and the C this is about is generated with the alias fix
-already in. Same FAILURE MODE as
-`CODEGEN_module_toplevel_undefined_in_selfhost.md` (a symbol the closure
-declares and calls, with no definition anywhere in the link) but a
-different symbol set, a different module and a different entry point, and
-that doc's cluster does not cover it.
+already in. Same FAILURE MODE as the two `<module>_toplevel` families that
+were in the now-deleted
+`bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md` (deleted 2026-10-02
+with both fixed: a symbol the closure declares and calls with no definition
+anywhere in the link, and `'struct _<mod>_toplev' has no member named 'NAME'`
+for a from-imported constant) but a different symbol set, a different module
+and a different entry point, and neither of those docs' clusters covered it.
 
 ## What I ran
 

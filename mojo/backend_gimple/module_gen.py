@@ -785,8 +785,7 @@ def _emit_reflection_fwd_decls(self, parts):
     errors, every one of them an implicit declaration gcc resolves to
     `int` — so the call compiled, the pointer it returned was truncated to
     32 bits, and every such container's element repr in the SELF-HOSTED
-    compiler was garbage (bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md,
-    which recorded this family as a by-product of its own).
+    compiler was garbage.
 
     Kept as declarations-only and kept in ONE place — this function — rather
     than duplicated ahead of the splice, so the definition pass emits
@@ -8183,8 +8182,7 @@ def gen_module_impl(self, stmts):
         `_build_stdlib_dylib_globals.STDLIB_PATH`, a field that module never
         declares ("'struct _build_stdlib_dylib_toplev' has no member named
         'STDLIB_PATH'", one per read site, 26 distinct names across 15
-        modules of the self-host closure —
-        bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md). The bare read
+        modules of the self-host closure). The bare read
         now routes such a name to its OWNER's field via
         `_own_imported_global_home`, which this split is what lets it
         distinguish from a same-named global this module never imported.

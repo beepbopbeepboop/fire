@@ -7589,10 +7589,10 @@ def main():
     # `_b_globals.K`, and before the fix it was `_root_globals.K` — a field
     # the importing module's own `<module>_toplev` never declares, so gcc
     # refused the whole program ("'struct _root_toplev' has no member named
-    # 'K'"). The self-host closure had 26 such names across 15 modules
-    # (bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md's 58-error
-    # family); the qualified `b.K` spelling of the same value was already
-    # correct, so this is the bare-name half of that pair.
+    # 'K'"). The self-host closure had 26 such names across 15 modules (one
+    # of the two `<module>_toplevel` families fixed in 6b7241c5); the
+    # qualified `b.K` spelling of the same value was already correct, so this
+    # is the bare-name half of that pair.
     _check_agrees_with_cpython("imported_module_constant_reads_the_owners_field", {
         'fgi_b.py': "K = 'abc'\n\ndef f():\n    return 1\n",
         'fgi_a.py': "from fgi_b import K\n\ndef main():\n    print(K)\nmain()\n",
