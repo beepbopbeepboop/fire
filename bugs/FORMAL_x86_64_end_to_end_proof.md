@@ -4,7 +4,7 @@
 
 | | 2026-09-26 | 2026-10-01 | 2026-10-02 |
 |---|---|---|---|
-| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 44 agree, 1 WRONG (`udivmod`) | unchanged (not re-measured; not touched) |
+| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 44 agree, 1 WRONG (`udivmod`) | **45 agree, 0 WRONG** |
 | `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus step-lemma APPLICABILITY at 17 lemmas x 38 real encodings, 354 hypotheses | 151/57, applicability at **22 lemmas x 48 real encodings, 482 hypotheses** |
 | `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** | **32** |
 | `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** | **0** |
@@ -106,6 +106,16 @@ parameterised over a symbolic address (though that is still needed once the tree
 follows the return).
 
 Everything below is the 2026-10-01 state and is left as written.
+
+One row above is not this pass's doing and is worth saying so: `udivmod` used to
+be the corpus's one WRONG (`real=4 model=7905747460161236410`, blamed on an
+untyped-`n` collapse in `bugs/FORMAL_default_int_type_typed_flag_collapse.md` and
+`bugs/FORMAL_pointer_value_model.md`, both other workers' claims). Re-measured
+here for the table and it now answers `ok: 4`, so the suite reads 45/45 agree
+and 0 WRONG. Nothing in this branch touches the model — the two `X86.lean` edits
+are `theorem`s and add no `def` — so this was fixed elsewhere between the
+recording and today. **Whoever owns those two docs should re-measure and delete
+them if the model is right;** that was not investigated here.
 
 ## Scope of this doc
 
