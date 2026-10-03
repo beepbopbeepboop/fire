@@ -850,25 +850,40 @@ CASES = [
      "    c.n = 3\n"
      "    c.LIMIT = 7\n"
      "    return c.read() * 10 + c.n\n", 73, None),
-    # A class constant whose VALUE is not a literal has nowhere to live: there
-    # is no module-global storage, so the read can only be answered by the value
-    # it is written with, and `3 + 4` is not a value this path materializes.
-    # This is `Coord.is_flat` (`Self.rank == Self.flat_rank`) and
-    # `_ZipIterator._InjectedValues` (`Tuple[*Self.Ts]`) reduced to the smallest
-    # program that reaches the same line, and the refusal is the CORRECT verdict
-    # for both. Checked on both backends: the pre-change message was a
-    # different one that was false about the file ("has no field 'is_flat' …
-    # in Python this is an AttributeError at run time", for a name the class
-    # declares 20 lines above the read).
+    # A class constant whose VALUE this build cannot materialize has nowhere to
+    # live: there is no module-global storage, so the read can only be answered
+    # by the value it is written with. This is `Coord.is_flat`
+    # (`Self.rank == Self.flat_rank`) and `_ZipIterator._InjectedValues`
+    # (`Tuple[*Self.Ts]`) reduced to the smallest program that reaches the same
+    # line, and the refusal is the CORRECT verdict for both. Checked on both
+    # backends: the pre-change message was a different one that was false about
+    # the file ("has no field 'is_flat' … in Python this is an AttributeError at
+    # run time", for a name the class declares 20 lines above the read).
+    #
+    # **THE VALUE IS `N + 4` AND NOT `3 + 4`, AND THAT IS THE WHOLE OF WHAT
+    # CHANGED.** `3 + 4` is a literal-only expression of two literals, and
+    # `formal/model.py::literal_default_word` — the one classifier behind
+    # `class_constant_word`, `struct_default_word` and `struct_field_kind` — used
+    # to be a SECOND, smaller copy of `fold_literal_expr` with no unary or binary
+    # arm, so `A = -3` was refused as "not a value this build can materialize"
+    # and `LIMIT = 3 + 4` with it. It folds with that folder now, so both are
+    # materialized: `3 + 4` is 7, exactly, in the same word. What is still
+    # refused is a value with a FREE NAME in it, because the class body is not a
+    # scope the materializer can resolve — which is the case the real sources
+    # are, and is what this row now pins. `N` is a module-level constant of this
+    # unit, so it is not a name nobody can find; it is a name the class body
+    # cannot read.
     #
     # The NEEDLE is the wording this tree raises, which quotes the VALUE: a
-    # "`comptime` class attribute … whose value is `3 + 4`" rather than the
+    # "`comptime` class attribute … whose value is `BinaryOp`" rather than the
     # generic "is a class-level constant of C" this case used to expect. The
     # quoted value is the part that sends the reader to the class body instead of
     # to the read.
     ("comptime_alias_nonliteral_value_refused",
+     "N = 4\n"
+     "\n"
      "struct C:\n"
-     "    comptime LIMIT = 3 + 4\n"
+     "    comptime LIMIT = N + 4\n"
      "    var n: Int\n"
      "\n"
      "def get() -> Int:\n"
@@ -883,8 +898,10 @@ CASES = [
     # the attribute exists, so the program does not raise. The needle is the
     # corrected half, the forbidden substring is the false half.
     ("comptime_alias_refusal_does_not_claim_an_attribute_error",
+     "N = 4\n"
+     "\n"
      "struct C:\n"
-     "    comptime LIMIT = 3 + 4\n"
+     "    comptime LIMIT = N + 4\n"
      "    var n: Int\n"
      "\n"
      "    def read(self) -> Int:\n"

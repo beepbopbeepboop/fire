@@ -1,109 +1,135 @@
-# FORMAL_a_dict_subscript_has_no_value_kind: `len(d[k])` is refused even with `d` annotated `dict[K, V]`
+# FORMAL_a_dict_subscript_has_no_value_kind: a dict SUBSCRIPT now has a value kind, gated on the key; the filed program needs `bytearray`, which has no representation at all
 
-**Status: OPEN, measured on `master` (2026-10-02) while sweeping slice `repo-c`,
-and NOT fixed here — the change it needs is a value-model capability with a
-SIGSEGV failure mode, which is not a light worker's call.** Found as the top
-row of `bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md` §4.1 (3 of 15 answerable
-files, one construct).
+**Status: the capability this document is about has LANDED and is measured; the
+program this document was filed with still does not build, for a reason that is
+not this one, and the field spelling the sweep found stays refused on purpose.
+Both of those are separate capabilities, and the second is filed.**
 
-## What I ran
+Found as the top row of `bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md` §4.1
+(3 of 15 answerable files, one construct) and filed on 2026-10-02.
+
+## What it was, and what it is now
+
+`len(d[k])` was refused with "the source does not say what this operand holds"
+for every `d`, and the refusal was TRUE: a dict's element word is written by a
+STORE — the literal's own pair, or a subscript assignment — and nothing else
+writes it. `ValueKinds.kind_of`'s `SubscriptExpr` arm read
+`list_elem_kind(kind_of(base))`, which asks the dict for ONE element kind for the
+whole table, so `{"a": 10, "b": "text"}` claimed nothing and every subscript of
+it was unclassified.
+
+**What landed** is the per-key answer, and the gate is the whole of it:
+
+| | before | after |
+|---|---|---|
+| `d = {"text": [1,2,3]}; len(d["text"])` | refused | `3`, both architectures |
+| `d = {"a": 10, "b": "text"}; print(d["a"])` | refused | `10`, both architectures |
+| `d = {"s": "hi"}; printf("%s", d["s"])` | `hi` | `hi` (unchanged) |
+| `d = {"a": [1]}; len(d["b"])` — key absent | refused | **refused** (the gate) |
+| `d = {"a": [1]}; len(d[k])` — key is a name | refused | **refused** |
+| `d = {"a": 1, "a": [2]}` — one key, two kinds | refused | **refused** |
+| `d = {"a": [1]}` … then `d = 5` | refused | **refused** (tombstone) |
+| `{str(i): [i] for i in range(3)}["1"]` | refused | **refused** |
+
+Three pieces, in `formal/model.py`:
+
+1. `dict_literal_key_value_kind(node, index)` — the shared reader. It answers
+   only when `node` is a dict **literal**, `index` is a string or integer
+   literal, and **the literal contains that key**; unanimity is over the pairs
+   under that key, because a subscript is a key scan and its answer is one
+   element word. That last clause is the gate: a missing key is CPython's
+   `KeyError`, which this path cannot raise, and the word a key scan leaves
+   behind is whatever the pair blob held — for a container value, address 0, so
+   `len` of it is `LDR X0, [X0]` with X0 zero. That is the SIGSEGV
+   `struct_field_kind`'s docstring records for the field spelling, and this
+   document's next-step section demanded the gate be designed before the
+   capability was written. It was, and it is the third row of the table above.
+2. `ValueKinds._note_dict_init` — the evidence, recorded per name with
+   `_ctor_calls`' tombstone discipline, because this map is flow-INsensitive and
+   a name bound to a dict literal and then to something else has two homes.
+   Identity (`is`), not equality: the scan runs twice over the same statements.
+3. `_pair_value_kind` — a nested container literal is a blob, so
+   `{"c": [1,2,3]}` says its value is a counted region. It is deliberately NOT
+   an arm of `_kind_of_simple`, and the docstring says why: that function is also
+   read by the module-global path (`global_slot_kind`), where a dict's values
+   are classified WITHOUT any check that the key being subscripted is one of
+   them. Widening it there would extend a plausible-wrong-number into a
+   plausible-wrong-number-that-is-also-a-null-dereference across every dict
+   global in the tree. Confined here, the nesting is available only where the
+   write is evidenced.
+
+**The `next step` this document listed was three pieces and two of them were
+the wrong shape.** It asked for `declared_type_kind` to answer `dict[K, V]`
+with `V`'s kind, and for `BLOB_TYPE_CTORS` to carry `bytearray`. Neither is
+needed for the capability and neither would have been sound: the annotation
+says what the TYPE is, and a dict element's word is written by a store — the
+same premise-versus-value split `struct_field_kind` exists to keep apart, and
+the same SIGSEGV it measured on both architectures when the annotation alone was
+believed. The per-key literal reader is a narrower question with evidence behind
+it, and the annotation route is still refused for the same reason it was before.
+
+## What still does not build, and is not this capability
+
+**`bytearray` has no representation on this path at all.** Measured:
 
 ```
-$ python3 tools/memslot.py --gb 8 --label repro -- python3 fire.py build --formal --no-prove .tmp/repro/s2.mojo
-build: len(d['text']) — the source does not say what this operand holds, and on
-this path the two things len() can answer are told apart by what the operand IS:
-a string is a bare char * whose length is a strlen over its bytes to the NUL, and
-a list or tuple is a frame-allocated blob whose count is its first 8 bytes.
-Reading 8 bytes at offset 0 of an unclassified word is a plausible-looking wrong
-number — for a char * it is the first eight CHARACTERS of the string — so it is
-refused. Annotate it (`x: String`) or bind it to a list, tuple, range or string
-literal this path can see the shape of
-```
-
-The program is three lines and the annotation is on the FIRST of them:
-
-```mojo
+$ cat .tmp/w/ba3.py
 def main():
-    d: dict[str, bytearray] = {"text": bytearray()}
-    printf("%d\n", len(d["text"]))     # refused
+    var b = bytearray()
+    printf("built %d\n", 1)
     return 0
+$ python3 fire.py build --formal --no-prove -o ba3.bin .tmp/w/ba3.py
+build: the image would bind 1 symbol(s) that nothing provides, so it could not
+be loaded: bytearray. …  (Provider check: asked the C library (dlsym).)
 ```
 
-## What I see, and the part that sizes the work
+So the program this document was filed with — `d: dict[str, bytearray] =
+{"text": bytearray()}` — is TWO gaps, and this fix closes the one about the
+subscript. The other is filed as
+`bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
 
-**It is not about struct fields.** A plain local with a plain annotation fails
-identically, so the `declared_kind` hook (which exists precisely for
-`len(self.<field>)`, and which is why `ValueKinds.kind_of` consults it) is not
-the missing piece — a **dict subscript has no value kind on this path at all**:
+## The field spelling, and why it stays refused
 
-```mojo
-def main():
-    d: dict[str, bytearray] = {"text": bytearray()}
-    d["text"].extend(1)          # this WORKS — the store reaches the slot
-    x = d["text"]
-    printf("%d\n", len(x))        # build: len(x) is len() of a value classified as 'int'
-```
+The sweep's three files are `len(self.sections["text"])` where
+`self.sections: dict[str, bytearray]` is a **declared field**. That is refused,
+and correctly: `S()` does not run `__init__` on this path (premise B2), so a
+fresh instance's slot holds the class-level default, and a field with no default
+is a word of zeros — so `len` of that subscript is a count read from address 0.
+The refusal is unchanged, byte for byte, which is the assertion that the gate is
+the gate.
 
-So the codegen can already *read and write through* the subscript; only the
-CLASSIFICATION is missing, and only `len` (and anything else that asks a kind)
-needs it. `formal/hostmods/struct.mojo`'s `pack_into(fmt, buf, off, …)` writes
-through a subscript and `unpack_from` reads one, so the corpus already depends on
-this working — what it cannot do is ask what the subscript holds.
+Answering it soundly would need one more hook — the field's own default
+initializer, so the key can be checked the way the local's is — and it would buy
+**nothing for the corpus**, because the field in all three files has no default.
+A dict field with a literal default (`var d: dict[str, List[Int]] = {"a": [1]}`)
+is the shape that hook would serve and no file in the sweep spells it. The
+missing thing there is not the kind: it is a dict FIELD with a value at all,
+which is the module-global storage question
+(`bugs/FORMAL_module_state_no_storage.md`).
 
-## Why the same construct is already in the tree three ways
+## Tests
 
-* `formal/model.py::global_slot_is_dict` exists and says a use site has only the
-  name, so "is this a key SCAN or an element address" has to come from the slot's
-  own initializer. That is a *dict-ness* answer for a NAME, and there is no
-  element-TYPE answer behind it.
-* `ValueKinds.kind_of` classifies `F.DictExpr` as `LIST_PREFIX` ("this path's
-  dict is a pair blob with a count in its first word, which is all `len` needs") —
-  which is right for `len(d)` and says nothing about `len(d[k])`.
-* `struct_field_kind`'s docstring records the failure mode to design against:
-  claiming a kind from the annotation alone **built and then died with SIGSEGV
-  (exit 139) on both architectures**, because the slot held 0 and `len` loaded
-  eight bytes from address 0.
+`test_formal_value_model.py`, which is the oracle suite for this area — its
+expectations are derived by running the SAME text through CPython:
 
-## The next step, and the gate to design before writing it
+* `a_dict_subscript_is_the_kind_of_the_pair_under_that_key` **replaces**
+  `a_dict_whose_values_disagree_is_refused`, and it is the interesting one: the
+  old refusal was true about the old rule and FALSE about the program. A
+  subscript is one element word, so `{"a": 10, "b": "text"}` says `d["a"]` is the
+  10 and CPython agrees. Both architectures, checked against CPython.
+* `a_dict_whose_one_key_holds_two_kinds_is_refused` — the gate, on the one shape
+  where unanimity over a single key's pairs actually fails.
+* `a_dict_subscript_of_a_key_the_literal_lacks_is_refused` and
+  `a_dict_subscript_of_a_name_key_is_refused` — the other two rows of the gate,
+  each refused identically on both backends (`run_refusal` requires the same
+  message from each, which is the only instrument that can see a defect both
+  backends share: they read one kind table).
 
-One capability, three cooperating pieces:
-
-1. `declared_type_kind` (or a sibling) answering `dict[K, V]` with `V`'s kind
-   rather than `None`;
-2. `ValueKinds.kind_of` gaining an `F.Subscript` arm that reads the BASE's
-   element kind;
-3. `BLOB_TYPE_CTORS` carrying `bytearray`, so `V` is a list of ints.
-
-**The gate is the whole of the design and it is not optional.** A dict element
-word is written by the SUBSCRIPT STORE, not by the constructor, so exactly
-`struct_field_kind`'s hazard applies: `len(d[k])` before any store into `d` reads
-a count from a word nothing wrote. Whatever decides this must be able to answer
-"has any element been written", the way `struct_field_kind` answers "is the slot's
-value something this path materializes". A refusal that fires on a `dict` whose
-elements were never stored is correct; one that fires on every `dict[k]` is the
-93.3 % → nothing regression in the other direction.
-
-**Do it with both directions of the oracle in the same file.** `len()` of a
-container is answered against a byte count, so a wrong answer here is a plausible
-number rather than a crash, and `test_formal_run.py`'s build-and-run shape is the
-only thing that notices. `formal/model.py`'s existing `ValueKinds` unit tests (if
-any) are the cheaper half; they cannot tell a right count from a wrong one.
-
-## The second, smaller row in the same cause, and it may not be the same fix
-
-`unescape_c.py`'s `len(s)` is `len() of a value classified as 'int'` — an
-unannotated parameter, which `ValueKinds.__init__` seeds `INT_KIND`, and
-`kind_of` DOES already ask `declared_kind` for a name in `_param_names`. So
-either that file's `s` has an annotation the analysis is not reading, or its
-value flows from a call the analysis cannot follow. **One probe tells those
-apart** and the two have nothing to do with each other; do not assume this is
-the same fix.
-
-## What was tried and did not work
-
-Nothing — this is a first filing of the shape, from the sweep rather than from a
-build that used to work. The closest existing doc is
-`bugs/FORMAL_module_global_string_elements_is_a_storage_decision.md`, which is
-about the STORAGE of a module global and not about a subscript's kind; it is
-cited there only because both questions end at "this path has no answer for
-this container shape".
+`test_formal_run.py` needed two rows changed rather than added, and the reason is
+this document's other bug: `comptime LIMIT = 3 + 4` was pinned as a REFUSAL and
+is now materialized as 7, because `literal_default_word` folded with
+`fold_literal_expr` instead of being a second, narrower classifier
+(`bugs/FORMAL_a_negative_class_constant_is_not_a_literal.md`, deleted by the
+commit that fixed it). Both rows now use `N + 4` with `N` a module-level
+constant, which is the shape that is still refused — a value with a FREE NAME in
+it, which the class body cannot resolve.

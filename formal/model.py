@@ -10560,6 +10560,105 @@ def _kind_of_elements(elems) -> str | None:
     return kinds.pop() if len(kinds) == 1 else None
 
 
+# A sentinel for "this subscript's key is not a literal I can compare", so a
+# missing answer is not spelled as a key that happens to equal nothing.
+_NOT_A_LITERAL_KEY = object()
+
+
+def _literal_dict_key(node):
+    """The Python value a dict subscript's key literal denotes, or the sentinel.
+
+    Deliberately narrow — a string or an integer literal, and nothing else —
+    because the whole point of the question is that the answer can be COMPARED
+    with the keys the initializer wrote. A name, a call or an arithmetic form
+    could be the right key and this path cannot know it, and a key it cannot
+    check is a key whose element word may never have been written.
+    """
+    if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
+            and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, F.IntLiteral):
+        try:
+            return int(node.value)
+        except (TypeError, ValueError):
+            return _NOT_A_LITERAL_KEY
+    return _NOT_A_LITERAL_KEY
+
+
+def _pair_value_kind(node):
+    """The kind a dict literal's VALUE carries as a subscript yields it.
+
+    `_kind_of_simple` with one addition, and the addition is the whole of why
+    this function exists rather than a call: **a nested container literal is a
+    blob**, so `{"a": [1, 2, 3]}` says its value is a counted region, and
+    `_kind_of_simple` has no arm for a `ListExpr` because it classifies a
+    literal and a list literal's kind is its ELEMENT's kind — which is
+    `_kind_of_elements`' question, one level down.
+
+    It is NOT put into `_kind_of_simple` itself, and that is deliberate. That
+    function is read by every container classification in the file, including
+    the module-global one (`global_slot_kind`), where the dict's VALUES are read
+    out of a slot's initializer WITHOUT a check that the key being subscripted
+    is one of them: the kind is claimed for the dict, and `list_elem_kind` then
+    hands it to any subscript. Widening it there would extend a
+    plausible-wrong-number into a plausible-wrong-number-that-is-also-a-null
+    dereference, over every dict global in the tree. Confined here, the only
+    reader is `dict_literal_key_value_kind`, which checks the key first — so
+    the nesting this adds is available only where the write is evidenced.
+    """
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return list_kind(_kind_of_elements(node.elements or []))
+    if isinstance(node, F.DictExpr):
+        return list_kind(container_literal_elem_kind(node))
+    return _kind_of_simple(node)
+
+
+def dict_literal_key_value_kind(node, index):
+    """What `node[<index>]` yields for a LITERAL key, or None when it cannot say.
+
+    **THE GATE, and it is the whole of what makes this safe.** A dict's element
+    word is written by a STORE — the literal's own pair, or a subscript
+    assignment — and not by anything that declares the dict's type. So a kind
+    read off a declaration is a claim about a slot that may still be zero, and
+    `len` of zero is `LDR X0, [X0]` with X0 zero: a SIGSEGV on both
+    architectures, measured and recorded in `struct_field_kind`'s docstring for
+    the field spelling of this. So this answers only when the initializer ITSELF
+    wrote the key:
+
+      * `node` is a dict LITERAL (a comprehension is a dict too, and is not one
+        of these — `{k: v for …}` builds its pairs at run time, so there is no
+        initializer here to check a key against);
+      * `index` is a string or integer literal, so it can be compared with the
+        keys the literal wrote rather than guessed at;
+      * the literal CONTAINS that key. A missing key is CPython's `KeyError`,
+        which this path cannot raise, and the word the key scan leaves behind is
+        whatever the pair blob had — which for a container value is address 0.
+
+    That last clause is why this is a function and not a `list_elem_kind` of the
+    dict's kind: the refusal it produces for a key the literal does not contain
+    is CORRECT, and it is the same refusal the pre-existing unclassified row
+    produces, so a program that reads a missing key is no worse off than before.
+
+    Unanimity over every pair that carries the key, because a dict literal may
+    repeat one (`{"a": 1, "a": [2]}` keeps the last), and this map is
+    flow-insensitive: two values of two kinds under one key claim nothing.
+    """
+    if not isinstance(node, F.DictExpr):
+        return None
+    key = _literal_dict_key(index)
+    if key is _NOT_A_LITERAL_KEY:
+        return None
+    values = [p[1] for p in (node.pairs or [])
+              if len(p) >= 2 and _literal_dict_key(p[0]) == key]
+    if not values:
+        return None
+    kinds = {_pair_value_kind(v) for v in values}
+    kinds.discard(None)
+    if len(kinds) != 1:
+        return None
+    return kinds.pop()
+
+
 def container_literal_elem_kind(node) -> str | None:
     """What a subscript of the container LITERAL `node` yields, or None.
 
@@ -10694,6 +10793,13 @@ class ValueKinds:
         # `_note_field_stores`, which carries the measurement that makes it
         # load-bearing rather than tidy.
         self._field_stores: dict = {}
+        # The dict LITERAL that bound a name in this body — the node itself, or
+        # a `None` tombstone for a name something else binds.  Same shape and
+        # same reason as `_ctor_calls`, for the same flow-insensitivity: the
+        # value kind of a SUBSCRIPT is a claim about one element word, and the
+        # only thing that says whether that word was written is the initializer
+        # this function itself ran.  See `_note_dict_init`.
+        self._dict_inits: dict = {}
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -10835,6 +10941,37 @@ class ValueKinds:
         else:
             self._ctor_calls[name] = None
 
+    def _note_dict_init(self, target, value) -> None:
+        """Record (or retract) the dict literal that gives a name its elements.
+
+        The evidence `dict_literal_key_value_kind` is asked about, and the reason
+        it is kept beside `_ctor_calls` rather than inside it is that the two
+        answer different questions: a construction says what a FIELD's slot
+        holds, and a dict literal says which element WORDS were written. The
+        second is the only thing that can answer "was the key this subscript
+        uses one of them", which is the gate the whole of this is built on.
+
+        The tombstone rules are `_ctor_calls`' and they are not tidiness. A name
+        bound to a dict literal and then to something else has two homes, and a
+        kind read off the first is a claim about one instruction; two dict
+        literals for one name are the same problem in a different shape, so the
+        second one also tombstones. And the scan runs twice over the same
+        statements, so identity — not equality — is what says "the same
+        statement", which is why the value stored is the NODE and the test is
+        `is`.
+        """
+        name = target if isinstance(target, str) else (
+            target.name if isinstance(target, F.IdentExpr) else None)
+        if name is None:
+            return
+        if isinstance(value, F.DictExpr):
+            if name not in self._dict_inits:
+                self._dict_inits[name] = value
+            elif self._dict_inits[name] is not value:
+                self._dict_inits[name] = None
+        elif name in self._dict_inits:
+            self._dict_inits[name] = None
+
     def _note_field_stores(self, target) -> None:
         """Record that a statement writes THROUGH a holder's field.
 
@@ -10923,10 +11060,12 @@ class ValueKinds:
                 self._bind_target(s.target, self._value_kind(s.value),
                                   own=self._own_shape_of(s.value))
                 self._note_construction(s.target, s.value)
+                self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value)
                 self._note_construction(s.name, s.value)
+                self._note_dict_init(s.name, s.value)
                 self._note_field_stores(s.name)
             elif isinstance(s, F.AugAssignStmt):
                 # `x += e` leaves x holding what it held; an unknown x stays
@@ -10934,6 +11073,7 @@ class ValueKinds:
                 self._bind_target(s.target, self.locals.get(
                     s.target.name if isinstance(s.target, F.IdentExpr) else ""))
                 self._note_construction(s.target, s.value)
+                self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.MultiAssignStmt):
                 vkind = self._own_shape_of(s.value)
@@ -10944,6 +11084,7 @@ class ValueKinds:
                 # tombstone is what says so.
                 for t in s.targets:
                     self._note_construction(t, s.value)
+                    self._note_dict_init(t, s.value)
                     self._note_field_stores(t)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
@@ -11252,8 +11393,36 @@ class ValueKinds:
             return INT_KIND
         if isinstance(e, F.SubscriptExpr):
             if not isinstance(e.index, F.SliceExpr):
+                # A dict subscript is a KEY SCAN, and its answer is a claim
+                # about ONE element word — a word that a store writes and
+                # nothing else does. So the initializer this function ran is
+                # asked whether it wrote the key, and that is a question a KIND
+                # cannot answer: `{"a": [1]}` says the dict holds lists, and
+                # `d["b"]` reads a slot nothing put a list into.
+                # `dict_literal_key_value_kind` carries the gate and returns
+                # None for every shape it cannot vouch for, so the fallback
+                # below — the LIST case, where the base's element kind IS the
+                # subscript's kind — is reached exactly as before.
+                keyed = self._dict_subscript_kind(e)
+                if keyed is not None:
+                    return keyed
                 return list_elem_kind(self.kind_of(e.obj))
         return None
+
+    def _dict_subscript_kind(self, e):
+        """What `e`'s dict subscript yields, when this body wrote the key.
+
+        The `_dict_inits` lookup and nothing else: a base that is a NAME is the
+        only shape whose initializer the scan can attribute to a binding, and a
+        subscript of a subscript (`d["a"]["b"]`) or of a field
+        (`self.d["a"]`) has no initializer in this map, so it falls through to
+        the list reading rather than reaching for one. That is the conservative
+        direction and it is the same refusal the shape got before.
+        """
+        obj = e.obj
+        if not isinstance(obj, F.IdentExpr):
+            return None
+        return dict_literal_key_value_kind(self._dict_inits.get(obj.name), e.index)
 
     def _string_method_kind(self, call):
         """What a lowered string method call yields, or None if this is not one.
