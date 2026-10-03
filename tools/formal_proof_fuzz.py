@@ -193,8 +193,9 @@ QUIET_VERDICTS = ("match", "not-checked", "pass", "admitted", "refused-import")
 # them is the hole count — which is why both carry it instead of being collapsed
 # into "green".
 PROOF_CLASSES = ("pass", "admitted", "lean-rejected", "bound-exceeded",
-                 "proof-refused", "codegen-refused", "refused-import",
-                 "proof-crash", "build-crash", "no-proof", "not-checked")
+                 "lean-memory-exceeded", "proof-refused", "codegen-refused",
+                 "refused-import", "proof-crash", "build-crash", "no-proof",
+                 "not-checked")
 
 #: The number of `sorry`s EVERY proof a generator emits carries, by
 #: architecture — its DESIGNED trust boundaries, not a defect in any one proof.
@@ -543,6 +544,26 @@ def _bound_detail(detail):
     return "exceeded" in text and ("wall" in text or "CPU" in text)
 
 
+def _lean_memory_detail(detail):
+    """Whether Lean hit its OWN memory ceiling rather than rejecting anything.
+
+    `formal/lean.py` gives every proof 6 GB (`LEAN_MEMORY_MB`) and Lean answers
+    an elaboration it cannot hold with
+
+        libc++abi: terminating due to uncaught exception of type
+        lean::memory_exception: excessive memory consumption detected
+
+    which is a statement about the MACHINE and not about the proof: the file was
+    never finished with. It is its own class for the reason `run_lean`'s
+    `bound-exceeded` is one — `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    §0.3 measured Lean's memory ceiling as the binding constraint on this half —
+    and a campaign that counted it as `lean-rejected` would report a resource
+    outcome as a fact about the generator, which is the one inference this tool
+    must never make.
+    """
+    return "excessive memory consumption" in str(detail or "")
+
+
 def proof_verdict(arch, work, timeout, check=True):
     """`(cls, detail, holes, proof_path)` for this worker's program.
 
@@ -607,6 +628,8 @@ def proof_verdict(arch, work, timeout, check=True):
                    n_sorries, proof_path)
     if _bound_detail(detail):
         return out("bound-exceeded", detail, n_sorries or 0, proof_path)
+    if _lean_memory_detail(detail):
+        return out("lean-memory-exceeded", detail, n_sorries or 0, proof_path)
     return out("lean-rejected", detail, n_sorries or 0, proof_path)
 
 
