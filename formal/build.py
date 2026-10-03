@@ -10164,6 +10164,23 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
+    # A `try`'s handler arm with a BODY is refused here, before anything is
+    # rewritten or emitted, and in this function because it is the one pipeline
+    # both front ends go through — the two emitters' `_emit_try` skip the arms
+    # outright, so a refusal asked from either backend would be a second copy of
+    # one decision, and the executable and dylib paths would answer differently
+    # about the same source. The sentence and the test of what an arm may
+    # contain are `formal/model.py`'s (`refuse_dropped_handler_arm`,
+    # `unemitted_handler_arm`); what is HERE is only the loop, because the
+    # functions are not in hand any earlier.
+    #
+    # Why a refusal and not the arm being emitted: there is no unwinder to emit
+    # it into. See the docstring for the measurement — a `try` whose handler
+    # printed built, ran, printed nothing and exited 0.
+    for fn in functions:
+        found = M.unemitted_handler_arm(fn)
+        if found is not None:
+            raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):

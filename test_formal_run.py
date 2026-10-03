@@ -11893,17 +11893,55 @@ REFUSAL_CASES = [
      "        p = 9\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
-    # Stored in every HANDLER of a `try`, which is a set of arms rather than a
-    # chain — the shape `bugs/FORMAL_read_before_store_dominating_store.md`
-    # names as one a partial rule gets wrong.
-    ("every_handler_stores_is_dominating",
+    # A `try`'s BODY store dominates after the statement. It used to be
+    # `every_handler_stores_is_dominating` — `except Exception: p = 2` — and the
+    # handler is gone from the program because a handler arm with a body is now
+    # REFUSED: neither emitter emits the arms (`_emit_try` skips them, `RaiseStmt`
+    # flushes the pending `finally` clauses and `exit(1)`s), so an arm's store is
+    # not in the image and the graph that walked it described a program nobody
+    # runs. The refusal is the next case down; this one keeps the RUNNING
+    # coverage of the dominance itself, which the `pass` arm does not weaken: the
+    # join is reached from the body's exits alone and `p` is in its IN set.
+    ("try_body_store_is_dominating_after_the_statement",
      "def f(n):\n"
      "    try:\n"
      "        p = 1\n"
      "    except Exception:\n"
-     "        p = 2\n"
+     "        pass\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
+    # …and the refusal itself, on the shape this file already had: a handler
+    # that PRINTS. Built and run before the change, it printed nothing and
+    # exited 0 — the program silently is not the program that was written, with
+    # no refusal, no warning and nothing on stderr. 921 arms in this
+    # repository's own 400 files have a body.
+    ("refuse_handler_arm_with_a_body",
+     "def f(n):\n"
+     "    try:\n"
+     "        sink(n)\n"
+     "    except ValueError:\n"
+     "        printf(\"HANDLER RAN\")\n"
+     "    return 0\n"
+     "\n"
+     "def sink(v):\n"
+     "    printf(\"s=%d\", v)\n",
+     "refuse:is a handler arm with a body this path cannot put in the image",
+     None),
+    # …and the store in an arm, which is the shape `read_before_store` was
+    # answering wrongly: it reported `p` as read before any store, on the
+    # strength of a path the image does not have.
+    ("refuse_handler_arm_that_stores",
+     "def f(n):\n"
+     "    try:\n"
+     "        sink(n)\n"
+     "    except ValueError:\n"
+     "        p = 1\n"
+     "    printf(\"p=%d\", p)\n    return 0\n"
+     "\n"
+     "def sink(v):\n"
+     "    printf(\"s=%d\", v)\n",
+     "refuse:is a handler arm with a body this path cannot put in the image",
+     None),
     # A `try`'s `else` clause, which is the shape the whole clause exists for:
     # do the work where it can fail, and use the result only on the path where
     # it did not. It was REFUSED on both architectures — "'p' is read at line 7
@@ -11913,12 +11951,18 @@ REFUSAL_CASES = [
     # and CPython runs the program. The graph reached the clause from the try's
     # header, i.e. from the one path the language skips it on. Same program
     # shape as `test_struct_formal.py:603`, which is where it was measured.
+    #
+    # The handler arm was `except Exception: return 1`, and a `return` is an
+    # effect like any other — an arm whose body says what the program should
+    # answer on failure is a program whose answer DEPENDS on which arm ran, and
+    # this path cannot compute that. `pass` says the same thing about the
+    # clause's reach, which is what this row is for, and keeps running.
     ("try_else_clause_runs_only_when_the_body_completed",
      "def f(n):\n"
      "    try:\n"
      "        p = n + 1\n"
      "    except Exception:\n"
-     "        return 1\n"
+     "        pass\n"
      "    else:\n"
      "        printf(\"p=%d\", p)\n"
      "    return 0\n",

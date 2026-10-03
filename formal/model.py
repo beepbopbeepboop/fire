@@ -3023,9 +3023,42 @@ def _build_cfg(body) -> tuple:
                                  [t.index])
                 body_end = len(blocks)
                 arm_exits = list(body_exits)
-                for h in (getattr(s, "handlers", None) or []):
-                    arm_exits += run(getattr(h, "body", None) or [], loops,
-                                     [t.index])
+                # The HANDLER ARMS ARE NOT RUN, and not as a simplification:
+                # neither emitter emits them. `_emit_try` in
+                # `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
+                # skips the arms outright and `RaiseStmt` flushes the pending
+                # `finally` clauses and then `exit(1)`s, so no edge runs from a
+                # raise site into an arm and no edge runs out of one — an arm
+                # contributes nothing to the image, and a graph that walks it
+                # describes a program nobody is going to run.
+                #
+                # What that cost, measured on this very shape:
+                #
+                #     def probe(n):
+                #         try:
+                #             p = 1
+                #         except ValueError:
+                #             pass
+                #         return p
+                #
+                # was REFUSED — "'p' is read at line 6 before anything in this
+                # function stores it, and CPython raises UnboundLocalError for
+                # that program" — with both halves false. CPython runs it and
+                # `p` is 1, and the emitted image would be right: the arm's
+                # `pass` stores nothing, so the path it contributed to the join
+                # was a path that stored nothing and nothing else.
+                #
+                # The premise the old shape rested on — "a handler that stores
+                # nothing is a path to the join that stores nothing, and nothing
+                # in the graph says the handler will not run" — is answered by
+                # the emitter: nothing CAN run it. And the direction it was
+                # protecting against is now unreachable from the other side,
+                # because `refuse_dropped_handler_arm` refuses an arm whose body
+                # stores anything before this walk is ever asked: the only arms
+                # that reach here are `pass`/`raise`/`continue`/`break` ones,
+                # which store nothing on either reading. So the two halves hold
+                # each other up, and each is the reason the other is safe.
+                #
                 # `else` runs only when the body did NOT raise and `finally`
                 # runs either way, so both are ARMS of the one statement
                 # rather than a chain. That is what makes a `return` inside
@@ -20146,6 +20179,118 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         elif id(stmt) in kept:
             final.append(stmt)
     return final
+
+
+# The statements whose presence in a `try`'s handler arm costs the image
+# nothing, and the ONE list they are asked from.
+#
+# A handler arm is not EMITTED on this path — `formal/arm64_codegen.py`'s
+# `_emit_try` and `formal/x86_64_codegen.py`'s skip the arms outright, and
+# `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s, so
+# there is no edge from a raise site into an arm and no edge out of one — which
+# makes the four statements below the four whose absence changes nothing:
+#
+#   * `pass` — there is nothing to drop;
+#   * `raise` — the arm cannot run, and a `raise` here would have left the
+#     process, so dropping it changes no answer the image gives;
+#   * `continue`, `break` — control transfers out of an arm the image never
+#     enters.
+#
+# Anything ELSE in an arm is a store, a call or a statement the program wrote
+# and the image does not contain, which is why `refuse_dropped_handler_arm` is
+# asked about it rather than about the arm's mere existence: `except: pass` is
+# the commonest shape in the corpus and must keep building.
+_HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
+
+
+def unemitted_handler_arm(fn):
+    """The first handler arm of `fn` whose body is not in the image, or None.
+
+    `(handler, statement)` for the statement that made the arm worth refusing,
+    so the message can point at a line the reader wrote rather than at the arm.
+    `None` is the answer for every function without one — which is the answer
+    for the overwhelming majority, and the reason this is a walk and not a
+    per-`try` flag threaded through the emitters.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        for handler in (getattr(node, "handlers", None) or []):
+            for stmt in (getattr(handler, "body", None) or []):
+                if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
+                    return (handler, stmt, node)
+    return None
+
+
+def exception_type_spelling(handler) -> str:
+    """`ValueError`, `(TypeError, KeyError)`, `except:`, `except E as e`.
+
+    The arm's own catch clause, as the reader wrote it, because the refusal is
+    about ONE arm and a message that named only the `try` would send the reader
+    looking through the arms for the one at fault. A parser that produces a bare
+    string for one name and a LIST of them for the tuple form is why this is a
+    function: `except (A, B) as e` spelled with the parentheses and the `as` is
+    two attributes and one line.
+    """
+    exc = getattr(handler, "exc_type", None)
+    if not exc:
+        head = "a bare `except:`"
+    elif isinstance(exc, (list, tuple)):
+        head = "`(" + ", ".join(str(e) for e in exc) + ")`"
+    else:
+        head = f"`{exc}`"
+    alias = getattr(handler, "name", None)
+    return f"{head} as {alias}" if alias else head
+
+
+def refuse_dropped_handler_arm(fn, found) -> str:
+    """Why this `try`'s handler arm is not in the image, in the reader's terms.
+
+    `found` is `unemitted_handler_arm`'s `(handler, statement, try_stmt)`.
+
+    The refusal exists because the alternative was SILENCE, and this file has
+    been shown what that costs: a handler body can store, call and print, and
+    with nothing to say so the program built, ran, and was not the program that
+    was written — `except ValueError: printf("HANDLER RAN")` printed nothing and
+    exited 0, with no diagnostic on either stream. That is the failure class
+    CLAUDE.md names ("a wrong-but-exit-0 artifact that every other check is
+    structurally blind to"), and 921 arms in this repository's own 400 files
+    have a body.
+
+    So this refuses the arm BY NAME and says what the path actually does, which
+    is the only sentence that is true of both the language and the image: the
+    arm is not dead (CPython enters it whenever the body raises) and it is not
+    unreachable either (this backend has no unwinder), it is NOT OURS. The three
+    ways out are all named, because they are different edits:
+
+      * move the body into the `try` or after it, when it is really cleanup for
+        the success path — which is what most `except: log-and-carry-on` arms
+        are, and what a `finally` expresses;
+      * `raise` at the end of the arm, when the program means to fail: `raise`
+        IS emitted (it flushes the pending `finally` clauses and exits), so an
+        arm that only re-raises changes no answer;
+      * return the value the program wants on failure, in the arm's own `return`
+        — but note that a `return` is an effect too, so it is refused as well.
+        This is deliberate: a program whose answer DEPENDS on which arm ran is a
+        program this path cannot compute, and saying so is the point.
+    """
+    handler, stmt, _try = found
+    line = getattr(stmt, "line", 0) or 0
+    where = f"line {line}: " if line else ""
+    return (
+        f"{where}{exception_type_spelling(handler)} is a handler arm with a body "
+        f"this path cannot put in the image, so it is refused rather than "
+        f"dropped: `formal` has no exception unwinder, so no edge runs from a "
+        f"raise site into an arm — a `raise` flushes the enclosing `finally` "
+        f"clauses and exits the process — and every statement in this arm "
+        f"(`{type(stmt).__name__}`) would be absent from the program that runs. "
+        f"Its effects would be silently missing: the image would build, exit 0, "
+        f"and not be the program you wrote, which is the one failure a value "
+        f"this compiler cannot detect on its own. An arm whose body is `pass`, "
+        f"`raise`, `continue` or `break` still builds — nothing is lost by "
+        f"leaving it out. Otherwise: move the work into the `try` body or after "
+        f"the statement (a `finally` if it is cleanup for the success path), or "
+        f"end the arm with `raise` if the program is meant to fail there.")
 
 
 def module_body_refusal(stmt):
