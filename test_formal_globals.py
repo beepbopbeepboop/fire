@@ -444,6 +444,84 @@ CASES = [
      "    printf(\"%s\", M[\"j\"])\n"
      "    return 0\n", "vw"),
 
+    # A NESTED container global, which used to be refused with "a container
+    # element is itself a container … only the SECOND level of fixups is
+    # missing". The element of a nested literal IS a word on this path — a
+    # pointer to a blob — so what was missing was never a word to put there but
+    # the blob it points at, and `build_data_image` now lays one out per nested
+    # element and adds it to the same `fixups` list the flat case already used.
+    #
+    # EVERY index of both levels is read, and that is the row's real subject.
+    # Element `i` of a blob is the word at `8 * (i + 1)`, so a blob's own words
+    # have to be CONTIGUOUS: laying an inner blob out as its element word is
+    # reached interleaves it, and then `X[1][0]` reads the FIRST inner blob's
+    # count (2) where element 1's pointer belongs, indexes 0 into it, and answers
+    # 2 — which is what the first version of this fix did, on both architectures,
+    # from a green build. `X[0][*]` was right in that version and `X[1][*]` was
+    # wrong, so a row that read only the first element would have passed on it.
+    ("nested_container_global",
+     "X = [[1, 2], [3, 4]]\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = X[0][0]\n"
+     "    b: Int = X[0][1]\n"
+     "    c: Int = X[1][0]\n"
+     "    d: Int = X[1][1]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    print(c)\n"
+     "    print(d)\n"
+     "    print(len(X))\n"
+     "    return 0\n", "1\n2\n3\n4\n2\n"),
+
+    # The same layout with a THIRD level, and the third level is where a
+    # worklist stops being an optimisation: each pass has to finish a whole
+    # blob before the next one starts, or the deepest blob lands inside the
+    # middle one. `DEEP[0][1][0]` and `DEEP[1][0][0]` together are the two
+    # directions through the queue.
+    ("three_level_nested_container_global",
+     "DEEP = [[[1, 2], [3]], [[4]]]\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = DEEP[0][1][0]\n"
+     "    b: Int = DEEP[1][0][0]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    return 0\n", "3\n4\n"),
+
+    # STRINGS inside the nested blob, which is the other word kind and the one
+    # that cannot be laid out as bytes: a string word is a pointer to the
+    # INTERNED literal in `__TEXT`, which is not in this image, so it is eight
+    # zero bytes plus a `string_cells` entry and only the CODE can name the
+    # target. A nested blob therefore needs the fixup for its own words AND a
+    # string cell per string inside it, and the shape is `tools/wave1_move_shared.py`'s
+    # `MOVES` and `tools/wave2_extract_shared.py`'s `EXTRACT` verbatim — the two
+    # module globals this capability exists for. Compared against the
+    # interpreter, so the expected answer is not a second copy of the words.
+    ("nested_container_of_strings_global",
+     "MOVES = [\n"
+     "    (\"gimple_solvers\", \"mojo/middle/solvers.py\", \"mojo.middle.solvers\"),\n"
+     "    (\"gimple_ctypes\", \"mojo/middle/types.py\", \"mojo.middle.types\"),\n"
+     "]\n"
+     "\n"
+     "EXTRACT = {\n"
+     "    \"gimple_gen_infra.py\": (\"infra_infer\", [\"_infer_param_types\"]),\n"
+     "    \"gimple_mod.py\": (\"mod\", [\"one\"]),\n"
+     "}\n"
+     "\n"
+     "def main(n):\n"
+     "    a: String = MOVES[0][1]\n"
+     "    b: String = MOVES[1][0]\n"
+     "    print(a)\n"
+     "    print(b)\n"
+     "    c: String = EXTRACT[\"gimple_mod.py\"][0]\n"
+     "    d: String = EXTRACT[\"gimple_gen_infra.py\"][1][0]\n"
+     "    print(c)\n"
+     "    print(d)\n"
+     "    print(len(MOVES))\n"
+     "    return 0\n",
+     "mojo/middle/solvers.py\ngimple_ctypes\nmod\n_infer_param_types\n2\n"),
+
     # THE CONTROL for the interning claim, and the reason the two rows above are
     # worth having: a string global and a string LITERAL are the same string, so
     # the comparison is true. Before, the global's bytes were a COPY in
@@ -877,19 +955,21 @@ CASES = [
 REFUSALS = [
     # A string ELEMENT inside a container global is NOT a refusal any more —
     # `read_list_of_strings` above runs it. What is still refused is a container
-    # element that is neither an int nor a string, and the pin is here because
-    # the refusal machinery is what stops a slot with no initializer from
-    # reading as the zero an unwritten slot gives: a list would report length 0
-    # and print an answer.
+    # element that is neither an int, a string, nor a NESTED container of those,
+    # and the pin is here because the refusal machinery is what stops a slot with
+    # no initializer from reading as the zero an unwritten slot gives: a list
+    # would report length 0 and print an answer.
     #
-    # A nested container is the interesting one, because its element IS a word
-    # (a pointer to a blob) and only the SECOND level of fixups is missing — so
-    # this is a real extension rather than a limit, and the message says which.
-    ("nested_container_global_refused",
-     "L = [[1, 2], [3]]\n"
+    # The element is a CALL here rather than a literal, which is the one word kind
+    # `_static_word` still cannot compute — its result is not known before the
+    # program runs, and no amount of laying out `__DATA` changes that. The
+    # nested-container half of the old message is gone with
+    # `nested_container_global` above; what is left is this.
+    ("call_computed_container_element_refused",
+     "L = [len(\"ab\"), 3]\n"
      "\n"
      "def main(n):\n"
-     "    v: Int = L[0][1]\n"
+     "    v: Int = L[0]\n"
      "    print(v)\n"
      "    return 0\n",
      "no initializer"),

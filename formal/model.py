@@ -21919,6 +21919,31 @@ def _container_shape(value) -> str:
     return "dict" if isinstance(value, F.DictExpr) else "sequence"
 
 
+class StaticNestedBlob:
+    """The words of a NESTED container literal, standing in for one outer word.
+
+    One word holds a pointer to a blob, so `L = [[1, 2], [3]]` is a blob of two
+    words and each of those words is a pointer to a blob of its own. `int` and
+    `str` were the two word kinds a flat run carried and this is the third: a
+    word whose content is another `words` list, which `build_data_image` lays
+    out as its own blob in the same trailing area and points at with one more
+    entry in the same `fixups` list the outer blob already used.
+
+    A class rather than a bare nested list, because `int` and `str` are the other
+    two word kinds and the three are told apart by their type in exactly one
+    place (`_lay_out_blob_words`). A nested list would then be indistinguishable
+    from a word the build cannot compute — which is the answer that has to stay
+    reachable, and which `("unknown", …)` is how the refusal says so."""
+
+    __slots__ = ("words",)
+
+    def __init__(self, words):
+        self.words = words
+
+    def __repr__(self):
+        return f"StaticNestedBlob({self.words!r})"
+
+
 def _static_container_words(value):
     """The blob words a module-level container literal is, or None if not one.
 
@@ -21938,10 +21963,17 @@ def _static_container_words(value):
     elements — so its keys and values are read with their own accessor and
     interleaved, and asking one for the other is a silent wrong answer.
 
-    Anything else is refused rather than half-done: a nested container or a call
-    as an element is a word this cannot compute, and a container that is not
-    all-words has no initializer to write into the slot. That is said by name
-    from `static_initializer_refusal_reason`."""
+    A word may also be a `StaticNestedBlob`, which is this same function applied
+    one level down: a nested container element IS a word — a pointer to a blob —
+    and what was missing was never a word to put there but the second level of
+    fixups, which `build_data_image` now lays out beside the first. The recursion
+    terminates on the shape of the SOURCE rather than on a depth argument, since
+    a literal cannot contain itself.
+
+    Anything else is refused rather than half-done: an element computed by a call
+    is a word this cannot compute, and a container that is not all-words has no
+    initializer to write into the slot. That is said by name from
+    `static_initializer_refusal_reason`."""
     if isinstance(value, F.DictExpr):
         words = []
         pairs = [p for p in (value.pairs or []) if len(p) >= 2]
@@ -21968,12 +22000,13 @@ def _static_container_words(value):
 def _static_word(node):
     """The word a container ELEMENT (or a unary sign of one) is, else None.
 
-    An `int` for a number, the `str` itself for a string. The two are told
-    apart by their type rather than by a tag because a formal value is one word
-    and a word holds one of them; `int` is never a `str` here, so the test is
-    exact. A bytes literal is deliberately NOT a string element: it is a numeric
-    buffer rather than text, and nothing in this path reads one out of a
-    container as a NUL-terminated string."""
+    An `int` for a number, the `str` itself for a string, a `StaticNestedBlob`
+    for a container literal. The three are told apart by their type rather than
+    by a tag because a formal value is one word and a word holds one of them;
+    `int` is never a `str` here, so the test is exact. A bytes literal is
+    deliberately NOT a string element: it is a numeric buffer rather than text,
+    and nothing in this path reads one out of a container as a NUL-terminated
+    string."""
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0):
         return node.value
     if isinstance(node, F.BoolLiteral):
@@ -21982,9 +22015,12 @@ def _static_word(node):
         return _int_literal_value(node)
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
         n = _static_word(node.operand)
-        if isinstance(n, str):
+        if isinstance(n, (str, StaticNestedBlob)):
             return None
         return None if n is None else (-n if node.op == "-" else n)
+    if _is_container_literal(node):
+        words = _static_container_words(node)
+        return None if words is None else StaticNestedBlob(words)
     return None
 
 
@@ -21997,7 +22033,7 @@ def static_initializer_refusal_reason(slot) -> str:
     `("unknown", …)`, because they have different repairs: a value computed by a
     call needs the module-level sequence that would fill it, a name imported
     from another module needs that module's storage, and a container with an
-    element that is not a word needs a nested layout.
+    element computed by a call needs a value before the program runs.
 
     **A slot the MODULE BODY fills is the one `("unknown", …)` shape that is not
     a refusal**, and it is checked here rather than at the three callers so the
@@ -22016,7 +22052,7 @@ def static_initializer_refusal_reason(slot) -> str:
         return None
     node = getattr(slot.site, "value", None)
     if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
-        return "nested_element"
+        return "computed_element"
     if isinstance(node, F.CallExpr):
         return "computed"
     if isinstance(node, (F.ImportStmt, F.FromImportStmt)):
@@ -22127,14 +22163,15 @@ def global_value_refusal(name: str, fn_name: str, why: str) -> str:
     their program."""
     who = f"{fn_name}: " if fn_name else ""
     detail = {
-        "nested_element": (
-            "a container element is itself a container, or is computed by a "
-            "call, and a container is laid out here as a FLAT run of words — so "
-            "an element that is not itself a word has nothing to put in the "
-            "blob. An int element and a string element both do (the string as a "
-            "pointer the initializer fills in); a nested container would need "
-            "its own blob and a second level of fixups, which this does not "
-            "do yet"),
+        "computed_element": (
+            "one of its elements is computed by a call, and a container is laid "
+            "out here as a run of words — so an element that is not a word has "
+            "nothing to put in the blob. An int element, a string element and a "
+            "NESTED container of those three all do (the string as a pointer the "
+            "initializer fills in, the nested container as a blob of its own with "
+            "one more fixup for the word that points at it); a call's result is "
+            "not known before the program runs, and no arrangement of `__DATA` "
+            "changes that"),
         "computed": (
             "its module-level value is computed by a call, and a call's result "
             "is not known before the program runs. The storage is there and is "
@@ -22217,18 +22254,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
             offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
-            for j, word in enumerate(slot.init[2]):
-                at_word = offset + GLOBAL_SLOT_BYTES * j
-                if isinstance(word, str):
-                    # Eight zero bytes until the initializer runs; the blob is
-                    # STATIC storage, so a word left unwritten is a pointer
-                    # nobody chose, and the lazy init writes it before the
-                    # flag says the globals are ready.
-                    tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
-                    string_cells.append((at_word, word))
-                    continue
-                tail.extend(int(word).to_bytes(GLOBAL_SLOT_BYTES, "little",
-                                               signed=True))
+            _lay_out_blob_words(slot.init[2], tail, fixups, string_cells,
+                                flag_offset + GLOBAL_SLOT_BYTES)
             blob[at:at + GLOBAL_SLOT_BYTES] = (base + offset).to_bytes(
                 GLOBAL_SLOT_BYTES, "little", signed=True)
             fixups.append((at, offset))
@@ -22237,6 +22264,71 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # The flag starts CLEAR: zero means "not yet filled in".
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
+
+
+def _lay_out_blob_words(words, tail, fixups, string_cells, tail_base) -> None:
+    """Append one container blob's `words` to `tail`, and record what it needs.
+
+    The three word kinds, and each one's reason for being here:
+
+      * an `int` — its own eight little-endian bytes, and nothing else. A blob
+        that is all integers needs no fixup at all, which is why the flat case
+        needed nothing from the initializer to be right.
+      * a `str` — eight ZERO bytes plus a `string_cells` entry, because the only
+        `char *` to these bytes on this path is the interned literal in `__TEXT`,
+        which is not in this image and which only the CODE can name
+        (`GlobalDataImage.string_cells`). The zero is overwritten before any read
+        can reach it: `initialization_is_lazy` is what makes the overwrite
+        ordered before the first read, and the flag is set last.
+      * a `StaticNestedBlob` — a reserved word of its own, and one more entry in
+        the same `fixups` list the outer blob already used.
+
+    **A blob's own words have to be CONTIGUOUS, and that is the whole of what is
+    easy to get wrong here.** Element `i` of a blob is the word at `8 * (i + 1)`,
+    so anything laid out between two of this blob's words shifts every later
+    element. Writing an inner blob out as its element word is reached interleaves
+    it, and `[[1, 2], [3, 4]][1][0]` then read the first inner blob's COUNT (2)
+    where element 1's pointer belongs, indexed 0 into it, and answered 2 from a
+    green build on both architectures — a wrong number that is also a plausible
+    one. Hence a WORKLIST rather than a recursion: one pass lays out every word
+    of one blob and queues its nested blobs, and the next pass lays out those.
+    A recursion that re-scans the shared queue is not a shorter way to write the
+    same thing, it is an infinite loop.
+
+    `tail_base` is the offset within the data image at which `tail` starts, so
+    every offset recorded here is in the same coordinates `fixups` and
+    `string_cells` have always used. It is passed rather than recomputed because
+    the queue has no other place to learn it from, and two places computing one
+    number is the shape of bug this file's layout comments are about.
+
+    Every appended chunk is a multiple of `GLOBAL_SLOT_BYTES`, so the alignment
+    loop only ever fires on the first blob; it is kept because `tail` starts empty
+    and its first blob still has to be word-aligned for the loaders to agree.
+    """
+    # `(offset of the word that points at this blob, the blob's words)`, and
+    # `None` for the outermost one, whose pointer word is the SLOT rather than a
+    # word of this run.
+    pending = [(None, words)]
+    at = 0
+    while at < len(pending):
+        at_pointer, blob_words = pending[at]
+        at += 1
+        if at_pointer is not None:
+            fixups.append((at_pointer, tail_base + len(tail)))
+        for word in blob_words:
+            while len(tail) % GLOBAL_SLOT_BYTES:
+                tail.append(0)
+            at_word = tail_base + len(tail)
+            if isinstance(word, StaticNestedBlob):
+                tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
+                pending.append((at_word, word.words))
+                continue
+            if isinstance(word, str):
+                tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
+                string_cells.append((at_word, word))
+                continue
+            tail.extend(int(word).to_bytes(GLOBAL_SLOT_BYTES, "little",
+                                           signed=True))
 
 
 # Published for the same reason `_MODULE_SYMBOLS` is: the consumers are a
