@@ -4628,7 +4628,20 @@ def _collect_one_field_dropped_stores(fn, owner, structs_by_name) -> None:
     `refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver` pins that
     wording. Two refusals for one construct is one too many, and the second one
     would be the worse-worded of the pair.
+
+    **`owner is None` returns here**, and that is a QUESTION not a shape: this is
+    called per function with `method_owners.get(fn.name)`, which is None for every
+    free function, and asking `one_word_sole_field_frame(None, …)` is asking a
+    question about nothing — it answers False, and the answer is thrown away by
+    the line above. Worse than useless, because `struct_is_one_field` is a
+    whole-struct derivation and the free functions are the majority: the asks
+    scale with the function count, which is the regression
+    `test_formal_bracketed_method_field_set.py`'s `module table` group asserts is
+    gone (`bugs/PERF_struct_field_split_asked_once_per_function.md`). The guard
+    is what puts it back.
     """
+    if owner is None:
+        return
     if M.one_word_sole_field_frame(owner, structs_by_name or {}) is not None:
         return
     sites = M.one_field_dropped_receiver_stores(fn, owner)
