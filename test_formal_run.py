@@ -5656,11 +5656,14 @@ BOTH_ARCH_CASES = [
     # return type settles it, with no name involved at all.
     #
     # `__eq__` reads neither operand on purpose.  A field-wise `__eq__` over two
-    # call operands is a different case and it is NOT here: x86-64 reads both
-    # operands' blocks as one (two names bound to returned frames alias the
-    # last block — pre-existing, measured, and filed as
-    # `bugs/FORMAL_x86_64_two_names_bound_to_returned_frames_read_one_block.md`),
-    # so that shape would pin a known-wrong answer as the expectation.
+    # call operands is a different case, and it was NOT here because x86-64 used
+    # to read both operands' blocks as one (two names bound to returned frames
+    # aliased the last block), which would have pinned a known-wrong answer as
+    # the expectation.  That defect is FIXED -- the x86-64 call site dropped the
+    # returned-frame convention's hidden trailing word -- and the field-wise row
+    # is now `a_returned_frame_compared_with_a_returned_frame_call` in
+    # `test_formal_returned_frame.py`, on both backends, because it is the shape
+    # that fails SILENTLY rather than loudly.
     ("both_arch_eq_dispatch_through_two_call_operands",
      "struct A:\n"
      "    var x: Int\n"
