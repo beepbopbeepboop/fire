@@ -181,13 +181,10 @@ CASES = [
     # shape are emitted into one body and a backend that confuses their state
     # reads a counter as a base address.
     #
-    # The comprehension is over a NAME holding a spliced result, not over a
-    # spliced LITERAL: `[v for v in [*a]]` is a separate, pre-existing defect
-    # on BOTH backends (it exits 1 — the capacity guard, since the iterable's
-    # blob is reserved inside the comprehension's own reservation), and
-    # `bugs/FORMAL_a_comprehension_over_a_spliced_literal_exits_1.md` holds it.
-    # Putting it here would make this file red for a reason that has nothing to
-    # do with the lowering below.
+    # The comprehension is over a NAME holding a spliced result;
+    # `a_comprehension_over_a_spliced_literal` below is the same program with
+    # the splice written INSIDE the `for`, which reserves a second blob inside
+    # the comprehension's own.
     ("a_comprehension_over_a_spliced_result",
      "def main():\n"
      "    var a = [3, 4]\n"
@@ -203,6 +200,81 @@ CASES = [
      "    b = [*a, *c]\n"
      "    d = [v * 2 for v in b]\n"
      "    sys.stdout.write(\"n=%d %d %d\" % (len(b), b[0], len(d)))\n"
+     "    return 0\n"),
+
+    # THE SAME COMPREHENSION with the splice written as the ITERABLE, which is
+    # the case this file deliberately left out while it was a separate defect.
+    # `[*a]` builds its blob by appending, so it holds up to
+    # `DYNAMIC_SPLAT_SLOTS` elements while `len([*a].elements)` is the ONE `*`
+    # written in it — and a comprehension's reservation used to be sized by that
+    # count. The iterable is evaluated inside the result's own reservation, so
+    # a three-element source appended into a one-element result and the second
+    # append hit the capacity guard: no output at all, exit 1, on every array
+    # size. Both backends now size it from `model.list_literal_reserved_slots`,
+    # the same rule the append path and `+` use.
+    #
+    # The static operand in the second half is the other side of that rule: it
+    # contributes its own length (2), so the result holds 10 and not 8, and a
+    # backend that counted the static operand as one would answer 9.
+    ("a_comprehension_over_a_spliced_literal",
+     "def main():\n"
+     "    var a = [3, 4, 5]\n"
+     "    var c = [v * 10 for v in [*a]]\n"
+     "    var d = [v for v in [*[100, 200], *a]]\n"
+     "    printf(\"n=%d %d %d n2=%d %d %d\", len(c), c[0], c[2],"
+     " len(d), d[0], d[4])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [3, 4, 5]\n"
+     "    c = [v * 10 for v in [*a]]\n"
+     "    d = [v for v in [*[100, 200], *a]]\n"
+     "    sys.stdout.write(\"n=%d %d %d n2=%d %d %d\" % "
+     "(len(c), c[0], c[2], len(d), d[0], d[4]))\n"
+     "    return 0\n"),
+
+    # THE SAME SHAPE AT THE LIMIT, and a DICT comprehension rather than a list.
+    # Eight elements is `DYNAMIC_SPLAT_SLOTS`, so the reservation has to be
+    # exactly right rather than nearly: seven would stop the eighth append and
+    # nine would reserve a blob the frame does not have. A dict comprehension
+    # stores PAIRS, so its element size is 16 and the same arithmetic runs on a
+    # different number — which is why it is here and not folded into the case
+    # above.
+    ("a_comprehension_at_the_splat_limit_and_a_dict_one",
+     "def main():\n"
+     "    var a = [1, 2, 3, 4, 5, 6, 7, 8]\n"
+     "    var c = [v * 2 for v in [*a]]\n"
+     "    var f = {v: v + 1 for v in [*a]}\n"
+     "    printf(\"n=%d %d n4=%d %d\", len(c), c[7], len(f), f[8])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [1, 2, 3, 4, 5, 6, 7, 8]\n"
+     "    c = [v * 2 for v in [*a]]\n"
+     "    f = {v: v + 1 for v in [*a]}\n"
+     "    sys.stdout.write(\"n=%d %d n4=%d %d\" % "
+     "(len(c), c[7], len(f), f[8]))\n"
+     "    return 0\n"),
+
+    # A SLICE OF a spliced literal: the same under-count, one call site over. A
+    # slice reserves for the elements it will copy and used to count `elements`
+    # for a `[*a]` base, so `[*a][0:2]` of a three-element source reserved one
+    # slot and exited 1 on arm64 while x86-64 — whose slice reservation never
+    # looked at `elements` — answered it. Two backends, one rule now.
+    ("a_slice_of_a_spliced_literal",
+     "def main():\n"
+     "    var a = [3, 4, 5, 6]\n"
+     "    var s = [*a][0:2]\n"
+     "    var t = [*a][1:3]\n"
+     "    printf(\"n=%d %d %d %d\", len(s), s[0], s[1], t[1])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [3, 4, 5, 6]\n"
+     "    s = [*a][0:2]\n"
+     "    t = [*a][1:3]\n"
+     "    sys.stdout.write(\"n=%d %d %d %d\" % "
+     "(len(s), s[0], s[1], t[1]))\n"
      "    return 0\n"),
 
     # AN APPEND INTO THE SPLICED RESULT. The splice's reservation is sized for

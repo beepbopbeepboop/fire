@@ -7709,7 +7709,30 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         Single-generator over a list/tuple literal uses its length; nested
         generators multiply. Unknown iterables fall back to a frame-safe
-        default (runtime append still bounds-checks)."""
+        default (runtime append still bounds-checks).
+
+        **A LITERAL's length is `model.list_literal_reserved_slots`, not
+        `len(elements)`, and the difference is a program that used to exit 1.**
+        A generator's iterable is evaluated inside the comprehension's own
+        reservation, so a `[*a]` literal builds its blob by APPENDING and
+        contributes up to `dynamic_splat_capacity` elements — while
+        `len([*a].elements)` is the one `*` written in it. `[v * 10 for v in
+        [*a]]` therefore reserved a ONE-element result, `[*a]` appended three,
+        and the second append hit the capacity guard: no output, exit 1, on
+        every array size. The rule is the same one
+        `list_literal_reserved_slots` states for the append path ("what it
+        occupies is the cap it reserved, not the number of `*` operands
+        written in it"), asked of the same shared function x86-64's `_compr_cap`
+        reaches through `_blob_est`, so the two backends now size one
+        comprehension's reservation identically.
+
+        Nothing here is a WIDENING of a cap: the number is what the iterable
+        can actually produce, stated in the units the reservation is in. The
+        frame budget is one sequential ledger (`_list_cursor` against
+        `_blob_cap`, every `_reserve_blob` a step along it), so the two
+        reservations are added whether or not this function counts the second
+        one — and a pair that does not fit is `_reserve_blob`'s refusal, not a
+        write past the blob."""
         gens = expr.generators or []
         if not gens:
             return 0
@@ -7726,7 +7749,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         for g in gens:
             it = g.iterable
             if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-                m = len(it.elements)
+                m = M.list_literal_reserved_slots(it)
             elif isinstance(it, F.CallExpr) and isinstance(it.func, F.IdentExpr) \
                     and it.func.name == "range" and it.args:
                 if len(it.args) == 1:
@@ -8419,7 +8442,13 @@ ctor_field_value=self._ctor_field_value_for(name),
         if sreason is not None:
             raise CodegenError(sreason)
         if isinstance(obj, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            src_cap = len(obj.elements)
+            # `list_literal_reserved_slots`, for the reason `_compr_cap` gives:
+            # a `[*a]` literal fills its blob by appending, so what a slice of
+            # it can hold is the cap it reserved and not the one `*` written.
+            # Measured before this, `[*a][0:2]` with a three-element `a` exited
+            # 1 on this backend and answered `2 3 4` on x86-64, whose slice
+            # reservation never counted `elements` at all.
+            src_cap = M.list_literal_reserved_slots(obj)
         elif isinstance(obj, F.Comprehension):
             src_cap = self._compr_cap(obj)
         else:
