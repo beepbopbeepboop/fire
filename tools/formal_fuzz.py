@@ -893,16 +893,19 @@ def blame(program, arch, workdir, memo):
     present = sorted(features_of(program.source()))
     if not present:
         return None
-    kept = present
-    if check_program(_neutralise_all(program, present), arch, workdir,
-                     memo).status != "AGREE":
+    everything = _neutralise_all(program, present)
+    if everything is None or not _has_body(everything):
+        return None            # present by pattern, unreachable by the swap
+    if check_program(everything, arch, workdir, memo).status != "AGREE":
         return None
+    kept = present
     for name in list(kept):
         smaller = [f for f in kept if f != name]
         if not smaller:
             continue
-        if check_program(_neutralise_all(program, smaller), arch, workdir,
-                         memo).status == "AGREE":
+        cand = _neutralise_all(program, smaller)
+        if cand is not None and _has_body(cand) and \
+                check_program(cand, arch, workdir, memo).status == "AGREE":
             kept = smaller
     return tuple(kept)
 

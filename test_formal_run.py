@@ -10629,6 +10629,69 @@ WAVE6_TRUTHY_CASES = [
      "        i = i + 1\n"
      "    printf(\"i=%d\", i)\n"
      "    return 0\n", 0, "i=3"),
+
+    # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
+    #
+    # Found by `tools/formal_fuzz.py` (its seed 206 reduces to the last row
+    # below), and it was silent on both architectures. `infer_expr` returns
+    # `None` for an expression with no declared type — a bare literal, or an
+    # operator whose operands are both typeless — and `None` means "this value
+    # takes the type of its context", not "this value is unsigned". Reading it
+    # as unsigned made `print` choose `%llu`, so `print(0 - 3)` printed
+    # 18446744073709551613. The confusing part, and the reason a hand-written
+    # case did not catch it: `v = 0 - 3; print(v)` printed `-3` all along,
+    # because an ASSIGNMENT resolves the flexible type to the default. The
+    # difference had no name in the source — only whether the expression was
+    # printed directly or bound first.
+    #
+    # `types.cmp_signed` is the one decision both backends and both proof
+    # generators read, so this is a single change with a single blast radius;
+    # these rows are the four places it reached.
+    ("both_arch_print_of_a_flexible_negation_is_signed",
+     "def main(n):\n"
+     "    print(0 - 3)\n"
+     "    return 0\n", 0, "-3"),
+    ("both_arch_print_of_a_flexible_folded_negation_is_signed",
+     "def main(n):\n"
+     "    print(-(1 + 2))\n"
+     "    return 0\n", 0, "-3"),
+    # The comparison half, and the row that matters most: a constant expression
+    # with no declared type was compared with UNSIGNED condition codes, so
+    # `(0 - 5) < 3` was FALSE — `-5` was 0xFFFF…FB. Both directions are here
+    # because a fix that made every constant comparison signed would pass the
+    # first and fail nothing here.
+    ("both_arch_a_constant_comparison_is_signed_in_both_directions",
+     "def main(n):\n"
+     "    printf(\"%d %d\", 1 if (0 - 5) < 3 else 0,"
+     " 1 if (0 - 5) > 3 else 0)\n"
+     "    return 0\n", 0, "1 0"),
+    # The row the fuzzer reduced to: a negation of a REMAINDER. `%` returns a
+    # typeless value (both operands typeless), so `-(…)` was flexible and
+    # printed unsigned: 18446744073709551614 where CPython prints -2.
+    ("both_arch_print_of_a_negated_flexible_remainder_is_signed",
+     "def main(n):\n"
+     "    print(-(2 % 5))\n"
+     "    return 0\n", 0, "-2"),
+    # THE GUARD, and it is the row that decides whether the fix is safe rather
+    # than a blanket "everything is signed": a DECLARED unsigned type still
+    # reads as unsigned, because `common_type` treats a flexible operand as
+    # neutral and the declared `UInt32` is what decides. Without this row a
+    # change that resolved every `None` to signed without asking `common_type`
+    # first would pass all four above.
+    ("both_arch_a_declared_unsigned_operand_is_still_unsigned",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    y: UInt32 = 2\n"
+     "    x = x - 4\n"
+     "    printf(\"%d %d\", 1 if x > y else 0, x)\n"
+     "    return 0\n", 0, "1 3"),
+    # …and the assignment half, which was never wrong and must stay right: it
+    # is what made the defect look like a `print` bug.
+    ("both_arch_a_bound_flexible_negation_was_always_signed",
+     "def main(n):\n"
+     "    v = 0 - 3\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n", 0, "-3"),
 ]
 
 
