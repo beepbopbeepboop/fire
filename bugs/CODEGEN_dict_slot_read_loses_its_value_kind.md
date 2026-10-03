@@ -35,6 +35,38 @@ compiled : {'n': None, 'z': 0, 'b': False, 'f': 1.5}      <- the repr is right
 Exit 0, no diagnostic, and the two halves of one program disagree with each
 other: `print(d)` says `None` and `print(d['n'])` says `0`.
 
+## It reaches a dict PARAMETER too, and the two halves of that are already separated
+
+Measured on the same tree, through the same harness:
+
+```
+def read(d):
+    return d['x']
+
+print(read({'x': 'a'}))     -> 'a'      both agree
+print(read({'x': 1.5}))     -> '1.5'    both agree
+print(read({'x': True}))    -> True     compiled: 1
+print(read({'x': 2})); print(read({'x': 'a'}))   # two DISAGREEING call sites
+                              -> 'a' is CPython's answer, compiled prints a pointer decimal
+```
+
+So the cross-call dict-value contract (`_param_dict_val_types`, added
+2026-10-02) does its documented job: a unanimous `char *` or `double` at the
+call sites types the parameter and the read picks `mojo_dict_get_str` /
+`mojo_dict_get_double`. Two shapes are left, and neither is that contract's
+fault:
+
+* a `bool` value, which is the slot-kind gap this doc is about (the codegen
+  knows the value is a bool at the call site — `is_python_bool_expr` says so —
+  and the store tags it, and then the READ throws the tag away);
+* DISAGREEING call sites, where the documented answer is "unknown" and the
+  consequence is exactly the same read-side gap: the slot's kind is on the
+  slot and nothing asks for it.
+
+Both are fixed by the accessor this doc's "Exact next step" describes. Worth
+saying plainly, because it bounds the work: the store side already tags every
+value kind correctly, and nothing above it consumes the tag.
+
 ## The mechanism
 
 `_lower_subscript`'s `ot == 'MojoDict *'` arm
