@@ -1711,6 +1711,115 @@ def test_mangle_is_injective(wd):
           f"pairs ({len(_targs)} round-trips)", not _rt_bad)
 
 
+def test_in_tu_instantiation(wd):
+    """An imported generic whose methods OVERLOAD is materialized in this
+    translation unit, not declared `extern` beside a CAS object.
+
+    The `.o` route cannot serve this shape, and the reason is measured rather
+    than argued: `_register_generic_struct` reads the object's symbols with
+    `nm`, sees two `__iter__` definitions (`..._0120be` and `..._0120be_2`),
+    knows the caller can only compose the UNSUFFIXED name, and refuses the
+    struct — so the caller's receiver types as a boxed `int64_t` and `next(obj)`
+    has nothing to dispatch on. Every iterator in `std/iter` is in this class
+    (`__iter__` on `var self` and on `ref self`, both erasing to
+    `(Struct *)`), which is what `bugs/CODEGEN_next_on_a_user_defined_iterator_
+    struct_is_unlowered.md` is about.
+
+    Driven through `build_stdlib_dylib.compile_module_to_c` — the SAME entry
+    point `compile_stdlib.py` uses — on two real stdlib test files, because the
+    properties below are only meaningful against the real generic and `gcc
+    -fsyntax-only` (the gate step) structurally cannot see any of them.
+
+    Pinned per property:
+      - the instantiation's methods are DEFINED in the module's own C, under the
+        names this codegen gave them;
+      - no `extern` claims them and no CAS object is contributed, i.e. exactly
+        one route took the instantiation;
+      - both `__iter__` overloads are DEFINED and the bare name is never
+        CALLED — two overloads define neither, so nothing may dispatch on it;
+      - `next(<struct>)` lowered for real, to the instantiation's own
+        `__next__`, not to the always-declared variadic `next`;
+      - the boundary predicate itself, on the real stdlib templates: an
+        iterator whose only overloads are protocol ones is carried, and one
+        whose overloads are NOT is refused (the `.o` route keeps it).
+    """
+    import os as _os
+    import threading as _th
+    from module_loader import STDLIB_PATH
+    import build_stdlib_dylib as bsd
+    import mojo.backend_gimple.elab_intu as EI
+
+    def _compile(rel):
+        path = _os.path.join(STDLIB_PATH, rel)
+        if not _os.path.exists(path):
+            return None
+        src = open(path).read()
+        mod = rel.replace('/', '.').replace('.mojo', '')
+        box = {}
+        _th.stack_size(1 << 30)
+        t = _th.Thread(target=lambda: box.update(
+            c=bsd.compile_module_to_c(src, path, mod)))
+        t.start(); t.join()
+        return box.get('c')
+
+    once_src = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
+    iter_src = open(once_src).read() if _os.path.exists(once_src) else ''
+
+    # The boundary predicate, on the real templates. This is the line the
+    # feature is drawn on, and it is a measurement rather than a whitelist:
+    # in-TU carries a struct whose ONLY duplicated method names are iteration
+    # protocol ones, because the two consumers resolve `__iter__` by the bare
+    # name and correctly keep the receiver's own type when it is absent, while
+    # every other overloaded method is dispatched through its signature hash and
+    # this codegen cannot yet pick an overload at a call site from real C
+    # parameter types. Measured counter-examples, all refused:
+    #   MoveCounter/ArcPointer/BitSet/StaticTuple  dup ['__init__']
+    #   Optional   ['__eq__', '__init__', '__iter__']
+    #   List       ['__getitem__', '__init__', '__iter__', 'extend', 'pop',
+    #               'resize']
+    #   Coord      ['__init__', '__len__', 'product']
+    class _G:
+        _imported_generic_structs = {
+            '_Empty': once_src, '_Once': once_src,
+            '_RepeatIterator': _os.path.join(STDLIB_PATH, 'std', 'itertools',
+                                             'itertools.mojo'),
+            'Optional': _os.path.join(STDLIB_PATH, 'std', 'collections',
+                                      'optional.mojo'),
+            'List': _os.path.join(STDLIB_PATH, 'std', 'collections',
+                                  'list.mojo'),
+        }
+        struct_field_types: dict = {}
+    check("intu#1: an iterator whose only overload is `__iter__` is carried "
+          "(`_Empty`, `_Once`, `_RepeatIterator`)",
+          all(EI._protocol_only_overloads(_G(), n)
+              for n in ('_Empty', '_Once', '_RepeatIterator')))
+    check("intu#2: an overload OUTSIDE the iteration protocol is REFUSED "
+          "(`Optional`, `List`) — the `.o` route keeps it",
+          not any(EI._protocol_only_overloads(_G(), n)
+                  for n in ('Optional', 'List')))
+
+    for rel, base, targs in (('test/iter/test_once.mojo', '_Once', {'T': 'Int64'}),
+                             ('test/iter/test_empty.mojo', '_Empty', {'T': 'Int'}),
+                             ('test/itertools/test_repeat.mojo',
+                              '_RepeatIterator', {'ElementType': 'Int64'})):
+        code = _compile(rel)
+        if code is None:
+            check(f"intu#3: {rel} is reachable in the stdlib tree", False)
+            continue
+        m = mm.mangle(base, targs)
+        check(f"intu#3: `{rel}` DEFINES `{m}` in its own C (in-TU, not extern)",
+              f'typedef struct {m} ' in code
+              and f'extern int64_t {m}___next__' not in code)
+        check(f"intu#4: `{rel}` defines `__next__` and both `__iter__` "
+              f"overloads, and CALLS no bare `__iter__`",
+              f'{m}___next__ (' in code
+              and code.count(f'{m}___iter___') >= 2
+              and f'= {m}___iter__ (' not in code)
+        check(f"intu#5: `{rel}` lowered `next(...)` to the instantiation's own "
+              f"`__next__`, not the variadic `next`",
+              f'= {m}___next__ (' in code and ' _next (' not in code)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1732,6 +1841,7 @@ def main():
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
         test_mangle_is_injective(wd)
+        test_in_tu_instantiation(wd)
         test_review_fixes_monomorphize_overload(wd)
         test_self_qualified_type_param_substitution(wd)
         test_type_param_markers_and_simd_unification(wd)
