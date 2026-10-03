@@ -95,7 +95,29 @@ same ground):
    `formal/lean.py`'s launcher, which now kills this exact file at
    `PROOF_CPU_S` and says so.
 
-**Status: root cause found, fix not attempted here.** The launcher bounds it;
-the generator that emits it is not this change's area (`lean:launcher`), and
-`FORMAL_OPUS_dylib_termination_handoff.md` is another worker's live handoff on
-the same code.
+**Status: root cause found; step 4 below is DONE and steps 1-3 are NOT MINE.**
+Re-read 2026-10-02 on `work/formal8-5`, which is what the rest of this section
+records:
+
+* **Step 4 is landed.** `formal/lean.py::run_lean` is now the ONE launcher for
+  every Lean run, bounded in wall AND cpu (`PROOF_WALL_S = PROOF_CPU_S = 1500.0`,
+  5x the slowest measured proof), so a `bv_decide` on a composed state that does
+  not terminate is a killed process that says so rather than a hang. That was
+  the "wrap it so a regression is a Lean error rather than a process" item, and
+  it is why this document's measurements below are reproducible rather than
+  destructive.
+* **Steps 1-3 are inside another worker's write set, so this document is not
+  worked here.** The fix site is `generate_dylib_proof` -> `_dylib_contract_proof`
+  in `formal/arm64_proof_gen.py`, and that file is the declared write set of
+  `bugs/FORMAL_OPUS_dylib_termination_handoff.md`, whose `OPUS-1` is "the single
+  remaining blocker on `formal-dylib`" on the same obligation — the same
+  `hreg`/`hx30` theorems, the same `bv_decide`. **Do not start this a second
+  time**: the measurements below are the input `OPUS-1` needs, and the fix
+  belongs to whoever holds that file.
+
+**What is therefore still true of the finding, in one line:** the proof this
+backend emits for a per-export contract is a 14-fold nested `Arm64State` decided
+in one `bv_decide`, and `bv_decide`'s internal `simp` has no budget to raise —
+three separate meters were measured failing to fire, so the goal has to get
+smaller (thread the value through the per-step equalities the walk region
+already proves) rather than the budget getting bigger.
