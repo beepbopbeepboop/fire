@@ -21077,9 +21077,8 @@ def _init_free_names(struct_def, value):
     function left in it.  `_init_type_position_names` is the walk that knows
     which names those are.
 
-    The three
-    singletons are excluded because they are the language's own and both
-    backends already materialize them (see `_INIT_SINGLETON_NAMES`).
+    The three singletons are excluded because they are the language's own and
+    both backends already materialize them (see `_INIT_SINGLETON_NAMES`).
     """
     receivers = struct_receivers(struct_def)
     type_names = _init_type_position_names(value) - receivers
