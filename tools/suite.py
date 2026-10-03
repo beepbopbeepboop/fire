@@ -2435,8 +2435,8 @@ test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
 #
 # Registered, not excused, and the deciding number is cost again. 7.0 s, 10.4 s,
 # 10.5 s, 18.7 s and 34.5 s at 0.07-0.13 GB, against the line `UNREGISTERED`
-# exists for ("minutes per job", and the fifteen formal suites it already
-# excuses are minutes each). The nearest registered neighbour for the shape is
+# exists for ("minutes per job", and the formal suites it already excuses are
+# minutes each). The nearest registered neighbour for the shape is
 # `formal-core-hostmods` at 25 s, which is in `proofs` only, and these are the
 # same kind of thing: a host module's ANSWERS, each computed twice — once
 # through `fire.py build --formal` and executed, once through this process's own
@@ -2716,12 +2716,14 @@ BUCKETS = {
                 # which is the same reason stated once more because it is now
                 # the fourth time: four host-module differentials and the
                 # admitted-contract ratchet, 7.0-34.5 s and 0.07-0.13 GB
-                # measured. `proofs` rather than `check` for the shape
-                # `formal-core-hostmods` above gives (an image per group,
-                # executed, against CPython); `formal-shutil` at 34.5 s is the
-                # one that would have argued for `proofs` on cost alone, and
-                # `formal-fcntl` at 7.0 s is cheaper than `formal-sys`, which is
-                # in both — so the line is the subject, not the clock.
+                # measured. `proofs`, for the shape `formal-core-hostmods`
+                # above gives — an image per group, executed, against CPython —
+                # and not for the clock, because the clock does not agree: a
+                # 34.5 s `formal-shutil` argues for `proofs` on cost and a
+                # 7.0 s `formal-fcntl`, cheaper than the `formal-sys` that is
+                # in both buckets, argues for `check`. What a test costs and
+                # what it is ABOUT are different questions, and only the second
+                # one should decide where it lives.
                 'formal-admitted', 'formal-fcntl', 'formal-math',
                 'formal-shutil', 'formal-stat'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
