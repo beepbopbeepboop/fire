@@ -64,6 +64,7 @@ WhileStmt = F.WhileStmt
 ForStmt = F.ForStmt
 Assign = F.AssignStmt
 AugAssign = F.AugAssignStmt
+VarDecl = F.VarDecl
 ExprStmt = F.ExprStmt
 Pass = F.PassStmt
 Break = F.BreakStmt
@@ -96,9 +97,18 @@ def _if_expand(st):
 
 
 def _target_name(assign_like) -> str:
-    """Name of an Assign/AugAssign target (fire target is an expression)."""
-    t = assign_like.target
-    return t.name if isinstance(t, F.IdentExpr) else str(t)
+    """Name of an Assign/AugAssign/VarDecl target.
+
+    The three differ in shape and not in meaning: `Assign` and `AugAssign` hold
+    a `target` EXPRESSION, `VarDecl` holds a bare `name`, and all three are the
+    statement that binds one name in the semantic model's environment. One
+    reader for the three is the whole of why `var a = 1` and `a = 1` produce the
+    same model rather than one of them producing zero — see `_stmts_go`.
+    """
+    t = getattr(assign_like, "target", None)
+    if t is not None:
+        return t.name if isinstance(t, F.IdentExpr) else str(t)
+    return assign_like.name
 
 
 def _range_args_of(for_stmt) -> list:
@@ -698,6 +708,27 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         env[_target_name(st)] = _expr_go(_bin, param, env, vtypes, call_types, scope)
         return _stmts_go(rest, param, env, fname, loop_counter, helpers,
                          vtypes, call_types, scope)
+    if isinstance(st, VarDecl):
+        # `var a = 1` IS `a = 1` for a `UInt64 → UInt64` model: the keyword
+        # spells a fresh local, and a local is exactly what the environment
+        # already is.  This used to fall off the end of the chain, and the end
+        # of the chain was `return "(0 : UInt64)"` — so the declaration was read
+        # as a statement whose value is 0, and because `_stmts_go` is a FOLD the
+        # 0 is what the rest of the function was then evaluated from.  A
+        # `return 2` after `var a = 1` failed as hard as `return a`, which is
+        # what showed it was the declaration and not the read.
+        #
+        # The alternative was a refusal, and it was the worse answer: the model
+        # can state this exactly, so refusing would be refusing a construct it
+        # has.  `bug:FORMAL_lean_model_call_semantics.md`'s territory is already
+        # the "the model must be RIGHT, not merely present" position, and a
+        # `var a = 1` the model reads as 0 is the false model `_no_value_model`
+        # exists to stop.
+        env = dict(env)
+        env[_target_name(st)] = _expr_go(st.value, param, env, vtypes,
+                                         call_types, scope)
+        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
+                         vtypes, call_types, scope)
     if isinstance(st, (ForStmt, Break, Continue)):
         raise NotImplementedError(
             f"model: {type(st).__name__} needs the generic loop contract")
@@ -734,7 +765,12 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
             f"  (if {cond} then {helper} ({updated}) else {rest_term})"
         )
         return f"({helper} {env.get(param, '(0 : UInt64)')})"
-    return "(0 : UInt64)"
+    raise NotImplementedError(
+        f"model: a {type(st).__name__} has no translation in the semantic "
+        f"model (a `UInt64 → UInt64` function over the source's statements); "
+        f"refusing rather than modelling it as 0, which would be a false "
+        f"statement about the source — `_no_value_model`'s reasoning, applied "
+        f"to a statement")
 
 
 # --- Typed (fixed-width int) semantic model -----------------------------------
@@ -891,6 +927,27 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         env[_target_name(st)] = _expr_go_t(_b, param, env, vtypes, call_types, scope)
         return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
                            loop_counter, helpers)
+    if isinstance(st, VarDecl):
+        # The typed twin of `_stmts_go`'s `VarDecl` arm, and the same statement:
+        # a fresh local bound in the environment, with the value carried at the
+        # local's DECLARED type's 64-bit representation (`_t_wrap`), which is
+        # what makes `var a: Int8 = 3` model as the sign-extended 3 the machine
+        # keeps rather than as the bare word.
+        #
+        # The type comes from `vtypes` and not from `st.type_ann`, because
+        # `formal.types.function_var_types` is the one reader of that question —
+        # it walks `VarDecl` itself, reads the annotation through
+        # `parse_type_name` and falls back to inferring from the value — so a
+        # second read of the annotation here is a second answer waiting to
+        # disagree. An absent name is the default type, which is the same
+        # "an absent answer IS the answer" rule the pointer value model states.
+        env = dict(env)
+        name = _target_name(st)
+        env[name] = _t_wrap(
+            _expr_go_t(st.value, param, env, vtypes, call_types, scope),
+            vtypes.get(name) or DEFAULT_INT_TYPE)
+        return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
+                           loop_counter, helpers)
     if isinstance(st, IfStmt):
         _c0, _tb0, _eb0 = _if_expand(st)
         cond = _expr_bool_go_t(_c0, param, env, vtypes, call_types, scope)
@@ -899,7 +956,13 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         e = _stmts_go_t(_eb0 + rest, param, env, fname, vtypes,
                         call_types, loop_counter, helpers)
         return f"(if {cond} then {t} else {e})"
-    raise NotImplementedError("typed model: while loops not yet supported")
+    if isinstance(st, WhileStmt):
+        raise NotImplementedError(
+            "typed model: while loops not yet supported")
+    raise NotImplementedError(
+        f"typed model: a {type(st).__name__} has no translation; refusing "
+        f"rather than modelling it as 0, which would be a false statement "
+        f"about the source")
 
 
 def _collect_conds_t(fn, param: str, env: dict, vtypes: dict,
@@ -1618,6 +1681,19 @@ def _stmts_ast(stmts) -> list:
             parts.append(f'MojoStmt.assign "{_target_name(st)}" '
                          f'(MojoExpr.binop "{_lean_op(st.op.rstrip(chr(61)))}" (MojoExpr.var "{_target_name(st)}") '
                          f'({_expr_ast(st.value)}))')
+        elif isinstance(st, VarDecl):
+            # The same desugar, for the same reason: `MojoStmt` has no
+            # declaration form and it should not grow one. The AST exists to
+            # CROSS-CHECK the model, and a `var a = 1` is a binding the AST's
+            # `MojoStmt.assign` already states exactly — `var a: Int = 1` differs
+            # only in a type the model also has to carry in the value rather than
+            # in the store. What is NOT acceptable is what this used to do,
+            # which was to fall off the end of the `elif` chain and be silently
+            # NOT APPENDED: the generated `ast` then had one statement where the
+            # source had two, and the cross-check compared a model of a
+            # different program against itself and found nothing.
+            parts.append(f'MojoStmt.assign "{_target_name(st)}" '
+                         f'({_expr_ast(st.value)})')
         elif isinstance(st, ExprStmt):
             parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value)})")
         elif isinstance(st, WhileStmt):
@@ -1630,6 +1706,19 @@ def _stmts_ast(stmts) -> list:
             raise NotImplementedError(
                 f"ast model: {type(st).__name__} needs the generic loop "
                 "contract (MojoStmt has no loop-else/break/for forms)")
+        else:
+            # The fallback that was missing, and it is the one that made the
+            # `VarDecl` omission a wrong ANSWER rather than an unfinished one:
+            # this chain had no `else`, so a statement form it did not name was
+            # simply not appended and the generated `ast` was a model of a
+            # SHORTER program. The `ast` is what the value-flow proofs
+            # cross-check the semantic model against, so a statement that
+            # vanishes from it removes the cross-check for that statement and
+            # reports nothing.
+            raise NotImplementedError(
+                f"ast model: a {type(st).__name__} has no MojoStmt form; "
+                f"refusing rather than dropping it, because an `ast` that is "
+                f"missing a statement is a model of a different program")
     return parts
 
 
