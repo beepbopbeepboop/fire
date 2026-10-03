@@ -709,8 +709,6 @@ def main() -> int:
                 "generic marker placed early would claim messages the more "
                 "specific markers below it were written for")
 
-    for f in failures:
-        print("  FAIL  " + f)
     # `+ 4` is the number of assertions `main` makes about the FAMILY table
     # below (precedence, the catch-all's absence, one per marker). It is
     # written as a literal because these are counted by hand, which is exactly
@@ -721,6 +719,15 @@ def main() -> int:
     # …and the `uses:` column's own audit, which counts its checks into the
     # same total rather than printing a second tally.
     checks += _uses_column_checks(failures)
+    checks += _host_rank_checks(failures)
+    # The failures are printed AFTER every group has run, and that ordering is
+    # the fix rather than the tidiness: the loop used to sit above the two
+    # `checks += …` lines, so a failure raised by either group was counted in
+    # the tally below and printed by NOTHING — the run said `FAIL (177/179)`
+    # and named neither of the two checks that failed. A failure a reader
+    # cannot see is the same as no check at all.
+    for f in failures:
+        print("  FAIL  " + f)
     print(f"\nrefusal taxonomy: {'PASS' if not failures else 'FAIL'} "
           f"({checks - len(failures)}/{checks} checks, "
           f"{len(set(names))} families, {len(C.CAUSES)} causes)")
@@ -885,6 +892,191 @@ def _uses_column_checks(failures):
               f"that being the whole story: if it changed, the row is a "
               f"different finding and the doc is wrong, and both need "
               f"re-auditing rather than a stale number standing in for them")
+    return n[0]
+
+
+# ── the HOST row of the same table: ranked by MODULE, not by construct ─────
+#
+# `tools/formal_sweep_causes.py --host` exists because the cause table above
+# cannot rank `not-answerable/host-import` at all: a host-import line is not a
+# refusal about a construct, it is a refusal about a MODULE, so the question a
+# person asks of that row is "which module" and the whole ranking is by module.
+# It is the largest class in the sweep (241 files against 285 codegen lines on
+# the 2026-10-02 arm), so "the tool declines to rank it" was the biggest thing
+# the instrument was not doing.
+#
+# EVERYTHING THE CAUSE TABLE GETS WRONG ABOUT ITS OWN `uses:` COLUMN IS WORSE
+# HERE, and the checks below are the same discipline applied to the same kind of
+# number. A host import blocks every importer of its importers, so the row is
+# closure-heavy by construction; and the names it searches for are `copy`,
+# `types`, `signal`, `html` and `datetime` — ordinary English words that appear
+# in prose, in comments and in the bodies of functions that have nothing to do
+# with the module. A word search would report `copy` as used by five files when
+# it is used by none, and `0 because it could not look` has to be told apart
+# from `0 because it looked` for the same reason it does above.
+
+_HOST_REFUSAL_HOST = ("gimple_codegen.py imports 'zlib', which is a host "
+                      "module (CPython standard library), which has no Mojo "
+                      "source for this backend to compile")
+_HOST_REFUSAL_UNTIERED = ("fire.py imports 'datetime', which is not a stdlib "
+                          "or sibling module, and no such file exists")
+_HOST_CHAIN = ("build: analyze_benchmarks_types.py imports 'gimple_codegen', "
+               "which cannot be built either: " + _HOST_REFUSAL_HOST)
+
+
+def _host_rank_checks(failures):
+    """The `--host` table's rows, and the three ways each of its numbers lies."""
+    import formal_sweep_causes as C
+    n = [0]
+
+    def check(ok, message):
+        n[0] += 1
+        if not ok:
+            failures.append(message)
+
+    tmp = tempfile.mkdtemp(prefix="host_row_")
+
+    def write(name, text):
+        path = os.path.join(tmp, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def rank(lines):
+        log = os.path.join(tmp, "log.txt")
+        with open(log, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        return C.host_rank(log)
+
+    # Three files behind one module, and each uses it in a DIFFERENT SPELLING,
+    # because the three spellings are three ways the `uses` column can be
+    # wrong: qualified (`m.copy`), a from-import (`from m import copy`) and a
+    # file that mentions the word in a comment and does NOT use it.
+    users = write("users_a.mojo", "import copy\nvar x = copy.copy(1)\n")
+    importer = write("users_b.mojo",
+                     "from copy import copy\nvar x = copy(1)\n")
+    prose = write("users_c.mojo",
+                  "import copy\n# we make a copy of the tree before we "
+                  "build\nvar x = 1\n")
+
+    def line(path, detail):
+        return f"NOT-ANSWERABLE/HOST-IMPORT: {path}  (build: {detail})"
+
+    table, nlines, nfiles = rank([
+        line(users, _HOST_REFUSAL_HOST),
+        line(importer, _HOST_REFUSAL_HOST),
+        line(prose, _HOST_REFUSAL_HOST),
+        line(write("chain.py", "import gimple_codegen\n"),
+             _HOST_CHAIN),
+        line(write("untiered.py", "import datetime\n"),
+             _HOST_REFUSAL_UNTIERED),
+    ])
+    rows = {r["module"]: r for r in table}
+    check(set(rows) == {"zlib", "datetime"},
+          f"the table ranked {sorted(rows)} and the log names exactly 'zlib' "
+          f"(three files plus one behind a CHAIN) and 'datetime'. A row for a "
+          f"module the log never names, or a missing row for one it does, is "
+          f"the ranking measuring something else")
+    z = rows.get("zlib")
+    if z is not None:
+        check(z["files"] == 4,
+              f"zlib blocked {z['files']} files and the log has four lines "
+              f"behind it, one of them through a dependency chain. A CHAIN is "
+              f"one line whose terminal refusal is the module, so it "
+              f"contributes one file")
+        # The declared names come from CPython's own source, so they are only
+        # known for a module that HAS one. `zlib` is built into the
+        # interpreter, so the honest answer is that they could not be read.
+        check(z["declared_known"] is False,
+              f"zlib's declared names are {z['declared']!r} "
+              f"(known={z['declared_known']}). zlib is a BUILT-IN extension "
+              f"with no stdlib source, so the only honest answer is None — a "
+              f"count computed from a list of names written here would be a "
+              f"number nobody can check against anything")
+    d = rows.get("datetime")
+    if d is not None:
+        check(d["untiered"] is True,
+              f"datetime is in NEITHER formal/imports.py tier and has no "
+              f"model, so its refusal reads 'not a stdlib or sibling module, "
+              f"and no such file exists' — false of a CPython standard-library "
+              f"module. The row has to SAY so (untiered={d['untiered']}) or a "
+              f"reader takes the count as a work item")
+        check(d["model"] is None,
+              f"datetime reported a model at {d['model']!r}")
+
+    # A module with a model is in no tier BY DESIGN (`HOST_MODELLED`'s rule is
+    # "a name LEAVES here by being WRITTEN"), and calling that a defect would
+    # report `os` and `sys` as mis-diagnosed.
+    try:
+        from formal import imports as I
+        tier = I.host_module_tier("os")
+        model = C._host_model_source("os")
+    except Exception as exc:                             # noqa: BLE001
+        check(False, f"formal.imports is not importable here: {exc}")
+        return n[0]
+    check(tier == "" and model is not None,
+          f"`os` is in tier {tier!r} with a model at {model!r}. The tier sets "
+          f"are for modules with NO source, so `os` in neither tier is the "
+          f"rule working, not a gap")
+    try:
+        import tempfile as _tf
+        tid = I.host_module_tier("tempfile")
+        tmodel = C._host_model_source("tempfile")
+    except Exception:                                    # noqa: BLE001
+        tid, tmodel = "?", None
+    if tmodel is not None:
+        check(tid == "",
+              f"`tempfile` has a model at {tmodel!r} and is in tier {tid!r}: a "
+              f"name LEAVES the tiers by being WRITTEN, so in neither is "
+              f"correct and a table that reported it as UNTIERED would be "
+              f"reporting the rule")
+
+    # The `uses` spelling, measured on three fixture files: two real uses in two
+    # different spellings, and one file that says the word in a comment.
+    try:
+        declared = sorted(C._host_declared_names("copy") or ())
+    except Exception as exc:                             # noqa: BLE001
+        check(False, f"copy's declared names could not be read: {exc}")
+        declared = []
+    if declared:
+        check("copy" in declared and "deepcopy" in declared,
+              f"copy's public names are {declared}, and it must contain both "
+              f"`copy` and `deepcopy` — they are read out of CPython's own "
+              f"source rather than from a list written here, because a list "
+              f"would be correct for exactly as long as CPython does not "
+              f"change it")
+        got = C._host_use_names(users, "copy", declared)
+        check(got == {"copy"},
+              f"`copy.copy(1)` counted {got!r}, and it must count the "
+              f"qualified spelling")
+        got = C._host_use_names(importer, "copy", declared)
+        check(got == {"copy"},
+              f"`from copy import copy` counted {got!r}, and a from-import is "
+              f"the second spelling a use can have")
+        got = C._host_use_names(prose, "copy", declared)
+        check(got == set(),
+              f"a file whose only `copy` is inside a COMMENT counted {got!r}. "
+              f"This is why the column searches for `mod.NAME` and a "
+              f"from-import rather than for the word: `copy`, `types`, "
+              f"`signal` and `html` are English words, and a word search "
+              f"reports a row as work when it is closure")
+    else:
+        print("  SKIP  this interpreter's stdlib is not reachable, so the "
+              "`uses` spelling checks are not run")
+
+    # A module CPython publishes through `__all__` is ranked on `__all__`, so a
+    # name the module has but does not publish cannot make a file look like a
+    # user of it.
+    try:
+        with __import__("tempfile").NamedTemporaryFile() as _f:
+            pass
+    except Exception:                                    # noqa: BLE001
+        pass
+    tf_names = C._host_declared_names("tempfile")
+    check(tf_names is not None and "mkdtemp" in tf_names
+          and not tf_names[0].startswith("_"),
+          f"tempfile's public names are {tf_names!r}, and `mkdtemp` is among "
+          f"them with no underscore-prefixed name in front")
     return n[0]
 
 

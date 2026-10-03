@@ -1058,7 +1058,16 @@ def host_rank(log_path):
             "declared": declared or (),
             "tier": _host_tier(mod),
             "model": _host_model_source(mod),
-            "unclassified": not _host_tier(mod),
+            # IN NO TIER is only a DEFECT when there is no model: a module that
+            # has been WRITTEN is in no tier by design (`HOST_MODELLED`'s rule
+            # is "a name LEAVES here by being WRITTEN", `HOST_ADMITTED`'s is "a
+            # name is here iff it has a source"), and its import resolves before
+            # either set is consulted. `os`, `sys` and `re` are in no tier for
+            # that reason and are not mis-diagnosed; `datetime` and `builtins`
+            # are in no tier because nobody classified them, and every file
+            # that wants one is told its import "is not a stdlib or sibling
+            # module, and no such file exists", which is false.
+            "untiered": not _host_tier(mod) and not _host_model_source(mod),
         })
     out.sort(key=lambda r: (-r["files"], r["module"]))
     return out, lines, len(files_all)
@@ -1069,9 +1078,16 @@ def print_host_table(table, minimum, lines=0, files_all=0):
     for r in table:
         if r["files"] < minimum:
             continue
-        tier = r["tier"] or "UNTIERED"
+        # A module with a source is WRITTEN, which is a third state and not a
+        # missing one: it is in neither tier because `HOST_MODELLED`'s rule is
+        # "a name LEAVES here by being WRITTEN" and `HOST_ADMITTED`'s is "a name
+        # is here iff it has a source", and its import resolves before either
+        # set is consulted. Printing it as UNTIERED would report `os` and `sys`
+        # as mis-diagnosed.
+        tier = r["tier"] or ("written" if r["model"] else "UNTIERED")
         model = r["model"] or "—"
-        print(f"{r['files']:>5} {r['uses']:>5}  {tier:<11} {model:<26} "
+        uses = r["uses"] if r["declared_known"] else "?"
+        print(f"{r['files']:>5} {str(uses):>5}  {tier:<11} {model:<26} "
               f"{r['module']}")
         if not r["declared_known"]:
             print(f"        uses:        NOT MEASURED: {r['module']} has no "
@@ -1088,7 +1104,7 @@ def print_host_table(table, minimum, lines=0, files_all=0):
         if r["names"]:
             print(f"        names:       "
                   + ", ".join(f"{k} x{v}" for k, v in r["names"]))
-        if r["unclassified"]:
+        if r["untiered"]:
             print(f"        UNTIERED:    {r['module']} is in NEITHER "
                   f"formal/imports.py tier, so its refusal reads "
                   f"\"not a stdlib or sibling module, and no such file "
