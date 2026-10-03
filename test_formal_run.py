@@ -8904,6 +8904,70 @@ WAVE6_TRUTHY_CASES = [
      "def main(n):\n"
      "    printf(\"%d %d\", f(\"\"), f(\"x\"))\n"
      "    return 0\n", 0, "0 1"),
+    # The same parameter with NO annotation, which is the ordinary Mojo
+    # spelling and used to print `1 1`: `ValueKinds` seeds an unannotated
+    # parameter as a WORD (a word is an integer here, which is right for every
+    # kind except a string), and the identity test then says the empty string is
+    # non-empty. The fix is the call site's argument kind propagated into the
+    # callee — `model.string_parameters_by_call_site`, UNANIMOUS over every call
+    # site of the name in the image.
+    ("truthy_unannotated_parameter_from_a_string_literal",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", f(\"\"), f(\"x\"))\n"
+     "    return 0\n", 0, "0 1"),
+    # The two directions the rule must NOT take, and both are the conservative
+    # one. The evidence is UNANIMOUS over every call site of the NAME in the
+    # image, so one disagreeing site removes the claim for the whole function —
+    # `f` below is called with a string, an integer and a string-returning
+    # callee, and all three answers are the identity test's. That is the rule
+    # rather than an accident: a parameter that is a `char *` at one call site
+    # and a word at another is a word, and answering per site would need a
+    # per-site compilation this path does not do.
+    ("truthy_unannotated_parameter_needs_every_site_to_agree",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def g(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def mk() -> String:\n"
+     "    return \"abc\"\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", f(\"\"), f(5), f(mk()), g(mk()))\n"
+     "    return 0\n", 0, "1 1 1 1"),
+    # The same evidence from a call rather than a literal, in isolation, so the
+    # row above's unanimity is the only thing that distinguishes the two: `g` is
+    # called with a string-returning callee at both its sites, so its parameter
+    # IS a string — and a `def` that DECLARES the return type is the declaration
+    # this path reads.
+    ("truthy_unannotated_parameter_from_a_string_returning_callee",
+     "def g(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def mk() -> String:\n"
+     "    return \"abc\"\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", g(mk()), g(mk()))\n"
+     "    return 0\n", 0, "1 1"),
+    # …and a KEYWORD binds the parameter it names rather than a position, so it
+    # is evidence too. The mixed case (positionals AND keywords at one call site)
+    # is deliberately not read: the positionals bind parameters this rule does
+    # not enumerate, and guessing them would be a claim about a signature.
+    ("truthy_unannotated_parameter_bound_by_keyword",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", f(s=\"\"), f(s=\"x\"))\n"
+     "    return 0\n", 0, "0 1"),
 
     # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`
     # was TRUE before this — a fabricated truthiness in the same family, found

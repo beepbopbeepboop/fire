@@ -11279,6 +11279,18 @@ class ValueKinds:
         `declared_type_kind` for the whole of it; the hook is consulted only
         where the answer would otherwise be a guess, and a `None` from it leaves
         every existing decision exactly where it was.
+      * `param_kind(name)` — what an UNANNOTATED parameter holds, agreed over
+        every call site of this function in the image
+        (`string_parameters_by_call_site`, which is the whole of the rule and
+        the reader for it).  The sixth hook, and the one that closes the last
+        place the "a word is an integer" default is a wrong answer rather than
+        a safe one: `def f(s): if s:` called `f("")` answered 1 where CPython
+        answers 0, because the empty string is a non-NULL pointer and
+        `truthy_lowering`'s third row — the word itself — is right for every kind
+        except this one.  It is asked only where the parameter has no
+        annotation, so an annotated parameter is never overridden, and `None`
+        (the default) leaves every existing decision exactly where it was, which
+        is why it is a hook and not a derivation.
       * `ctor_field_value(struct_name, call, field)` — the expression a
         CONSTRUCTION puts in a field's slot, or None.  The fifth hook, and it
         exists because `declared_kind` answers about the struct while a
@@ -11295,10 +11307,12 @@ class ValueKinds:
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
-                 slot_key=None, declared_kind=None, ctor_field_value=None):
+                 slot_key=None, declared_kind=None, ctor_field_value=None,
+                 param_kind=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
+        self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
@@ -11340,9 +11354,21 @@ class ValueKinds:
         for pname, pann in _param_list(fn):
             self._param_names.add(pname)
             # An unannotated parameter is a word arriving from the caller, and
-            # a word is an integer here (see the note on kinds above).
-            self.locals[pname] = (
-                STR_KIND if pann in self._string_names else INT_KIND)
+            # a word is an integer here (see the note on kinds above).  The
+            # exception is a word the CALL SITES agree is a `char *`, which the
+            # `param_kind` hook carries: without it `def f(s): if s:` called
+            # `f("")` printed 1 where CPython prints 0, on both architectures,
+            # because the empty string is a non-null pointer and the identity
+            # test is the right answer for every kind except this one.  An
+            # ANNOTATED parameter is not overridden — the annotation is a
+            # statement about the value and the call sites are evidence about
+            # the calls — which is why the hook is asked only in the `else`.
+            if pann in self._string_names:
+                self.locals[pname] = STR_KIND
+            elif pann:
+                self.locals[pname] = INT_KIND
+            else:
+                self.locals[pname] = self._param_kind(pname) or INT_KIND
         # Two passes: a name whose value is another name bound later resolves
         # on the second. A third would not help — the chain that needs it is
         # one the first pass already walked.
@@ -11973,6 +11999,154 @@ def subscript_callee_name(call) -> str | None:
 
 def _param_list(fn):
     return list(getattr(fn, "params", None) or [])
+
+
+# ── The kind of a PARAMETER, from the call sites rather than from an annotation
+#
+# `ValueKinds` seeds an unannotated parameter as a word, and a word is an integer
+# here (see the note on kinds). That default is right for every kind on this path
+# EXCEPT one, and the exception is a wrong ANSWER rather than a refusal:
+#
+#     def f(s):
+#         if s:            # `truthy_lowering`'s third row: the word itself
+#         return 1         # the empty string is a NON-NULL pointer, so this
+#     return 0             # is TRUE
+#     f("")               # -> 1, where CPython says 0
+#
+# Measured on both architectures, and the same program with `s: String`
+# annotated answers 0. The annotation is the only thing that closes it today,
+# which is the gap `ValueKinds`' own docstring records for `print` ("A `char *`
+# reaching print through an unannotated parameter is the remaining gap, and it is
+# the gap the annotation exists to close").
+#
+# So: the call site's argument kind, propagated into the callee. This is the part
+# of that which is decidable from the argument's OWN SHAPE — a string literal, or
+# a call to a function whose declared return type is a string — and the rule is
+# UNANIMITY over every call site of the name in the image, because a parameter
+# that is a string at one call site and something else at another is a word and
+# nothing else is an answer. A call site whose argument shape says nothing claims
+# nothing, which is the permissive direction the rest of this file's kind tables
+# take wherever the alternative is a refusal on the majority of a corpus.
+#
+# What it deliberately does NOT read, and why each is a decision rather than an
+# omission:
+#
+#   * the CALLER's `ValueKinds`, so `f(some_local)` where `some_local` holds a
+#     string is still unclassified. Reading it would mean building a ValueKinds
+#     per caller from inside the callee's, which is the recursion `func_kind`
+#     already guards with a depth limit — and a kind that depends on which
+#     function the emitter reached first is a worse answer than no answer, since
+#     it decides whether `printf("%s", s)` formats a pointer or bytes;
+#   * a SPECIALIZED call, `f[a](x)`, whose brackets shift every position by the
+#     comptime parameters. Skipping the whole call is the conservative reading
+#     and costs only the generics;
+#   * a call with KEYWORDS, whose positions are not the positional order. A call
+#     that is keywords only is read by name; a call that mixes them binds the
+#     positionals to parameters this function does not enumerate, so it claims
+#     nothing at all;
+#   * `*args` / `**kwargs` at the call site, for the same reason.
+
+
+def _string_argument_shape(arg, rets=None):
+    """`STR_KIND` when the argument's OWN SHAPE is a string, else None."""
+    if isinstance(arg, F.StringLiteral) and not getattr(arg, "is_bytes", 0):
+        return STR_KIND
+    if isinstance(arg, F.CallExpr) and isinstance(arg.func, F.IdentExpr):
+        ann = (rets or {}).get(arg.func.name)
+        if ann and annotation_base_name(ann) in STRING_TYPE_CTORS:
+            return STR_KIND
+    return None
+
+
+def string_parameters_by_call_site(functions, rets=None) -> dict:
+    """`{function: {parameter: STR_KIND}}` — agreed over EVERY call site.
+
+    Unanimity is the whole of the answer, and it is the same rule every
+    flow-INsensitive table in this file uses (`struct_frame_slot_candidates`,
+    `callees_returning_containers`): a name whose definitions or whose call sites
+    disagree answers no single question, and the disagreement is resolved by
+    claiming nothing rather than by picking the first or the majority. A name
+    with NO call site is absent from the table entirely — nothing observed it, so
+    nothing is claimed, which is what keeps a module of never-called helpers
+    paying nothing.
+    """
+    by_name: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    claims: dict = {}
+    for caller in functions or ():
+        for call in iter_nodes(getattr(caller, "body", None) or []):
+            if not isinstance(call, F.CallExpr):
+                continue
+            if isinstance(call.func, F.SubscriptExpr):
+                continue          # a specialization: the brackets shift
+            callee = call_callee_name(call.func)
+            if callee is None or callee not in by_name:
+                continue
+            args = list(getattr(call, "args", None) or [])
+            kwargs = list(getattr(call, "kwargs", None) or [])
+            if any(isinstance(a, F.UnaryOp) and a.op in ("*", "**")
+                   for a in args):
+                continue
+            names = _positional_parameter_names(by_name[callee])
+            if kwargs and args:
+                continue          # mixed: the positionals bind the rest
+            pairs = list(zip(names, args)) if not kwargs else \
+                [(k[0], k[1]) for k in kwargs if k[0] in names]
+            for pname, arg in pairs:
+                claims.setdefault((callee, pname), set()).add(
+                    _string_argument_shape(arg, rets))
+    return {callee: {pname: STR_KIND for (c, pname), seen in claims.items()
+                     if c == callee and seen == {STR_KIND}}
+            for callee in {c for c, _p in claims}}
+
+
+def _positional_parameter_names(defs) -> list:
+    """The callee's parameter names, RECEIVER first, in binding order.
+
+    A receiver (`out self`, `self`, `this`) is parameter 0 of the signature and
+    is never bound by a call site's argument list, so every index here is one
+    before the position it names. `struct_receivers` is the recogniser, and it
+    is the same one the arity tables use, so the two cannot disagree about which
+    parameter the first argument lands on.
+    """
+    for fn in defs or ():
+        params = [p[0] if isinstance(p, (tuple, list)) else p
+                  for p in _param_list(fn)]
+        receivers = struct_receivers(fn)
+        if not params:
+            return []
+        return [p for p in params[1:] if p not in receivers] \
+            if params[0] in receivers else params
+    return []
+
+
+class ParameterKindReader:
+    """`(function name) -> (parameter name) -> kind or None`, computed at most once.
+
+    A class rather than a function returning a closure so the table is built
+    LAZILY: `ValueKinds` asks about a parameter only when the parameter has no
+    annotation, so a module that annotates everything — and a corpus that mostly
+    does — never walks its own bodies for this. One object per image, and both
+    backends build it from the same function, which is what keeps the two
+    architectures from answering this question differently.
+    """
+    def __init__(self, functions, rets=None):
+        self._functions = functions
+        self._rets = rets
+        self._table = None
+
+    def table(self) -> dict:
+        if self._table is None:
+            self._table = string_parameters_by_call_site(self._functions,
+                                                        self._rets)
+        return self._table
+
+    def for_function(self, fn_name):
+        """The `param_kind` hook `ValueKinds` asks, bound to one function."""
+        return lambda pname: self.table().get(fn_name, {}).get(pname)
 
 
 # ── What a linked module's export table says about a call ──────────────────

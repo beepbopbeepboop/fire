@@ -1010,6 +1010,13 @@ dylib_exports: list = None, globals_base: int = None,
         self._return_types = M.CalleeReturnTable(
             self._functions.values(), int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES)
+        # What an UNANNOTATED parameter holds, agreed over every call site — the
+        # hook `ValueKinds` asks, and the one reader for both backends
+        # (`ParameterKindReader`), so the two architectures cannot disagree about
+        # whether a word arriving from a caller is a `char *`. Lazy: a module
+        # that annotates its parameters never walks its own bodies for it.
+        self._param_kinds = M.ParameterKindReader(
+            self._functions.values(), self._return_types)
 
         self._call_types = {
             g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
@@ -2956,7 +2963,8 @@ dylib_exports: list = None, globals_base: int = None,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
-            ctor_field_value=self._ctor_field_value_for(name))
+            ctor_field_value=self._ctor_field_value_for(name),
+            param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
 
