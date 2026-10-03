@@ -5368,16 +5368,28 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
         # silently did nothing for every function but one, which is exactly
         # what it did until this line was spelled differently.
         fn_one_word = (one_word or {}).get(_fn_key(fn)) or {}
-        if not hs and not fn_one_word:
+        # **The call-operand path needs no HOLDER NAME at all**, so this guard has
+        # to ask `_call_frame_structs` before it concludes that this function has
+        # no comparison it could dispatch.  `mk(1) == mk(2)` in a function that
+        # binds NOTHING has no frame-valued name to ask about — there is no
+        # `var t = mk(1)` anywhere in it — and the callee's own declared return
+        # type is the entire answer, so the old guard dropped exactly the case
+        # the call-operand work was written for and left the operator an address
+        # compare.  That is a SILENT WRONG ANSWER rather than a refusal: a class
+        # whose `__eq__` returns True for everything printed `0`, because two
+        # calls are two objects and an address compare answers "are these the
+        # same one".  Measured on both architectures; see
+        # `bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.
+        fn_call_frame = _fn_comparison_call_frame(fn, functions_by_name,
+                                                  structs_by_name)
+        if not hs and not fn_one_word and not fn_call_frame:
             continue
         pending = []
         for node in M.iter_nodes(getattr(fn, "body", None)):
             if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
                 call = _eq_dispatch_call(
                     node, node.op, node.left, node.right, by_name, hs,
-                    fn_one_word,
-                    _call_frame_structs(node, functions_by_name,
-                                        structs_by_name))
+                    fn_one_word, fn_call_frame)
                 if call is not None:
                     pending.append((id(node), call))
                 continue
@@ -5385,8 +5397,7 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
                 continue
             if any(op not in ("==", "!=") for op in node.ops):
                 continue
-            call_frame = _call_frame_structs(node, functions_by_name,
-                                             structs_by_name)
+            call_frame = fn_call_frame
             links, lowered = [], True
             for i, op in enumerate(node.ops):
                 left, right = node.operands[i], node.operands[i + 1]
@@ -5416,6 +5427,34 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
             _replace_nodes(fn.body, {node_id: call})
         moved += len(pending)
     return moved
+
+
+def _fn_comparison_call_frame(fn, functions_by_name: dict,
+                              structs_by_name: dict) -> dict:
+    """`{id(call): struct}` for every COMPARISON operand in `fn` that settles.
+
+    Per FUNCTION, and that is not a tidiness choice: the guard in
+    `_rewrite_eq_on_frame_receivers` needs to know whether this function has a
+    dispatchable call operand AT ALL before it walks its comparisons, and the
+    walk needs the same answers.  Asking `_call_frame_structs` per node and then
+    asking the guard whether any node had one would be the same walk twice over
+    two functions that could disagree about it.
+
+    A superset is safe and deliberate: `_eq_dispatch_call` reads only the ids of
+    its OWN operands, `id()` is unique within one body, and the operator set
+    mirrors the loop's (an `==`/`!=` pair, or a chain all of whose links are)
+    because a chain with a `<` in it is not dispatched at all.
+    """
+    out = {}
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
+            out.update(_call_frame_structs(node, functions_by_name,
+                                           structs_by_name))
+        elif isinstance(node, F.CompareChain) and len(node.ops) >= 2 \
+                and all(op in ("==", "!=") for op in node.ops):
+            out.update(_call_frame_structs(node, functions_by_name,
+                                           structs_by_name))
+    return out
 
 
 def _call_frame_structs(node, functions_by_name: dict, structs_by_name: dict):
@@ -6039,19 +6078,27 @@ def _check_own_eq_dispatch(classes: dict, functions: list,
         # and answered 0, where the source's own `__eq__` says True.
         hs = getattr(fn, "_frame_holders", None) or set()
         for node in M.iter_nodes(getattr(fn, "body", None)):
-            for op, left, right in _comparison_operands(node):
+            pairs = _comparison_operands(node)
+            if not pairs:
+                continue
+            # ONE answer per node, read by both the filter below and the
+            # decision it feeds: `mk(1) == 5` is a bypass whether the `mk(1)`
+            # side is recognised or not, and two recognisers of it is the pair
+            # that agrees until the day one of them is edited.
+            call_frame = _call_frame_structs(node, functions_by_name,
+                                             structs_by_name)
+            for op, left, right in pairs:
                 name = _own_eq_class_touching(own, own_names, cands, one_word,
-                                              left, right)
+                                              left, right, call_frame)
                 if name is None:
                     continue
                 if _eq_dispatch_call(
                         node, op, left, right, cands, hs, one_word,
-                        _call_frame_structs(node, functions_by_name,
-                                            structs_by_name)) is not None:
+                        call_frame) is not None:
                     continue
                 spelled = f"{M.spelled(left)} {op} {M.spelled(right)}"
                 raise CodegenError(DC.own_eq_refusal(
-                    name, spelled, _own_eq_gap(left, right)))
+                    name, spelled, _own_eq_gap(left, right, call_frame)))
 
 
 def _comparison_operands(node):
@@ -6071,7 +6118,7 @@ def _comparison_operands(node):
 
 
 def _own_eq_class_touching(own: dict, own_names: set, cands: dict,
-                           one_word: dict, left, right):
+                           one_word: dict, left, right, call_frame=None):
     """The own-`__eq__` dataclass either operand of this pair can be a value of.
 
     `None` when neither operand is a value of one — which is most comparisons
@@ -6080,11 +6127,41 @@ def _own_eq_class_touching(own: dict, own_names: set, cands: dict,
     can share a name across a module boundary and those tables hold the StructDef
     itself; a CONSTRUCTION is recognised by its callee's NAME, which is the only
     thing a call site has.
+
+    **A CALL TO A FUNCTION is the fourth shape, and it was missing until
+    2026-10-03** — which made this filter blind in exactly the case the audit
+    exists for. Three shapes were here: a construction, a name in the frame
+    candidate table, a name in the one-word table. A call to a function of this
+    image is none of them, and `mk` is not a class name, so in
+
+        @dataclass
+        class Always:
+            x: int
+            y: int
+            def __eq__(self, other): return True
+
+        def mk(v: int) -> Always: ...
+        printf("%d", 1 if mk(1) == 5 else 0)          # CPython prints 1
+
+    the audit saw no own-`__eq__` class on either side, said nothing, and the
+    image printed 0 — the same silent wrong answer the audit was written to stop,
+    reached through the spelling the rewrite itself had just learned to dispatch.
+    The answer it now asks for is `call_frame` (`_call_frame_structs`, i.e.
+    `model.call_result_frame_struct` on the callee's DECLARED return type), which
+    is the SAME interprocedural answer `_eq_dispatch_call` decides from: the
+    filter and the decision therefore agree by construction rather than by two
+    recognisers agreeing.
     """
+    call_frame = call_frame or {}
     for side in (left, right):
-        if isinstance(side, F.CallExpr) and isinstance(side.func, F.IdentExpr) \
-                and side.func.name in own_names:
-            return side.func.name
+        if isinstance(side, F.CallExpr):
+            if isinstance(side.func, F.IdentExpr) \
+                    and side.func.name in own_names:
+                return side.func.name
+            st = call_frame.get(id(side))
+            if st is not None and id(st) in own:
+                return own[id(st)]
+            continue
         name = getattr(side, "name", None)
         if not isinstance(side, F.IdentExpr) or not name:
             continue
@@ -6095,7 +6172,7 @@ def _own_eq_class_touching(own: dict, own_names: set, cands: dict,
     return None
 
 
-def _own_eq_gap(left, right) -> str:
+def _own_eq_gap(left, right, call_frame=None) -> str:
     """Which of the two dispatch requirements this pair misses, in one clause.
 
     Three clauses, and which one is named is the whole of the usefulness: a
@@ -6103,9 +6180,20 @@ def _own_eq_gap(left, right) -> str:
     "the literal `5` is not a plain name" knows which line of the source to
     change. `a == 5`, `Always(3, 4) == p` and `p == q` across two classes are
     three different gaps and three different repairs.
+
+    **A call the dispatch CAN resolve is not a gap, and saying it was one would
+    send the reader to the wrong line** (2026-10-03). `mk(...) == 5` was
+    refused with "mk(...) is a construction" once this filter learned to see the
+    call at all, which is false in every clause: `mk` is a function, its declared
+    return type names the class, and the operator's own dispatch lowers that
+    operand quite happily — it is the `5` the dispatch cannot lower. So an
+    operand `call_result_frame_struct` settles is left out, and what is named is
+    the operand that made the pair unlowerable.
     """
+    call_frame = call_frame or {}
     sides = [(M.spelled(side), side) for side in (left, right)
-             if not isinstance(side, F.IdentExpr)]
+             if not isinstance(side, F.IdentExpr)
+             and not (isinstance(side, F.CallExpr) and id(side) in call_frame)]
     if not sides:
         return ("the two names are not both values of the SAME class as far as "
                 "this image can tell, and Python resolves `==` through "
@@ -6360,7 +6448,7 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
         _park_frame_return(fn, M.frame_return_mixed_refusal(
             fn.name, _frame_return_spelling(frames[0][1]), None, True))
         return _RETURN_UNSOUND, None, None
-    # Every path returns a frame, so the only question left is WHICH frame, and
+# Every path returns a frame, so the only question left is WHICH frame, and
     # the answer has to be one struct: the copy is `n` slots wide and the
     # caller reserved a block sized for the struct this returns.
     shapes = []

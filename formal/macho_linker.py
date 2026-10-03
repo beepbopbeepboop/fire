@@ -541,23 +541,40 @@ def _bind_info(external_syms: list[str], dylib_of: dict = None,
         # what made dyld (and `codesign`, which runs the same validator) reject
         # the image outright.
         out += bytes((BIND_SYMBOL_FLAGS_FUNCTION,))
-        # The stream carries the bare C name, and dyld prepends the Mach-O
-        # underscore when it forms the symbol it looks up — `macho_export_name`
-        # is that relationship. Both spellings were measured against a real
-        # dyld: "printf" binds and calls through, while "_printf" gets "Symbol
-        # not found: __printf" — the underscore in the message is dyld's own, on
-        # top of ours.
+# The stream carries the name the SOURCE spelled; dyld prepends the
+        # Mach-O underscore when it forms the symbol it looks up —
+        # `macho_export_name` is that relationship, and it is one function so a
+        # second spelling of the rule cannot appear here. Both spellings were
+        # measured against a real dyld: "printf" binds and calls through, while
+        # "_printf" gets "Symbol not found: __printf" — the underscore in the
+        # message is dyld's own, on top of ours. The codegen hands us the name
+        # as the source spelled it, so it is written out unchanged.
         #
-        # The name is written AS GIVEN. It used to have one leading underscore
-        # removed, which is right for the two spellings of a C function and
-        # wrong for every other one: an ABI export symbol may legitimately begin
-        # with `_` (`abi_module_name` on a module called `__pkg` gives
-        # `__pkg__helper_twice_9f63a2`), and eating that character made the
-        # bind ask dyld for a name the library never exported. Which of the two
-        # conventions a name is spelled in is not decidable from the name, so
-        # the answer cannot be a guess made here: the caller hands over C names,
-        # and `macho_export_name`/`_c_export_name` are the two ends of the one
-        # rule they are all read against.
+        # **It used to drop one leading underscore here**, on the reading that
+        # the name arriving is the assembler's spelling — and that is false of
+        # every name this link line produces, which are source spellings
+        # (measured: a program calling a hostmod function binds
+        # `['os_path_join_2dbb98', 'printf']`, and neither begins with `_`). Two
+        # kinds of name were silently renamed by that one character, measured
+        # from both ends and neither visible in the other's argument:
+        #
+        #   * a C FUNCTION that legitimately begins with one. An external call
+        #     to `_exit` bound `exit`, which flushes stdio, where `_exit` does
+        #     not (C99 7.20.4.4 / POSIX — `_exit` terminates without flushing
+        #     open streams). Measured on both architectures, before this line
+        #     changed: the image printed what `exit` flushes and one that calls
+        #     the real `_exit` prints nothing.
+        #   * an ABI EXPORT SYMBOL that legitimately begins with one.
+        #     `abi_module_name` flattens dots to `_` and nothing else, so a
+        #     module called `__pkg` exports `__pkg__helper_twice_9f63a2`; the
+        #     trie held that name while the consumer's bind stream asked dyld
+        #     for `pkg__helper_twice_9f63a2`, and the library died at load for
+        #     a function that was right there.
+        #
+        # Which convention a name is spelled in is not decidable from the name,
+        # so the answer cannot be a guess made here: the caller hands over
+        # source spellings, and `macho_export_name`/`_c_export_name` are the two
+        # ends of the one rule they are all read against.
         out += sym.encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))

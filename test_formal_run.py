@@ -5286,6 +5286,47 @@ ASSIGNED_TYPE_CASES = [
 # a member tuple target, x86-64 refused it by name, and nothing in the suite
 # noticed for the whole life of the divergence.
 BOTH_ARCH_CASES = [
+    # …and the eq-dispatch case that is in this group for the reason the group's
+    # docstring gives, read for this construct: the two backends' HOLDER
+    # analysis is one shared table (`formal/build.py`'s `_frame_receivers`), so
+    # the dispatch decision is shared, and a construct where they once disagreed
+    # is checked on both rather than on the host's.  What is being pinned is
+    # that `mk(1) == mk(2)` REACHES the method at all: `__eq__` returns True for
+    # everything, so the two answers are 1 (the method ran) and 0 (the operator
+    # stayed a compare of two ADDRESSES, which is CPython's INHERITED identity
+    # `__eq__` and answers "are these the same object" — and two calls are two
+    # objects).  Nothing refused the wrong answer: it was a silent 0 on both
+    # machines, which is
+    # `bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.
+    #
+    # The function that dispatches it binds NOTHING, which is the whole shape:
+    # the rewrite used to skip any function with no frame-valued name in it, and
+    # after the call-operand work a frame operand can be a CALL whose declared
+    # return type settles it, with no name involved at all.
+    #
+    # `__eq__` reads neither operand on purpose.  A field-wise `__eq__` over two
+    # call operands is a different case and it is NOT here: x86-64 reads both
+    # operands' blocks as one (two names bound to returned frames alias the
+    # last block — pre-existing, measured, and filed as
+    # `bugs/FORMAL_x86_64_two_names_bound_to_returned_frames_read_one_block.md`),
+    # so that shape would pin a known-wrong answer as the expectation.
+    ("both_arch_eq_dispatch_through_two_call_operands",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        return True\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"eq=%d\", 1 if mk(1) == mk(2) else 0)\n"
+     "    return 0\n", 0, "eq=1"),
     # A positive case whose expected answer is under 256, because the formal
     # entry point's return value becomes the process exit status and a status is
     # eight bits wide: 347 & 255 == 91, and a constant written as 347 would be a

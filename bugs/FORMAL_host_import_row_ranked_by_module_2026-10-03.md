@@ -1,5 +1,12 @@
 # FORMAL_host_import_row_ranked_by_module_2026-10-03: the 241-file host-import row, ranked, and what each module is actually worth
 
+**Status 2026-10-03 (`work/formal13-4`): §5 item 3 LANDED** —
+`formal/hostmods/posixpath.mojo` re-exports `os.path` under CPython's own name for
+it, `test_formal_os.py` measures the re-export with the same corpus and the same
+CPython oracle, and the `posixpath` row has left `HOST_MODELLED`. The other items
+are where they were, and §5 has what each one costs. The work map itself is kept
+rather than deleted: it is a queue with four items, not a bug with one.
+
 **Claim** `sweep12:hostmods-rank` on `work/formal12-hostmods-rank`. Every number
 below is read off `bugs/sweeps/sweep-arm-7.txt` (the 2026-10-02 arm64 sweep,
 complete over all 668 files) with
@@ -69,7 +76,7 @@ written — which is the ordinary way this row gets smaller.
 | 1 | ? | modelled | `itertools` | — | one file; generators are a documented limit |
 | 1 | ? | unreachable | `asyncio`, `socket`, `traceback` | — | one file each, and all three are named in the tier rule itself |
 | 1 | 1 | modelled | `html` | `escape` x1 | **REACHABLE AND SMALL**: `escape`/`unescape` are five character replacements over `os/_syscalls.mojo`'s `str_replace_all`, the `shlex` shape. One file (`tools/md2html.py`) is the whole prize |
-| 1 | 1 | modelled | `posixpath` | eight names | **THE MODEL IS WRITTEN**: `formal/hostmods/os/path/__init__.mojo` IS CPython's `posixpath`. What is missing is the SPELLING — a `formal/hostmods/posixpath.mojo` re-exporting `os.path`, as `os/__init__.mojo` already does for its own five names. One file (`test_formal_os.py`), and that file spells `os.path` everywhere else |
+| 1 | 1 | **WRITTEN 2026-10-03** | `posixpath` | eight names | **DONE — §5 item 3.** `formal/hostmods/posixpath.mojo` re-exports every public name of `os/path/__init__.mojo`, which IS CPython's `posixpath`, and `test_formal_os.py`'s new `posixpath` group runs the whole path corpus through that spelling against the same CPython oracle. It left `HOST_MODELLED`, which is what a written module does |
 | 2 | 2 | modelled | `datetime` | `datetime` x2 | a clock this tree reads plus arithmetic; the ANSWER is the shaped record `bugs/FORMAL_time_struct_shaped_answers.md` |
 | 2 | 0 | modelled | `resource` | — | `getrusage(2)` is libSystem and `struct rusage` is a fixed layout; 2 files, and both spell `getrusage(RUSAGE_CHILDREN)` |
 | 3 | ? | unreachable | `builtins` | — | all three spell `set(dir(builtins))`: the interpreter enumerating itself |
@@ -165,10 +172,38 @@ OBJECT is more than one 64-bit word) and `mkstemp` (2 — a two-word tuple).
    lines of comparison against CPython over a corpus with `&<>"'` in it. Listed
    here rather than done because a work map that quietly does its own item 2 is
    not a work map.
-3. **`formal/hostmods/posixpath.mojo`, 1 file.** A re-export of `os.path`, which
-   `os/__init__.mojo` already does for five of its names. One file that spells
-   `os.path` everywhere else is thin evidence, which is the honest reason it is
-   item 3 and not item 1.
+3. ~~**`formal/hostmods/posixpath.mojo`, 1 file.**~~ **LANDED 2026-10-03
+   (`work/formal13-4`).** A re-export of `os.path`, which `os/__init__.mojo`
+   already does for five of its names, plus the test that makes it a measurement
+   rather than a transcription: `test_formal_os.py`'s `posixpath` group runs the
+   `strings` group's whole corpus — 34 path shapes, seven one-argument functions,
+   three two-argument ones over a cross product and a pair list, and the one
+   documented deviation — through `from posixpath import …` and compares every
+   answer against this process's own `posixpath`. Same corpus, same oracle, other
+   spelling: which is the only assertion a re-export can be wrong about, since a
+   name bound to the wrong function still builds.
+
+   What it cost, so the next writer is not surprised: **three tables had to learn
+   about it**, and one of them is a new shape the account had never had.
+   `test_formal_link_accounting.py`'s `HOST_SET_ADDED_TIERS` loses its
+   `posixpath` row (a name with source does not belong in a claim tier);
+   `test_formal_imports.py`'s placement table loses it too, which is the test
+   that used to assert a `posixpath` import is refused as a host module; and
+   `test_formal_admitted.py`'s `ADMITTED_COUNTS` gains `"posixpath": 0`, because
+   a module with a model that is not in that table is a claim of trust nobody
+   counted. The new one is `HOST_SET_ADDED_THEN_WRITTEN`, because `posixpath` is
+   the first name that was ADDED to a tier after the split and then WRITTEN: it
+   is in neither `PRE_SPLIT_HOST_MODULES` nor any tier, so the "what left the host
+   set" account could not see it move — and a name that cannot be seen to move is a
+   name whose tier entry can rot, which is how `tempfile` sat in
+   `HOST_UNREACHABLE` with an `mkdir` behind it for a day.
+
+   **And the honest measure of the win, which is what §2 already said:** one file
+   moves, and `test_formal_os.py`'s `posixpath.` names are its CPython ORACLE
+   rather than a program to compile, so the sweep row it unblocks is a test
+   harness asking this backend to compile itself. The capability was never
+   missing; the NAME was, and a caller that spells `import posixpath` now reaches
+   the model.
 4. **`glob`, 18 files** — `formal10-3`'s, not this row's.
 5. **The six pure-closure modules** — nothing to do. Whoever picks them up should
    read the module that really stops those files out of §4's table, which is the

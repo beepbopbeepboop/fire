@@ -5,7 +5,93 @@ per-path entry statement they needed is in `formal/arm64_proof_gen.py`;
 `formal/examples/either.mojo` and `both.mojo` build AND typecheck). A chain
 NESTED inside a chain is not, and this says why and what closes it.
 
-## What was measured
+## Status 2026-10-03 (`work/formal13-4`): NOT FIXED, and BOTH of the 2026-10-03
+## Status section's hypotheses are now MEASURED FALSE. The discriminator is
+## identified, and it is not which side the sub-chain is on.
+
+The next step this document asks for is step 1 of its last section — "compare the
+`try rw [...]` list in `hcond_2` against the one in `either.mojo`'s passing
+`hcond`: if the nested one is missing a slot write, that is the whole failure and
+it is a one-line set difference". **It is not a set difference, and the flow is
+not short a block.** Read off the two emitted files (both generated without
+running Lean, by calling `formal.build.compile_formal(..., prove=True,
+check=False)`, which writes `<stem>_proof.lean` and stops):
+
+| | `either.mojo`'s passing `hcond_2` (line 4222) | `nested_or`'s failing `hcond_2` (line 5272) |
+|---|---|---|
+| statement | `arm64_reg 0 s_2 = 0 ↔ ¬(A ≠ 0)` | `arm64_reg 0 s_2 ≠ 0 ↔ ((A ≠ 0) ∨ (B ≠ 0))` |
+| `rw` | `[hsid_2]` | `[hsid_2]` |
+| `simp only` block lemmas | `either_b2_*` | `f_b2_*` |
+| predecessors in `simp only` | `hsid_2, hsid_0`, `either_b0_*` | `hsid_2, hsid_0`, `f_b0_*` — **the same two, and the whole prior prefix** |
+| `mem_read_two_writes_adj_uint` address | `…sp -16 -16 -32 -16` | **the same expression, character for character** |
+| flag lemma | `arm64_flag_gt_s` | `arm64_flag_gt_s` |
+| closer | `by_cases h : … <;> simp [h, …] <;> bv_decide` | the same |
+
+So `ctx["flow_blocks"]` reaches every predecessor (both `hsid`s and the whole
+`b0` prefix are unfolded in the failing proof, which is what the comment on
+`either`'s `_cset_bi != bi` branch asks for), and `_hcond_mem_rws`' set is not
+short of anything. **The only difference is the shape of the right-hand side: a
+nested chain's VALUE (an `Or`) where a single-operand chain has one term.**
+
+**And it is the `Or`, not the nesting direction.** The control is one program:
+
+```python
+def f(n):
+    if n > 10 or (n == 0 or n < -4):      # the sub-chain on the RIGHT
+        return 1
+    else:
+        return 0
+```
+
+built through `formal/lean.py::check_proof_cached` (one Lean run, 3.1 GB peak,
+under the bounds): **FAILED, with the same signature** — one `unsolved goals` on
+`eval_eq_mojo` at 25:54 and two `counterexample`s (5478:264 and 5651:266) against
+four for the left-nested spelling. Its failing statement is the mirror image:
+
+    have hcond_3 : (arm64_reg 0 s_3 = 0) ↔ ¬((B ≠ 0) ∨ (C ≠ 0)) := by
+
+with the register holding **B**'s compare result (`arm64_flag_eq` in the `simp`,
+and B's slot at `… -16 -16 -32 -16 + 16`). So this document's §"Why the two-path
+statement does not reach it" is right that the statement is the problem and wrong
+about the trigger being a LEFT operand that is itself a chain.
+
+**Why the `Or` fails, in one sentence:** `simp [h]` does not split a
+disjunction, so on the path where operand K's cset wrote the register the goal is
+`(if K then 1 else 0) ≠ 0 ↔ ((A ≠ 0) ∨ (B ≠ 0))` with the *other* operand's
+disjunct unconstrained — and `bv_decide` is right to report a counterexample for an
+equivalence that does not hold on that path. Lean says so itself, and its witness
+is the tell: `Consider the following assignment: n = 0, x19✝¹ = 0, … ,
+arm64_reg 0 {…} = 0` — every register free, because the register was left OPAQUE
+by the rewrite chain, exactly as the 2026-10-03 section recorded for `either.mojo`.
+
+### The next step, now that the discriminator is known
+
+**Decompose the statement per operand and recombine, and the decomposition is
+already half-written in this file's §"The next step":** for a merge block whose
+register was written by operand K's cset on this path, state
+`arm64_reg r <merge> = 0 ↔ ¬(K ≠ 0)` — which is what the passing two-operand case
+already emits — and build the CHAIN's value fact from K with `Or.inl`/`Or.inr`,
+so `hscL` is `Or.inl (hcond_M.mp hc_M)` rather than `hcond_M.mp hc_M`. The
+travelling fact then stays a fact about the sub-chain's value, which is what both
+spellings already need, and the depth stops mattering because nothing in the
+statement is a chain any more.
+
+The part that is NOT free, and is the reason this is not a one-line change: the
+outer merge's travelling fact is `¬((A ≠ 0) ∨ (B ≠ 0))` on the fall-through path,
+and `¬(K ≠ 0)` alone does not give it — the other operands' falsity is a fact
+about the PATH, not about the register, so it has to come from the sub-chain's own
+per-operand statements (`hcond_2`/`hcond_3` on the same path) rather than from the
+merge. That is a second mechanism and it is the reason the doc's §"The next step"
+proposed the value-fact route in the first place.
+
+**Not attempted, and why (unchanged from 2026-10-03, with one measurement added):**
+this is Lean-level debugging of a 500 KB generated proof at ~80 s per iteration,
+the failure mode of a half-finished change here is a generator that emits
+statements which LOOK right and are not proved, and both `either` and `both` are
+the canary that must keep proving. What is new here costs nothing to keep: the two
+hypotheses above are settled, so the next session does not re-measure them.
+
+## What was measured (original, 2026-10-02)
 
 ```
 $ cat .tmp/nc/nested_or.mojo

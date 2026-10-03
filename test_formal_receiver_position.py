@@ -690,6 +690,37 @@ REFUSALS = [
      "    r.b = 4\n"
      "    return m.make().take[7](r)\n",
      "`m.make().take(…)` cannot be lowered"),
+
+    # …and the OTHER call-result receiver, which is a different spelling with a
+    # different reason to be refused and was reaching the LINK AUDIT instead.
+    # `Box()` is a CONSTRUCTION of a struct this module declares, so its type is
+    # not in question at all — the declaration settles it — and what the lift
+    # still cannot do is name a RECEIVER, because the call carries none.  Before
+    # this was refused at the construct, `Box().get()` built and died at the link
+    # with "the image would bind 1 symbol(s) that nothing provides: get", which
+    # is the sentence `formal/model.py`'s `subscript_receiver_method_refusal`
+    # calls worse than a wrong number because it is silent: a symbol spelled after
+    # the METHOD can collide with a real one and the image then computes a
+    # plausible wrong answer with nothing reporting a failure.
+    #
+    # `Box` is a ONE-FIELD struct here on purpose, because that is the shape the
+    # refusal's ADVICE runs into: it tells the reader to bind the receiver to a
+    # local of a declared struct type, and whether that advice answers this
+    # program is a separate question with its own answer
+    # (`bugs/FORMAL_method_call_on_a_construction_is_not_rewritten.md`). A
+    # two-field receiver builds and computes, so this row is not the only place
+    # the two shapes could have been confused.
+    ("refuse_a_method_call_on_a_construction_receiver",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n\n"
+     "struct Box:\n"
+     "    var inner: Opt\n\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v\n\n"
+     "def main() -> int:\n"
+     "    return Box().get()\n",
+     "`Box().get(…)` cannot be lowered"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

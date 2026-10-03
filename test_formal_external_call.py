@@ -397,6 +397,32 @@ CASES = [
      "    external_call[\"free\", NoneType](buf)\n"
      "    return 0 if w == 4 else 1\n",
      0, "n=42|"),
+
+    # A C IDENTIFIER THAT BEGINS WITH AN UNDERSCORE, and the only observable
+    # difference between `_exit` and `exit` is the one this row is about: POSIX
+    # `_exit` terminates WITHOUT flushing open streams, and `exit` flushes them.
+    # Both link lines here used to bind `exit` for a program that spelled `_exit`
+    # -- `formal/macho_linker.py::_bind_info` dropped one leading underscore
+    # before writing the name dyld looks up, on the reading that the name
+    # arriving is the assembler's spelling, which is false of every name this
+    # pipeline produces (measured: a program calling `os.path.join` binds
+    # `['os_path_join_2dbb98', 'printf']`, neither of them underscore-prefixed).
+    # So the image flushed, and the row below is the failure: a program that
+    # asked to terminate without flushing printed what it had buffered.
+    #
+    # `printf` before the call, and NOTHING after it, because `main` cannot
+    # return: the whole answer is whether the buffered text survives. stdout is
+    # a pipe here (the harness captures it), so it is block-buffered and the
+    # flush is the only thing that can put the text out.
+    ("c_identifier_beginning_with_an_underscore_binds_that_function",
+     "def bail(status: Int) -> Int:\n"
+     "    _ = external_call[\"_exit\", Int32](Int32(status))\n"
+     "    return 0\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"flushed\")\n"
+     "    return bail(3)\n",
+     3, ""),
 ]
 
 
@@ -543,9 +569,20 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
         return False, (f"exit status {run.returncode}, expected {want_exit}"
                        + (f"; stdout: {run.stdout.strip()[:120]}"
                           if run.stdout.strip() else ""))
-    if want_stdout is not None and want_stdout not in run.stdout:
-        return False, (f"stdout {run.stdout.strip()[:160]!r} does not contain "
-                       f"{want_stdout!r}")
+    if want_stdout is not None:
+        # `""` means "printed NOTHING", and it cannot be left to the `in` test
+        # below: every string contains the empty string, so the one row that
+        # needs the assertion most (an `_exit` that must not flush) would pass
+        # on a flushed image. Spelled as its own case rather than as a
+        # convention on the value, because `""` is otherwise the most natural
+        # way to write "I do not care" and this file has rows that mean that.
+        if want_stdout == "":
+            if run.stdout != "":
+                return False, (f"stdout {run.stdout.strip()[:160]!r}, expected "
+                               f"nothing at all")
+        elif want_stdout not in run.stdout:
+            return False, (f"stdout {run.stdout.strip()[:160]!r} does not "
+                           f"contain {want_stdout!r}")
     if verbose:
         print(f"      stdout={run.stdout.strip()[:60]!r} exit={run.returncode}")
     return True, ""

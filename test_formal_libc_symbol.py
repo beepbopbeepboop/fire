@@ -336,16 +336,37 @@ def group_table(verbose):
     # whether the C library provides a symbol, and that dlsym runs in this
     # python3 — so on an arm64 host `readdir$INODE64` cannot be found and
     # asking about it would refuse a correct x86-64 image.
+    # A C IDENTIFIER MAY BEGIN WITH AN UNDERSCORE, and this table used to
+    # assert the opposite in three of its seven rows -- `_readdir` → `readdir`,
+    # `_printf` → `printf`, `_os_syscalls_readdir_9f63a2` →
+    # `os_syscalls_readdir_9f63a2`.  All three were the same wrong inverse:
+    # `libc_source_name` is asked "what did the SOURCE spell?", and the only
+    # thing this pipeline re-spells is the `$INODE64` suffix
+    # (`target_libc_symbol`), so a leading underscore is part of the name and
+    # stripping it asks `dlsym` about a DIFFERENT function.  libSystem's
+    # `_NSGetExecutablePath` is the one that bites: the audit reported a symbol
+    # libSystem exports as one nothing provides.
+    #
+    # The suffix cases are unchanged and are the only ones the strip is for.
+    # `_readdir$INODE64` still arrives with an underscore because a Mach-O
+    # spelling reaches here together with the suffix `target_libc_symbol` added.
     for spelled, want in (("readdir$INODE64", "readdir"),
                           ("_readdir$INODE64", "readdir"),
-                          ("_readdir", "readdir"),
+                          ("_readdir", "_readdir"),
                           ("readdir", "readdir"),
                           ("printf", "printf"),
-                          ("_printf", "printf"),
+                          ("_printf", "_printf"),
+                          ("_NSGetExecutablePath", "_NSGetExecutablePath"),
                           ("_os_syscalls_readdir_9f63a2",
-                           "os_syscalls_readdir_9f63a2")):
+                           "_os_syscalls_readdir_9f63a2")):
         check(libc_source_name(spelled) == want,
               f"libc_source_name({spelled!r}) is {want!r}")
+    # …and a name with NO underscore in it is unaffected, which is the other half
+    # of "the strip exists for the suffix": every ordinary libc name this tree
+    # emits goes through unchanged.
+    check(all(libc_source_name(n) == n for n in
+              ("printf", "malloc", "getcwd", "arc4random_buf", "CC_SHA256")),
+          "an ordinary C name is its own source name")
     return fails
 
 

@@ -80,8 +80,16 @@ KNOWN_GAP = {
                   "        return 1\n"
                   "    else:\n"
                   "        return 0\n",
-                  "bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md: a "
-                  "chain nested in a chain reaches the outer merge four ways"),
+                  "bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md: "
+                  "the merge statement's right-hand side is a nested chain's "
+                  "VALUE, and `simp [h]` cannot split the `Or`, so the operand "
+                  "that did not write the register is unconstrained and "
+                  "`bv_decide` reports a counterexample. Measured 2026-10-03 on "
+                  "the emitted proofs: the `rw`/`simp only`/`mem_read_two_"
+                  "writes_adj_uint` lines are character-for-character the "
+                  "passing two-operand case's, and the RIGHT-nested spelling "
+                  "(`n > 10 or (n == 0 or n < -4)`) fails the same way, so it "
+                  "is the `Or` and not which side the sub-chain is on"),
 }
 
 EXAMPLE_STEMS = ("either", "both")
