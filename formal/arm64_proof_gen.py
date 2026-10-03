@@ -1663,7 +1663,15 @@ def _go_simp_lemmas(fn) -> list:
 
 
 def _expr_ast(e) -> str:
-    """Translate a Mojo expression to a ProofLib MojoExpr term."""
+    """Translate a Mojo expression to a ProofLib MojoExpr term.
+
+    The `Call` arm keeps exactly one argument, and that is NOT a choice:
+    `MojoExpr.call` in `lib/ProofLib.lean` carries a single `MojoExpr`, and
+    `callFunc` is `String → UInt64 → UInt64`, so there is no way to hand it two.
+    `_ast_bridge_gaps` is what keeps this honest — every caller of the bridge
+    asks it first, so `e.args[0]` below is reached only for a call that can be
+    stated.
+    """
     if isinstance(e, Var):
         return f'MojoExpr.var "{e.name}"'
     if isinstance(e, Int):
@@ -1681,6 +1689,145 @@ def _expr_ast(e) -> str:
     if isinstance(e, Call):
         return f'(MojoExpr.call "{_call_name(e)}" ({_expr_ast(e.args[0])}))'
     return "MojoExpr.int 0"
+
+
+def _ast_bridge_gaps(fn, resolvable) -> list:
+    """The calls in `fn` that the AST bridge cannot state, most useful first.
+
+    `eval_eq_mojo` is the statement that the AST evaluation and the `_go` model
+    are the same function, and it is stated against `callFunc` — the stub
+    `_call_func_lean` emits, which answers for the proved function and for the
+    admitted contract spellings and **0 for every other name**. A call the stub
+    cannot resolve therefore evaluates to 0 while the model evaluates it to the
+    callee's value, and the theorem is not merely unproved: it is FALSE, and
+    `simp` reports `⊢ False` (measured on
+    `def main(x): return _scalar_max2(x, x)` under
+    `build --formal --backend=x86_64`: `prog_proof.lean:44:59: error:
+    unsolved goals`). Emitting that is worse than refusing: the file builds, the
+    hole census reads as the generator's designed trust boundary, and the
+    disagreement is only visible as a red build of a program whose source is
+    three lines long.
+
+    Two independent gaps, both consequences of `MojoExpr.call` carrying one
+    argument and `callFunc` being unary:
+
+      * an UNRESOLVABLE callee — anything but the proved function and an
+        admitted contract. `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
+        §"step 2" is the work: `callFunc` has to become the model's own
+        function table over the program's `_go` definitions, which `_gen_go`
+        already emits.
+      * an ARITY other than one. Zero arguments reached `e.args[0]` and raised
+        `IndexError: list index out of range` out of the generator (measured on
+        `cas.reset_stats()`, `build --formal` on arm64); two or more silently
+        dropped every argument after the first, which is the same false theorem
+        by a different route.
+
+    A recursive self-call is neither: its name is the proved function's and it
+    passes one argument, which is why all six of the examples whose AST carries
+    a `MojoExpr.call` (`count`, `fact`, `fib`, `pow2`, `sqsum`, `sum`) are
+    unaffected by this.
+    """
+    gaps = []
+
+    def visit_expr(e, used):
+        # Explicit node types, not `hasattr(node, "args")`: a duck-type test
+        # over this AST silently stops at the first node that has no `args`,
+        # which is every literal, so `return zero() + x` — a call nested under
+        # a binary operator — read as a body with no call at all.
+        if isinstance(e, Call):
+            name = _call_name(e)
+            if len(e.args) != 1:
+                gaps.append(
+                    f"`{name or '?'}` with {len(e.args)} arguments — "
+                    f"`MojoExpr.call` carries ONE `MojoExpr` and `callFunc` is "
+                    f"`String → UInt64 → UInt64`, so a call of any other arity "
+                    f"has no faithful AST: with none, `_expr_ast` reached "
+                    f"`e.args[0]` and raised `IndexError`; with two or more, "
+                    f"every argument after the first was dropped silently")
+            elif used and name not in resolvable:
+                gaps.append(
+                    f"`{name}` — `callFunc` answers 0 for a name it does not "
+                    f"know, and the model answers the callee's value, so "
+                    f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
+                    f"value>`")
+            for a in e.args:
+                visit_expr(a, used)
+        elif isinstance(e, Unary):
+            visit_expr(e.operand, used)
+        elif isinstance(e, BinOp):
+            visit_expr(e.left, used)
+            visit_expr(e.right, used)
+
+    def visit_stmt(st):
+        # The same set of statement forms `_stmts_ast` renders, so what is
+        # walked and what is translated cannot drift: a form the translator
+        # refuses (`WhileStmt`, `ForStmt`, `Break`, `Continue`) is refused
+        # before this, and a form it translates (`Return`, `IfStmt`, `Assign`,
+        # `AugAssign`, `VarDecl`, `ExprStmt`) is walked here.
+        #
+        # `used` is "this value can reach the function's result", and it is
+        # what separates a gap from a harmless call. `MojoStmt.exprstmt _ =>
+        # evalBodyEnv callFunc rest env` (`lib/ProofLib.lean:875`) DISCARDS an
+        # expression statement's value, so `print(42)` evaluates to nothing at
+        # all and `callFunc`'s 0 for `print` is never in a position to disagree
+        # with the model — which is why `fn main(): print(42)` proved with no
+        # holes and must keep doing so. Everything else is `used`: a `return`,
+        # an assignment's right-hand side (a later `return` may name the
+        # variable, and tracking that would be a second analysis for no extra
+        # safety), and every condition.
+        if isinstance(st, (Return, Assign, AugAssign, VarDecl)):
+            visit_expr(st.value, True)
+        elif isinstance(st, ExprStmt):
+            visit_expr(st.value, False)
+        elif isinstance(st, IfStmt):
+            _c, then_body, else_body = _if_expand(st)
+            visit_expr(_c, True)
+            for s in then_body or []:
+                visit_stmt(s)
+            for s in else_body or []:
+                visit_stmt(s)
+        elif isinstance(st, (WhileStmt, ForStmt)):
+            # `_stmts_ast` raises on both, so a body that reaches here with one
+            # of them is already refused; walking the condition keeps the check
+            # honest if that ever changes.
+            visit_expr(getattr(st, "condition", None)
+                       or getattr(st, "iterable", None), True)
+            for s in getattr(st, "body", None) or []:
+                visit_stmt(s)
+
+    for st in getattr(fn, "body", None) or []:
+        visit_stmt(st)
+    return gaps
+
+
+def _ast_gap_message(gaps: list) -> str:
+    """The refusal both generators raise for a call the bridge cannot state.
+
+    ONE message for both architectures, because the limit is one limit:
+    `MojoExpr.call` carries a single argument and `callFunc` is
+    `String → UInt64 → UInt64`, and `eval_eq_mojo` is stated against that
+    `callFunc` on both sides. Two copies would be free to drift into two
+    different accounts of the same gap, and the x86-64 copy is the one that
+    decides whether a false theorem is emitted or the bridge is dropped.
+
+    At most three gaps are named: the message goes into the generated file as a
+    one-line note (via `x86_64_proof_gen._first_sentence`) as well as onto the
+    build's stderr, and a program whose every method call is a gap would
+    otherwise print its own source back at itself.
+    """
+    shown = gaps[:3]
+    more = (f" (and {len(gaps) - 3} more of the same shape)"
+            if len(gaps) > 3 else "")
+    plural = "s" if len(gaps) > 1 else ""
+    return (f"eval_eq_mojo: the AST bridge cannot state this function's "
+            f"call{plural} — " + "; ".join(shown) + more
+            + ". Refusing rather than emitting `eval_eq_mojo` as a statement "
+              "about a different program: `callFunc` and `MojoExpr.call` are "
+              "the two ends of one limit (a unary handler and a one-argument "
+              "node), and until both are widened the bridge can only speak "
+              "about a function that calls nothing but itself. "
+              "`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` has "
+              "the measurement and the two routes.")
 
 
 def _stmts_ast(stmts) -> list:
@@ -5081,20 +5228,59 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             # the contract's result unify without record-expansion mismatches.
             arg_term = f"arm64_reg 0 {s_cur}"
             call_state = f"({{ {s_cur} with x30 := UInt64.ofNat {ret}, pc := {entry} }})"
-            _b0_names = run_info[0][4] or []
-            _cw_names = def_names or []
-            _sdefs = ", ".join(list(_b0_names) + list(_cw_names)
-                               + ["arm64_reg", "arm64_set_reg", "Arm64State.init"])
+            # The UNFOLD SET for the two goals below (`hargeq_{bi}` and
+            # `hspd`) is the PATH-SCOPED one — every `hsid_i` and every block
+            # state function the walk has emitted so far, in reverse order —
+            # and not "block 0's defs plus this block's defs".  That shortcut
+            # was correct while the call sat one block deep, because `s_0`'s
+            # definition closed the whole state; it is not correct at depth,
+            # because `s_6`'s definition is written in terms of `s_4`, and a
+            # simp set carrying neither `hsid_4` nor `s_4`'s own block defs
+            # leaves `s_4` a free variable in the goal.  Two consequences,
+            # both measured on `formal/examples/count.mojo` (8 blocks, the
+            # recursive call at depth 3): `hargeq` was left with an unsolved
+            # goal, and `hspd` failed with "Expected type must not contain
+            # free variables" — `native_decide` cannot decide a statement that
+            # mentions a local.  The same idiom is what the sibling goals in
+            # this function already use (`hfrread_{bi}`, `_hsid`), so this is
+            # one definition of "what has to be unfolded here", not a third.
+            _sdefs = ", ".join(list(reversed(ctx["flow_hsid"]))
+                               + list(ctx["flow_defs"])
+                               + ["arm64_reg", "arm64_set_reg",
+                                  "Arm64State.init"])
+            # The fact that the RECURSION ARGUMENT is below `n` needs the
+            # source condition of the branch this call is under — `¬(n = 0)`
+            # for a dec1 program — and that is the hypothesis the nearest
+            # enclosing conditional block emitted (`hsrc_{bi}` there, or
+            # `hscL_{bi}` for a short-circuit chain's own branch), carried
+            # down the walk in `ctx["branch_src"]`.
+            #
+            # This used to be the literal `hsrc_0`, which names nothing in any
+            # generated proof: no `hsrc_0` is ever emitted, so every dec1
+            # program with a recursive call produced a proof referring to an
+            # unknown identifier, hundreds of lines after the call that
+            # wanted it. It was not visible while the surrounding goals also
+            # failed for other reasons.
+            _bsrc = ctx.get("branch_src")
+            if not _bsrc:
+                raise NotImplementedError(
+                    f"recursion contract: the call in block {bi} has to be "
+                    f"below the source condition's negation "
+                    f"(`u64_sub_one_toNat_le` needs it), and this walk "
+                    f"reached the call with no enclosing branch condition to "
+                    f"take it from. Refusing rather than naming a hypothesis "
+                    f"this path never emitted: a `have` that cites `hsrc_0` "
+                    f"reads as proved and is an `Unknown identifier` in Lean.")
             # The callee's argument is `n - 1`; state that directly (rather than
             # the weaker `≤ n`) so the callee's frame bound has the one-stride
             # headroom the descent needs.
             if is_dec1:
                 A(f"{IND}have hargeq_{bi} : ({arg_term}) = n - 1 := by")
-                A(f"{IND}  simp only [hsid_{bi}, hsid_0, {_sdefs}]")
+                A(f"{IND}  simp only [{_sdefs}]")
                 A(f"{IND}  simp [mem_read_after_write_u64, mem_read_after_write_u64_ne, "
                   f"mem_read_two_writes_same]")
                 A(f"{IND}have harg_{bi} : ({arg_term}).toNat + 1 ≤ n.toNat := "
-                  f"u64_sub_one_toNat_le n ({arg_term}) hsrc_0 hargeq_{bi}")
+                  f"u64_sub_one_toNat_le n ({arg_term}) {_bsrc} hargeq_{bi}")
             else:
                 raise ValueError("unsupported: recursion argument bound (not a dec1 pattern)")
             # The callee's frame bound is the caller's bound carried down one
@@ -5112,7 +5298,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"{IND}have hbndbl_{bi} : FrameBound {stride} ({call_state}) ({arg_term}) := by")
             if is_dec1:
                 A(f"{IND}  have hspd : 18446744073709551600 - {stride} ≤ ({call_state}).sp.toNat := by")
-                A(f"{IND}    simp only [hsid_{bi}, hsid_0, {_sdefs}]")
+                A(f"{IND}    simp only [{_sdefs}]")
                 A(f"{IND}    native_decide")
                 A(f"{IND}  exact frameBound_descend {stride} {init} ({call_state}) n "
                   f"({arg_term}) harg_{bi} (by rfl) hspd hbnd")
@@ -7483,13 +7669,6 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"  evalFunc ast {_cf_text} [n] = mojo n := by\n"
             f"  {eval_eq_mojo_proof}"
         )
-    if _range_loop_pattern(fn) is not None:
-        ast_def = ""  # the AST model has no loop form; the bridge is omitted
-    else:
-        ast_stmts = ", ".join(_stmts_ast(fn.body))
-        ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
-                   % (func_name, _param_list_lean(fn), ast_stmts))
-
     code_defs = _gen_code_defs(func_name, code, base_addr, test_input)
     extern_calls = info.get("extern_calls") or []
     externs = list(getattr(prog, "externs", []) or [])
@@ -7586,6 +7765,39 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"not a missing case here.  The semantic model for the call is "
             f"correct and emitted (see the `_go` definitions above); what is "
             f"missing is the machine half.")
+    # The AST bridge's own limit, asked AFTER the machine half's so that the
+    # refusal a two-function program gets names the bigger of the two gaps: the
+    # CFG walk cannot follow the call at all, where the bridge could be fixed
+    # without the machine model.  Both refuse; this one is second because its
+    # message is about a smaller piece of work.
+    _resolvable = {func_name} | {spelling for spelling, lean
+                                 in _admitted_calls_map.items() if lean}
+    # …and only where the AST is going to be EMITTED. A `for`-range program
+    # gets `ast_def = ""` and its bridge omitted (the untyped AST model has no
+    # loop form), so nothing it contains can make a claim that is false — and
+    # refusing there would turn a proof that typechecks into a refusal, which
+    # is the opposite of what this check is for. `sum_range`'s `range(n)` is
+    # the measured case: caught by the check, refused, and worth 2 holes on
+    # both architectures.
+    _gaps = (_ast_bridge_gaps(fn, _resolvable)
+             if _range_loop_pattern(fn) is None else [])
+    if _gaps:
+        raise NotImplementedError(_ast_gap_message(_gaps))
+
+    # The `ast` VALUE is built here rather than beside `eval_eq_mojo_section`
+    # above, and the reason is the check just made: `_stmts_ast` reaches
+    # `_expr_ast`'s `Call` arm, which reads `e.args[0]` and cannot render a
+    # call of any other arity. Built earlier, a zero-argument call raised
+    # `IndexError: list index out of range` out of the generator before either
+    # refusal above could say what the limit is. Nothing between the old site
+    # and here reads `ast_def` — it is used once, in the assembly at the end of
+    # this function.
+    if _range_loop_pattern(fn) is not None:
+        ast_def = ""  # the AST model has no loop form; the bridge is omitted
+    else:
+        ast_stmts = ", ".join(_stmts_ast(fn.body))
+        ast_def = ('def ast : MojoFunc := MojoFunc.mk "%s" %s ([%s])'
+                   % (func_name, _param_list_lean(fn), ast_stmts))
 
     # A program that calls out of the image cannot be run to completion by the
     # model, so `arm64_exec_go` returns `none` and `run_result_exit` answers 0.
