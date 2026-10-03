@@ -16,6 +16,12 @@ from dataclasses import dataclass
 import fire_compiler as F
 from mojo.middle.boundnames import _with_item_alias_name, _lbn_target_names
 
+# `fold_literal_expr` is the ONE folder for literal-only arithmetic (model.py's
+# own note: "It is now in all three folders"), and `infer_expr` needs its
+# answer to decide SIGNEDNESS. This import is safe in that direction: model.py
+# imports no other formal module, so there is no cycle, and it costs 3 ms.
+from formal import model as M
+
 
 @dataclass(frozen=True)
 class IntType:
@@ -189,8 +195,33 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
             return IntType(64, True)
         return infer_expr(e.operand, vtypes, call_types)
     if isinstance(e, F.BinaryOp):
-        return common_type(infer_expr(e.left, vtypes, call_types),
-                           infer_expr(e.right, vtypes, call_types))
+        lt = common_type(infer_expr(e.left, vtypes, call_types),
+                         infer_expr(e.right, vtypes, call_types))
+        # The same rule the negated-literal arm above states, for the OTHER way
+        # a negative value is written.  `0 - 4` is a BinaryOp of two literals,
+        # so both sides are typeless, `common_type` is None, and `cmp_signed`
+        # then answers False — the comparison is emitted with UNSIGNED
+        # condition codes and `17 <= (0 - 4)` is TRUE, because the value is
+        # 0xFFFF...FC.  Measured on BOTH backends, against CPython:
+        #
+        #     0 < (51 - 55)     arm64 1  x86-64 1  CPython 0
+        #     17 <= (0 - 4)      arm64 1  x86-64 1  CPython 0
+        #     (0 - 4) < 0        arm64 0  x86-64 0  CPython 1
+        #
+        # while the unary spelling of the very same value is right, which is
+        # what made this survive: `17 <= -4` answers 0 on both.  The old
+        # docstring here called the unary arm's narrowness deliberate and named
+        # this case as excluded; the exclusion is what was wrong, because a
+        # negative value cannot be unsigned however it is spelled.  Narrow
+        # still: only when BOTH sides are typeless (so only literal-only
+        # arithmetic), only for `+ - * //`, and only when the folded value is
+        # negative — so nothing that had a type changes type.
+        if lt is None:
+            folded = M.fold_literal_expr(e)
+            if isinstance(folded, int) and not isinstance(folded, bool) \
+                    and folded < 0:
+                return IntType(64, True)
+        return lt
     if isinstance(e, F.CompareChain):
         # The chain's result is a boolean; operands share the common type
         # only insofar as each link needs it — report default.
