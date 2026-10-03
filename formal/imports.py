@@ -1418,6 +1418,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     # out before anything asks — so that the set of answers this function can
     # give is the set `resolve_module_path` can return, and a future caller
     # that bypasses the filter says the right thing.
+    advice = ""
     if is_frontend_provided(module_name):
         kind = ("provided by this backend's front end as a compile-time "
                 "transform, so there is no source to compile and nothing for "
@@ -1425,10 +1426,79 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
+        advice = _host_module_advice(module_name)
     else:
         kind = "not a stdlib or sibling module, and no such file exists"
     return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
-            f"is {kind}")
+            f"is {kind}" + advice)
+
+
+# What a caller of a HOST module wants, and what this target can offer instead.
+#
+# **This is the cheapest real deliverable in
+# `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` and it is
+# a MESSAGE, not a module.** That document measured five files in this
+# repository's own tooling blocked on `import collections`, four of them on one
+# call:
+#
+#     formal/lean.py:816          Census = collections.namedtuple("Census", "ok detail …")
+#     formal/model.py:13195       InitShape = collections.namedtuple("InitShape", "…")
+#     tools/formal_sweep.py:1810  Missing, Verdict, BuildRun — all `namedtuple`
+#
+# …and the answer for a COMPILE-TIME-KNOWN record with readable fields is a
+# `struct`: `formal/hostmods/struct.mojo` exists, a struct's fields are words in
+# a frame, and that is exactly what those four call sites want. Without a line
+# saying so, the refusal reads as "this target cannot do records", and the next
+# thing a reader does is file the next bug document about `collections`.
+#
+# **What is NOT answerable, and is stated here so nobody has to discover it by
+# building:** a type CONSTRUCTED AT RUN TIME. There is no word that denotes a
+# type on this path, so `collections.namedtuple("Census", "ok detail")` cannot be
+# lowered even in principle — the field list is a string and there is nothing to
+# make a type out of it. That is `doc/ABI.md`'s monomorphisation boundary, and
+# it is why "write a struct instead" is a complete answer for a record whose
+# fields the compiler can see and is NOT an answer for one it cannot.
+#
+# Measured, so this paragraph cannot go stale on a claim: every host module below
+# is named because a file in THIS repository imports it, and the count is the
+# number of such files.
+HOST_MODULE_ADVICE = {
+    "collections": (
+        ". The record the callers here want is a STRUCT: declare it with its "
+        "fields, and read them as fields. What cannot be done is building the "
+        "type at run time — `namedtuple(\"Census\", \"ok detail …\")` asks for a "
+        "type from a string, and there is no word on this path that denotes a "
+        "type (doc/ABI.md, Generics). `Counter` is a dict rather than a record, "
+        "so it is the other question: see "
+        "bugs/FORMAL_listdir_no_run_time_sequence.md."),
+    "copy": (
+        ". A field-wise copy of a type the COMPILER KNOWS at the call site is a "
+        "struct construction: build a new one and assign the fields. A copy "
+        "chosen at run time, over a graph whose shape the build cannot see, has "
+        "no answer here — the same missing thing as a type built at run time."),
+    "functools": (
+        ". The higher-order functions are a callable this path has no "
+        "representation for; the arithmetic they wrap is ordinary code and can "
+        "be written out."),
+}
+
+
+def _host_module_advice(module_name: str) -> str:
+    """The `what to write here instead` half of the host-module refusal, or "".
+
+    Each entry starts with a PERIOD, because it is appended to a `kind` clause
+    that has none: "…no Mojo source for this backend to compile. The record …".
+
+    Separate from `unresolvable_import_error` because it is a DIFFERENT claim
+    with a different lifetime: the refusal's first half is a fact about the
+    resolver's search order and cannot change without a module appearing, while
+    this half is a claim about what the target can represent and has to be
+    revisited when that changes. Both are pinned by
+    `test_formal_imports.py`, which asserts the advice is present for a module
+    in the table and ABSENT for one that is not — a message that grew advice for
+    every host module would be the same noise in a different place.
+    """
+    return HOST_MODULE_ADVICE.get(module_name, "")
 
 
 def imported_struct_defs(source_path: str, stmts: list,
