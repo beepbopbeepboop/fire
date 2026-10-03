@@ -326,11 +326,16 @@ def build_and_run(src, name, tmpdir, compare, backends=None, cross=None,
         x86-64 reads `XMM0`; see
         `bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`).
 
-    Records are the `@@`-separated fields of the image's stdout, which is the
-    convention every hostmod test in this tree uses: a Mojo string
-    literal's BACKSLASH-N is NOT unescaped on this path, so an image
-    prints the two characters backslash and `n` and a
-    record-structured program has to choose its own terminator.
+    Records are the `@@`-separated fields of the image's stdout. `@@` is the
+    record terminator every hostmod test in this tree uses, and it is here for a
+    reason that does not expire: a separator this suite can read back WITHOUT
+    asking whether the image decoded the literal, two bytes that a real newline
+    cannot collide with. A suite that went on to depend on the decoder's answer
+    would be a suite whose reader has to know it.
+
+    This is the comment the other hostmod suites in the family follow, so it is
+    the one whose wording has to be right for a reader who arrives in one of
+    them.
 
     `cwd` is where the image RUNS, and it defaults to `tmpdir` because a hostmod
     suite that puts a program anywhere but its own scratch directory is asking

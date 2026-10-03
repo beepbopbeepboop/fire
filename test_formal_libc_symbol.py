@@ -67,10 +67,10 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 300
 RUN_TIMEOUT = 60
 
-# The record terminator, for the reason every other formal test file gives: a
-# Mojo string literal's `\n` is not unescaped on this path, so a formal image
-# prints the two characters backslash and `n` and a record-structured program
-# has to choose its own terminator.
+# The record terminator, for the reason every other formal test file gives
+# (`test_formal_dylib.py` states it): a separator this suite can read back
+# without asking whether the image decoded a literal, `@@` being two bytes a
+# real newline cannot collide with.
 REC = "@@"
 
 # How many bytes of each `struct dirent` the `dirent` group dumps. 32 is

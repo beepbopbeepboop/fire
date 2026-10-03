@@ -3,6 +3,36 @@
 **Area:** FORMAL (`tools/formal_sweep.py`, the `-t` default and its help text,
 and the summary's `tool` block).
 
+**Status 2026-10-03 (`work/formal10-6`): §3 is ANSWERED — the profile it asked
+for exists, and it says the two files' cost is NOT the AST-walk-per-pass shape
+this section names.** Measured on this tree with wall-clock timers (not
+`cProfile`, whose overhead is per call and which ranks `iter_nodes` first for a
+walker that is 6-8% of the real time): `struct_field_names` walks every method
+body of a struct and is asked **743 times for a 172-line file**
+(`std/builtin/int.mojo`, where `_self_field_names` is 2.51 s of 3.9 s), and
+`_init_field_assignments` walks `__init__` **four times per (struct, field)**
+from `frame_field_type_candidates` alone (`monomorphize.py`, 1.42 s of 8.9 s).
+The cost is `#asks x #bodies`, not `#structs x #bodies`.
+
+The measurement, the harness that produces it, and the next step are in
+`bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`. Two
+things it settles that this file's §3 could not:
+
+* **the "finer unit" alternative is the wrong one.** Sweeping per FUNCTION would
+  make the unit smaller without making the per-unit cost smaller; the cost is in
+  a table recomputed per ask, and a smaller unit asks it more often. The profile
+  is the alternative that was worth taking and it has been taken.
+* **the ceiling on `gimple_codegen.py` / `myinterpreter.py` is a NUMBER, and it
+  is "however long a per-struct census takes, times every ask of it".** Whether
+  that lands inside any `-t` is step 3 of the new doc, and it is the first
+  measurement that could put those two files in a rate at all.
+
+**What is still open here, unchanged: the §2 policy decision** — whether the
+default stays 30 s for both populations (it does, and the help names the one
+that needs more) or the tool grows a `-t per population` flag. That is a real
+feature, this file says so, and the numbers for it are §2's tables below. It is
+not a bug fix and nothing in this status claims otherwise.
+
 **Status: the REPORTED half is FIXED (commit `e0dc0e0a`) — the `tool` bucket is
 split by cause, each cause carries its share of the scope, and a timeout row
 says the file's answer is UNKNOWN at this `-t` rather than absent, together with
@@ -189,3 +219,16 @@ So for those two the answer is not a number. Either
 
 Both are recorded in the repo-b work map with the same numbers, so a reader who
 wants them has the measurement rather than the question.
+
+**The second one is DONE (2026-10-03) and the first one is the wrong fix.** The
+profile is in `bugs/PERF_formal_build_recomputes_a_per_struct_census_on_every_ask.md`
+with the harness in it, and it puts the cost in the per-struct tables rather than
+in the AST walk: `struct_field_names` re-derives a struct's whole method-body
+census on every ask (743 asks for a 172-line file), and `_init_field_assignments`
+walks `__init__` four times per (struct, field) from `frame_field_type_candidates`
+alone. `iter_nodes` — the walker this section named — is 6-8% of the real time,
+which `cProfile`'s ranking hides because its overhead is per call.
+
+So a finer unit makes it worse rather than better: the unit is not what is
+expensive, the recomputation is, and a smaller unit asks for the same table more
+often.

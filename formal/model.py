@@ -15042,6 +15042,16 @@ def method_callee_base(call):
     Returned UNWRAPPED, so each caller decides what the brackets mean: a call
     rewrite passes them on as the callee's leading comptime arguments, and a
     field walk skips them because the member itself is what it was looking for.
+
+    **Five readers, and the number is the argument for it being here** (2026-10-03
+    added the last three): `formal/build.py`'s `_method_call_target` (which lifts
+    the call), its `_receiver_shape_refusal` (which refuses the lift that did not
+    happen, and which read `call.func` directly until then — so `recv.m[T](x)`
+    never reached it at all), its `_call_receivers` (the frame analysis's census
+    of call positions), and `_self_field_names` below. Four of the five had each
+    written the strip themselves; the fifth was the one that made the two
+    SPELLINGS of a call two different questions with two different answers, which
+    is the failure this function exists to make impossible.
     """
     func = getattr(call, "func", None)
     if isinstance(func, F.SubscriptExpr):
@@ -24494,7 +24504,20 @@ def subscript_receiver_method_refusal(member: str, receiver_text: str,
     this module — without that, every dotted call whose receiver is not a plain
     name would be refused here, including `mod.f()` across a dylib boundary and
     the `external_call` templates, both of which are correct and have their own
-    answers.
+    answers. **An AMBIGUOUS name is therefore a decline, not a sentence**, and the
+    analysis's own `frame_opaque_position_refusal` answers that one instead —
+    which is the right order, because with two structs declaring `m` even a
+    receiver with a known type would not settle the callee. Measured, the two
+    halves of that question on the same shape: `mk().take(r)` with `take`
+    declared once is refused here, and with `take` declared by `A` and `B` it is
+    refused there (`test_formal_run.py`'s
+    `byref_refuse_an_opaque_position_as_opaque` and
+    `…_when_the_method_name_is_ambiguous`).
+
+    It now answers for a CALL RESULT as well as a subscript, since 2026-10-03;
+    `formal/build.py`'s `_receiver_shape_refusal` asks it of both, and the two
+    spellings of either shape (`recv.m(x)` and `recv.m[T](x)`) get this one
+    sentence.
     """
     who = f"{fn_name}: " if fn_name else ""
     owner = owners.get(member)

@@ -149,13 +149,13 @@ def mojo_string(s):
     return '"' + out + '"'
 
 
-# The record terminator. NOT a newline: `\n` inside a Mojo string literal is
-# not unescaped on this path — a formal image prints the two characters `\` and
-# `n` — so every program in this file emits its records back to back and this
-# token is what separates them. It is recorded in
-# bugs/FORMAL_pointer_value_model.md as a pre-existing `printf` string-escape
-# question, and `test_formal_run.py`'s harness cases avoid line-structured
-# output for the same reason.
+# The record terminator. NOT a newline, and for a reason that does not expire:
+# a separator this suite can read back WITHOUT asking whether the image decoded
+# a literal. `@@` is two bytes that a real newline cannot collide with, so every
+# program in this file emits its records back to back and this token is what
+# separates them. The `printf` string-escape question behind the old wording is
+# recorded in `bugs/FORMAL_pointer_value_model.md`, and `test_formal_run.py`'s
+# harness cases avoid line-structured output for the same reason.
 REC = "@@"
 
 
@@ -357,8 +357,9 @@ def run(out, cwd=None):
 def parse(text):
     """`{key: value}` from the program's `label|index|part|value` records.
 
-    Split on the record terminator rather than on lines, because a Mojo string
-    literal's `\n` is not unescaped on this path (see `REC`).
+    Split on the record terminator rather than on lines, for the reason `REC`
+    gives: the records are separated by a token rather than by a decoded byte,
+    so reading them does not ask whether the image decoded a literal.
     """
     out = {}
     for chunk in text.split(REC):
