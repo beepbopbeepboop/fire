@@ -4935,6 +4935,96 @@ def string_operand_is_string(kind) -> bool:
 # wrote and hands it to C unchecked.
 PRINTF_TEXT_CONVERSIONS_CALLEES = frozenset({"printf"})
 
+# The two argument classes SysV AMD64 sorts arguments into, as the two short
+# strings the tables below spell them with. `str` is not one of them: a `char *`
+# is an INTEGER argument (a pointer), which is why `%s` costs a GPR on this ABI
+# and not an XMM.
+INTEGER_CLASS = "integer"
+SSE_CLASS = "sse"
+
+# ── the FLOATING conversions, and the class each conversion puts its argument in ──
+#
+# SysV AMD64 classifies every argument as INTEGER or SSE and allocates the two
+# classes from INDEPENDENT register files: an INTEGER argument consumes the next
+# of the six GPRs, an SSE one the next of the eight XMMs, and only a class that
+# has run out of registers goes to the stack. So a `double` at vararg position 0
+# is XMM0 and does NOT consume RDI, which means the INTEGER argument after it is
+# RDI and not RSI — a call that "passes the arguments in order" gets that case
+# wrong in a way no amount of moving a single operand can repair.
+#
+# `aA` are the floating conversions; the `L`/`l` length modifiers and the `0`
+# flags are already consumed by `_PRINTF_CONVERSION_RE`, which returns the
+# CONVERSION character, so `%.17g`, `%le` and `%La` all arrive here as `g`, `e`
+# and `a`. `%n` is not in it (it writes through a pointer) and `%p` is not
+# (Darwin's `%p` renders the ADDRESS, which is an integer word).
+PRINTF_FLOAT_CONVERSIONS = frozenset("aAeEfFgG")
+# Eight XMM registers, and the boundary is the ABI's rather than this path's.
+PRINTF_SSE_REGISTERS = 8
+PRINTF_INTEGER_REGISTERS = 6
+
+
+def printf_argument_classes(fmt_text) -> list | None:
+    """`[INTEGER|SSE]` per vararg of a format string, or None if unparsed.
+
+    Index `j` of the answer is vararg `j` — the argument after the format
+    string — and it is the same index arithmetic
+    `printf_conversion_specifiers` establishes, read from the same parse, so the
+    two cannot disagree about where a conversion's argument is. A `*` width or
+    precision consumes an argument and is classified INTEGER, which is what C
+    says: a `*` reads an `int`.
+
+    The format STRING is argument 0 and is INTEGER — it is a pointer, and it is
+    the caller's one fixed argument rather than a vararg, so the answer starts
+    at the first conversion and the caller is expected to prepend it.
+
+    None for a format this does not parse, and that is the permissive direction
+    and the same one `printf_conversion_specifiers` takes: a call whose
+    conversions cannot be enumerated keeps whatever behaviour it had, rather
+    than becoming a new refusal.
+    """
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    return [SSE_CLASS if c in PRINTF_FLOAT_CONVERSIONS else INTEGER_CLASS
+            for c in convs]
+
+
+def printf_float_operand_indices(fmt_text) -> set | None:
+    """Which vararg positions a floating conversion reads, or None if unparsed.
+
+    The narrower question `printf_argument_classes` answers, and the one the
+    emitter actually asks at the point where it moves a word into an XMM: given
+    `"%f %lld %g"`, the answer is `{0, 2}` — position 1 is an integer and must
+    NOT be moved. Asking for the classes and filtering is one reader of the
+    same parse, not a second parser that could enumerate the conversions
+    differently.
+    """
+    classes = printf_argument_classes(fmt_text)
+    if classes is None:
+        return None
+    return {j for j, c in enumerate(classes) if c == SSE_CLASS}
+
+
+def printf_float_conversion_refusal(callee: str, n_float: int) -> str:
+    """Why a floating conversion this path does not place is refused.
+
+    The ninth and later floating conversions are the boundary, and it is the
+    ABI's: SysV AMD64 has eight XMM registers, so the ninth `double` is an
+    OVERFLOW argument and lives in the caller's frame at a slot the register
+    numbering no longer describes. That is a construct this path could place —
+    the stack half of the calling convention is here — and it is not placed
+    here, so it is refused by name rather than emitted into the wrong slot,
+    which would print one operand's bits under another operand's conversion.
+    """
+    return (
+        f"{callee}'s format string has {n_float} floating conversions, and "
+        f"this path places the first {PRINTF_SSE_REGISTERS} of them: SysV "
+        f"AMD64 passes a `double` in XMM0..XMM{PRINTF_SSE_REGISTERS - 1} and "
+        f"the one after that in the caller's frame, at a slot this path does "
+        f"not assign. Refused rather than emitted, because a conversion "
+        f"reading another operand's word is a wrong answer that prints."
+    )
+
 # A printf conversion specification: `%`, the flags, an optional width and
 # precision (each of which may be `*`, which is itself an argument), an
 # optional length modifier, and the conversion character.  `%%` matches and is

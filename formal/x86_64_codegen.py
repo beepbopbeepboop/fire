@@ -6427,7 +6427,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # that reads a dropped argument as whatever the register held — a wrong
         # value being strictly worse than a refusal, but so is a refusal to a
         # program the ABI can express.
-        n_stack = max(0, len(args) - len(ARG_REGS))
+        # The REGISTER each argument goes in, which for an ordinary call is
+        # `ARG_REGS[j]` and for a `printf` with a floating conversion is not —
+        # see `_vararg_placement`, and the reason it is asked here rather than
+        # in the argument loop below is that the stack half and the register
+        # half both need the same answer.
+        placement = self._vararg_placement(name, args)
+        n_stack = sum(1 for _c, _slot in placement if _c == "stack")
         if len(args) > _MAX_INCOMING_ARGS:
             raise CodegenError(
                 f"call {name}(): {len(args)} arguments exceeds the "
@@ -6482,7 +6488,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # nested call in a stack argument safe: with the area reserved and
         # nothing else pushed yet, that nested call pushes strictly below it.
         for k in range(n_stack):
-            self._emit_expr(args[len(ARG_REGS) + k])
+            arg = args[next(j for j, (c, s) in enumerate(placement)
+                            if c == "stack" and s == k)]
+            self._emit_expr(arg)
             self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 8 * k, Reg.RAX))
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
@@ -6490,22 +6498,62 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # POP only ever targets RAX, so each popped value is moved across
         # after the pop — including argument 0, whose register is RDI and not
         # RAX the way the arm64 ABI's X0 would have been.
-        for arg in args[:len(ARG_REGS)]:
-            self._emit_expr(arg)
+        #
+        # The register arguments are `placement`'s, not `args[:6]`: an SSE
+        # argument goes in an XMM and so does not consume a GPR, which for
+        # `printf("%f %lld", d, n)` puts `n` in RDI rather than RSI. Pushing by
+        # argument ORDER and popping into the plan's registers is what keeps the
+        # two halves of one plan from disagreeing with each other.
+        reg_plan = [(j, c, slot) for j, (c, slot) in enumerate(placement)
+                    if c in ("gpr", "xmm")]
+        for j, _c, _slot in reg_plan:
+            self._emit_expr(args[j])
             self._push_slot(Reg.RAX)
         if sret_site is not None:
             self._emit_blob_base(self._blob_base + self._ret_frame_base
                                  + sret_site[1], Reg.RAX)
             self._push_slot(Reg.RAX)
-        for i in range(min(nargs, len(ARG_REGS)) - 1, -1, -1):
+            reg_plan.append((len(args), "sret", len(reg_plan)))
+        # An SSE argument goes STRAIGHT from the pop into its XMM register and
+        # never through a GPR, because SysV AMD64 passes a `double` in
+        # XMM0..XMM7 and nowhere else: a `printf("%f", w)` whose word is in RDI
+        # reads whatever XMM0 happened to contain, which is a DENORMAL and a
+        # DIFFERENT one on each run of the same binary, because the register was
+        # never written. arm64 needs none of this — AAPCS passes a double and an
+        # integer in register number 0 both, so there is no second register file
+        # to reach.
+        #
+        # `%lld` must not gain the move, and what says which is which is
+        # `model.printf_argument_classes`, read from the SAME parse as the `%s`
+        # check (`model.printf_text_conversion_refusal`) — one reader of one
+        # format string, so the two cannot disagree about where a conversion's
+        # argument is.
+        nxmm = 0
+        for _j, c, slot in reversed(reg_plan):
             self._pop_slot(Reg.RAX)
-            self.asm.emit(encode_mov_r64_r64(ARG_REGS[i], Reg.RAX))
+            if c == "sret":
+                # The hidden word is the LAST register argument and the first
+                # one popped, so it is already in RAX. Every ordinary argument
+                # that follows it in argument order is popped after it and
+                # overwritten by its own pop.
+                continue
+            if c == "xmm":
+                self.asm.emit(encode_movq_xmm_rm64(slot, Reg.RAX))
+                nxmm = max(nxmm, slot + 1)
+            else:
+                self.asm.emit(encode_mov_r64_r64(ARG_REGS[slot], Reg.RAX))
 
         if is_extern:
-            # AL = number of vector registers used, which the ABI requires a
-            # variadic callee be told; 0 is always right for the calls this
-            # path makes, and harmless for the rest.
-            self._emit_mov_imm(Reg.RAX, 0)
+            # AL = how many vector registers the caller used, which the ABI
+            # requires a variadic callee to be told: `va_start` builds the
+            # register-save area from it, so a callee told 0 while the caller
+            # put a word in XMM0 reads the SAVE AREA rather than the register —
+            # the same wrong answer as not moving the word across at all. It
+            # was a constant 0 for every call this path made before a floating
+            # conversion was placed, and it is the plan's own count so the number
+            # in AL and the moves above cannot disagree. RAX is not an argument
+            # register on this ABI, so writing it disturbs no argument.
+            self._emit_mov_imm(Reg.RAX, nxmm)
             self._emit_extern_call(symbol)
 
         else:
@@ -6521,6 +6569,90 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
         if ext_return is not None:
             self._emit_extern_return(ext_return)
+
+    def _vararg_placement(self, name: str, args: list) -> list:
+        """`[(class, register-or-slot index)]` per argument of a call.
+
+        **`("gpr", j)` for the first `len(ARG_REGS)` arguments and
+        `("stack", k)` after them, which is the whole ABI story for everything
+        this path called until a floating conversion existed.** A `printf` with a
+        `%f` is not that: SysV AMD64 classifies each argument as INTEGER or SSE
+        and allocates the two classes from INDEPENDENT register files, so an SSE
+        argument is XMM0..XMM7 and does NOT consume RDI..R9.
+        `printf("%f %lld", d, n)` therefore wants `d` in XMM0 and `n` in **RDI**
+        — passing them "in order" puts `n` in RSI and prints whatever the caller
+        had there.
+
+        So the answer is the identity for every call whose arguments are all
+        INTEGER-class, and the classified allocation otherwise. `classes` is
+        `model.printf_argument_classes`, which reads the SAME parse as
+        `printf_text_conversion_refusal` (the `%s` check) does, so the two
+        cannot enumerate a format's conversions differently; the caller is
+        `model.PRINTF_TEXT_CONVERSIONS_CALLEES`, the same set that one consults.
+
+        Four reasons the identity is the answer for everything else, rather than
+        a classification applied everywhere:
+
+        * A LOCAL function is not variadic, so it reads its arguments out of the
+          GPRs by parameter position and an XMM placement would be a wrong
+          answer, not a conservative one;
+        * an extern call whose format cannot be parsed (`printf_conversion_
+          specifiers` returns None) keeps the previous behaviour, which is the
+          permissive direction `printf_text_conversion_refusal` also takes;
+        * the format string is argument 0 and is a POINTER, so it is INTEGER and
+          takes RDI whatever the conversions say;
+        * `*width` is an `int` argument, so `printf("%*f", w, d)` puts `w` in
+          RDI and `d` in XMM0 — which the classification already says, and is
+          the row that would fail if a `*` were counted as a conversion.
+
+        `("stack", k)` is the overflow argument slot, assigned in ARGUMENT ORDER
+        across both classes — which is what `overflow_arg_area` does in C: every
+        argument that has run out of registers takes the next 8 bytes, in order.
+        The ninth floating conversion is where that stops being placeable here,
+        so it is refused by name (`printf_float_conversion_refusal`) rather than
+        emitted into a slot whose order nothing on this path states.
+        """
+        out: list = []
+        nstack = 0
+        for j in range(len(args)):
+            if j < len(ARG_REGS):
+                out.append(("gpr", j))
+            else:
+                out.append(("stack", nstack))
+                nstack += 1
+        if name not in M.PRINTF_TEXT_CONVERSIONS_CALLEES or not args:
+            return out
+        fmt = args[0]
+        if not isinstance(fmt, F.StringLiteral):
+            return out
+        classes = M.printf_argument_classes(fmt.value)
+        if classes is None:
+            return out
+        # A format that names MORE conversions than the call passes arguments
+        # for keeps the identity: that is the caller's own bug, the extra
+        # conversion reads a register nobody wrote on both backends, and the
+        # alternative would be a refusal on a shape C allows a program to write
+        # deliberately (`printf("%s")`). `classes[:len(args) - 1]` is the
+        # matching slice below and the reason the two agree about which operand
+        # is which.
+        n_float = sum(1 for c in classes if c == M.SSE_CLASS)
+        if n_float > M.PRINTF_SSE_REGISTERS:
+            raise CodegenError(M.printf_float_conversion_refusal(name, n_float))
+        out = [("gpr", 0)]              # the format string, a pointer
+        ngpr = 1
+        nxmm = 0
+        nstack = 0
+        for c in classes[:len(args) - 1]:
+            if c == M.SSE_CLASS and nxmm < M.PRINTF_SSE_REGISTERS:
+                out.append(("xmm", nxmm))
+                nxmm += 1
+            elif c != M.SSE_CLASS and ngpr < len(ARG_REGS):
+                out.append(("gpr", ngpr))
+                ngpr += 1
+            else:
+                out.append(("stack", nstack))
+                nstack += 1
+        return out
 
     def _emit_extern_return(self, kind) -> None:
         """Put the return register into the shape the DECLARED return type says.

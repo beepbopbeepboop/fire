@@ -105,25 +105,51 @@ def exact_double_bits(ns):
     return ((e + 1023) << 52) | (m & ((1 << 52) - 1))
 
 
-def build(src, name):
+# The architecture this file builds and runs, and why it is a MODULE GLOBAL
+# rather than an argument on every group: a group's whole oracle is a set of
+# readings taken from the image it just ran, so the architecture is a property of
+# the run rather than of any one assertion. `--backend` exists because the
+# `clocks` and `convert` groups PRINT A DOUBLE (`%.6f`, `%.9f`) and printing a
+# double is where the two architectures were never the same program: a SysV
+# variadic callee reads it from XMM0 and AAPCS reads it from d0, so a word
+# printed as a double used to be a denormal on x86-64 and the right number on
+# arm64 — and nothing here could have said so, because there was no way to ask
+# this file about x86-64 at all.
+BACKEND = "arm64"
+
+
+def build(src, name, backend=None):
+    backend = backend or BACKEND
     tmp = os.path.join(TEMP, name + ".mojo")
     out = os.path.join(TEMP, name)
     with open(tmp, "w") as f:
         f.write(src)
     r = subprocess.run([sys.executable, FIRE, "build", "--formal", "--no-prove",
-                        "-o", out, tmp],
+                        f"--backend={backend}", "-o", out, tmp],
                        capture_output=True, text=True, timeout=BUILD_TIMEOUT,
                        cwd=HERE)
     check(r.returncode == 0,
-          f"build failed: {(r.stderr or r.stdout).strip()[-500:]}")
+          f"build failed (--backend={backend}): "
+          f"{(r.stderr or r.stdout).strip()[-500:]}")
     check(os.path.isfile(out), f"no image at {out}")
     return out
 
 
-def run(out):
-    r = subprocess.run([out], capture_output=True, text=True,
+def run(out, backend=None):
+    backend = backend or BACKEND
+    argv = [out]
+    if (backend == "x86_64" and platform.machine() in ("arm64", "aarch64")
+            and sys.platform == "darwin"):
+        # The image is x86-64 and this host is not, so it runs under Rosetta.
+        # Selected by the BACKEND rather than applied to whatever was built: on
+        # an arm64 host `arch -x86_64 <an arm64 image>` is "Bad CPU type in
+        # executable", which reads as the host's fault and is really the harness
+        # asking the wrong machine to run the program.
+        argv = ["arch", "-x86_64", out]
+    r = subprocess.run(argv, capture_output=True, text=True,
                        timeout=RUN_TIMEOUT, cwd=HERE)
-    check(r.returncode == 0, f"image exited {r.returncode}: "
+    check(r.returncode == 0, f"image exited {r.returncode} "
+                             f"(--backend={backend}): "
                              f"{(r.stderr or r.stdout).strip()[-300:]}")
     got = {}
     for tag, val in re.findall(r"([A-Za-z0-9_]+)=([^@]*)" + REC, r.stdout):
@@ -428,14 +454,25 @@ TEMP = None
 
 
 def main():
-    global TEMP
+    global TEMP, BACKEND
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--backend", default=None,
+                    choices=["arm64", "x86_64"],
+                    help="which formal backend to build and run; the host's "
+                         "architecture by default")
     ap.add_argument("groups", nargs="*", help="subset: " + ", ".join(GROUPS))
     args = ap.parse_args()
-    if platform.machine() not in ("arm64", "aarch64"):
-        print(f"SKIP: formal output is arm64-only, host is "
-              f"{platform.machine()}")
+    if args.backend:
+        BACKEND = args.backend
+    host = platform.machine()
+    if BACKEND == "arm64" and host not in ("arm64", "aarch64"):
+        print(f"SKIP: an arm64 formal image cannot run on {host}")
+        return 0
+    if BACKEND == "x86_64" and host in ("arm64", "aarch64") \
+            and sys.platform != "darwin":
+        print(f"SKIP: an x86-64 formal image needs Rosetta and the host is "
+              f"{host}/{sys.platform}")
         return 0
     names = args.groups or list(GROUPS)
     for n in names:
@@ -458,7 +495,8 @@ def main():
                 ("  " + detail) if detail else ""))
             if not ok:
                 failed.append(name)
-    print(f"\n{len(names) - len(failed)}/{len(names)} groups passed")
+    print(f"\n{len(names) - len(failed)}/{len(names)} groups passed "
+          f"(--backend={BACKEND})")
     return 1 if failed else 0
 
 

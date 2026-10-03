@@ -1656,6 +1656,27 @@ CASES = [
      "    return poly([1, 2, 3])\n",
      "refuse_either:does not fold to a compile-time constant"
      "|unsupported statement ComptimeVarStmt", None),
+    # The ninth FLOATING conversion of a variadic call, which is the boundary
+    # of `model.printf_argument_classes`'s placement and the reason the boundary
+    # is a refusal rather than an approximation. SysV AMD64 has eight XMM
+    # registers, so the ninth `double` is an overflow argument in the caller's
+    # frame at a slot nothing on this path assigns; the eight that fit are
+    # placed by `encode_movq_xmm_rm64`.
+    #
+    # `refuse_either:` because the two backends refuse for DIFFERENT and both
+    # honest reasons — arm64 has no second register file at all (AAPCS passes
+    # everything in x0..x7) and says the variadic stack area is unplaced, while
+    # x86-64 says what its own ABI says the ninth one is. Same verdict, and the
+    # shared-text rule cannot apply because the two limits are genuinely
+    # different facts about two ABIs.
+    ("limit_a_ninth_floating_printf_operand",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 4607182418800017409\n"
+     "    printf(\"%f %f %f %f %f %f %f %f %f\",\n"
+     "           a, a, a, a, a, a, a, a, a)\n"
+     "    return 0\n",
+     "refuse_either:floating conversions"
+     "|puts 2 of them past the 8 argument registers", None),
     # A body written `...` is a declaration with no instructions behind it, and
     # there is nothing to emit. Reached only where the walk actually gets to
     # the body — an `...` in a trait method nothing calls compiles, which is

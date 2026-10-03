@@ -398,7 +398,7 @@ CASES = [
      # read out of the caller's frame rather than out of a local's home, and a
      # `**=` writes the accumulator back through `_store_var` where the binary
      # form leaves it in a register.
-     ("variable_exponent_through_a_parameter_and_an_augmented_power",
+("variable_exponent_through_a_parameter_and_an_augmented_power",
      "def power(k: Int) -> Int:\n"
      "    return 2 ** k\n"
      "def main():\n"
@@ -419,7 +419,51 @@ CASES = [
      "    b **= n\n"
      "    sys.stdout.write(\"%d %d %d\" % (power(n), a, b))\n"
      "    return 0\n"),
-     # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
+    # A FLOATING CONVERSION, which is a whole ABI question and not a
+    # rendering: SysV AMD64 hands a `double` to a variadic callee in XMM0..XMM7
+    # and an integer in RDI..R9, out of two INDEPENDENT register files, so
+    # `printf("%f", w)` read whatever XMM0 held — a denormal, and a different
+    # one on each run of the same binary, because the register was never
+    # written. arm64 needs nothing: AAPCS passes a double and an integer in
+    # register number 0 both, which is why this was invisible from every suite
+    # that builds one architecture.
+    #
+    # The values are the IEEE-754 BIT PATTERNS of doubles (`math.mojo`'s own
+    # representation, and the module's docstring says why), and 17 digits is
+    # the shortest round-tripping form, so CPython's `repr` and the C library's
+    # `%.17g` produce the same text. The `1.0000000000000002` is deliberate: it
+    # is the smallest double above 1.0 and its low 32 bits are 1, so a lowering
+    # that truncated the word to 32 bits — which is what an unannotated integer
+    # does on this path — would print `1.000000` and this row would still pass
+    # on that conversion alone. The mixed rows are the other half and are the
+    # reason this is not one `movq`: an SSE argument does not consume a GPR, so
+    # `printf("%f %lld", d, n)` needs `n` in **RDI** rather than RSI, and a fix
+    # that only moved the float would print `n` one register late.
+    ("printf_float_operand_read_from_an_xmm_register",
+     "def main():\n"
+     "    var one = 4607182418800017409\n"
+     "    var two = 4611686018427387904\n"
+     "    var n = 12345\n"
+     "    printf(\"%.17g %.17g\\n\", one, two)\n"
+     "    printf(\"%f %d\\n\", one, n)\n"
+     "    printf(\"%d %f %d %f\\n\", n, one, 99, two)\n"
+     "    printf(\"%e %g\\n\", one, two)\n"
+     "    printf(\"%d %d\\n\", n, 7)\n"
+     "    return 0\n",
+     "import sys\nimport struct\n\n"
+     "def d(u):\n"
+     "    return struct.unpack('<d', struct.pack('<Q', u))[0]\n\n"
+     "def main():\n"
+     "    one = 4607182418800017409\n"
+     "    two = 4611686018427387904\n"
+     "    n = 12345\n"
+     "    sys.stdout.write(\"%.17g %.17g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%f %d\\n\" % (d(one), n))\n"
+     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, d(one), 99, d(two)))\n"
+     "    sys.stdout.write(\"%e %g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%d %d\\n\" % (n, 7))\n"
+     "    return 0\n"),
+    # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
     # not a variation: a plain name loads and stores a local, while `self.x`
     # goes through `_member_slot_key` into the frame's slot array, and
     # `_emit_div_mod`/`_emit_pow` reach the target through `_emit_expr` /
