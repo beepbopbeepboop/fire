@@ -659,6 +659,22 @@ def main():
         print("lean not found (see ./lean-toolchain)")
         return 1
     lib = os.path.join(root, "lib")
+    # THE LIBRARY ELABORATES, and it is worth saying out loud that this call is
+    # that check. It was recorded for a long time as not being one: the
+    # applicability rows below ask whether a lemma is APPLICABLE at a real
+    # encoding, `x86_step_cqo`'s row among them, and a stale `cqo` lemma was
+    # reported green by them while the library did not elaborate — because they
+    # never touch the library's `.olean`, they generate their own file. It is
+    # `ensure_library` that catches it, and it is here, at the top, before any
+    # sample is even collected.
+    #
+    # `ensure_library` raises `RuntimeError` when `lean` returns non-zero, so a
+    # `lib/X86.lean` that does not elaborate stops this script here rather than
+    # at the first goal that needs it. That is the whole guard for a stale
+    # lemma, and the reason the cqo incident took as long as it did to surface
+    # is worth stating next to it: the failure first appeared in
+    # `test_formal_dylib.py` and `test_formal_short_circuit_cond.py`, whose
+    # messages are a truncated diagnostic tail, and neither names the line.
     L.ensure_library(lean, lib)
 
     samps = samples()
