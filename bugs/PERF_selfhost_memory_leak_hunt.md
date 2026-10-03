@@ -55,10 +55,35 @@ see WHICH items and why.
 |---|---|
 | ~720 MB `_walk_ast` flat node lists (`exprtypes.py:46`) | **FIXED, elsewhere.** `exprtypes.py` now has `_walk_ast_into(node, out)`, which appends into ONE caller-owned list instead of building and discarding a list per subtree, and its own docstring credits `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — **another claim's**, so it was never mine to land or verify. |
 | ~650 MB `_dedup_variadic_externs` re-splitting the cumulative preamble | **FIXED, elsewhere, twice.** `emit_infra.py`'s `_DEDUP_EXTERN_PARTS_CACHE` (process-global, keyed on a part's exact text) plus a second phase that DERIVES a parent's entry from its children's rather than re-parsing it (`_record_output_parse`). Its comment names the same `PERF_nested_module_compile_walk_ast_quadratic_rescan.md` doc and says the 2026-09-26 re-profile put it at 34% of a 160-module chain. `test_gimple.py`'s `dedup_variadic_externs_cache_is_a_faithful_parse` is the regression. |
-| ~320 MB x2 per-function `_infer_local_var_types` results and set adds under `_lower_call` | **MIS-ATTRIBUTED, and now measured.** See below. |
+| ~320 MB x2 per-function `_infer_local_var_types` results and set adds under `_lower_call` | **BOTH MIS-ATTRIBUTED, and now measured.** The `_infer_local_var_types` half is measured below. The "set adds under `_lower_call" half names a function that has no such set: on this tree `_lower_call` (`mojo/backend_gimple/emit_calls.py`) contains exactly ONE `.add()` — `_asdict_dispatch_needed.add(1)`, a one-element flag read only as a boolean ("did a `dict`/`vars()` appear?"), which cannot grow. The `next(iter(_seen))` set the entry probably named was replaced years ago and its own comment says why (a self-host closure could not compile through it). |
 | 512 MB the container-kind registry (`_reg_list`) | **STILL OPEN, and not fixable without a collector.** It grows with every container that is never freed and shrinks only as leaked ones are returned, so its size IS the leak count. The doc's own caution applies in reverse here: `leaks` would report little (the containers are reachable from the registry), and the fix is the durable one in item 3 of `PERF_memory_over_4gb_is_a_bug.md` — free what a pass has finished with — not a shrink at this site. |
 | ~270 MB `ast_rewriter.py:709`, ~180 MB `collect_method_scalar_obs`, ~150 MB `param_ctype`, `py_tokenize` 170 MB | **NOT RE-CHECKED.** Each needs the profiler run this doc's own method describes, which is a whole-closure `--dump-full` — the integrator's job, explicitly not a worker's ("a worker's part is to read the report and fix sites"). Untouched rather than re-asserted. |
-| "Retention by design: every parsed module's AST and every generated function's type tables live to the end" | **UNCHANGED and correctly filed as retention rather than leak.** |
+| "Retention by design: every parsed module's AST and every generated function's type tables live to the end" | **UNCHANGED and correctly filed as retention rather than leak — and now MEASURED as bounded.** See the second table below. |
+
+### The "set adds under `_lower_call`" item, measured rather than asserted
+
+The measurement the first item above needed is the one this doc's method can
+afford at worker scale: compile a real module in-process
+(`gimple_codegen._run_pipeline` on `mojo/middle/exprtypes.py`, 406 491 bytes of
+generated C), then walk the root `GimpleGen`'s container attributes and print
+the entry count of each, then compile a SECOND module through the same process
+and print what GREW.
+
+Everything that grows is a per-function or per-module table, bounded by the
+input — the signature and import tables, `_emitted_line_pairs`, `_str_pool`,
+`_calls_in_stmts_cache`, `_find_generic_visited`, `struct_field_types`. The
+largest single container on the first module is 617 entries
+(`_calls_in_stmts_cache`) and 519 (`_KNOWN_SIGS`); the biggest deltas on the
+second are `func_return_types` +301 and `imported_symbols` +166, i.e. the second
+module's own functions. Nothing grows per CALL, which is the shape this entry
+described.
+
+**That is the answer, and it is a negative one:** there is no set under
+`_lower_call` that is added to and never emptied, so this entry retires rather
+than becoming a fix. The honest residual of the measurement is that it is ONE
+module-sized sample, at `-O0`-equivalent python-hosted codegen, and it says
+nothing about the self-hosted binary's own heap — which is what item 2 of
+`PERF_memory_over_4gb_is_a_bug.md` needs, and why that remains the integrator's.
 
 ### The mis-attribution, measured
 
@@ -81,14 +106,15 @@ is no set that grows without emptying; what there is one small entry per
 function, re-derived per pass, which is **bounded retention by design** and
 belongs in the row above, not in the leak list.
 
-The other half of that entry, "set adds under `_lower_call`", is NOT resolved
-by this measurement — it names a different function and would need the
-profiler. Left open.
+The other half of that entry, "set adds under `_lower_call`", needed a
+different measurement and got one the same day — see the table's row and the
+section under it. It retires too, and for a sharper reason: the function has no
+such set.
 
 ### What this branch did land against the standard
 
-Two of the leaks in this tree's own "before/after" story were real programs, not
-the self-hosted compiler, and both are now measured:
+The leaks in this tree's own "before/after" story that were real programs, not
+the self-hosted compiler, are all now measured:
 
 * a printed container leaked its `mojo_str_cat` buffers — 200000 `print(xs)` of
   an 8-element list peaked at **99.7 MB**. All of that family is now fixed and
