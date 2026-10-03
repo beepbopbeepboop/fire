@@ -39,6 +39,16 @@ image, so a whole class of bug (address arithmetic, segment placement, lazy
 initialization ordering) is invisible to it and can only be caught by two
 independent codegens landing on the same number.
 
+`FRAME_CASES` and `FRAME_REFUSALS` are the module-level STRUCT group, and they
+are the sharpest use of that three-way agreement in the file. Every other case
+stores an int or a container into eight bytes of static image; a module-level
+`X = Struct(...)` is the one binding whose value does not fit in a word, and it
+used to be the address of a block the module BODY had already returned from —
+a lifetime defect rather than a gap, which no printed number can distinguish from
+a correct frame and which the interpreter could never have caught (it stores a
+real object). So those rows are the ones where the two architectures and the
+interpreter are all necessary and none is sufficient.
+
     python3 test_formal_globals.py [-v] [case ...]
 """
 import argparse
@@ -1264,6 +1274,289 @@ REFUSALS = [
      "print() cannot tell whether SubscriptExpr is a string or a number"),
 ]
 
+# ── a module-level STRUCT: the frame is in the IMAGE ─────────────────────
+#
+# Every case above stores an INT or a container into eight bytes of static
+# image. A module-level `X = Struct(...)` is the one binding whose value does not
+# fit in a word, and it had no storage at all until now — which was a LIFETIME
+# defect rather than a gap. The body compiles to `__module_body__`, a function,
+# so `X = Struct()` reserved a block in THAT activation and left its address in
+# the slot; the block dies with the body, so every later read dereferenced
+# reclaimed stack. The refusal the two call sites produced
+# (`ModuleLoader_load_module(self, …)` beside
+# `ModuleLoader_load_module(_module_loader, …)`) was right about the program and
+# could not be lifted without moving the storage, because lifting it alone turns
+# the refusal into a SIGSEGV.
+#
+# What moved the storage is `model.module_frame_slot_initializer`: the frame is
+# laid out in `__DATA` beside the container blobs and the slot holds its link-time
+# address like any other. These cases are the evidence that the frame is not
+# stack the body has left, which is the only property the fix is about — a
+# `fire.py run` comparison alone could not tell, because the interpreter stores a
+# real object and the images store eight bytes in a segment.
+#
+# The trailing `main(0)` is what every container row above carries and is load
+# bearing here for a second reason: it keeps the module body non-empty, so
+# `entry_function`'s rule 1 makes the BODY the entry in both engines and the two
+# agree on what ran. Without it the body is emptied by the fix, `main` becomes the
+# entry in the image and is never called under `fire.py run`.
+FRAME_CASES = [
+    # The base shape: read through a method from a function, mutate the field
+    # from a function, read it back. `_g.first()` is the disagreement the fix
+    # exists for — `p.first()` hands a LIVE frame and `_g.first()` hands the
+    # image's — and it is also the only thing here that would print a wrong
+    # number if the frame were the body's: `read_from_module()` would read
+    # whatever the second call to `bump` left in the body's reclaimed block.
+    #
+    # `__init__` is declared and assigns BOTH fields, and that is not
+    # decoration: `fire.py run` answers `None` for a field read of a fresh
+    # instance of a struct that declares no `__init__`
+    # (`bugs/INTERPRETER_a_fresh_instance_of_a_struct_with_no_init_reads_none.md`),
+    # so without it this row's interpreter comparison would be comparing against
+    # a known-wrong reference. `y = 0` is what makes `e` a real zero rather than
+    # a missing value on both sides.
+    ("frame_global_read_and_mutated_from_functions",
+     "struct Pair:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n"
+     "\n"
+     "    def first(self) -> Int:\n"
+     "        return self.x\n"
+     "\n"
+     "_g = Pair()\n"
+     "\n"
+     "def read_from_module() -> Int:\n"
+     "    return _g.first()\n"
+     "\n"
+     "def bump() -> Int:\n"
+     "    _g.x = 41\n"
+     "    return _g.first()\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair()\n"
+     "    p.x = 1\n"
+     "    a: Int = p.first()\n"
+     "    print(a)\n"
+     "    b: Int = read_from_module()\n"
+     "    print(b)\n"
+     "    c: Int = bump()\n"
+     "    print(c)\n"
+     "    d: Int = read_from_module()\n"
+     "    print(d)\n"
+     "    e: Int = _g.y\n"
+     "    print(e)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "1\n0\n41\n41\n0\n"),
+
+    # A field whose value comes from `__init__`, which is the `ModuleLoader`
+    # shape and the one the whole row is about: a struct that DECLARES nothing and
+    # gets its whole value from its constructor. `_g.n` reads 7 rather than 0,
+    # and it is the only thing here that distinguishes "the image laid the field
+    # out" from "the image laid zeros out and the program got lucky".
+    #
+    # `_bump` is a free function rather than a method on purpose: it is the
+    # `ModuleLoader_load_module(_module_loader, …)` call site — a name that
+    # holds the frame reaching a callee that wants one — and the row above only
+    # reaches the callee through a method.
+    ("frame_global_with_an_init_assigned_field",
+     "struct Named:\n"
+     "    var tag: String\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = \"hello\"\n"
+     "        self.n = 7\n"
+     "\n"
+     "    def show(self) -> String:\n"
+     "        return self.tag\n"
+     "\n"
+     "_named = Named()\n"
+     "\n"
+     "def _bump() -> Int:\n"
+     "    return _named.n + 1\n"
+     "\n"
+     "def read() -> String:\n"
+     "    return _named.show()\n"
+     "\n"
+     "def main(n):\n"
+     "    s: String = read()\n"
+     "    print(s)\n"
+     "    k: Int = _bump()\n"
+     "    print(k)\n"
+     "    m: Int = _named.n\n"
+     "    print(m)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "hello\n8\n7\n"),
+
+    # A CONTAINER field, and the strongest of the three: the frame's word for it
+    # is a pointer to a second-level blob laid out beside the frame, so reading
+    # `items[2]` exercises the nested fixup rather than a number that happened to
+    # be in the image. `read_at(0)`/`read_at(2)` reach the slot through a method
+    # on `_b` — the frame address going to a callee — and the `1` is the first
+    # element of a blob whose address was in a word of a frame whose address was
+    # in a slot.
+    ("frame_global_with_a_container_field",
+     "struct Boxy:\n"
+     "    var items: List[Int]\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.items = [1, 2, 3]\n"
+     "        self.n = 7\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        return self.items[i]\n"
+     "\n"
+     "_b = Boxy()\n"
+     "\n"
+     "def read_at(i: Int) -> Int:\n"
+     "    return _b.get(i)\n"
+     "\n"
+     "def main(n):\n"
+     "    a: Int = read_at(0)\n"
+     "    print(a)\n"
+     "    b: Int = read_at(2)\n"
+     "    print(b)\n"
+     "    c: Int = _b.n\n"
+     "    print(c)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "1\n3\n7\n"),
+
+    # THE CROSS-IMAGE ROW, and the one that would be impossible without the
+    # fix. `helper.mojo` declares the struct and the module-level value; it is
+    # compiled into a DYLIB, and `prog.mojo` links it. A frame in the executable's
+    # own `__DATA` would say nothing about a dylib's, and a dylib has no entry
+    # point at all — its body runs from `__TEXT,__init_offsets`, so the store the
+    # old path emitted happened at LOAD time and the block died with it. So `4` on
+    # the third line is the frame surviving the body of a library that has already
+    # returned, in a segment the loader mapped at a slide.
+    ("frame_global_mutated_across_a_dylib_boundary",
+     {"helper.mojo":
+      "struct Cfg:\n"
+      "    var n: Int\n"
+      "    var tag: String\n"
+      "\n"
+      "    def __init__(self):\n"
+      "        self.n = 3\n"
+      "        self.tag = \"cfg\"\n"
+      "\n"
+      "    def bump(self) -> Int:\n"
+      "        self.n = self.n + 1\n"
+      "        return self.n\n"
+      "\n"
+      "    def read(self) -> Int:\n"
+      "        return self.n\n"
+      "\n"
+      "cfg = Cfg()\n"
+      "\n"
+      "def bump_cfg() -> Int:\n"
+      "    return cfg.bump()\n"
+      "\n"
+      "def read_cfg() -> Int:\n"
+      "    return cfg.read()\n",
+      "prog.mojo":
+      "from helper import bump_cfg, read_cfg\n"
+      "\n"
+      "def main(n):\n"
+      "    a: Int = read_cfg()\n"
+      "    print(a)\n"
+      "    b: Int = bump_cfg()\n"
+      "    print(b)\n"
+      "    c: Int = read_cfg()\n"
+      "    print(c)\n"
+      "    return 0\n"
+      "\n"
+      "main(0)\n"}, "3\n4\n4\n"),
+]
+
+# The refusals the fix must NOT have lifted. Each one is a shape where the frame
+# cannot be written into the image, and the point of pinning them is that
+# "lifted" and "correctly refused" look identical from the outside: a build that
+# said yes to any of these would lay out a frame whose words are not the value the
+# source means, which is a plausible wrong answer rather than a diagnostic.
+FRAME_REFUSALS = [
+    # A frame whose field is computed by a CALL. There is no word for it before
+    # the program runs, so there is no frame to write into `__DATA`, so the slot
+    # stays the one the body fills — and the disagreement refusal is STILL what
+    # says so. It has to be a METHOD as the holder-holding callee rather than a
+    # free function taking the struct: `def get(s: S)` reaches
+    # `_check_declared_parameter` first, which is a different refusal about a
+    # declared type, so a free-function spelling of this row would pass for the
+    # wrong reason.
+    ("a_frame_field_computed_by_a_call_is_still_refused",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(self, k: Int):\n"
+     "        self.a = k\n"
+     "        self.b = 1\n"
+     "\n"
+     "    def first(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "_s = S(3)\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return _s.first()\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = S(1)\n"
+     "    a: Int = p.first()\n"
+     "    print(a)\n"
+     "    b: Int = get()\n"
+     "    print(b)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n",
+     "One parameter, two kinds of value"),
+
+    # A module global a FUNCTION assigns. The image does not hold the value for
+    # the whole run — `reset()`'s store would put a fresh block address into a
+    # word every reader dereferences as the struct's fields, which is the very
+    # lifetime defect the fix exists to remove — so the lift is withheld and the
+    # old path stands. Pinned because it is the one input the
+    # `functions_writing_globals` gate in `prepare_module_frame_slots` exists
+    # for, and a build that ignored the gate would build this and SIGSEGV.
+    ("a_frame_global_a_function_writes_through_global_is_still_refused",
+     "struct Pair:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n"
+     "\n"
+     "    def first(self) -> Int:\n"
+     "        return self.x\n"
+     "\n"
+     "_g = Pair()\n"
+     "\n"
+     "def reset() -> None:\n"
+     "    global _g\n"
+     "    _g = Pair()\n"
+     "\n"
+     "def main(n):\n"
+     "    reset()\n"
+     "    var p = Pair()\n"
+     "    p.x = 9\n"
+     "    a: Int = p.first()\n"
+     "    print(a)\n"
+     "    b: Int = _g.first()\n"
+     "    print(b)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n",
+     "One parameter, two kinds of value"),
+]
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True,
@@ -1541,7 +1834,9 @@ def main():
         return 0
 
     everything = ([(c[0], c[1], c[2]) for c in CASES]
+                  + [(c[0], c[1], c[2]) for c in FRAME_CASES]
                   + [(c[0], c[1], c[2]) for c in REFUSALS]
+                  + [(c[0], c[1], c[2]) for c in FRAME_REFUSALS]
                   + [(c[0], None, c[1]) for c in LAYOUT_CASES])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
@@ -1549,7 +1844,7 @@ def main():
         print(f"ERROR: unknown case(s): {sorted(set(args.cases) - known)}",
               file=sys.stderr)
         return 2
-    refusal_names = {c[0] for c in REFUSALS}
+    refusal_names = {c[0] for c in REFUSALS} | {c[0] for c in FRAME_REFUSALS}
     layout_names = {c[0] for c in LAYOUT_CASES}
 
     passed = failed = 0
