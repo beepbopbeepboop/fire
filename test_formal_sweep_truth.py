@@ -1001,22 +1001,41 @@ class TestX86EndToEndTree(unittest.TestCase):
                          ["push_r64", "mov_rm64_r64_reg", "alu_ri32:sub_rsp",
                           "leave", "ret"])
 
-    def test_a_call_that_returns_is_its_own_outcome_not_a_proof(self):
-        """`call` pushes a return address and `ret` pops one.
+    def test_a_callees_return_continues_into_the_caller(self):
+        """`call` pushes a return address and `ret` pops one, so the callee's
+        `ret` is NOT the end of the run.
 
         The caller below is `push rbp ; call far ; mov rax, 0 ; ret` and the callee
-        is `push rbp ; leave ; ret`. Walking it must DECLINE, naming the reason,
-        because the theorem it would emit claims the run stops at the callee's
-        `ret` and the machine carries on into `mov rax, 0`.
+        is `push rbp ; leave ; ret`. Walking it used to DECLINE, naming the
+        reason, because the theorem it emitted claimed the run stopped at the
+        callee's `ret` — and the machine carries on into `mov rax, 0`. Declining
+        was right and stopping was wrong; following the return is the fix, and
+        this is the case that says the chain now runs to the exit.
+
+        The `ret` at 0x1016 is the CALLEE's and its successor is 0x1009, the
+        instruction after the `call` at 0x1004 — which is `UInt64.ofNat (m + 5)`,
+        the literal the model's own `x86_step_call_rel32` pushes, so the two agree
+        about where the machine goes. The LAST node is the caller's own `ret`,
+        with no successor: that is the outermost one, and it pops the zero
+        `X86State.init` leaves on the stack, which is what makes address 0 the
+        exit sentinel.
         """
-        from formal.x86_64_endtoend_test import _NoTree
+        from formal.x86_64_endtoend_test import _paths
         MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
         code, shapes = _image(_calling(PROLOGUE, PROLOGUE + EPILOGUE,
                                        MOV_EAX_0 + b"\xc3"))
-        with self.assertRaises(_NoTree) as cm:
-            self._tree(code, shapes)
-        self.assertEqual(cm.exception.kind, "call")
-        self.assertIn("caller", str(cm.exception))
+        root = self._tree(code, shapes)
+        self.assertIsNotNone(root, "the return must be followed, not declined")
+        (path,) = _paths(root)
+        self.assertEqual([n.form for n in path],
+                         ["push_r64", "mov_rm64_r64_reg", "call_rel32",
+                          "push_r64", "mov_rm64_r64_reg", "leave", "ret",
+                          "mov_rm64_imm32", "ret"])
+        rets = [n for n in path if n.form == "ret"]
+        self.assertEqual([n.succ for n in rets],
+                         [self.BASE + 9, None],
+                         "the callee's ret returns to the instruction after the "
+                         "call; only the outermost one ends the run")
 
     def test_calling_one_function_twice_is_two_calls_not_a_loop(self):
         """The second call re-enters an address the path has already been in.
@@ -1031,8 +1050,14 @@ class TestX86EndToEndTree(unittest.TestCase):
         offset.  The `seen` set that would catch this mistake is the one the
         SECOND call walks into, so the case has to actually contain two calls --
         one call into a callee that itself calls once would not reach it.
+
+        Following the return is what makes this case bite twice: the callee's
+        `ret` comes back to 0x1009, which is the SECOND call, so a `seen` carried
+        across the return boundary would read the callee's own body as a cycle.
+        The callee is entered at 0x1016 twice and the chain still ends at the
+        caller's `ret`.
         """
-        from formal.x86_64_endtoend_test import _NoTree
+        from formal.x86_64_endtoend_test import _paths
         callee = PROLOGUE + EPILOGUE
         MOV_EAX_0 = b"\x48\xc7\xc0\x00\x00\x00\x00"
         first = len(PROLOGUE)
@@ -1045,9 +1070,15 @@ class TestX86EndToEndTree(unittest.TestCase):
         self.assertEqual(len(code), target + len(callee),
                          "the callee must start where the two calls point")
         _, shapes = _image(code)
-        with self.assertRaises(_NoTree) as cm:
-            self._tree(code, shapes)
-        self.assertEqual(cm.exception.kind, "call")
+        root = self._tree(code, shapes)
+        self.assertIsNotNone(root, "two calls are two calls")
+        (path,) = _paths(root)
+        entered = [n.addr for n in path if n.addr == self.BASE + target]
+        self.assertEqual(len(entered), 2, "the callee is entered twice")
+        self.assertEqual(path[-1].form, "ret")
+        self.assertIsNone(path[-1].succ,
+                          "the chain ends at the CALLER's return, which is the "
+                          "outermost one")
 
     def test_a_backward_call_is_a_loop_and_not_the_call_outcome(self):
         """`jmp` back to the function's own entry is recursion, and `_has_loop`
@@ -1259,6 +1290,92 @@ class TestLeanLaunchEstate(unittest.TestCase):
         self.assertEqual(offenders, [],
                          "a shell recipe that starts Lean bypasses every bound "
                          "in formal/lean.py: " + "; ".join(offenders))
+
+
+class TestX86EndToEndEmitter(unittest.TestCase):
+    """What the path-tree EMITTER does with a return, checked on the text.
+
+    `_tree` following the return is only half of it: the step after a `ret` has
+    to know `s_k.rip`, and the model says that is a value read out of the frame
+    rather than a literal. So the emitter has to state the value as its own named
+    fact and put it into the step, or the chain cannot continue. These are
+    Lean-free and they compile one small program — a 100-second proof is a very
+    expensive way to learn that the emitter forgot a line.
+    """
+
+    SOURCE = ("struct Point:\n"
+              "    var x: Int\n"
+              "    fn get_x(self) -> Int:\n"
+              "        return self.x\n"
+              "\n"
+              "def main(n) -> Int:\n"
+              "    var p = Point()\n"
+              "    return p.get_x()\n")
+
+    #: No call at all, so the whole return machinery must be absent. Loop-free
+    #: too, because `_tree` declines a body with a back edge and this is about
+    #: the return, not about that.
+    STRAIGHT = ("def main(n) -> Int:\n"
+                "    var t = n * 3 + 1\n"
+                "    return t\n")
+
+    @staticmethod
+    def _emitted(source=None):
+        import tempfile
+        import formal.x86_64_endtoend_test as E
+        with tempfile.TemporaryDirectory(prefix="formal-ret-emit-") as td:
+            path = os.path.join(td, "case.mojo")
+            with open(path, "w") as f:
+                f.write(TestX86EndToEndEmitter.SOURCE if source is None
+                        else source)
+            return E.emit_terminates(path)
+
+    def test_the_return_is_a_named_fact_and_the_step_uses_it(self):
+        text = self._emitted()
+        self.assertIn("hpop", text,
+                      "the value a `ret` pops is read out of memory, so the "
+                      "step after a return needs it as a fact of its own")
+        # The step is still the MODEL's: the literal goes back to
+        # `(mem_read_bytes …).toNat` and `x86_step_ret` concludes the record.
+        self.assertIn("(mem_read_bytes s", text)
+        self.assertIn("x86_step_ret", text)
+        self.assertIn("rw [← hpop", text)
+        # …and the closing fact is still about the EXIT SENTINEL, which is the
+        # outermost `ret` and not the callee's. Before the return was followed
+        # this was the false claim the whole bug is about.
+        self.assertRegex(text, r"have hrip : s\d+\.rip = 0 := by")
+
+    def test_a_chain_that_crossed_a_frame_is_admitted_at_the_closing_read(self):
+        """The cost side, stated as text so it cannot be forgotten.
+
+        A chain that returned into its caller has more than one frame's worth of
+        register file for the closing `simp` to reconstruct, and that `simp` does
+        not finish: measured on `wide_recv` it is 1190 s and then a heartbeat
+        timeout, which is B21's lesson from the other side — an unaffordable
+        attempt reported as a FAILURE is worse than an admitted gap. So a crossed
+        chain takes the cheap route at `hrip` and says so with a `sorry`.
+        """
+        text = self._emitted()
+        i = text.index("have hrip :")
+        closing = text[i:]
+        self.assertIn("simp only [hs", closing,
+                      "a crossed chain must not pay for the full closing simp")
+        self.assertNotIn("x86_flags_add", closing,
+                         "…which is what makes it the expensive one")
+
+    def test_a_chain_that_never_left_its_frame_is_untouched(self):
+        """The other half, and the one that must NOT change: 32 of the 45 examples
+        prove with no sorry, and they get there through the expensive closing
+        block. If the return work had changed that block for them, every one of
+        them would quietly become `proved, 1 sorry`.
+        """
+        text = self._emitted(self.STRAIGHT)
+        self.assertNotIn("hpop", text,
+                         "a straight-line function has no return to follow")
+        i = text.index("have hrip :")
+        self.assertIn("x86_flags_add", text[i:],
+                      "…and it keeps the expensive closing block, which is what "
+                      "those 32 sorries-free proofs go through")
 
 
 # ── 8. the other half of the launch estate: WHERE the generated file goes ─────
