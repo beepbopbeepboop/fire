@@ -5,6 +5,68 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-02, later — defect 2 is FIXED; the feature is not, and the remaining call-site defect is unchanged)
+
+Defect 2 below — the `sprintf("%d", (void *)ptr)` — is closed, and the entry
+that called it "independent of the feature and fixable on its own" was right.
+
+```
+                       before        after
+CPython 3.14.7      <function step at 0x7f...>   (unchanged)
+fire.py run         99                             (unchanged — interpreter half)
+compiled + run      74387272         <function step at 0x10469cf48>
+```
+
+A function VALUE lowers to a `void *` (the pre-declared `_funcptr_<csym>`
+static, because GIMPLE forbids `&func_name` as an rvalue). Nothing downstream
+knew it was a function rather than a pointer, so `print` reached its generic
+`sprintf(fmt, val)` arm and `TypeLattice.printf_fmt('void *')` answered `%d`
+— it has no format for a pointer and its default is the integer one.
+Formatting a 64-bit pointer with `%d` is undefined behaviour; on this target
+it prints the low half in decimal. **The address was never the wrong answer**
+(CPython prints one too), so the `%d` was the whole bug and the NAME was the
+missing half.
+
+Fixed at both sites that spell one: both `_lower_IdentExpr` function-value
+branches now record the value name in `gen._func_value_names`, and `print`'s
+dispatch has an arm for it. The format string stays a literal and the `%p`
+conversion happens in a new runtime helper `mojo_sprintf_ptr` — because
+`printf_fmt` cannot know a value is a pointer from its C type alone, which is
+exactly why it was the wrong place for this. Regression:
+`test_gimple.py::print_of_a_function_value_is_not_a_decimal_address`, which
+compares the SHAPE rather than the value (the address differs per build and
+per platform) and fails with the fix reverted.
+
+**Deliberately NOT changed**, so the next reader does not read it as an
+oversight: `printf_fmt`'s `%d` default for every OTHER unlisted pointer type.
+Widening it to `%p` would alter the printed form of every struct pointer in
+the tree on no evidence that any of them wants it. That is a separate
+measurement and a separate decision.
+
+### What is still open, unchanged
+
+**Defect 3 — the actual bug — is untouched.** The call site still resolves the
+bare name to the C symbol, so `step(7)` still answers `1` where CPython
+raises `TypeError: 'int' object is not callable`. It needs the module-level
+rebinding data model the 2026-10-02 entry lays out in three steps, and its
+own measurement stands: refusing decorated `def`s wholesale is ruled out
+because the stdlib decorates 426 definitions with names outside the
+compile-time-only set, 11 of them on free functions. Defect 1 (the decorator's
+own parameter typed `int64_t`, because the decoration is its only call site
+and is never emitted) is likewise unchanged and is a prerequisite of step 2.
+
+**And the three-step plan in the entry below is still the plan**, with defect 2
+now off the list: (1) the module-level rebinding data model, (2) the
+decorator's parameter typed from that new call site, (3) a refusal for the
+one unrepresentable case. Step 3 remains cheap and safe to land on its own
+precisely because that case is silently wrong today.
+
+**One thing the plan does not yet account for**, found while fixing defect 2:
+`print` now formats a function value correctly, but the CLOSURE form does not
+compile at all on this tree, so the arm is not exercised for the
+`MojoBoundMethod *` spelling a capturing closure lowers to. Filed as
+`bugs/CODEGEN_a_closure_value_in_a_local_does_not_declare.md`.
+
 ## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
 
 Same verdict, from the doc's own minimal repro compiled through
