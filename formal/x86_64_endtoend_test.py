@@ -387,6 +387,17 @@ _FORMS = {
     # wiring half of a pair is still worth having: `cqo` alone makes udivmod's
     # tree one form short rather than two, which is a measurement.
     "cqo": ("x86_step_cqo", False, ["rip", "b0", "b1", "rex", "w"]),
+    # `66 REX.W 0F 6E /r`, `movq xmm, r64`: the GPR-to-SSE move a floating
+    # `printf` needs, and the first instruction in this corpus that crosses from
+    # one register FILE into another.  Four hypotheses pin the PREFIXES and the
+    # opcode apart from the ModRM (`b0` is the `0x66`, `b1` the REX, `b2` the
+    # `0F`, `b3` the `6E`), because they are four separate bytes at four
+    # separate positions: `b2` and `b3` in particular are the two-byte escape,
+    # and a row that took `b2` for the opcode would be a lemma about `0F 6E`
+    # without its prefix -- a different, four-byte instruction.
+    "movq_xmm_rm64": ("x86_step_movq_xmm_rm64", False,
+                      ["rip", "b0", "b1", "b2", "b3", "b4", "rex", "w",
+                       "not66", "mod"]),
     "leave": ("x86_step_leave", False, ["rip", "b0"]),
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
@@ -625,6 +636,17 @@ _SUCCS = {
     # it.  A successor table is a copy of the model, so the model was changed in
     # three places and this was the fourth.
     "cqo": "{ $s with rdx := x86_cqo $s.rax, rip := $next }",
+    # The successor QUOTES the model's own expressions (`x86_set_xmm` over the
+    # ModRM's `reg` and `rm + x86_rex_b rex`), which is B3's rule for a
+    # successor table and is not optional here: `x86_set_xmm` is a `match` on
+    # the XMM index, so a successor naming an index of its own with a
+    # `k = …` hypothesis beside it leaves the goal as two records differing in
+    # a `match` (B10).  Nothing is substituted into this row, so `$modrm` is
+    # not a placeholder and `$next` is the literal the five bytes imply.
+    "movq_xmm_rm64":
+        "{ x86_set_xmm $s ((($modrm).toNat >>> 3) &&& 7) "
+        "(x86_get_reg $s ((($modrm).toNat &&& 7) + x86_rex_b $rex)) "
+        "with rip := $next }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $next }",
@@ -754,7 +776,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                 # exist yet -- "Unknown identifier hs20".
                 sc.append(sc_("simp [" + ", ".join(
                     [hs_in or ("hs%d" % k)] + list(cases)) + "]"))
-        elif c in ("b0", "b1", "b2", "b3", "imm", "disp", "disp32", "off"):
+        elif c in ("b0", "b1", "b2", "b3", "b4", "imm", "disp", "disp32",
+                   "off"):
             sc.append(sc_(_BYTES))
         elif c in ("dst", "dst_lt", "rm_ne", "rm_ne4", "rm_ne5"):
             # Closed arithmetic on the encoding: the destination register is
@@ -763,7 +786,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             sc.append(sc_("decide"))
         elif c in ("rex", "rex2", "w", "mod", "reg", "rm", "rb", "rr", "cc",
                    "lo", "hi", "nsetcc_lo", "njcc", "nzx", "op2", "notrex",
-                   "digit"):
+                   "not66", "digit"):
             # Closed arithmetic on the ModRM/REX literals, or a range test on a
             # concrete opcode byte: nothing here comes from the byte list, so
             # `decide` and not `simp [hb]`.
@@ -914,6 +937,22 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         # every other `b1` here.
         extra_args = " %d" % raw[0]
         extra_succ = {"$rex": str(raw[0])}
+    elif form == "movq_xmm_rm64":
+        # `66 REX 0F 6E /r`: FIVE bytes, and every one of them is at a different
+        # offset than for a one-byte opcode.  `raw[2]` is the `0F` escape and the
+        # ModRM is `raw[4]` -- the same "an `0F` escape puts the ModRM one byte
+        # further out" trap `imul` and `movsx_r64_r8` above record, and one byte
+        # further again here because the operand-size prefix pushes everything
+        # along.  `$modrm` and `$rex` MUST be set here rather than left to the
+        # generic `setdefault` below, which reads the ModRM out of `raw[2]` --
+        # that is `0x0f`, so it would supply `0x0f &&& 7 = 7` as the source GPR.
+        rex, modrm = raw[1], raw[4]
+        extra_args = " %d %d" % (rex, modrm)
+        # `$modrm` as a TYPED literal. The successor reads `(($modrm).toNat >>> 3)`
+        # because the model reads the ModRM through `UInt8.toNat`, and a bare
+        # `220` in Lean source is a `Nat` -- `220.toNat` is "Invalid field toNat",
+        # which is a different error naming neither the form nor the byte.
+        extra_succ = {"$rex": str(rex), "$modrm": "(%d : UInt8)" % modrm}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)

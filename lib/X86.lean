@@ -91,6 +91,30 @@ def x86_set_reg (s : X86State) (i : Nat) (v : UInt64) : X86State :=
   | 14 => {s with r14 := v} | 15 => {s with r15 := v}
   | _ => s
 
+/-! ### The SSE register file
+
+`XMM0`..`XMM7`, one word each. They are addressed by a separate `match` rather
+than folded into `x86_get_reg` / `x86_set_reg` because they are a DIFFERENT
+file with a DIFFERENT numbering: the GPR index carries `REX.B` and the XMM index
+does not (there is no `XMM8` in SysV AMD64, and `formal/x86_64.py` asserts
+`0 <= xmm <= 7`), so sharing one accessor would put `x86_rex_b` on a field that
+must not have it. See the `X86State` docstring for why the file exists at all
+and for what it deliberately does not model. -/
+
+def x86_get_xmm (s : X86State) (i : Nat) : UInt64 :=
+  match i with
+  | 0 => s.xmm0 | 1 => s.xmm1 | 2 => s.xmm2 | 3 => s.xmm3
+  | 4 => s.xmm4 | 5 => s.xmm5 | 6 => s.xmm6 | 7 => s.xmm7
+  | _ => 0
+
+def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
+  match i with
+  | 0 => {s with xmm0 := v} | 1 => {s with xmm1 := v}
+  | 2 => {s with xmm2 := v} | 3 => {s with xmm3 := v}
+  | 4 => {s with xmm4 := v} | 5 => {s with xmm5 := v}
+  | 6 => {s with xmm6 := v} | 7 => {s with xmm7 := v}
+  | _ => s
+
 /-! ## REX prefix -/
 
 def x86_is_rex (b : UInt8) : Bool := b.toNat ≥ 64 && b.toNat ≤ 79
@@ -612,7 +636,43 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     else none
   else none
 
-/-- Instruction forms with no REX prefix. -/
+/-! ### The `0x66` operand-size prefix
+
+`0x66` is not a REX byte, so `x86_step` hands it to `x86_step_plain` rather than
+to a prefix dispatcher — and the forms behind it are read HERE, in a decoder of
+their own, rather than inline in the plain one. The reason to keep it separate
+is instruction LENGTH: a `0x66`-prefixed opcode sits one byte further along than
+the same opcode without it, so a decoder that shared the plain path's byte
+positions would compute a successor that lands inside the next instruction.
+That is B6 in `bugs/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
+being dispatched in two places is recorded as the costliest single bug in that
+file precisely because the two disagreed about the length. -/
+
+/-- `0x66`-prefixed forms. `rex` is the byte at `rip + 1`, i.e. the REX that
+    follows the operand-size prefix; every OTHER byte position is read HERE,
+    which is the point. `66 48 0f 6e c0` has the two-byte `0F` escape between
+    the prefix and the opcode, so the opcode is at `rip + 3` and the ModRM at
+    `rip + 4` — and a caller that passed the opcode in would have to know that,
+    which is the shape of B6's bug: two places holding an instruction's length.
+    The first version of this did exactly that, read `code (rip + 2)`, and
+    compared it against `0x6e` — so it saw the `0F` and declined every
+    encoding, silently, at the one instruction the whole change was for. -/
+def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
+    Option X86State :=
+  let rip := s.rip
+  let w := x86_rex_w rex
+  if code (rip + 2) = 0x0f && code (rip + 3) = 0x6e && w then
+    -- movq xmm, r/m64
+    let modrm := code (rip + 4)
+    if (modrm.toNat >>> 6) != 3 then none
+    else
+      let k := (modrm.toNat >>> 3) &&& 7
+      let r := (modrm.toNat &&& 7) + x86_rex_b rex
+      some { x86_set_xmm s k (x86_get_reg s r) with rip := rip + 5 }
+  else none
+
+/-- Instruction forms with no REX prefix, and the `0x66` operand-size
+    prefix that is not one. -/
 def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X86State :=
   let rip := s.rip
   let opn := b0.toNat
@@ -706,6 +766,37 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
       | some v => some { x86_set_reg s ((modrm.toNat >>> 3) &&& 7) v with rip := rip + 4 }
       | none => none
     else none
+  else if b0 = 0x66 then
+    -- The `0x66` OPERAND-SIZE prefix, and the only instruction behind it that
+    -- this backend emits: `66 REX.W 0F 6E /r`, `movq xmm, r/m64`.
+    --
+    -- `0x66` reaches HERE rather than a prefix dispatcher of its own because it
+    -- is not a REX byte: `x86_step` routes on `x86_is_rex b0`, which is false for
+    -- `0x66`, so the plain decoder is what sees it. Adding a third dispatcher
+    -- for one instruction would have been a second place that has to agree with
+    -- this one about instruction LENGTH, which is B6 in
+    -- `bugs/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
+    -- dispatched twice and the two dispatches disagreed about it once.
+    --
+    -- So the two prefixes are read here, in the order they are encoded: `0x66`,
+    -- then optionally a REX byte, then `0F 6E`. `w` is REQUIRED, because
+    -- `0F 6E` without REX.W is `MOVD`, which drops all but the low 32 bits and
+    -- so moves a DIFFERENT VALUE rather than a different placement of the same
+    -- one — a `movd` arm here would be a lemma about an instruction the
+    -- encoder never produces.
+    --
+    -- The direction is the load-bearing half and it is easy to get backwards:
+    -- `0F 6E` is `movq xmm, r/m64` (XMM in ModRM.reg, GPR in rm) and `0F 7E` is
+    -- the reverse, which assembles, links, and quietly loads whatever was
+    -- already in XMM0 into RDI. Only `0F 6E` is modelled, because only
+    -- `encode_movq_xmm_rm64` exists; `mod = 3` is required for the same reason
+    -- every other register-to-register arm here requires it, and a memory
+    -- operand is refused rather than half-decoded.
+    --
+    -- FIVE bytes, which is what the prefix bytes are for: without the `0x66`
+    -- this is the four-byte `x86_step_rex` `0F 6E` shape, and getting that
+    -- wrong puts the successor three bytes into the next instruction.
+    x86_step_op66 s code (code (rip + 1))
   else none
 
 /-- The x86-64 step function: a REX prefix routes to the prefixed forms, and
@@ -1372,6 +1463,63 @@ theorem x86_step_cqo (s : X86State) (code : Nat → UInt8) (m : Nat) (rex : UInt
   -- the claim the theorem is actually about.
   simp [x86_step, x86_step_rex, x86_cqo, x86_msb,
         h_rip, h_b0, h_b1, h_rex, h_w]
+
+/-- `66 REX.W 0F 6E /r` with mod=3: `movq xmm<k>, r64`, the GPR-to-SSE move.
+
+    **The first instruction this project has emitted into a formal x86-64 image
+    that crosses from the general-purpose register file into the SSE one**, and
+    so the first one whose successor touches a field `X86State` did not have.
+    SysV AMD64 hands a `double` to a variadic callee in `XMM0`..`XMM7` and
+    nowhere else, so `printf("%f", w)` cannot be lowered without it — and a
+    value here is one word in a GPR until this instruction moves it.
+
+    The destination is the ModRM `reg` field and the SOURCE is `rm` (+REX.B),
+    which is the opposite sense from `89 /r` and `31 /r` above and the reason
+    those two are called out in this file's "operand-order traps" note. Getting
+    it backwards produces a model that writes the GPR's value into an XMM slot
+    and leaves XMM0 holding whatever it held, which is `FORMAL_x86_64_end_to_
+    end_proof.md`'s B2 one level down: a lemma about an instruction the binary
+    does not contain.
+
+    The XMM index carries NO REX.R, because there is no `XMM8` in this ABI and
+    `formal/x86_64.py::encode_movq_xmm_rm64` asserts `0 <= xmm <= 7`. A `+ 8`
+    here would model a register the encoder cannot name.
+
+    FIVE bytes, from `0x66` + REX + `0F` + `6E` + ModRM — which is the whole
+    reason the length is worth stating in the theorem rather than left to the
+    model: it is the difference between this successor and one that lands three
+    bytes into the following instruction. -/
+theorem x86_step_movq_xmm_rm64 (s : X86State) (code : Nat → UInt8) (m : Nat)
+    (rex modrm : UInt8)
+    (h_rip : s.rip = m) (h_b0 : code m = 0x66) (h_b1 : code (m + 1) = rex)
+    (h_b2 : code (m + 2) = 0x0f) (h_b3 : code (m + 3) = 0x6e)
+    (h_b4 : code (m + 4) = modrm) (h_rex : x86_is_rex rex = true)
+    (h_w : x86_rex_w rex = true) (h_not66 : x86_is_rex 0x66 = false)
+    (h_mod : modrm.toNat >>> 6 = 3) :
+    x86_step s code = some { x86_set_xmm s ((modrm.toNat >>> 3) &&& 7)
+        (x86_get_reg s ((modrm.toNat &&& 7) + x86_rex_b rex)) with rip := m + 5 } := by
+  -- The successor QUOTES the model\'s expressions rather than naming an XMM index
+  -- and a GPR index of its own, and that is not a style preference: it is what
+  -- makes the step close at all. With `k` and `r` as parameters beside
+  -- `h_k : ... = k` and `h_r : ... = r`, `simp` rewrites the STATEMENT side\'s
+  -- `x86_set_xmm s k ...` into an unfolded eight-arm `match k with` while the
+  -- model\'s side stays folded, and the goal is two records that differ in a
+  -- `match` \u2014 B10 exactly, reached from the other direction. Quoting the
+  -- model\'s own terms makes the two records syntactically identical, which is
+  -- B3\'s rule for a successor table.
+  --
+  -- `x86_set_xmm` IS in the set and has to be: it is what projects the record so
+  -- the two sides can be compared field by field. `x86_get_reg` and
+  -- `x86_set_reg` are NOT, and neither is `x86_get_xmm` \u2014 this is the only
+  -- instruction whose successor is an XMM slot, so `x86_get_xmm` is never on a
+  -- successor and unfolding it is machinery nothing calls.
+  --
+  -- `x86_is_rex` is in the set for `h_not66`: without it the `x86_step` dispatch
+  -- is an `if` on two comparisons, `simp` splits on it, and the REX arm has to
+  -- reduce before the goal is about the instruction the bytes encode.
+  simp [x86_step, x86_step_plain, x86_step_op66, x86_is_rex, x86_rex_b,
+        x86_set_xmm,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_b4, h_rex, h_w, h_not66, h_mod]
 
 /-! `shl` / `shr` / `sar` by an immediate byte (REX.W C1 /digit, mod=3).
 

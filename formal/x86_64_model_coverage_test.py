@@ -72,6 +72,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import formal.x86_64 as X                                # noqa: E402
 import formal.x86_64_decode as D                         # noqa: E402
 import formal.lean as L                                  # noqa: E402
+import formal.x86_64_endtoend_test as ET                 # noqa: E402
 
 R = X.Reg
 BASE = 0x1000
@@ -429,6 +430,36 @@ def step_lemmas():
          "code %d = %d" % (BASE + 16 * len(out) + 1, cqo[1]),
          "x86_is_rex %d = true" % cqo[0],
          "x86_rex_w %d = true" % cqo[0]]))
+    # `movq xmm, r64`: the GPR-to-SSE move, and the one emittable form whose
+    # FIRST byte is not the REX.  Two rows, not one, and the reason is the two
+    # properties that have to be true at once and cannot both be checked at one
+    # encoding: the XMM number comes from the ModRM `reg` field with NO REX.R, and
+    # the source GPR comes from `rm` WITH REX.B.  At `xmm0`/`rax` both are 0, so
+    # a row there would be satisfied by a lemma that dropped either extension
+    # and put REX.R on the XMM index.  `xmm3`/`r12` is the encoding where a
+    # dropped REX.R names XMM11 and a dropped REX.B names RSP.
+    for xmm, gpr in ((0, X.Reg.RAX), (3, X.Reg.R12)):
+        enc = X.encode_movq_xmm_rm64(xmm, gpr)
+        m = BASE + 16 * len(out)
+        out.append(Lemma(
+            "x86_step_movq_xmm_rm64", "movq xmm, %s" % gpr.name, enc,
+            ["s.rip = %d" % m,
+             "code %d = %d" % (m, enc[0]),
+             "code %d = %d" % (m + 1, enc[1]),
+             "code %d = %d" % (m + 2, enc[2]),
+             "code %d = %d" % (m + 3, enc[3]),
+             "code %d = %d" % (m + 4, enc[4]),
+             "x86_is_rex %d = true" % enc[1],
+             "x86_rex_w %d = true" % enc[1],
+             "x86_is_rex %d = false" % enc[0],
+             # `(%d : UInt8).toNat` and not `%d.toNat`, and the reason is
+             # `_rex_mod3_hyps`'s own docstring: Lean reads a bare `192.toNat` as
+             # a malformed decimal and `(192).toNat` elaborates 192 as a `Nat`,
+             # which has no `toNat` field.  Written the other way this row was
+             # an elaboration ERROR, and the applicability report attributed it
+             # to a hypothesis that does hold -- which is how a check for
+             # vacuous lemmas ends up reporting one that never ran.
+             "(%d : UInt8).toNat >>> 6 = 3" % enc[4]]))
     for lemma, label, enc, dst, sib in _memory_samples():
         # `rm ≠ 4` is the "no SIB byte follows" exclusion, so a SIB row is the one
         # shape where it must NOT be asserted -- rm=4 is what SELECTS the SIB.
@@ -571,6 +602,82 @@ def _memory_samples():
     ]
 
 
+#: The forms whose SUCCESSOR this file also checks against the model, with the
+#: encoder to read the bytes from.  Distinct from `step_lemmas()` above, which
+#: asks whether a lemma's HYPOTHESES can hold; this asks whether the successor
+#: the end-to-end emitter writes is the successor the model computes.
+#:
+#: The two answer different questions and both have been needed.  A `cqo` whose
+#: `_SUCCS` row said `x86_sign_extend32` while the model's arm computes
+#: `x86_cqo` left every hypothesis satisfiable — so the row above was green —
+#: and the end-to-end proof of that step was a proof of a different instruction.
+#: That is the whole argument for having this: the applicability check cannot
+#: see a successor at all, and a successor is a second copy of the model that
+#: has to be kept in step with it.
+#:
+#: Read out of the ENCODER, so the bytes are the ones the backend emits, and the
+#: successor out of `_resolve`, so the check is against what the generator
+#: actually writes rather than against a hand-written copy of it.
+#: `(form, encoding, probe)` — the probe is `X86State -> (Nat x UInt64)`, the
+#: `rip` and the ONE field the instruction writes.  It is a fact about the
+#: instruction, not a copy of the successor, so the check below stays
+#: non-circular: it compares the model's step against the emitter's successor on
+#: the fields the instruction is ABOUT.
+#:
+#: `RDI` and not `R12` for the `movq` source, and that is the whole reason the
+#: row has teeth.  `X86State.init 10 _` sets `rdi := 10` and every other general
+#: register to 0, so an encoding whose source is RDI carries a NON-ZERO value
+#: into the XMM slot -- and swapping the two halves of the ModRM, which is the
+#: one mistake this instruction invites, then reads `rbx` (0) instead and the two
+#: successors differ.  At `x12`/`r12`, which is the pair the applicability rows
+#: use, both halves are 0 and the swap is invisible.
+SUCCESSOR_FORMS = (
+    ("cqo", X.encode_cqo(), "fun t => (t.rip, t.rdx)"),
+    ("movq_xmm_rm64", X.encode_movq_xmm_rm64(3, X.Reg.RDI),
+     "fun t => (t.rip, t.xmm3)"),
+)
+
+
+def successor_lean_source(forms):
+    """`(text, checks)` — one `native_decide` per form's successor claim.
+
+    The claim is `(x86_step s code).map PROBE = (some EMITTER_SUCC).map PROBE`
+    rather than the two records compared whole, and the reason is `Decidable`:
+    a successor carries `mem : Nat -> UInt8`, so record EQUALITY on two of them
+    is not decidable and `native_decide` reports "failed to synthesize Decidable"
+    -- which is an error, so it is caught, but it says nothing about the
+    successor.  Mapping both sides through a probe puts them in
+    `Option (Nat x UInt64)`, which is decidable and computable.
+    """
+    out = ["import X86", ""]
+    checks = []
+    for i, (form, enc, probe) in enumerate(forms):
+        m = BASE + 16 * i
+        items = ", ".join("0x%02x" % b for b in enc)
+        out.append("def scode_%d (code : Nat) : UInt8 :=" % i)
+        out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
+                   % (m, items, m))
+        out.append("def sst_%d : X86State := X86State.init 10 %d" % (i, m))
+    for i, (form, enc, probe) in enumerate(forms):
+        succ = ET._resolve(form, enc, BASE + 16 * i, "s", 0, length=len(enc))[1]
+        claim = ("(let s := sst_%d; let code := scode_%d; "
+                 "(x86_step s code).map (%s) = (some %s).map (%s))"
+                 % (i, i, probe, succ, probe))
+        first = len(out) + 1
+        checks.append((first, first + 2, form,
+                       "the emitter's successor for %s disagrees with the "
+                       "model's step at %s on rip or on the field this "
+                       "instruction writes — the end-to-end proof of this step "
+                       "is about a different instruction than the one the model "
+                       "runs" % (form, enc.hex(" "))))
+        out.append("/-- %s at %s: the model's step and the emitter's successor "
+                   "agree on rip and on the field it writes -/"
+                   % (form, enc.hex(" ")))
+        out.append("example : %s := by" % claim)
+        out.append("  native_decide")
+    return "\n".join(out) + "\n", checks
+
+
 def lemma_lean_source(lems):
     """`(text, checks)` — the applicability file, and where each check landed.
 
@@ -622,12 +729,26 @@ _LEAN_LOC = re.compile(r"^(\S+):(\d+):\d+: error: ", re.M)
 def lemma_check_failures(out, checks, filename):
     """The `checks` ranges Lean reported an error in, in file order.
 
-    The file name is compared rather than assumed, because Lean prints the path
-    it was given and a caller elsewhere in this file passes an absolute one.
+    Matched on the BASENAME, and that is not tidiness — it is the difference
+    between a check and a green. `run_lean` is handed an ABSOLUTE path (the
+    scratch directory is private and per-run), and Lean prints the path it was
+    given, so the diagnostic names `/var/folders/…/StepLemmas.lean:412` while
+    the caller holds `"StepLemmas.lean"`. Comparing the two strings never
+    matched, so no diagnostic was ever attributed to a check and the report read
+    `every hypothesis satisfiable` whatever Lean said.
+
+    Measured, on a planted falsehood and on a planted wrong successor: both
+    printed exactly that line and exited 0. It is the failure mode this file's
+    own docstring names — "a check that cannot fail is worse than no check: it is
+    green" — and it is the one place in this project where the check that exists
+    to catch a vacuous lemma was itself vacuous.
+
+    A whole-path match is kept as a fallback so a caller that does pass the
+    absolute path is not made worse by the fix.
     """
     at = set()
     for m in _LEAN_LOC.finditer(out):
-        if m.group(1) == filename:
+        if m.group(1) == filename or os.path.basename(m.group(1)) == filename:
             at.add(int(m.group(2)))
     return [(label, why, sorted(n for n in at if lo <= n <= hi))
             for lo, hi, label, why in checks if any(lo <= n <= hi for n in at)]
@@ -738,6 +859,30 @@ def main():
                   "the finding.")
             return 1
         lout = cp.stdout + cp.stderr
+
+        # The SUCCESSORS. `StepLemmas.lean` above asks whether each lemma's
+        # hypotheses can hold at a real encoding; this asks whether the
+        # successor the end-to-end emitter writes for that instruction is the
+        # one the model computes. It is a separate file because a diagnostic in
+        # it means a different thing — a wrong successor, not an inapplicable
+        # lemma — and it has been needed: `cqo`'s `_SUCCS` row once named
+        # `x86_sign_extend32` while the model's arm computes `x86_cqo`, which
+        # left every hypothesis satisfiable and every `cqo` step a proof of a
+        # different instruction.
+        sforms = SUCCESSOR_FORMS
+        stext, schecks = successor_lean_source(sforms)
+        sname = "Successors.lean"
+        spath = os.path.join(workdir, sname)
+        with open(spath, "w") as f:
+            f.write(stext)
+        cp = L.run_lean(lean, [spath], cwd=workdir, env=env,
+                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+        if cp.exceeded:
+            print("\nFAIL: " + cp.exceeded)
+            print("  the successor check is UNMEASURED, not satisfied: a `decide` "
+                  "that never finished is not a claim about the successor.")
+            return 1
+        sout = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
         if ("example : (x86_step (X86State.init 10 %d) code_%d" % (BASE + i * 16, i)) in text:
@@ -757,6 +902,15 @@ def main():
     rc = 1 if unstepped else 0
 
     bad = lemma_check_failures(lout, checks, lname)
+    sbad = lemma_check_failures(sout, schecks, sname)
+    print("\nemitted successor vs the model: %d form(s) — %s"
+          % (len(sforms), "each successor is the model's"
+             if not sbad else "%d of %d FAILED" % (len(sbad), len(schecks))))
+    for label, why, where in sbad:
+        print("  %-20s %s" % (label, why))
+        print("      Lean reported it on line(s) %s of %s" % (where, sname))
+    if sbad:
+        rc = 1
     print("\nstep-lemma applicability: %d lemma(s) at %d real encoding(s), %d "
           "hypotheses — %s"
           % (len({l.lemma for l in lems}), len(lems), len(checks),
