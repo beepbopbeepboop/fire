@@ -30,6 +30,7 @@ says so and skips without it. The units are the census and the classifier.
 """
 import io
 import os
+import re
 import sys
 import unittest
 from contextlib import redirect_stderr
@@ -1258,6 +1259,166 @@ class TestLeanLaunchEstate(unittest.TestCase):
         self.assertEqual(offenders, [],
                          "a shell recipe that starts Lean bypasses every bound "
                          "in formal/lean.py: " + "; ".join(offenders))
+
+
+# ── 8. the other half of the launch estate: WHERE the generated file goes ─────
+#
+# Section 6 above is about who starts Lean; this is about where the file Lean
+# reads was written. Two scripts each wrote their generated source to a
+# hard-coded `os.path.join("/tmp", "<a fixed name>")` and handed it to `lean` BY
+# RELATIVE NAME with `cwd` set there
+# (`bugs/FORMAL_x86_model_scripts_write_to_a_shared_tmp_path.md`). Both are
+# registered suite jobs, the corpus has several worktrees, and `tools/suite.py`
+# runs `-j 18` — so two concurrent runs wrote the SAME `Coverage.lean` and the
+# second writer's bytes were what the first run's `lean` read. The coverage file
+# is 151 `native_decide` goals plus 482 hypothesis checks, so an interleaved
+# read is not a small corruption, and it surfaces as "a form is not steppable"
+# or "hypothesis N does not hold": a model or lemma bug, in the wrong file, in
+# somebody else's run. It is the same hazard `ensure_library` takes an exclusive
+# `flock` over, arrived at from the other end — a bound that says "only one
+# writer" and a path that says "any number of them".
+#
+# The guard is scoped to files that RUN Lean, which is the estate this bug is
+# in. `tools/tu_grind.py` has the same shape for its own `.ci` scratch and is
+# outside it; it is written down at `bugs/TOOLS_tu_grind_scratch_defaults_to_tmp.md`.
+
+_TMP_LITERAL = re.compile(r"^/tmp(?:/|$)")
+
+
+def _shared_scratch_dirs(source: str, path: str = "<snippet>"):
+    """[(lineno, literal)] for every hard-coded absolute scratch path in `source`.
+
+    Read out of the AST, for the reason `_launch_sites` gives: a file that
+    explains why it needs no scratch directory must not be mistaken for one that
+    does, and a comment is not in the AST. A docstring *is* a `Constant`, so the
+    search is restricted to constants a CALL or an ASSIGNMENT consumes — which is
+    also what makes it find `workdir = os.path.join("/tmp", name)`, where the
+    literal is nowhere near an `open` or a `makedirs`.
+    """
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return [(-1, f"does not parse ({e})")]
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Call, ast.Assign, ast.AugAssign,
+                                 ast.AnnAssign)):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                    and _TMP_LITERAL.match(sub.value):
+                out.add((sub.lineno, sub.value))
+    return sorted(out)
+
+
+class TestScratchDirEstate(unittest.TestCase):
+    def test_the_detector_sees_a_hard_coded_dir_and_ignores_an_explanation(self):
+        """The control, in both directions: a detector that finds nothing makes
+        the guard below a green light over an unexamined tree."""
+        self.assertEqual(
+            _shared_scratch_dirs('import os\n'
+                                 'workdir = os.path.join("/tmp", "x86_model")\n'
+                                 'os.makedirs(workdir, exist_ok=True)\n'),
+            [(2, "/tmp")], "the literal is in the join, not in the makedirs")
+        self.assertEqual(
+            _shared_scratch_dirs('import os, tempfile, shutil\n'
+                                 '# a comment naming /tmp proves nothing\n'
+                                 'workdir = tempfile.mkdtemp(prefix="x86_model")\n'
+                                 'shutil.rmtree(workdir, ignore_errors=True)\n'),
+            [], "a comment, and a private mkdtemp, are not a shared path")
+
+    def test_nothing_generates_a_lean_file_into_a_hard_coded_dir(self):
+        found, scanned = {}, []
+        for rel, path in _lean_files(HERE, skip=("formal/lean.py",
+                                               os.path.basename(__file__))):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            if "run_lean" not in source:
+                continue          # not a Lean-launching file; see above
+            scanned.append(rel)
+            hits = _shared_scratch_dirs(source, rel)
+            if hits:
+                found[rel] = hits
+        self.assertEqual(found, {},
+                         "a generated .lean goes in a private directory "
+                         "(formal/lean.py::scratch_dir): " + repr(found))
+        # This file is exempt — like formal/lean.py is above — because it QUOTES
+        # the violation in its own control, and a string holding source text is
+        # indistinguishable from source to `ast`. So the exemption has to be
+        # shown to be costing nothing: the walk must still reach both scripts the
+        # bug named, or the guard is green over an unexamined estate.
+        for rel in ("formal/x86_64_model_test.py",
+                    "formal/x86_64_model_coverage_test.py"):
+            self.assertIn(rel, scanned,
+                          "the guard stopped reaching " + rel)
+
+    def test_the_two_scripts_ask_for_a_private_directory(self):
+        """The positive half, against the two files the doc named.
+
+        The guard above is a negative ("nothing hard-codes /tmp"), which a file
+        that writes nowhere at all would satisfy. So the two scripts are also
+        required to name the helper, and to hand `lean` a path built by joining
+        onto the directory rather than a bare `os.path.basename` of it — the
+        relative name is what made the shared directory load-bearing.
+        """
+        for rel in ("formal/x86_64_model_test.py",
+                    "formal/x86_64_model_coverage_test.py"):
+            with open(os.path.join(HERE, rel), encoding="utf-8") as f:
+                source = f.read()
+            self.assertIn("scratch_dir", source, rel)
+            self.assertNotIn("os.path.basename(src)", source,
+                             rel + ": lean is handed a relative name, so the "
+                             "cwd has to be the scratch directory — which is "
+                             "the half of the old shape that collides")
+            self.assertNotIn("os.path.basename(lpath)", source, rel)
+
+    def test_scratch_dir_is_private_and_self_removing(self):
+        """The helper's three properties, each of which the bug needs."""
+        import shutil
+        import tempfile
+        with L.scratch_dir("x86_model_test") as a, \
+                L.scratch_dir("x86_model_test") as b:
+            self.assertNotEqual(a, b, "two runs got the same directory, which "
+                                      "is the collision")
+            self.assertTrue(os.path.isdir(a))
+            with open(os.path.join(a, "Coverage.lean"), "w") as f:
+                f.write("import X86\n")
+            self.assertTrue(os.path.isdir(b))
+        for path in (a, b):
+            self.assertFalse(os.path.exists(path),
+                             "a generated .lean outlived its run")
+
+        # TMPDIR is what puts it inside the checkout for a worker or a sandbox
+        # with no writable /tmp, so the helper has to honour it rather than
+        # asking for /tmp by name.
+        base = tempfile.mkdtemp(prefix="scratch_base_")
+        old = os.environ.get("TMPDIR")
+        os.environ["TMPDIR"] = base
+        try:
+            with L.scratch_dir("x86_model_coverage") as inner:
+                self.assertEqual(os.path.dirname(inner), base)
+        finally:
+            if old is None:
+                os.environ.pop("TMPDIR", None)
+            else:
+                os.environ["TMPDIR"] = old
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_scratch_dir_removes_the_directory_when_the_body_raises(self):
+        """The other control: a `finally`, not a happy-path `rmtree`.
+
+        A run that dies mid-elaboration is the one that most needs the directory
+        gone, and it is the one that would leave it behind.
+        """
+        import tempfile
+        seen = []
+        with self.assertRaises(RuntimeError):
+            with L.scratch_dir("x86_model_coverage") as path:
+                seen.append(path)
+                raise RuntimeError("lean did not finish")
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(os.path.exists(seen[0]))
 
 
 if __name__ == "__main__":
