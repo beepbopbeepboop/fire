@@ -1333,7 +1333,121 @@ def test_the_executors_answer_the_same_questions(tmpdir, _):
               f"{name}: neither architecture ran it ({verdicts['arm64']})")
 
 
+# ── (6) a module-level STORE the image already holds, across the boundary ────
+#
+# The other half of what a dylib boundary carries is not an argument but the
+# MODULE'S OWN DATA. `model.module_body` already answers "does this top-level
+# statement HAVE TO RUN?" with two exemptions — a value that FOLDS (`X = 5`,
+# substituted at each read) and a name that is a `__DATA` SLOT whose initializer
+# the image lays out before anything runs (`X = ["a", "b"]`, which is
+# storage-shaped rather than foldable). So a module whose top level is only those
+# is not "an API that is its top-level statements", and it is importable.
+#
+# This case exists because 16 files in the 668-file sweep
+# (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3) are refused for the OTHER
+# answer — `module_loader.py`, `tools/memslot.py`, `formal/x86_64.py`,
+# `determinism_trace.py` have a body that genuinely must run — and the fix for
+# those is a load-time initializer in both object writers. **That fix cannot be
+# attempted without knowing that what is already in the image arrives intact**, and
+# nothing asserted that: a dylib `__DATA` slot carrying `5` where the source says
+# `5` would read as `0` and this suite would be green, because every other case in
+# this file crosses the boundary with a VALUE and never with the module's own
+# initialized data. So this is the test the fix's precondition needs, written
+# before the fix.
+#
+# The module is named `globlib` rather than something shorter because the CPython
+# oracle puts this directory on `PYTHONPATH` and a module named after a stdlib
+# module would shadow it.
+GLOBLIB = """\
+COUNT = 5
+NAMES = ["alpha", "beta"]
+
+
+def get() -> Int:
+    return COUNT
+
+
+def bump():
+    global COUNT
+    COUNT = COUNT + 1
+
+
+def width() -> Int:
+    return len(NAMES)
+"""
+
+GLOBAL_PROG = """\
+def main(k):
+    printf("first=%d@", get())
+    bump()
+    bump()
+    printf("second=%d@", get())
+    printf("width=%d@@", width())
+    return 0
+"""
+
+
+def test_a_module_stores_that_the_image_already_holds_cross_the_boundary(
+        tmpdir, _):
+    """`COUNT = 5` read through another module is 5, and stays 7 after two writes.
+
+    Three things in one case, and each is a way the boundary could be wrong
+    without anything looking broken:
+
+      * the FOLDED store (`COUNT = 5`, nothing writes it at first) has to arrive
+        as the value the source says and not as the zero an unwritten slot gives;
+      * the SLOT store (`NAMES = ["alpha", "beta"]`, which is storage-shaped, so
+        it is a `__DATA` word holding a blob address) has to arrive with its blob
+        laid out — `width()` is `len()` of it across the boundary;
+      * the WRITE (`bump()` does `global COUNT; COUNT = COUNT + 1`) has to reach
+        the module's own storage and not a register in the caller, so the second
+        read is 7 and not 5.
+
+    Compared with CPython on the same text, like every other case here: a value
+    written down beside this test would be a second answer to the same question.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "globinit")
+    os.makedirs(root)
+    write_tree(root, {"globlib.mojo": GLOBLIB, "prog.mojo": GLOBAL_PROG})
+    _r, dylib = build_dylib(root, "globlib.dylib", ["globlib.mojo"])
+    text, rc = agrees_with_cpython(
+        tmpdir, "module stores across the boundary", root, "prog.aout",
+        expect_exit=0, extra=["--link-dylib", dylib],
+        preamble="from globlib import get, bump, width\n")
+    check(text == "first=5@second=7@width=2@@",
+          f"the module's own initialized data did not survive the boundary: "
+          f"{text!r}")
+
+
+def test_a_module_body_with_code_in_it_is_still_refused(tmpdir, _):
+    """The CONTROL for the case above: a body that must RUN is still refused.
+
+    `COMPUTED = compute()` is not foldable and not a slot initializer — the value
+    does not exist until something calls `compute()` — so this module's API really
+    is its top-level statements and a dylib has nowhere to run it. Asserted by
+    WORDS, because the words are the product: whoever adds the load-time
+    initializer has to change this case deliberately, and the message it removes
+    has to change with it.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "globbody")
+    os.makedirs(root)
+    write_tree(root, {
+        "computed.mojo": "LITERAL = 3\nCOMPUTED = compute()\n\n\n"
+                         "def compute() -> Int:\n    return 7\n\n\n"
+                         "def get() -> Int:\n    return COMPUTED\n",
+    })
+    result, _out = build_dylib(root, "computed.dylib", ["computed.mojo"],
+                               expect_ok=False)
+    refuses(result, "this module's API is its top-level statements")
+
+
 TESTS = [
+    ("a module's own folded and slot stores cross the boundary",
+     test_a_module_stores_that_the_image_already_holds_cross_the_boundary),
+    ("a module body with code in it is still refused",
+     test_a_module_body_with_code_in_it_is_still_refused),
     ("`from m import f as g` calls the function it stands for",
      test_a_from_import_alias_calls_the_function_it_stands_for),
     ("an alias of a NON-exported name is refused by name",

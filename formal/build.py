@@ -7889,9 +7889,34 @@ def _chain_declared_struct(st, fields, structs_by_name: dict):
     return cur
 
 
+def _constant_site(st, kind: str, member: str = None) -> tuple:
+    """One entry of `_constant_read_sites`'s table: `(struct, kind, member)`.
+
+    **ONE shape for every producer, and that is the whole point of this
+    function.** The table used to carry a 2-tuple for a class constant and a
+    3-tuple for an ENUM member, and the two consumers unpacked differently:
+    `_apply_constant_sites` knew about both spellings and `refuse_none_comparisons`
+    knew about one, so a file that read an enum member AND had a `None`-valued
+    constant raised `ValueError: too many values to unpack (expected 2, got 3)` out
+    of the middle of `_prepare_functions` — the backend RAISING where it owes a
+    refusal, on four of this repository's own files in the 668-file sweep of
+    2026-10-03. A heterogeneous table is not a style question: it is a shape a
+    caller cannot destructure without reading every producer, which is exactly
+    what one of them did not do.
+
+    `member` is the enum member's own accessor (`value` / `name`) and is None for
+    every other spelling, which is the one spelling that has no accessor at all.
+    """
+    return (st, kind, member)
+
+
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
                          receiver_structs: dict = None) -> dict:
-    """{access path: (struct, kind)} for every read of a class-level constant.
+    """{access path: (struct, kind, member)} for every read of a class-level
+    constant.
+
+    The value's shape is `_constant_site`'s, which is the only definition of it:
+    a third element that is None for every spelling but an enum member's.
 
     `fn` and not a statement list, because the evidence below is a property of
     the FUNCTION: what it binds, and which struct it is a method of. Both call
@@ -7970,12 +7995,12 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
         if not M.class_constant_candidates(st) & members:
             continue
         for name, _default in M.struct_class_constants(st):
-            sites[f"{st.name}.{name}"] = (
+            sites[f"{st.name}.{name}"] = _constant_site(
                 st, "comptime" if name in M.struct_comptime_aliases(st)
                 else "constant")
     for path, (st, kind, member) in _enum_member_sites(
             structs_by_name, bound).items():
-        sites[path] = (st, kind, member)
+        sites[path] = _constant_site(st, kind, member)
     def publish(holder, st, comptime_only):
         """Every read of `st`'s class-level values through `holder`.
 
@@ -8005,9 +8030,9 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
             if comptime_only and kind != "comptime":
                 continue
             if holder != st.name and name in shadowed:
-                sites[f"{holder}.{name}"] = (st, "overridden")
+                sites[f"{holder}.{name}"] = _constant_site(st, "overridden")
                 continue
-            sites[f"{holder}.{name}"] = (st, kind)
+            sites[f"{holder}.{name}"] = _constant_site(st, kind)
 
     # A LOCAL (or a parameter) bound to `S` may read ANY of `S`'s class-level
     # values: the base is the value the call site or the declaration says it is,
@@ -8025,9 +8050,8 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
             publish(receiver, owner, comptime_only=True)
         shadowed = _overridden_comptime_names(structs_by_name, owner)
         for name in M.struct_comptime_aliases(owner):
-            sites[f"Self.{name}"] = (
-                (owner, "overridden") if name in shadowed
-                else (owner, "comptime"))
+            sites[f"Self.{name}"] = _constant_site(
+                owner, "overridden" if name in shadowed else "comptime")
     for holder, st in sorted((receiver_structs or {}).items()):
         if holder in locals_ or holder == st.name:
             continue
@@ -10999,7 +11023,7 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
             raise CodegenError(why)
         got = sites.get(f"{node.obj.name}.{node.member}")
         if got is not None:
-            st, kind = got
+            st, kind, _member = got
             if kind == "overridden":
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
@@ -11134,10 +11158,11 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
         # The alias census is PER FUNCTION, because `p = Plain(1)` is a fact
         # about one body: `p.b` is a read of the class's own value in the
         # function that wrote that `p` and not in any other.
-        none_paths = {path: kind for path, (st, kind) in _constant_read_sites(
+        sites = _constant_read_sites(
             fn, structs_by_name, (method_owners or {}).get(fn.name),
-            receiver_bases(fn) if receiver_bases else None).items()
-            if (st.name, path.partition(".")[2]) in none_consts}
+            receiver_bases(fn) if receiver_bases else None)
+        none_paths = {path: kind for path, (st, kind, _member) in sites.items()
+                      if (st.name, path.partition(".")[2]) in none_consts}
         if not none_names and not none_paths:
             continue
         bound = _names_bound_in(fn)
