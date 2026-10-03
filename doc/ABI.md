@@ -18,6 +18,16 @@ looking for declarations that do not exist. Re-verify rather than extend when
 touching this file — the renames it missed (`mojo_*` → `fire_*`) are exactly
 the kind of change a document at rest does not notice.
 
+**Revised 2026-10-03**, for "The formal backend's receiver convention" only: a
+receiver crosses a boundary by pointer for every struct on both formal backends,
+which is the row the Methods section above already stated for the compiled
+backend. That subsection is the only part of this file added since the
+verification above, and it is verified against the tree in the same way — read
+`formal/model.py`'s `receiver_writeback_name` for the rule and
+`formal/arm64_codegen.py`'s `_allocation_split` for the storage the callee gets.
+The verification date above is deliberately NOT restated: the rest of the file
+was last checked at `7604105` and has not been re-read since.
+
 The header names, the `mojo_*` ABI prefix, and the `__mojo_reflect` symbol are
 load-bearing elsewhere and are **not** candidates for renaming.
 
@@ -137,6 +147,57 @@ These cross the boundary as opaque pointers to the runtime types in
   (libc names already in our headers are not re-declared). This is the escape
   hatch to libc / OS syscalls (e.g. `write`).
 - Functions are forward-declared so mutual recursion and cross-module calls work.
+
+### The formal backend's receiver convention
+
+**Every method's receiver crosses a boundary by POINTER, on both formal
+backends, for every struct.** This section is that rule; the row above it
+(`R Struct_method (Struct *self, args…)`) is the same rule, and the formal
+backend used to disagree with it on exactly one shape.
+
+| struct | receiver at the boundary | who owns the storage |
+|---|---|---|
+| two or more fields | the address of a frame of 8-byte slots, one per field, in declaration order | the caller, for the whole call |
+| exactly one field | the address of a **one-word cell** | the caller, for the whole call |
+| a method with no mutating convention (`self`) | the value, by register | the callee's copy |
+
+So `self.f = x` in a method of either shape writes into storage the caller still
+owns, and the write is visible without a convention of its own. Two consequences
+are worth stating because they are what a client has to know:
+
+- **A mutating method's return register carries the DECLARED return value and
+  nothing else.** `def pop(mut self) -> Int` is one function with two effects:
+  the receiver is updated through the pointer, and the popped element comes back
+  in the return register. It used not to be lowerable — the return register was
+  the receiver, so a method that both changed the receiver and produced a value
+  had nowhere to put the value — which is why `std/collections/binary_heap.mojo`
+  did not build and why 165 files behind it did not either.
+- **The mutating conventions are `mut self`, `out self` and `inout self`.**
+  `inout self` names the same convention as `out self` here; it is a different
+  spelling, not a different ABI.
+
+A receiver that is a method of a one-field struct is the case worth reading twice,
+because the struct's *whole state* is one word: `self._value` and `self` are the
+same storage (`formal/build.py`'s `_rewrite_self_fields`), which is why passing
+the receiver by pointer is the only way a store to it can reach the caller at
+all. A receiver passed by value there would be a copy, and the caller would keep
+the old word.
+
+**This is a change to a boundary contract, and the reason it is a fix rather than
+a break is that the old convention was not describable in one.** It only worked
+for a call in statement position: `c.bump(5)` became `c = Cell_bump(c, 5)`, and a
+mutator call in an argument position (`sink(c.bump(5))`) or a call into another
+module had nowhere to put that store and silently dropped it — the callee
+computed the new value, the caller kept the old one, and both architectures
+agreed on the wrong answer. See `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md`
+and the commit on `work/formal15-mutator-return-abi`.
+
+**A client calling one of these symbols from C needs no declaration of its own**
+if it follows the row above: `int64_t pop(struct Cell *cell)` for
+`def pop(mut self) -> Int`, with `*cell` the receiver's current value on entry
+and the updated value on exit. A C client that wants the receiver's value
+*returned* instead — which is what a caller written against the old convention
+was effectively doing — is reading a register the callee never promised.
 
 ### Exception-handling entry points
 
