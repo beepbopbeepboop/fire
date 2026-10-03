@@ -19,6 +19,43 @@ the one program that would BUILD if the import stopped being what refuses it,
 since a decorator on this path is parsed and never applied. Measured: 7/7
 groups in that file pass.
 
+**Update 2026-10-03: one of the two measurements under §"What I saw" was a
+false diagnosis, and it is fixed — which matters because a false diagnosis is
+what makes a missing capability look like a binding bug.** §2 measured "a
+callable argument is refused outright … The message is the read-before-store one:
+`f`/`dbl` is read as a VALUE and the register allocator gives the name a home
+because the function assigns it somewhere, so the image cannot say 'unbound'."
+The refusal was real; the sentence was not, in every clause. Both this emitter and
+the allocation walk know `dbl` is not a local — which is why neither gave it one
+— so they do not "disagree", and nothing was assigned anywhere. What is true is
+that a first-class function has no representation on this path at all: a value is
+one 64-bit word and a function is a code address, so there is nothing for that
+word to hold.
+
+`formal/model.py::function_value_refusal` now says that, and both backends raise
+it (`_no_home` in each) when the unplaceable name is a function of this image.
+Measured, both spellings and both architectures:
+
+```
+$ printf 'def dbl(x: Int) -> Int:\n    return x * 2\n\ndef main(n: Int) -> Int:\n    var g = dbl\n    return g(5)\n' > .tmp/fv.mojo
+$ python3 fire.py build --formal --no-prove -o .tmp/fv .tmp/fv.mojo
+build: main: 'dbl' is a FUNCTION, and a function is not a value on this path: … a value is one 64-bit word
+       and a function is a code address, so there is nothing for that word to hold …
+$ python3 fire.py build --formal --backend=x86_64 --no-prove -o .tmp/fv .tmp/fv.mojo
+build: main: 'dbl' is a FUNCTION, and a function is not a value on this path: …
+```
+
+Pinned by `test_formal_run.py`'s `REFUSAL_CASES`:
+`a_function_name_read_as_a_value_is_named_as_one` and
+`a_function_name_passed_as_an_argument_is_named_as_one` — two spellings because
+they reach the read differently, and the second is the one a
+`functools.reduce(add2, [1,2,3], 0)` would be.
+
+**This does not make `functools` writable and is not a step towards it**: the
+construct is still refused, and refused for the right reason now. What it removes
+is the last message in this family that sent a reader to look at the register
+allocator.
+
 **What is still exactly as below, and is the whole of the remaining work:**
 nothing here is module-shaped. Step 1 (a first-class function value) is a
 lowering in both backends plus a representation rule, and the representation
@@ -70,11 +107,12 @@ assumed:
 * **A callable argument is refused outright.** `functools.reduce(add2, [1,2,3], 0)`
   does not lower, and neither does the same shape with BOTH functions in the
   caller's own file (`def call2(f, a): return f(a)` called as `call2(dbl, 5)`),
-  so it is not a dylib-boundary problem. The message is the read-before-store
-  one: `f`/`dbl` is read as a VALUE and the register allocator gives the name a
-  home because the function assigns it somewhere, so the image cannot say
-  "unbound". With the name coming from an imported module the failure is even
-  blunter: `the library would bind 1 symbol(s) that nothing provides: f`.
+  so it is not a dylib-boundary problem. **The message this bullet used to
+  quote was a false diagnosis and has been replaced** — see the 2026-10-03 note
+  at the top: it is now `model.function_value_refusal`, which says a function is
+  a code address and a value here is one 64-bit word. With the name coming from
+  an imported module the failure is still blunter, and still a different one:
+  `the library would bind 1 symbol(s) that nothing provides: f`.
 * **A decorator is silently DROPPED.** `@tag` on a function and `@unique` on a
   class both build, and neither the decorator body nor anything it was supposed
   to enforce ever runs (measured with a `printf` inside the decorator: no

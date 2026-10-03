@@ -1684,6 +1684,15 @@ dylib_exports: list = None, globals_base: int = None,
         if "." in name:
             return M.field_access_refusal(name, self.func_name or "<module>",
                                           name.split(".", 1)[0], holder)
+        # A FUNCTION NAME read as a value is not an unplaceable name: both this
+        # emitter and the allocation walk know it is not a local, which is why
+        # neither gave it one, and the allocator sentence below is false in
+        # every clause. Named here for the reason `model.function_value_refusal`
+        # gives — a first-class function has no representation on this path at
+        # all, so the message says that instead of blaming the allocator.
+        if name in self._functions:
+            return M.function_value_refusal(name,
+                                            self.func_name or "<module>")
         return M.unresolved_name_refusal(
             name, self.func_name or "<module>",
             "the register allocator collected no home for it, so the emitter "

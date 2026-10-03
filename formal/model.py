@@ -22927,6 +22927,41 @@ def unresolved_name_refusal(name: str, fn_name: str, why: str) -> str:
             f"source says 5")
 
 
+def function_value_refusal(name: str, fn_name: str) -> str:
+    """Why a FUNCTION NAME cannot be read as a value, in its own words.
+
+    `def dbl(x): …` followed by `call2(dbl, 5)` — or by `var g = dbl` — reaches
+    the name as an ordinary read, and the read finds no home for it because a
+    function is not a local, a receiver field, or a folded module constant. The
+    refusal that stood there was `unresolved_name_refusal`'s, whose `why` clause
+    is *"the register allocator collected no home for it, so the emitter and the
+    allocation walk disagree about this function's locals"*.
+
+    **Every clause of that is false, and it is false in the direction that costs
+    a reader the most.** The emitter and the allocation walk agree perfectly:
+    both of them know `dbl` is not a local, which is why neither gave it one.
+    What is true is that a first-class function has no representation on this
+    path at all \u2014 one word is a value and a function is a code address, so there
+    is nothing for the word to hold (`pointer_value_model` is what says what a
+    word can and cannot denote). Measured on this tree, both spellings above
+    were refused with the allocator sentence.
+
+    So the message says what the construct is, which is the same repair
+    `UNIMPLEMENTED_BUILTINS` and `FRAME_IDENTITY_CALLS` are: name the thing
+    instead of the machinery that failed to hold it.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a FUNCTION, and a function is not a value on "
+            f"this path: it has no representation here \u2014 a value is one 64-bit "
+            f"word and a function is a code address, so there is nothing for "
+            f"that word to hold, and passing one as an argument, storing one in "
+            f"a container, or returning one is refused rather than answered "
+            f"with a number that means nothing. `formal/hostmods/` has no "
+            f"module that hands back a callable for the same reason "
+            f"(`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"it directly, or move the work into a `def` and pass its results")
+
+
 def member_chain_text(expr) -> str:
     """`a.b.c` for a MemberExpr chain, spelled the way the source spells it.
 

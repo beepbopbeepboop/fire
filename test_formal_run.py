@@ -12350,6 +12350,36 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # they no longer say what this paragraph says about them; they are here
 # because the diagnosis they record is a diagnosis about a refusal.
 REFUSAL_CASES = [
+    # A FUNCTION NAME in a value position, which is the first thing any
+    # first-class-function work hits and the reason `functools` is not a host
+    # module (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # The refusal used to be the unresolved-NAME one, whose reason clause is
+    # "the register allocator collected no home for it, so the emitter and the
+    # allocation walk disagree about this function's locals" — false in every
+    # clause: both know `dbl` is not a local, which is why neither gave it one,
+    # and what is actually true is that a function is a code address and a value
+    # here is one 64-bit word. The needle is the clause that names the
+    # CONSTRUCT, so a change that went back to blaming the allocator fails.
+    #
+    # Two spellings, because they reach it differently and the second is the one
+    # a `functools.reduce(add2, [1,2,3], 0)` would be: the first stores the name
+    # in a local, the second hands it straight to a callee's parameter.
+    ("a_function_name_read_as_a_value_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = dbl\n"
+     "    return g(5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+    ("a_function_name_passed_as_an_argument_is_named_as_one",
+     "def dbl(x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def call2(f: Int, a: Int) -> Int:\n"
+     "    return f + a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    return call2(dbl, 5)\n",
+     "refuse:is a FUNCTION, and a function is not a value on this path", None),
+
     # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
     # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
     # used to open with says about them.  What is left of that history is worth
