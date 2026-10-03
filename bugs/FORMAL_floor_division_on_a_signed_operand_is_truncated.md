@@ -113,6 +113,24 @@ here rather than attempted.
    `KNOWN_DIVERGENCES` **in the same commit**, which is the anti-rot: a known
    construct left in that table stops being measured the day it is fixed.
 
+## What the corpus looks like once this is accounted for
+
+A 500-seed arm64 run with this divergence and the other known ones classified
+(`tools/formal_fuzz.py --seeds 1000-1499 -j 2`, 2026-10-03): **238 agree, 64
+refused, 198 diverged — every one of the 198 attributed — 0 errors, 0
+unexplained.** The attribution split is 89 `%`, 28 `//`, 74 `s[i]`, 7 pairs.
+
+That number is the argument for doing this first. Two thirds of the corpus's
+disagreements with CPython are `%` and `//` between them, so fixing them is what
+turns the fuzzer from a machine that reports the same three known divergences
+into one that can find the next one — and the next tier is `s[i]`, which is
+`bugs/FORMAL_string_value_model.md`'s to answer, not this file's.
+
+The x86-64 arm over 200 of the same seeds is the same picture with the same
+counts scaled (86 agree, 33 refused, 81 diverged, all attributed), which is the
+result to expect from a rule both backends read from `formal/model.py` and
+`formal/types.py`.
+
 ## Reproducing
 
 ```console
