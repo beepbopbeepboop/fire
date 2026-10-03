@@ -10670,10 +10670,87 @@ class ValueKinds:
             return
         self.locals[name] = kind
 
-    def _bind_value(self, name, value) -> None:
-        """Bind `name` to what `value` holds, defaulting an unclassified
-        non-container value to a word (see the note on kinds)."""
-        self._bind(name, self._value_kind(value), own=self._own_shape_of(value))
+    def _bind_value(self, name, value, ann=None) -> None:
+        """Bind `name` to what `value` holds — `_kind_with_ann` then `_bind`."""
+        kind, own = self._kind_with_ann(value, ann)
+        self._bind(name, kind, own=own)
+
+    def _kind_with_ann(self, value, ann=None):
+        """`(kind, evidence)` for a binding, with the DECLARED type folded in.
+
+        `ann` is the `type_ann` of the statement doing the binding, and it is
+        read only to IMPROVE an answer the value could not give.  That is the
+        whole of the rule and it is one-directional on purpose: the value's own
+        shape is a direct statement about what flows into the name, while the
+        annotation is metadata about what the name is FOR — which is the reading
+        `formal/build.py`'s `AssignStmt` arm already takes ("type_ann is
+        metadata, not a storage decision").  So an annotation can replace a
+        DEFAULT and never a claim, and `var x: String = 5` still classifies as
+        the integer the literal says it is.
+
+        The case this exists for is the one where the default was the only thing
+        there was.  Measured, both architectures, before this reader:
+
+            from os.path import dirname, abspath
+
+            HERE = dirname(abspath(__file__))          # a module-global slot
+
+            def main(n):
+                s: String = HERE                       # annotated String
+                print(s)                               # -> 105553157226576
+
+        `HERE` is a module-level name holding a `char *`, so it is not a local
+        of `main` and `global_slot_kind` claims nothing about it (`_body_store_shape`
+        asks only of a bare-name callee, deliberately); `kind_of` then returned
+        None, `_value_kind` turned that into `INT_KIND` — this model's default
+        for a word — and `print` rendered the interned path as a DECIMAL.  A green
+        build, an exit status of 0, and an address printed as though it were the
+        string.  The declaration is in the source and says `String`; the reader
+        for it is `_annotation_kind`, which is the same vocabulary test
+        `_param_list`'s parameter seeding uses so a parameter and an annotated
+        assignment of the same spelling cannot answer differently.
+
+        BOTH statement forms are covered and that is not tidiness: `var d: T = x`
+        parses as a `VarDecl` while `d: T = x` — the same text without the
+        keyword, and the spelling this repository's own files use — parses as an
+        `AssignStmt` carrying a `type_ann`.  Only the `AssignStmt` arm reached
+        the reader at first, which is why the measurement above was still an
+        address after the first attempt.
+        """
+        own = self._own_shape_of(value)
+        kind = self._value_kind(value)
+        if own is None and ann is not None:
+            declared = self._annotation_kind(ann)
+            if declared is not None:
+                kind, own = declared, declared
+        return kind, own
+
+    def _annotation_kind(self, ann):
+        """What a declared type says a name holds, or None.
+
+        The vocabulary test `_param_list`'s parameter seeding uses — `int_names`
+        and `string_names` are the build's own annotation vocabularies, read
+        from `formal/types.py` by both backends — and it answers None for
+        everything else, which is the safe direction: a container annotation
+        (`List[Int]`), a `-> T` return type in a position that is not a
+        declared type, and a name that is not in either vocabulary leave the
+        value's own classification exactly as it was.
+
+        `String` is the only annotation that changes an answer, and that is not
+        an accident of this path: a string here is a `char *` and an integer
+        here is a word, so the two are indistinguishable except by a
+        declaration — which makes the declaration the only evidence there is,
+        and makes `None` for everything else the conservative answer rather than
+        the convenient one.
+        """
+        text = ann.strip() if isinstance(ann, str) else None
+        if not text:
+            return None
+        if text in self._string_names:
+            return STR_KIND
+        if text in self._int_names:
+            return INT_KIND
+        return None
 
     def _own_shape_of(self, value):
         """`kind_of(value)`, or None when that answer is a fallback.
@@ -10847,12 +10924,18 @@ class ValueKinds:
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
-                self._bind_target(s.target, self._value_kind(s.value),
-                                  own=self._own_shape_of(s.value))
+                # `d: String = x` is an `AssignStmt` with a `type_ann` and not a
+                # `VarDecl`, so the declared-type reader has to be asked here as
+                # well — see `_kind_with_ann`, whose docstring carries the
+                # measurement of what happens when only one of the two arms asks.
+                kind, own = self._kind_with_ann(s.value,
+                                                getattr(s, "type_ann", None))
+                self._bind_target(s.target, kind, own=own)
                 self._note_construction(s.target, s.value)
                 self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
-                self._bind_value(s.name, s.value)
+                self._bind_value(s.name, s.value,
+                                 ann=getattr(s, "type_ann", None))
                 self._note_construction(s.name, s.value)
                 self._note_field_stores(s.name)
             elif isinstance(s, F.AugAssignStmt):
@@ -20028,7 +20111,56 @@ def _comptime_statement(stmt) -> bool:
     return type(stmt).__name__ == "ComptimeVarStmt"
 
 
-def collect_module_symbols(stmts: list) -> dict:
+def builtin_module_constants(source_path: str) -> dict:
+    """`{name: value}` for the module-level names the BUILD can answer.
+
+    One name today, and the list is short on purpose: a name belongs here only
+    because the build was HANDED the fact, not because the source wrote it.
+
+    `__file__` is the path of the file being compiled.  It was refused by name
+    before this — `'__file__' has no home` — on the reasoning recorded in
+    `_UNRESOLVED_NAME_ALLOWED` ("module attributes, which are strings by the
+    language and **identical in every program this path can compile**"), which
+    is false of this one and only this one: every other name on that list has
+    the same value whatever file reads it, and `__file__` is a different string
+    in every file.  So it belongs here rather than there, and the honest way to
+    hold a value that differs per unit is the table a per-unit constant already
+    lives in: `collect_module_symbols` seeds it, the module-constant
+    substitution puts the literal at every read, and a dylib publishes it the
+    way it publishes every other folded constant.
+
+    Two properties make the value right rather than merely plausible:
+
+      * it is `abspath`, not the spelling the caller used.  CPython has made
+        `__file__` absolute for the entry script and for imported modules since
+        3.9, and the target here is 3.14, so a relative path would be a
+        well-formed wrong answer for `os.path.dirname(os.path.abspath(__file__))`
+        — the exact spelling `tools/bootstrap_verify.py` and
+        `tools/audit_selfhost_struct_fields.py` use;
+      * it is the SOURCE's path, which is the file the build was handed.  Mojo is
+        a Python superset and this path compiles `.py` directly, so for a `.py`
+        file it is that file's own path — the same value CPython would report for
+        the same file.  It is NOT resolved through symlinks, because CPython does
+        not do that either and a `realpath` would invent a difference.
+
+    A source binding of the same name WINS: the table is seeded before the
+    statement loop and the loop's own `table[name] = …` overwrites it, so
+    `__file__ = "x"` at file level is an ordinary module-level constant rather
+    than a conflict between the language and the build.
+
+    **What this is not:** it is not `sys.argv`.  `argv` is the process's command
+    line, which arrives in registers the entry stub overwrites before the first
+    statement runs, so there is nothing for the build to hold —
+    `bugs/FORMAL_module_state_no_storage.md` §(4) is right about that one and
+    this doc's author grouped `__file__` with it by shape rather than by cause.
+    A source the BUILD was handed is not a source that is gone.
+    """
+    if not source_path:
+        return {}
+    return {"__file__": os.path.abspath(source_path)}
+
+
+def collect_module_symbols(stmts: list, source_path: str = None) -> dict:
     """`{name: GlobalSymbol}` for every module-level binding in `stmts`.
 
     Walks the module's OWN statement list, in order, which is the only place a
@@ -20100,6 +20232,22 @@ def collect_module_symbols(stmts: list) -> dict:
     shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
     known: dict = {}
+    # The names the BUILD can answer, seeded FIRST so a source binding of the
+    # same name overwrites one rather than conflicting with it
+    # (`builtin_module_constants`). They are in `table` and not in `known`,
+    # deliberately: `known` is the resolution scope for a module-level
+    # initializer, and a name no statement in this file bound is not something
+    # an initializer here may read to fold against. The seeding is what makes
+    # them readable, and `_substitute_module_constants` is the reader.
+    for name, value in (builtin_module_constants(source_path) or {}).items():
+        # `site="builtin"` and not `"assigned"`: no statement in this file bound
+        # the name, and the two consumers that want to tell a source-declared
+        # module-level name from one the build supplied cannot answer that
+        # question from `site` if both spell it the same way. It is named in
+        # `_why_unplaced`'s "the table is empty" test, which is the consumer
+        # that broke: a module that declares nothing used to say so.
+        table[name] = GlobalSymbol(name, folded_literal_node(value, None),
+                                   "builtin", None, 0)
     # EVERY FunctionDef at any depth, not the top-level ones. A `global G`
     # inside a method is a write to the module's `G` exactly as one inside a
     # free function is — the module is the scope either way, and the method's

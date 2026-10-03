@@ -354,10 +354,30 @@ store of ANOTHER computed global, so refusing every reader below it would refuse
    export rule publishes functions and folded constants, and `_emit_global_init`'s
    measurement says a `__DATA` data symbol is not honoured by this target's dyld,
    so it has to be reached by an imported FUNCTION. Unmeasured, and an ABI change.
-3. **`__file__`**, measured this round: `'__file__' has no home`. The same shape as
-   (1) — a source that does not exist on this path — and the reason
-   `tools/bootstrap_verify.py` and `test_runtime_header_scan.py` still do not reach
-   their own globals.
+3. **`__file__`** — **DONE (2026-10-02, `work/formal8-7`), and it was NOT the
+   same shape as (1) after all.** It was refused `'__file__' has no home`, which
+   this document read as "a source that does not exist on this path" and grouped
+   with `argv` for it. The measurement that separates them is one sentence: for
+   `argv` the source is gone, because the entry stub overwrites the kernel's
+   `argc`/`argv` before the first statement runs and nothing on this path has
+   them; `__file__` is the path of the file the BUILD WAS HANDED, so the source
+   exists, at build time, and the build is the authority on it.
+   `model.builtin_module_constants` seeds it into the module-level table as a
+   folded constant (`abspath`, which is what CPython reports since 3.9), the
+   ordinary substitution puts the literal at every read, and a dylib publishes
+   it in its manifest's `constants` — so `mylib.__file__` gives MYLIB's path
+   across the boundary, measured on both architectures and pinned by
+   `test_formal_module_attr.py`.
+   The three real files this document names now reach their NEXT refusal and no
+   longer this one: `tools/bootstrap_verify.py` stops at `sys.stderr` (§(2)+(3),
+   as its own table says) and `tools/audit_selfhost_struct_fields.py` at
+   `ast.ClassDef`, a module attribute that is a variable. `test_runtime_header_scan.py`
+   was not re-measured here.
+   `GlobalSymbol.site` is `"builtin"` for it, which is load-bearing rather than
+   bookkeeping: `__why_unplaced`'s "the table is empty" test has to be able to
+   tell a name the source declared from one the build supplied, or every
+   unplaced read in every module started claiming the module declares
+   module-level names.
 4. **A callee that declares nothing**, which is a value-model row rather than
    this one: `D = mk()` with an unannotated `mk` is still emitted as a sequence
    subscript. Filed as
@@ -665,11 +685,13 @@ that is worth seeing.
    be nothing in it. `sys.executable` is the same shape with a smaller gap —
    libSystem's `_NSGetExecutablePath` writes into a CALLER-SUPPLIED buffer, so
    what is missing is a place to put a path, and that IS this document's subject.
-   **`__file__` is this entry, measured 2026-10-02:** `'__file__' has no home`, on
-   both architectures, and it is what keeps `tools/bootstrap_verify.py` and
-   `test_runtime_header_scan.py` from reaching their own globals — both spell it
-   `os.path.dirname(os.path.abspath(__file__))`, so the whole expression is
-   unavailable rather than half of it.
+   **`__file__` was grouped with this entry and is not the same shape** — see
+   "What is still open" item 3, where it is now DONE. The distinction is the
+   whole of it: `argv`'s source is GONE (the entry stub overwrites it), and
+   `__file__`'s source is a fact the build was HANDED. **`sys.executable` stays
+   in this entry**, and it is the interesting half: libSystem has the call and
+   what is missing is a place to put its answer, which is storage rather than a
+   missing source.
 
 Two smaller remainders, both honest refusals rather than wrong answers, both
 named by `static_initializer_refusal_reason`: a container element that is itself

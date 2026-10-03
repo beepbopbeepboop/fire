@@ -467,10 +467,76 @@ def test_a_module_constant_is_readable_in_both_spellings(tmpdir, _shared,
     files = write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
     agrees_with_cpython(root, "prog", files, prog, verbose)
     m = manifest(module_dylib("mylib"))
-    check(m.get("constants") == {"CONST": 41, "S": "hello"},
-          f"the manifest does not record the module's folded constants, or "
-          f"records something else: {m.get('constants')!r} — a consumer cannot "
-          f"answer `mod.CONST` from a manifest that does not carry the value")
+    constants = m.get("constants") or {}
+    # The two the program uses are checked BY NAME rather than by dictionary
+    # equality, because the table now carries a third entry that is not this
+    # case's business and is right to be there: `__file__`, the module's own
+    # source path. It is a build-time fact about the file (`model.
+    # builtin_module_constants`), it is a folded module-level constant by every
+    # rule this file's other rows rely on, and an importer that reads
+    # `mylib.__file__` should get MYLIB's path rather than the program's — which
+    # is what CPython says. So the check is "the two named constants are here
+    # with these values, and anything else in the table is a name this module
+    # can answer", not "the table has exactly two entries".
+    for name, want in (("CONST", 41), ("S", "hello")):
+        check(constants.get(name) == want,
+              f"the manifest does not record the module's folded constant "
+              f"{name!r} (or records something else): {constants!r} — a "
+              f"consumer cannot answer `mod.{name}` from a manifest that does "
+              f"not carry the value")
+    check("__file__" in constants,
+          f"the manifest does not publish the module's own `__file__`, so an "
+          f"importer reading `mylib.__file__` would get the IMPORTER's path "
+          f"where CPython gives the module's: {constants!r}")
+
+
+def test_a_dotted_file_read_gives_the_MODULES_own_path(tmpdir, _shared,
+                                                       verbose):
+    """`mylib.__file__` is MYLIB's path, and `__file__` is the program's own.
+
+    The one module attribute that is a FOLDED CONSTANT rather than a variable,
+    and therefore the one attribute read across a dylib boundary that has a
+    real answer: the build was handed the module's source path, so the manifest
+    carries it the way it carries `CONST`, and the importer materializes the
+    same literal. What makes it worth its own case is WHICH path — a dotted read
+    that answered with the IMPORTER's path would be a plausible-looking wrong
+    answer in a shape nobody would look at twice, and the ordinary in-unit
+    substitution is exactly the machinery that could do it, because it has no
+    idea whose file it is standing in.
+
+    **Not compared against the CPython oracle**, and that is a property of the
+    construct rather than a gap in the case: the answer IS a path, and this
+    file's oracle runs the program from a `cpython/` copy of the tree with its
+    own file names (`prog.cpython.py`), so the two engines are necessarily
+    reading different files and the literal cannot match. What is comparable is
+    the property: each module reports ITS OWN source, and the two differ. That
+    is what this asserts, on both architectures — a dotted read that answered
+    with the importer's path would satisfy neither half.
+    """
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            '  printf("%s|%s|", mylib.__file__, __file__)\n'
+            "  return mylib.addup(1, 2)\n")
+    root = os.path.join(tmpdir, "dotted_file")
+    os.makedirs(root)
+    files = write_tree(root, {"mylib.mojo": LIB, "prog.mojo": prog})
+    fresh_cas()
+    want = os.path.join(root, "mylib.mojo")
+    for arch in ARCHES:
+        out = build(root, "prog", arch)
+        if not runnable(arch):
+            continue
+        code, stdout, _stderr = run(out)
+        check(code == 3, f"{arch}: exited {code}, want 3 (`addup(1, 2)`)")
+        got_lib, _, got_own = stdout.partition("|")
+        got_own = got_own.rstrip("|")
+        check(got_lib == want,
+              f"{arch}: `mylib.__file__` is {got_lib!r}, want MYLIB's own "
+              f"source {want!r} — the importer's path would be a plausible "
+              f"wrong answer in a shape nobody reads twice")
+        check(got_own == os.path.join(root, "prog.mojo"),
+              f"{arch}: `__file__` is {got_own!r}, want the program's own "
+              f"source")
 
 
 def test_a_constant_reaches_the_importer_through_a_package(tmpdir, _shared,
@@ -959,6 +1025,8 @@ TESTS = [
      test_a_submodule_chain_runs),
     ("`mod.CONST` and `from mod import CONST` both lower",
      test_a_module_constant_is_readable_in_both_spellings),
+    ("`mylib.__file__` is the MODULE's own path, and `__file__` the program's",
+     test_a_dotted_file_read_gives_the_MODULES_own_path),
     ("`pkg.LIMIT` — a constant the package re-exports",
      test_a_constant_reaches_the_importer_through_a_package),
     ("a STORE to another module's constant is refused, not dropped",

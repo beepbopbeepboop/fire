@@ -1,10 +1,21 @@
 # FORMAL_module_global_bound_to_a_non_literal_has_no_lazy_initializer: 5 files in slice repo-c, and the mechanism that would hold it already exists
 
-**Status: OPEN, measured on `master` (2026-10-02) while sweeping slice `repo-c`.
-NOT fixed here: the claim that owns the mechanism is
-`bug:FORMAL_module_state_no_storage`, and this filing also asks for a correction
-to that claim's doc, which is not this branch's to make.** The remaining causes
-are ranked in `bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md` §4.2 — this is
+**Status: PARTIALLY FIXED (2026-10-02, `work/formal8-7`): `__file__` is DONE and
+the two `REPO`/`HERE` files now reach their next refusal; the LAZY INITIALIZER
+this document's title names is still not what carries them.** What landed is
+`model.builtin_module_constants` — the build is handed the source path, so
+`__file__` is a build-time constant rather than a computed one, and the ordinary
+module-constant substitution carries it. `os.path.dirname(os.path.abspath(
+__file__))` now runs on both architectures and prints CPython's answer byte for
+byte; `tools/bootstrap_verify.py` stops at `sys.stderr` and
+`tools/audit_selfhost_struct_fields.py` at `ast.ClassDef`, neither of which is a
+storage fact. See "The next step" item 0.
+
+The claim that owns the mechanism is
+`bug:FORMAL_module_state_no_storage`, and both are this worker's, so the doc
+correction this filing asked for has been made in that document rather than left
+outstanding. The remaining causes are ranked in
+`bugs/FORMAL_sweep_work_map_2026-10-02_repo-c.md` §4.2 — this is
 the second-largest row (5 of the slice's 15 answerable files) and it is ONE gap
 wearing two messages.
 
@@ -70,11 +81,39 @@ restricted, decidable subset.
 
 ## The next step, in the order it should be done
 
+0. **`__file__` — DONE 2026-10-02 (`work/formal8-7`), and it was step 0 in
+   substance without appearing here.** The filing grouped `__file__` with
+   `sys.argv` because both spelled a name with no storage, and step 1 below is
+   the right repair for a name whose value is not known before the program runs.
+   `__file__` is not that: its value is the path of the file the build was
+   HANDED, so the build knows it, and the honest home for a value the build
+   knows is the module-level constant table rather than the lazy initializer.
+   `model.builtin_module_constants` seeds it (`abspath`, which is what CPython
+   reports since 3.9), the ordinary substitution materializes it at every read,
+   and the manifest publishes it so `mylib.__file__` crosses a dylib boundary as
+   MYLIB's path. Rows 1–3 (`REPO`, `HERE`, and every `sys`-side computed path)
+   now reach the value: `tools/bootstrap_verify.py`'s
+   `os.path.dirname(os.path.abspath(__file__))` runs on both architectures and
+   prints CPython's answer byte for byte, and both files this filing names move
+   to their next refusal (`sys.stderr`, `ast.ClassDef`).
+
+   **What this does NOT do is step 1**, and the distinction is the whole of the
+   measurement: nothing here runs an expression before the first read. The value
+   is computed at BUILD time, which is only sound because the expression is a
+   path the caller supplied.
 1. **Extend the lazy initializer to run the module-level EXPRESSION at the first
    read and write the slot**, for a deliberately narrow and decidable subset — a
    call to an imported Mojo-side function, and arithmetic over literals — and
    refuse everything else exactly as it does now. This is the whole of rows 1–3
-   (`REPO`, `HERE`, and every `sys`-side computed path).
+   (`REPO`, `HERE`, and every `sys`-side computed path`) **that is not `__file__`**.
+   Note what item 0 changed about this step: `REPO` and `HERE` now hold their
+   values in a `__DATA` slot the module BODY fills, which is the mechanism this
+   document's §"the mechanism" section describes and which the `sweep6` round
+   measured landing. So what is left of step 1 is the **side-effect ordering**
+   question this filing already named and declined to claim: the lazy initializer
+   runs at the first READ rather than at module scope, so a program whose
+   module-level expression has an effect sees it happen later than CPython runs
+   it.
 2. **Then `b"…"` as a literal**, which is a different and cheaper question: a
    bytes literal is a blob whose words are the bytes' own, so
    `_static_container_words` may be able to compute it once it is told a bytes
@@ -85,7 +124,7 @@ restricted, decidable subset.
    failure is narrower: `_static_container_words` gave up, and **its own message
    is the thing to read first** — it says why.
 
-## A doc correction this filing is asking for, and is not making
+## A doc correction this filing asked for — MADE, 2026-10-02
 
 `bugs/FORMAL_module_global_string_elements_is_a_storage_decision.md` states, as
 current fact:
@@ -99,8 +138,14 @@ flag word described at `formal/model.py:17745`, `__DATA` written by
 `build_data_image`). That
 document also correctly says its own quoted refusal is stale. **A reader who
 follows its four-step next step would rebuild machinery that is already there**,
-which is the failure mode this repository's docs are most often written to avoid,
-so the correction is worth making by whoever owns the claim.
+which is the failure mode this repository's docs are most often written to avoid.
+
+**The correction to `FORMAL_module_state_no_storage.md` this filing asked for is
+made in that document** (its "What is still open" item 3 and its item 3 in
+"What is left"): the two docs are this worker's, so asking across a claim
+boundary was the only reason it was outstanding. `FORMAL_module_global_string_
+elements_is_a_storage_decision.md` itself is untouched — it is not in this
+claim, and the paragraph above is its record either way.
 
 ## What this filing does not claim
 

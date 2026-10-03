@@ -1302,7 +1302,8 @@ def compile_formal(source_path: str, output: str = None,
     parked_prepare_refusal = None
     try:
         functions, structs, symbols, slots = _prepare_functions(
-            stmts, synthetic=True, extra_structs=imported_structs)
+            stmts, synthetic=True, extra_structs=imported_structs,
+            source_path=source_path)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
         # proper, so a refusal raised there — a method whose receiver is wider
@@ -1718,7 +1719,8 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # needs: a module-level store needs storage, and this path has none
     # (`bugs/FORMAL_module_state_no_storage.md`).
     functions, structs, symbols, slots = _prepare_functions(
-        stmts, synthetic=False, as_dylib=True)
+        stmts, synthetic=False, as_dylib=True,
+        source_path=source_path)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -9678,6 +9680,26 @@ def _comptime_bound_names(fn) -> set:
     return out
 
 
+def _declared_module_names() -> set:
+    """The module-level names THIS FILE declared, as opposed to the build's.
+
+    A second reader would be a second answer, so it is the one filter over the
+    published table rather than a new walk of the statements: a
+    `GlobalSymbol.site` of `"builtin"` is a name the BUILD supplied
+    (`model.builtin_module_constants` — today `__file__` and nothing else), and
+    a module that declares no names of its own must still be able to say so.
+
+    It matters because the unplaced-name refusal prints one of two sentences
+    depending on this, and the choice was made visible the moment `__file__`
+    became answerable: every module has that one entry now, so "the table is
+    empty" had become unreachable and every unplaced read was reported as "this
+    module declares no module-level name by that spelling" — which is true, and
+    was sent to a reader looking for a declaration in a file that has none.
+    """
+    return {name for name, sym in M.module_symbols().items()
+            if getattr(sym, "site", None) != "builtin"}
+
+
 def _why_unplaced(node, fn, frame_slots: dict) -> str:
     """The evidence this check had, in words, for `node`'s name.
 
@@ -9688,7 +9710,7 @@ def _why_unplaced(node, fn, frame_slots: dict) -> str:
     if sym is not None:
         return (f"it is a module-level name of this module "
                 f"({sym.site}), and its value is not one the build can fold")
-    if M.module_symbols():
+    if _declared_module_names():
         return ("this module declares no module-level name by that spelling, "
                 "and the reading function declares no local or parameter by "
                 "it either")
@@ -10073,7 +10095,8 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
 
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
-                       as_dylib: bool = False) -> tuple:
+                       as_dylib: bool = False,
+                       source_path: str = None) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
 
     `as_dylib` says this unit is being compiled as a LIBRARY rather than as a
@@ -10121,7 +10144,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # node walk inside a backend, and neither has the module statements in
     # hand.  Replaces, never merges — a dylib and its dependent are two units
     # and their globals are not one table.
-    symbols = M.collect_module_symbols(stmts)
+    symbols = M.collect_module_symbols(stmts, source_path)
     M.publish_module_symbols(symbols)
     # A top-level statement whose MEANING changes when the body is wrapped in a
     # function — a file-level `return`, `global`, `break`, a `yield`/`await` —

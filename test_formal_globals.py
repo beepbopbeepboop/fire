@@ -63,6 +63,24 @@ BACKENDS = ("arm64", "x86_64")
 # an address as if it were text — so each case binds the global to an annotated
 # local first. That annotation is not incidental: it is the ordinary Mojo way to
 # say what a name holds, and every case below uses it.
+#
+# The expected answer may be a callable of (tmpdir, name) instead of a string;
+# `run_case` calls it, and `__file___is_the_source_the_build_was_handed` is the
+# one case that needs it, for the reason its own comment gives.
+def __file__case(tmpdir, name):
+    """`<__file__>`, `<dirname(__file__)>`, `<dirname(dirname(__file__))>`.
+
+    The three lines `tools/bootstrap_verify.py:31` computes and this file's
+    last case prints, with the path the RUNNER chose for the source.  Not
+    written down as a literal because it is not the same path twice: it is
+    `<tmpdir>/<case name>.mojo`, and `tmpdir` is a fresh `TemporaryDirectory`
+    per run.
+    """
+    path = os.path.join(tmpdir, name + ".mojo")
+    here = os.path.dirname(path)
+    return f"{path}\n{here}\n{os.path.dirname(here)}"
+
+
 CASES = [
     # ── the case this whole capability exists for ──
     # The measured wrong answer before module-global storage was 5. The write
@@ -771,6 +789,80 @@ CASES = [
      "    v: Int = _B\n"
      "    print(v)\n"
      "    return 0\n", "6\n"),
+
+    # ── `__file__`, the one module-level name the BUILD can answer ──
+    #
+    # It was refused by name (`'__file__' has no home`) on the reasoning that
+    # module attributes "are strings by the language and identical in every
+    # program this path can compile" — which is true of the eleven other names on
+    # that list and false of this one, because `__file__` is a different string
+    # in every file. What the build was HANDED is the path of the file it is
+    # compiling, so the value is a build-time fact and it lives in the table a
+    # folded module constant already lives in.
+    #
+    # The expected value is not written down beside the case: it is computed
+    # from the source path the runner handed `fire.py`, which is the only honest
+    # way to pin it — a hand-written absolute path would go stale the moment the
+    # tree moved, and would be wrong for every reader but this one. The
+    # `os.path.dirname(os.path.abspath(__file__))` shape is
+    # `tools/bootstrap_verify.py:31` and `tools/audit_selfhost_struct_fields.py`
+    # verbatim, and `REPO = dirname(HERE)` is `bootstrap_verify.py`'s next line:
+    # the whole point is that a name bound to a CALL is a slot the body fills,
+    # and this row is what says the value in it is the build's and not zero's.
+    #
+    # The trailing `main(0)` is the same thing every container row above carries
+    # and for the same reason: the module body IS the entry, so `main` runs
+    # because the source says so.
+    ("__file___is_the_source_the_build_was_handed",
+     "from os.path import dirname, abspath\n"
+     "\n"
+     "HERE = dirname(abspath(__file__))\n"
+     "REPO = dirname(HERE)\n"
+     "\n"
+     "def main(n):\n"
+     "    s: String = __file__\n"
+     "    d: String = HERE\n"
+     "    r: String = REPO\n"
+     "    print(s)\n"
+     "    print(d)\n"
+     "    print(r)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", __file__case),
+
+    # The half of the row above that is about the ANNOTATION rather than about
+    # `__file__`, isolated so it cannot be read as "the case passes because
+    # `__file__` works".  `HERE`'s initializer is a call into another module's
+    # dylib, so `_body_store_shape` claims nothing about the slot's KIND (it
+    # asks only of a bare-name callee, deliberately), `global_slot_kind` is
+    # therefore None, and `kind_of(HERE)` is None — which `_value_kind` turns
+    # into this model's DEFAULT for a word.  Measured before the annotation was
+    # read, on BOTH architectures:
+    #
+    #     print(d)   ->   105553157226576
+    #
+    # An interned `char *` printed as a decimal, from a green build, with an
+    # exit status of 0.  `printf("%s", HERE)` in the same program printed `/a/b`
+    # throughout, so the value was never wrong — only the RENDERING was, and
+    # only because the one piece of evidence in the source (`d: String`) was not
+    # being read.
+    #
+    # The control is in the same program: `e = dirname(HERE)` has no annotation
+    # and is still classified from the call, so the row says the annotation
+    # IMPROVES an unknown rather than replacing a classification.
+    ("an_annotated_local_takes_its_type_from_the_annotation",
+     "from os.path import dirname, abspath\n"
+     "\n"
+     "HERE = dirname(abspath(\"/a/b/c.py\"))\n"
+     "\n"
+     "def main(n):\n"
+     "    d: String = HERE\n"
+     "    e: String = dirname(HERE)\n"
+     "    print(d)\n"
+     "    print(e)\n"
+     "    return 0\n"
+     "\n"
+     "main(0)\n", "/a/b\n/a\n"),
 ]
 
 # Cases that must be REFUSED, and why each one is a refusal rather than a wrong
@@ -1034,11 +1126,18 @@ def interpreter_stdout(tmpdir, name, files):
 
     The interpreter has no `__DATA`, no slot index and no image, so it cannot
     catch an addressing bug; it is here to catch a SEMANTIC one, and it shares
-    no code with either backend below the parser."""
+    no code with either backend below the parser.
+
+    The interpreter reads the SAME path the images are built from
+    (`<tmpdir>/<name>.mojo`, `write_sources`), not a `.interp.mojo` copy of it.
+    That was a `.interp.mojo` and it was invisible until a case's answer was the
+    source's own path: `__file__` is a fact about the file, so two spellings of
+    the same file are two different answers, and the harness was the thing that
+    made them differ. One path per case now, which is also what "the same
+    program" means.
+    """
     entry = files["prog.mojo"] if isinstance(files, dict) else files
-    src = os.path.join(tmpdir, name + ".interp.mojo")
-    with open(src, "w") as f:
-        f.write(entry)
+    src, _paths = write_sources(tmpdir, name, files)
     p = run([sys.executable, FIRE, "run", src], timeout=RUN_TIMEOUT)
     return p.returncode, p.stdout
 
@@ -1080,7 +1179,15 @@ def image_stdout(tmpdir, name, backend, files):
 
 
 def run_case(name, files, want_stdout, tmpdir, verbose):
-    want = want_stdout
+    # A case's expected answer may be a CALLABLE of (tmpdir, name) instead of
+    # a string, and one case needs that: `__file__` is the path of the source
+    # the build was handed, which is `<tmpdir>/<name>.mojo` — a path that is
+    # different in every run of this file, in every checkout, and on every
+    # machine. Writing it down beside the case would be a second answer to the
+    # same question and would go stale the moment the tree moved; computing it
+    # from the argument the runner itself passed to `fire.py` is the only way
+    # to pin the value rather than a value.
+    want = want_stdout(tmpdir, name) if callable(want_stdout) else want_stdout
     got = {}
     for backend in BACKENDS:
         result, err = image_stdout(tmpdir, name, backend, files)
