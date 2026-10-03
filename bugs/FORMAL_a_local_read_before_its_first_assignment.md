@@ -138,6 +138,58 @@ now an OVERCOUNT by however many `with … as y:` bodies read `y`. That directio
 is safe — it means the true figure is lower — and it is one of the three things
 to redo before the 233 means anything.
 
+### A FIFTH artifact class, and it is not about a statement shape at all: an
+### EDGE the CFG has that the language does not (FIXED, 7633d9e4)
+
+The four classes above are all "a name is bound somewhere this scan did not
+count".  This one is the opposite: no binding is involved, and the analysis
+invents a PATH.
+
+`formal/model.py::_build_cfg` ended with
+
+```python
+entry = new([])
+entry.succs += run(body, [], [entry.index])
+```
+
+`run` returns the blocks that **fall off the end** of a run.  Inside the body
+that list is exactly what a caller needs — they are the join's predecessors. At
+the TOP level it has no use at all, because control leaves the function there,
+and attaching it to `entry.succs` invented an edge from the entry block to every
+block the function can end in.  The entry block's OUT set is `seed` and nothing
+else: the parameters the CALLER stores.  `_definitely_stored` intersects
+predecessors, so the entry's set erased everything the body had stored, and every
+read at the END of a function was reported.
+
+The shape that reached the corpus is a **trailing `for`**, because a loop's
+`latch` is a fall-through whenever the loop is the last statement — so every read
+of a loop target inside the body of a trailing loop was refused:
+
+```python
+def resolve_extern(self, target_addrs):
+    for sym_name, pos, instr_len, kind in self.extern_refs:
+        if sym_name not in target_addrs:      # refused: 'sym_name' at line 775
+            raise ValueError(...)
+```
+
+That is `formal/arm64.py`'s `Assembler.resolve_extern`, verbatim, and it is why
+`formal/arm64.py`, `formal/macho.py` and `formal/macho_linker.py` were all
+`codegen` / `codegen/dependency` behind one method.  The same edge also refused
+`if n: p = 1 else: p = 2` followed by a bare `sink(p)`, and `try`/`with` whose
+bodies all store followed by a bare read.
+
+**Why every existing case missed it: they all end in `return`.**  `return` has no
+successor, `run` returns `[]`, and there is no edge to invent.  The gap is
+invisible in a table of shapes precisely because the table is made of `return`s.
+
+**Why dropping it is the sound direction, and not a weakening:** the edge could
+only ever REMOVE a name from a set, so it could only ever invent a refusal and
+never miss one.  `test_formal_read_before_store.py` gained ten rows in the same
+direction, including the two that must STAY refused — a trailing loop's body
+store read after the loop (`range(0)` reaches the read) and a trailing `while`'s
+— so "this removed a false refusal" and "this did not weaken the rule" are
+pinned in the same file rather than one of them being argued.
+
 ## The sibling the filing did not mention: `global` and no storage
 
 ```

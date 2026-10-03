@@ -10861,26 +10861,35 @@ EQ_DISPATCH_CASES = [
      "    return bump()\n",
      "refuse:G is read in bump() at `G + 1`", None),
     # The sibling the filing did not mention: the same name WRITTEN through a
-    # `global` declaration.  It USED to expect a refusal here — "there is no
-    # storage a write could outlive a frame in", which was true and which both
-    # emitters enforced by treating the declaration as a no-op, so CPython
-    # answered 6 and 6 where this path answered 10601485 and 5 on arm64 and 11
-    # and 5 on x86-64.  That sentence stopped being true when
-    # `formal-module-globals` gave a written module-level name a `__DATA` slot,
-    # and the row was left asserting a refusal the backend no longer owes —
-    # red on `master` as well as on the branch that found it.  That was recorded
-    # in a `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
-    # doc, now deleted with the row it was about; the decision and its
-    # measurement are in `bugs/FORMAL_module_state_no_storage.md`'s "Re-measured
-    # 2026-10-02" section, which named this doc's owner as the decider.  Option 1
-    # of that doc's two, and the one the tree's behaviour already implements:
-    # the program is RIGHT, so the row asserts the number.
+    # `global` declaration.  It is the one row in this file that used to expect
+    # a refusal, and it is CPython's answer now: the module-global SLOT landed
+    # (`formal-module-globals`), so there is somewhere for a write to outlive the
+    # frame that made it.  Both emitters used to treat the declaration as a
+    # no-op, so CPython answered 6 and 6 where this path answered 10601485 and 5
+    # on arm64 and 11 and 5 on x86-64.  That sentence stopped being true, and
+    # the row was left asserting a refusal the backend no longer owed — red on
+    # `master` as well as on the branch that found it, which is what
+    # `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+    # recorded before it was deleted with the row it was about.  The decision and
+    # its measurement are in `bugs/FORMAL_module_state_no_storage.md`'s
+    # "Re-measured 2026-10-02" section, which named that doc's owner as the
+    # decider: option 1 of its two, and the one the tree's behaviour already
+    # implements — the program is RIGHT, so the row asserts the number.  (Those
+    # old numbers and the refusal message are history, kept where they are still
+    # readable, in `mutated_module_global_refusal`'s docstring.)
+    #
+    # `formal/build.py`'s `_collect_shadowed_global_reads` is what makes the
+    # refusal disappear: it gates the finding on `declared_globals & assigned -
+    # set(M.module_slots() or ())`, so a name WITH a slot is not a finding.
     #
     # 12 is CPython's: `G` goes 5 -> 6 and both reads see 6.  Measured on both
     # backends on this tree, and the same number from `python3`.  The exit
     # status is the assertion and the empty stdout is the other half of it —
     # `main` RETURNS the sum rather than printing it, so an image that printed
-    # something and exited 0 would not pass.
+    # something and exited 0 would not pass.  The shape is a `return` OF the
+    # global rather than the bare increment `test_formal_globals.py`'s
+    # `write_int_through_global` already pins, so the two files are the same
+    # fact on two shapes.
     ("a_mutated_module_global_is_read_back_from_its_slot",
      "G = 5\n"
      "def bump():\n"
@@ -10891,7 +10900,7 @@ EQ_DISPATCH_CASES = [
      "    return G\n"
      "def main(n):\n"
      "    return bump() + rd()\n",
-     12, ""),
+     12, None),
 ]
 
 

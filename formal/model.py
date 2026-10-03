@@ -2889,6 +2889,29 @@ def _build_cfg(body) -> tuple:
     # answers correctly (it keeps the universe and so reports no read), so this
     # change SUBTRACTS a false edge and never creates an unreachable region —
     # the only direction in which removing an intersection could lose a refusal.
+    #
+    # …and the soundness argument, which is the reason dropping the edge could
+    # not lose a refusal: the edge could only ever REMOVE a name from a set, so
+    # it could only ever invent a refusal and never miss one.  Two more shapes
+    # the same refusal refused, both programs CPython runs:
+    #
+    #     def f(c):                      def f(rows):
+    #         if c: p = 1               for i in rows:
+    #         else: p = 2                   sink(i)
+    #         sink(p)          # refused 'p'
+    #                                    # refused 'i'
+    #
+    # The `for` half is the one that reached the corpus on arm64: the loop's
+    # LATCH is a fall-through whenever the loop is the function's LAST
+    # statement, so every read of a loop target inside the body of a trailing
+    # loop was reported — `formal/arm64.py`'s `Assembler.resolve_extern` (`for
+    # sym_name, … in self.extern_refs: if sym_name not in target_addrs:`)
+    # among them, which put the whole of `formal/` behind a codegen gap from one
+    # function.  (The `if`/`else` half is the `for`-free twin of the
+    # `one_arm_store_before_a_trailing_loop_still_refused` rows in
+    # `test_formal_read_before_store.py`: there a store in one arm really is not
+    # dominating and the refusal is correct; it was refused here because the
+    # ENTRY was also counted as a predecessor.)
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:

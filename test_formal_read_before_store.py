@@ -501,6 +501,63 @@ CASES = [
     ("for_target_is_stored_for_its_own_body_ok",
      "    for i in range(n):\n        sink(i)\n", "ok"),
 
+    #
+    # The same edge, from the other end: the block that falls OFF THE END is
+    # what `run` returns, so a body's last statement being a loop, a branch, a
+    # `with` or a `try` is what gives `run` something to attach.  A trailing
+    # `for` is the shape that reached the corpus, because the loop's LATCH is a
+    # fall-through whenever the loop is the last statement: every read of a
+    # loop target inside the body of a trailing loop was refused.  This is
+    # `formal/arm64.py`'s `Assembler.resolve_extern` — `for sym_name, pos,
+    # instr_len, kind in self.extern_refs:` then `if sym_name not in
+    # target_addrs:` — which put the whole of `formal/` behind one function's
+    # codegen gap.
+    # ── the LAST statement of the body: where control LEAVES the function ─
+    # Every case above ends in `return`, which is why none of them found this.
+    # `_build_cfg` used to attach `run`'s return value — the blocks that fall
+    # OFF THE END of the body — to `entry.succs`, inventing an edge from the
+    # entry block (whose OUT set is only the parameters the CALLER stores) to
+    # every block the function can end in. The fixpoint intersects
+    # predecessors, so the entry's empty set threw away everything the body had
+    # stored and every read at the end of a function was reported.
+    #
+    # A trailing `for` is the shape that reached the corpus, because the loop's
+    # LATCH is a fall-through whenever the loop is the last statement: every
+    # read of a loop target inside the body of a trailing loop was refused. This
+    # is `formal/arm64.py`'s `Assembler.resolve_extern` —
+    # `for sym_name, pos, instr_len, kind in self.extern_refs:` then
+    # `if sym_name not in target_addrs:` — which put the whole of `formal/`
+    # behind one function's codegen gap.
+    ("trailing_for_target_read_in_if_ok",
+     "    for i in range(n):\n        if i:\n            sink(i)\n", "ok"),
+    # The discriminator: a trailing loop whose BODY stores and whose store is
+    # read AFTER it is a real defect (`range(0)` reaches the read), and it must
+    # still be refused. This is the row that says the fix removed a false
+    # refusal rather than weakening the rule.
+    ("trailing_for_body_store_read_after_refused",
+     "    for i in range(n):\n        t = i\n    sink(t)\n", "refuse"),
+    ("trailing_if_else_both_arms_then_read_ok",
+     "    if n:\n        p = 1\n    else:\n        p = 2\n    sink(p)\n", "ok"),
+    ("trailing_with_body_store_then_read_ok",
+     "    with sink(n) as s:\n        p = 1\n    sink(p)\n", "ok"),
+    ("trailing_try_all_arms_store_then_read_ok",
+     "    try:\n        p = 1\n    except ValueError:\n        p = 2\n"
+     "    sink(p)\n", "ok"),
+    # A trailing `while` is NOT in the `ok` group, and that asymmetry is the
+    # shape of the real rule rather than an inconsistency in it: the loop body
+    # is not guaranteed to run, so `p` is genuinely unbound at `n == 0`. The
+    # bound is explicit so CPython terminates for every probe value.
+    ("trailing_while_body_store_then_read_refused",
+     "    i = 0\n    while i < n:\n        p = 1\n        i = i + 1\n"
+     "    sink(p)\n", "refuse"),
+    ("trailing_store_then_read_ok",
+     "    p = 1\n    sink(p)\n", "ok"),
+    ("trailing_unstored_read_refused",
+     "    sink(q)\n", "refuse"),
+    ("trailing_for_after_if_join_refused",
+     "    if n:\n        p = 1\n    for i in range(n):\n        sink(i)\n"
+     "    sink(p)\n", "refuse"),
+
     # ── names the check must NOT ask about ───────────────────────────────
     # A comprehension's target is bound inside its own scope, so a read of it
     # is not a read of an unstored local — the row a flat node walk gets
