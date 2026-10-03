@@ -7523,163 +7523,94 @@ def _sole_field_name(st) -> str:
     return name
 
 
-def _return_the_receiver(fn, wb=None) -> None:
-    """Make every exit of a one-field mutator RETURN its receiver.
+def _take_the_receiver_by_reference(fn, wb) -> None:
+    """Record that `fn` receives its receiver as the ADDRESS of a one-word cell.
 
-    The callee half of `model.receiver_writeback_name`. Three things, and the
-    first two are the ones that are easy to leave out:
+    The callee half of `model.receiver_writeback_name`, and it is now a MARKER
+    rather than a rewrite: both emitters read `fn._recv_ref_receiver` and do the
+    two instructions themselves, in the two places that own the question —
 
-      * a `return` with no value becomes `return <receiver>`, so an EARLY exit
-        hands the receiver back too. Rewriting only the fall-through would make
-        `if c: return` return whatever the return register happened to hold, and
-        the caller would store that over the object's value — a build-dependent
-        word, which is the whole class of defect this path refuses elsewhere;
-      * a body that can fall off its end gets a `return <receiver>` appended, so
-        no path returns nothing. `model.returns_on_every_path` is the reader for
-        that, not either backend's private `_always_returns`: this is a build
-        pass, and a pass that grew its own third copy of "does this body always
-        return" is how the two architectures end up disagreeing about it;
-      * a method that already returns a VALUE is refused, because one 64-bit
-        word is already spoken for and dropping one of the two silently is how a
-        program that builds computes the wrong answer. The declared return type
-        is the ordinary way to hit that and a literal `return 1` is the
-        undeclared one, so both are asked here.
+      * the PROLOGUE reads the word out of the cell (`LDR X19, [X0]` /
+        `mov R11, [RDI]`) so the body's `self._value` still rewrites to `self`
+        and every existing lowering of the body is unchanged;
+      * every EXIT writes it back, so a mutator that also returns a value has the
+        return register free for that value.
 
-    Runs BEFORE `_rewrite_self_fields`, which is what makes the appended
-    `return self` mean the new value: the rewrite turns `self._value` into
-    `self`, so a `return` placed after it reads the word the body just stored.
+    It replaces `_return_the_receiver`, which appended `return self` on every
+    path. That is not a refactor: three measured shapes on both architectures
+    dropped the write-back when it travelled in the return register — a mutator
+    that also returns a value (refused, which is what blocked
+    `std/collections/binary_heap.mojo`), a mutator call in an ARGUMENT
+    (`sink(c.bump(5))` printed 15 and left `c` at 10), and a mutator call whose
+    callee is in ANOTHER MODULE (`c=10`). `receiver_writeback_name` has the
+    three programs. A store through the caller's own storage has none of those
+    doors: it does not care what position the call is in, and it does not care
+    which image compiled the callee.
+
+    The returned-frame conflict is asked by `_refuse_two_hidden_word_conventions`
+    rather than here, because it needs `_returns_frame_struct` and that is
+    published by `_frame_receivers`, which runs AFTER this loop.
     """
-    if (getattr(fn, "return_type", None) is not None
-            or any(isinstance(n, F.ReturnStmt) and n.value is not None
-                   for n in M.iter_nodes(fn.body))):
-        # The MEMBER name, not the lifted one: the reader wrote `c.bump()` and a
-        # diagnostic that says `Cell.Cell_bump()` sends them looking for a
-        # function they never declared. It is carried by the write-back entry
-        # rather than sliced off the symbol for exactly that reason.
-        raise CodegenError(M.mutating_receiver_return_refusal(
-            getattr(wb, "owner", None) or fn.name,
-            getattr(wb, "member", None) or fn.name))
     recv = M.receiver_writeback_name(fn)
     if recv is None:
         return
-    for node in M.iter_nodes(fn.body):
-        if isinstance(node, F.ReturnStmt) and node.value is None:
-            node.value = F.IdentExpr(name=recv)
-    if not M.returns_on_every_path(fn.body):
-        fn.body = list(fn.body) + [
-            F.ReturnStmt(value=F.IdentExpr(name=recv), line=fn.line)]
+    fn._recv_ref_receiver = recv
 
 
-def _writeback_spelling(node) -> str:
-    """The receiver as the reader wrote it, for the refusal's sentence."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.MemberExpr):
-        obj = _writeback_spelling(node.obj)
-        return f"{obj}.{node.member}" if obj else str(node.member)
-    if isinstance(node, F.SubscriptExpr):
-        obj = _writeback_spelling(node.obj)
-        return f"{obj}[…]" if obj else "[…]"
-    return type(node).__name__
+def _refuse_two_hidden_word_conventions(functions, writebacks: dict) -> None:
+    """A one-field mutator that ALSO returns a frame is refused.
 
-
-def _apply_receiver_writeback(node, writebacks: dict) -> None:
-    """`c.bump(4)` as a statement -> `c = Cell_bump(c, 4)`, in place.
-
-    The caller half, and the reason it is a STATEMENT-shaped rewrite: the word
-    the callee handed back has to land in the binding the receiver was read
-    from, and a call in any other position has nowhere to put it. `x = c.bump()`
-    would read the receiver's new value as `x`, which is a different program
-    from the one written; so it is refused, as is a receiver this path cannot
-    store through. Both refusals are the trade the rest of this file makes — a
-    construct that cannot be lowered honestly is named, not emitted.
-
-    A NAME and nothing else, because a name is the one receiver this path can
-    store the answer into — a local's home. A field receiver (`h.cell.bump()`)
-    is already refused further out, by the rule that a method call on a frame
-    slot is not a call this backend lowers, so it never reaches here; a SUBSCRIPT
-    receiver (`items[0].bump(4)`) has no addressable storage on this path at
-    all. Both are named by `model.mutating_receiver_target_refusal` rather than
-    left to fail in an emitter, because a construct that cannot be lowered
-    honestly is named, not emitted.
-
-    The list arm is a `while` loop rather than a `for` because the rewrite
-    REPLACES an element with a different node: iterating a list while changing
-    its length is how a pass like this skips the statement after the one it
-    just rewrote.
-
-    `model.call_callee_name` rather than `getattr(call.func, "name", None)`,
-    and the two spellings it accepts are the whole of the difference.  This pass
-    runs AFTER `_rewrite_method_calls`, which replaces the callee of `c.bump[7]`
-    with `Cell_bump` and leaves the specialization brackets ON it — so the
-    callee node here is a `SubscriptExpr` over an `IdentExpr` and has no `name`
-    of its own.  Reading `.name` found nothing, `writebacks.get(None)` was None,
-    and the call was left alone: `c.bump[7](3)` on a one-field struct built, ran
-    and left `c` at 5 where the source says 15 — the receiver the callee handed
-    back was dropped, and the program computed the wrong answer with no
-    diagnostic anywhere.  `call_callee_name` is the reader both emitters already
-    use for this question (`arm64_codegen._specialization_of` delegates to
-    `comptime.specialization_name`), so the write-back and the call it rewrites
-    now name the callee the same way.
-
-    `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
-    list of `(condition, body)` TUPLES, so the hand-rolled recursion below
-    descended every `if` body and every `else` and stopped dead at the first
-    `elif` — and the construct it then missed is a STORE, so what came out was
-    not a refusal but a program that computed the wrong number. Measured, both
-    architectures, `c.bump(5)` in an `elif` arm of a one-field struct:
-
-        if k > 100: c.bump(100)
-        elif k > 0: c.bump(5)          # 10 + 5 = 15, and the image says 10
-
-    with the `if`/`else` twin of the same program answering 15 on both. That is
-    `_apply_receiver_writeback`'s own docstring's recorded defect ("the program
-    built, ran, and printed the value the caller had") reached by a door the
-    rewrite had already closed everywhere else, so this is the LAST of the four
-    rewrites the `elif` walk reached; see
-    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
-
-    The two `None` returns are the arm that means "handled, do not descend", and
-    each is the behaviour the hand-rolled walk had rather than a new decision:
-
-      * an `ExprStmt` is a STATEMENT, and nothing inside an expression is one —
-        this walk rewrites `c.bump(x)` into `c = Cell_bump(c, x)` only because it
-        is a statement whose value is a discarded call;
-      * a `CallExpr` is not descended either, so the calls this can refuse as a
-        value-position write-back are exactly the ones it used to refuse: a call
-        read out of a statement's own slot (`x = c.bump(5)`, `return c.bump(5)`).
-        A call nested in another call's ARGUMENTS is not among them, before or
-        after, and it does not need to be: the receiver is handed to the callee
-        by reference, so the store the mutator made is visible through the
-        caller's own binding — measured, `if k > 0: sink(c.bump(5))` leaves `c`
-        at 15 on both architectures.
+    The last shape the by-reference receiver does not cover, and it is about the
+    argument list rather than the return register: a function that returns a
+    frame takes a TRAILING hidden word (the address of a block the caller
+    reserved) and a by-reference receiver is the LEADING argument, so both fit
+    and nothing runs out. What has no answer is the pair — two conventions
+    describing one parameter list, with no measured order between them. Named by
+    `model.mutating_receiver_return_refusal`, which is why that diagnostic kept
+    its name while its subject changed: it is still about "a one-field mutator
+    that returns more than a word".
     """
-    def visit(n):
-        if isinstance(n, F.ExprStmt):
-            call = n.value
-            if not isinstance(call, F.CallExpr):
-                return None
-            wb = writebacks.get(M.call_callee_name(call.func))
-            if wb is None:
-                return None
-            recv = call.args[0] if call.args else None
-            if not isinstance(recv, F.IdentExpr):
-                raise CodegenError(
-                    M.mutating_receiver_target_refusal(
-                        wb.owner, wb.member, _writeback_spelling(recv)))
-            return F.AssignStmt(target=recv, value=call, line=n.line)
-        if isinstance(n, F.CallExpr):
-            wb = writebacks.get(M.call_callee_name(n.func))
-            if wb is not None:
-                recv = n.args[0] if n.args else None
-                raise CodegenError(M.mutating_receiver_value_refusal(
-                    wb.owner, wb.member,
-                    _writeback_spelling(recv) if recv is not None
-                    else "the receiver"))
-            return None
-        return n
+    for fn in functions:
+        if fn.name not in writebacks:
+            continue
+        if getattr(fn, "_returns_frame_struct", None) is not None:
+            raise CodegenError(M.mutating_receiver_return_refusal(
+                writebacks[fn.name].owner, writebacks[fn.name].member))
 
-    M.rewrite_tree(node, visit)
+
+def _plan_receiver_call_sites(fn, writebacks: dict) -> None:
+    """Record every receiver hand-off in `fn` as a by-reference argument.
+
+    The caller half, and it is `model.receiver_writeback_plan` rather than a
+    walk here for the reason that function's own docstring gives: the emitter has
+    to ask the same question at the same call node, and two walks that both
+    derive "is argument 0 of this call a receiver" is the disagreement that
+    produces a wrong number rather than a refusal.
+
+    What lands on the function is two things the emitters cannot work out for
+    themselves:
+
+      * `_recv_ref_sites` — `{id(call): ReceiverWriteback}`, so `_emit_call`
+        knows to hand argument 0 over as an ADDRESS. `struct_returned_frame_sites`
+        publishes its table the same way and for the same reason;
+      * `_address_taken` — the locals whose home must BE their storage, which
+        `_allocation_order` puts after every register-eligible name so they
+        spill. A copy into a scratch word and a copy back would need to be
+        ordered against every other argument of the call, and that ordering has
+        no answer on this path (`mutating_receiver_order_refusal`).
+
+    Replaces `_apply_receiver_writeback`, which rewrote the STATEMENT-position
+    call `c.bump(5)` into `c = Cell_bump(c, 5)`. Nothing is rewritten now: the
+    call is already the right lowering, because the callee writes through the
+    pointer the caller passed.
+    """
+    if not writebacks:
+        return
+    sites, address_taken = M.receiver_writeback_plan(fn, writebacks)
+    if not sites:
+        return
+    fn._recv_ref_sites = sites
+    fn._address_taken = tuple(address_taken)
 
 
 def _rewrite_self_fields(node, mapping: dict):
@@ -9134,9 +9065,8 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     runs EARLIER in the same pipeline and normalizes every `elif` pair into a
     LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
     assigned into). So this walk reached the arms by an accident of ANOTHER
-    pass's traversal, with nothing recording the dependency — and the two walks
-    that run before it, `_rewrite_self_fields` and `_apply_receiver_writeback`,
-    are still tuples by then and still miss every arm
+    pass's traversal, with nothing recording the dependency — and `_rewrite_self_fields`
+    is still tuples by then and still misses every arm
     (`bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`).
 
     A store's TARGET and a call's CALLEE are the two positions a name must not be
@@ -12097,8 +12027,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # shape is unanswerable anywhere later in the pipeline.
         _collect_one_field_receiver_rebinds(fn, method_owners.get(fn.name),
                                             structs_by_name)
+        # …and the OWNING STRUCT, published on every method so
+        # `model.declared_receiver_writeback` can ask the one-field question of a
+        # declaration without a `method_owners` table in hand. That is what lets
+        # the emitters read a by-reference receiver off a callee they did not
+        # compile, from `formal/imports.py`'s `external_declarations`, with the
+        # same rule — one attribute, two readers, no second derivation.
+        if method_owners.get(fn.name) is not None:
+            fn._owner_struct = method_owners[fn.name]
         if fn.name in writebacks:
-            _return_the_receiver(fn, writebacks[fn.name])
+            _take_the_receiver_by_reference(fn, writebacks[fn.name])
         # The two tables the receiver-position rewrites read, built HERE and
         # before both of them rather than beside their old callers, because a
         # rewrite whose evidence is computed after it has run is a rewrite that
@@ -12168,14 +12106,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # from a constructor.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name))
-        # …and the CALLER half of the one-field mutator write-back, after
-        # `_rewrite_self_fields` so the receiver it stores through is the same
-        # word the callee was handed (`c._value` is `c` by now, and it is `c`
-        # in the argument too). Before it would store through a spelling the
-        # emitter has already rewritten, which is a store to a name nothing
-        # binds.
+        # …and the CALLER half of the one-field mutator hand-off, after
+        # `_rewrite_self_fields` so the receiver is the same word the callee is
+        # handed (`c._value` is `c` by now, and it is `c` in the argument too).
+        # Before it would plan a site through a spelling the emitter has already
+        # rewritten, which is a call to a name nothing binds. Unlike the rewrite
+        # it replaces it is NOT a rewrite, so nothing is left behind for a later
+        # pass to find.
         if writebacks:
-            _apply_receiver_writeback(fn.body, writebacks)
+            _plan_receiver_call_sites(fn, writebacks)
     # A member read through a LITERAL, refused here for the same reason
     # `refuse_none_comparisons` is refused above — one of the two answers to the
     # same source was the word 0, and 0 is a plausible-looking number that is not
@@ -12307,6 +12246,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
                      star_imported_modules(stmts))
+    # …and the ONE shape the by-reference receiver cannot serve, asked now
+    # because it needs `_returns_frame_struct`, which the call above is what
+    # publishes. Both conventions want a hidden word and neither wants the
+    # other's register, so it is refused rather than ordered.
+    if writebacks:
+        _refuse_two_hidden_word_conventions(functions, writebacks)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so

@@ -17193,25 +17193,41 @@ MUTATING_RECEIVER_CONVENTIONS = ("out", "inout", "mut")
 
 
 def receiver_writeback_name(fn) -> object:
-    """The receiver a method must HAND BACK, or None when it need not.
+    """The receiver a method must hand BACK to its caller, or None.
 
-    **`out self` on a ONE-FIELD struct, and why the receiver has to come back
+    **`mut self` on a ONE-FIELD struct, and why the receiver has to come back
     at all.** A multi-field struct's receiver is the ADDRESS of a frame of
     8-byte slots, so `self.f = x` in the callee writes into storage the caller
     still owns and the write is visible with no convention and no help. A
     one-field struct's receiver IS its field: `_one_word_field_map` rewrites
     `self.f` to `self` and `c.f` to `c`, so the caller's local and the callee's
     parameter are the same word in two registers and a store to the callee's
-    copy is a store to a register the caller never reads back. Measured:
+    copy is a store the caller never reads back. Measured:
     `self._value = self._value + 4` inside `def bump(out self)` built on both
     architectures, ran, and printed the value the caller had — the new one is
     computed and dropped (`bugs/FORMAL_one_field_struct_mutating_method_is_a_no_op.md`).
 
-    So the callee RETURNS the receiver on every path and the caller stores it
-    back over the same expression it passed. The value is a plain word on both
-    sides, so neither backend's call path changes: the call already leaves its
-    result in the return register, and the store is the store the source's
-    `c.f = ...` would have been.
+    **HOW it comes back, and the change of 2026-10-03 is the whole of what this
+    docstring used to be about.** It used to be the return register: the callee
+    appended `return self` on every path and the caller stored that over the
+    expression the receiver was read from, which is only expressible when the
+    call is a STATEMENT (`formal/build.py`'s `_apply_receiver_writeback`). It is
+    now MEMORY: the caller passes the ADDRESS of the receiver's own storage and
+    the callee writes the value back through it on every exit. Three measured
+    facts forced it, each on both architectures, and all three are the same
+    defect — the write-back was dropped and the caller kept the old word:
+
+      * `mutating_receiver_return_refusal`, i.e. `def pop(mut self) -> Int`. The
+        return register was the receiver, so a method that both changed the
+        receiver and returned a value had nowhere to put the value. That is the
+        shape `std/collections/binary_heap.mojo`'s `pop` is, and refusing it
+        preempts every emitter refusal in that file;
+      * a mutator call in an ARGUMENT — `sink(c.bump(5))` — has no statement to
+        store into, so the rewrite left it alone: the callee computed 15, `sink`
+        printed 15, and `c` was still 10;
+      * a mutator call whose CALLEE IS IN ANOTHER MODULE is not in the
+        per-module table the rewrite is built from, so the store was never
+        generated: `from cellmod import Cell; c.bump(5)` printed `c=10`.
 
     None for anything else, and the two exclusions are both deliberate:
 
@@ -17220,7 +17236,8 @@ def receiver_writeback_name(fn) -> object:
         through — so there is nothing here to give back and guessing would
         invent a copy semantic the source did not ask for;
       * a struct that is not one field, whose receiver is an address and
-        therefore already shared.
+        therefore already shared — which is why the new mechanism changes
+        nothing for it and is invisible there.
     """
     convs = getattr(fn, "param_convs", None) or {}
     name = method_receiver_name(fn)
@@ -17237,12 +17254,14 @@ def receiver_writeback_name(fn) -> object:
 # name the construct — and re-deriving the owner from the key at refusal time
 # would be a second lookup that can disagree with the first.
 ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
-                                           "receiver owner member")
+                                           "receiver owner member decl")
 ReceiverWriteback.__doc__ = (
-    "`receiver` is the name to store the call's answer over; `owner`/`member` "
-    "are the class and the method as the source spells them, for "
-    "`mutating_receiver_target_refusal` and "
-    "`mutating_receiver_value_refusal`.")
+    "`receiver` is the local whose OWN STORAGE is handed to the callee as "
+    "argument 0 — the address, not the value; `owner`/`member` are the class "
+    "and the method as the source spells them, for the two refusals; `decl` is "
+    "the FunctionDef itself, which is how a call SITE learns whether the method "
+    "declares a return type and so has a value to put in a value position "
+    "(`mutating_receiver_value_refusal`).")
 
 
 def one_field_mutating_methods(functions, method_owners: dict) -> dict:
@@ -17252,8 +17271,15 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
     spelling `formal/build.py`'s `_struct_methods` gives it and the same one
     `_rewrite_method_calls` puts on the call site — so the call site joins on
     the name it already carries, with no second lookup and therefore no second
-    answer to "is this call a write-back". A table the call site cannot join on
-    is how those two drift apart.
+    answer to "is this call a receiver hand-off". A table the call site cannot
+    join on is how those two drift apart.
+
+    **`ReceiverWriteback.receiver` is a NAME, and it is also the ARGUMENT the
+    address goes in.** `formal/build.py` turns each entry into a `_recv_ref_receiver`
+    on the callee (its prologue reads the word out of the cell and every exit
+    writes it back) and a `_recv_ref_sites` table on each caller (its argument 0
+    is the address of that name's own storage). So the emitter needs no second
+    lookup to answer "is argument 0 of this call a receiver, and whose".
 
     `method_owners` is `formal/build.py`'s `{lifted name: StructDef}`: a
     FunctionDef carries no back-pointer to the class body it was written in, so
@@ -17275,79 +17301,326 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
         # rather than a second copy of that loop, because the one-field rebind
         # refusal needs the same two names for the same method.
         member = method_member_name(st, fn)
-        out[fn.name] = ReceiverWriteback(recv, st.name, member)
+        out[fn.name] = ReceiverWriteback(recv, st.name, member, fn)
     return out
 
 
-def mutating_receiver_return_refusal(owner: str, member: str) -> str:
-    """The diagnostic for a one-field mutator that also RETURNS a value.
+def mutating_receiver_address_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a mutator call whose receiver has no ADDRESS.
 
-    A formal value is one 64-bit word, so the word a one-field mutator hands
-    back is the receiver and there is no second word to return something else
-    in. Choosing one silently would drop the other, and which one is lost
-    depends on the method rather than on the program — so this asks rather than
-    picks. The two ways out are the two the language already has: give the
-    method a declared return type and no receiver write (so it is a reader of
-    the object, not a mutator of it), or split it into a mutator and a reader.
-    """
-    return (
-        f"{owner}.{member}() both changes its receiver and returns a value, and "
-        f"a formal value is one 64-bit word: on this path the word a one-field "
-        f"struct's mutating method hands back IS the receiver, so there is no "
-        f"second word to return anything else in, and dropping one of the two "
-        f"silently is how a program that builds computes the wrong answer. "
-        f"Split it into a method that changes the receiver and returns nothing, "
-        f"and one that reads it and returns the value — or make it read the "
-        f"receiver instead of writing it. The rule is "
-        f"`formal/model.py`'s `receiver_writeback_name`, and the shape is pinned "
-        f"by `test_formal_run.py`'s "
-        f"`one_field_mutator_with_a_return_value_is_refused`.")
-
-
-def mutating_receiver_value_refusal(owner: str, member: str, spelled) -> str:
-    """The diagnostic for a mutator call in a VALUE position.
-
-    The write-back is a store, so it needs a statement to be a statement in, and
-    `x = c.bump(4)` has none: reading the call's result instead would hand `x`
-    the object's new CONTENTS, which is a different program from the one
-    written — the source says the method changes the object and says nothing
-    about what it evaluates to. Refused rather than guessed, because the guess
-    is the defect this mechanism exists to remove wearing a different hat.
+    The write-back is a store through the receiver's own storage, so the caller
+    must be able to produce that storage's address. A NAME this path can place
+    (a local or a parameter, lowered to a stack slot exactly so it has one)
+    can; a SUBSCRIPT cannot — a formal value is one word with no address the
+    compiler took, and `items[0]` is a computed word rather than a place — and
+    neither can a call result. Refused rather than guessed, because the guess is
+    the defect this mechanism used to have wearing a different hat: passing the
+    VALUE where the callee expects the address made the callee store through a
+    number, and the caller's object kept the old word.
     """
     return (
         f"{owner}.{member}() is a one-field struct's mutating method, so the "
-        f"value it hands back IS the receiver, and the caller stores that over "
-        f"the expression the receiver was read from. It is called here as a "
-        f"VALUE rather than as a statement of its own, so there is nowhere to "
-        f"store it — and reading the call's result instead would hand the "
-        f"caller the object's new contents, which is a different program from "
-        f"the one written. Call `{spelled}.{member}(...)` as a statement of its "
-        f"own. (`formal/model.py`'s `receiver_writeback_name` is the rule.)")
+        f"value it computed has to be stored back through the receiver's own "
+        f"storage, which means the caller has to hand it the ADDRESS of that "
+        f"storage. {spelled} is not a place this path can take the address of: "
+        f"a formal value is one 64-bit word and nothing here computed a "
+        f"location for it. Bind it to a local first — `var it = {spelled}` "
+        f"then `it.{member}(...)` — which is the same computation and one "
+        f"store this path can lower. (`formal/model.py`'s "
+        f"`receiver_writeback_name` is the rule.)")
 
 
-def mutating_receiver_target_refusal(owner: str, member: str, spelled) -> str:
-    """The diagnostic for a mutating call whose receiver is not a plain name.
+def mutating_receiver_order_refusal(owner: str, member: str, spelled,
+                                    reader: str) -> str:
+    """The diagnostic for a mutator call and a read of the SAME receiver in one
+    argument list.
 
-    The write-back stores the callee's answer over the expression the receiver
-    was read from, and a NAME is the one such expression this path can store
-    through: a local has a home. A SUBSCRIPT has none — a formal value is one
-    word with no address the compiler took — so `items[0].bump(4)` has nowhere
-    to put the new value, and the alternative is the defect this whole mechanism
-    exists to remove: the callee computes the new value and the caller keeps the
-    old one, with both architectures agreeing on the wrong answer. A FIELD
-    receiver (`h.cell.bump()`) is a different refusal that fires earlier, by the
-    rule that a method call on a frame slot is not a call this path lowers, and
-    is not this one.
+    `f(c.pop(), c.field)` asks two questions whose answers this path cannot both
+    give in one order. The receiver's word lives in the storage the callee
+    writes, so `c.field` reads whatever is in there WHEN it is evaluated — and
+    the mutator's effect happens when the CALL is made. Left to right, the
+    callee runs first and `c.field` is the new value; run as an address
+    computation the mutator's store happens last and `c.field` is the old one.
+
+    Making the second answer the source's would mean evaluating one argument
+    before another, which no statement on this path says how to do, and getting
+    it wrong is a wrong NUMBER rather than a refusal: the program runs and
+    reports a value the source never wrote. Named instead.
     """
     return (
-        f"{owner}.{member}() is called on {spelled}, and the receiver of a "
-        f"one-field struct's mutating method is the struct itself, so the new "
-        f"value has to be stored back through the expression the receiver was "
-        f"read from. {spelled} is not a name this path can store through: a "
-        f"formal value is one 64-bit word with no address behind it, so there is "
-        f"no lvalue here. Bind it to a local first — "
-        f"`var it = {spelled}` then `it.{member}(...)` — which is the same "
-        f"computation and one store this path can lower.")
+        f"{owner}.{member}() is called in the same argument list that reads "
+        f"{reader}, the receiver it changes. The receiver's value is read out "
+        f"of the storage the callee writes, and this path evaluates a call's "
+        f"arguments before it makes the call, so the read would see the value "
+        f"from BEFORE {spelled}.{member}(...) ran — where the source means the "
+        f"one after. Take the two in separate statements, so the read is "
+        f"either unambiguously before or unambiguously after.")
+
+
+def statement_call_ids(fn) -> set:
+    """`id()` of every call that is an `ExprStmt`'s OWN value.
+
+    The one reader of "is this call's result thrown away", which is what
+    separates the two positions a by-reference receiver can appear in: a call of
+    its own (`c.bump(5)`) has nowhere to put a result and the callee's return
+    register is unobserved, and a call inside an expression (`x = c.pop()`,
+    `sink(c.pop())`) needs a real answer in it. An `ExprStmt` is a STATEMENT, so
+    nothing inside an expression is one — which is why this is the statement's
+    own `value` and not a search for a call with an unused result.
+    """
+    out = set()
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.ExprStmt) and isinstance(node.value, F.CallExpr):
+            out.add(id(node.value))
+    return out
+
+
+def mutating_receiver_value_refusal(owner: str, member: str, spelled) -> str:
+    """The diagnostic for a by-reference mutator's result used where there is
+    none.
+
+    Since the receiver stopped travelling in the return register, the call's
+    result IS the method's declared return value and nothing else. A method that
+    declares no return type has no result, so `sink(c.bump(5))` and
+    `x = c.bump(5)` have an expression position with nothing to put in it —
+    and what the callee happens to leave in the return register is the
+    fall-through zero, which is a number the source never wrote.
+
+    This is the boundary the old `mutating_receiver_value_refusal` drew, for the
+    same reason and with one fewer case: it used to fire on every mutator used as
+    a value, and now it fires only on one that has no value to give. The
+    mutator that DOES declare a return type — `BinaryHeap.pop() -> Self.T` —
+    is exactly the shape that was refused for a whole sweep row, and it builds.
+    """
+    return (
+        f"{owner}.{member}() changes its receiver and declares no return type, so "
+        f"the call has no value, and it is used as one here. On this path a "
+        f"one-field struct's mutating method hands the receiver back by WRITING "
+        f"through the address the caller passed, so the return register carries "
+        f"whatever the body fell off its end with. Give {spelled}.{member} a "
+        f"declared return type if the call is meant to produce one, or call it "
+        f"as a statement of its own. (`formal/model.py`'s "
+        f"`receiver_writeback_name` is the rule.)")
+
+
+def receiver_writeback_plan(fn, writebacks: dict):
+    """`({id(call): ReceiverWriteback}, [address-taken locals])` for one function.
+
+    The CALLER's half of `receiver_writeback_name`, and the table both emitters
+    read instead of re-deriving. A call whose callee is in `writebacks` is a
+    receiver hand-off: argument 0 is the address of a local's own storage, and
+    that local's home has to BE that storage — which is why the names come back
+    here and go into `formal/arm64_codegen.py`'s `_allocation_order` rather than
+    being copied into a spill slot around the call. A copy in and a copy out
+    would have to be ordered against every other argument, and that ordering is
+    `mutating_receiver_order_refusal`'s subject.
+
+    `id(call)` rather than the node, and the same key `struct_returned_frame_sites`
+    uses: a walk that hands the emitter a node it can look up beats one that
+    re-derives a callee name and can disagree about it. EVERY call site is
+    marked, whatever position the call is in, because with the store going
+    through memory a value position and an argument position are the same
+    lowering — which is the second and third of the three measurements
+    `receiver_writeback_name`'s docstring records.
+
+    Each value is `(ReceiverWriteback, the caller's name for the receiver)`. The
+    pair is not redundancy: `ReceiverWriteback.receiver` is the CALLEE's receiver
+    parameter (`self`, which is what the callee's prologue and exits need) and
+    the local the caller passes is spelled something else (`c`), and
+    `mutating_receiver_order_refusal` is about the caller's — so a table with
+    only one of the two compares `self` against a set of caller locals and never
+    matches.
+    """
+    sites, address_taken = {}, []
+    statements = statement_call_ids(fn)
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr):
+            continue
+        wb = (writebacks or {}).get(call_callee_name(node.func))
+        if wb is None:
+            continue
+        recv = node.args[0] if node.args else None
+        if not isinstance(recv, F.IdentExpr):
+            raise CodegenError(mutating_receiver_address_refusal(
+                wb.owner, wb.member,
+                receiver_spelling(recv) if recv is not None
+                else "the receiver"))
+        if id(node) not in statements and not declared_returns_a_value(wb.decl):
+            raise CodegenError(mutating_receiver_value_refusal(
+                wb.owner, wb.member, receiver_spelling(recv)))
+        # The CALLER's spelling of the receiver, alongside the callee's: the
+        # two are different names for the same word (`self` in the method, `c`
+        # at the call site) and the evaluation-order refusal is about the
+        # caller's, so a table carrying only the callee's would compare `self`
+        # against a set of caller locals and never match.
+        sites[id(node)] = (wb, recv.name)
+        if recv.name not in address_taken:
+            address_taken.append(recv.name)
+    _refuse_receiver_read_in_own_argument_list(fn, writebacks, sites)
+    return sites, address_taken
+
+
+def declared_returns_a_value(decl) -> bool:
+    """Whether `decl` has a value a caller can read.
+
+    The DECLARED return type, or a `return` with an expression: a method that
+    returns a bare literal declares nothing and this is the undeclared spelling
+    of the same fact, so both are asked — `formal/build.py`'s
+    `_return_the_receiver` asked exactly these two before the return register
+    stopped carrying the receiver.
+
+    A declared `None` return is not a value here: `-> None` is `void` at the ABI
+    (`doc/ABI.md`'s scalar table), so it is read as no value rather than as one
+    word that happens to be spelled `None`.
+    """
+    if getattr(decl, "return_type", None) is None:
+        return False
+    if str(getattr(decl, "return_type")).strip() in ("None", "NoneType"):
+        return False
+    return True
+
+
+def declared_receiver_writeback(decl):
+    """`decl`'s receiver, when the declaration says it is a one-field MUTATOR.
+
+    **The one reader both backends ask about a callee, for all three ways a
+    callee can be reached.** `formal/build.py` marks the definitions a module
+    compiles (`_recv_ref_receiver`), and `formal/imports.py`'s
+    `external_declarations` parses an imported module's own source so a call
+    ACROSS a dylib boundary can ask the same question. That second half is not a
+    convenience: before it, a cross-module `c.bump(5)` was passed by value to a
+    callee that dereferences its argument 0, and the write-back the per-module
+    table could not see was dropped — measured, `c=10` where CPython says 15, on
+    both architectures.
+
+    So the answer is read from the DECLARATION, never derived at the call site.
+    A call site that had to decide for itself would have two answers (by value,
+    by reference) and picking either one silently is the defect this convention
+    exists to remove.
+
+    The owner is `_owner_struct`, annotated by whoever parsed the declaration:
+    `formal/imports.py`'s `external_declarations` finds the `StructDef` the
+    method was written in, and `formal/build.py` has the same fact in its
+    `method_owners` table. Without one the answer is None — a free function is
+    not a receiver, and a declaration whose owner could not be resolved must not
+    be guessed into one.
+    """
+    if decl is None:
+        return None
+    owner = getattr(decl, "_owner_struct", None)
+    if owner is None or not struct_is_one_field(owner):
+        return None
+    return receiver_writeback_name(decl)
+
+
+def receiver_address_refusal(callee: str, receiver: str) -> str:
+    """The diagnostic for a receiver this function cannot hand over by ADDRESS.
+
+    The by-reference convention is the whole of how a one-field mutator's
+    effect reaches its caller, so a receiver with no address has no lowering:
+    passing its VALUE is the pre-2026-03 defect under a new name (the callee
+    would store through a number), and reading one out of a callee-saved
+    register is the same wrong answer one step later. A name with a register but
+    no spill slot is this case — `_allocation_order` puts address-taken names
+    past every register-eligible one precisely so they have a slot — and so is
+    a compiler bug rather than a source problem, which is why the message says
+    so.
+    """
+    return (
+        f"calling {callee}() hands over {receiver} as the ADDRESS of a one-word "
+        f"cell for the callee to write its receiver back through, and {receiver} "
+        f"has no address in this function: a receiver that is a local is given a "
+        f"stack slot so it has one, and a receiver that is not a local has no place "
+        f"at all (`_allocation_split` in either backend removes the name from "
+        f"the register-eligible half for exactly this). Bind it to a local of "
+        f"its own, or make the method a reader.")
+
+
+def receiver_spelling(node) -> str:
+    """The receiver as the reader wrote it, for a refusal's sentence.
+
+    Moved here from `formal/build.py` so the model half that raises the refusal
+    and the emitters that could have raised it print one spelling: a name, a
+    field chain, a subscript, or the node's type when there is nothing to spell.
+    """
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.MemberExpr):
+        obj = receiver_spelling(node.obj)
+        return f"{obj}.{node.member}" if obj else str(node.member)
+    if isinstance(node, F.SubscriptExpr):
+        obj = receiver_spelling(node.obj)
+        return f"{obj}[…]" if obj else "[…]"
+    return type(node).__name__
+
+
+def _names_mentioned(node, into: set) -> None:
+    """Every bare name `node` mentions, into `into`."""
+    if isinstance(node, F.IdentExpr):
+        into.add(node.name)
+        return
+    if isinstance(node, F.MemberExpr):
+        _names_mentioned(node.obj, into)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _names_mentioned(x, into)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    for f in node.__dataclass_fields__:
+        _names_mentioned(getattr(node, f, None), into)
+
+
+def _refuse_receiver_read_in_own_argument_list(fn, writebacks, sites) -> None:
+    """Refuse a hand-off whose receiver is also READ in the same argument list.
+
+    `mutating_receiver_order_refusal` is the diagnostic and this is where it
+    fires. The shape is one CALL (`f(c.pop(), c.field)`, `sink(c.pop(), c.n)`)
+    with two facts about the same local: an argument that is a receiver hand-off
+    and another argument that mentions its name. Left to right, the read happens
+    before the store, so it sees the old word; the source means the new one.
+    """
+    if not sites:
+        return
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr):
+            continue
+        for i, arg in enumerate(node.args):
+            if id(arg) not in sites:
+                continue
+            others = set()
+            for j, other in enumerate(node.args):
+                if j != i:
+                    _names_mentioned(other, others)
+            wb, spelling = sites[id(arg)]
+            if spelling in others:
+                raise CodegenError(mutating_receiver_order_refusal(
+                    wb.owner, wb.member, spelling, spelling))
+
+
+def mutating_receiver_return_refusal(owner: str, member: str) -> str:
+    """The diagnostic for a one-field mutator that ALSO returns a FRAME.
+
+    Since the receiver stopped travelling in the return register
+    (`receiver_writeback_name`), a mutator may return a value, and an ordinary
+    word is not what is left over: a function that returns a frame takes a
+    trailing hidden word — the address of a block the CALLER reserved — and a
+    mutator's receiver is the leading argument. Both fit, so this is not about
+    running out of registers; it is that the block the frame convention copies
+    into is the caller's, and the one-word cell the receiver convention writes
+    through is the caller's too, so a function that does both has two
+    conventions describing one argument list and there is no measured order
+    between them on this path. Refused until there is.
+    """
+    return (
+        f"{owner}.{member}() changes its receiver and returns a frame, and "
+        f"this path has two hidden-word conventions — the frame's caller-"
+        f"reserved block and the receiver's one-word cell — with no measured "
+        f"order between them. Split it: have the method change the receiver "
+        f"and return nothing, and read the frame from a separate call. The "
+        f"rules are `formal/model.py`'s `receiver_writeback_name` and "
+        f"`struct_returned_frame_sites`.")
 
 
 def struct_frame_slots(struct_def) -> list:
