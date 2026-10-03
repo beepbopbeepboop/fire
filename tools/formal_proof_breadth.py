@@ -140,8 +140,9 @@ SKIP_DIRS = {".git", ".tmp", "__pycache__", "cas", "output", "lib", "build",
 BUILTIN_NAMES = {
     "True", "False", "None", "abs", "all", "any", "bin", "bool", "chr",
     "divmod", "enumerate", "float", "hex", "int", "len", "list", "max",
-    "min", "oct", "ord", "pow", "print", "range", "repr", "reversed", "round",
-    "sorted", "str", "sum", "tuple",
+    "min", "oct", "ord", "pow", "print", "property", "range", "repr",
+    "reversed", "round", "sorted", "staticmethod", "classmethod", "str",
+    "sum", "tuple",
 }
 
 MAX_STMTS = 14          # a "small-to-medium function", in top-level statements
@@ -265,6 +266,20 @@ class _Loader(ast.NodeVisitor):
     def visit_FunctionDef(self, node):
         for dec in node.decorator_list:
             self.visit(dec)
+        # The SIGNATURE is read too — a default value is an expression and an
+        # ANNOTATION names a type the emitted module may not carry. Walking the
+        # body alone made `def f(x) -> CallExpr:` a body with no free names at
+        # all, which is how `mojo/middle/methods_shared.py:23` entered the
+        # sample with a return type nothing in the module defines.
+        for d in list(node.args.defaults) + [k for k in node.args.kw_defaults
+                                             if k is not None]:
+            self.visit(d)
+        for arg in (list(node.args.posonlyargs) + list(node.args.args)
+                    + list(node.args.kwonlyargs)):
+            if arg.annotation is not None:
+                self.visit(arg.annotation)
+        if node.returns is not None:
+            self.visit(node.returns)
         self._scope(node)
         for st in node.body:
             self.visit(st)
@@ -299,6 +314,56 @@ def _free_names(fn, bound):
     for st in fn.body:
         loader.visit(st)
     return loader.loads - bound
+
+
+def _class_free_names(cls) -> set:
+    """The names a class reads that it does not bind — bases included.
+
+    A BASE is a read. `class TestFailure(Exception)` is emitted verbatim, so the
+    module the sample hands the backend needs `Exception` to be defined in it,
+    and this backend has no representation for an exception class either way.
+    An earlier version of this skipped the bases on the reasoning that
+    `class A(B)` binds `A` and so does not need `B` — which is about the class's
+    own NAME, and said nothing about what the body inherits from. Measured on
+    `test_formal_dylib.py:105 read_uleb`, whose helper `TestFailure` is exactly
+    that: the sample carried an item whose emitted module named a class it did
+    not define.
+    """
+    binder = _Binder()
+    binder.bound.add(cls.name)
+    loader = _Loader()
+    loader.bound = binder.bound
+    for base in cls.bases:
+        loader.visit(base)
+    for kw in cls.keywords:               # metaclass=…, and any future keyword
+        loader.visit(kw.value)
+    for st in cls.body:
+        if isinstance(st, ast.FunctionDef):
+            # `self`/`cls` are the implicit first parameter every method reads.
+            loader.bound.add("self")
+            loader.bound.add("cls")
+        loader.visit(st)
+    return loader.loads - binder.bound
+
+
+def _const_free_names(node) -> set:
+    """The names a module-level `X = …` / `X: T = …` reads beyond its bindings.
+
+    A constant is emitted verbatim, so the names its right-hand side reads are
+    part of the module the sample hands the backend. The ANNOTATION counts:
+    `X: CallExpr = …` names a type exactly as `def f() -> CallExpr` does.
+    """
+    loader = _Loader()
+    loader.bound = set()
+    values = ([node.value] if isinstance(node, ast.Assign)
+              else [getattr(node, "value", None)])
+    for v in values:
+        if v is not None:
+            loader.visit(v)
+    ann = getattr(node, "annotation", None)
+    if ann is not None:
+        loader.visit(ann)
+    return loader.loads - loader.bound
 
 
 def _module_defs(tree):
@@ -338,6 +403,8 @@ def _eligible(fn, defs, lines):
         if arg.annotation is not None and _ann_text(arg.annotation) != "int":
             return None, (f"parameter {arg.arg} is annotated "
                           f"{_ann_text(arg.annotation)}")
+    if fn.returns is not None and _ann_text(fn.returns) != "int":
+        return None, f"return annotation {_ann_text(fn.returns)}"
     if not 2 <= len(fn.body) <= MAX_STMTS:
         return None, f"{len(fn.body)} top-level statements"
 
@@ -367,8 +434,42 @@ def _eligible(fn, defs, lines):
             dep_binder.visit_FunctionDef(dep)
             if dep_binder.bad:
                 return None, f"depends on {name}, which {dep_binder.bad}"
-            stack.extend(n for n in _free_names(dep, set(dep_binder.bound))
-                         if n in defs)
+            dep_free = _free_names(dep, set(dep_binder.bound))
+            unknown_dep = sorted(n for n in dep_free
+                                 if n not in defs and n not in BUILTIN_NAMES)
+            if unknown_dep:
+                return None, (f"depends on {name}, which reads "
+                              + ", ".join(unknown_dep[:4]))
+            stack.extend(n for n in dep_free if n in defs)
+        elif isinstance(dep, ast.ClassDef):
+            # A class is emitted verbatim like a function, so its BODY's reads
+            # are as much a part of the module as the function's are. Checking
+            # only function dependencies let four items through whose class
+            # reads a name the emitted module does not carry (`CallExpr`,
+            # `NamedTuple`, `Exception`), which is the same hole one level
+            # down and shows up as a `codegen-refused` row about a name rather
+            # than about the proof layer.
+            cls_free = _class_free_names(dep)
+            unknown_cls = sorted(n for n in cls_free
+                                 if n not in defs and n not in BUILTIN_NAMES)
+            if unknown_cls:
+                return None, (f"depends on class {name}, whose body reads "
+                              + ", ".join(unknown_cls[:4]))
+            stack.extend(n for n in cls_free if n in defs)
+        else:
+            # A module-level CONSTANT is emitted verbatim like a function, and
+            # its right-hand side is an expression: `STDLIB_ROOT =
+            # Path(STDLIB_PATH).resolve()` carries two names the emitted module
+            # does not define, and the function that reads `STDLIB_ROOT` then
+            # brings the hole with it.
+            const_free = _const_free_names(dep)
+            unknown_const = sorted(n for n in const_free
+                                   if n not in defs
+                                   and n not in BUILTIN_NAMES)
+            if unknown_const:
+                return None, (f"depends on {name}, whose value reads "
+                              + ", ".join(unknown_const[:4]))
+            stack.extend(n for n in const_free if n in defs)
     chunks = [_span(fn, lines)] + [_span(defs[n], lines)
                                   for n in sorted(needed)]
     body = "\n".join(chunks)
