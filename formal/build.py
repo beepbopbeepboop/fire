@@ -1509,6 +1509,25 @@ def compile_formal(source_path: str, output: str = None,
         # distinction is the whole gate: a call that is word-shaped but not
         # exported is refused, and one that is exported is not.
         "runtime_calls": list(runtime_calls),
+        # The ADMITTED CONTRACTS this image's link line rests on, and nothing
+        # else about the host.  `formal/admitted.py`'s `Contract`s, one per
+        # `@admitted(...)` reachable through this file's import closure, sorted
+        # by `module.name` so two runs of the same file produce the same line.
+        #
+        # It is in the RESULT rather than printed by this module because this
+        # module prints nothing at all — every diagnostic it raises is an
+        # exception and `fire.py` is what renders one — and because the three
+        # consumers that need it (fire.py's `trust:` line, `tools/formal_sweep.py`'s
+        # class, `test_formal_admitted.py`'s count) each need it in a different
+        # process from each other.  A verdict that is not carrying this cannot
+        # answer "what does this build trust?", which is the question a
+        # built-with-admitted-contracts file raises.
+        #
+        # Computed ALWAYS, not only under `prove`: the sweep builds with
+        # `--no-prove` and still has to classify the file, and a trust report
+        # that appeared only when proofs were on would make the sweep's class and
+        # the build's line disagree for the same file.
+        "admitted": _admitted_summary(source_path),
     }
 
     if prove:
@@ -1516,13 +1535,24 @@ def compile_formal(source_path: str, output: str = None,
         # constructs a Program. fire has no ExternFunction nodes on this
         # path — pass [] and let _gen_extern_test's `ret_type_of.get`
         # default handle any recorded extern_calls.
+        #
+        # `admitted` is the third thing read off it, and it is what puts this
+        # file's claims of trust into the generated Lean as countable `sorry`s.
+        # It is the SAME list the result dict publishes and `fire.py` prints as
+        # its `trust:` line, computed once above, so the proof and the verdict
+        # cannot describe different admissions — which is the failure that would
+        # make the count meaningless: a proof with six holes and a `trust:` line
+        # naming three, or the reverse.
         if arch == "x86_64":
             from formal.x86_64_proof_gen import generate_x86_64_proof
             generate_proof = generate_x86_64_proof
         else:
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
-        prog = SimpleNamespace(functions=ordered, externs=[])
+        prog = SimpleNamespace(functions=ordered, externs=[],
+                               admitted=result["admitted"],
+                               admitted_calls=_admitted_calls(
+                                   source_path, result["admitted"]))
         proof = generate_proof(prog, code, info)
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
@@ -1543,6 +1573,96 @@ def compile_formal(source_path: str, output: str = None,
                 raise FormalBuildError(f"proof check failed: {detail}")
 
     return result
+
+
+def _admitted_summary(source_path: str) -> list:
+    """The admitted contracts `source_path`'s closure rests on, as plain dicts.
+
+    A list of `{name, assumes, lean_name, source, line}` rather than the
+    `formal/admitted.py` `Contract` objects themselves, and the reason is the
+    PROCESS this value is read in.  The sweep's classifier is a separate process
+    from the build that produced the verdict it is caching, and it reads this
+    out of a `pickle`-free `.result` blob written by an earlier run; an object
+    whose class lives in a module that later changes its `__slots__` would fail
+    to unpickle or, worse, come back with fields missing.  Dicts are what the
+    consumers actually need — `name` for the `trust:` line, `assumes` for the
+    sweep's class reason, `lean_name` and the location for the generated Lean —
+    and `Contract.__init__`'s signature is the one place they are built from, so
+    the two shapes are one declaration rather than two.
+
+    Never raises.  This is called while assembling a verdict for a build that
+    SUCCEEDED, and turning a bookkeeping failure into a build failure would mean
+    a sweep cannot classify a file because a note about it could not be written.
+    A failure here returns `[]` and says so in the value: `error` is set, the
+    list is empty, and the `trust:` line prints the error instead of claiming
+    the file trusts nothing — which is the claim that would be false and the one
+    nobody would check.
+    """
+    try:
+        from formal import imports as _imports
+        contracts = _imports.admitted_contracts(source_path)
+    except Exception as e:  # noqa: BLE001 — a verdict must still be returned
+        return [{"name": "(unreadable)", "assumes": "", "lean_name": "",
+                 "source": source_path, "line": 0,
+                 "error": f"{type(e).__name__}: {e}"}]
+    return [{"name": c.qualified, "assumes": c.assumes,
+             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+            for c in contracts]
+
+
+def _admitted_calls(source_path: str, admitted: list) -> dict:
+    """`{the spelling a call site uses: the contract's Lean name}`.
+
+    The map the SOURCE model uses when a call's value comes from an admitted
+    contract, so that the contract is the thing being trusted rather than a
+    declaration nothing reads.  Without it `formal/arm64_proof_gen.py`'s
+    `_call_go` refuses any call it has no `<fn>_go` for, and a file importing
+    `subprocess` gets no proof at all — which leaves the emitted `sorry`s
+    describing admissions no theorem in the file actually rests on.
+
+    Three spellings, because the source has three, and each is what
+    `formal/arm64_proof_gen.py`'s `_call_name` produces:
+
+      * `import subprocess` … `subprocess.run(…)`   → key `subprocess.run`
+      * `import subprocess as sp` … `sp.run(…)`     → key `sp.run`
+      * `from subprocess import run` … `run(…)`     → key `run`
+
+    All three come out of `formal/imports.py`'s `import_bindings`, which is the
+    reader the BUILD already uses to bind a call to a callee's declaration, so
+    this cannot bind a name to a different contract than the one the call
+    actually calls.  The qualified spelling is added as a key as well, because
+    `import_bindings` reports `sp -> ('subprocess','subprocess')` — the module,
+    not the member — for `import subprocess as sp`, and the member is only known
+    from the call site.
+
+    Every admitted contract in the closure gets its qualified name as a key even
+    when this file imports nothing that binds it.  That is the same deliberate
+    over-report `formal/imports.py`'s `admitted_contracts` states: a key that is
+    present and unused costs one dictionary entry, and a key that is MISSING for
+    a call the source really makes turns a proof into a refusal with a message
+    that names an extern instead of the contract that would have covered it.
+    """
+    out = {}
+    for c in admitted or []:
+        name = c.get("name") or ""
+        if not name or name.startswith("("):
+            continue                    # the unreadable-closure placeholder
+        out[name] = c.get("lean_name") or ""
+        if "." in name:
+            out[name.split(".")[-1]] = c.get("lean_name") or ""
+    try:
+        from formal import imports as _imports
+        from formal.build import parse_module as _parse
+        with open(source_path) as f:
+            stmts = _parse(f.read(), filename=source_path)
+        for local, (module, defining) in _imports.import_bindings(stmts).items():
+            for key in (f"{module}.{defining}", defining):
+                if key in out:
+                    out[local] = out[key]
+                    break
+    except Exception:  # noqa: BLE001 — an unreadable file gets the qualified
+        pass                             # keys only, which is the safe direction
+    return out
 
 
 def _formal_module_functions(source_path: str, link_dylibs: list = None,
@@ -2597,8 +2717,7 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
-                     star_imports: tuple = (),
-                     method_owners: dict = None) -> None:
+                     star_imports: tuple = ()) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -2609,12 +2728,30 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     are flattened and lambdas lifted, because a lifted lambda is a function
     with its own locals and its own receivers.
 
-    `method_owners` is `{function name: struct}` and it is needed HERE rather
-    than only at the class-constant rewrites that follow: a `comptime` binding
-    read through a receiver is the same read whichever order the two passes run
-    in, and `refuse_none_comparisons` runs BEFORE the rewrite that would
-    materialize it — so asking it a census that does not know which functions are
-    methods is asking a different question than the substitution asks.
+    WHICH STRUCT A FUNCTION IS A METHOD OF is answered by the local
+    `method_owners` (`M.method_owner_names(structs)`, i.e.
+    `{<Struct>_<method> function name: StructDef}`) and by nothing else, and
+    that is a load-bearing choice rather than a tidiness one. It is needed HERE
+    as well as at the class-constant rewrites, because a `comptime` binding read
+    through a receiver is the same read whichever order the two passes run in,
+    and `refuse_none_comparisons` runs BEFORE the rewrite that would materialize
+    it — so asking it a census that does not know which functions are methods is
+    asking a different question than the substitution asks. The table is BUILT
+    here rather than passed in, because the two tables a module has are easy to
+    confuse and confusing them is a crash rather than a wrong answer:
+    `_method_owners` is `{BARE method name: struct NAME}` — the dispatch table,
+    for a `MemberExpr`'s `.member` — and this one is `{LIFTED <Struct>_<method>
+    name: StructDef}`. A sixth parameter documented as the second was filled
+    from the first, so the owner lookup answered with a `str` for any function
+    whose name happened to be a struct's method name, which a module-level `def`
+    colliding with one is; the string reached `_overridden_comptime_names` and
+    was asked for `.name`, and `_check_method_receiver_types` matched nothing at
+    all because a lifted name is never a key in the bare-name table. Deleting
+    the parameter beats handing it the right one: the census is a pure function
+    of `structs_by_name`, which is already a parameter, so there is nothing left
+    here that can be passed wrong. The reproducer and the measurement are
+    `test_formal_run.py`'s
+    `class_constant_census_survives_a_function_named_like_a_method`.
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
@@ -2670,10 +2807,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             fn._frame_candidates = {}
             fn._one_word_candidates = dict(one_word[_fn_key(fn)])
         return
-    owners = M.method_owner_names(structs)
+    # {LIFTED `<Struct>_<method>`: struct} — the census every consumer below
+    # wants, and the one that used to arrive as a parameter and be the other
+    # table (see the docstring).
+    method_owners = M.method_owner_names(structs)
     # {BARE method name: [struct, …]}, which is the other direction and is not
-    # the same table: `owners` is keyed by the lifted `<Struct>_<method>` a
-    # rewritten call spells, and a MemberExpr's `.member` is the bare name.  A
+    # the same table: `method_owners` is keyed by the lifted `<Struct>_<method>`
+    # a rewritten call spells, and a MemberExpr's `.member` is the bare name.  A
     # name two structs declare is left with both, so a caller can tell "one
     # owner" from "ambiguous" rather than seeing whichever came last.
     by_method = {}
@@ -2790,7 +2930,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # when two definitions of one name disagreed.
     returns_frame: dict = {}
     for fn in functions:
-        owner = owners.get(fn.name)
+        owner = method_owners.get(fn.name)
         # `and M.method_receiver_name(fn) is not None`, and the guard rather
         # than a change to `struct_receivers` because this asks about ONE
         # method while `struct_receivers` answers for the whole CLASS. Its
@@ -3317,9 +3457,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # describes it. Deciding them here is what keeps a frame
                 # diagnostic from being printed for a call that never had a
                 # layout question.
-                # `owners` is keyed by the LIFTED name `<Struct>_<method>`, and
-                # this is the BARE name the source spells, so the lookup is
-                # `by_method`.  A name two structs declare is genuinely
+                # `method_owners` is keyed by the LIFTED name
+                # `<Struct>_<method>`, and this is the BARE name the source
+                # spells, so the lookup is `by_method`.  A name two structs declare is genuinely
                 # ambiguous, and `_rewrite_method_calls` already refused to
                 # rewrite it, so there is nothing to say about it here that it
                 # has not said — hence the `== 1` and not a pick.
@@ -3639,7 +3779,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # believe about the parameter it lands in, which is not a fact this
         # function can see.  `params_of` is complete before the fixpoint runs,
         # so it is complete here.
-        _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
+        _check_frame_escapes(fn, hs, by_name, param0, method_owners,
+                             structs_by_name,
                              set(_constructor_bindings(
                                  fn, framed,
                                  [f.name for f in functions])), rets,
@@ -3647,7 +3788,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                              _callee_defs(functions), imported,
                              star_imports, _name_defs,
                              by_name_returns_frame)
-        _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
+        _check_method_receiver_types(fn, hs, by_name, method_owners,
+                                     structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
         fn._frame_slots = slots
@@ -4213,7 +4355,7 @@ def check_frame_holder_rebinds(functions) -> None:
 def check_value_position_method_reads(functions, structs) -> None:
     """Raise a `<recv>.<name>` read that is a METHOD of the receiver's own struct.
 
-    `model.struct_receiver_reads` already REMOVES these names from the derived
+    `model.struct_method_receiver_reads` already REMOVES these names from the derived
     field set, so the wrong answer is gone before this runs; what is left is the
     diagnosis, and it is a separate check because the frame pass cannot give it:
     the frame pass only sees reads whose base it has already classified as a
@@ -4244,7 +4386,7 @@ def check_value_position_method_reads(functions, structs) -> None:
     and STORES into is an instance attribute and stays a field, so a read of it
     is a field read and is not this check's — `u13b.py` is that case and it still
     builds and computes what CPython computes. Only a name nothing stores into is
-    a method here, which is exactly the set `struct_receiver_reads` demoted, so
+    a method here, which is exactly the set `struct_method_receiver_reads` demoted, so
     the two cannot disagree about which names are which.
 
     **The walk is `iter_nodes` and that is a limitation, not a choice.** A
@@ -4257,14 +4399,25 @@ def check_value_position_method_reads(functions, structs) -> None:
     absence of that.
     """
     owners = M.method_owner_names(list(structs or ()))
+    # Keyed by `id(owner)` and NOT by the struct: `StructDef` is a plain
+    # dataclass, so it is unhashable, and this dict lives no longer than the
+    # loop below — which only reads — so there is nothing for a stale entry to
+    # outlive.
+    demoted_by_owner = {}
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is None:
             continue
         receivers = M.struct_receivers(owner)
-        methods = {m.name for m in M.struct_methods(owner)
-                   if getattr(m, "name", None)}
-        demoted = methods - M.struct_receiver_stores(owner, receivers)
+        # `struct_demoted_method_names` and NOT `methods - struct_receiver_stores`
+        # spelled here: the census is a property of the STRUCT, so asking it of
+        # one function re-walked every method's body once per method — the same
+        # defect `struct_method_receiver_reads` was fixed for on the model's
+        # side, and the one place here that had its own copy of the rule.
+        demoted = demoted_by_owner.get(id(owner))
+        if demoted is None:
+            demoted = M.struct_demoted_method_names(owner, receivers)
+            demoted_by_owner[id(owner)] = demoted
         if not demoted:
             continue
         for node in M.iter_nodes(getattr(fn, "body", None)):
@@ -6379,8 +6532,16 @@ def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
         seen.add(st.name)
         field = _sole_field_name(st)
         chain.append(field)
-        base = M.struct_field_type(st, field, structs_by_name)[0]
-        st = structs_by_name.get(base) if base else None
+        # `model.one_word_field_struct`, NOT `model.struct_field_type`: this walk
+        # asks whether the chain CONTINUES, and the two readers differ on
+        # exactly the shape this repository's own source is full of — a field
+        # assigned from `__init__`'s annotated parameter, which the frame-slot
+        # reader classifies as "cannot reduce to a type" and which the chain can
+        # read.  Both readers are called from both places that walk a chain, so
+        # the identity (`_rewrite_self_fields`) and the method lift
+        # (`_lift_one_word_field_method`) cannot disagree about where it stops.
+        nxt, _evidence = M.one_word_field_struct(st, field, structs_by_name)
+        st = nxt
     return tuple(chain)
 
 
@@ -6737,9 +6898,48 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     one node and they read as one question ("does this callee name a method of
     the struct its receiver's DECLARED type names?"), which is not the same
     shape as "visit every node".
+
+    TWO SHAPES reach here and both are refusals without it.  The first is the
+    field chain below (`recv.f.m(x)`), whose receiver this pass exists for.  The
+    second is a BARE receiver whose method name two structs of this image
+    declare, which is what is left over after `_rewrite_method_calls`: it lifts
+    `recv.m(x)` by NAME and declines a name two structs declare, so
+    `b.size()` for a `b` holding `Box` — with `size` on `Box`, `Leaf` and
+    `ContiguousSlice` — arrives here unlifted and is refused as "a method call
+    on a value", naming `b.size` as though the program had written something
+    else.  `b` is a `Box` (that is what `one_word` recorded), `Box` declares
+    `size`, and Python agrees; the evidence is the same declaration
+    `_rewrite_method_calls` uses, one step further along.
+
+    That second arm CANNOT redirect a call the name-only path resolved, and it is
+    worth being precise about why rather than only about the fact: it runs after
+    `_rewrite_method_calls`, so any call that path could lift has already been
+    lifted and its callee is an `IdentExpr`, not a `MemberExpr` — reaching this
+    function at all means the name-only path declined it.  And a member this
+    arm lifts is one the receiver's own struct DECLARES, which is the test the
+    name-only path cannot make.
+
+    The census behind the pair, over `stdlib/std`: 61 call sites in 14 files,
+    of which 16 are the ambiguous bare-receiver shape and 45 the field chain —
+    6 of the field-chain sites are in `std/pathlib/path.mojo`, 7 in
+    `std/random/_rng.mojo` and 1 in `std/io/file_descriptor.mojo`, and
+    `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the instance whose
+    three refusals are written out above.
     """
     func = call.func
     obj = func.obj
+    if isinstance(obj, F.IdentExpr):
+        st = one_word.get(obj.name)
+        if st is None or not any(m.name == func.member
+                                 for m in M.struct_methods(st)):
+            return False
+        if _derived_overrides(st, func.member, structs_by_name):
+            return False
+        call.func = F.IdentExpr(name=M.method_function_name(st.name,
+                                                            func.member))
+        if func.member not in (receiverless or ()):
+            call.args = [obj] + list(call.args)
+        return True
     if not isinstance(obj, F.MemberExpr):
         return False
     # `_root_ident` and not `obj.obj` being an `IdentExpr`, because the chain can
@@ -6764,10 +6964,48 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     if inner is None or not any(m.name == func.member
                                 for m in M.struct_methods(inner)):
         return False
+    if _derived_overrides(inner, func.member, structs_by_name):
+        return False
     call.func = F.IdentExpr(name=M.method_function_name(inner.name, func.member))
     if func.member not in (receiverless or ()):
         call.args = [obj] + list(call.args)
     return True
+
+
+def _derived_overrides(st, member: str, structs_by_name: dict) -> bool:
+    """Whether a struct of THIS UNIT derives from `st` and declares `member` too.
+
+    The one condition under which a lift by DECLARED TYPE is a wrong answer
+    rather than a better one, and it is a silent wrong answer: the lifted callee
+    is the BASE's method compiled against the base's layout, so a value of the
+    derived struct is read through it and the program builds, runs, and prints
+    digits no source wrote.  Python dispatches on the value; this path can only
+    see the DECLARATION, which names the base.
+
+        struct Slice:        var start: Int
+                            def emit_slice(self, w) -> Int: return self.start
+        struct FancySlice(Slice):
+                            def emit_slice(self, w) -> Int: return 1000
+        struct Box:          var _inner: Slice
+                            def go(self, w) -> Int: return self._inner.emit_slice(w)
+
+    `self._inner` may hold either, so there is no single callee and the honest
+    answer is the pre-existing refusal rather than the base's method.  Note the
+    asymmetry with the AMBIGUOUS-NAME case, which this is not: there, two
+    unrelated structs share a spelling and the receiver's type settles it; here
+    one struct IS the other, and the type settles only the layout.
+
+    Transitive, because `struct_derived_names` is: a grandchild overriding the
+    method is the same hazard as a child overriding it.
+    """
+    declared = {m.name for m in M.struct_methods(st)}
+    for name in M.struct_derived_names(list((structs_by_name or {}).values()),
+                                        st.name):
+        derived = structs_by_name.get(name)
+        if derived is not None and declared & {m.name for m in
+                                               M.struct_methods(derived)}:
+            return True
+    return False
 
 
 def _chain_declared_struct(st, fields, structs_by_name: dict):
@@ -6781,8 +7019,10 @@ def _chain_declared_struct(st, fields, structs_by_name: dict):
     """
     cur = st
     for field in fields:
-        base = M.struct_field_type(cur, field, structs_by_name)[0]
-        cur = structs_by_name.get(base) if base else None
+        # The same reader `_one_word_sole_field_chain` uses, for the reason its
+        # comment gives: two walks of one chain that can stop in different places
+        # is how a collapse and a lift disagree about the same expression.
+        cur, _evidence = M.one_word_field_struct(cur, field, structs_by_name)
         if cur is None:
             return None
     return cur
@@ -6837,8 +7077,36 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
     if not structs_by_name:
         return sites
     bound = _names_bound_in(fn)
+    # The names this body SPELLS — its base names and its member names, which are
+    # what decides the loop below. A site is keyed `"<base>.<name>"` and the only
+    # thing that ever looks one up is a `MemberExpr` over an `IdentExpr` in THIS
+    # body — `_constant_read_spelling` builds the key from exactly that node and
+    # `_apply_constant_sites` matches exactly that shape. So a struct this body
+    # cannot spell a read of has no site anybody can reach, and asking it for its
+    # class constants walks every method of every struct in the module once per
+    # function.
+    #
+    # Measured on `gimple_codegen.py` (arm64): 400,000 struct-constant questions
+    # for ~100 structs and ~2,000 functions, and 87% of that build's time. On
+    # `formal/arm64_codegen.py` the residue after the base-name filter is
+    # `ARM64Codegen` asked 2,948 times — 177 methods, walked each time, for a
+    # class that DECLARES NOTHING, so every one of those walks could only return
+    # an empty list. Hence `class_constant_candidates`, which answers "could this
+    # struct have a class constant at all?" from the class body alone.
+    #
+    # Both filters are supersets of what the rewrite can match — `iter_nodes`
+    # descends into every dataclass field, and a constant is by definition a
+    # declared name — which is the direction that cannot lose a site.
+    spelled, members = set(), set()
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.IdentExpr):
+            spelled.add(node.name)
+        elif isinstance(node, F.MemberExpr):
+            members.add(node.member)
     for st in structs_by_name.values():
-        if st.name in bound:
+        if st.name in bound or st.name not in spelled:
+            continue
+        if not M.class_constant_candidates(st) & members:
             continue
         for name, _default in M.struct_class_constants(st):
             sites[f"{st.name}.{name}"] = (
@@ -6862,6 +7130,15 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
         inherits it changes nothing, so disqualifying the whole struct would
         refuse a program whose answer is exact."""
         shadowed = _overridden_comptime_names(structs_by_name, st)
+        # The same two filters as the loop above, for the same reason: a site
+        # keyed `"<holder>.<name>"` is reachable only through a `MemberExpr` over
+        # an `IdentExpr` this body spells, and `name` has to be a name the class
+        # body declared. The receiver case is the one that pays — it is asked
+        # once per receiver spelling of the function's OWN struct, for every
+        # function in the module, which is 2,948 full walks of `ARM64Codegen` on
+        # `formal/arm64_codegen.py`.
+        if not M.class_constant_candidates(st) & members:
+            return
         for name, _default in M.struct_class_constants(st):
             kind = _constant_kind(st, name)
             if comptime_only and kind != "comptime":
@@ -8599,6 +8876,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         bracketed = {}
         exempt_roots = set()
         first_mlir = None
+        # The dialect OPERATION each `__mlir_op` root spells, keyed by the
+        # ROOT's identity for the reason `bracketed` is: `iter_nodes` has no
+        # parent, so the name and the operation it applies to are two separate
+        # nodes, and keying on the string would pair one call's name with
+        # another call's operation. Without it the refusal can only name the
+        # `__mlir_` PREFIX, which is what made one sentence cover 104
+        # operations that denote three different things — see
+        # `model.mlir_dialect_op_refusal`.
+        dialect_ops = {}
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
                 # `exempt_roots` is the OTHER half of the rule the arm below
@@ -8614,10 +8900,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if first_mlir is None and id(sub) not in exempt_roots \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
-                        or M.mlir_dialect_refusal(sub.name)
+                        or M.mlir_dialect_refusal(sub.name,
+                                                  dialect_ops.get(id(sub)))
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
+            # The bracketed and dotted spellings both reach here as one node or
+            # a MemberExpr under a SubscriptExpr, and `mlir_dialect_op_name`
+            # unwraps the bracket itself rather than asking twice.
+            op = M.mlir_dialect_op_name(sub)
+            if op is not None:
+                root_ident = sub
+                while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
+                    root_ident = root_ident.obj
+                dialect_ops.setdefault(id(root_ident), op)
             if M.template_is_answered(sub):
                 # Answered at build time, so nothing is left to refuse about it
                 # and the tree below it is not a use of anything. The rewrite
@@ -9058,8 +9354,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `model.mlir_dialect_refusal` for why naming it beats the
                 # fallback's "no home", which names a symptom of the register
                 # fall-through and sends the reader to the allocator instead of
-                # to the construct.
-                why = M.mlir_dialect_refusal(name)
+                # to the construct. The OPERATION is passed as well as the name
+                # when `dialect_ops` has it, because the name alone cannot say
+                # which of the several kinds of dialect construct this is: 104
+                # operations over the stdlib denote an effect, an elementwise
+                # arithmetic result or something that needs a fact this path
+                # does not have, and one sentence over all three was false of a
+                # measurable subset.
+                why = M.mlir_dialect_refusal(name, dialect_ops.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:
@@ -9805,7 +10107,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
-    owners = _method_owners(stmts, extra_structs)
+    # NAMED for what it holds, because the two tables in this function have the
+    # same SUBJECTS and incompatible SHAPES and were interchanged once already
+    # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):
+    #
+    #   `dispatch_owners` — `{`size`: "Pair"}`  bare method name → struct NAME.
+    #                       What `recv.m(x)` dispatches on, so a name TWO
+    #                       structs declare is absent: that absence is what
+    #                       makes an ambiguous call decline to be rewritten.
+    #   `method_owners`  — `{`Pair_size`: <Pair StructDef>}`  LIFTED function
+    #                       name → the struct, every method present however many
+    #                       structs declare it.  What "which struct is this
+    #                       FUNCTION a method of" is answered from.
+    #
+    # Reading either as the other is a crash or a refusal, not a degradation.
+    dispatch_owners = _method_owners(stmts, extra_structs)
     # This file's own declarations win over an imported one of the same name:
     # a local definition shadows the import, and the local is what this file's
     # code means.
@@ -9896,7 +10212,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # required — a class name is not a value and has no register, so the call
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
-    receiverless = _receiverless_methods(owners, structs_by_name)
+    receiverless = _receiverless_methods(dispatch_owners, structs_by_name)
     # The class values a function may read through its OWN receiver, per
     # function, and read here rather than at the substitution because both of
     # the consumers below need the same answer and neither has the other's
@@ -9935,7 +10251,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
-        _rewrite_method_calls(fn.body, owners, wide, receiverless, fn.name,
+        _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
+                              fn.name,
                               _this_unit_modules)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
@@ -10053,20 +10370,23 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
-    # `method_owners`, NOT `owners`, and the two are not the same map: `owners`
-    # (line 8840) is `{bare method name: struct NAME}` for `_rewrite_method_calls`
-    # to dispatch `recv.m(...)` by name, while `method_owners` (line 8890) is
-    # `{lifted function name: struct}` for the passes that need to know which
-    # struct's LAYOUT a body is written against. `_frame_receivers` is the
-    # latter kind of consumer — its `method_owners` parameter is documented as
-    # `{function name: struct}` and both its uses read `.name` off the value —
-    # and it was being handed the former.
+    # …and nothing else. `_frame_receivers` used to take a sixth parameter, the
+    # method census, and this site filled it from `dispatch_owners` — i.e.
+    # `_method_owners`' `{bare method name: struct NAME}`, the DISPATCH table
+    # `_rewrite_method_calls` uses to resolve `recv.m(...)` by name.  Every
+    # consumer inside the pass wanted the OTHER table, the one keyed by the
+    # LIFTED `<Struct>_<method>` a rewritten call spells and carrying a
+    # `StructDef`, so a `str` was read as a struct and `st.name` raised.  The
+    # pass builds the owner table from `structs_by_name`, which is this
+    # function's own list of the same nodes, so there is nothing to thread
+    # through and no way to hand it the other one again: the parameter is gone
+    # rather than corrected.
     #
     # Measured on `std/builtin/reversed.mojo`, arm64:
     #
     #   AttributeError: 'str' object has no attribute 'name'
     #     formal/build.py:6465 in _overridden_comptime_names
-    #       st.name          <- `owners`' value is a struct NAME
+    #       st.name          <- `dispatch_owners`' value is a struct NAME
     #     formal/build.py:6255 in publish
     #       _overridden_comptime_names(structs_by_name, st)
     #     formal/build.py:6232 <- owner = method_owners.get(fn.name)
@@ -10074,14 +10394,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # so the sweep classified the file `backend-crash` ("the backend RAISED
     # rather than refusing"), which is the one class that is never cached and
     # that means a bug in the compiler's own plumbing rather than a finding
-    # about the source. The lookup only ever HIT because `owners` is keyed by a
-    # BARE method name and a lifted one-field method keeps its bare name, so
-    # every other module missed and silently got an empty census — which is the
-    # quieter half of the same bug and the reason the fix is the argument rather
-    # than a `.name` guard.
+    # about the source.  The lookup only ever HIT because `dispatch_owners` is
+    # keyed by a BARE method name and a lifted one-field method keeps its bare
+    # name, so
+    # every other module missed and silently got an empty census — the quieter
+    # half of the same bug, and why `_check_method_receiver_types` was dead.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts), method_owners)
+                     star_imported_modules(stmts))
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
@@ -10176,7 +10496,13 @@ def _method_call_target(call, owners: dict):
 
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
-    has no owner to lift to.
+    has no owner to lift to.  A receiver that is not a bare NAME is `None` too,
+    and that is a limit of the RECOGNITION rather than of the construct: the one
+    receiver whose declared type settles an ambiguous name is a one-word field,
+    and `_lift_one_word_field_method` is where that case is answered — it runs
+    immediately after this one, on the same `one_word` table, and it can lift an
+    ambiguous `m` where this cannot because it reads the field's DECLARED TYPE
+    instead of the spelling.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
@@ -10221,11 +10547,11 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     becomes its first argument and every existing rule about arguments,
     registers and tail calls applies unchanged.
 
-    Which is also why the by-reference receiver needed NO change here. The
+    Which is also why the by-reference receiver needed NO change here.  The
     receiver this already passes is the word the local holds, and for a
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
-    has is still enough. The whole ABI question
+    has is still enough.  The whole ABI question
     `bugs/FORMAL_wide_receiver_by_reference.md` asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
@@ -12291,6 +12617,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         "info": info,
         "exports": exports,
         "backend": f"{arch}/macho-dylib",
+        # Same field, same meaning, same shape as the program path's: a module
+        # dylib whose source declares `@admitted` contracts is the library half
+        # of an admission — this is where `subprocess.run`'s body actually lands
+        # — so a `dylib --formal` verdict that omitted it would report a library
+        # carrying six admitted contracts as trusting nothing at all.
+        "admitted": _admitted_summary(source_paths[0]),
     }
 
     if prove:

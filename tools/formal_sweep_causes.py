@@ -175,11 +175,29 @@ CAUSES = (
     # (`std/_gpu/_utils.mojo`, `std/builtin/{_coroutine,enum_like,type_aliases}
     # .mojo`, `std/sys/info.mojo`), and the label already named `__mlir_type`,
     # so the row claimed a construct it could not see.
+    # A FIFTH wording, and the one that needs the most care: `formal/model.py`'s
+    # `mlir_dialect_op_refusal` used to answer every `__mlir_op` with ONE
+    # sentence, and it named the `__mlir_` PREFIX rather than the operation. It
+    # now classifies the OPERATION by what it denotes — an effect, an
+    # elementwise arithmetic result, or a value that needs a fact this path
+    # lacks — so four different messages carry the word "dialect OPERATION" and
+    # one carries the old prefix wording for a caller with no operation in hand.
+    #
+    # Both spellings are listed, because a marker is a CONTRACT WITH A MESSAGE
+    # THAT CAN BE REWORDED and breaking it is invisible from here: every cause
+    # keyed on the old wording silently drops to zero and its files fall into
+    # `other refusal`. `test_formal_sweep.py` asserts every marker matches a
+    # refusal the sweep actually produced, by building the message from
+    # `formal/`'s own text rather than from a copy in the test, so a reword that
+    # broke a marker fails a test rather than quietly moving a column — but only
+    # for a marker a sample exercises, which is why there is a sample per
+    # wording below rather than one for the row.
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      (("is initialized from an MLIR attribute template",),
       ("is initialized from an MLIR type template",),
       ("__mlir_attr[",),
-      ("__mlir_op is an MLIR dialect construct",))),
+      ("__mlir_op is an MLIR dialect construct",),
+      ("is a dialect OPERATION",))),
     ("inlined_assembly (a gimple-C runtime construct)",
      (("inlined_assembly:",),)),
     # ABOVE the broad `has no representation` cause below, and it has to be:

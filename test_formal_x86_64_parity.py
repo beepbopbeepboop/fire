@@ -476,6 +476,85 @@ CASES = [
      "    q.b = 6\n"
      "    sys.stdout.write(\"recv=%d\" % q.wide(1, 2, 3, 4, 5, 6, 7))\n"
      "    return 0\n"),
+    # `x^` is Mojo's OWNERSHIP TRANSFER marker — a borrow-check annotation
+    # naming no runtime operation — and it is the one unary operator the two
+    # backends used to answer differently about.  arm64's `_emit_expr` had an
+    # `is_ownership_transfer` branch; x86-64's `_emit_unary` did not, so it fell
+    # through to `unsupported unary operator '^' on the formal x86-64 path`.
+    # That is a codegen gap in x86-64 and not a wording difference: it refused
+    # correct stdlib Mojo, `std/builtin/swap.mojo` (`var tmp = lhs^`), which
+    # builds on arm64 and was carried as unstarted x86-64-side work in
+    # `bugs/FORMAL_known_limits.md` §6.5.
+    #
+    # The case is the WHOLE of `swap.mojo`'s shape rather than the bare
+    # operator, because a bare `var t = a^` and `swap(a, b)`'s three-operator
+    # body differ in what they prove.  The bare one says the operator emits
+    # something; this one says the emitted value is the operand's, on both
+    # backends, with the operands printed afterwards to show the transfer
+    # marked no MOVE — a lowering that consumed or zeroed the source would
+    # satisfy the first and fail this.
+    ("ownership_transfer_caret",
+     "def main():\n"
+     "    var a = 11\n"
+     "    var b = 22\n"
+     "    var c = 33\n"
+     "    var x = a^\n"
+     "    var y = b^\n"
+     "    var z = c^\n"
+     "    printf(\"%d %d %d\", x, y, z)\n"
+     "    printf(\" %d %d %d\", a, b, c)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    a = 11\n"
+     "    b = 22\n"
+     "    c = 33\n"
+     "    x = a\n"
+     "    y = b\n"
+     "    z = c\n"
+     "    sys.stdout.write(\"%d %d %d\" % (x, y, z))\n"
+     "    sys.stdout.write(\" %d %d %d\" % (a, b, c))\n"
+     "    return 0\n"),
+    # The same operator over a NEGATIVE value, because the pass-through is
+    # implemented by emitting the operand and a lowering that truncated or
+    # sign-extended on the way through would agree with the case above on every
+    # non-negative input and disagree here.  `-7` is the smallest value whose
+    # sign bit and whose magnitude disagree under a 32-bit truncation.
+    ("ownership_transfer_keeps_a_negative",
+     "def main():\n"
+     "    var n = -7\n"
+     "    var m = n^\n"
+     "    printf(\"%d %d\", m, n)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    n = -7\n"
+     "    m = n\n"
+     "    sys.stdout.write(\"%d %d\" % (m, n))\n"
+     "    return 0\n"),
+    # A CALL's result under the marker, which is the shape inside a loop body in
+    # `swap.mojo` (`unsafe_take_pointee()` is an extern call).  It is here for
+    # the RAX handoff rather than the value: every case above reads a name, and
+    # a lowering that emitted the marker by re-evaluating its operand — which
+    # is the one implementation that gets the first three cases right and this
+    # one wrong, by calling `bump()` twice — passes them all.
+    ("ownership_transfer_of_a_call_result",
+     "import sys\n\ndef bump():\n"
+     "    print(\"bump\")\n"
+     "    return 7\n"
+     "\n"
+     "def main():\n"
+     "    var v = bump()^\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n",
+     "import sys\n\ndef bump():\n"
+     "    print(\"bump\")\n"
+     "    return 7\n"
+     "\n"
+     "def main():\n"
+     "    v = bump()\n"
+     "    sys.stdout.write(\"%d\" % v)\n"
+     "    return 0\n"),
 ]
 
 
