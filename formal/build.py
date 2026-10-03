@@ -821,7 +821,8 @@ def _container_family(path: str) -> str:
     return "unknown"
 
 
-def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
+def _audit_link_line_containers(linked, fmt: str, where: str,
+                              arch: str = None) -> None:
     """Every library on this link line must be in the image's OWN container.
 
     The gap this closes is the one that let an ELF image import a module for
@@ -842,6 +843,18 @@ def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
     and nothing about the host decides which way it goes: `fmt` is chosen by
     the caller, so a caller can ask for one container while the libraries on
     the line are in the other.
+
+    **What it says when it fires changed with the ELF emitter.** It used to
+    close with "this path emits {want} module libraries only", which was true
+    while there was no ELF emitter and false the moment there was one. The
+    refusal is now the ordinary cross-container mismatch rather than a
+    capability limit, and the reason a mismatch is still POSSIBLE is worth
+    stating because it is not a bug: `formal/imports.py::build_module_dylib`
+    builds a library in `default_format(arch)` — the HOST's container — while
+    `compile_formal`'s `fmt` is the CALLER's. On Linux the two agree and this
+    never fires; on macOS, asking for an ELF image on a Mach-O host builds the
+    module as a Mach-O and this says so, which is the honest answer (the file
+    to rebuild is named) rather than a refusal about a gap that is gone.
     """
     want = "macho" if fmt == "macho" else "elf"
     for d in linked or []:
@@ -856,8 +869,9 @@ def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
                 f"{got}: {article} {want} loader cannot open {article} {got} "
                 f"library, so every symbol it exports is unresolvable at "
                 f"load. The library's container is what has to match, not the "
-                f"symbol names — rebuild the dependency for {fmt!r}. This "
-                f"path emits {want} module libraries only.")
+                f"symbol names — module libraries are built in "
+                f"{default_format(arch)!r}, the HOST's container, while this "
+                f"image was asked for {fmt!r}.")
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,
                           dylib_exports=None) -> list:
     """Every extern must be accounted for: a C library, or a linked dependency.
@@ -965,23 +979,36 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # BEFORE any codegen pass: a library the loader cannot open makes every
     # symbol it exports unresolvable, so there is nothing worth compiling and
     # the diagnostic is better before the image exists.
-    _audit_link_line_containers(dylibs, fmt, "image")
+    _audit_link_line_containers(dylibs, fmt, "image", arch)
     if fmt == "elf":
-        from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
-                                 compute_got_addrs)
+        from formal import elf
+        # ONE `DT_NEEDED` per library on the link line, plus libc when there is
+        # an extern to bind. This is what the ELF half of the module-import
+        # path needs and what it did not have: the image carries the module's
+        # exported symbol in `.dynstr`, and before `build_elf_dylib` there was
+        # nothing that could be named as providing it, so the module was built,
+        # audited (`provided`) and then put NOWHERE. The symbol audit could not
+        # see it because it asks "does something on this line DECLARE this
+        # name" and the question that mattered was "will the loader OPEN that
+        # library" -- which is what
+        # `_audit_link_line_containers` above answers, four bytes of magic from
+        # each file.
+        elf_deps = [os.path.basename(d["install_name"]) for d in dylibs]
+        needed = elf.elf_needed(elf_deps, True)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                 comptime_hook, dylib_exports, import_aliases,
                                 extern_decls)
         try:
-            code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
+            code, info = codegen.compile(ordered, base_addr=elf.DEFAULT_BASE,
                                          structs=structs)
         except CodegenError as e:
             raise FormalBuildError(str(e))
         external_syms = info.get("external_syms") or []
+        needed = elf.elf_needed(elf_deps, bool(external_syms))
         if external_syms:
-            got = compute_got_addrs(len(code), external_syms,
-                                    vaddr=info["base_addr"],
-                                    lib_name=DEFAULT_LIBC)
+            got = elf.compute_got_addrs(len(code), external_syms,
+                                         vaddr=info["base_addr"],
+                                         needed=needed)
             codegen.asm.resolve_extern(got)
             code = bytes(codegen.asm.sections["text"])
         unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
@@ -990,10 +1017,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             raise FormalBuildError(
                 _unaccounted_report(source_path or "<program>", unaccounted,
                                     "image"))
-        binary = build_elf(code, entry=info["base_addr"],
-                           vaddr=info["base_addr"],
-                           external_syms=external_syms, lib_name=DEFAULT_LIBC,
-                           globals_image=globals_image(fmt))
+        binary = elf.build_elf(code, entry=info["base_addr"],
+                               vaddr=info["base_addr"],
+                               external_syms=external_syms,
+                               deps=needed,
+                               globals_image=globals_image(fmt))
         return code, info, external_syms, binary
 
     # The extern entry offset depends on the linked dylibs: each adds a load
@@ -1330,37 +1358,6 @@ def compile_formal(source_path: str, output: str = None,
         # launch with "Symbol not found" for a function the source plainly
         # imports.
         raise FormalBuildError(str(e))
-    if fmt != "macho" and import_dylibs:
-        # An ELF image with a module dependency, refused rather than emitted.
-        #
-        # `formal/imports.py` builds module libraries with
-        # `build_macho_dylib`, so `import_dylibs` here is a list of Mach-O
-        # shared objects — and `formal/elf.py`'s `build_elf` carries ONE
-        # `lib_name` (`libc.so.6`) and writes exactly one `DT_NEEDED`, with no
-        # `.dynamic` entry for anything else. The libraries are therefore built,
-        # audited (their symbols are `provided`, so `_audit_bound_symbols`
-        # passes) and then put NOWHERE: the image's `.dynstr` carries
-        # `ANY_add1_9f63a2` while the only `DT_NEEDED` is libc.
-        #
-        # That is the worst shape this can take, because the audit is what
-        # makes it look right. The image builds, the audit passes, and the
-        # program dies at load with an unresolved symbol for a function its
-        # own source imports. This is the ELF half of the container gap named
-        # in bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md: `arch`
-        # selects the code generator and is honoured, but there is no ELF
-        # shared-object emitter, so a program that imports a module has no
-        # target-shaped library to link.
-        from formal.elf import DEFAULT_LIBC
-        raise FormalBuildError(
-            f"{os.path.basename(source_path)} imports {len(import_dylibs)} "
-            f"module(s) and cannot be built for {fmt!r}: module libraries are "
-            f"Mach-O on this path (formal/macho_linker.py's build_macho_dylib "
-            f"is the only emitter) and {fmt} has no shared-object form here — "
-            f"formal/elf.py writes one DT_NEEDED ({DEFAULT_LIBC!r}) and no "
-            f".dynamic entry for anything else, so the image would carry the "
-            f"module's symbols in .dynstr with nothing providing them. The "
-            f"code generator does honour arch; the container is the missing "
-            f"half. Build for macho, or lower the module into this image.")
     # THE PARKED REFUSAL, and the ORDER is the whole fix: the import diagnosis
     # above has had its say, and so has the ELF-container check above this, and
     # both are facts about whether this file can be built HERE at all — which
@@ -12268,7 +12265,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
                        constants: dict = None, traits: list = None,
-                       source: str = None) -> dict:
+                       source: str = None, fmt: str = "macho") -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
@@ -12372,13 +12369,29 @@ def _namespace_library(output: str, install_name: str, arch: str,
             f"doc/ABI.md keeps out of the boundary — and not something this "
             f"backend can paper over: emitting a link line with no definition "
             f"behind it turns a build error into a wrong answer at run time.")
-    binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
-        install_name, False, dep_install), [], install_name, arch=arch,
-        deps=dep_install or None)
+    if fmt == "elf":
+        # The EMPTY export table is the design here (see the docstring), so this
+        # is the one caller that says so: `build_elf_dylib` refuses an empty
+        # table by default because for anything else it means the build lost the
+        # module's API.
+        from formal import elf
+        binary = elf.build_elf_dylib(
+            b"", elf.DYLIB_BASE, [], os.path.basename(output),
+            external_syms=None,
+            deps=[os.path.basename(name) for name in dep_install],
+            namespace=True)
+    else:
+        binary = build_macho_dylib(b"", TEXT_BASE + dylib_code_offset(
+            install_name, False, dep_install), [], install_name, arch=arch,
+            deps=dep_install or None)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)
-    _ad_hoc_sign(output)
+    if fmt != "elf":
+        # An ELF image carries no code signature and none is expected; the Mach-O
+        # half still needs one, and `codesign -v` is what
+        # `test_formal_x86_64_dylib.py` asserts of it.
+        _ad_hoc_sign(output)
     manifest_path = write_dylib_manifest(output, install_name, [], source=source,
                                          module=module, constants=constants)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
@@ -12393,7 +12406,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
         "exports": [],
         "reexports": reexports,
         "traits": list(traits or []),
-        "backend": f"{arch}/macho-dylib-namespace",
+        "backend": f"{arch}/{fmt}-dylib-namespace",
     }
 
 
@@ -12523,13 +12536,22 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # and does not is worse than a hardcoded literal: the caller gets an
     # artifact it did not ask for and no diagnostic. Refusing says the gap is
     # the container, which is where the work is.
-    if fmt != "macho":
+    if fmt not in ("macho", "elf"):
         raise FormalBuildError(
-            f"a formal dylib is a Mach-O container; {fmt!r} was asked for and "
-            f"this path has no {fmt} dylib emitter (formal/elf.py builds "
-            f"executables only — no .dynamic/.dynsym/.dynstr/.hash). The code "
-            f"generator is selected by arch={arch!r} and does honour it; the "
-            f"container is the missing half.")
+            f"unknown dylib container {fmt!r} (expected macho|elf)")
+    # `fmt` selects the CONTAINER and the CODEGEN, and both are real for both
+    # values now. The previous condition was `not fmt_wants_macho(arch) and fmt !=
+    # "macho"`, which on a Mach-O host is `False and …` for EVERY `fmt` — so
+    # `fmt="elf"` on macOS was accepted, ignored, and returned a Mach-O labelled
+    # by the caller's own argument. An argument that reads like it is doing
+    # something and does not is worse than a hardcoded literal: the caller gets
+    # an artifact it did not ask for and no diagnostic.
+    #
+    # `formal/elf.py::build_elf_dylib` is the ELF emitter, and it is the SAME
+    # export information `build_macho_dylib` writes into its trie — a name and an
+    # address per export — so what the two differ on is the container and not the
+    # analysis. See that function for why there is no `.plt` and one
+    # `R_X86_64_GLOB_DAT` per extern instead.
     reexports = dict(reexports or {})
 
     # The libraries THIS library links. Their export spellings decide how a
@@ -12646,7 +12668,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # Same reason and same check as the image path: a sibling library in the
     # wrong container is on this library's `deps` list and will be written into
     # its load commands, so the loader is told to open a file it cannot open.
-    _audit_link_line_containers(linked, fmt, "library")
+    _audit_link_line_containers(linked, fmt, "library", arch)
     dylib_syms = {}
     for d in linked:
         for bare, mangled in (d.get("map") or {}).items():
@@ -12716,7 +12738,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 f", whose libraries are on this one's link line.")
         return _namespace_library(
             output, install_name, arch, reexports, dylib_syms, dep_install,
-            linked,
+            linked, fmt=fmt,
             source=source_paths[0],
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
@@ -12745,6 +12767,79 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # this merge is what makes the library's slots distinct.
     M.publish_global_slots(library_slots)
     has_globals = bool(library_slots)
+    if fmt == "elf":
+        # ONE pass, not two, and the reason is the layout: a Mach-O dylib's
+        # code starts after a load-command list whose SIZE depends on whether
+        # there are externs and on how many dependencies there are, so the
+        # first pass has to discover the externs before the base address can be
+        # chosen. An ELF image's headers are a fixed size and its code starts
+        # immediately after them, so the base is known before anything is
+        # emitted and only the GOT addresses — which need `len(code)` — come
+        # second. Same `resolve_extern` call the executable ELF path makes.
+        from formal import elf
+        elf_soname = os.path.basename(output)
+        elf_deps = [os.path.basename(name) for name in dep_install]
+        codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                                dylib_exports=dylib_exports)
+        try:
+            code, info = codegen.compile(ordered, base_addr=elf.DYLIB_BASE,
+                                         emit_startup=False,
+                                         structs=library_structs)
+        except CodegenError as e:
+            raise FormalBuildError(str(e))
+        external_syms = info.get("external_syms") or []
+        unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
+                                           "library", dylib_exports)
+        if unaccounted:
+            raise FormalBuildError(
+                _unaccounted_report(source_paths[0], unaccounted, "library"))
+        exports = _formal_exports(source_paths, ordered, info, module_prefixes,
+                                  _method_exports(source_paths, structs_by_file,
+                                                  module_prefixes))
+        if not exports:
+            raise FormalBuildError("formal dylib has no public functions")
+        if external_syms:
+            got = elf.compute_got_addrs(
+                len(code), external_syms, vaddr=elf.DYLIB_BASE,
+                soname=elf_soname, exports=exports,
+                needed=elf.elf_needed(elf_deps, True))
+            codegen.asm.resolve_extern(got)
+            code = bytes(codegen.asm.sections["text"])
+        binary = elf.build_elf_dylib(
+            code, elf.DYLIB_BASE, exports, elf_soname,
+            external_syms=external_syms,
+            deps=elf.elf_needed(elf_deps, bool(external_syms)),
+            globals_image=globals_image(fmt) if has_globals else None)
+        with open(output, "wb") as f:
+            f.write(binary)
+        os.chmod(output, 0o755)
+        # NO `_ad_hoc_sign`: an ELF image carries no code signature and none is
+        # expected — `codesign` is a Mach-O container's business, and its absence
+        # is what makes the file readable by `ld` at all.
+        manifest_path = write_dylib_manifest(
+            output, install_name, exports, source=source_paths[0],
+            module=(module_prefixes or {}).get(source_paths[0])
+            or _module_prefix(source_paths[0]),
+            constants=constants)
+        if linked:
+            _record_link_deps(manifest_path, linked)
+        result = {
+            "manifest_path": manifest_path,
+            "path": output,
+            "code": code,
+            "binary": binary,
+            "info": info,
+            "exports": exports,
+            "backend": f"{arch}/elf-dylib",
+            # Same field, same meaning, same shape as the program path's and the
+            # Mach-O library's: a module dylib whose source declares `@admitted`
+            # contracts is the library half of an admission.
+            "admitted": _admitted_summary(source_paths[0]),
+        }
+        if prove:
+            _prove_dylib_result(result, code, info, exports, ordered, output,
+                                check)
+        return result
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
@@ -12833,34 +12928,49 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     }
 
     if prove:
-        from formal.arm64_proof_gen import generate_dylib_proof, _dylib_spec_lean
-        # The spec comes from the export's SOURCE, and the proof checks the
-        # machine against it (`bv_decide`), so a wrong spec is a build failure
-        # rather than a believed claim.  An export whose body is not a single
-        # `return` of pure arithmetic over its parameter gets no spec, and the
-        # proof keeps naming that export's contract as an open obligation
-        # instead of guessing one.
-        specs = {}
-        for fn in ordered:
-            spec = _dylib_spec_lean(fn)
-            if spec is not None:
-                specs[fn.name] = spec
-        proof = generate_dylib_proof(code, info, exports, specs)
-        proof_path = os.path.splitext(output)[0] + "_proof.lean"
-        if os.path.exists(proof_path):
-            os.chmod(proof_path, 0o644)
-        with open(proof_path, "w") as f:
-            f.write(proof)
-        os.chmod(proof_path, 0o444)
-        result["proof_path"] = proof_path
-        if check:
-            from formal.lean import check_proof_cached
-            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            ok, detail, cached, n_sorries = check_proof_cached(
-                proof_path, repo_root=repo_root)
-            result["proof_checked"] = ok
-            result["proof_cached"] = cached
-            result["proof_sorries"] = n_sorries
-            if not ok:
-                raise FormalBuildError(f"proof check failed: {detail}")
+        _prove_dylib_result(result, code, info, exports, ordered, output, check)
     return result
+
+
+def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,
+                        ordered: list, output: str, check: bool) -> None:
+    """Emit and (optionally) typecheck a library's proof. Mutates `result`.
+
+    Shared by the two containers rather than repeated, because the proof is a
+    property of the CODE and not of the container: it takes `code` and `info`
+    and knows nothing about Mach-O or ELF, and a second copy for the ELF
+    library is a second place for the spec set to differ between two libraries
+    built from one source — which is exactly what `bugs/FORMAL_opus_dylib
+    _termination_handoff.md` §OPUS-2 records an equality check already being
+    unable to distinguish.
+    """
+    from formal.arm64_proof_gen import generate_dylib_proof, _dylib_spec_lean
+    # The spec comes from the export's SOURCE, and the proof checks the
+    # machine against it (`bv_decide`), so a wrong spec is a build failure
+    # rather than a believed claim.  An export whose body is not a single
+    # `return` of pure arithmetic over its parameter gets no spec, and the
+    # proof keeps naming that export's contract as an open obligation
+    # instead of guessing one.
+    specs = {}
+    for fn in ordered:
+        spec = _dylib_spec_lean(fn)
+        if spec is not None:
+            specs[fn.name] = spec
+    proof = generate_dylib_proof(code, info, exports, specs)
+    proof_path = os.path.splitext(output)[0] + "_proof.lean"
+    if os.path.exists(proof_path):
+        os.chmod(proof_path, 0o644)
+    with open(proof_path, "w") as f:
+        f.write(proof)
+    os.chmod(proof_path, 0o444)
+    result["proof_path"] = proof_path
+    if check:
+        from formal.lean import check_proof_cached
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ok, detail, cached, n_sorries = check_proof_cached(
+            proof_path, repo_root=repo_root)
+        result["proof_checked"] = ok
+        result["proof_cached"] = cached
+        result["proof_sorries"] = n_sorries
+        if not ok:
+            raise FormalBuildError(f"proof check failed: {detail}")
