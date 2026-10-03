@@ -86,6 +86,74 @@ word-typed sites, reachable, its own terminal being a `_type=` rather than the
 vector-width question), and it is still not reached by this change —
 `bugs/FORMAL_known_limits.md` §2.2's correction now records that too.
 
+**Status (2026-10-03, `work/formal14-std-os-io`): one EFFECT now lowers, and the
+"effects stay refused" in item 3 below is narrower than it reads.** The sweep
+scope `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` has exactly ONE in-file
+`__mlir_op` refusal, and it is a trap used as a statement: `std/sys/debug.mojo:20`
+is `__mlir_op.`llvm.intr.debugtrap`()()` and nothing else, so the whole module
+was refused for it. That file now **builds on both architectures** and the
+scope's `codegen` class is 0.
+
+**Why an effect at a STATEMENT is a different question from an effect anywhere.**
+`MLIR_EFFECT_OPS` is right that these operations denote no value, and the refusal
+in `mlir_dialect_op_refusal` was written for exactly that fact. But it was asked
+at every use, and at a use whose value is DISCARDED there is no result to
+represent and nothing that reads one — so the ground the refusal stood on ("no
+representation in a 64-bit word, because there is no value to represent") is
+simply absent there. Refusing was an OVER-refusal, not a safety, and it cost a
+module for a construct that lowers to the one thing this path already emits when
+control must not continue: the divergence `raise` emits, now one `_emit_diverge`
+per backend shared by both callers.
+
+**It is not a trap instruction, and the reason is the proofs.** The source asked
+for a fault a debugger sees; what is emitted is Darwin `exit(1)` on arm64 and the
+C library's `exit` on x86-64. `brk #0`/`int3` would be the better lowering and is
+the one to build once the Lean model grows a step for it — but every word in the
+divergence already has a `work_step_*` lemma in `lib/work.lean`, whereas an
+unmodelled `brk` falls through `formal/arm64_proof_gen.py`'s
+`_step_branch_index` as "not modelled" and is skipped, which would put a hole in
+the proofs of anything containing it.
+
+**The narrowing is `MLIR_EFFECT_DIVERGENCE_OPS` = {`llvm.intr.trap`,
+`llvm.intr.debugtrap`}, plus two requirements on the USE:** a zero-argument call,
+and the whole value of an `F.ExprStmt` (`model.mlir_effects_all_lowered`, which
+also requires every dialect root in the body to be one of those, so a second
+construct cannot ride along unseen). So `return __mlir_op.`llvm.intr.trap`()` is
+still refused with the same sentence, and every other member of
+`MLIR_EFFECT_OPS` still is, for the fact it has beyond the missing value: an
+ownership marker asserts something about a reference this path does not track, a
+`pop.store` has an address whose pointee width nothing states, a `pop.fence` and
+a `pop.inline_asm` are ordering and clobber facts with no encoding agreed here, a
+coroutine step is the shape this path lowers to a plain call, and
+`kgen.codegen.reachable` carries operands this path computes rather than being a
+bare marker.
+
+The four corpus sites this reaches, three of them in `std/sys` and `std/os`:
+
+    std/sys/debug.mojo:20         __mlir_op.`llvm.intr.debugtrap`()
+    std/sys/info.mojo:702         __mlir_op.`llvm.intr.trap`()
+    std/os/os.mojo:242            __mlir_op.`llvm.intr.trap`()   (_abort_base)
+    std/_plugin/selector.mojo:74  __mlir_op.`llvm.intr.trap`()
+
+Only the first moves a file: the other three are behind other modules' refusals
+(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`
+has the chain), so this change moves them one refusal along rather than out.
+
+**One defect found and removed on the way.** `mlir_dialect_op_refusal` had an
+UNREACHABLE tail after its fallback `return`: a second copy of the unguarded arm
+and a branch for `MLIR_WORD_VALUED_OPS`, **a name that exists nowhere in the
+tree**. It never fired and so never raised the `NameError` it would have, which
+is exactly the failure mode a reader cannot see; what is in its place is a comment
+saying why a name-keyed word-valued table must not come back (the §Correction
+below is the reason). A test that would have caught the class is
+`test_formal_mlir_precedence.py`'s EMITTED table plus the
+`a_trap_in_a_value_position_is_still_refused` row; what would catch a *future*
+undefined name is a static check that every global this module's functions read is
+defined in it, which does not exist yet and is worth having.
+
+**Items 1 and 3 of "The next step" are unchanged and still in that order**, and
+neither is about an effect.
+
 **What is worth keeping here is the census**, and the correction to it.
 
 ## What was run
@@ -486,9 +554,14 @@ next mechanical step it was going to be. The remaining work, in order:
      question rather than the vector-width one. Memory, variants, coroutines and
      the `lit.*`/ownership effects stay refused, and `MLIR_EFFECT_OPS` says so in
      the message rather than leaving them to look like a missing lowering.
+     **(2026-10-03: the two TRAPS are the one exception, and only as a statement
+     whose value is discarded — see the Status at the top. `llvm.intr.trap` and
+     `llvm.intr.debugtrap` lower to this path's divergence, and nothing else in
+     `MLIR_EFFECT_OPS` does.)**
 
 `test_formal_mlir_precedence.py` is the suite that goes red if any of this moves:
 its `CLASSIFIED` rows assert each class's own words AND the absence of another
 class's, so an arm that lowers an operation by name alone without establishing
 the operand type will red the elementwise row rather than quietly answering a
-vector site with a scalar add.
+vector site with a scalar add. Its `EMITTED` table is the other half, and it is
+the part that would catch a lowering which builds and computes nothing.

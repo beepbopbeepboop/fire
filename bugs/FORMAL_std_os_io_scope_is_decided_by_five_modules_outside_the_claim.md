@@ -149,15 +149,30 @@ same change reaches `std/sys/info.mojo:702`, `std/os/os.mojo:242` and
 `std/_plugin/selector.mojo:74` as their NEXT refusal rather than this one; none
 of those three files moves, because each is behind link 1.
 
-**Measured and available, deliberately not done here:** `std/sys/compile.mojo:34`
-is `__mlir_op.`kgen.codegen.reachable`[…]()` as a statement, and it is refused as
-an effect. It could honestly lower to NOTHING — the operation asserts a block is
-reachable for code placement, and this path places every instruction it emits, so
-the assertion holds by construction — which is a second table beside
-`MLIR_EFFECT_DIVERGENCE_OPS` with a different meaning (satisfied, not diverged
-through) and its own `EMITTED`-style check that the image is unchanged against a
-control. **It moves no file**: `std/sys/compile.mojo` is behind link 1. Recorded
-because it is cheap and the next worker on this scope will otherwise re-derive it.
+**Measured, and NOT taken: the other statement-position effect in this scope.**
+`std/sys/compile.mojo:34` is `__mlir_op.`kgen.codegen.reachable`[… ]()` as a
+statement, refused as an effect, and lowering it to nothing looked like the
+obvious second entry beside `MLIR_EFFECT_DIVERGENCE_OPS` — "this block is
+reachable" is satisfied by construction on a path that places every instruction
+it emits. **It is not obvious, and the bracket is why:**
+
+```
+sys/compile.mojo:34   __mlir_op.`kgen.codegen.reachable`[
+                          cond=(not cond).__mlir_i1__(),
+                          message=_get_kgen_string[msg, *extra](),
+                          _type=None,
+                      ]()
+```
+
+`cond` and `message` are values this path COMPUTES, so "emit nothing" is either
+an evaluation whose result is dropped — honest, and only available if both
+operands lower — or a dropped bracket, which is the defect this backend exists to
+prevent (`formal/build.py`'s own comment at the bracketed-callee arm names
+`std/sys/_assembly.mojo`'s `_get_kgen_string[asm]()` as a refusal already, at
+"nineteen swept files' worth"). And it moves no file: `std/sys/compile.mojo` is
+behind link 1. Recorded because the next worker on this scope will otherwise
+propose it, and the reason it is not a one-liner is in the source rather than
+being obvious.
 
 **Left, with the owner for each:** links 1–4 of §2. None of them is in this
 claim, and §3 says why each one is not a patch.

@@ -674,17 +674,55 @@ decide whether the result is a word; the **operand's type** does. 26 of those 38
 sites have a vector or mask operand, 9 have a word operand, 3 are pointer
 arithmetic.
 
-What did NOT change, and is the reason this section still reads CLOSED: every one
-of the 259 is still refused, on both architectures, with byte-identical text, and
-none of them links an image. What changed is that the refusal says **which**
-operation and **which** of those three facts is missing, instead of asserting a
-property of the target that was false of a quarter of the arithmetic sites. A
-lowering table keyed on the operation NAME is what that correction rules out:
-`pop.add(a, b)` → `a + b` is right for the 9 word-typed sites and WRONG for the
-26 vector-typed ones, where it would compute a scalar add of two vector-typed
-words — a plausible-looking number rather than a refusal. Pinned by the
-`CLASSIFIED` rows of `test_formal_mlir_precedence.py`, each of which asserts its
-own class's words on both backends and the ABSENCE of another class's.
+What did NOT change, and is the reason this section still reads CLOSED: with ONE
+exception taken 2026-10-03 (below), every one of the 259 is still refused, on
+both architectures, with byte-identical text, and none of them links an image.
+What changed is that the refusal says **which** operation and **which** of those
+three facts is missing, instead of asserting a property of the target that was
+false of a quarter of the arithmetic sites. A lowering table keyed on the
+operation NAME is what that correction rules out: `pop.add(a, b)` → `a + b` is
+right for the 9 word-typed sites and WRONG for the 26 vector-typed ones, where
+it would compute a scalar add of two vector-typed words — a plausible-looking
+number rather than a refusal. Pinned by the `CLASSIFIED` rows of
+`test_formal_mlir_precedence.py`, each of which asserts its own class's words on
+both backends and the ABSENCE of another class's.
+
+### The one exception, 2026-10-03: a TRAP used as a statement lowers
+
+**4 of the 259 sites now build**, and the count above is 255 refused rather than
+259. All four are `llvm.intr.trap` or `llvm.intr.debugtrap` whose value is
+DISCARDED — `std/sys/debug.mojo:20`, `std/sys/info.mojo:702`,
+`std/os/os.mojo:242`, `std/_plugin/selector.mojo:74` — and the reason is the
+one distinction the effect class had not drawn: **"denotes no value" is not a
+refusal reason at a statement.** Nothing reads a result there, so there is
+nothing to represent, and what is left to emit is the effect itself, which is the
+divergence `raise` already emits (`_emit_diverge`, one per backend, both callers).
+
+It is not a trap instruction: `brk #0`/`int3` is the better lowering and is the
+one to build once the Lean model has a step for it, but every word in the
+divergence already has a `work_step_*` lemma in `lib/work.lean` and an unmodelled
+`brk` is SKIPPED by `formal/arm64_proof_gen.py`'s `_step_branch_index`. The
+source's observable difference — an exit with a nonzero status rather than a fault
+a debugger sees — is the difference `raise` already has on this path.
+
+**The effect class is not thereby smaller in a way a reader should bank on.** Only
+those two operations, only as a zero-argument call that is the whole value of an
+`F.ExprStmt`, and only when every dialect root in the body is one of those
+(`MLIR_EFFECT_DIVERGENCE_OPS`, `model.mlir_effects_all_lowered`).
+`return __mlir_op.`llvm.intr.trap`()` is still refused with the same sentence, and
+an ownership marker, a store, a fence, an inline asm, a coroutine step and
+`kgen.codegen.reachable` are each still refused for the fact they have beyond the
+missing value — the last of those because its bracket carries two values this path
+COMPUTES, so "emit nothing" is a dropped bracket rather than a no-op.
+
+Only **one file** moves: `std/sys/debug.mojo`, whose whole body is the trap. The
+other three sit behind other modules' refusals
+(`bugs/FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`),
+so they move one refusal along rather than out — which is §2.0's "the next
+terminal is a different construct" again, and the reason the census above is
+corrected by 4 and not re-derived. `test_formal_mlir_precedence.py` pins both
+halves: `a_trap_in_a_value_position_is_still_refused` for the refusal that
+remains, and the `EMITTED` table for the divergence that is emitted.
 
 `formal/model.py`'s tables stay arch-free, so the two architectures cannot
 disagree about what an operation denotes; a per-emitter copy of them is the one
