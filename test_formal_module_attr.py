@@ -729,15 +729,22 @@ def test_a_module_object_read_is_still_refused(tmpdir, _shared, verbose):
 
 # ── a SPINE link that resolves, and one that does not ───────────────────────
 #
-# `os.environ.get(k, '')` is the measured instance: `environ` is not a name the
-# formal `os` publishes (28 of them, and it is not among them) and `os.environ`
-# is not a module with a library on the link line, so nothing can bind the call —
-# and the file was reported as a STRING COMPARISON, because the spine exemption
-# was unconditional and the diagnostic raised during emission beat the one
-# raised at the end of the symbol walk. The three shapes below are the two
-# answers plus the guard between them, because a fix that asked only "does the
-# parent module publish it" would refuse `pkg.sub.twice(…)` — a submodule with
-# its own library, whose name the parent does not publish at all.
+# `os.environ.get(k, '')` is the measured instance, and it has been BOTH of the
+# answers below in turn. `os.environ` is not a module with a library on the link
+# line, so nothing can bind the call; and while `environ` was not a name the
+# formal `os` published the file was reported as a STRING COMPARISON, because the
+# spine exemption was unconditional and the diagnostic raised during emission
+# beat the one raised at the end of the symbol walk. `formal/hostmods/os`
+# publishes `environ` and a dozen operations on it now
+# (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`), which
+# moved this shape from the middle case to the third one: the parent publishes
+# the link, so the chain is a call through a VALUE and the answer has to say
+# that and name the functions that are the operations.
+#
+# The four shapes below are those answers plus the guards between them, because
+# a discriminator that asked only "does the parent module publish it" would
+# refuse `pkg.sub.twice(…)` — a submodule with its own library, whose name the
+# parent does not publish at all.
 
 def test_a_spine_link_that_resolves_is_not_a_member_read(
         tmpdir, _shared, verbose):
@@ -787,6 +794,98 @@ def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
               f"what the module DOES publish (its re-exports included), or a "
               f"reader cannot tell a missing capability from a missing name: "
               f"{text.strip()[-400:]}")
+
+
+# A module that hands back a VALUE and publishes the operations on it as
+# functions of its own — which is the only way it can, since a dylib publishes
+# functions and not the objects they are called on. `os.environ` and
+# `environ_get`/`environ_len`/… is the measured instance; these two are the rule
+# on a module of this test's own, because the rule is what is being pinned and
+# not one host module's spelling of it.
+THING = """\
+def thing() -> Pointer[UInt8]:
+  return 0
+
+
+def thing_len(t) -> int:
+  return 0
+
+
+def thing_get(t, k) -> str:
+  return ""
+"""
+
+# The same value with NO operation published beside it, which is the other half
+# of the message: an empty list has to be reported as an empty list, because
+# "call one of those" with nothing after it is a repair that does not exist.
+BARE = """\
+def thing() -> Pointer[UInt8]:
+  return 0
+
+
+def other() -> int:
+  return 0
+"""
+
+
+def test_a_call_through_a_value_a_module_publishes_is_refused_by_name(
+        tmpdir, _shared, verbose):
+    """`mylib.thing.get(t, k)` — a call through a VALUE, and the operations.
+
+    `thing` is a FUNCTION of `mylib`, so `mylib.thing` is a value and not a
+    module, and `.get` on it is not a name any library publishes. Before
+    `formal/model.py::dylib_value_member_refusal` this chain fell through to a
+    bare reference and the bind audit reported it as "the image would bind 1
+    symbol(s) that nothing provides: mylib.thing.get" — a statement about the
+    LINK LINE, which is not what is wrong with it.
+
+    The message has to name the repair, and the repair is read off the same
+    table rather than hard-coded: a module that publishes `thing` and also
+    `thing_len` and `thing_get` has published the operations on the value it
+    hands back.
+    """
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  t = mylib.thing()\n"
+            "  printf(\"[%s]@@\", mylib.thing.get(t, \"k\"))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": THING, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("mylib.thing" in text and "thing_get" in text
+              and "thing_len" in text and "VALUE" in text,
+              f"{arch}: the refusal must say the chain is a call through a "
+              f"VALUE and name the functions that are the operations on it: "
+              f"{text.strip()[-400:]}")
+
+
+def test_a_value_with_no_published_operation_says_so(
+        tmpdir, _shared, verbose):
+    """`mylib.thing.get(t, k)` where `mylib` publishes no `thing_*` at all.
+
+    The other half, and it is a test because the empty list is the easy half to
+    get wrong in the other direction: a message that lists nothing and still
+    says "call one of those" is a repair that does not exist, which is the same
+    defect this file was written about — a diagnostic false about the name it
+    names.
+    """
+    prog = ("import mylib\n\n"
+            "def main():\n"
+            "  t = mylib.thing()\n"
+            "  printf(\"%d@@\", mylib.thing.get(t, 1))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "value_member_bare")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": BARE, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("mylib.thing" in text
+              and "publishes no function whose name begins `thing_`" in text,
+              f"{arch}: a module with no operation published beside the value "
+              f"must be reported as publishing none, not handed a repair that "
+              f"does not exist: {text.strip()[-400:]}")
 
 
 def test_a_module_attribute_read_is_refused_as_an_attribute(
@@ -1469,6 +1568,10 @@ TESTS = [
      test_a_spine_link_that_resolves_is_not_a_member_read),
     ("a spine link that resolves to nothing is refused as the attribute",
      test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read),
+    ("a call through a VALUE a module publishes names the operations",
+     test_a_call_through_a_value_a_module_publishes_is_refused_by_name),
+    ("a value with no published operation is reported as having none",
+     test_a_value_with_no_published_operation_says_so),
     ("a published constant reads in EVERY position, including a store's value",
      test_a_published_constant_is_readable_in_every_position),
     ("every store kind tests its VALUE side, and a module store stays a store",

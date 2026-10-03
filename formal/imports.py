@@ -219,14 +219,27 @@ HOST_MODELLED = frozenset((
     #     `argv`, `path` and the stream objects are ONE missing capability (an
     #     argument vector with no place to put it, and streams), not nine
     #     missing names, so they are filed once, as a bug.
-    #   `os`  — `formal/hostmods/os/__init__.mojo`,
-    #     `formal/hostmods/os/path/__init__.mojo` (CPython's posixpath) and
-    #     `formal/hostmods/os/_syscalls.mojo` (every libSystem call it makes,
-    #     once), all three built and RUN by `test_formal_os.py`: 436 path
-    #     answers against CPython's own, 75 filesystem operations against the
-    #     real filesystem. `listdir` and `walk` need a run-time-length
-    #     sequence, which a list on this path cannot be, and `environ` needs
-    #     a `char **` walk; both are bug docs rather than approximations.
+#   `os`  — `formal/hostmods/os/__init__.mojo`,
+#     `formal/hostmods/os/path/__init__.mojo` (CPython's posixpath) and
+#     `formal/hostmods/os/_syscalls.mojo` (every libSystem call it makes,
+#     once), all three built and RUN by `test_formal_os.py`: 436 path
+#     answers against CPython's own, 75 filesystem operations against the
+#     real filesystem. `listdir` and `walk` need a run-time-length
+#     sequence, which a list on this path cannot be, and both are here as
+#     `malloc`'d blobs for that reason. `environ` is here too and was NOT
+#     for a long time: this entry used to say it "needs a `char **` walk"
+#     and that the three POSIX calls "are what `os.environ.get(k)` and
+#     `os.environ[k]` have to become". The walk was available —
+#     `os/_syscalls.mojo`'s `fs_environ_vec` asks the dynamic loader for
+#     the `environ` global at RUN time — and `getenv` answers `""` for both
+#     "set to nothing" and "not set", which a dict does not. So
+#     `environ()` is a snapshot with twelve operations over it, measured
+#     against CPython on both backends against a fixed environment by
+#     `test_formal_os_backing.py`'s `environ_view` and `environ_view_empty`
+#     cases; what is still absent is an EXPORTED slot, so each call is its
+#     own view. The accounting, and what the four sweep files the row was
+#     worth are actually worth, is in
+#     `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`.
     #   `io`  — `formal/hostmods/io.mojo`, in the part of CPython's `io` that
     #     is not streams: `SEEK_SET`, `SEEK_CUR`, `SEEK_END` and
     #     `DEFAULT_BUFFER_SIZE`, each checked against CPython's own `io` by
