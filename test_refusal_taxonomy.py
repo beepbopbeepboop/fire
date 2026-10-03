@@ -666,6 +666,89 @@ def check_cause_table(failures):
                 "call — and a merge would hide which one a file is blocked by")
 
 
+def _no_def_callee_arm_checks(failures):
+    """EVERY arm of `frame_undefined_callee_refusal` keeps the clause, and every
+    arm classifies as the one family in BOTH tables.
+
+    The row this rests on is `bugs/FORMAL_callee_no_def_ceiling_zero.md`: the
+    fifth branch of `frame_receiver_escape_refusal` used to be one sentence over
+    five different facts, four of them false of the program in front of the
+    reader, and splitting it into one arm per fact meant the arms had to stay
+    distinguishable. They are told apart by their tail; what keeps them in the
+    SAME family is the clause they all open with.
+
+    That clause is load-bearing and nothing tested it. Two taxonomies key on the
+    exact substring — `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    `tools/formal_sweep_causes.py`'s `callee has no definition on this path` —
+    and the message itself begins `a X receiver is passed to …`, which is the
+    `receiver passed as an argument` family's own opening. So an arm that
+    reworded its opening would fall into whichever family matches next, with a
+    wrong number in a table a planner acts on and no test failing. It already
+    happened: the first version of the split had four arms that did not keep it.
+
+    So this asks the question at the SOURCE rather than at a sample: one callee
+    per arm, taken from the arm's own condition, and three assertions each --
+    the clause is there, the family is the same in both tables, and the texts are
+    pairwise DISTINCT (a shared text would be the pre-split defect returning, and
+    it would pass the first two assertions).
+
+    The arms, and the fact that selects each: a compile-time reflection
+    intrinsic, a builtin with no implementation (`UNIMPLEMENTED_BUILTINS`, added
+    after the document's five), a compile-time parameter, a name bound by a
+    `from … import …`, a name reachable only through a star import, and nothing
+    at all. `struct_names` is passed for all six because a frame receiver is what
+    makes the sentence about a receiver at all.
+    """
+    sys.path.insert(0, HERE)
+    from formal.model import frame_undefined_callee_refusal
+    clause = "which is a name with no definition in hand"
+    family = "callee has no definition on this path"
+    arms = [
+        ("reflection intrinsic", "__get_mvalue_as_litref", {}),
+        ("unimplemented builtin", "getattr", {}),
+        ("compile-time parameter", "Fn",
+         {"comptime_param_of": "drive"}),
+        ("imported free function", "_b64encode",
+         {"imported_from": "._b64encode"}),
+        ("star import", "assert_true",
+         {"star_imported_from": "lib"}),
+        ("genuinely unbound", "mojo_print", {}),
+    ]
+    texts = {}
+    for label, callee, kwargs in arms:
+        msg = frame_undefined_callee_refusal(callee, ["P"], **kwargs)
+        if msg is None:
+            failures.append(
+                f"the {label} arm returned None for {callee!r}; the caller "
+                "cannot distinguish 'this construct is fine' from 'this arm is "
+                "unreachable'")
+            continue
+        texts[label] = msg
+        if clause not in msg:
+            failures.append(
+                f"the {label} arm does not carry {clause!r}. Two taxonomies key "
+                f"on that substring and the message begins 'a X receiver is "
+                f"passed to …', which is the receiver family's own opening, so "
+                f"this arm's files would be counted as receiver problems: "
+                f"{msg[:120]}")
+        for tool, got in (("formal_sweep", S._refusal_family(msg)),
+                          ("formal_sweep_causes", C.classify_message(msg))):
+            if got != family:
+                failures.append(
+                    f"{tool} classifies the {label} arm as {got!r}, not "
+                    f"{family!r}")
+    seen = {}
+    for label, msg in texts.items():
+        for other, prev in seen.items():
+            if msg == prev:
+                failures.append(
+                    f"the {label} arm and the {other} arm emit the SAME text, "
+                    "so the split that gives each its own reason has collapsed "
+                    "back to one sentence over two facts")
+        seen[label] = msg
+    return len(arms) * 3 + len(texts) - len(set(texts.values()))
+
+
 def main() -> int:
     failures = []
     checks = len(SAMPLES) + 3
@@ -721,6 +804,9 @@ def main() -> int:
     # …and the `uses:` column's own audit, which counts its checks into the
     # same total rather than printing a second tally.
     checks += _uses_column_checks(failures)
+    # …and the six-arm census of `frame_undefined_callee_refusal`, whose clause
+    # both tables key on and which nothing tested.
+    checks += _no_def_callee_arm_checks(failures)
     print(f"\nrefusal taxonomy: {'PASS' if not failures else 'FAIL'} "
           f"({checks - len(failures)}/{checks} checks, "
           f"{len(set(names))} families, {len(C.CAUSES)} causes)")
