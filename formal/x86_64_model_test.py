@@ -46,8 +46,8 @@ LEAN_ENV_EXTRA = (os.path.join(os.path.dirname(os.path.dirname(
 
 #: Bounds for the ONE Lean run this file makes, which is bigger than a proof
 #: check: ~150 `#eval!` goals over the whole example corpus, in one process.
-#: 3600 s wall / 3600 s CPU is ~40x the largest generated proof measured on this
-#: tree (see `formal/lean.py`'s docstring) and still two orders of magnitude
+#: 3600 s wall / 3600 s CPU is 12x the slowest generated proof measured on this
+#: tree (297.8 s; see `formal/lean.py`'s docstring) and two orders of magnitude
 #: below the hundred-CPU-hour processes this bound exists to end. Set as
 #: constants rather than as a bare `timeout=` because this file used to carry a
 #: 7200-second wall timeout and NO cpu bound at all, which is the case where a
