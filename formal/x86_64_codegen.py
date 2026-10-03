@@ -948,10 +948,18 @@ class X86_64Codegen:
             getattr(f, "_one_word_candidates", None) or {})
         # The x86-64 twin of arm64's, from the same function table: a
         # construction argument has to be told apart from a container returned
-        # by a callee, and the declared return type is the only evidence there
-        # is.
-        self._return_types = M.function_return_types(
-            self._functions.values())
+        # by a callee, and the declared return type is only the first of the two
+        # sources — a callee that declares NO return type is read from its
+        # return statements, in the same `CalleeReturnTable` both backends
+        # build, so the two cannot disagree about a program.
+        self._return_types = M.CalleeReturnTable(
+            self._functions.values(), int_names=TYPE_NAMES,
+            string_names=STRING_TYPE_NAMES)
+        # The x86-64 twin of arm64's, from the same two functions in the same
+        # shared model: what an UNANNOTATED parameter holds, agreed over every
+        # call site of its function in the image.
+        self._param_kinds = M.ParameterKindReader(
+            self._functions.values(), self._return_types)
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
@@ -6243,10 +6251,11 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
-            ctor_field_value=self._ctor_field_value_for(name),
+ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
-            dict_names=DICT_TYPE_NAMES)
+            dict_names=DICT_TYPE_NAMES,
+            param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
         return vk
 

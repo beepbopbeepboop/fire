@@ -12374,6 +12374,18 @@ class ValueKinds:
         `declared_type_kind` for the whole of it; the hook is consulted only
         where the answer would otherwise be a guess, and a `None` from it leaves
         every existing decision exactly where it was.
+      * `param_kind(name)` — what an UNANNOTATED parameter holds, agreed over
+        every call site of this function in the image
+        (`string_parameters_by_call_site`, which is the whole of the rule and
+        the reader for it).  The sixth hook, and the one that closes the last
+        place the "a word is an integer" default is a wrong answer rather than
+        a safe one: `def f(s): if s:` called `f("")` answered 1 where CPython
+        answers 0, because the empty string is a non-NULL pointer and
+        `truthy_lowering`'s third row — the word itself — is right for every kind
+        except this one.  It is asked only where the parameter has no
+        annotation, so an annotated parameter is never overridden, and `None`
+        (the default) leaves every existing decision exactly where it was, which
+        is why it is a hook and not a derivation.
       * `ctor_field_value(struct_name, call, field)` — the expression a
         CONSTRUCTION puts in a field's slot, or None.  The fifth hook, and it
         exists because `declared_kind` answers about the struct while a
@@ -12391,10 +12403,12 @@ class ValueKinds:
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
-                 callee_is_dict=None, dict_names=("Dict", "dict")):
+                 callee_is_dict=None, dict_names=("Dict", "dict"),
+                 param_kind=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
+        self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
@@ -12460,9 +12474,21 @@ class ValueKinds:
         for pname, pann in _param_list(fn):
             self._param_names.add(pname)
             # An unannotated parameter is a word arriving from the caller, and
-            # a word is an integer here (see the note on kinds above).
-            self.locals[pname] = (
-                STR_KIND if pann in self._string_names else INT_KIND)
+# a word is an integer here (see the note on kinds above).  The
+            # exception is a word the CALL SITES agree is a `char *`, which the
+            # `param_kind` hook carries: without it `def f(s): if s:` called
+            # `f("")` printed 1 where CPython prints 0, on both architectures,
+            # because the empty string is a non-null pointer and the identity
+            # test is the right answer for every kind except this one.  An
+            # ANNOTATED parameter is not overridden — the annotation is a
+            # statement about the value and the call sites are evidence about
+            # the calls — which is why the hook is asked only in the `else`.
+            if pann in self._string_names:
+                self.locals[pname] = STR_KIND
+            elif pann:
+                self.locals[pname] = INT_KIND
+            else:
+                self.locals[pname] = self._param_kind(pname) or INT_KIND
             # …and the dict axis, which the kind above cannot carry: a
             # `Dict[String, Int]` parameter and a `List[Int]` one are the same
             # kind here and opposite answers to `d["a"]`.  A parameter has no
@@ -13249,6 +13275,154 @@ def subscript_callee_name(call) -> str | None:
 
 def _param_list(fn):
     return list(getattr(fn, "params", None) or [])
+
+
+# ── The kind of a PARAMETER, from the call sites rather than from an annotation
+#
+# `ValueKinds` seeds an unannotated parameter as a word, and a word is an integer
+# here (see the note on kinds). That default is right for every kind on this path
+# EXCEPT one, and the exception is a wrong ANSWER rather than a refusal:
+#
+#     def f(s):
+#         if s:            # `truthy_lowering`'s third row: the word itself
+#         return 1         # the empty string is a NON-NULL pointer, so this
+#     return 0             # is TRUE
+#     f("")               # -> 1, where CPython says 0
+#
+# Measured on both architectures, and the same program with `s: String`
+# annotated answers 0. The annotation is the only thing that closes it today,
+# which is the gap `ValueKinds`' own docstring records for `print` ("A `char *`
+# reaching print through an unannotated parameter is the remaining gap, and it is
+# the gap the annotation exists to close").
+#
+# So: the call site's argument kind, propagated into the callee. This is the part
+# of that which is decidable from the argument's OWN SHAPE — a string literal, or
+# a call to a function whose declared return type is a string — and the rule is
+# UNANIMITY over every call site of the name in the image, because a parameter
+# that is a string at one call site and something else at another is a word and
+# nothing else is an answer. A call site whose argument shape says nothing claims
+# nothing, which is the permissive direction the rest of this file's kind tables
+# take wherever the alternative is a refusal on the majority of a corpus.
+#
+# What it deliberately does NOT read, and why each is a decision rather than an
+# omission:
+#
+#   * the CALLER's `ValueKinds`, so `f(some_local)` where `some_local` holds a
+#     string is still unclassified. Reading it would mean building a ValueKinds
+#     per caller from inside the callee's, which is the recursion `func_kind`
+#     already guards with a depth limit — and a kind that depends on which
+#     function the emitter reached first is a worse answer than no answer, since
+#     it decides whether `printf("%s", s)` formats a pointer or bytes;
+#   * a SPECIALIZED call, `f[a](x)`, whose brackets shift every position by the
+#     comptime parameters. Skipping the whole call is the conservative reading
+#     and costs only the generics;
+#   * a call with KEYWORDS, whose positions are not the positional order. A call
+#     that is keywords only is read by name; a call that mixes them binds the
+#     positionals to parameters this function does not enumerate, so it claims
+#     nothing at all;
+#   * `*args` / `**kwargs` at the call site, for the same reason.
+
+
+def _string_argument_shape(arg, rets=None):
+    """`STR_KIND` when the argument's OWN SHAPE is a string, else None."""
+    if isinstance(arg, F.StringLiteral) and not getattr(arg, "is_bytes", 0):
+        return STR_KIND
+    if isinstance(arg, F.CallExpr) and isinstance(arg.func, F.IdentExpr):
+        ann = (rets or {}).get(arg.func.name)
+        if ann and annotation_base_name(ann) in STRING_TYPE_CTORS:
+            return STR_KIND
+    return None
+
+
+def string_parameters_by_call_site(functions, rets=None) -> dict:
+    """`{function: {parameter: STR_KIND}}` — agreed over EVERY call site.
+
+    Unanimity is the whole of the answer, and it is the same rule every
+    flow-INsensitive table in this file uses (`struct_frame_slot_candidates`,
+    `callees_returning_containers`): a name whose definitions or whose call sites
+    disagree answers no single question, and the disagreement is resolved by
+    claiming nothing rather than by picking the first or the majority. A name
+    with NO call site is absent from the table entirely — nothing observed it, so
+    nothing is claimed, which is what keeps a module of never-called helpers
+    paying nothing.
+    """
+    by_name: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    claims: dict = {}
+    for caller in functions or ():
+        for call in iter_nodes(getattr(caller, "body", None) or []):
+            if not isinstance(call, F.CallExpr):
+                continue
+            if isinstance(call.func, F.SubscriptExpr):
+                continue          # a specialization: the brackets shift
+            callee = call_callee_name(call.func)
+            if callee is None or callee not in by_name:
+                continue
+            args = list(getattr(call, "args", None) or [])
+            kwargs = list(getattr(call, "kwargs", None) or [])
+            if any(isinstance(a, F.UnaryOp) and a.op in ("*", "**")
+                   for a in args):
+                continue
+            names = _positional_parameter_names(by_name[callee])
+            if kwargs and args:
+                continue          # mixed: the positionals bind the rest
+            pairs = list(zip(names, args)) if not kwargs else \
+                [(k[0], k[1]) for k in kwargs if k[0] in names]
+            for pname, arg in pairs:
+                claims.setdefault((callee, pname), set()).add(
+                    _string_argument_shape(arg, rets))
+    return {callee: {pname: STR_KIND for (c, pname), seen in claims.items()
+                     if c == callee and seen == {STR_KIND}}
+            for callee in {c for c, _p in claims}}
+
+
+def _positional_parameter_names(defs) -> list:
+    """The callee's parameter names, RECEIVER first, in binding order.
+
+    A receiver (`out self`, `self`, `this`) is parameter 0 of the signature and
+    is never bound by a call site's argument list, so every index here is one
+    before the position it names. `struct_receivers` is the recogniser, and it
+    is the same one the arity tables use, so the two cannot disagree about which
+    parameter the first argument lands on.
+    """
+    for fn in defs or ():
+        params = [p[0] if isinstance(p, (tuple, list)) else p
+                  for p in _param_list(fn)]
+        receivers = struct_receivers(fn)
+        if not params:
+            return []
+        return [p for p in params[1:] if p not in receivers] \
+            if params[0] in receivers else params
+    return []
+
+
+class ParameterKindReader:
+    """`(function name) -> (parameter name) -> kind or None`, computed at most once.
+
+    A class rather than a function returning a closure so the table is built
+    LAZILY: `ValueKinds` asks about a parameter only when the parameter has no
+    annotation, so a module that annotates everything — and a corpus that mostly
+    does — never walks its own bodies for this. One object per image, and both
+    backends build it from the same function, which is what keeps the two
+    architectures from answering this question differently.
+    """
+    def __init__(self, functions, rets=None):
+        self._functions = functions
+        self._rets = rets
+        self._table = None
+
+    def table(self) -> dict:
+        if self._table is None:
+            self._table = string_parameters_by_call_site(self._functions,
+                                                        self._rets)
+        return self._table
+
+    def for_function(self, fn_name):
+        """The `param_kind` hook `ValueKinds` asks, bound to one function."""
+        return lambda pname: self.table().get(fn_name, {}).get(pname)
 
 
 # ── What a linked module's export table says about a call ──────────────────
@@ -18527,7 +18701,8 @@ def _member_chain_text(node) -> str:
     return ".".join(reversed(parts))
 
 
-def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
+def construction_dead_blob_refusal(name: str, field: str, arg,
+                                   evidence: str = "declared") -> str:
     """A construction argument that is a blob belonging to a CALLEE.
 
     The one per-argument hazard the confinement above does not cover, and the
@@ -18543,11 +18718,20 @@ def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
     premises` looks at what a METHOD BODY writes, and this is a constructor
     argument.
 
+    `evidence` is WHICH of the two sources said so, and it is a parameter
+    because the message has to name the one that fired: a reader who is told
+    "is declared to return a container" about a callee that declares nothing
+    goes looking for a declaration that does not exist, and comes back
+    concluding the compiler cannot see what is in front of it.  `"declared"` is
+    `BLOB_TYPE_NAMES` on the return annotation; `"inferred"` is
+    `callees_returning_containers` on the callee's return statements, which is
+    what says it when the callee declares no return type at all.
+
     The exception is a call to a struct this path PLACES: that is a frame
     address, one word, with a lifetime the frame layout governs, and
     `_callee_is_placed_frame` is the one predicate that knows.
     """
-    # `call_callee_name`, for the reason `_construction_arg_spelling` gives: a
+# `call_callee_name`, for the reason `_construction_arg_spelling` gives: a
     # specialization names the same function as its bare twin, and a message
     # that says `?()` where the source says `mklist[1]()` sends the reader to
     # look for a callee that is not there.  Measured: with this reading the
@@ -18555,18 +18739,44 @@ def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
     # `_construction_arg_is_dead_blob` learned the same name — and the message
     # names `mklist`.
     callee = call_callee_name(arg.func) or "?"
+    because = (
+        f"{callee}() declares no return type and every `return` in it yields a "
+        f"container"
+        if evidence == "inferred" else
+        f"{callee}() is declared to return a container")
     return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
-            f"field {field!r} is refused on this path: {callee}() is declared "
-            f"to return a container, and a container on this path is a "
-            f"bump-allocated region of the CALLEE's own reserved scratch, so by "
-            f"the time the constructor stores it the bytes are reclaimed — and "
-            f"a method reaching through the slot afterwards appends into "
-            f"reclaimed stack. A container LITERAL, or a name bound here or in "
-            f"a caller, is fine for exactly the opposite reason: it is built in "
-            f"a function that is still running, and so is any call whose "
-            f"declared return type is not a container. Build the container and "
-            f"assign the field after `S()`, which is the same program with a "
-            f"lifetime this analysis can see")
+            f"field {field!r} is refused on this path: {because}, and a "
+            f"container on this path is a bump-allocated region of the CALLEE's "
+            f"own reserved scratch, so by the time the constructor stores it the "
+            f"bytes are reclaimed — and a method reaching through the slot "
+            f"afterwards appends into reclaimed stack. A container LITERAL, or a "
+            f"name bound here or in a caller, is fine for exactly the opposite "
+            f"reason: it is built in a function that is still running, and so is "
+            f"any call whose declared return type is not a container — and a call "
+            f"that declares nothing at all and does not return a container "
+            f"consistently either. Build the container and assign the field "
+            f"after `S()`, which is the same program with a lifetime this "
+            f"analysis can see")
+
+
+def construction_arg_dead_blob_refusal(name: str, field: str, arg,
+                                       rets=None):
+    """The refusal for `arg` if it is a callee's container, else None.
+
+    ONE function rather than a predicate plus three `if refused:` sites at the
+    three callers, because the two halves are not separable: the DECISION is
+    which source of evidence fired and the MESSAGE names that source, so a
+    predicate that returned a bool would force each caller to re-derive it and
+    the three could drift.
+
+    `rets` is `CalleeReturnTable` — the declared annotations plus the inferred
+    reading — and a plain dict is accepted so that anything holding only the
+    declared table keeps working with the declared-only answer.
+    """
+    evidence = _callee_container_evidence(arg, rets)
+    if evidence is None:
+        return None
+    return construction_dead_blob_refusal(name, field, arg, evidence)
 
 
 def construction_frame_in_value_refusal(name: str, field: str, arg,
@@ -18753,6 +18963,12 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     because a reader who has been told "this constructor is not lowered" needs
     to know WHICH LINE of it is responsible, and the two questions have
     different fixes.
+
+    `rets` is the construction pass's `CalleeReturnTable`, and it is asked here
+    for the same fact it is asked about a positional argument: a right-hand side
+    that is a CALL to a function returning a container is a blob in the CALLEE's
+    reclaimed scratch, and an inlined constructor body runs at a construction
+    site in the CALLING function, so nothing about the lifetime differs.
     """
     method, params, _positional, _required, _optional = shape
     got = len(list(getattr(call, "args", None) or []))
@@ -19166,9 +19382,10 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
     free = _init_free_names(struct_def, value)
     if free is not None:
         return (None, free)
-    if _construction_arg_is_dead_blob(value, rets):
-        return (None, construction_dead_blob_refusal(
-            struct_def.name, "of this `__init__`", value))
+    refusal = construction_arg_dead_blob_refusal(
+        struct_def.name, "of this `__init__`", value, rets)
+    if refusal is not None:
+        return (None, refusal)
     return (value, None)
 
 
@@ -19522,9 +19739,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
     `formal/build.py`'s `{holder name: [StructDef, …]}` for the function the
     call is in — the recognition a copy construction needs, and the only thing
     in the compiler that can say a word is a frame address, and `rets` is
-    `function_return_types`' `{name: declared return annotation}` — the
-    evidence for the one argument kind that is refused, a container returned by
-    a callee (`_construction_arg_is_dead_blob`).
+    `CalleeReturnTable`'s `{name: declared return annotation}` plus its reading
+    of a callee that declares none — the evidence for the one argument kind that
+    is refused, a container returned by a callee (`_callee_container_evidence`).
 
     A `plan` is `(kind, …)`:
 
@@ -19702,8 +19919,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         arg = bound[only]
         if arg is None:
             return ((CONSTRUCTION_DEFAULT,), None)
-        if _construction_arg_is_dead_blob(arg, rets):
-            return (None, construction_dead_blob_refusal(name, only, arg))
+        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets)
+        if refusal is not None:
+            return (None, refusal)
         src = _frame_source_structs(arg, candidates)
         if src:
             return (None, construction_frame_in_value_refusal(
@@ -19717,8 +19935,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         if field in placed:
             return (None, construction_nested_slot_refusal(
                 name, field, arg, placed[field]))
-        if _construction_arg_is_dead_blob(arg, rets):
-            return (None, construction_dead_blob_refusal(name, field, arg))
+        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+        if refusal is not None:
+            return (None, refusal)
         if arg is not None:
             continue
         # A field filled from its own default and holding a nested FRAME: the
@@ -19897,53 +20116,52 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
     return ({f: bound.get(f) for f in slots}, None)
 
 
-def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
-    """Whether a construction argument is a container belonging to a CALLEE.
+def _callee_container_evidence(arg, rets=None):
+    """`"declared"`, `"inferred"` or None — WHICH evidence says `arg` is a blob.
 
-    One predicate, because it is one fact and the two call sites were two
-    copies of a three-line test.  It is a CALL, and among calls only the ones
-    whose DECLARED RETURN TYPE is a bump-allocated region: a function that says
-    it returns `Int` puts an integer in the slot, whatever it did internally,
-    and a function that says it returns a `List` puts a region of ITS OWN
-    reserved scratch in the slot, and that scratch is reclaimed the moment it
-    returns.
+    The decision half of `construction_arg_dead_blob_refusal`, split out because
+    three call sites need it and one of them (`_init_store_value`) asks it about
+    an `__init__` body's right-hand side rather than about a construction
+    argument.  It replaced `_construction_arg_is_dead_blob`, which returned a
+    bool and so could not say WHICH source of evidence fired — which is the fact
+    the message names.  The two sources and why the second exists:
 
-    The declared return type is the whole of the evidence, and the cases are
-    the three this path can tell apart:
+    A container LITERAL and a name are not here at all: a literal is built by
+    the function whose block is being filled and a name was bound in that
+    function or an ancestor, so in both cases the region outlives every read of
+    the slot.  `construction_dead_blob_refusal` is where that argument is spelled
+    out for the reader.
 
-      * a container type — refused, by name;
-      * any other type, INCLUDING no type at all — allowed.  A function that
-        declares nothing returns whatever its body returns, and a
-        `-> Int`-shaped declaration is the ordinary case (`scale(2)` in
-        `constr_positional_expression_arguments`), so refusing every call would
-        refuse essentially every positional construction in a real program.  An
-        absent answer has to be the PERMISSIVE one here, and that is the
-        opposite tie-break from the copy construction's on purpose: a wrong
-        word in a slot is a value the source did not write, while a missed blob
-        is only reachable if some method later appends through the slot — and
-        that path is refused on its own terms today (`list.append()` needs the
+      * `"declared"` — the callee's return annotation names a bump-allocated
+        region (`BLOB_TYPE_NAMES` through `return_type_is_blob`);
+      * `"inferred"` — the callee declares NO return type and every one of its
+        definitions returns a container (`CalleeReturnTable.returns_container`),
+        which is a spelling real Mojo uses constantly and which used to be
+        allowed here on the strength of an absence;
+      * None — anything else.  A callee this unit does not define, a
+        `-> Int` declaration, a callee whose returns disagree with one another,
+        an argument that is not a call to a NAME at all (a dotted callee or a
+        computed one — `call_callee_name` is the reader, so a comptime
+        specialization `f[a]()` IS one, and `List[Self.T]()` / `a.b()` /
+        `f()[0]()` are not), and a call to a struct this path PLACES (a frame
+        address, one word, with a lifetime the frame layout governs —
+        `_callee_is_placed_frame` is the one predicate that knows).  An absent
+        answer is the PERMISSIVE one, and the argument for that is the one this
+        predicate replaced, restated here because a permission needs its reason
+        in the place it is granted: this function's caller: a wrong word in a
+        slot is a value the source did not write, while a missed blob is only
+        reachable if some method later mutates the container through the slot —
+        and that is refused on its own terms today (`list.append()` needs the
         capacity to be known where the list is built, and a slot is not a list
-        literal).  So the residual is real and it is stated rather than
-        guessed at in either direction: it is the same gap premise (B1) has
-        about a bare name, and what closes it is the VALUE KIND of a call's
-        result, which is `ValueKinds`' question and not a re-derivation to be
-        smuggled in here;
-      * a call to a struct this path PLACES — a frame address, one word, with a
-        lifetime the frame layout governs.  Not a container and not refused.
-
-    A container LITERAL and a name are not in this function at all: a literal
-    is built by the function whose block is being filled and a name was bound
-    in that function or an ancestor, so in both cases the region outlives every
-    read of the slot.  `construction_dead_blob_refusal` is where that argument
-    is spelled out for the reader.
+        literal).
     """
     if not isinstance(arg, F.CallExpr):
         # Not a call, so not a value belonging to a callee: a container literal
         # and a name are answered above.
-        return False
+        return None
     # `call_callee_name`, NOT `isinstance(arg.func, F.IdentExpr)`. It is the
-    # tree's one reader of "which function does this call name", and a
-    # comptime SPECIALIZATION `f[a]` names the same function as its bare twin —
+    # tree's one reader of "which function does this call name", and a comptime
+    # SPECIALIZATION `f[a]` names the same function as its bare twin —
     # which is the whole content of `bugs/FORMAL_a_specialization_defeats_the_
     # frame_escape_refusals.md`, in a reader that decides a REPRESENTATION.
     #
@@ -19963,10 +20181,15 @@ def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
     # permissive tie-break above, which is where an absent answer belongs.
     callee = call_callee_name(arg.func)
     if callee is None:
-        return False
+        return None
     if _callee_is_placed_frame(callee):
-        return False
-    return return_type_is_blob((rets or {}).get(callee))
+        return None
+    if return_type_is_blob((rets or {}).get(callee)):
+        return "declared"
+    if getattr(rets, "returns_container", None) is not None \
+            and rets.returns_container(callee):
+        return "inferred"
+    return None
 
 
 # The annotations that name a BUMP-ALLOCATED REGION on this path — the types
@@ -19992,9 +20215,9 @@ def return_type_is_blob(annotation) -> bool:
     is, and the arguments decide nothing this value model has a slot for.
 
     False for an absent or unreadable annotation.  That is the permissive
-    direction and `_construction_arg_is_dead_blob` says why, at length, because
-    a reader who finds this predicate alone would reasonably guess the other
-    way round.
+    direction and `_callee_container_evidence` says why, at length, because a
+    reader who finds this predicate alone would reasonably guess the other way
+    round.
     """
     base = annotation_base_name(annotation)
     return base is not None and base in BLOB_TYPE_NAMES
@@ -20014,6 +20237,98 @@ def function_return_types(functions) -> dict:
         if name:
             out[name] = getattr(fn, "return_type", None)
     return out
+
+
+def callees_returning_containers(functions, int_names=None,
+                                 string_names=None) -> dict:
+    """`{name: element kind or None}` for every callee whose RETURNS are containers.
+
+    The SECOND source of the dead-blob evidence, beside the declared return
+    annotation, and it exists because the declaration is absent about half the
+    time in real Mojo: `def make(): return [1, 2]` is an ordinary spelling and
+    `Bag2(make(), 5)` stores exactly the same dead region a `-> List[Int]`
+    declaration would have warned about.  Read with NO `func_kind` hook, which is
+    the safety argument rather than a shortcut — the same one
+    `_callee_blob_elem_kind` gives: a hook resolves a call in a return position
+    by recursing into the callee, and an undecidable answer has to be the
+    permissive one.
+
+    The rule is UNANIMITY over every definition of the name, for the reason
+    `_callee_blob_elem_kind` states: Mojo overloads are ordinary (`std/builtin/
+    reversed` is defined eight times over) and a name that means several bodies
+    answers no single question.  One definition returning a list and another
+    returning an integer therefore claims nothing, which is the direction that
+    keeps a refusal from being a guess.
+
+    The VALUE is the element kind where the returns pin one and `None` where
+    they agree only that it is a container — `is_list_kind` is the question the
+    callers ask, and an element it does not need is not guessed at."""
+    by_name: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    out: dict = {}
+    for name, defs in by_name.items():
+        elems = set()
+        for fn in defs:
+            kind = ValueKinds(
+                fn, int_names=int_names or INT_TYPE_CTORS,
+                string_names=string_names or STRING_TYPE_CTORS).return_kind
+            if not is_list_kind(kind):
+                break
+            elems.add(list_elem_kind(kind))
+        else:
+            out[name] = elems.pop() if len(elems) == 1 else None
+    return out
+
+
+class CalleeReturnTable(dict):
+    """`function_return_types`' table, able to answer the INFERRED case too.
+
+    A dict SUBCLASS rather than a second table, and the reason is that the
+    construction pass is handed ONE evidence argument by three callers
+    (`formal/build.py` and the two emitters): a separate table would be a second
+    thing to thread through all three and a second thing to keep in step with the
+    first.  As a subclass, every existing reader of the declared table keeps
+    reading a mapping and the extra evidence is a question asked of the same
+    object.
+
+    `returns_container(name)` is the dead-blob question, and the ORDER in it is
+    the whole decision:
+
+      * a callee that DECLARES a return type is answered by that declaration
+        alone, both ways.  A `-> List[Int]` is refused as a dead blob, and a
+        `-> Int` is allowed even if its body returns a list — the declaration is
+        the contract, and a body that contradicts it is a bug in the program
+        rather than a fact about this path's representation;
+      * a callee that declares NOTHING is then read from its RETURN STATEMENTS
+        (`callees_returning_containers`), which is the case this class exists
+        for;
+      * anything else — a name this unit does not define, a definition whose
+        returns disagree, a `ValueKinds` that could not classify them — claims
+        nothing, and claiming nothing is allowed here for the reason
+        `_callee_container_evidence` argues at length: a wrong word in a slot
+        is a value the source did not write, while a missed blob is only
+        reachable through a method that mutates the container through the slot.
+
+    The inference is computed AT MOST ONCE and only when it is asked, so a unit
+    with no positional construction that passes a call pays nothing for it."""
+    def __init__(self, functions, int_names=None, string_names=None):
+        super().__init__(function_return_types(functions))
+        self._functions = list(functions or ())
+        self._int_names = int_names
+        self._string_names = string_names
+        self._inferred = None
+
+    def returns_container(self, name: str) -> bool:
+        declared = self.get(name)
+        if declared:
+            return return_type_is_blob(declared)
+        if self._inferred is None:
+            self._inferred = callees_returning_containers(
+                self._functions, self._int_names, self._string_names)
+        return name in self._inferred
 
 
 def _frame_source_structs(arg, candidates: dict):
@@ -23112,6 +23427,51 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"Write the operation in this module, or call a public function "
             f"that does it — which is the same program with a definition this "
             f"image can bind")
+
+
+def function_value_refusal(name: str, fn_name: str = "") -> str:
+    """The diagnostic for reading a FUNCTION of this unit as a VALUE.
+
+    The same shape as `external_call_value_refusal` one level out, and for the
+    same reason: the name resolves, and it resolves to something that is not a
+    value.  What it used to be reported as is the reason this function exists —
+    `'plain' has no home: the register allocator collected no home for it, so the
+    emitter and the allocation walk disagree about this function's locals` — which
+    is a TRUE statement about this pass and a useless one, because it sends the
+    reader to look for a register-allocation bug in a program whose real problem
+    is that it asked for a construct this path does not have.  Measured on
+    `call_it(plain, 5)` on both architectures: the allocator sentence, naming an
+    internal table, for a program that is ordinary Mojo.
+
+    **A function is not a word on this path, and the refusal is about the
+    CONSTRUCT rather than about a missing representation of it.**  Every callee
+    on this path is a NAME: the emitters resolve `_functions`, a struct's
+    declaration, a dylib export table or a type constructor, and each of those is
+    reached by name at the call.  There is no indirect-call form, so a function
+    that arrives as a word has nothing to call — and the two things that could
+    give it one (a function pointer, and a callee that is a subscript of a
+    parameter) are both refused elsewhere with their own sentences, which is why
+    this one says what to do instead.
+
+    The shape it blocks is `workgroup_function[tile_size](offset)` in
+    `std/algorithm/backend/tile.mojo`: the callee is a PARAMETER whose declared
+    type is `Some[Static1DTileUnitFunc]`, and the brackets are a specialization
+    of a function TYPE.  `specialization_call_refusal` already refuses that call,
+    and it is right to — but it is refused as a question about BRACKETS, and the
+    wall behind it is that the callee is a value at all.  Measured, both
+    architectures: passing a function as an argument is this refusal, before any
+    bracket is reached.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a function of this module read as a VALUE, and "
+            f"there is no value of a function on this path: a formal value is "
+            f"one 64-bit word, and every callee this backend reaches is a NAME "
+            f"— a function of this module, a struct's constructor, a type "
+            f"conversion, or an export on the link line. Nothing here can call "
+            f"through a word, so the call that would use it has no form. Call "
+            f"`{name}(...)` where the name is written out; if the callee has to "
+            f"be chosen at run time, write the choice as a branch over the calls, "
+            f"which is the same program with a callee this path can name")
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,

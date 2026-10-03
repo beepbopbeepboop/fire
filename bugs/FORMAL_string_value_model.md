@@ -9,15 +9,20 @@ found the same defect class in **eleven more operators** — every one measured,
 every one refused. Wave 6 closed the three it left (`~`, the truthiness
 conversion, and a slice of a string) and found **three more** in the same family
 that no list had recorded: `if []:`, a short-circuit chain used as a condition,
-and an x86-64 `assert` that always failed. What is still NOT fixed, and is the
-larger thing, is the collision between that representation and the stdlib's own
-`String` struct — which is what all 16 of the "a String receiver is
-returned/passed" refusals in the stdlib sweep actually are, and which is not a
-string-value-model problem at all. Two regressions that arrived from outside
-this work, with a merge, are at the bottom. **`not <string>` — the one item this
-document left as "a choice rather than a limit" — landed 2026-10-02 on
-`work/formal8-11` (see "Sites deliberately NOT routed" below), and the `%s`
-family that reached a non-text value through a one-field struct, through a
+and an x86-64 `assert` that always failed. 2026-10-03 closed the last item in
+"what was found while looking" that had a decidable fix — the unannotated
+parameter's fabricated truthiness, which is the call site's argument kind
+propagated into the callee — and the one next to it, the comprehension over a
+list of strings, is re-measured as still open with its scope question named,
+because it is a different hook and not a smaller version of the same one. What
+is still NOT fixed, and is the larger thing, is the collision between that
+representation and the stdlib's own `String` struct — which is what all 16 of
+the "a String receiver is returned/passed" refusals in the stdlib sweep actually
+are, and which is not a string-value-model problem at all. Two regressions that
+arrived from outside this work, with a merge, are at the bottom. **`not <string>`
+— the one item this document left as "a choice rather than a limit" — landed
+2026-10-02 on `work/formal8-11` (see "Sites deliberately NOT routed" below), and
+the `%s` family that reached a non-text value through a one-field struct, through a
 conversion and through a bare expression is closed with
 `bugs/FORMAL_struct_receiver_as_a_printf_string.md` deleted.**
 
@@ -530,26 +535,80 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   a string bug; the `_emit_mov_imm(Reg.R11, 1)` next to it was also dead — R11 is
   the divisor, the shift count and the alloc size on this path and an `assert`
   does none of those — and is gone.)
-- **An UNANNOTATED `String` parameter is still a fabricated truthiness.**
-  `def f(s): if s:` called with `f("")` prints `1`, because `ValueKinds` seeds an
-  unannotated parameter as `INT_KIND` (a word) and nothing downstream can tell a
-  word from a `char *`. A `String`-ANNOTATED parameter is classified correctly and
-  now answers `0 1`. This is the same gap the `ValueKinds` docstring already
-  records for `print` ("A `char *` reaching print through an unannotated
+- **An UNANNOTATED `String` parameter was a fabricated truthiness. FIXED
+  2026-10-03 (`work/formal10-5`).**
+  `def f(s): if s:` called with `f("")` printed `1`, because `ValueKinds` seeded
+  an unannotated parameter as `INT_KIND` (a word) and nothing downstream could
+  tell a word from a `char *`. A `String`-ANNOTATED parameter was classified
+  correctly and answered `0 1`. This was the same gap the `ValueKinds` docstring
+  already records for `print` ("A `char *` reaching print through an unannotated
   parameter is the remaining gap, and it is the gap the annotation exists to
-  close") — it is now a second site rather than a new gap, and the fix belongs
-  in the kind table rather than in `truthy_lowering`. **Next step:** either
-  propagate the CALL SITE's argument kind into the callee (the honest answer,
-  and the same by-reference question as the frame table) or refuse `if <word>:`
-  when the word is unclassified, which is a much larger diagnostic surface.
-  `truthy_lowering` deliberately does NOT refuse the unclassified case: an
-  unclassified operand is a case where the identity test is right for every kind
-  except a string, and refusing would turn every `if <unannotated name>:` in a
-  codebase that annotates almost nothing into a diagnostic.
-- **A comprehension over a list of STRINGS does not filter on truthiness.**
-  `[x for x in ["p", "", "q"] if x]` keeps all three, because the loop variable of
-  a `list:str` is typed as a word by `types.function_var_types`. Same root cause
-  and the same next step as the bullet above, in the `for`-target kind.
+  close") — a second site rather than a new gap.
+
+  **It took the first of the two repairs this bullet offered, and the one it
+  called the honest answer.** `model.string_parameters_by_call_site` propagates
+  the CALL SITE's argument kind into the callee, unanimity over every call site
+  of the name in the image, reading the evidence from the argument's OWN SHAPE (a
+  string literal, or a call to a function whose declared return type is a string).
+  It is `ValueKinds`' sixth hook `param_kind`, asked only where a parameter has no
+  annotation, so an annotation is never overridden. The other repair — refusing
+  `if <word>:` for an unclassified operand — was not taken, and this bullet's own
+  argument against it stands and is now the reason it was not needed: the
+  identity test is right for every kind except a string, so the fix belongs in
+  the kind table and only there.
+
+  Measured before and after on BOTH architectures, `f("")` / `f("abc")`:
+  **`1 1` → `0 1`**, where CPython says `0 1`. Four cases in `test_formal_run.py`:
+  the literal case, the keyword-bound case (`f(s="")`), the string-returning
+  callee, and the negative one — a function whose three call sites DISAGREE (a
+  string, an integer, a string-returning callee) stays `1 1 1`, because a
+  parameter that is a `char *` at one site and a word at another is a word.
+
+  **What it deliberately does not read, and each is a decision rather than a
+  gap.** The CALLER's `ValueKinds`, so `f(some_local)` is still unclassified —
+  reading it means building a ValueKinds per caller from inside the callee's,
+  which is the recursion `func_kind` already guards with a depth limit, and a
+  kind that depends on which function the emitter reached first decides whether
+  `printf("%s", s)` formats a pointer or bytes. A SPECIALIZED call `f[a](x)`,
+  whose brackets shift every position. A call mixing positionals with keywords,
+  whose positionals bind parameters this does not enumerate. `*args` / `**kwargs`
+  at the call site.
+
+  Verified not to move anything: `test_formal_run.py` PASS=702 FAIL=0, and a
+  252-file stdlib sweep on x86-64 reports "unchanged: 252" — 18 pass, 13 codegen,
+  219 codegen/dependency, identical family counts. It is a wrong-answer fix with
+  no new refusal surface.
+- **A comprehension over a list of STRINGS does not filter on truthiness. STILL
+  OPEN, and it is a DIFFERENT hook from the bullet above.**
+  `[x for x in ["p", "", "q"] if x]` keeps all three (measured again 2026-10-03:
+  exit 33, where CPython says 22), and re-measuring it after the fix above
+  confirms it did not move — correctly, because the fix is a PARAMETER hook and
+  this is the `for`-target kind. `ValueKinds._scan` binds `F.ForStmt`'s target
+  from `_iterable_kind` and has no `F.Comprehension` arm at all, so a
+  comprehension's loop variable is never in the map the guard is asked against.
+
+  **Next step, and it is smaller than the bullet above made it look:** the
+  iterable's element kind is already computed — `_iterable_own_shape` answers
+  `list_kind(_kind_of_elements(...))` for a list literal — so the arm is a bind,
+  not a derivation.
+
+  **The thing to get right is SCOPE, and master now has the reader for it.**
+  A comprehension has its own scope in Python 3, so binding its target into
+  `ValueKinds.locals` — the FUNCTION's map — would let `var x = 5` beside
+  `[x for x in ["a", "b"]]` move `x`'s kind, and the conflict rule's answer to
+  that is "undecidable", which is a word and not the integer the outer `x`
+  holds. `formal/build.py`'s `_comprehension_scoped_names(fn)` (landed on master
+  in `92175ec0`, "a comprehension is its own scope") is exactly the predicate
+  that question needs — "bound by a comprehension target and NOTHING else" — and
+  the two facts it distinguishes are the two facts a kind bind needs here: a name
+  only a comprehension binds may take the comprehension's element kind, and a
+  name an ordinary statement also binds may not.
+
+  So the shape is: an overlay consulted only by the sites inside a comprehension,
+  keyed by the comprehension node, rather than a `_bind` into `locals`. It was not
+  done in the same commit as the parameter fix because it is a second change to a
+  second hook and its blast radius is every comprehension in the corpus rather
+  than every annotated call.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String

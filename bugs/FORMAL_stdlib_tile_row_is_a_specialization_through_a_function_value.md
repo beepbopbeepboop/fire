@@ -2,8 +2,10 @@
 
 **Area:** FORMAL (comptime specialization on a callee this unit does not
 compile). Found 2026-10-01 on `work/formal-re-refusal` while working the
-`other refusal` row. **NOT FIXED, and it is not this branch's to fix** — see
-"Whose" below.
+`other refusal` row. **NOT FIXED — and the "Whose" section below is STALE: the
+`construct:mlir-and-gpu-globals` claim it points at no longer exists, so this row
+is unowned. What is new is the measurement at the end, which shows that this
+document's own next step is necessary and NOT sufficient.**
 
 ## What was run
 
@@ -121,3 +123,60 @@ One of two, and which one is a decision rather than an implementation:
 
 Either way the refusal stays until one of them lands: emitted with the brackets
 dropped it would build, run, and return a number the source never wrote.
+## Measured 2026-10-03 (`work/formal10-5`): the wall below the brackets is a FUNCTION VALUE
+
+The refusal above is unchanged, on both architectures, byte for byte. What moved
+is what a reader is told NEXT, and it is the wall this document's "next step"
+runs into.
+
+**A function has no representation on this path at all.** Measured, both
+architectures:
+
+```python
+def plain(v): return v + 100
+def call_it(f, x): return f(x)
+def main(n): return call_it(plain, 5)
+```
+
+```
+build: main: 'plain' is a function of this module read as a VALUE, and there is
+no value of a function on this path: a formal value is one 64-bit word, and every
+callee this backend reaches is a NAME — a function of this module, a struct's
+constructor, a type conversion, or an export on the link line. Nothing here can
+call through a word, so the call that would use it has no form. …
+```
+
+(The message is `model.function_value_refusal`, landed in the same commit as this
+measurement; before it the same program was refused with `'plain' has no home:
+the register allocator collected no home for it …`, which names an internal table
+instead of the construct. Pinned by `test_formal_specialization.py`'s
+`a function read as a value is refused by name`, on both architectures, with a
+shadowing local as the negative guard.)
+
+**So the two options at the end of this document are not the two options.** The
+first — "bind the brackets to a declared parameter list", reading
+`comptime Static1DTileUnitFunc = def[width: Int](Int) -> None` and passing the
+bracketed values as leading arguments — is necessary and not sufficient, because
+the thing it would pass them to is a WORD this path cannot call through. This
+document already says the half of that it could see ("this path resolves
+parameter types to words"); what it does not say is that a word naming a
+function has no call form either. `workgroup_function` is declared
+`Some[Static1DTileUnitFunc]`, so the row needs, in order: a value for a function,
+a value for an `Optional` of that value, and then the brackets.
+
+**What that costs the row's estimate, honestly.** Three constructs, not one, and
+the first is a language feature this backend has no lowering for at all (no
+indirect call exists: every callee is reached by name through `_functions`, a
+struct declaration, a dylib export table or a type constructor). The 4 files
+below it are still 4 files blocked, and no file of them moves until the first of
+the three lands. Anyone picking this up should measure the function-value
+question FIRST — it is checkable on a five-line program, which is how it was
+measured here — rather than binding brackets.
+
+**And "Whose" needs replacing.** `construct:mlir-and-gpu-globals` is not in
+`python3 tools/control.py claims` any more, and `workgroup_function` is a GPU
+launch abstraction rather than an MLIR dialect construct, so this row is
+unowned work rather than somebody else's. It stays out of the `other refusal`
+row's module-caused count for the reason the original author gave — it is not
+counted twice — which is still true and is why the row belongs to whoever takes
+the function-value question.

@@ -1527,8 +1527,9 @@ measured rather than argued:
   `_error: String` and `_stack_trace: Optional[StackTrace]`;
 * a formal value is one 64-bit word, and `Optional[StackTrace]` is a two-word
   niche whose unwrap this path cannot answer (`self.step.or_else() is an
-  Optional unwrap`, the limit `FORMAL_string_value_model.md` and
-  `FORMAL_struct_construction_shapes.md` both record);
+  Optional unwrap`, the limit `FORMAL_string_value_model.md` records and
+  `FORMAL_struct_construction_shapes.md` also recorded before it was `git rm`'d
+  on 2026-10-03 with the construction family);
 * so `Error` cannot be brought up as a frame until the `Optional` niche has a
   representation, and the `String` field is the separate collision
   `FORMAL_string_value_model.md` is about.
@@ -1548,9 +1549,10 @@ So the receiver hand-off itself is **not** what stops these: the shape lowers
 wherever the fields are plain words and the arity matches, and each failure
 above is about the field TYPES (`String`, `Optional`), the arity, or a
 returned frame — the three limits
-`bugs/FORMAL_string_value_model.md` and `FORMAL_struct_construction_shapes.md`
-already carry. None of them is reachable by changing what a receiver may be
-handed to.
+`bugs/FORMAL_string_value_model.md` already carries, and that
+`FORMAL_struct_construction_shapes.md` carried too before it was `git rm`'d on
+2026-10-03 with the construction family. None of them is reachable by changing
+what a receiver may be handed to.
 
 **This is why the row's file count is not a work estimate, and it is the third
 time this document has had to say so.** The row is 15 files; the part of it

@@ -371,8 +371,9 @@ is the answer a planner needs and it is the opposite of the usual outcome:
 * **The value-model change is still real** (`formal/model.py:5879`'s comment
   says what it is: Optional needs a niche, a discriminant or a tag word) and it
   is owned: `formal2-re-and-slice` holds `builtin_slice.mojo`, and
-  `bugs/FORMAL_struct_construction_shapes.md` records the landing of the same
-  line when its refusal changed from a false reason to a true one.
+  `bugs/FORMAL_struct_construction_shapes.md` recorded the landing of the same
+  line when its refusal changed from a false reason to a true one (that doc was
+  `git rm`'d 2026-10-03 with the construction family).
 * Read the two rows together, exactly as §5 says to: the bracket row and the
   Optional row are both `std/collections`/`std/builtin` boundary effects, and
   neither is worth anything until the module behind it exports something.

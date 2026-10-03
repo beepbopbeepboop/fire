@@ -218,10 +218,12 @@ CAUSES = (
     # declares, because the refusal is about `builtin_slice`'s own line rather
     # than about the importing file. So this row is one value-model change
     # (Optional needs a niche, a discriminant or a tag word) whose OWN doc is
-    # `bugs/FORMAL_struct_construction_shapes.md`, and its measured landing is
-    # recorded there: the same line used to refuse with a FALSE reason
-    # ("constructing Slice with 3 argument(s)") and now refuses with a true
-    # one.
+    # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`. The FALSE-reason
+    # half of it was the construction family's, and that doc is deleted: the same
+    # line used to refuse with "constructing Slice with 3 argument(s)" — a
+    # three-field construction that the source never wrote, because `Slice` is a
+    # call to a declared `__init__` — and now refuses with a true one, so what is
+    # left here is the representation question alone.
     ("Optional unwrap: `None` and a value are one word, with no tag",
      (("is an Optional unwrap",),)),
     ("value with no representation on this path",

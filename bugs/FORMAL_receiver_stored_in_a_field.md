@@ -67,8 +67,10 @@ narrower than §3 assumed:** `struct_nested_frame_fields` does not look at what
 the constructor STORES. A field whose `__init__` stores a name rather than
 building a nested frame there is not a placed frame — it is a pointer slot — and
 teaching the placement that is one predicate over the constructor's own body.
-That predicate is what `FORMAL_struct_construction_shapes.md` is already about,
-which is why this doc stops here rather than reaching into it.
+That predicate was already the subject of `FORMAL_struct_construction_shapes.md`
+(`git rm`'d 2026-10-03, when the construction family closed — its `constr_*`
+cases in `test_formal_run.py` stand in its place), which is why this doc stops
+here rather than reaching into it.
 
 ---
 
@@ -242,7 +244,8 @@ neither row's 24 or 13 is a promise:
   re-sweep the 24, and record where each lands. The `builtin_slice.mojo` row is
   the precedent for what to expect: 20 files that move onto
   `self.step.or_else() is an Optional unwrap`, which is a true fact about the
-  same line and is tracked in `FORMAL_struct_construction_shapes.md`. Expect a
+  same line and was tracked in `FORMAL_struct_construction_shapes.md` (`git rm`'d
+  2026-10-03 when the construction family closed). Expect a
   similar landing, and expect the ceiling to be well under 24.
 * **Row B, 13 files.** Cheaper and prior to any change: for each of the 13,
   check whether CPython raises on the same source. A file whose program is

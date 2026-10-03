@@ -8320,8 +8320,10 @@ CONSTRUCTION_CASES = [
 
     # ── a DECLARED `__init__`: `S(a, b)` is a CALL, and the call is INLINED ──
     #
-    # This whole block is `bugs/FORMAL_struct_construction_shapes.md`'s one
-    # remaining refusal, closed.  `Slice` — the case that found it — declares
+    # This whole block is the construction family's last remaining refusal,
+    # closed — the family was `bugs/FORMAL_struct_construction_shapes.md` and
+    # that doc is deleted now that every shape lowers, so the cases here are what
+    # stands in its place.  `Slice` — the case that found it — declares
     # TWO `__init__` overloads against three fields and the corpus writes all
     # three counts, so `Slice(a, b)` is a call to the two-parameter constructor
     # and NOT a two-field construction of a three-field struct.  What used to
@@ -9133,7 +9135,7 @@ CONSTRUCTION_REFUSALS = [
     # get one answer.
     #
     # They did not, and they got it in the PERMISSIVE direction, which is the
-    # expensive one: `model._construction_arg_is_dead_blob` read the callee with
+    # expensive one: `model._callee_container_evidence` read the callee with
     # its own `isinstance(arg.func, F.IdentExpr)`, a subscript callee fell out,
     # and `Bag2(mklist[1](), 5)` BUILT on both architectures with a word in the
     # slot that points into reclaimed scratch. That is premise (B1)'s hazard
@@ -9157,11 +9159,68 @@ CONSTRUCTION_REFUSALS = [
      "refuse:constructing Bag2 with the call to 'mklist' as field 'items' is "
      "refused on this path: mklist() is declared to return a container",
      None),
+    # ── the SAME hazard with NO declaration to read ──
+    #
+    # `def mklist(): return [1, 2, 3]` is an ordinary Mojo spelling and stores
+    # exactly the same dead region the case above refuses, so the DECLARATION
+    # was never the fact — it was one reader of it.  The needle names the second
+    # reader (the callee's return statements) rather than repeating the first,
+    # because a message that said "is declared to return a container" about a
+    # callee that declares nothing would send the reader looking for a
+    # declaration that does not exist.
+    ("constr_refuse_container_inferred_from_a_callee",
+     "struct Bag4:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mklist():\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return xs\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag4(mklist(), 5)\n"
+     "    return b.n\n",
+     "refuse:declares no return type and every `return` in it yields a container",
+     None),
+    # The other direction, and it is a build rather than a refusal because the
+    # permissive tie-break has to stay permissive for the cases it is right
+    # about: an unannotated callee that returns a STRING (static storage, so no
+    # lifetime problem at all), one whose returns DISAGREE with one another (no
+    # single question, so no claim), and one declared `-> Int` whose body returns
+    # a list (the declaration is the contract). Each field has its own return
+    # code, so a regression says which of the three started being refused.
+    ("constr_allow_a_callee_that_is_not_a_container",
+     "struct Bag5:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mkstr():\n"
+     "    return \"abc\"\n"
+     "\n"
+     "def mixed(c: Int):\n"
+     "    if c > 0:\n"
+     "        return [1]\n"
+     "    return 7\n"
+     "\n"
+     "def lying() -> Int:\n"
+     "    return [9]\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Bag5(mkstr(), 1)\n"
+     "    if a.n != 1:\n"
+     "        return 10 + a.n\n"
+     "    var b = Bag5(mixed(n), 2)\n"
+     "    if b.n != 2:\n"
+     "        return 20 + b.n\n"
+     "    var c = Bag5(lying(), 3)\n"
+     "    if c.n != 3:\n"
+     "        return 30 + c.n\n"
+     "    return 7\n", 7, None),
     # The REACHABLE CONSEQUENCE of the hazard the case above refuses, checked
     # separately and for a different reason. `append` through a frame slot is
     # refused on its own terms — the room an append needs has to be known where
     # the list is built, and a slot is not a list literal — which is what makes
-    # the permissive tie-break in `_construction_arg_is_dead_blob` safe rather
+    # the permissive tie-break in `_callee_container_evidence` safe rather
     # than merely arguable: a container LITERAL in a field, and a call with no
     # declared return type, are both allowed, and neither can be reached
     # through a method on this path. This case is here so that the day the
@@ -9850,6 +9909,70 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n"
      "def main(n):\n"
      "    printf(\"%d %d\", f(\"\"), f(\"x\"))\n"
+     "    return 0\n", 0, "0 1"),
+    # The same parameter with NO annotation, which is the ordinary Mojo
+    # spelling and used to print `1 1`: `ValueKinds` seeds an unannotated
+    # parameter as a WORD (a word is an integer here, which is right for every
+    # kind except a string), and the identity test then says the empty string is
+    # non-empty. The fix is the call site's argument kind propagated into the
+    # callee — `model.string_parameters_by_call_site`, UNANIMOUS over every call
+    # site of the name in the image.
+    ("truthy_unannotated_parameter_from_a_string_literal",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", f(\"\"), f(\"x\"))\n"
+     "    return 0\n", 0, "0 1"),
+    # The two directions the rule must NOT take, and both are the conservative
+    # one. The evidence is UNANIMOUS over every call site of the NAME in the
+    # image, so one disagreeing site removes the claim for the whole function —
+    # `f` below is called with a string, an integer and a string-returning
+    # callee, and all three answers are the identity test's. That is the rule
+    # rather than an accident: a parameter that is a `char *` at one call site
+    # and a word at another is a word, and answering per site would need a
+    # per-site compilation this path does not do.
+    ("truthy_unannotated_parameter_needs_every_site_to_agree",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def g(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def mk() -> String:\n"
+     "    return \"abc\"\n"
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", f(\"\"), f(5), f(mk()), g(mk()))\n"
+     "    return 0\n", 0, "1 1 1 1"),
+    # The same evidence from a call rather than a literal, in isolation, so the
+    # row above's unanimity is the only thing that distinguishes the two: `g` is
+    # called with a string-returning callee at both its sites, so its parameter
+    # IS a string — and a `def` that DECLARES the return type is the declaration
+    # this path reads.
+    ("truthy_unannotated_parameter_from_a_string_returning_callee",
+     "def g(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def mk() -> String:\n"
+     "    return \"abc\"\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", g(mk()), g(mk()))\n"
+     "    return 0\n", 0, "1 1"),
+    # …and a KEYWORD binds the parameter it names rather than a position, so it
+    # is evidence too. The mixed case (positionals AND keywords at one call site)
+    # is deliberately not read: the positionals bind parameters this rule does
+    # not enumerate, and guessing them would be a claim about a signature.
+    ("truthy_unannotated_parameter_bound_by_keyword",
+     "def f(s):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", f(s=\"\"), f(s=\"x\"))\n"
      "    return 0\n", 0, "0 1"),
 
     # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`

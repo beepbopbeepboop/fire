@@ -61,8 +61,11 @@ kwargs if k not in slots]` before it reaches the `if shapes:` arm), so a keyword
 that names a *parameter* is reported as a keyword that names no *field*.
 
 **Not filed as its own bug here, and that is a decision worth recording**: the
-keyword-construction area is `bugs/FORMAL_struct_construction_shapes.md`, which
-is another worker's live claim, so this document does not edit it. The sharp
+keyword-construction area was `bugs/FORMAL_struct_construction_shapes.md`, which
+was another worker's live claim, so this document did not edit it. **That doc was
+`git rm`'d on 2026-10-03, when the construction family closed** (its `constr_*`
+cases in `test_formal_run.py` are what stands in its place), so this item is now
+UNOWNED and the sharp form below is the whole of it. The sharp
 form of the finding, for whoever holds it: *a keyword that names no field and
 does name a parameter of a declared `__init__` is refused as an unknown keyword
 rather than as the keyword construction it is, and the lowerable fix is to bind
