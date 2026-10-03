@@ -17,6 +17,49 @@ five things that are still open.
 Current arm64 baseline: 284 files, `PASS=80`, `codegen=54`,
 `codegen coverage 80/134 = 59.7%`, and **0** of those name this diagnostic.
 
+**Update 2026-10-03: three things this document lists as open are closed, and
+one of them is a premise rather than a feature.**
+
+* **Premise (B1) — a method that stores a CALL into a frame field — is no longer
+  a blanket refusal.** `struct_field_container_writes` treated any call this
+  image cannot see through as "possibly a container constructor", because a
+  container is a bump-allocated region of the CALLEE's scratch and so dies with
+  the callee's activation. A function of the same module whose DECLARED return
+  type is a plain word cannot be one: a `str` here is a `malloc`'d buffer the
+  caller owns for as long as it likes, and a number is a number.
+  `model.plain_word_callee_names` + `publish_plain_word_callees` (published per
+  module beside `publish_placed_frame_structs`, cleared with it) are the
+  narrowing, and they are needed by anything that stores a computed value into a
+  receiver — the case that found it is
+  `formal/hostmods/tempfile.mojo`'s `TemporaryDirectory.__enter__` writing
+  `self.name = mkdtemp(p)`, which is a context manager this path now enters.
+* **`mod.S(...)` — a construction of an IMPORTED struct — reserves its block.**
+  `struct_constructor_sites` read only the BARE spelling, so the layout pass and
+  the emitter disagreed about a dotted construction: the emitter emitted it and
+  the table had reserved nothing, which is its own "the frame layout and the body
+  disagree" refusal. Both spellings reserve now, and
+  `model.dotted_struct_construction` is the one decision both emitters read.
+  Measured population before the change: **zero** — no host module in
+  `formal/hostmods/` declared a struct at all, so no corpus file could reach it.
+* **The `dozens` band's open question — "a function that both recurses and
+  creates wide frames has no stated bound relating the two" — is answered, and the
+  answer is that there is nothing to relate.** A frame block is reserved ONCE per
+  construction SITE in the prologue out of the fixed per-activation scratch
+  (`_SCRATCH`, 128 KiB), so a 263-field struct costs the same per activation as a
+  two-field one. Measured, arm64, a recursive function that builds a 263-field
+  frame per activation: depth 20 answers, depth 100 and 400 exit **2** — the
+  stack-floor guard's documented overflow status — at exactly the same depths as
+  the same function with no frame at all, and x86-64 answers at 400. So the bound
+  is the one `STACK_FLOOR_BUDGET_BYTES` already states, the wide frame spends none
+  of it, and the failure mode is a status a caller can read rather than a SIGSEGV.
+
+Still open, unchanged: no method is proved end to end by the generator (step 6),
+no loop contract for a method, the `work_step_*` aliases are still misnamed
+pending the `_WORK_STEP` rename, and the x86-64 model has still not been re-audited
+for arm64's class of mis-modelled memory form (`bugs/FORMAL_x86_64_model_has_no_
+step_for_a_gpr_to_xmm_move.md` and its siblings, claimed elsewhere). The first
+three are `formal/arm64_proof_gen.py` and `lib/`, which no test in this batch runs.
+
 ## Is the one-word value a true invariant?
 
 **Yes, and the proof side's own account of it is correct.** Verified, not taken
