@@ -24,8 +24,11 @@ arrived from outside this work, with a merge, are at the bottom. **`not <string>
 — the one item this document left as "a choice rather than a limit" — landed
 2026-10-02 on `work/formal8-11` (see "Sites deliberately NOT routed" below), and
 the `%s` family that reached a non-text value through a one-field struct, through a
-conversion and through a bare expression is closed with
-`bugs/FORMAL_struct_receiver_as_a_printf_string.md` deleted.**
+conversion and through a bare expression is closed with its doc deleted.
+(Named without the `bugs/` prefix on purpose: the file is not there, and
+`tools/dangling_doc_refs.py` counts a citation of a doc that is not there, so
+re-introducing the spelling to say it is missing would put this file back on
+its own census.)**
 
 ## The decision, and the reasoning that decides it
 
@@ -883,7 +886,10 @@ above, and the two attributions they guessed.
   now `PASS=29 KNOWN-GAP=6 FAIL=10` and on x86-64 `PASS=44 KNOWN-GAP=0
   FAIL=1` — the `@spec` files build and typecheck again, so the residual
   failures are a THIRD `19bc0dd` regression in `formal/`, not string work.
-  See `bugs/FORMAL_default_int_type_typed_flag_collapse.md`.
+  The doc that recorded it (`FORMAL_default_int_type_typed_flag_collapse.md`,
+  named without the `bugs/` prefix because it is not there any more — it went
+  with its fix, which is this project's rule) is gone, so the attribution
+  stands here and the evidence for it does not.
 
 
 ---
@@ -948,7 +954,24 @@ and `a` holds a `char *`; `_constructor_bindings` sees a name in
 then through a text-section address plus 8. Two answers to one question, in one
 file, and the measurement is a crash rather than a wrong number.
 
-Full reproducer, the two candidate fixes and their blast radii, and the
-denominator warning that goes with either:
-`bugs/FORMAL_string_constructor_collision.md`. It is the file to read before
-trying to land a `String`-shaped frame on this path.
+The doc that held the reproducer and the two candidate fixes
+(`FORMAL_string_constructor_collision.md`, named without the `bugs/` prefix
+because it is not there any more) went with its fix, and the fix is measured on
+this tree: the SIGBUS is a REFUSAL now, and one that names the collision rather
+than the crash it used to cause. Same reproducer, both architectures build it
+and answer:
+
+```
+$ python3 tools/memslot.py --gb 8 --label sc -- python3 fire.py build \
+      --formal --no-prove -o .tmp/sc/sc .tmp/sc/sc.mojo
+build: a = String(...) binds a to a value this path holds as TEXT, and a.<field>
+asks for a frame: String is declared here as a struct of 3 field(s):
+_ptr_or_data, _len_or_data, _capacity_or_data, so the field has a slot, and
+String is also a type this path lowers as a conversion, so the call is a
+conversion and a is the address of a NUL-terminated `char *`. …
+```
+
+So the collision is refused by name and nothing in this document has to
+re-derive it. **What that does not do is make the collision resolvable** — the
+two representations are still in force at once, and this refusal is what stands
+between them. A `String`-shaped frame on this path is still the project.
