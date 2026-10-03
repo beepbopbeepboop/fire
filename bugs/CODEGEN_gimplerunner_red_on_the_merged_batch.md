@@ -1,4 +1,4 @@
-# `test_gimple_runner.py` is RED on the merged bug-batch tree on seven cases, and `silentnoop` TIMES OUT, and nobody has filed either
+# `test_gimple_runner.py` is RED on the merged bug-batch tree on seven cases, `silentnoop` TIMES OUT, and `selfhost` fails in two different ways — nobody has filed any of them
 
 **Area:** CODEGEN / TESTS. Found 2026-10-02 on `work/bugs4-2` while fixing
 five other docs, when narrow runs of `gimplerunner` and `silentnoop` failed and
@@ -123,6 +123,77 @@ compiled binaries) or in sleep, and which one is the question to answer before
 raising anything. **If it is gcc, `checked_run.py`'s content-addressed cache
 may simply not be covering this test** — worth checking first, because a cached
 replay would take seconds and the measured numbers say it never gets one.
+
+## And `selfhost` is red too, in TWO different ways — worth its own measurement
+
+`python3 tools/suite.py selfhost` **fails on the merged batch tree and on my
+tree**, at the same stage (compiling the self-host closure), with different
+error sets. Both measured, both ~11-25 min:
+
+```
+baseline (git archive HEAD~3, alone)                1471 s   FAIL
+mine      (this branch's end, alone)                  654 s   FAIL
+```
+
+The baseline's error list is **464 distinct errors, overwhelmingly
+`_slit_NNNNN undeclared`** (the string-pool family) — plus the one that stops
+it early:
+
+```
+ERROR: compiling imported module 'mojo.backend_gimple.module_gen' from
+  .../module_gen.py: '<=' not supported between instances of 'int' and 'NoneType'
+ERROR: compiling imported module 'reflect' from .../reflect.py: '<=' ...
+```
+
+My tree's is **65 distinct errors** in three families:
+
+* `'_mojo_elem_repr_X' undeclared (first use in this function)` — ~35 of them,
+  across `fire_compiler.py`, `coro.py`, `offload.py`, `module_gen.py`,
+  `emit_calls.py`, `emit_loops.py`, `infra_infer.py`, `lambdareduce.py`,
+  `ast_rewriter.py`, `regex_compile.py`, `solvers.py`, `funcs_shared.py`,
+  `cpp_core.py`, `myinterpreter.py`, `gimple_codegen.py`. This is
+  `bugs3-codegen-5-r2`'s `mojo_list_set_elem_repr` / `mojo_list_repr_elem`
+  work: the per-list element-repr function pointer is referenced from a
+  translation unit that does not have its definition.
+* `'struct _mojo_backend_gimple_*_toplev' has no member named ...` and the
+  same for `_mojo_middle_*` — a module-scope global that one unit expects
+  another to have declared.
+* `module_loader.py: implicit declaration of function
+  'mojo_mark_dict_bool_values'` — the SAME removed-runtime-name mistake as item
+  2 above, in a second call site.
+
+**So `selfhost` is deeply red on the merged batch and the two runs do not even
+fail the same way.** I could not attribute the difference: the two runs
+diverge before the first error, so "my list has 65 and the baseline's has
+464" is not evidence that I removed 400 errors — it is evidence that they stop
+in different places. **Two of the 65 are the ones I would look at first and
+could not attribute with the budget available:**
+
+```
+mojo/backend_gimple/emit_methods.py: passing argument 1 of
+    'mojo_repr_list_ints' makes pointer from integer without a cast
+mojo/backend_gimple/device_glue.py:  passing argument 1 of
+    '_mojo_repr_list' makes pointer from integer without a cast
+```
+
+which is the boxed-`int64_t`-handle-into-a-`MojoList *`-parameter shape, and
+which my dict/element-type work touches. The next step for whoever has the
+budget is to re-run the baseline with `module_gen.py`'s `'<='` failure
+bypassed (or fixed) so the two runs reach the same stage and the lists can be
+diffed honestly — **until then, "my list is shorter" is not a result.**
+
+### One self-host regression of MY OWN, found and fixed by running this
+
+Recording it because it is the argument for running `selfhost` at all rather
+than trusting the narrow suites: my `d.pop` lowering indexed
+`_DICT_POP_RT[val_type]` directly, and a `d.pop(k)` on a
+`dict[str, FunctionDef *]` (`self._owner[fn.name] = fn` then
+`self._owner.pop(nm)` — `module_gen.py`'s own shape) raised
+`KeyError: 'FunctionDef *'`, which took `module_gen` out of the closure
+entirely. A dict slot is one raw `int64_t` for a struct pointer exactly as much
+as for a container, so the non-scalar case now pops the WORD and casts it back.
+**None of `gimple`, `gimplerunner`, `runtimediff`, `gimplegenerators`,
+`silentnoop` saw that shape** — only `selfhost` did.
 
 ## The exact next step
 
