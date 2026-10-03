@@ -569,6 +569,12 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm = Assembler()
         self._functions = {}
         self._structs: dict = {}
+        # Filled by `compile()`: a callable NAME -> the label a call to it lands
+        # on, and the per-definition labels it points at, which are not
+        # published in `info["labels"]`. See `compile()` for why a name and an
+        # address are two different things on this path.
+        self._entry_labels: dict = {}
+        self._internal_labels: set = set()
         self._current_function = None
         self._cur_fn = None
         self._if_counter = 0
@@ -786,6 +792,37 @@ dylib_exports: list = None, globals_base: int = None,
             # and `yield` leaves its value in X0 (compile-only fidelity).
             self._functions[f.name] = f
 
+        # A NAME is not an ADDRESS, and this is where that stops being true by
+        # accident. `self._functions[f.name] = f` above means a name with two
+        # definitions — an ordinary Mojo overload, or a class whose two
+        # `__init__` overloads are renamed one — is ONE function in this image,
+        # and a call to it reaches whichever body was registered last. That rule
+        # is deliberate (`formal/build.py`'s `_check_holder_agreements` is asked
+        # about EVERY definition for exactly this reason, and
+        # `test_formal_run.py`'s `overload_*_CASES` assert the answer the last
+        # body computes). What was NOT deliberate is how it reached the
+        # assembler: every body was emitted under `self.asm.label(f.name)`, and
+        # `Assembler.label` keeps the LAST address for a name, so the rule was
+        # implemented by a silent rebinding — the defect
+        # `Assembler.label` now refuses (fixed 2026-10-03 in 3656dc87).
+        #
+        # So each DEFINITION gets a label of its own, and the NAME is bound to
+        # the last of them explicitly, below, once every body has been emitted.
+        # The reachable set is unchanged — a call still lands on the last body,
+        # at the same address — and what is left is a statement of that rule
+        # instead of an accident of dict insertion order.
+        self._entry_labels = {}          # callable NAME -> the label it lands on
+        self._internal_labels = set()    # per-definition labels, not published
+        self._def_labels = []            # per DEFINITION, in `functions` order
+        nth: dict = {}
+        for f in functions:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -806,8 +843,19 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
-        for f in functions:
-            self._emit_function(f)
+        for f, label in zip(functions, self._def_labels):
+            self._emit_function(f, label)
+
+        # Every body is out, so a NAME can be bound to the one a call reaches.
+        # One binding per name, at one place, after every definition — which is
+        # what the rebinding did by accident, stated on purpose. It happens
+        # BEFORE `resolve()` so the startup `bl` above and every `bl` in a body
+        # are patched out of it, and the per-definition labels stay out of
+        # `info["labels"]` so a reader of that map sees one address per name,
+        # which is what every consumer of it (`build.py`'s dylib export table,
+        # `arm64_proof_gen.py`'s method table) is asking for.
+        for name, label in self._entry_labels.items():
+            self.asm.labels[name] = self.asm.labels[label]
 
         # Append string literal data (labels resolved for ADRP/ADD loads)
         for label, data in self._strings:
@@ -825,7 +873,8 @@ dylib_exports: list = None, globals_base: int = None,
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
-            "labels": dict(self.asm.labels),
+            "labels": {n: a for n, a in self.asm.labels.items()
+                       if n not in self._internal_labels},
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -843,7 +892,7 @@ dylib_exports: list = None, globals_base: int = None,
     def func_name(self):
         return self._current_function or ""
 
-    def _emit_function(self, f: F.FunctionDef) -> None:
+    def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         # The whole image's `{function: struct}` table for the functions that
         # RETURN a frame, published by `formal/build.py`'s fixpoint.  It is
@@ -864,7 +913,10 @@ dylib_exports: list = None, globals_base: int = None,
         # `_module_global`. Built from the same shared allocation order the
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_collect_var_names(f))
-        self.asm.label(f.name)
+        # THIS DEFINITION's entry label, from the pre-pass in `compile()` — not
+        # `f.name`, which is the name a CALL uses and which a second definition
+        # of the same name shares.
+        self.asm.label(label if label is not None else f"{f.name}__def1")
 
         var_names = _allocation_order(f)
         # The RETURNED-FRAME convention, set up before the locals so that the
@@ -7045,7 +7097,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_add_xd_xn_imm(31, 31, area))
         else:
             self.asm.emit(encode_bl(0))
-            self.asm.emit_label_rel(name, here_offset=-4)
+            # The NAME a call reaches, not the label this image happens to keep
+            # for it: `compile()` gives every definition its own entry label, and
+            # `name` is the alias bound to the last of them after every body is
+            # out. `resolve()` patches out of the alias, so a caller emitted
+            # before the callee lands on the same address it always did.
+            self.asm.emit_label_rel(self._entry_labels.get(name, name),
+                                    here_offset=-4)
         if stack_bytes:
             _emit_add_imm(self.asm, 31, 31, stack_bytes)
         if ext_return is not None:

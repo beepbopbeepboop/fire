@@ -2222,6 +2222,89 @@ class TestLabelUniqueness(unittest.TestCase):
                 # the assembler quietly dropped the branch to keep going.
                 self.assertEqual([r[1] for r in asm.relocs], ["one"])
 
+    #: An OVERLOADED name — ordinary Mojo, and a class whose two `__init__`
+    #: overloads are renamed one. Both backends key their function table by
+    #: NAME, so a name with two definitions is one function in the image and a
+    #: call reaches the body registered last. That rule is deliberate
+    #: (`formal/build.py`'s `_check_holder_agreements` is asked about EVERY
+    #: definition for exactly this reason, and `test_formal_run.py`'s
+    #: `overload_*_CASES` assert the answer the LAST body computes) — but it
+    #: used to reach the assembler as `self.asm.label(f.name)` for both bodies,
+    #: which implemented "last wins" as a silent REBINDING. That is the defect
+    #: the guard above refuses, so the two guards together refused five real
+    #: programs in `test_formal_run.py` until the emitters gave each definition
+    #: a label of its own and bound the name to the last one explicitly.
+    OVERLOADED = ("def twice(x: Int) -> Int:\n"
+                  "    return x * 2\n"
+                  "\n"
+                  "def twice[K: Copyable](x: Int) -> Int:\n"
+                  "    return x * 3\n"
+                  "\n"
+                  "def main(n: Int) -> Int:\n"
+                  "    return twice(7)\n")
+
+    @staticmethod
+    def _compiled(arch: str):
+        """`(code, info, labels)` for `OVERLOADED` on `arch`, from the real
+        emitter.
+
+        Driven through `formal/build.py`'s own `_make_codegen`, so the backend
+        gets the same globals base and data-segment budget every real build
+        gives it — a Codegen built by hand would be a second answer to "what
+        does this backend emit", which is the thing this file exists to
+        prevent. The assembler's own label table comes back with it because
+        the per-definition labels are emitter-internal: `info["labels"]`
+        deliberately does not publish them, so they can only be read here.
+        """
+        import formal.build as B
+        import fire_compiler as F
+        stmts = F.Parser(F.py_tokenize(TestLabelUniqueness.OVERLOADED)
+                         ).with_filename("t").parse_module()
+        gen = B._make_codegen(arch, "macho", 10)
+        code, info = gen.compile(stmts)
+        return code, info, dict(gen.asm.labels)
+
+    def test_an_overloaded_name_is_one_label_per_definition_and_one_address(
+            self):
+        """The shape that replaced the rebinding, on both backends.
+
+        Three facts, and each is a way the rule can be got wrong:
+
+          * the program BUILDS — the guard above refusing it is the regression
+            this case exists to keep fixed;
+          * the label table holds one entry per DEFINITION, so no label is
+            defined twice and the guard above never has to fire on a name the
+            emitter itself owns;
+          * `info["labels"]` publishes ONE address per NAME, equal to the LAST
+            definition's — the rule the rebound label implemented by accident,
+            now stated — and none of the per-definition labels leak into it,
+            because `build.py`'s dylib export table and `arm64_proof_gen.py`'s
+            method table both read that map and both expect one address per
+            name.
+        """
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(backend=arch):
+                code, info, emitted = self._compiled(arch)
+                self.assertTrue(code)
+                per_def = sorted(n for n in emitted
+                                  if n.startswith("twice") and "__def" in n)
+                self.assertEqual(per_def, ["twice__def1", "twice__def2"],
+                                 f"[{arch}] each definition gets its own entry "
+                                 "label, and no two share one")
+                self.assertEqual(info["labels"]["twice"],
+                                 emitted["twice__def2"],
+                                 f"[{arch}] a call to an overloaded name lands "
+                                 "on the LAST definition, which is what the "
+                                 "rebound label did")
+                self.assertEqual(
+                    sorted(n for n in info["labels"] if "__def" in n), [],
+                    f"[{arch}] a per-definition label leaked into the published "
+                    "map, which every consumer reads as one address per name")
+                # …and the main module is not overloaded, so its name is still
+                # bound and still points into the image: an alias that forgot
+                # the single-definition case would show up here as a KeyError.
+                self.assertEqual(info["labels"]["main"], info["func_offset"])
+
 
 if __name__ == "__main__":
     unittest.main()

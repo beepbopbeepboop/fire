@@ -604,6 +604,13 @@ class X86_64Codegen:
         self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
+        # Filled by `compile()`: a callable NAME -> the label a call to it
+        # lands on, and the per-definition labels it points at, which are not
+        # published in `info["labels"]`. arm64's `_entry_labels` is the same
+        # pair, for the reason `compile()` gives there.
+        self._entry_labels: dict = {}
+        self._internal_labels: set = set()
+        self._def_labels: list = []
         self._current_function = None
         # The FUNCTION NODE, not just its name — the pointer value model reads
         # a receiver's declared pointee from the function being emitted.  See
@@ -761,6 +768,31 @@ class X86_64Codegen:
             # and `yield` leaves its value in RAX (compile-only fidelity).
             self._functions[f.name] = f
 
+        # A NAME is not an ADDRESS, and this is arm64's rule read from the same
+        # shape: every DEFINITION gets an entry label of its own and the NAME is
+        # bound to the last of them below, once every body has been emitted.
+        # `self._functions[f.name] = f` above means an overloaded name — or a
+        # class whose two `__init__` overloads are renamed one — is ONE function
+        # in this image and a call reaches whichever body was registered last;
+        # that rule is deliberate and `test_formal_run.py`'s `overload_*_CASES`
+        # assert the answer the last body computes. What was not deliberate was
+        # reaching the assembler with `self.asm.label(f.name)`, which
+        # implemented the rule as a silent rebinding of one label — the defect
+        # `Assembler.label` refuses (fixed 2026-10-03 in 3656dc87). The
+        # reachable set is unchanged: a call still lands on the last body, at
+        # the same address.
+        self._entry_labels = {}          # callable NAME -> the label it lands on
+        self._internal_labels = set()    # per-definition labels, not published
+        self._def_labels = []            # per DEFINITION, in `functions` order
+        nth: dict = {}
+        for f in functions:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -779,8 +811,17 @@ class X86_64Codegen:
             self.asm.emit(encode_pop_r64(Reg.RBP))
             self.asm.emit(encode_ret())
 
-        for f in functions:
-            self._emit_function(f)
+        for f, label in zip(functions, self._def_labels):
+            self._emit_function(f, label)
+
+        # Every body is out, so a NAME can be bound to the one a call reaches.
+        # Before `resolve()`, so the startup `call` above and every `call` in a
+        # body are patched out of it, and with the per-definition labels kept
+        # out of `info["labels"]`, so a reader of that map sees one address per
+        # name — which is what `build.py`'s dylib export table and
+        # `x86_64_proof_gen.py` ask it for.
+        for name, label in self._entry_labels.items():
+            self.asm.labels[name] = self.asm.labels[label]
 
         # String literal data goes after the code: its label is what the
         # RIP-relative LEAs point at, so it has to exist before resolve().
@@ -800,7 +841,8 @@ class X86_64Codegen:
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
-            "labels": dict(self.asm.labels),
+            "labels": {n: a for n, a in self.asm.labels.items()
+                       if n not in self._internal_labels},
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -815,7 +857,7 @@ class X86_64Codegen:
 
     # ── functions ────────────────────────────────────────────────────
 
-    def _emit_function(self, f: F.FunctionDef) -> None:
+    def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         self._cur_fn = f
         # This function's LOCAL names, which is what decides whether a bare
@@ -823,7 +865,10 @@ class X86_64Codegen:
         # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_allocation_order(f))
-        self.asm.label(f.name)
+        # THIS DEFINITION's entry label, from the pre-pass in `compile()` —
+        # not `f.name`, which is the name a CALL uses and which a second
+        # definition of the same name shares.
+        self.asm.label(label if label is not None else f"{f.name}__def1")
 
         var_names = _allocation_order(f)
         # The RETURNED-FRAME convention, set up before the locals so the hidden
@@ -7182,7 +7227,13 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         else:
             self.asm.emit(encode_call_rel32(0))
-            self.asm.emit_label_rel32(name, here_offset=-4)
+            # The NAME a call reaches, not the label this image happens to
+            # keep for it: `compile()` gives every definition its own entry
+            # label and `name` is the alias bound to the last of them after
+            # every body is out, so a caller emitted before the callee lands
+            # on the same address it always did.
+            self.asm.emit_label_rel32(self._entry_labels.get(name, name),
+                                      here_offset=-4)
         # The outgoing area is released HERE and not by the callee: SysV AMD64
         # is caller-cleanup, and this backend's own callee proves the point —
         # its epilogue is `leave; ret`, which restores RSP from RBP and so
