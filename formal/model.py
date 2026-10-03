@@ -288,6 +288,56 @@ MLIR_EFFECT_OPS = frozenset((
     "rocdl.raw.ptr.buffer.load.lds",
 ))
 
+# The EFFECT operations this path LOWERS instead of refusing, and why the
+# answer is "as a divergence" rather than "as a trap instruction".
+#
+# `MLIR_EFFECT_OPS` above is right that these denote no value, and the refusal
+# that table feeds was written for exactly that fact — but it was asked at
+# every use, and at a use whose value is DISCARDED the question does not arise:
+# there is nothing to represent, because nothing reads a result. So the ground
+# the refusal stood on ("no representation in a 64-bit word, because there is
+# no value to represent") is absent at a statement, and refusing there is an
+# OVER-refusal rather than a safety: it costs a whole module for a construct
+# that lowers to the one thing this path already emits when control must not
+# continue, which is what `raise` lowers to (`_emit_diverge` in each backend,
+# and the Darwin `exit(1)` sequence both of those share).
+#
+# **What this is NOT.** It is not a trap, and it does not stop the machine the
+# way `brk`/`int3` would: the source asked for a fault the debugger sees, and
+# what this emits is an ordinary exit with a NONZERO status. That is the same
+# difference `raise` already has on this path (no unwinder, so an exception is
+# `exit(1)`), and it is the reason the divergence is a reuse of that sequence
+# rather than a new instruction: every word in it already has a `work_step_*`
+# lemma in `lib/work.lean`, so a program containing one is still PROVABLE to
+# the point the source stops, whereas an unmodelled `brk` word would fall
+# through `formal/arm64_proof_gen.py`'s `_step_branch_index` as "not modelled"
+# and be skipped. A trap instruction is the better lowering and is the one to
+# build if the Lean model grows a step for it; until then this is the one that
+# does not put a hole in the proofs.
+#
+# **Why only these two.** Every other member of `MLIR_EFFECT_OPS` is refused for
+# a fact beyond the missing value: a `lit.ownership.mark_initialized` asserts
+# something about a reference this path does not track, a `pop.store` has an
+# ADDRESS whose pointee width nothing states, a `pop.fence` and a
+# `pop.inline_asm` are ordering and clobber facts with no encoding agreed here,
+# and a coroutine step is the shape this path lowers to a plain call. Emitting
+# the divergence for any of those would be a different program wearing the same
+# words. Four sites in the stdlib corpus reach this table, three of them in
+# `std/sys` and `std/os`:
+#
+#     std/sys/debug.mojo:20        __mlir_op.`llvm.intr.debugtrap`()
+#     std/sys/info.mojo:702        __mlir_op.`llvm.intr.trap`()
+#     std/os/os.mojo:242           __mlir_op.`llvm.intr.trap`()     (_abort_base)
+#     std/_plugin/selector.mojo:74 __mlir_op.`llvm.intr.trap`()
+#
+# and all four are standalone statements whose value nothing reads — which is
+# the property `mlir_effects_all_lowered` requires and `MLIR_EFFECT_OPS`'s own
+# membership rule ("the corpus uses it as a standalone statement at EVERY one of
+# its sites") already measured.
+MLIR_EFFECT_DIVERGENCE_OPS = frozenset((
+    "llvm.intr.trap", "llvm.intr.debugtrap",
+))
+
 # ELEMENTWISE arithmetic: one operation applied to every element of its operand.
 # For a scalar operand the result is the one 64-bit word this path has, and both
 # architectures already emit that computation for the ordinary spelling. For a
@@ -453,6 +503,75 @@ def mlir_dialect_op_name(node):
     return name[1:-1]
 
 
+def mlir_effect_diverge_call(expr):
+    """The divergence `expr` denotes, or None if it is not a lowerable one.
+
+    `expr` is lowered only when it is a dialect-operation CALL with NO
+    arguments whose operation is in `MLIR_EFFECT_DIVERGENCE_OPS`. The argument
+    count is part of the predicate rather than an assumption about the dialect:
+    a trap takes none in every spelling in the corpus, and a site that passed
+    one would be asking this path to compute something before it stops, which
+    is a different construct that deserves its own refusal.
+
+    This is the ONE reader of that table, and both backends' statement emitters
+    ask it through here rather than reading the set each — the failure mode this
+    module exists to prevent is two backends disagreeing about what a dialect
+    operation denotes, and a per-emitter copy of the set is how that happens.
+    """
+    if not isinstance(expr, F.CallExpr) or expr.args:
+        return None
+    op = mlir_dialect_op_name(expr.func)
+    if op is None or op not in MLIR_EFFECT_DIVERGENCE_OPS:
+        return None
+    return op
+
+
+def mlir_effects_all_lowered(body) -> bool:
+    """True when `body`'s ONLY dialect constructs are lowered effects.
+
+    The question `formal/build.py`'s name-placement pass asks before it refuses
+    a function for naming a dialect root: is there anything here this path
+    cannot lower? A trap used as a statement has nothing to represent and
+    nothing that reads a result, so it is not that — and a function may hold
+    several sites, so the answer is over the WHOLE body and not over the site
+    the walk happened to reach.
+
+    Every dialect root in `body` must therefore be accounted for twice: by
+    identity, so that no `__mlir_*` name is left over by a walk that counted
+    only the calls it recognised, and by POSITION, so that each recognised call
+    is the whole value of an `F.ExprStmt` rather than something an assignment
+    or a `return` reads. Both halves are needed and neither subsumes the other:
+    the identity half stops a second construct from riding along unseen, and
+    the position half is what "the value is discarded" actually means — a
+    `return __mlir_op.`llvm.intr.trap`()` is a value position whatever the
+    arguments are.
+
+    False when there is no dialect construct at all, so a caller cannot read
+    "nothing to refuse" as "everything here lowers".
+    """
+    roots = set()
+    for node in iter_nodes(body):
+        if isinstance(node, F.IdentExpr) \
+                and node.name.startswith(MLIR_DIALECT_PREFIX):
+            roots.add(id(node))
+    if not roots:
+        return False
+    stmt_values = {id(s.value) for s in iter_nodes(body)
+                   if isinstance(s, F.ExprStmt)}
+    calls = [c for c in iter_nodes(body) if mlir_effect_diverge_call(c)]
+    if not calls:
+        return False
+    lowered = set()
+    for call in calls:
+        if id(call) not in stmt_values:
+            return False
+        root = call.func
+        while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+            root = root.obj
+        lowered.add(id(root))
+    return lowered == roots
+
+
 def mlir_dialect_op_refusal(op: str) -> str:
     """Why this path refuses the dialect OPERATION `op`, by what it denotes.
 
@@ -529,34 +648,22 @@ def mlir_dialect_op_refusal(op: str) -> str:
         f"out of a register, which is what produced 10 on arm64 and 0 on "
         f"x86-64 for one source"
     )
-    if op in MLIR_UNGUARDED_OPS:
-        return (
-            f"`{op}` is a dialect OPERATION whose value could be a word on this "
-            f"path, but it cannot be GUARDED here: {MLIR_UNGUARDED_OPS[op]}. "
-            f"This is a deliberate deferral, not an impossibility — the "
-            f"operation is nameable and its operands are values, so what is "
-            f"missing is the fact its result depends on, not a representation "
-            f"of the result"
-        )
-    if op in MLIR_WORD_VALUED_OPS:
-        return (
-            f"`{op}` is a dialect OPERATION and IS implementable here: the "
-            f"value it denotes is one 64-bit word, which is the only value "
-            f"this path has, and both architectures already emit the same "
-            f"computation for the ORDINARY spelling of it. It is refused "
-            f"because this path has no lowering table for dialect operations "
-            f"— a deliberate deferral, not an impossibility. Write the "
-            f"ordinary spelling at the use site; it is the same computation "
-            f"and this path already emits it"
-        )
-    return (
-        f"`{op}` is a dialect OPERATION, and this path has no lowering table "
-        f"for dialect operations: it lowers a Mojo program to a Mach-O image "
-        f"whose only value is a 64-bit word, and no instruction selection here "
-        f"knows what this operation denotes. Refused by name rather than read "
-        f"out of a register, which is what produced 10 on arm64 and 0 on "
-        f"x86-64 for one source"
-    )
+    # A NAME-keyed "this operation denotes one 64-bit word, so write the
+    # ordinary spelling" table is DELIBERATELY not here, and this is the place
+    # that says so, because a version of this function did carry one and it was
+    # wrong: `MLIR_EFFECT_OPS` above and the census in
+    # `bugs/FORMAL_mlir_dialect_refusal_is_false_of_the_word_valued_ops.md` §
+    # Correction both exist because the answer to "is this operation's result a
+    # word?" is a fact about its OPERANDS, not its name — 26 of the 38
+    # arithmetic sites are elementwise over an N-lane vector, and a name-keyed
+    # table would have lowered those to a scalar add of two vector-typed words.
+    # That branch was UNREACHABLE (a `return` above ended the function), so it
+    # never fired and never raised the `NameError` its undefined
+    # `MLIR_WORD_VALUED_OPS` would have; deleting it is a deletion and not a
+    # behaviour change, and `test_formal_mlir_precedence.py`'s
+    # `no_dialect_table_is_keyed_on_the_operation_name_alone` is what keeps a
+    # reader from putting it back. A real table has to read the operand's
+    # declared type first, which is the next step that document names.
 
 
 def mlir_dialect_refusal(name: str, op: str = None) -> str:
@@ -881,7 +988,6 @@ def _backtick_text(name: str):
     if isinstance(name, str) and len(name) >= 2 and name[0] == "`" \
             and name[-1] == "`":
         return name[1:-1]
-    return None
 
 
 def _template_fragments(e):

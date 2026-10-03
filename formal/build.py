@@ -11301,7 +11301,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         bracketed = {}
         exempt_roots = set()
         first_mlir = None
-        # The dialect OPERATION each `__mlir_op` root spells, keyed by the
+        # Whether this function's dialect constructs are ALL effects this path
+        # lowers, asked ONCE over the whole body and before the loop rather than
+        # per site: `model.mlir_effects_all_lowered` needs every dialect root
+        # accounted for, and a per-site question cannot see the others. A trap
+        # used as a statement of its own denotes nothing that a register has to
+        # hold, so there is nothing here to refuse — see that function for why
+        # the argument is "over the whole body" and not "at this node".
+        effects_lowered = M.mlir_effects_all_lowered(fn.body)
+        # The dialect OPERATION each `__mlir_op` root spells, keyed on the
         # ROOT's identity for the reason `bracketed` is: `iter_nodes` has no
         # parent, so the name and the operation it applies to are two separate
         # nodes, and keying on the string would pair one call's name with
@@ -11323,10 +11331,12 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # a construct this build answers, which is the worse of the two
                 # mistakes available here.
                 if first_mlir is None and id(sub) not in exempt_roots \
+                        and not effects_lowered \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
                         or M.mlir_dialect_refusal(sub.name,
                                                   dialect_ops.get(id(sub)))
+
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
@@ -11853,6 +11863,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         cname, csym, fn.name))
                 continue
             name = node.name
+            if effects_lowered and name.startswith(M.MLIR_DIALECT_PREFIX):
+                # The root of an EFFECT this path LOWERS.
+                # `mlir_effects_all_lowered` has already established that every
+                # dialect root in this body is one, so there is no binding to
+                # place here: the emitter consumes the whole call as a statement
+                # and never reads a name out of it. Skipping the root is what
+                # stops this walk from answering the CONSTRUCT's question with
+                # its own fallback — "'__mlir_op' has no home", which is a fact
+                # about placement and sends the reader to the allocator instead
+                # of to the dialect operation, which is the whole reason the two
+                # arms above name the operation at all. Same exemption and same
+                # reason as `module_reads` skipping a module root.
+                continue
             if name in placed or name in frame_slots \
                     or M.module_constant_literal(name) is not None \
                     or M.name_resolves_without_a_local(name):
@@ -11876,7 +11899,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 raise CodegenError(M.dtype_object_refusal(name))
             if "." in name and name.split(".", 1)[0] in holders:
                 continue
-            if name.startswith(M.MLIR_DIALECT_PREFIX):
+            if name.startswith(M.MLIR_DIALECT_PREFIX) and not effects_lowered:
                 # An MLIR DIALECT construct no template rule covers — see
                 # `model.mlir_dialect_refusal` for why naming it beats the
                 # fallback's "no home", which names a symptom of the register
@@ -11888,6 +11911,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # arithmetic result or something that needs a fact this path
                 # does not have, and one sentence over all three was false of a
                 # measurable subset.
+                #
+                # `effects_lowered` is the same answer `first_mlir` above is
+                # given, and both arms carry it rather than one of them being
+                # deleted: a trap used as a statement of its own is emitted by
+                # the backends, so refusing it here would refuse a construct
+                # this build answers. One reader (`mlir_effects_all_lowered`),
+                # asked twice, rather than two decisions that can disagree —
+                # which is what the comment at `first_mlir` says about asking
+                # the same question twice and is the reason this arm exists at
+                # all rather than being the only one.
                 why = M.mlir_dialect_refusal(name, dialect_ops.get(id(node)))
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
