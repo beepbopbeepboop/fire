@@ -3287,6 +3287,43 @@ BYREF_REFUSALS = [
      "    print(p)\n"
      "    return n\n",
      "refuse:is a builtin of the language rather than a C entry point", None),
+    # A PYTHON BUILTIN rather than a name somebody forgot to declare. The arm
+    # above says "this module defines no FUNCTION of that name … and no
+    # `from … import …` in it binds the name either", and for a builtin both of
+    # those are impossible — the name comes from the LANGUAGE — so the sentence
+    # sent the reader to look for a missing `def` that cannot exist. `type_of`
+    # is on the list on the measurement in
+    # `bugs/FORMAL_frame_by_value_ceiling_zero.md` (`std/memory/unsafe_pointer`
+    # is refused with this very message and the doc's note is "`type_of` is a
+    # missing builtin, on any receiver"); the two cases below are the two
+    # families the table carries, and the needle is the clause that names what
+    # the callee is rather than what this file lacks.
+    #
+    # The prefix "which is a name with no definition in hand" is asserted by
+    # neither needle and is load-bearing anyway: two taxonomies key on that
+    # exact substring (`tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    # `tools/formal_sweep_causes.py`), so an arm that reworded the opening would
+    # silently move files out of the family they are counted in.
+    ("byref_refuse_type_of_names_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return type_of(p)\n",
+     "refuse:type_of` is a Python BUILTIN", None),
+    ("byref_refuse_getattr_names_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return getattr(p, \"a\")\n",
+     "refuse:getattr` is a Python BUILTIN", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary

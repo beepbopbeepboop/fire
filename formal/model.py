@@ -8835,6 +8835,65 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 ))
 
 
+# PYTHON BUILTINS THIS PATH DOES NOT IMPLEMENT, and why each one has no answer
+# here. The values are the second half of the sentence they appear in.
+#
+# This is the table `bugs/FORMAL_frame_receiver_handoff.md` names as the thing
+# the `getattr`/`setattr` finding was waiting for — "a program that reaches one
+# of them is a program with a Python builtin this backend does not implement,
+# which is a fact about the backend's surface rather than about the image, and
+# naming it needs a table of what the backend DOES implement" — and it is also
+# the one remaining wrong diagnosis in
+# `bugs/FORMAL_frame_by_value_ceiling_zero.md`'s landing table, where
+# `std/memory/unsafe_pointer.mojo` is refused with "a Pointer receiver is
+# passed to type_of()" and the doc's own note says what that sentence is worth:
+# "`type_of` is a missing builtin, on any receiver".
+#
+# **Why the existing sentence is wrong for these and only these.** The last arm
+# of `frame_undefined_callee_refusal` says "this module defines no FUNCTION of
+# that name … and no `from … import …` in it binds the name either", which sends
+# the reader to look for a missing `def` or a missing import. For a builtin both
+# of those are impossible: the name comes from the LANGUAGE, so there is
+# nothing to define and nothing to import. Every other callee in this branch is
+# a name somebody might have meant to define, which is exactly why the sentence
+# is right for them.
+#
+# `type_of` is here on the measurement in that doc; the four attribute builtins
+# are here on the `getattr`/`setattr` finding in the hand-off doc, which names
+# them as reaching this same branch. Neither list is exhaustive and this is the
+# one place to add to — a name added here changes a diagnostic, never a verdict:
+# the hand-off is unsound either way, because none of these has a compiled body
+# to hand an address to.
+UNIMPLEMENTED_BUILTINS = {
+    "type_of": (
+        "its answer is a TYPE, and this path has no value that denotes a type: "
+        "every value is one 64-bit word (`pointer_value_model`), a struct "
+        "crosses a boundary as a LAYOUT rather than as something that is 'of' "
+        "its class, and a type name read as a value has no home at all — so "
+        "there is no answer to hand back whatever the receiver is, and the "
+        "receiver's layout is not the question here"),
+    "getattr": (
+        "the attribute it names is a STRING at run time, and a field read on "
+        "this path is a load from `[base, #8k]` with a slot index the build "
+        "computed from the struct's own field list; a frame has no element "
+        "width and no length, so a run-time-indexed read of one is not an "
+        "address arithmetic question this backend can answer"),
+    "setattr": (
+        "the same run-time string, and a store rather than a load — which also "
+        "means the write's target is not a slot the build established, so "
+        "there is nowhere proved to write to"),
+    "hasattr": (
+        "its answer is whether the attribute is there, and on this path a field "
+        "read has no absent case to report: a frame's slots are its whole "
+        "layout, so the question has no representation to be answered in"),
+    "delattr": (
+        "its effect is to remove a field from an object, and an object here is "
+        "a frame block with a fixed layout and no storage to give up — the "
+        "field list the build compiled against is not something a call can "
+        "change"),
+}
+
+
 def frame_undefined_callee_refusal(callee: str, struct_names,
                                    imported_from: str = None,
                                    comptime_param_of: str = None,
@@ -8923,6 +8982,20 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"of its 50 spellings), and that construct is what this path "
             f"refuses; this name is its operand rather than a call of its own. "
             f"Nothing about the receiver's layout is at fault here")
+    if callee in UNIMPLEMENTED_BUILTINS:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and the reason is not that "
+            f"anything is MISSING and not that this file forgot to declare it: "
+            f"`{callee}` is a Python BUILTIN, a name the language provides, so "
+            f"there is no `def` to find here and no import that could bind it. "
+            f"No part of this path implements it, and there is no answer for it "
+            f"to give: {UNIMPLEMENTED_BUILTINS[callee]}. That is a fact about "
+            f"what this backend does, not about the receiver — so nothing about "
+            f"{who}'s layout is at fault, and no declaration of {callee} in "
+            f"this file would change it. `bugs/"
+            f"FORMAL_frame_by_value_ceiling_zero.md` has the measurement that "
+            f"put this name on the list")
     if comptime_param_of:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
