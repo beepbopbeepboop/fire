@@ -114,11 +114,21 @@ def measure(path):
         return None
     edges = M.call_graph_edges(fns, structs)
     inside = sum(len(v) for v in edges.values())
-    # The residual `stack_floor_guarded_names` leaves: the same graph with every
-    # GUARDED caller's edges removed, so what is left is a chain of bodies the
-    # guard does not reach. `M.body_has_conditional_branch` is the rule's OWN
-    # predicate and not a second copy of it — a census that re-spelled the rule
-    # would measure a different residual than the one the rule has.
+    # The residual `stack_floor_guarded_names` leaves, which is what this column
+    # has always meant: the same graph with every GUARDED caller's edges removed,
+    # so what is left is a chain of bodies the guard does not reach.
+    # `M.body_has_conditional_branch` is the rule's OWN predicate and not a second
+    # copy of it — a census that re-spelled the rule would measure a different
+    # residual than the one the rule has.
+    #
+    # **It is asked of the MODULE-DYLIB rule, deliberately** (`every_function`
+    # left False), and that is the honest reading of what is left: a PROGRAM image
+    # guards every prologue, so its residual is 0 by construction, and a census
+    # that reported 0 for it would be reporting the flag rather than the corpus.
+    # What this column still measures is the rule a module dylib is emitted with,
+    # where every function may be an export with a proved per-export contract —
+    # see `model.stack_floor_guarded_names` for why that image cannot take the
+    # third rule.
     guarded = M.stack_floor_guarded_names(fns, structs)
     slim = {name: {c for c in callees if c not in guarded}
             for name, callees in edges.items() if name not in guarded}

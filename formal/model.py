@@ -27986,10 +27986,33 @@ def _has_branch_node(node) -> bool:
                for name in _node_field_names(node))
 
 
-def stack_floor_guarded_names(functions, structs: dict = None) -> set:
+def stack_floor_guarded_names(functions, structs: dict = None,
+                              every_function: bool = False) -> set:
     """The functions of one image whose prologue carries the stack-floor guard.
 
-    Two rules, and the SECOND is what the measurement forced:
+    Three rules, and only the third is new:
+
+      * **`every_function`** — the whole image. This is the rule for an image
+        that has a STARTUP STUB and therefore no exports, and it exists because
+        the guard's floor is written by the FIRST guarded function to run
+        (`CBNZ X16, done` in the sequence below): a guard that only some
+        prologues carry is a guard whose floor is set by whichever of those
+        prologues the program happens to reach FIRST, so a chain of unguarded
+        functions below that one is below a floor that was already too deep to
+        catch anything. Measured on the shape — 600 straight-line functions in a
+        chain from a straight-line `main`, so no cycle and no branch anywhere —
+        arm64 answers `exit 139`: a SIGSEGV with no output and no status, which
+        is the defect this whole mechanism exists to replace. With `main` in the
+        set the chain traps at the budget instead.
+
+        The one thing that made this not obvious is that guarding `main` ALONE
+        does not close it: the check runs once, at main's prologue, where the
+        stack is one frame deep. It is the whole SET that has to be guarded, and
+        the whole set is affordable here for the reason the per-export contract
+        argument gives — a program image has no exports, so no export loses a
+        contract. That is why this is a parameter and not the rule: a MODULE
+        DYLIB, where every function may be an export with a proved contract, must
+        keep the two rules below.
 
       * **on a call-graph CYCLE.** Unbounded call depth is a cycle: a chain of
         distinct functions has a finite depth, and it is the return to a function
@@ -28052,6 +28075,8 @@ def stack_floor_guarded_names(functions, structs: dict = None) -> set:
                     stack.append(nxt)
         return False
 
+    if every_function:
+        return set(by_name)
     return {name for name in by_name
             if reaches_self(name) or body_has_conditional_branch(by_name[name])}
 

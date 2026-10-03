@@ -6701,21 +6701,29 @@ BOTH_ARCH_CASES = [
        "    if n > 1000000:\n"
        "        return n\n"
        "    return d0(n)\n", 2, None),
-    # GUARD for the row above, and it is the row that says the widening is not
-    # "guard everything": a chain of STRAIGHT-LINE bodies is left exactly as it
-    # was, because a body the emitter lays out without a branch is a body whose
-    # per-export contract the guard's own branch would cost. 61 is where arm64
-    # would cross its budget, so a program that stopped here is a program the
-    # rule is not reaching — and 11 is `main`'s own answer for the argument the
-    # entry stub passes, which is what makes it an assertion about the DEPTH
-    # rather than about the guard being present.
-    ("guard_a_straight_line_chain_is_left_alone",
+    # ── THE THIRD RULE: EVERY FUNCTION, IN AN IMAGE THAT HAS AN ENTRY ─────
+    #
+    # The two rules above are a predicate over a body. This one is a fact about
+    # the IMAGE, and it is what closes the residual
+    # `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` measured: the
+    # guard's floor is written by the first guarded function to RUN, so a guard
+    # on only some prologues puts the floor wherever the program happens to reach
+    # one first, and a chain of unguarded functions below that point is under a
+    # floor that was already too deep to catch anything.
+    #
+    # Measured, both architectures, on the shape below (601 straight-line
+    # functions, no cycle and no branch anywhere): before, `exit 139` — a
+    # SIGSEGV with no output and no status; after, `STACK_TRAP_STATUS`, exit 2.
+    # Guarding `main` ALONE does not do it — the check runs once, at main's
+    # prologue, where the stack is one frame deep — which is why the rule is the
+    # whole set and not the entry.
+    ("both_arch_a_straight_line_chain_past_the_floor_is_a_status",
      "".join(
          "def d%d(n: Int) -> Int:\n"
-         "    %s\n" % (i, "return n + 1" if i == 60 else "return d%d(n)" % (i + 1))
-         for i in range(61))
+         "    %s\n" % (i, "return n + 1" if i == 599 else "return d%d(n)" % (i + 1))
+         for i in range(600))
      + "def main(n: Int) -> Int:\n"
-       "    return d0(n)\n", 11, None),
+       "    return d0(n)\n", 2, None),
     # ── A DELEGATING CONSTRUCTOR OVER A STRUCT OF THIS MODULE ──────────────
     #
     # The last reason `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating
@@ -18051,6 +18059,35 @@ _STACK_FLOOR_PROBES = [
      "    return inner(n)\n", set()),
 ]
 
+# THE THIRD RULE, asked directly: `every_function` is the image's shape, not a
+# predicate over a body, so it cannot be answered by the probe table above — and
+# the thing that has to hold is BOTH halves. True covers the image whose floor is
+# otherwise set too deep; False is the module-dylib rule, unchanged, because
+# there every function may be an export with a proved per-export contract.
+_STACK_FLOOR_IMAGE_PROBES = [
+    # The acyclic straight-line chain: the two-rule predicate guards NOTHING in
+    # it, which is the residual, and `every_function` is what closes it.
+    ("an_image_with_an_entry_guards_every_function",
+     "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n    return leaf(n)\n"
+     "def main(n):\n    return mid(n)\n",
+     True, {"leaf", "mid", "main"}),
+    # The same source as a module dylib, where the answer must not move: the
+    # per-export contract is what the two rules protect, and a straight-line
+    # export still has one.
+    ("a_module_dylib_keeps_the_two_rules",
+     "def leaf(n):\n    return n * 2\n"
+     "def mid(n):\n    return leaf(n)\n"
+     "def main(n):\n    return mid(n)\n",
+     False, set()),
+    # …and a branching body in one is still guarded, because the cycle-or-branch
+    # half is not conditional on the image's shape.
+    ("a_module_dylib_still_guards_a_cycle",
+     "def deep(n):\n    return deep(n - 1)\n"
+     "def main(n):\n    return deep(n)\n",
+     False, {"deep"}),
+]
+
 
 def check_stack_floor_decision(verbose=False):
     """`model.stack_floor_guarded_names` on the parsed probes, and
@@ -18091,6 +18128,24 @@ def check_stack_floor_decision(verbose=False):
         passed += 1
         if verbose:
             print(f"  PASS  stack-floor-decision: {name}")
+    for name, source, every, want in _STACK_FLOOR_IMAGE_PROBES:
+        stmts = build.parse_module(source, "<stack-floor-image>")
+        structs = {st.name: st for st in stmts
+                   if type(st).__name__ == "StructDef"}
+        fns = [st for st in stmts if type(st).__name__ == "FunctionDef"]
+        for st in structs.values():
+            for mth in M.struct_methods(st):
+                lifted = _copy.deepcopy(mth)
+                lifted.name = M.method_function_name(st.name, mth.name)
+                fns.append(lifted)
+        got = M.stack_floor_guarded_names(fns, structs,
+                                          every_function=every)
+        if got != want:
+            failures.append(f"image/{name}: {sorted(got)} (want {sorted(want)})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  stack-floor-decision: image/{name}")
     passed, failures = passed, list(failures)
     for name, edges, want in _STACK_FLOOR_DEPTH_PROBES:
         got = M.call_graph_depth(edges)
