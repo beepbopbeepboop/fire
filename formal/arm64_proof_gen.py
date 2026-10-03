@@ -2853,6 +2853,25 @@ def audit_step_table(lean_path: str) -> list:
         body = fh.read()
     body = body[body.index("def arm64_step"):]
     body = body[:body.index("\n\n")]
+    # COMMENTS ARE NOT BRANCHES, and reading them as branches is not a
+    # hypothetical: `arm64_step`'s own note about where the TBZ case is placed
+    # writes the condition out in full -- "because `(insn &&& 0xff000000) =
+    # 0x36000000` is specific" -- so the regex counted `0x36000000` twice, the
+    # sets were equal, and the comparison `sorted(model) != sorted(table)`
+    # failed with `only in ProofLib []` and `only in _STEP_CONDS []`, naming
+    # nothing.  `test_formal.py` calls this before it builds anything, so the
+    # whole arm64 formal corpus -- the job registered as `formal`, with no
+    # `expect=` and no `disabled=` -- could not run at all.
+    #
+    # A LINE comment is dropped rather than a block comment being tracked,
+    # because `arm64_step`'s body has no block comment inside it: the two
+    # `/-` markers in the extracted text are the docstring of the definition
+    # that FOLLOWS it, which the `\n\n` cut already excludes.  A block comment
+    # added inside the body later would be caught rather than silently
+    # misread, because a line that opens or closes one is not a branch line and
+    # is left alone.
+    body = "\n".join(l for l in body.split("\n")
+                     if "--" not in l and "/-" not in l and "-/" not in l)
     full = 0xFFFFFFFF
     model = [(int(m, 0), int(b, 0)) for m, b in
              _re.findall(r"insn &&& (0x[0-9a-fA-F]+|\d+)\) = (0x[0-9a-fA-F]+|\d+)", body)]
