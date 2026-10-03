@@ -5,7 +5,7 @@ apart.**
 
 * **`6febd26e`** — the MISCLASSIFICATION. A build whose memcap wrapper died is
   `tool`/`wrapper-died` with no verdict about the source, and is not published.
-* **`d5c1a3e7`** — **WHAT KILLED THE WRAPPER**, which this doc recorded as
+* **`1752dfcc`** — **WHAT KILLED THE WRAPPER**, which this doc recorded as
   unestablished. It is now established two ways: the one signal class that could
   produce the silent state has been **removed** (memcap handles SIGTERM and
   SIGINT: it takes its tree down, prints `interrupted`, and exits 143/130), and
@@ -90,23 +90,22 @@ one state. It is three:
   silent-death fallback is a documented choice; the fix is about not putting the
   wrapper's bookkeeping in the file's mouth).
 
-## Part 2 — what killed the wrapper (`d5c1a3e7`)
+## Part 2 — what killed the wrapper (`1752dfcc`)
 
 The original report was careful not to conclude: `tools/control.py guard` was
-"a candidate, not a conclusion". Two facts make it a conclusion now, and the
-second one means nobody has to reproduce a machine failure to see it.
+"a candidate, not a conclusion". Two changes make it a conclusion, and the second
+means nobody has to reproduce a machine failure to see it.
 
-**The state is no longer reachable by any signal memcap can catch.** memcap had
-no SIGTERM handler, so its default action skipped every line it prints — and left
-the workload running unmonitored, which is the exact failure the ceiling exists
-to prevent. That is the second-order cost, and it is the one that mattered: a
-wrapper killed by TERM orphans the build it was watching. `tools/control.py reap`
-sends `os.killpg(pid, 15)` and `os.kill(pid, 15)`, so a sweep in a finished
-worker's tree was a candidate for exactly this, and so was any operator's
-`kill -TERM`. Now:
+**The state is no longer reachable by any signal memcap can catch.** It had no
+SIGTERM handler, so its default action skipped every line it prints — and left
+the workload running unmonitored, which is the exact runaway the ceiling exists
+to prevent. That second-order cost is the one that mattered. `tools/control.py
+reap` sends `os.killpg(pid, 15)` and `os.kill(pid, 15)` at leftovers in finished
+workers' trees, so a sweep in such a tree was a candidate for exactly this, and
+so was any operator's `kill -TERM`:
 
 ```
-$ python3 tools/memcap.py --limit-gb 4 --label fg -- python3 slow.py &   # then kill -TERM
+$ python3 tools/memcap.py --limit-gb 4 --label fg -- python3 slow.py   # kill -TERM
 memcap: fg -- ceiling 4.0 GB across the process tree
 
 memcap: interrupted by signal 15, killing fg -- nothing below this wrapper is
@@ -114,13 +113,8 @@ left running, and this run was NOT accounted for by any ceiling
 $ echo $?   ->  143
 ```
 
-and `procrun.memcap_accounted` recognises that line, so `memcap_wrapper_died` is
-False for it. The outcome WORD is `interrupted` and not `terminated`, because
-`memcap_accounted` reads a set of words and a word outside it would have left a
-signalled wrapper still reading as a silent one.
-
-**What is left is a SIGKILL, and the row says so.** The wrapper's own exit status
-answers the question this doc could not:
+**What is left is a SIGKILL, and the row names it**, read off the wrapper's own
+exit status rather than guessed:
 
 ```
 the 4 GB per-file wrapper (tools/memcap.py) died before it reported an outcome —
@@ -130,22 +124,21 @@ the tree's RSS sum passes its budget — so its banner is in the output with no
 breach and no completion …
 ```
 
-Which is checkable against this repository rather than asserted: `control.py`
-guard is the only code that aims a SIGKILL at a process by name
-(`tools/control.py:381`, `os.kill(pid, 9)`), `tools/control.py reap` and
-`tools/autointegrate.py` both use 15, memcap's own group kill happens after it
-has printed `BREACH`, and the sweep's other kill (`procrun.kill_group`) is on the
-timeout path, which raises `TimeoutExpired` and so never reaches this branch. The
-row also refuses to name a cause it does not have: a wrapper that exited without a
-signal says so instead of claiming the guard.
+which is checkable against this repository instead of asserted: `control.py`'s
+`os.kill(pid, 9)` is the only SIGKILL aimed at a process by name, `control.py
+reap` and `autointegrate.py` both use 15, memcap's own group kill happens after
+it printed `BREACH`, and the sweep's other kill (`procrun.kill_group`) is on the
+timeout path, which raises `TimeoutExpired` and never reaches this branch. The
+row also declines to name a cause it does not have: a wrapper that exited without
+a signal says so.
 
-**Three cases in `TestWrapperDied`** (plus the five from `6febd26e`): the row
-names SIGKILL and the guard for `-9`, names the signal and NOT the guard for
-`-15`, and declines to invent a cause for a positive exit code; and one case runs
-the real `tools/memcap.py` binary, sends it a SIGTERM and asserts all three
-things the silent-death reader depends on — an outcome `memcap_accounted`
-recognises, exit 143, and **the workload gone** (polled, because it is reparented
-to init when it dies). `test_formal_sweep.py`: 95 tests OK.
+**Four cases in `TestWrapperDied`** (plus the five from `6febd26e`): the SIGKILL
+row names the guard, a `-15` row names the signal and NOT the guard, a positive
+exit invents no cause, and one case runs the real `tools/memcap.py` binary —
+sends it a SIGTERM, then asserts an outcome `memcap_accounted` recognises, exit
+143, and **the workload gone** (polled, because it is reparented to init when the
+wrapper dies; that last one is the property the old default lost).
+`test_formal_sweep.py`: 95 tests OK.
 
 ## The cost of the fix, which the reader should not have to rediscover
 
