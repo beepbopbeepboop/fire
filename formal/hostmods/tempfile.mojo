@@ -5,16 +5,18 @@ and §1 of this file is the measurement that retired that: **the terminal is
 unavailable and the directory is not.** The sweep's own log counts 111 files
 refused for `tempfile` — the largest host-import row in the corpus, 2.4x the
 next one — and 128 files in this repository import it. What they actually call,
-read with `ast` over every `.py` the sweep covers:
+read with `ast` over every `.py` the sweep covers **except
+`test_formal_tempfile.py`, which is the file that pins these numbers and must
+not be one of the things it counts**:
 
 | name | call sites | reachable here? |
 |---|---|---|
 | `TemporaryDirectory` | 142 | **no** — a context manager and a class |
-| `mkdtemp` | 96 | **YES**, and it is COMPUTED, not admitted |
+| `mkdtemp` | 92 | **YES**, and it is COMPUTED, not admitted |
 | `NamedTemporaryFile` | 64 | **no** — a file object, i.e. a stream |
 | `TemporaryFile` | 3 | **no** — a stream |
 | `mkstemp` | 3 | **yes, and NOT written** — see §4 |
-| `gettempdir` | 3 | **YES**, and it is COMPUTED |
+| `gettempdir` | 1 | **YES**, and it is COMPUTED |
 
 So **44** of the 128 use nothing but the names this module answers
 (`mkdtemp`, `gettempdir`, `mkstemp`), and those are the files that move. The

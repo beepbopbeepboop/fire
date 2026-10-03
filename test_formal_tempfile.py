@@ -417,13 +417,20 @@ _ABSENT = {
 # source. The module docstring says these numbers and this file says they are
 # what the source says, which is the only way a table in a docstring cannot go
 # stale quietly.
+#
+# The population is `_repo_sweep_files()`, which EXCLUDES this file — so these
+# are 92 and 1, not the 96 and 3 a walk that includes this file reports.  The
+# difference is this file's own four `mkdtemp` calls and two `gettempdir` calls,
+# and the first version of this ratchet counted them and then failed on its own
+# number, which is the clearest statement of the rule: a measurement must not
+# move the thing it measures.
 _SPELLED_COUNTS = {
     "TemporaryDirectory": 142,
-    "mkdtemp": 96,
+    "mkdtemp": 92,
     "NamedTemporaryFile": 64,
     "TemporaryFile": 3,
     "mkstemp": 3,
-    "gettempdir": 3,
+    "gettempdir": 1,
 }
 _REACHABLE_ONLY_FILES = 44
 _IMPORTING_FILES = 128
@@ -494,8 +501,18 @@ def group_absent(tmpdir, cas_root, verbose):
                   f"measurement claims is still {only_reachable}")
 
 
+# This file, out of the population the census measures. **A measurement must
+# not move the thing it measures**, and this one calls `tempfile.mkdtemp` and
+# `tempfile.gettempdir` in three places, so leaving it in would make every
+# case added here move `mkdtemp`'s count and then fail — which is what happened
+# the first time: the count read 97 against a docstring that said 96, and the
+# ratchet was right and the population was wrong.  The census is about the
+# CALLERS a module is written for, and this file is not a caller.
+_SELF = os.path.basename(os.path.abspath(__file__))
+
+
 def _repo_sweep_files():
-    """The REPO half of the sweep's scope, and only the repo half.
+    """The REPO half of the sweep's scope, MINUS this file, and only the repo.
 
     `tools/formal_sweep.py`'s default scope is this repository plus the
     external stdlib tree, and the stdlib's `std/` has no `import tempfile` in
@@ -508,7 +525,8 @@ def _repo_sweep_files():
     """
     sys.path.insert(0, os.path.join(HERE, "tools"))
     import formal_sweep as S
-    return S.find_source_files([HERE])
+    return [p for p in S.find_source_files([HERE])
+            if os.path.basename(p) != _SELF]
 
 
 def _count_spelled():
