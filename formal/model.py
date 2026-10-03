@@ -11787,6 +11787,49 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
     return (syms or {}).get(name, name)
 
 
+def module_spine_link_resolves(qualifier: str, by_module: dict,
+                               forwarded: dict) -> bool:
+    """Whether one link on a dotted callee's SPINE is a name that resolves.
+
+    `qualifier` is the chain's spelling from its root down to and including the
+    link — `os.path` for the object of `os.path.join(…)`, `os.environ` for the
+    object of `os.environ.get(…)`. Two facts make it resolve, and it needs
+    either:
+
+      * it names a LIBRARY on this link line (`os.path`, which has its own
+        dylib and its own export table). `_module_is_linked`'s own docstring is
+        why this half exists as a test rather than as an export lookup: "linked
+        and publishes nothing" and "not a module" both answer `{}` through
+        `dylib_export_module`;
+      * its LAST segment is an EXPORT of the module above it (`os.getenv_or`,
+        which is a function of `os` and not a submodule of it).
+
+    **The narrowing that is not this one**, and it is the reason this function
+    exists rather than a `name in table` test: "does the parent module publish
+    it" alone refuses `os.path.join`. `path` is NOT one of the 28 names the
+    formal `os` publishes (measured) — it is a SUBMODULE with its own library,
+    and it resolves through the module table, never through `os`'s.
+
+    A link that resolves is exempt from `check_module_symbols`' member-refusal
+    arm; one that does not is not, and the refusal that follows names the link
+    and prints what the parent module does publish. That is the whole of the
+    fix for `os.environ.get(k, '')`, which was reported as a string comparison
+    (`v == '1'`, `strcmp`, "the value of `v` as an address") because the
+    spine exemption was unconditional and the link-time symbol check lost the
+    race to a diagnostic raised during EMISSION.
+    """
+    if not qualifier or "." not in qualifier:
+        # A single-segment qualifier IS the root, and the root is a module by
+        # the time anything asks this (`dylib_module_reference` gates on it).
+        return True
+    parent, _, leaf = qualifier.rpartition(".")
+    if _module_is_linked(by_module, forwarded, qualifier):
+        return True
+    if leaf in dylib_export_module(by_module, parent):
+        return True
+    return leaf in dylib_export_module(forwarded, parent)
+
+
 def dylib_module_reference(node, imported) -> str:
     """The module a dotted chain reads THROUGH, or None if it is not one.
 

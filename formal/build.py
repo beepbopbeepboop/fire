@@ -8830,6 +8830,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     struct_names = set(structs_by_name or {})
     # A read-before-store hit per function, raised after the loop: see the
     # ordering note where they are raised.
+    #
+    # The link line's module tables, ONCE, for the spine test inside the loop.
+    # `dylib_export_tables` is the same function both emitters resolve a callee
+    # through, so a link it says does not resolve is a link the emitter cannot
+    # bind either — the two cannot disagree about where the exemption stops
+    # because there is only one table. Built here rather than per function: it
+    # walks every manifest on the line, and a file with a hundred functions
+    # would build the same three dicts a hundred times (measured as a kill at
+    # the memory ceiling on `test_formal_os.py`'s `dirs` group).
+    _by_name, by_module, forwarded = M.dylib_export_tables(link_line)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -9364,22 +9374,75 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     continue
                 link = c.func
                 while True:
-                    dotted_callees.add(id(link))
+                    # CONDITIONAL, and the condition is the fix: a link UNDER a
+                    # call's callee is skipped only while it RESOLVES — as a
+                    # module with a library on this link line, or as an export of
+                    # the module above it (`model.module_spine_link_resolves`,
+                    # which is the ONE place that question is asked).
+                    #
+                    # Unconditional, the exemption hid a name nothing publishes,
+                    # and the refusal that should have named it lost the race to
+                    # a diagnostic raised during EMISSION. Measured, arm64 and
+                    # x86-64 identically:
+                    #
+                    #     import os
+                    #     def probe(k):
+                    #         v = os.environ.get(k, '')
+                    #         return v == '1'
+                    #
+                    #     build: `v == '1'` compares a NUMBER with a string,
+                    #       and the string comparison this would lower to is
+                    #       `strcmp`, which DEREFERENCES both operands … it
+                    #       would be handed the value of `v` as an address.
+                    #
+                    # which is advice about a byte comparison, sent to a reader
+                    # whose line is an environment lookup. The right sentence is
+                    # the member refusal below — "os.environ reads 'environ'
+                    # out of the imported module `os` … What `os` publishes" —
+                    # and it is raised at the END of this function, before any
+                    # emission, so it wins on its own without an ordering rule.
+                    #
+                    # The other direction is the one that would break the tree:
+                    # `os.path.join(…)` is 532 measured call sites, and `path`
+                    # is NOT one of the 28 names the formal `os` publishes — it
+                    # is a SUBMODULE with its own library. Testing "does the
+                    # parent publish it" alone refuses every one of them.
+                    #
+                    # THE CALLEE'S OWN LINK IS NOT ASKED, and that is the
+                    # division of labour rather than an exception to it: a call
+                    # binds a SYMBOL, and `_extern_symbol` owns that question and
+                    # already answers it with the module's own export list —
+                    # `pkg.nosuchfunction(x)` on a package that forwards `twice`
+                    # is refused as "exports no `nosuchfunction` … What it does
+                    # export: twice", which is the more precise sentence and the
+                    # one `test_formal_module_attr.py` pins. The member arm's is
+                    # about a name the module cannot publish AS A VALUE, which
+                    # is the `os.environ` half and not this one.
+                    if link is c.func or M.module_spine_link_resolves(
+                            M.member_chain_text(link), by_module, forwarded):
+                        dotted_callees.add(id(link))
                     if not isinstance(link, F.MemberExpr):
                         break
                     link = link.obj
             for sub in M.iter_nodes(fn.body):
                 if not isinstance(sub, F.MemberExpr):
                     continue
-                # A CALL through the chain is the callee exemption's business
-                # and the emitter already resolves it from the module's export
-                # table; `_extern_symbol` refuses a name the module does not
-                # publish, with a message that already lists what it does
+                # A CALL through a RESOLVING chain is the callee exemption's
+                # business and the emitter already resolves it from the module's
+                # export table; `_extern_symbol` refuses a name the module does
+                # not publish, with a message that already lists what it does
                 # publish. Asking about it here too would pre-empt that with
                 # this one — and would REFUSE programs that build today, which
-                # is how both versions of this arm were caught. Every link on
-                # the callee's spine is skipped, `os.path` included: the spine
-                # is `dylib_export_module`'s question, not this one's.
+                # is how both versions of this arm were caught.
+                #
+                # A link that does NOT resolve is not that case, and skipping it
+                # unconditionally is what let `os.environ.get(k, '')` be
+                # reported as a string comparison: the chain never reaches
+                # `_extern_symbol` because nothing can bind it, and the check
+                # that would have said so never asked. So the skip is keyed on
+                # `dotted_callees`, which the loop above fills only for links
+                # that resolve — `os.path` and `os.getenv_or` are in it,
+                # `os.environ` is not.
                 if id(sub) in dotted_callees:
                     continue
                 root_name = M.dylib_module_reference(sub, imported)
