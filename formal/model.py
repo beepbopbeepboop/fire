@@ -12528,12 +12528,14 @@ _CTYPE_QUALIFIERS = ('const ', 'volatile ', 'restrict ', 'struct ', 'union ',
 
 
 def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
-    """(base, pointer depth) for a C type spelling, with whitespace collapsed.
+    """(base, pointer depth) for a C type spelling, with whitespace collapsed,
+    with the headers' own `typedef` ALIASES resolved.
 
-    Deliberately not a regex: this module imports `os` and `fire_compiler` and
-    nothing else, and a type declaration is not worth a third import. The
-    grammar is a base type and a run of `*`, which is all a prototype's types
-    are.
+    Two steps, and they are separate functions because they answer different
+    questions: `_ctype_words` reads the spelling, this one asks what the type
+    IS. An alias is a second spelling of a type the rule already knows, so a
+    prototype written through one is a prototype the rule must be able to read
+    — see `_runtime_typedefs` for what was measured when it could not.
 
     `is_param` says whether the spelling still carries its DECLARATOR NAME,
     because it does in a parameter list and does not in a return type:
@@ -12541,6 +12543,22 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     makes every parameter a type called `void db`, which nothing recognises as a
     scalar — and a rule that refuses all 546 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
+
+    The result is the RESOLVED type, which is what every reader of it wants:
+    `_ctype_is_word` asks whether a value can be this, `_box_why` names the
+    mismatch, and `test_formal_runtime_link.py`'s ceiling-3 count asks whether
+    this entry point takes a `void *`. A resolved base answers all three; a
+    spelling answers none of them, because an alias is a word, not a type."""
+    return _resolve_typedef(*_ctype_words(decl, is_param))
+
+
+def _ctype_words(decl: str, is_param: bool = False) -> tuple:
+    """(base, pointer depth) for a C type SPELLING, aliases NOT resolved.
+
+    Deliberately not a regex: this module imports `os` and `fire_compiler` and
+    nothing else, and a type declaration is not worth a third import. The
+    grammar is a base type and a run of `*`, which is all a prototype's types
+    are.
 
     The base type is then the LAST word: everything before it is a qualifier
     (`const`), a sign, or a width modifier, none of which changes the size.
@@ -12560,6 +12578,77 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
                 s = s[len(q):]
                 changed = True
     return s.rpartition(' ')[2], depth
+
+
+_RUNTIME_TYPEDEFS = None    # alias -> (base, extra depth); see runtime_typedefs()
+
+
+def _runtime_typedefs() -> dict:
+    """The runtime headers' scalar and pointer `typedef` ALIASES, resolved once.
+
+    **This is the fix for a refusal whose stated reason was false.** The
+    headers alias a handful of their types — `typedef void* MojoFileHandle;`,
+    `typedef void *mojo_coro_handle;`, `typedef char* mojo_string;` — and a
+    prototype written through an alias says nothing about the type. Read
+    without this table, `mojo_write(MojoFileHandle fh, char *data, int64_t
+    len)` had a first argument of base type `MojoFileHandle`, which is in no
+    scalar set, so `_ctype_is_word` refused the entry point and `_box_why` said
+    its first argument "is a `MojoFileHandle`, which is a by-value aggregate,
+    which is a struct in memory rather than a word". **It is a `void *`.** The
+    same sentence was printed for `mojo_async_schedule_ready(mojo_coro_handle)`
+    and four of its siblings, and it was false nine times over.
+
+    Read the headers, do not remember them: `reflect`'s scanner is the one that
+    already reads these files for the export table, and an alias list written
+    out here would rot the moment a header renamed one — which is exactly what
+    `_WORD_SCALARS` is for, a list of type SPELLINGS and not of names.
+
+    Aliases to a struct/union/enum are deliberately absent (the scanner drops
+    them): an aggregate is a box under every rule that reads these prototypes,
+    so an unresolved aggregate spelling is already the right answer.
+    """
+    global _RUNTIME_TYPEDEFS
+    if _RUNTIME_TYPEDEFS is not None:
+        return _RUNTIME_TYPEDEFS
+    import reflect          # lazy — see runtime_abi()'s docstring for why
+    out = {}
+    hdr_dir = _runtime_header_dir()
+    try:
+        headers = sorted(h for h in os.listdir(hdr_dir) if h.endswith('.h'))
+    except OSError:
+        headers = []
+    for h in headers:
+        for name, target in reflect.collect_runtime_typedefs_h(
+                os.path.join(hdr_dir, h)).items():
+            # First header wins, for the reason `runtime_abi` gives: the order
+            # is decided by a sorted list and not by which file the scanner
+            # reached first.
+            if name not in out:
+                out[name] = _ctype_words(target)
+    _RUNTIME_TYPEDEFS = out
+    return out
+
+
+def _resolve_typedef(base: str, depth: int, _seen=frozenset()) -> tuple:
+    """`base`, with the headers' aliases followed to the type they stand for.
+
+    Depth ACCUMULATES rather than being replaced, which is the half that
+    matters: `MojoFileHandle` is `void *`, so `MojoFileHandle *` is `void **` —
+    a pointer to a pointer, which `_ctype_is_word` refuses in every position
+    because the callee dereferences twice. Reading the alias as a word would
+    have turned that refusal into a miscompile.
+
+    `_seen` is C's own cycle rule (an alias cannot name itself) implemented
+    defensively: a header is text, and this walk is cheap enough that being
+    wrong about that costs a hang rather than a wrong answer.
+    """
+    table = _RUNTIME_TYPEDEFS if _RUNTIME_TYPEDEFS is not None \
+        else _runtime_typedefs()
+    while base in table and base not in _seen:
+        target_base, target_depth = table[base]
+        base, depth = target_base, depth + target_depth
+        _seen = _seen | {base}
+    return base, depth
 
 
 def _ctype_is_word(base: str, depth: int, in_return: bool) -> bool:

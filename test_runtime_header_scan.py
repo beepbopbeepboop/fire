@@ -316,13 +316,23 @@ def test_every_declaration_is_seen():
     # this header that nothing checks and nothing could use. See the header's own
     # comment.
     #
+    # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
+    # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
+    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
+    # §0.2 for why they were left out and what decided it). Both are DEFINED by
+    # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
+    # declared here, so both cross the export-trie intersection and both are
+    # callable from a formal image -- `mojo_close`; `mojo_open`'s `void *`
+    # return is the ceiling-3 shape and is still refused. Read off the CALL
+    # (546), the same way every other number in this ledger was.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 544),
+    for header, want in (('fire_runtime.h', 546),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

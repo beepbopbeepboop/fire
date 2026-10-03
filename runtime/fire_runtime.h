@@ -1642,11 +1642,28 @@ void mojo_replace_argv(MojoList *lst);
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
 
-/* mojo_open and mojo_close are defined by the Mojo stdlib (renamed from 'open'/'close').
-   Do not declare them here to avoid conflicting types. */
-/* mojo_write: stdlib mode redefines this with all-int64_t params (raw fd/buf/len) */
+/* mojo_open and mojo_close are ALSO defined by the Mojo stdlib (renamed from
+   'open'/'close') under the same two names, which is why this block is guarded
+   the way mojo_write's is: a stdlib-mode translation unit defines its own pair
+   and must not see a C prototype that would contradict it.
+
+   They were left undeclared for the whole of FORMAL.md phase 2's ceiling 2,
+   on the belief that the symbol the dylib exports is a DIFFERENT function from
+   one `fire_runtime.c` declares — which is why declaring them needed a decision
+   rather than a line. Measured (`bugs/FORMAL_runtime_library_on_the_link_line.md`
+   §0.2, and re-measured on this tree): `fire_runtime.c` has `#define USE_PYTHON
+   0`, so the definition behind the symbol is the `#else` arm at :452, and BOTH
+   arms of that `#if` carry the same C signature. `MojoFileHandle` is
+   `typedef void*` (above), so the C pair and the stdlib pair agree on the type
+   as well as on the name.
+
+   The declaration is not a formality: `build_stdlib_dylib.runtime_export_entries`
+   is the headers' entry points INTERSECTED with the symbols the objects define,
+   so a name no header declares is not exported at all. */
 #ifndef __MOJO_STDLIB_MODE__
 int64_t mojo_write(MojoFileHandle fh, char *data, int64_t len);
+MojoFileHandle mojo_open(char *filename, char *mode);
+void mojo_close(MojoFileHandle fh);
 #endif
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
 char *mojo_file_read_all(char *filename);

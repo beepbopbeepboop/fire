@@ -1,4 +1,4 @@
-# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed; two measured ceilings are open and one is closed
+# FORMAL_runtime_library_on_the_link_line: the phase-2 payoff is landed and the header gap is CLOSED; two measured ceilings are open
 
 FORMAL.md phase 2 made a `mojo_*` call *decidable* — `model.gimple_runtime_callable`
 answers, from the runtime header's own types, whether a formal image could make
@@ -6,19 +6,20 @@ one, and the answer had been "no, and for one reason: the library" for every one
 of them since. This records what that link line now carries, and — more to the
 point — what it still does not.
 
-**Status: the link line is done and measured; CEILING 2 IS CLOSED (13 → 6, the
-five word-shaped tagged-box accessors are now callable and one program calls
-them on both architectures); 56 of the word-shaped entry points are still
-refused because the library does not define them (51 when this was written;
-`mojo_metal_*` arrived after), and 32 of the linked ones need a heap handle this
-path cannot produce. Both remaining ceilings are re-measured on 2026-10-03
-rather than carried forward. The `mojo_open`/`mojo_close` TRAP — which this
-revision said "needs a DECISION rather than a declaration" — is DECIDED and
-MEASURED on 2026-10-03 (`work/formal13-6`), the decision turns out to be that
-the doc's stated REASON for the trap was wrong, and the payoff is one name rather
-than two. §0.2 has the measurement and the scoped next step; nothing here is
-edited in `runtime/` because `fire_runtime.h` is on the compiled path's include
-list and that owes a gate this session must not run.**
+**Status: ceiling 2 is CLOSED — all of it, and one of its two halves was closed
+by a defect in the model's TYPE READER rather than by a declaration.**
+`runtime/fire_runtime.h` declares `mojo_open` and `mojo_close` (§0.2's decision,
+§0.3's edit), and `formal/model.py` now resolves the headers' `typedef` aliases,
+which is what made `mojo_close` word-shaped at all: `MojoFileHandle` is
+`typedef void*`, and read as a bare spelling it was refused as **"a by-value
+aggregate, which is a struct in memory rather than a word"** — nine times over,
+about eight pointers and one `int`. **258 word-shaped entry points now, 202 of
+them on a formal image's link line, 39 of those needing a handle this path
+cannot produce** (251 / 195 / 32 before this section), and the file-I/O trio
+`mojo_open_file` / `mojo_write` / `mojo_read` / `mojo_close` builds, links and
+RUNS on both architectures. What is left is ceiling 1 (56 entry points the
+library does not link) and ceiling 3 (the handle), which is FORMAL.md phase 6
+and was never this document's.
 
 Round: agent [5] of the five-agent round of 2026-09-28.
 
@@ -53,10 +54,12 @@ Three things about it, and each is a decision rather than a transcription:
   answer means was a `.c` file nothing includes. They are now an enum in the
   header and the `#define`s are gone: one vocabulary, beside the accessors that
   hand one back.
-* **THE TRAP IS LEFT ALONE.** `mojo_open` / `mojo_close` are still undeclared,
-  for the reason this doc gives: the symbol the dylib exports is the Mojo
-  stdlib's renamed pair and the C file's declaration is a different function
-  behind the same name. `test_formal_runtime_link.py`'s
+* **THE TRAP IS LEFT ALONE — and was wrong to be.** `mojo_open` /
+  `mojo_close` are still undeclared *in this section*, for the reason this doc
+  gives: the symbol the dylib exports is the Mojo stdlib's renamed pair and
+  the C file's declaration is a different function behind the same name. §0.2
+  measures that reason and finds it false, and §0.3 declares them.
+  `test_formal_runtime_link.py`'s
   `test_the_tagged_box_accessors_are_declared_and_callable` pins that they are
   not declared with the C signature, so "close the ceiling" cannot become
   "declare whatever the export table lists".
@@ -83,24 +86,29 @@ outside and only one of them was closed.
 
 ## 0.1 Re-measured 2026-10-03
 
-| | this doc | 2026-10-01 | 2026-10-02 | 2026-10-03 |
-|---|---|---|---|---|
-| word-shaped, on a formal image's link line | 156 | 240 | 246 | **251** |
-| …needing no heap handle | 138 | 152 | 158 | **163** |
-| …needing a `void *` handle the path cannot produce | 18 | 32 | 32 | **32** |
-| word-shaped but NOT linked (ceiling 1) | 51 | 51 | 56 | **56**, same families |
-| exported by the library, declared by no header (ceiling 2) | 13 | 13 | 13 | **6**, same names less the six tagged ones |
+| | this doc | 2026-10-01 | 2026-10-02 | 2026-10-03 | now (§0.3) |
+|---|---|---|---|---|---|
+| word-shaped, on a formal image's link line | 156 | 240 | 246 | 251 | **258** |
+| …needing no heap handle | 138 | 152 | 158 | 163 | **163** |
+| …needing a `void *` handle the path cannot produce | 18 | 32 | 32 | 32 | **39** |
+| word-shaped but NOT linked (ceiling 1) | 51 | 51 | 56 | 56 | **56**, unchanged |
+| exported by the library, declared by no header (ceiling 2) | 13 | 13 | 13 | 6 | **4**, and nothing refuses them |
 
 Ceiling 1's six families are unchanged and re-measured as
 `ncurses 16, sqlite3 16, ssl 11, python 6, metal 5, zlib 2` on both
-architectures; ceiling 2's remaining six are `MojoParser`, `scan_expr`,
+architectures; ceiling 2's remaining six were `MojoParser`, `scan_expr`,
 `note_list_literal`, `compile_to_gimple` (not in the `mojo_*` namespace, so they
-bind normally and nothing refuses them) and the `mojo_open` / `mojo_close` trap.
+bind normally and nothing refuses them) and the `mojo_open` / `mojo_close` trap,
+and §0.3 closes the trap, leaving the first four — which is what the last column
+counts.
 
 Ceiling 3 grew with the payoff, as the table above shows: 32 linked entry points
 need a `void *` handle, and the only things on this path that produce one are
 `void *`-RETURNING entry points, which the word rule refuses. That is FORMAL.md
-phase 6 and it is unchanged by this round.
+phase 6 and it is unchanged by this round — and it grew again to 39 in §0.3,
+because every entry point the `typedef` fix made callable takes a handle. The
+dependency is the same one, and §0.3 says what that means for what this whole
+document is worth.
 
 ## 0.2 The trap, decided and measured (2026-10-03, `work/formal13-6`)
 
@@ -155,16 +163,136 @@ non-`mojo_` names in the six (`MojoParser`, `scan_expr`, `note_list_literal`,
 `compile_to_gimple`) are not in the namespace, so they bind normally and nothing
 refuses them; with the trap gone, ceiling 2 is those four plus nothing.
 
-**Why it is not taken here.** `runtime/fire_runtime.h` is on the COMPILED
-path's include list (`mojo/backend_gimple` emits `#include` of it), so a change
-to it owes `make check` and a `stdlib-dylib` run to confirm the gimple path
-still compiles and the export table still crosses the `nm` check. That is the
-integrator's. The measurement is pinned in `test_formal_runtime_link.py`'s
-`test_the_tagged_box_accessors_are_declared_and_callable` — both that the two
-names are in no header today, and what each one's word verdict would be — so the
-next reader does not have to re-derive it, and a later edit that lands the
-declaration turns the first pair of checks red rather than silently changing the
-ceiling numbers this document quotes.
+**Why it was not taken in that session, and what it turned out to need.** It was
+not taken because `runtime/fire_runtime.h` is on the COMPILED path's include
+list (`mojo/backend_gimple` emits `#include` of it), so a change to it owes
+`make check` and a `stdlib-dylib` run. That is still true; §0.3 is the change,
+and §0.4 is what it was measured against. The measurement §0.2 pinned in
+`test_formal_runtime_link.py` — both that the two names are in no header, and
+what each one's word verdict would be — is what made the edit safe to make
+without re-deriving anything, and the two checks that asserted "not in the
+header table" went red on the day it landed, which is what they were for.
+
+## 0.3 What landed: `typedef` resolution, and then the declaration
+## (`work/formal16-6`)
+
+**The declaration alone would not have worked, and finding that out is the
+reason this section is here rather than "one line, done".** `mojo_close` is
+declared as `void mojo_close(MojoFileHandle fh)`, and §0.2 measured its word
+verdict through the spelling `void mojo_close(void *fh)` — which is the same
+type, but not the spelling the header uses. Read as the header spells it,
+`MojoFileHandle` was a base type in no scalar set, so `_ctype_is_word` said no
+and `_box_why` produced this sentence:
+
+> its first argument is `MojoFileHandle fh`, which is a by-value aggregate,
+> which is a struct in memory rather than a word
+
+**That sentence is false, and it was false nine times over.** The headers alias
+eight of their types, and every alias in them is a scalar or a pointer:
+
+| alias | declared | where | what the reader saw |
+|---|---|---|---|
+| `MojoFileHandle` | `typedef void*` | `fire_runtime.h:1643` | an unknown base type, i.e. a box |
+| `mojo_coro_handle` | `typedef void *` | `fire_async_runtime.h:42` | the same |
+| `mojo_fctx_t` | `typedef void *` | `fire_coro_ctx.h:37` | the same |
+| `mojo_any`, `mojo_generic_func` | `typedef void*` | `fire_runtime.h:34,47` | the same |
+| `mojo_string` | `typedef char*` | `fire_runtime.h:33` | the same |
+| `mojo_int` | `typedef int` | `fire_runtime.h:31` | **an `int` refused as a struct** |
+| `mojo_float` | `typedef float` | `fire_runtime.h:32` | **a `float` refused as a struct** |
+
+**An alias is a second SPELLING of a type the rule already knows, and a rule
+that reads the prototype without reading the `typedef` above it is reading half
+the declaration.** So the fix is in the type reader, not in a name list:
+
+* `reflect.collect_runtime_typedefs_h` — the same scanner that already reads
+  these headers for the export table, asked for `typedef` aliases instead of
+  prototypes. Scalar and pointer targets only: an alias to `struct`/`union`/
+  `enum` is an aggregate by another name, and an aggregate is already a box
+  under every rule that reads these prototypes, so resolving it would buy
+  nothing and would put a C parser in the business of understanding a struct
+  body. The scanner is the right home because a name list written into
+  `formal/model.py` would rot the moment a header renamed one — which is what
+  `_WORD_SCALARS` is *not*.
+* `formal/model.py::_runtime_typedefs` + `_parse_ctype` — the resolution, with
+  **depth accumulating** rather than being replaced: `MojoFileHandle *` is
+  `void **`, a pointer to a pointer, which `_ctype_is_word` refuses in every
+  position because the callee dereferences twice. Reading an alias as a word
+  would have turned that refusal into a miscompile.
+* `runtime/fire_runtime.h` — `mojo_open` and `mojo_close` declared under the
+  `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` already uses, with the
+  definitions' own signatures. §0.2's decision, applied: both arms of
+  `fire_runtime.c`'s `#if USE_PYTHON` carry the same C signature, so one
+  declaration serves either build, and `MojoFileHandle` is `typedef void*`, so
+  the C pair and the stdlib pair agree on the type as well as on the name.
+
+**Six entry points moved, and every one of them for the same reason** — a
+`typedef` the reader could not see, so a handle that is a `void *` was a box:
+
+| name | before | after |
+|---|---|---|
+| `mojo_write`, `mojo_read` | not word-shaped (`MojoFileHandle`) | **word-shaped, callable** |
+| `mojo_async_schedule_ready`, `mojo_async_schedule_timer`, `mojo_async_register_read`, `mojo_async_register_write` | not word-shaped (`mojo_coro_handle`) | **word-shaped, callable** |
+| `mojo_close` | no header declared it | **declared, word-shaped, callable** |
+| `mojo_open` | no header declared it | declared, still refused — its `void *` **return** is ceiling 3, and the refusal now says so instead of claiming no header declares the name |
+
+Measured, both architectures, by a program that CALLS the trio:
+
+```
+w=-1 r=-1        # mojo_write(0, "hello", 5), mojo_read(0, 0, 8), mojo_close(0)
+```
+
+`0` is the only handle a formal program can produce — `mojo_open_file` is the
+one entry point that returns a handle as a word, and it opens for reading only —
+and the runtime checks both arguments (`fire_runtime.c:482`). **-1 is the
+evidence and 0 would not be**: a call to nowhere, or a mis-bound one, answers
+0, and a refusal replaced by an image that computes 0 is the failure
+`test_formal_runtime_link.py` was built to catch.
+
+**The counters, which the test computes rather than asserts:**
+
+| | 2026-10-03 (before) | now |
+|---|---|---|
+| word-shaped, on a formal image's link line | 251 | **258** |
+| …of those, exported by the runtime library | 195 | **202** |
+| …needing no heap handle | 163 | **163** |
+| …needing a `void *` handle the path cannot produce | 32 | **39** |
+| exported by the library, declared by no header (ceiling 2) | 6 | **4** |
+
+The third row not moving is the honest half and is worth reading: **every name
+this section made callable is one that needs a handle**, which is ceiling 3.
+The section bought a correct type vocabulary and a closed header gap, not a
+file-I/O story — `mojo_read`'s `char *buffer` is an argument the callee writes
+*through*, and this path has no addressable storage to hand it.
+
+**A judgement this widens, stated because it was already live.** A `void *` in
+ARGUMENT position is admitted on a reachability argument: a formal program
+cannot produce a bad handle because it cannot produce one at all. That was
+already true of 32 entry points (`mojo_vararg_call_*`, `mojo_closure_free`,
+`mojo_str`, `mojo_obj_getattr` — every one of which would misbehave on a
+literal 0), and these 7 join that class rather than opening it. What is
+different about `mojo_async_*` is that a program *can* pass 0 to them and the
+scheduler will dereference it, so a formal program calling
+`mojo_async_schedule_ready(0)` now builds and crashes where it used to be
+refused. No test here calls one: the four async names are asserted through the
+table (`entry['word']`), not by execution, and that is the reason.
+
+## 0.4 What was run against the header edit, and what the integrator still owes
+
+`runtime/fire_runtime.h` is on the compiled path's include list, so the edit is
+the one change in this document that is not verified by `formal/` alone.
+Measured here, on both architectures:
+
+| | result |
+|---|---|
+| `test_formal_runtime_link.py` | 153 passed, 0 failed (was 136) — builds ~20 images across both architectures |
+| `test_runtime_header_scan.py` | 37 passed, 0 failed — the declaration LEDGER moves 544 → 546, read off the call as that file's own comment requires |
+| `test_runtime_dylib.py` | 116 passed, 0 failed — the export table is `561 of 562 runtime entry points advertised (0 misresolved, 1 undefined: py_tokenize)`, so both new declarations cross the headers ∩ objects intersection |
+| `test_gimple_runner.py` (compiled path, compile-and-execute) | 302 passed, 0 failed, 7 timed out — the generated-module TU that emits its own `void *mojo_open(char *, char *);` beside `#include <fire_runtime.h>` compiles, and a repeated declaration with an equivalent typedef is legal C |
+| `test_formal_run.py gimple_runtime_sqlite_refused gimple_runtime_print_runs` | PASS=35 FAIL=0 — the ceiling-1 refusal and the phase-2 payoff are both unmoved |
+
+**Still owed by the integrator:** `make check` and a `stdlib-dylib` run (the
+export table above is computed by the same code path, but the gate's own
+self-hosting steps are not in this table).
 
 ## Re-measured 2026-10-01 (`work/formal3-7`): the payoff grew, and the
 ## ceilings below are still the ceilings
@@ -307,12 +435,12 @@ per unit set in the CAS. Half a day, and it is not purely mechanical:
 
 **INTERFACE REQUEST filed** — see `INTERFACE-REQUESTS-agent5.md`.
 
-## Ceiling 2 — was 13 names the library exports and no header declares; SIX of
-## them are declared now (§0), and this is what the rest of it was
+## Ceiling 2 — CLOSED, all thirteen of them (§0, §0.3)
 
-**Is the refusal true? Yes, and the message says so** ("no header in runtime/
-declares it, so there is no signature here to check"). It is a header gap, and
-unlike ceiling 1 this one is not a capability limit at all.
+**This section is what the rest of it WAS.** The header gap is gone: the six
+`mojo_tagged_*` / `mojo_double_bits` names were declared in §0, and `mojo_open`
+and `mojo_close` in §0.3. What remains in the map is the four non-`mojo_` names
+below, and nothing refuses them.
 
 The export trie carries 478 C-spelled names and 465 of them are declared
 somewhere in `runtime/`. Thirteen are not, and **nine** of those thirteen carry
@@ -339,7 +467,7 @@ against the model's own word rule, **five of the nine** are word-shaped:
 
 | would become callable | still refused, and why |
 |---|---|
-| `mojo_tagged_int` `mojo_tagged_word_dyn` `mojo_tagged_tag_dyn` `mojo_tagged_list` `mojo_tagged_str` | `mojo_tagged_double` (returns a `double`), `mojo_double_bits` (takes one) — the float rule below, which is correct. `mojo_open` / `mojo_close` return and take `MojoFileHandle`, a typedef this rule reads as a box; see the trap. |
+| `mojo_tagged_int` `mojo_tagged_word_dyn` `mojo_tagged_tag_dyn` `mojo_tagged_list` `mojo_tagged_str` | `mojo_tagged_double` (returns a `double`), `mojo_double_bits` (takes one) — the float rule below, which is correct. `mojo_open` / `mojo_close` are declared now (§0.3): `mojo_close` is callable, and `mojo_open` is refused for its `void *` RETURN, which is ceiling 3. |
 
 The other four (`MojoParser`, `scan_expr`, `note_list_literal`,
 `compile_to_gimple`) are NOT in the namespace — `is_gimple_runtime_builtin`
@@ -367,7 +495,9 @@ DECISION rather than a declaration — read the definition the linker resolves,
 not the one the C file spells — and the four non-`mojo_` names, which nothing
 refuses.
 
-## Ceiling 3 — 18 linked entry points need a handle the path cannot produce
+## Ceiling 3 — 39 linked entry points need a handle the path cannot produce
+## (32 when the table above was written; §0.3 added the seven `void *`-handle
+## entry points whose `typedef` the type reader could not see)
 
 **Is the refusal true? Yes.** These are word-shaped, exported and linked, and a
 formal program still cannot call them, because every one takes a `void *` and

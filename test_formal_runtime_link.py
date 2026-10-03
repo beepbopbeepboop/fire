@@ -392,9 +392,22 @@ def test_link_line_is_the_dylibs_exports():
         # The two differ in BOTH directions on this tree, which is the whole
         # reason the map is read out of the artifact.
         extra = sorted(cnames - abi)
-        check(len(extra) >= 5,
+        check(len(extra) >= 4,
               f'{arch}: the dylib exports names no header declares',
               str(sorted(extra)))
+        # …and the four that are LEFT are named rather than counted, because
+        # this is the ceiling-2 remainder and it used to be six: `mojo_open` and
+        # `mojo_close` were exported by the library and declared by no header,
+        # so nothing could put them on a formal link line, and they are declared
+        # now (`runtime/fire_runtime.h`). `MojoParser`, `scan_expr`,
+        # `note_list_literal` and `compile_to_gimple` are not in the
+        # `mojo_*` namespace, so `is_gimple_runtime_builtin` answers False for
+        # them and they take the ordinary extern path — they are listed only
+        # because the map carries them.
+        check(extra == ['MojoParser', 'compile_to_gimple', 'note_list_literal',
+                        'scan_expr'],
+              f'{arch}: …and the four that remain are the whole of ceiling 2, '
+              'not a count that can drift', str(extra))
         check(all(n in amap for n in extra),
               f'{arch}: and the link line offers them anyway — it is the '
               f"dylib's table, not the header's", str(sorted(extra)[:5]))
@@ -623,36 +636,65 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
     # to check") is a statement about the LINK LINE and not only about a
     # signature, and why declaring it is not a formality: the declaration is what
     # puts it on the line.
-    for name in ('mojo_open', 'mojo_close'):
-        check(M.runtime_abi_entry(name) is None,
-              f'{name} is not in the header table, so it is not on any '
-              f'formal link line — which is what the refusal says',
-              str(M.runtime_abi_entry(name)))
-    # AND WHAT A HEADER EDIT WOULD BUY, measured through the model's own word
-    # rule rather than asserted: `mojo_close` is word-shaped and `mojo_open` is
-    # not, because a `void *` RETURN is the ceiling-3 shape (`void *` in
-    # ARGUMENT position is admitted, and `mojo_close` takes one).  So ceiling 2's
-    # remaining six becomes FIVE and `mojo_open` moves to ceiling 3 — which is why
-    # the edit is one line in `runtime/fire_runtime.h` and not the decision the
-    # doc was afraid of, and why it is not taken here: `fire_runtime.h` is on the
-    # COMPILED path's include list, so a change to it owes a `make check` and a
-    # `stdlib-dylib` run, which is the integrator's.
-    close_entry = M._runtime_abi_entry(
-        {'name': 'mojo_close', 'signature': 'void mojo_close (void *fh)',
-         'ret': 'void', 'params': 'void *fh'})
-    check(close_entry['word'],
-          'declared as `void mojo_close(void *)`, mojo_close IS word-shaped — '
-          'a `void *` in argument position is admitted, and this is the one name '
-          'a header edit makes callable', close_entry['signature'])
-    open_entry = M._runtime_abi_entry(
-        {'name': 'mojo_open',
-         'signature': 'void *mojo_open (char *filename, char *mode)',
-         'ret': 'void *', 'params': 'char *filename, char *mode'})
-    check(not open_entry['word'] and open_entry['boxes'],
-          'declared as `void *mojo_open(char *, char *)`, mojo_open is NOT '
-          'word-shaped — a `void *` RETURN is the ceiling-3 shape, so it moves '
-          'from ceiling 2 to ceiling 3 rather than becoming callable',
-          str(open_entry['boxes']))
+# AND THE EDIT, LANDED (2026-10-03, this tree): `runtime/fire_runtime.h`
+    # declares `mojo_open` and `mojo_close` under the same
+    # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses for exactly this
+    # stdlib-conflict reason, so the trap is gone and the doc's two rows are
+    # what happened.  `mojo_close` is callable; `mojo_open` is declared and
+    # still refused, and now for the RIGHT reason — a `void *` RETURN is the
+    # ceiling-3 shape, where a `void *` argument is admitted.
+    #
+    # The declaration is only half of it, and the half that is easy to lose:
+    # `MojoFileHandle` is a `typedef void*`, so before the alias was resolved
+    # this entry point's first argument had a base type in no scalar set and the
+    # refusal said it "is a by-value aggregate, which is a struct in memory" —
+    # about a `void *`.  Both halves are checked here, so neither can be undone
+    # quietly: the alias resolution because `_parse_ctype` is what applies it,
+    # and the declaration because the table is read out of the headers.
+    check(M._parse_ctype('MojoFileHandle fh', is_param=True) == ('void', 1),
+          "the headers' typedefs resolve, so `MojoFileHandle` reads as the "
+          "`void *` it is rather than as an unknown spelling",
+          str(M._runtime_typedefs()))
+    check(M._parse_ctype('MojoFileHandle *', is_param=False) == ('void', 2),
+          '…and the depth ACCUMULATES, so a pointer to the alias is the '
+          'pointer-to-a-pointer the word rule refuses in every position')
+    close_entry = M.runtime_abi_entry('mojo_close')
+    check(close_entry is not None and close_entry['word'],
+          'mojo_close is declared by a header now, and every type crossing '
+          'the boundary is one word', str(close_entry))
+    check(M.gimple_runtime_callable('mojo_close', provided=True),
+          'so mojo_close is callable: a word-shaped, library-provided entry '
+          'point — which is the whole of ceiling 2\'s mojo_* half')
+    open_entry = M.runtime_abi_entry('mojo_open')
+    check(open_entry is not None and not open_entry['word'] and open_entry['boxes'],
+          'mojo_open is declared too, and is still NOT callable — a `void *` '
+          'RETURN is the ceiling-3 shape, so it moved there rather than '
+          'becoming callable', str(open_entry))
+    msg = build_expecting_refusal('def main():\n    return mojo_open("f", "r")\n',
+                                  'mojoopen')
+    check('return value' in msg and 'address' in msg,
+          'and the refusal now names the return value as the thing that cannot '
+          'cross the boundary, instead of claiming no header declares the name',
+          msg[:300])
+    # The two that were only refused because their `typedef` was unreadable, and
+    # the four async ones beside them — all six move together, and the alias is
+    # the whole reason, so they are asserted by name and not by count.
+    for name in ('mojo_write', 'mojo_read', 'mojo_async_schedule_ready',
+                 'mojo_async_schedule_timer', 'mojo_async_register_read',
+                 'mojo_async_register_write'):
+        entry = M.runtime_abi_entry(name)
+        check(entry is not None and entry['word'],
+              f'{name} is word-shaped — its handle is a `void *` and a `void *` '
+              f'in argument position is admitted', str(entry))
+    # …and the general half, which is the one that stops this class coming back:
+    # NO entry point may name an ALIAS as the type that stops it, because every
+    # alias in these headers is a scalar or a pointer and both are decidable.
+    aliased = sorted({n for n, e in M.runtime_abi().items()
+                      for _w, _s, b, _d in e['boxes'] if b in M._runtime_typedefs()})
+    check(not aliased,
+          'no entry point is refused for an ALIAS type any more — the '
+          'aggregate aliases are deliberately absent from the table, so every '
+          'box names the real type behind it', str(aliased))
     # And the cheap half of the claim, checked against the real table rather
     # than against a spelling: a `void *` return is refused and a `void *`
     # parameter is not, on a name that IS on the link line today.
@@ -671,6 +713,40 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
         check('tag=4 word=0 int=0' in out,
               f'{arch}: the tagged accessors run and answer MOJO_TAG_NONE on '
               f'an empty box', f'exit {rc!r}, stdout {out!r}')
+    # The file-I/O trio, BY EXECUTION.  `0` is the only handle a formal program
+    # can produce — `mojo_open_file` is the one entry point that RETURNS a
+    # handle as a word, and it opens for reading only — and the runtime checks
+    # both arguments: `mojo_write` returns -1 on a null handle and `mojo_read`
+    # returns -1 on a null handle or a null buffer.  **-1 is the evidence and
+    # 0 would not be**: a call to nowhere, or a mis-bound one, answers 0, and a
+    # refusal replaced by an image that computes 0 is the failure this file
+    # exists to catch.
+    fio = ('def main():\n'
+           '    var w = mojo_write(0, "hello", 5)\n'
+           '    var r = mojo_read(0, 0, 8)\n'
+           '    mojo_close(0)\n'
+           '    printf("w=%d r=%d", w, r)\n'
+           '    return 0\n')
+    for arch in ('arm64', 'x86_64'):
+        r = build(fio, 'fileio', arch=arch)
+        rc, out = run(r)
+        check('w=-1 r=-1' in out,
+              f'{arch}: mojo_write / mojo_read / mojo_close build, link and '
+              f'run, and answer the runtime\'s own null-handle value',
+              f'exit {rc!r}, stdout {out!r}')
+        # …and the three calls really put the library on the link line.  Not
+        # `nm -u`: a formal image is built with no symbol table, so the image
+        # cannot be asked what it calls — which is why the answer is read from
+        # the link line the build chose AND from the library's own map, and the
+        # run above is what says the calls bound.
+        amap = B.runtime_library(arch, 'macho')['map']
+        check(all(n in amap
+                  for n in ('mojo_write', 'mojo_read', 'mojo_close')),
+              f'{arch}: …and the library it carries offers all three',
+              str([n for n in ('mojo_write', 'mojo_read', 'mojo_close')
+                   if B._c_export_name(n) not in amap]))
+        check(r['linked_dylibs'],
+              f'{arch}: …and the image carries a library at all', str(r))
 
 
 def main():
