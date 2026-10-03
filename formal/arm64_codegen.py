@@ -5502,6 +5502,21 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_set_union(e.left, e.right)
             return
 
+        if op == "*" and (self._is_container_expr(e.left)
+                          or self._is_container_expr(e.right)):
+            left_is = self._is_container_expr(e.left)
+            if left_is and self._is_container_expr(e.right):
+                raise CodegenError(M.list_repeat_operands_refusal(
+                    M.spelled(e.left), M.spelled(e.right)))
+            blob, count_expr = ((e.left, e.right) if left_is
+                                else (e.right, e.left))
+            n = self._static_int(count_expr)
+            if n is None:
+                raise CodegenError(M.list_repeat_count_refusal(
+                    M.spelled(e), M.spelled(count_expr)))
+            self._emit_list_repeat(blob, n)
+            return
+
         # Bitwise ALU — evaluate both sides.
         alu = {
             "+": encode_add_xd_xn_xm,
@@ -8366,7 +8381,7 @@ dylib_exports: list = None, globals_base: int = None,
         if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
             return e.func.name in ("range", "list", "sorted", "set",
                                    "reversed")
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "or", "and"):
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "*", "or", "and"):
             return (self._is_container_expr(e.left)
                     or self._is_container_expr(e.right))
         if isinstance(e, F.IdentExpr):
@@ -8396,6 +8411,20 @@ dylib_exports: list = None, globals_base: int = None,
                 return 64
         if isinstance(e, F.BinaryOp) and e.op in ("+", "|"):
             return self._blob_est(e.left) + self._blob_est(e.right)
+        if isinstance(e, F.BinaryOp) and e.op == "*":
+            # REPETITION: len(blob) x count. The count has to be the literal the
+            # emitter requires (`_emit_list_repeat` refuses anything else), so
+            # the reservation is the product rather than the 64 an unknown
+            # side gets below — over-reserving is the safe direction here,
+            # since it is `frame_blob_refusal` at the end of the frame either
+            # way.
+            blob, count = ((e.left, e.right)
+                           if self._is_container_expr(e.left)
+                           else (e.right, e.left))
+            n = self._static_int(count)
+            if n is None:
+                return 64
+            return max(0, self._blob_est(blob) * max(0, n))
         if isinstance(e, F.BinaryOp) and e.op in ("or", "and"):
             return max(self._blob_est(e.left), self._blob_est(e.right))
         if isinstance(e, F.IdentExpr):
@@ -8500,6 +8529,95 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_b_to(cr)
         self.asm.label(crd)
         self._emit_list_base(offset)
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
+    def _emit_list_repeat(self, blob, count) -> None:
+        """`xs * n` as a list-blob REPETITION → base pointer in X0.
+
+        The construct was not lowered at all before this: `*` reached the
+        integer ALU with both operands still holding blob ADDRESSES, so
+        `C = [7] * 4` bound `C` to `7*4` scaled by eight — the address of
+        nothing — and every read through it walked a count at that address.
+        Measured on both architectures before this emitter, on one program per
+        architecture: `C = [7] * 4` then `for x in C: n = n + 1` built, ran, and
+        died with SIGSEGV (exit 139) where CPython counts 4. A build that
+        succeeds and then crashes is the worst of the three answers this
+        backend can give, so it was worth the emitter rather than a refusal.
+
+        Two loops and no division: `k` over the repetitions and `i` over the
+        source's elements, with `X10` holding `k*nL` so the destination is
+        `base + 8 + 8*(X10 + i)` without a multiply. The source blob is read
+        through its own count word, so the answer is right for a blob whose
+        length this path did not know statically either — the reservation below
+        is the estimate and the loop is the truth.
+
+        `count` is the literal: `_emit_binop` refuses a repetition whose count
+        it cannot read (`model.list_repeat_count_refusal`), because the
+        reservation is made before anything runs and there is no heap to grow
+        into afterwards.
+        """
+        est = max(0, self._blob_est(blob) * max(0, count))
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(M.frame_blob_refusal(
+                "a list repetition", self._list_cursor + 8, self._blob_cap))
+        cap = max(1, min(est, (avail - 8) // 8))
+        self._emit_expr(blob)
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # blob
+        self._emit_mov_imm("X0", max(0, count))
+        self.asm.emit(encode_stp_sp_pre(0, 2))          # count, blob
+        # A nested emit above may have advanced the cursor — re-clamp.
+        avail = self._blob_cap - self._list_cursor
+        if avail < 8:
+            raise CodegenError(M.frame_blob_refusal(
+                "a list repetition", self._list_cursor + 8, self._blob_cap))
+        cap = max(1, min(est, (avail - 8) // 8))
+        offset = self._list_cursor
+        self._list_cursor += 8 + 8 * cap
+        self.asm.emit(encode_ldr_xt_xn_imm(8, 31, 0))    # count (top of stack)
+        self.asm.emit(encode_ldr_xt_xn_imm(7, 31, 16))   # blob
+        self.asm.emit(encode_ldp_sp_post(0, 31))         # drop count
+        self.asm.emit(encode_ldp_sp_post(0, 31))         # drop blob
+        self.asm.emit(encode_ldr_xt_xn_imm(2, 7, 0))     # nL
+        self._emit_list_base(offset)                     # X9 = result base
+        self.asm.emit(encode_movz_xd_imm(5, 0))           # k = 0
+        self.asm.emit(encode_movz_xd_imm(10, 0))          # k*nL = 0
+        self._while_counter += 1
+        ck = f"{self.func_name}_rep{self._while_counter}"
+        ckd = f"{ck}d"
+        self.asm.label(ck)
+        self.asm.emit(encode_cmp_xn_xm(5, 8))            # k >= count
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(ckd, here_offset=-4)
+        self.asm.emit(encode_movz_xd_imm(6, 0))           # i = 0
+        self._while_counter += 1
+        ci = f"{self.func_name}_repi{self._while_counter}"
+        cid = f"{ci}d"
+        self.asm.label(ci)
+        self.asm.emit(encode_cmp_xn_xm(6, 2))            # i >= nL
+        self.asm.emit(encode_cset_xd_cond(0, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 0))
+        self.asm.emit_label_rel(cid, here_offset=-4)
+        self.asm.emit(encode_add_xd_xn_imm(0, 7, 8))     # src = blob + 8
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(0, 0, 6))  # + 8*i
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+        self.asm.emit(encode_add_xd_xn_imm(1, 9, 8))     # dst = base + 8
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 10))  # + 8*k*nL
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(1, 1, 6))  # + 8*i
+        self.asm.emit(encode_str_xt_xn_imm(0, 1, 0))
+        self.asm.emit(encode_add_xd_xn_imm(6, 6, 1))
+        self._emit_b_to(ci)
+        self.asm.label(cid)
+        self.asm.emit(encode_add_xd_xn_xm(10, 10, 2))    # k*nL += nL
+        self.asm.emit(encode_add_xd_xn_imm(5, 5, 1))     # k += 1
+        self._emit_b_to(ck)
+        self.asm.label(ckd)
+        # The count word is len(blob) * count, computed from the two counts the
+        # loops used, so `len(xs * n)` is the number of elements the copy
+        # actually wrote rather than the count operand.
+        self.asm.emit(encode_mul_xd_xn_xm(0, 2, 8))
+        self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_set_union(self, left, right) -> None:

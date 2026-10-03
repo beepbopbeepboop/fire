@@ -6543,6 +6543,53 @@ def set_union_refusal(left: str, right: str) -> str:
         f"membership test. arm64 lowers this operator correctly")
 
 
+def list_repeat_count_refusal(spelled: str, count_spelled: str) -> str:
+    """Why `xs * n` is refused because its COUNT is not a compile-time constant.
+
+    The one question about `*` on a container that is not about the frame, and
+    the one that has to be asked before the frame question can be: a repetition
+    is `len(xs) * n` element slots, so a count this path cannot read at compile
+    time makes the RESERVATION meaningless, and a reservation is the only place
+    the elements live — there is no heap. Measured: `[0.0] * (m * k)` in
+    `test_llm/dumb_gemm.mojo` asks for 4096 slots from a frame whose whole
+    container budget is a few kilobytes shared with every other blob in the
+    body, so lowering it would either overrun the frame or reserve a guess and
+    fail at run time. Both are worse than saying so here, where the reader can
+    see the count they wrote.
+
+    `spelled` is the whole expression and `count_spelled` the count operand, so
+    the message can name both.
+    """
+    return (
+        f"{spelled} is a REPETITION, and this path can only lower one whose "
+        f"count it can read while emitting: the result is len(xs) x n element "
+        f"slots in the function's own frame, and there is no heap to grow "
+        f"into, so the reservation is made before anything runs and "
+        f"{count_spelled} "
+        f"is not a number this build can see. Write the count as a literal, or "
+        f"build the list at run time (append into a list literal sized for "
+        f"what the program needs), or split it across two functions so each "
+        f"gets its own budget")
+
+
+def list_repeat_operands_refusal(left: str, right: str) -> str:
+    """Why `a * b` with a container on BOTH sides is refused.
+
+    Python raises `TypeError: can't multiply sequence by non-int of type
+    'list'` for every such pair, so there is no program here to answer — and the
+    alternative is the one this backend exists to prevent: both words are blob
+    addresses, and `mul` of two addresses is a number nowhere near either blob.
+    Named rather than lowered so the diagnostic is about the operator.
+    """
+    return (
+        f"{left} * {right} multiplies two containers. Python raises a "
+        f"TypeError for that (`can't multiply sequence by non-int`), and on "
+        f"this path "
+        f"both operands are blob ADDRESSES, so the integer multiply would be a "
+        f"product of two pointers rather than a repetition of either. Use `+` "
+        f"to concatenate, or `xs * n` with an integer count")
+
+
 def list_append_overflow_message(name: str, capacity: int) -> str:
     """The ONE text an over-capacity `xs.append(v)` writes to fd 2 before it
     stops the program — for BOTH backends, because two architectures printing
@@ -6566,10 +6613,10 @@ def list_append_overflow_message(name: str, capacity: int) -> str:
     bounded container operation on this path makes the same bargain and every
     other one says which bound it hit.
 
-    No `printf` on this path, so the name and the capacity are spelled into the
-    text by the build rather than formatted at run time; `name` is the local the
-    receiver resolved to, which is the only thing about the site this path knows.
-    """
+    No `printf` on this path, so the name and the capacity are spelled into
+    the text by the build rather than formatted at run time; `name` is the local
+    the receiver resolved to, which is the only thing about the site this path
+    knows."""
     return (f"formal: list.append overflowed {name!r}: its capacity is "
             f"{capacity}, the number of append SITES in the function that "
             f"built it, and every EXECUTION of a site counts against it — so a "
@@ -12114,17 +12161,47 @@ def is_dict_expr(e) -> bool:
             and getattr(e, "kind", "list") == "dict")
 
 
-def _unify(a, b):
+def _unify(a, b, op=None):
     """The kind an expression has when its two operands have kinds `a` and `b`.
 
     None (undecidable) wins over a kind, and two different kinds have no
     unification at all: `x + y` is not an int because one side looks like one.
+
+    **A blob of ANY element kind makes the whole expression a blob**, and it
+    used to be the bare `LIST_PREFIX` alone that did — false about every
+    list whose elements have a kind, because `list_kind` spells that kind INTO
+    the kind string. `[1, 2] * 3` therefore had `list:int` on its left and `int`
+    on its right, the two did not unify, `kind_of` answered None, and the
+    "unclassified non-container value is a word, and a word is an integer"
+    default bound the name to an integer. Measured on both architectures before
+    this line: `C = [7] * 4` then `for x in C` built, ran, and died with
+    SIGSEGV (exit 139) — `C` was the integer 12, so the loop walked a count at
+    address 12 — and `len(C)` was refused as "len() of a value classified as
+    'int', and an integer has no length", which is a true statement about the
+    wrong word.
+
+    `op` is the operator where it changes the answer, and `*` is the one:
+    `xs * n` is REPETITION, so the result's elements are the left operand's own
+    and there is nothing to unify — `2 * xs` is the same repetition with the
+    operands the other way round. `+`/`|` on two lists of DIFFERENT element
+    kinds has no element kind of its own, and says so by answering the bare
+    `LIST_PREFIX` rather than by inventing one.
     """
     if a is None or b is None:
         return None
     if a == b:
         return a
-    if a == LIST_PREFIX or b == LIST_PREFIX:
+    if op == "*":
+        # REPETITION, both spellings. Two blobs is a TypeError in Python, so
+        # there is no honest kind to answer and None (undecidable) is it.
+        if is_list_kind(a) and not is_list_kind(b):
+            return a
+        if is_list_kind(b) and not is_list_kind(a):
+            return b
+        return None
+    if is_list_kind(a) and is_list_kind(b):
+        return list_kind(_unify(list_elem_kind(a), list_elem_kind(b)))
+    if is_list_kind(a) or is_list_kind(b):
         # `+`/`|` on a blob is list concat/set union, so a list side makes the
         # whole thing a blob whatever the other side is.
         return LIST_PREFIX
@@ -13030,7 +13107,7 @@ class ValueKinds:
         if isinstance(e, F.BinaryOp):
             if e.op in _COMPARISON_OPS or e.op in ("and", "or"):
                 return INT_KIND          # a comparison or a bool is 0/1
-            return _unify(self.kind_of(e.left), self.kind_of(e.right))
+            return _unify(self.kind_of(e.left), self.kind_of(e.right), e.op)
         if isinstance(e, F.CompareChain):
             return INT_KIND
         if isinstance(e, F.TernaryExpr):

@@ -4007,6 +4007,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.BinaryOp):
             if e.op in ("+", "|"):
                 return self._blob_est(e.left) + self._blob_est(e.right)
+            if e.op == "*":
+                # REPETITION: len(blob) x count. The count has to be the
+                # literal `_emit_list_repeat` requires, so the reservation is
+                # the product rather than the 64 an unknown side gets below —
+                # over-reserving is the safe direction, since a
+                # `frame_blob_refusal` at the end of the frame answers either
+                # way.
+                blob, count = ((e.left, e.right)
+                               if self._is_container_expr(e.left)
+                               else (e.right, e.left))
+                n = self._static_int(count)
+                if n is None:
+                    return 64
+                return max(0, self._blob_est(blob) * max(0, n))
             if e.op in ("or", "and"):
                 return max(self._blob_est(e.left), self._blob_est(e.right))
         return 64
@@ -4122,6 +4136,105 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._emit_jmp(cr)
         self.asm.label(crd)
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDI))
+
+    def _emit_list_repeat(self, blob, count) -> None:
+        """`xs * n` over a blob -> a fresh blob with the elements n times, in
+        RAX.  arm64's `_emit_list_repeat`, and the same register plan as this
+        backend's `_emit_list_concat` so the two shapes read alike.
+
+        The construct was not lowered at all before this: `*` reached the
+        integer ALU with both operands still holding blob ADDRESSES, so
+        `C = [7] * 4` bound `C` to `7*4` scaled by eight — the address of
+        nothing — and every read through it walked a count at that address.
+        Measured on both architectures before this emitter, on one program per
+        architecture: `C = [7] * 4` then `for x in C: n = n + 1` built, ran and
+        died with SIGSEGV (exit 139) where CPython counts 4.  A build that
+        succeeds and then crashes is the worst of the three answers this
+        backend can give, so it was worth the emitter rather than a refusal.
+
+        Two loops and no division, as on arm64: `k` over the repetitions, `i`
+        over the source's elements, and the source pointer is reset per
+        repetition instead of taking a modulo.  The count word is
+        `len(blob) * count` computed from the two counts the loops used, so
+        `len(xs * n)` is the number of elements the copy actually wrote.
+
+        RSI the source blob, R8 its length, R9 the count, RDX the destination
+        BASE, RDI the walking destination, RCX the walking source, R10 the
+        inner index, R11 the repetition index, RAX the element.  No call
+        happens between the two loops, so the caller-saved scratch is free.
+
+        `count` is the literal: `_emit_binop` refuses a repetition whose count
+        it cannot read (`model.list_repeat_count_refusal`), because the
+        reservation is made before anything runs and there is no heap to grow
+        into afterwards.
+        """
+        est = max(0, self._blob_est(blob) * max(0, count))
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a list repetition", 16, avail))
+        cap = max(1, min(est, (avail - 8) // 8))
+
+        self._emit_expr(blob)
+        self.asm.emit(encode_mov_r64_r64(Reg.RSI, Reg.RAX))   # blob
+        # A count of 0 or less is the EMPTY list in Python (`[7] * 0` and
+        # `[7] * -1` are both `[]`), so the loop bound is clamped rather than
+        # being allowed to run with a negative trip count.
+        self._emit_mov_imm(Reg.R9, max(0, count))
+        # A nested emit above advanced the cursor; re-clamp against what is
+        # actually left, exactly as `_emit_list_concat` does.
+        avail = self._blob_available() - self._blob_used()
+        if avail < 16:
+            raise CodegenError(M.frame_blob_refusal(
+                "a list repetition", 16, avail))
+        cap = max(1, min(est, (avail - 8) // 8))
+        offset = self._reserve_blob(8 + 8 * cap, "a list repetition")
+
+        self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # len(blob)
+        self._emit_blob_base(offset, Reg.RDX)                      # dst base
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RDX))
+        self.asm.emit(encode_add_r64_imm32(Reg.RDI, 8))           # dst = +8
+        self._while_counter += 1
+        fn = f"{self.func_name}_rep{self._while_counter}"
+        self._emit_mov_imm(Reg.R11, 0)                            # k = 0
+        ck = f"{fn}_k"
+        ckd = f"{fn}_kd"
+        self.asm.label(ck)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R11, Reg.R9))
+        self._emit_jcc(COND_AE, ckd)
+        # The SOURCE restarts at its first element for every copy; the
+        # DESTINATION walks on where the previous copy left it.
+        self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RSI))
+        self.asm.emit(encode_add_r64_imm32(Reg.RCX, 8))           # src
+        self._emit_mov_imm(Reg.R10, 0)                            # i = 0
+        ci = f"{fn}_i"
+        cid = f"{fn}_id"
+        self.asm.label(ci)
+        self.asm.emit(encode_cmp_r64_r64(Reg.R10, Reg.R8))
+        self._emit_jcc(COND_AE, cid)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RCX, 0))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDI, 0, Reg.RAX))
+        self.asm.emit(encode_add_r64_imm8(Reg.RCX, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.RDI, 8))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
+        self._emit_jmp(ci)
+        self.asm.label(cid)
+        # RDI is NOT reset and NOT advanced again: the inner loop's own
+        # `add rdi, 8` per element already left it at the first slot of the
+        # NEXT copy, which is what arm64's X10 (the running k*nL) holds there.
+        # Adding a second 8*len(blob) here is how every other repetition landed
+        # two slots further on and left half the blob as frame garbage, with
+        # the count word — computed from nL*count, not from the copies — still
+        # exactly right.
+        self.asm.emit(encode_add_r64_imm8(Reg.R11, 1))
+        self._emit_jmp(ck)
+        self.asm.label(ckd)
+        # count word = len(blob) * count, so `len(xs * n)` is the number of
+        # elements the copy actually wrote.
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R8))
+        self.asm.emit(encode_imul_r64_r64(Reg.RAX, Reg.R9))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RDX, 0, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
 
     def _emit_membership(self, left, right, invert: bool) -> None:
         """`needle in haystack` / `needle not in haystack`, list blob or string.
@@ -4863,6 +4976,24 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 raise CodegenError(M.set_union_refusal(
                     M.spelled(e.left), M.spelled(e.right)))
             self._emit_list_concat(e.left, e.right)
+            return
+
+        # `xs * n` is a REPETITION and never reached the ALU table before
+        # `_emit_list_repeat` existed: both operands were blob addresses there
+        # and the multiply scaled one of them. See that method's measurement.
+        if op == "*" and (self._is_container_expr(e.left)
+                          or self._is_container_expr(e.right)):
+            left_is = self._is_container_expr(e.left)
+            if left_is and self._is_container_expr(e.right):
+                raise CodegenError(M.list_repeat_operands_refusal(
+                    M.spelled(e.left), M.spelled(e.right)))
+            blob, count_expr = ((e.left, e.right) if left_is
+                                else (e.right, e.left))
+            n = self._static_int(count_expr)
+            if n is None:
+                raise CodegenError(M.list_repeat_count_refusal(
+                    M.spelled(e), M.spelled(count_expr)))
+            self._emit_list_repeat(blob, n)
             return
 
         if op in ("in", "not in"):
@@ -6722,7 +6853,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
             return e.func.name in ("range", "list", "sorted", "set",
                                    "reversed")
-        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "or", "and"):
+        if isinstance(e, F.BinaryOp) and e.op in ("+", "|", "*", "or", "and"):
             return (self._is_container_expr(e.left)
                     or self._is_container_expr(e.right))
         if isinstance(e, F.IdentExpr):
