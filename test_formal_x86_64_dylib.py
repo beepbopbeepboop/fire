@@ -687,10 +687,10 @@ def test_the_x86_64_dylib_exports_its_module_api(tmpdir, shared):
 # A library has no `main`, so a module body compiled into one is a function
 # nothing calls — the file builds, links, and does nothing at load time, which
 # is the silent no-op one level down from the executable path's own and cost 16
-# files of this repository (`bugs/FORMAL_dylib_module_body_has_no_load_time_
-# entry_point.md`). Each object writer therefore emits the loader's own
-# mechanism for "call this when the image loads", and each one is a DIFFERENT
-# mechanism, so each is checked in its own container:
+# files of this repository (the dylib-module-body row, §6 of
+# `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`). Each object writer therefore
+# emits the loader's own mechanism for "call this when the image loads", and each
+# one is a DIFFERENT mechanism, so each is checked in its own container:
 #
 #   * Mach-O: a `__TEXT,__init_offsets` section of type `S_INIT_FUNC_OFFSETS`
 #     holding 32-bit offsets from the image's mach_header. NOT the

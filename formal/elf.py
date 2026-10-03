@@ -347,10 +347,12 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
     # without being claimed twice: a loader reads the array, it does not write
     # it, and this image's second PT_LOAD starts at the globals.
     #
-    # An ABSOLUTE pointer, like the `st_value` of an export and for the same
+    # An ABSOLUTE address, like the `st_value` of an export and for the same
     # reason: this is an `ET_DYN` whose `p_vaddr` is `base_addr` and whose
-    # relocations cover the `.got` only, so the array holds `base_addr + offset`
-    # and nothing relocates it.
+    # relocations cover the `.got` and nothing else, so a pointer written here is
+    # one the loader will not touch — and the emitters hand over addresses
+    # already expressed in this image's space (`Assembler.label` records
+    # `org + len(text)`), so nothing is added to them.
     init_array_off = off
     off += init_array_size
     # The .globals CONTENT sits at the end of the image but is MAPPED at
@@ -894,8 +896,7 @@ def build_elf_dylib(code: bytes, base_addr: int = DYLIB_BASE,
     of the `__TEXT,__init_offsets` array
     `formal/macho_linker.py::build_macho_dylib` writes, and it exists for the
     same reason: a library with a module body needs an entry point that runs at
-    load, and without one the body compiles to a function nothing calls
-    (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`). Empty —
+    load, and without one the body compiles to a function nothing calls. Empty —
     the ordinary case — writes no array and no dynamic tags, so an image without
     a module body is byte-for-byte what it was before this argument existed.
     """

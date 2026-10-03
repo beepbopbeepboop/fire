@@ -380,7 +380,7 @@ omission.
 |---|---|---|
 | module exports no public functions (`binary_heap.mojo`) | 165 | **the row is 164/165 closure** (§3.1). The real blocker is one file: `std/collections/binary_heap.mojo` is itself refused on `len(self._data)`, "a slot's declared type is not a value this path can supply" — the value-model premise, whose probe is a **stdlib edit** and therefore not makeable from a repository worktree. `FORMAL_dylib_export_loops_and_frame_bounds` (`formal10-2`) is the live claim on the export rule; `FORMAL_dylib_export_gate_ceiling.md` was **deleted** on this tree (`0fbd2874`), so the "ceiling 0" measurement it held is retired with it and re-measuring it is open |
 | other refusal (`builtin_slice.mojo`) | 43 closure + 8 in-file | the closure half is `formal10-2`'s `FORMAL_builtin_slice_optional_field_is_a_frame_holder` (a returned frame cannot cross a dylib boundary); the 8 in-file rows are §3.2's list |
-| **a module whose API is its top-level statements** | **16** | **unowned and unclaimed — §6, and filed as `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`.** 1 use in 16. Its precondition test now exists and passes; the work left is a load-time initializer in two object writers, and the doc's item 2 is a four-build measurement of whether that is worth 16 files or 9 |
+| **a module whose API is its top-level statements** | **16** | **FIXED 2026-10-03** (`sweep12:dylib-module-init`, `formal/build.py` + both object writers): the load-time initializer this row said was missing now exists — `__TEXT,__init_offsets` in a Mach-O library, `.init_array` in an ELF one — and `FORMAL_dylib_module_body_has_no_load_time_entry_point.md` was **deleted** with the fix, as §6 below now records. Re-measured on the same 16 files: **0** are blocked by a missing entry point, and each reports a different, already-owned refusal instead (the receiver of `ModuleLoader_load_module` ×7, `base.value` ×2, `os.environ` ×2, an `except ValueError as e` arm ×5), so the initializer bought the ROW and not 16 files or 9. Before the fix: 1 use in 16. |
 | a module's ATTRIBUTE read as a value (`sys.argv` ×6, `sys.stderr`, `sys.executable`, `os.environ`, `ast.ClassDef`, `stat.S_IXUSR`) | 11 (all in-file) | `FORMAL_module_state_no_storage` (`formal8-7`); its own Status says the ceiling on folding these reads is 0 of 6, measured per use |
 | bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 10 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value` (`formal10-5`); **4 of 4 blocked files use `tile`**, so that half is work; the `random.mojo`/`format_int.mojo` halves are 1 of 3 and 1 of 2 |
 | MLIR dialect construct | 5 | `formal-mlir-gpu` / `formal2-mlir-comptime`; `FORMAL_known_limits.md` §2. `_select.mojo` is 1 file and **is** work (1 of 1 use it) |
@@ -393,6 +393,18 @@ omission.
 ---
 
 ## 6. The largest unowned row, and what it actually needs
+
+> **CLOSED 2026-10-03** (`sweep12:dylib-module-init`). The load-time initializer
+> this section says is missing now exists in both object writers, a dylib runs its
+> module body when the loader loads it, and the doc filed with this map was
+> **deleted** in the same commit as the fix. Re-measured on the same 16 files
+> (`formal_sweep.py -j 2 -t 120 --no-stdlib <the 16>`): **0** blocked by the
+> missing entry point, with each file reporting the next real refusal instead —
+> `module_loader.py`'s two-kinds-of-receiver ×7, `formal/x86_64.py`'s
+> `base.value` ×2, `determinism_trace.py`'s `os.environ` ×2, `tools/memslot.py`'s
+> handler arm ×5, each already a named row. What is below is the measurement as
+> it was, kept because the §6 conclusion ("a project and not a patch") was right
+> and because the four-build question it left open has its answer above.
 
 `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`, filed with this
 map, with the measurement below. The row in one paragraph:

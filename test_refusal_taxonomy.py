@@ -27,8 +27,9 @@ protecting, and they are not the same thing:
 3. **A marker for a message the backend can no longer produce is rot with a
    sample attached to it.** The family "a module whose API is its top-level
    statements, imported by another" and its sample were removed on
-   2026-10-03 with `bugs/FORMAL_dylib_module_body_has_no_load_time_entry
-   _point.md`: both object writers emit a load-time initializer, so the refusal
+   2026-10-03 with the dylib-module-body row it keyed on (§6 of
+   `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose doc was deleted with
+   the fix): both object writers emit a load-time initializer, so the refusal
    that named it no longer exists and a sample of a message nothing produces is
    a sample that can only rot. A family is removed when its message stops being
    reachable, and the test that says so is this file's list — the absence of a

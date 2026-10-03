@@ -187,18 +187,6 @@ def _synthetic_main() -> F.FunctionDef:
     raise FormalBuildError("synthetic main failed to parse")
 
 
-def _first_body_where(body: list) -> str:
-    """"line N: " for the first statement of a module body, or "".
-
-    A diagnostic that can point at a line should, and the line is the only
-    thing that distinguishes `sep = "/"` at the top of a file from the same
-    store three hundred lines down. Empty when the body carries no line
-    numbers, because a message reading "line : " is worse than one that does
-    not mention a line at all."""
-    line = getattr(body[0], "line", 0) if body else 0
-    return f"line {line}: " if line else ""
-
-
 def _refuse_unlowerable_module_body(body: list) -> None:
     """Raise `CodegenError` on a top-level statement with no function-level meaning.
 
@@ -1811,13 +1799,13 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # `no_public_api_reason`'s question, asked a few lines below).
     #
     # The body used to be REFUSED here, on the reasoning that a library has
-    # nowhere to run it. That is what `bugs/FORMAL_dylib_module_body_has_no_load
-    # _time_entry_point.md` measured as the largest unowned row of the formal
-    # sweep: 16 files in this repository refused for importing one of four
-    # modules, 15 of them for nothing they used. The absence was the entry
-    # point, and it now exists, so the body is lowered here like any other
-    # function and the library carries a `__init_offsets` section (Mach-O) or
-    # `.init_array` (ELF) entry pointing at it.
+    # nowhere to run it — which was the largest unowned row of the formal sweep
+    # (`bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §6): 16 files in this
+    # repository refused for importing one of four modules, 15 of them for
+    # nothing they used. The absence was the entry point and it now exists, so
+    # the body is lowered here like any other function and the library carries a
+    # `__init_offsets` section (Mach-O) or `.init_array` (ELF) entry pointing at
+    # it.
     functions, structs, symbols, slots = _prepare_functions(
         stmts, synthetic=False)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
@@ -11346,7 +11334,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # reasoning was right about the container and wrong about the remedy: the
     # absence was an entry point, and a library has one — the load-time
     # initializer, `__TEXT,__init_offsets` in a Mach-O image and `.init_array`
-    # in an ELF one, which both object writers now emit from the offsets the
+    # in an ELF one, which both object writers now emit from the addresses the
     # emitters report in `info["mod_init_addrs"]`. So the body is compiled for
     # both and run by whichever mechanism that image has. A store the body
     # computes and drops is not lost by being dropped: a module-level name has no
@@ -14101,7 +14089,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
 
 
 def _mod_init_addrs(info: dict, has_mod_init: bool, source_paths: list) -> list:
-    """The library's load-time initializer offsets, or `[]` for no body.
+    """The library's load-time initializer ADDRESSES, or `[]` for no body.
 
     `has_mod_init` is the answer BEFORE the code was emitted — the container's
     load-command size depends on it, which is why it is decided from the
@@ -14118,16 +14106,16 @@ def _mod_init_addrs(info: dict, has_mod_init: bool, source_paths: list) -> list:
     there is one" is a compiler bug with no reader-facing repair, and the next
     thing to do with it is find out which of the two is wrong.
     """
-    offsets = list(info.get("mod_init_addrs") or [])
-    if bool(offsets) != bool(has_mod_init):
+    addrs = list(info.get("mod_init_addrs") or [])
+    if bool(addrs) != bool(has_mod_init):
         raise FormalBuildError(
             f"{os.path.basename(source_paths[0])}: this library has "
             f"{'a' if has_mod_init else 'no'} module body to run at load time "
             f"and the code generator reported "
-            f"{len(offsets)} initializer offset(s), so the image's "
+            f"{len(addrs)} initializer address(es), so the image's "
             f"load-time entry section and its contents disagree. That is a "
             f"compiler bug, not a property of this module")
-    return offsets
+    return addrs
 
 
 def _prove_dylib_result(result: dict, code: bytes, info: dict, exports: list,

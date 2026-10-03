@@ -575,8 +575,7 @@ def test_file_level_await_is_refused(tmpdir, verbose):
 # whose remedy was wrong: a library has no `main`, so a module whose top level
 # had statements in it compiled to a function nothing called — built, linked,
 # and silent. 16 files in this repository were refused for it, 15 of them for
-# having IMPORTED the offending module and for using nothing it declares
-# (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`).
+# having IMPORTED the offending module and for using nothing it declares.
 #
 # The remedy was an entry point, not a refusal: both object writers now emit
 # one — `__TEXT,__init_offsets` in a Mach-O library, `.init_array` in an ELF one

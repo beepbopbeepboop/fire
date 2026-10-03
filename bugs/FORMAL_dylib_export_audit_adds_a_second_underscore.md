@@ -1,8 +1,8 @@
 # FORMAL_dylib_export_audit_adds_a_second_underscore: `formal-sweep` is red on master — the audit re-derives a C name the writer already decided
 
-**Not mine, found on 2026-10-03 while re-measuring
-`FORMAL_dylib_module_body_has_no_load_time_entry_point.md`, and it is an
-UNDECLARED red**: `test_formal_sweep.py::TestDyldProbe` fails in `setUpClass`,
+**Not mine, found on 2026-10-03 while re-measuring the dylib-module-body row
+(§6 of `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, closed the same day), and
+it is an UNDECLARED red**: `test_formal_sweep.py::TestDyldProbe` fails in `setUpClass`,
 `formal-sweep` is a registered job in the `proofs` bucket with no `expect=`
 (`tools/suite.py:2007`), and nothing in the suite says so. It is a one-line
 disagreement between two functions about one spelling.

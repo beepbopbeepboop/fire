@@ -65,7 +65,6 @@ MH_EXECUTE = 2
 # The name is a convention; the type is the mechanism, and `_write_text_segment`
 # is told the type.
 S_INIT_FUNC_OFFSETS = 0x16
-_INIT_OFFSET_WIDTH = 4
 
 
 def _init_offsets_blob(addrs) -> bytes:
@@ -1287,12 +1286,13 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     address the image maps.
 
     This is the library's entry point, and the reason a module with top-level
-    statements can be a library at all
-    (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`). An
-    initializer runs after the image's dependencies are loaded and before the
-    program's `main`, which is the position CPython gives a module body's
-    statements at import. A library with a body and no initializer compiles the
-    body to a function nothing runs, which is the silent no-op the list removes.
+    statements can be a library at all: an initializer runs after the image's
+    dependencies are loaded and before the program's `main`, which is the
+    position CPython gives a module body's statements at import. A library with a
+    body and no initializer compiles the body to a function nothing runs, which
+    is the silent no-op the list removes — and which cost 16 files of this
+    repository before it existed (`tools/formal_sweep.py`'s
+    CODEGEN/DEPENDENCY rows, all sixteen of which were this one message).
 
     Empty — the ordinary case, every module whose top level is declarations and
     constants — writes no section and does not move the code, so every image the
