@@ -11443,7 +11443,7 @@ WAVE7_G2_CASES = [
      "    var b = B()\n"
      "    return len(b)\n",
      3, None),
-    # ── and the four shapes that must STILL be refused, which are the whole of
+    # ── and the shapes that must STILL be refused, which are the whole of
     # the gate's safety ──
     #
     # Each of these is a case where claiming the kind from the DECLARATION
@@ -11474,18 +11474,42 @@ WAVE7_G2_CASES = [
      "    var b = B(k)\n"
      "    return len(b)\n",
      "refuse:this slot's DECLARED type is 'List[Int]'", None),
-    # A container constructor WITH a capacity.  The inline is accepted — every
-    # name in `List[Int](capacity=3)` is a type name or a literal — so this
-    # reaches the emitter, and the emitter is what refuses: a blob that has to
-    # HOLD n elements needs a frame reservation sized by a value this compiler
-    # does not have at layout time.  The zero-operand form is eight bytes with a
-    # zero count and is a different question, which is why the needle is the
-    # sized one and not the container's.
-    ("len_one_word_struct_constructed_with_a_capacity_is_refused",
+    # A container constructor with a `capacity=` RESERVATION, which is a
+    # DIFFERENT question from one that has to hold n elements and so is
+    # answered: a capacity says how much room to set aside, not what is in the
+    # container, and the container is empty either way.  0, not 3 — the count
+    # word of the blob is zero and the reservation is not modelled, which
+    # `model.blob_constructor_lowering` states as its limits.  This store is the
+    # one that kept `ctor_establishes_slot` shut for
+    # `std/collections/binary_heap.mojo`, whose second `__init__` is
+    # `self._data = List[Self.T](capacity=capacity)`.
+    ("len_one_word_struct_constructed_with_a_capacity",
      "struct B:\n"
      "    var _data: List[Int]\n"
      "    def __init__(out self):\n"
      "        self._data = List[Int](capacity=3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     0, None),
+    # …and the two operand shapes that are STILL a sized blob and so are still
+    # refused.  A positional argument says how many elements the container has,
+    # which is content rather than reservation, and `model` recognises exactly
+    # one reservation keyword because that is the one this stdlib spells.
+    ("len_one_word_struct_constructed_with_a_positional_size_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](3)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:has no representation on this path", None),
+    ("len_one_word_struct_constructed_with_an_unknown_keyword_is_refused",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](reserve=3)\n"
      "def main(k: Int) -> Int:\n"
      "    var b = B()\n"
      "    return len(b)\n",
@@ -14402,18 +14426,37 @@ TYPE_APPLICATION_REFUSALS = [
      "    printf(\"ok\")\n"
      "    return 0\n",
      0, "ok"),
-    # WITH ARGUMENTS it is a genuinely different question and gets its own
-    # diagnostic, which says why: a blob's size is fixed when the function is
-    # laid out, so one that must hold n elements needs a reservation sized by a
-    # value the compiler does not have. Before this change it was refused as
-    # "has no representation on this path", which is FALSE about the empty form
-    # and true about this one, and so true of neither — the diagnostic this row
-    # pins is the one that says both halves.
+    # WITH ARGUMENTS that are CONTENT it is a genuinely different question and
+    # gets its own diagnostic, which says why: a blob's size is fixed when the
+    # function is laid out, so one that must hold n elements needs a reservation
+    # sized by a value the compiler does not have. Before the diagnostic existed
+    # this was refused as "has no representation on this path", which is FALSE
+    # about the empty form and true about this one, and so true of neither — the
+    # diagnostic this row pins is the one that says both halves.
+    #
+    # It was `capacity=n`, and `capacity=n` no longer belongs here: a capacity is
+    # a RESERVATION rather than content, so
+    # `model.blob_constructor_lowering` answers it with the empty container and
+    # `len_container_field_constructed_with_a_positional_size_is_refused` is the
+    # row that keeps the class. The needle still says "the empty form is a
+    # different question" because that clause is what makes the refusal a
+    # statement about CONTENT.
     ("blob_constructor_with_operands_is_refused_by_its_own_reason",
      "def main(n: Int) -> Int:\n"
-     "    var xs = List[Int](capacity=n)\n"
+     "    var xs = List[Int](n)\n"
      "    return 0\n",
      "refuse:the empty form is a different question", None),
+    # …and the reservation form, which is the case this file's row above used to
+    # pin as a refusal and which now has to be pinned as an ANSWER instead, or
+    # nothing would notice it changing back. `len(xs)` is 0 because the
+    # container a capacity builds is empty; the room is not modelled and
+    # `blob_constructor_lowering`'s docstring is where that is written down.
+    ("blob_constructor_with_a_capacity_operand_is_the_empty_container",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = List[Int](capacity=n)\n"
+     "    printf(\"n=%d\", len(xs))\n"
+     "    return 0\n",
+     0, "n=0"),
 ]
 
 

@@ -7298,13 +7298,16 @@ def _value_materializes_blob(value) -> bool:
 
     Two shapes, and they are the two the emitter already has a layout for:
     a container display (`_emit_list` lays out `[count][elements…]`) and a
-    zero-operand construction of an empty container (`_emit_empty_blob`, the
-    same eight bytes with a zero count).  Everything else is False, which is
-    the absent answer rather than a judgement: a name, an arithmetic
-    expression, a container constructor with operands, a call to something this
-    path does not place.  `List[Int](capacity=n)` is the one whose absence is
-    felt — a blob that must HOLD n elements needs a reservation this compiler
-    does not have at layout time — and it stays refused by name.
+    construction of an EMPTY container (`_emit_empty_blob`, the same eight bytes
+    with a zero count) — with or without a `capacity=` reservation.  Everything
+    else is False, which is the absent answer rather than a judgement: a name, an
+    arithmetic expression, a container constructor with an operand that is not a
+    reservation, a call to something this path does not place.  The last of
+    those is `List[Int](n)`, which has to HOLD n elements and needs a
+    reservation this compiler does not have at layout time — so it stays
+    refused by name.  The decision is `blob_constructor_lowering` rather than a
+    test spelled here, because the emitter asks the same question and the two
+    answers have to be one.
     """
     if isinstance(value, (F.ListExpr, F.DictExpr, F.TupleExpr)):
         return True
@@ -7316,10 +7319,16 @@ def _value_materializes_blob(value) -> bool:
         base = getattr(base, "obj", None)
     if not isinstance(base, F.IdentExpr):
         return False
-    if list(getattr(value, "args", None) or []) or \
-            list(getattr(value, "kwargs", None) or []):
-        return False
-    return empty_blob_constructor(base.name)
+    # `blob_constructor_lowering`, not a test spelled here: a kind claimed for a
+    # slot has to come from the same rule the emitter applied, or
+    # `ctor_establishes_slot` would open a door the emitter shuts. That is the
+    # whole reason it is one function — it is what stopped
+    # `std/collections/binary_heap.mojo`, whose SECOND `__init__` builds
+    # `List[Self.T](capacity=capacity)` and whose first one builds
+    # `List[Self.T]()`.
+    return blob_constructor_lowering(
+        base.name, getattr(value, "args", None),
+        getattr(value, "kwargs", None)) is not None
 
 
 def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
@@ -13217,9 +13226,16 @@ class ValueKinds:
             # the same line contradicts, and one the two spellings disagreed
             # about (the bracketed one reached `_flat_callee`'s None arm, the
             # bare one reached the type-constructor fallback).
+            # `blob_constructor_lowering` and NOT `empty_blob_constructor`, so
+            # this arm and the emitter's cannot answer differently: a
+            # `capacity=` reservation produces the same empty blob the
+            # zero-operand form does, and a local bound to one of those (`var d =
+            # List[Int](capacity=4)`) was classified an integer while the emitter
+            # emitted a blob for it — so `len(d)` was refused with "an integer
+            # has no length" about a container the same line had just built.
             ctor = subscript_callee_name(e) or callee
-            if ctor is not None and empty_blob_constructor(ctor) \
-                    and not (e.args or e.kwargs):
+            if ctor is not None and blob_constructor_lowering(
+                    ctor, e.args, e.kwargs) is not None:
                 return LIST_PREFIX
             if callee is None:
                 return None
@@ -14341,6 +14357,13 @@ def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
     reservation sized by a value the compiler does not have, and emitting it
     anyway would mean a blob whose capacity is whatever the allocator left —
     which is the X19 fall-through this path refuses everywhere else.
+
+    **`capacity=` is no longer one of the refused shapes**, and
+    `blob_constructor_lowering` is what says so instead. The paragraph above is
+    about a blob that has to HOLD `nargs` ELEMENTS; a capacity says how much room
+    to set aside, not what is in the container, and the two are not the same
+    question. The limits of the answer are in that function's docstring and they
+    are the reason this refusal is still reached for every other operand.
     """
     return (
         f"constructing {callee_name}[…](…) with {nargs} argument(s) has no "
@@ -14349,9 +14372,77 @@ def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
         f"out [count:i64][element 0]…, so {callee_name}() is eight bytes with a "
         f"zero count in them and lowers, while a blob that has to HOLD {nargs} "
         f"element(s) needs a frame reservation whose size is a value this "
-        f"compiler does not have at layout time. Build the container in the "
-        f"caller and assign the field after construction, or append to a "
+        f"compiler does not have at layout time. (A `capacity=` operand is not "
+        f"in that class — it is a reservation hint and lowers as the empty "
+        f"container; see `model.blob_constructor_lowering`.) Build the container "
+        f"in the caller and assign the field after construction, or append to a "
         f"{callee_name} literal, which reserves the room it needs")
+
+
+# The keyword a container's RESERVATION is spelled with, and the only one. A
+# narrow name on purpose: this is the stdlib's spelling (`List[Self.T](capacity=
+# capacity)` in `std/collections/binary_heap.mojo`, `List(capacity=n)` everywhere
+# else) and a second accepted spelling would be a guess about a keyword this
+# compiler has never seen.
+BLOB_CAPACITY_KEYWORD = "capacity"
+
+# The two answers, named rather than spelled at the two emitters separately.
+BLOB_LOWER_EMPTY = "empty"
+BLOB_LOWER_RESERVED = "reserved"
+
+
+def blob_constructor_lowering(callee_name: str, positional=(),
+                              keywords=()) -> str | None:
+    """How to lower `List[…](…)`, or None when it cannot be lowered.
+
+    ONE decision for both architectures and for every caller that needs to know
+    whether a container construction produces a blob — the emitters, and
+    `_value_materializes_blob`'s question about a constructor store. The last of
+    those is why this is a function and not an emitter arm: a kind claimed for a
+    slot has to come from the same rule the emitter applied, or
+    `struct_field_kind` would open a door the emitter shuts.
+
+      * `BLOB_LOWER_EMPTY` — no operands. Eight bytes with a zero count, which is
+        `_emit_empty_blob` and is the same blob `[]` builds.
+      * `BLOB_LOWER_RESERVED` — every operand is the keyword `capacity`.
+        `blob_constructor_with_operands_refusal`'s own paragraph is about a blob
+        that has to HOLD n ELEMENTS, and a capacity is not that: it says how much
+        room to set aside, and the container it builds is EMPTY either way. So
+        the value is the empty container and the reservation is not modelled.
+      * None — anything else, refused by name.
+
+    **The limits of `BLOB_LOWER_RESERVED`, because an answer with unstated limits
+    is the thing this codebase keeps refusing to ship.** What is dropped is the
+    RESERVATION and nothing else: `len` of the result is 0 and stays 0 until a
+    statement appends, and the count word is a real word in a real eight-byte
+    blob. What is NOT claimed is that appending to it will work: `append` into a
+    blob this path did not reserve the room for is refused by name already
+    (`list.append() is not lowered … the receiver is not a list literal`), so the
+    dropped reservation cannot turn into a write past a blob. And a program that
+    can OBSERVE a capacity is not one this path can run either way —
+    `List.capacity` is not a lowered method and `unsafe_ptr` is refused — so
+    there is no construct whose answer this changes from right to wrong.
+
+    **Measured, on both architectures, on the stdlib file this was found on.**
+    `std/collections/binary_heap.mojo` declares
+    `def __init__(out self, *, capacity: Int): self._data =
+    List[Self.T](capacity=capacity)`, and that ONE store is what kept
+    `model.ctor_establishes_slot` shut for the whole file — the other four
+    hundred lines' worth of constructor evidence were already in order. With this
+    answer, `len(self._data)` in `__len__` lowers and `binary_heap.mojo` stops
+    refusing on it.
+    """
+    if not empty_blob_constructor(callee_name):
+        return None
+    positional = list(positional or ())
+    keywords = list(keywords or ())
+    if not positional and not keywords:
+        return BLOB_LOWER_EMPTY
+    if positional:
+        return None
+    if all(name == BLOB_CAPACITY_KEYWORD for name, _v in keywords):
+        return BLOB_LOWER_RESERVED
+    return None
 
 
 def subscript_callee_names(call) -> list:

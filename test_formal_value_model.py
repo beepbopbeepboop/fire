@@ -549,6 +549,32 @@ FIXED_CASES = [
     # and because the two are lowered by DIFFERENT emitters (`_emit_empty_blob`
     # and `_emit_list`) — a kind claimed for one says nothing about the other.
     # 0 rather than 4 is the whole difference between the cases.
+    # The RESERVATION spelling, which is `std/collections/binary_heap.mojo`'s
+    # second constructor and the one store that was keeping the value model shut
+    # for that whole file: `self._data = List[Self.T](capacity=capacity)`. A
+    # capacity is a request for room, not a statement about contents, so the
+    # container it builds is empty — 0 — and the answer is the same blob the
+    # zero-operand form builds. Both forms are in this ONE program, and the
+    # local is the second reader of the same value, so a classification that
+    # answered the field and not the local (which is what happened: the local
+    # was classified an integer and `len(d)` said "an integer has no length")
+    # shows up as two numbers that must agree.
+    ("a_reserved_container_measures_zero_and_is_not_an_integer",
+     "struct Cap:\n"
+     "    var _data: List[Int]\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._data = List[Int](capacity=8)\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = Cap()\n"
+     "    var d = List[Int](capacity=4)\n"
+     "    printf(\"f=%d l=%d\", c.size(), len(d))\n"
+     "    return 0\n",
+     "f=0 l=0"),
     ("a_one_field_container_struct_built_empty_measures_zero",
      "struct Sized:\n"
      "    var _data: List[Int]\n"
