@@ -18383,11 +18383,37 @@ def struct_block_children(struct_def, decls: dict, base: int = 0,
     """
     depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
     out = []
+    for fname, slot, child, child_off in struct_block_direct_children(
+            struct_def, decls, base, depth):
+        out.append((fname, slot, child, child_off))
+        out.extend(struct_block_children(child, decls, child_off, depth - 1))
+    return out
+
+
+def struct_block_direct_children(struct_def, decls: dict, base: int = 0,
+                                 depth=None) -> list:
+    """`[(field, slot, child, offset)]` — this struct's OWN nested frames.
+
+    The same rows `struct_block_children` flattens, one level at a time, and it
+    is its own function because that is the only shape a RECURSIVE walk can
+    consume: the parent of each row is the struct the row was asked about, so a
+    caller that stores `child`'s address into `slot` has the parent's offset in
+    hand. A flat list has thrown that away, which is why the two placement loops
+    in each backend used to disagree about where a depth-2 frame's address goes
+    — and then crashed before either could be observed, because the row they were
+    unpacking came from the three-value function rather than this four.
+
+    `struct_block_children` is written in terms of this one, so the offset
+    arithmetic exists once: `struct_frame_block_bytes` decides the sizes and this
+    decides where each frame starts, which is the property
+    `struct_frame_block_layout`'s docstring is about.
+    """
+    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
+    out = []
     inner = base + struct_frame_bytes(struct_def)
     for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
                                                           depth):
         out.append((fname, slot, child, inner))
-        out.extend(struct_block_children(child, decls, inner, depth - 1))
         inner += struct_frame_block_bytes(child, decls, depth - 1)
     return out
 

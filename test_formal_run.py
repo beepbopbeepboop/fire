@@ -4332,12 +4332,133 @@ DECLARED_TYPE_CASES = [
      "    fn go(self) -> Int:\n"
      "        return self.in1.bump()\n"
      "\n"
+"def main(n: Int) -> Int:\n"
+    "    var o = Outer()\n"
+    "    o.in1.a = 2\n"
+    "    o.in1.b = 3\n"
+    "    o.in1.c = 4\n"
+    "    return o.go()\n", 10, None),
+    # ── THREE LEVELS: the innermost frame of a chain two frames deep ──
+    #
+    # Depth 2 is the shape above and it has been there since C5.  Depth 3 is
+    # `o.inner.inner2.x`, and it was refused on BOTH architectures with a
+    # diagnostic about the WRONG LEVEL: the build pass spelled the outer field as
+    # `chain.split(".")[-2]`, which for `o.inner.inner2.x` is `inner2` — a
+    # spelling the source does not use and a slot whose layout was never
+    # consulted.  It is now a WALK (`formal/build.py`'s `_nested_frame_levels`),
+    # so each level asks the placement question in the order the source asks it.
+    #
+    # Nothing in either emitter changed, and that is the shape of the answer: both
+    # resolve a `_frame_nested_slots` key by loading the chain with its last field
+    # removed and indexing the frame that leaves, so filling every PREFIX of the
+    # chain is the whole of the third level.  Two objects with different values
+    # at the innermost level, because "the innermost frame is shared" is the wrong
+    # answer a single object cannot see.
+    ("byref_three_level_nested_frames_read_and_write",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
      "    var o = Outer()\n"
-     "    o.in1.a = 2\n"
-     "    o.in1.b = 3\n"
-     "    o.in1.c = 4\n"
-     "    return o.go()\n", 10, None),
+     "    o.inner.inner2.x = 5\n"
+     "    o.inner.inner2.y = 6\n"
+     "    o.inner.z = 7\n"
+     "    o.w = 8\n"
+     "    printf(\"x=%d y=%d z=%d w=%d\", o.inner.inner2.x, o.inner.inner2.y,"
+     " o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=5 y=6 z=7 w=8"),
+    ("byref_three_level_nested_frames_two_objects_no_alias",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Outer()\n"
+     "    var b = Outer()\n"
+     "    a.inner.inner2.x = 1\n"
+     "    a.inner.inner2.y = 2\n"
+     "    a.inner.z = 3\n"
+     "    a.w = 4\n"
+     "    b.inner.inner2.x = 11\n"
+     "    b.inner.inner2.y = 12\n"
+     "    b.inner.z = 13\n"
+     "    b.w = 14\n"
+     "    printf(\"a=%d,%d,%d,%d \", a.inner.inner2.x, a.inner.inner2.y,"
+     " a.inner.z, a.w)\n"
+     "    printf(\"b=%d,%d,%d,%d\", b.inner.inner2.x, b.inner.inner2.y,"
+     " b.inner.z, b.w)\n"
+     "    return 0\n", 0, "a=1,2,3,4 b=11,12,13,14"),
+    # A ONE-FIELD struct at the third level, which is the one case where the
+    # chain is NOT a frame access: a struct of one field has no block, so the
+    # word in `o.inner.inner2` IS `Inner2`'s only field and
+    # `o.inner.inner2.x` is the same word under a longer spelling.  The
+    # REWRITE (`_rewrite_one_word_nested_fields`) collapses it onto
+    # `o.inner.inner2`, and every level it walks needs a table entry for the
+    # collapsed spelling to have an address — which is why the fill is shared
+    # with the frame case rather than duplicated for it.
+    ("byref_three_level_chain_through_a_one_field_struct",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.w = 7\n"
+     "    o.inner.inner2.x = 8\n"
+     "    printf(\"x=%d z=%d w=%d\", o.inner.inner2.x, o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=8 z=0 w=7"),
+    # …and the same with the type coming from the nested struct's `__init__`
+    # rather than from the class-body annotation, which is a DIFFERENT evidence
+    # source (`struct_field_type`'s "assigned" row rather than its "declared"
+    # one) and therefore its own case.  `o.inner = Inner(Inner2(5), 6)` puts a
+    # whole `Inner` block in the slot, and the depth-3 chain below has to reach
+    # through it.
+    ("byref_three_level_chain_with_the_type_assigned_in_init",
+     "struct Inner2:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Inner:\n"
+     "    var inner2: Inner2\n"
+     "    var z: Int\n"
+     "    def __init__(self, i: Inner2, b: Int):\n"
+     "        self.inner2 = i\n"
+     "        self.z = b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var w: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.inner = Inner(Inner2(5), 6)\n"
+     "    o.w = 7\n"
+     "    o.inner.inner2.x = 8\n"
+     "    printf(\"x=%d z=%d w=%d\", o.inner.inner2.x, o.inner.z, o.w)\n"
+     "    return 0\n", 0, "x=8 z=6 w=7"),
 ]
 
 DECLARED_TYPE_REFUSALS = [
