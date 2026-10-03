@@ -5225,6 +5225,62 @@ BOTH_ARCH_CASES = [
      "    var s = \"abc\"\n"
      "    print(s[0])\n"
      "    return 0\n", 0, "97"),
+    # THE GUARDS for the one-field receiver rebinding rule, and they are the
+    # reason the rule is scoped to a name of the receiver's OWN TYPE rather than
+    # written as "never rebind a one-field receiver". Both of these are the
+    # mechanism that rule sits next to, and both are how 28 of the 51
+    # hand-written `self = …` sites in this repository and the stdlib are spelled
+    # (`self = self & rhs`, `self = False`, `self = _binary_op(self, rhs)`).
+    #
+    # `self.a = other.a` is the field store the rewrite collapses onto `self`
+    # and the write-back exists to deliver: CPython copies 2 into `x` and so
+    # does this. `self = self + 4` is the same store spelled as a rebinding of
+    # the receiver's own word: CPython's `x` is 5 and so is this. A rule that
+    # matched the TARGET rather than the VALUE would refuse both and cost
+    # `std/builtin/bool.mojo`, whose `__iand__`/`__ior__`/`__ixor__` are the
+    # second row verbatim.
+    ("both_arch_one_field_stores_through_the_receiver_still_reach_the_caller",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def take(out self, other: Self):\n"
+     "        self.a = other.a\n"
+     "\n"
+     "    def bump(out self):\n"
+     "        self = self + 4\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.take(y)\n"
+     "    x.bump()\n"
+     "    printf(\"a=%d\", x.a)\n"
+     "    return 0\n", 0, "a=6"),
+    # …and the SCOPE of the rule, which is the receiver WRITE-BACK and not the
+    # rebinding: a PLAIN receiver on a one-field struct is never handed back, so
+    # nothing this method does to its own word can reach the caller and Python's
+    # rebinding semantics are already what happens. `x` keeps 1, which is
+    # CPython's answer, and a rule that ignored the receiver's convention would
+    # refuse a program that is right.
+    ("both_arch_one_field_plain_receiver_rebinding_is_left_alone",
+     "struct T:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def peek(self, other: Self) -> Int:\n"
+     "        var t = other\n"
+     "        self = t\n"
+     "        return self\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.peek(y)\n"
+     "    printf(\"a=%d\", x.a)\n"
+     "    return 0\n", 0, "a=1"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -11584,6 +11640,64 @@ EQ_DISPATCH_CASES = [
      "    r = 5\n"
      "    return r.a\n",
      "refuse:r is assigned 5 in main()", None),
+    # THE RECEIVER HALF OF THE WIDE OWNER, and it is the one shape in this group
+    # whose defect is a WRONG ANSWER rather than a refusal, because a struct of
+    # ONE field has no address-shaped cause: its receiver IS its single word.
+    #
+    #     struct T:
+    #         var a: Int
+    #         def take(out self, other: Self):
+    #             self = other
+    #
+    # CPython runs that and leaves the caller's object alone — Python has no
+    # "assign the receiver" operation, so after `self = other` the method's own
+    # `self.a` goes to `other` and `x` is untouched (`a=1`). This path builds,
+    # runs, prints the OTHER object's value and exits 0, because a one-field
+    # mutator's word is HANDED BACK and stored over the caller's object
+    # (`formal/model.py`'s `receiver_writeback_name`) — the same mechanism that
+    # makes `self.a = self.a + 4` reach the caller at all.
+    #
+    # The rule cannot be asked after `_rewrite_self_fields`, which collapses
+    # `recv.<field>` onto `recv` and makes this text identical to a field store
+    # that must keep working, so `formal/build.py`'s
+    # `_collect_one_field_receiver_rebinds` runs before it and
+    # `model.receiver_own_type_names` recognises the two spellings of "a
+    # reference to an object of the receiver's own type" from declarations.
+    # Measured exposure: 0 sites in 1002 files (`tools/
+    # formal_receiver_rebind_census.py` counts 51 hand-written `self = …` in
+    # one-field methods, 23 constructions and 28 values the method computed, and
+    # not one name of the receiver's own type).
+    ("one_field_receiver_rebound_to_a_parameter_is_refused",
+     "struct T:\n"
+     "    var a: Int\n"
+     "    def take(out self, other: Self):\n"
+     "        self = other\n"
+     "def main(n):\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    var y = T()\n"
+     "    y.a = 2\n"
+     "    x.take(y)\n"
+     "    return x.a\n",
+     "refuse:`other` is a parameter of this method and holds a `T`", None),
+    # …and the LOCAL spelling, which is a different object with the same answer:
+    # `t` belongs to this method, so Python's later stores through the rebound
+    # receiver mutate something nobody outside can name, and this path has no
+    # way to deliver that either. A rule that recognised only the parameter
+    # spelling would let this one through.
+    ("one_field_receiver_rebound_to_a_local_of_its_own_type_is_refused",
+     "struct T:\n"
+     "    var a: Int\n"
+     "    def grab(out self):\n"
+     "        var t = T()\n"
+     "        t.a = 9\n"
+     "        self = t\n"
+     "def main(n):\n"
+     "    var x = T()\n"
+     "    x.a = 1\n"
+     "    x.grab()\n"
+     "    return x.a\n",
+     "refuse:`t` is a local of this method and holds a `T`", None),
     # THE RECEIVER HALF of the row above, and it is a separate rule because the
     # rule above's two REPAIRS do not exist for a receiver: a receiver is not
     # a name the caller can re-declare, and "copy the value out of it first" is
