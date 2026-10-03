@@ -1963,6 +1963,156 @@ def test_namespace_library_exports_nothing(tmpdir, _shared):
           f"has nothing to resolve to")
 
 
+# A package body that is a DOCSTRING, which is what `formal/__init__.py` is and
+# what a docs-only package is. Measured on the 2026-10-03 sweep
+# (`bugs/sweeps/sweep-arm-8.txt`): the export gate refused it as "declares no
+# function and no type at all", which took out three repository files that
+# import the PACKAGE (`from formal import model as M`) and name nothing it
+# publishes.
+#
+# The program's spelling is load-bearing and measured, not chosen: `import pkg`
+# is what puts the PACKAGE in the importer's closure and so what makes its dylib
+# get built, while `from pkg.sub import bump` does not build it at all (the
+# closure holds the submodule) and `from pkg import sub` builds it and is then
+# refused for binding a module as a value — a different refusal, further on, and
+# not this gate's business.
+EMPTY_BODY_PKG = '"""A namespace package: the API is the submodules."""\n'
+SUBMODULE_ONLY_MODULE = """\
+def bump(x):
+  return x + 2
+"""
+EMPTY_BODY_PROG = """\
+import pkg
+import pkg.sub
+def main():
+  return 42
+"""
+PKG_ATTRIBUTE_PROG = """\
+import pkg
+def main():
+  return pkg.bump(40)
+"""
+
+
+def test_a_docstring_only_package_is_a_namespace_library(tmpdir, _shared):
+    """A package `__init__` that declares nothing builds, and a consumer of it
+    builds, LOADS and RUNS.
+
+    The positive half, and the RUN is the point: a dylib that builds is not a
+    result. The package's library is on this program's link line with an empty
+    trie, so `return 42` is also the statement that dyld can load a namespace
+    library and the program still starts.
+    """
+    root = os.path.join(tmpdir, "emptybody")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": EMPTY_BODY_PKG,
+                      "pkg/sub.mojo": SUBMODULE_ONLY_MODULE,
+                      "prog.mojo": EMPTY_BODY_PROG})
+    fresh_cas()
+    result, out = build(root, "prog.aout")
+    check(result.returncode == 0,
+          f"a consumer of a docstring-only package did not build: "
+          f"{(result.stderr or result.stdout or '').strip()[-400:]}")
+    rc, text = run(out)
+    check(rc == 42,
+          f"the program did not run to its own return value (exit {rc}): "
+          f"{text!r}")
+
+
+def test_a_docstring_only_package_dylib_is_empty_and_says_namespace(
+        tmpdir, _shared):
+    """The restrictive half, read off the artifact rather than off the exit code.
+
+    An empty trie is the DESIGN here and not a side effect: the package defines
+    nothing, so any entry in its export table would be an address lookup into an
+    image with no code. And `kind: "namespace"` is what makes
+    `load_dylib_manifests` accept an empty `exports` list at all, so this is
+    the fact a later edit has to preserve.
+    """
+    root = os.path.join(tmpdir, "emptybody2")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": EMPTY_BODY_PKG,
+                      "pkg/sub.mojo": SUBMODULE_ONLY_MODULE,
+                      "prog.mojo": EMPTY_BODY_PROG})
+    fresh_cas()
+    _result, _out = build(root, "prog.aout")
+    pkg = module_dylib("pkg")
+    check(os.path.isfile(pkg), f"no package dylib at {pkg}")
+    m = manifest(pkg)
+    check(m.get("kind") == "namespace",
+          f"the package dylib is not marked namespace: {m.get('kind')!r}")
+    check(m.get("exports") == [],
+          f"a package that declares nothing exports {m.get('exports')!r}")
+    with open(pkg, "rb") as f:
+        info = parse_macho(f.read())
+    check(info["exports"] == {},
+          f"the package dylib's export trie is not empty: {info['exports']}")
+
+
+def test_a_name_the_empty_package_does_not_declare_is_still_refused(
+        tmpdir, _shared):
+    """The protective half, and the one that must not regress.
+
+    The package now builds, so the question is what happens to a consumer that
+    asks it for something. `pkg.bump` has to be a REFUSAL naming the package —
+    not an empty trie read as "nothing there, fine", and above all not a bind
+    to some other library's `bump`. This is the failure the export gate exists
+    to prevent, and widening the gate must not have widened it.
+    """
+    root = os.path.join(tmpdir, "emptybody3")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": EMPTY_BODY_PKG,
+                      "pkg/sub.mojo": SUBMODULE_ONLY_MODULE,
+                      "prog.mojo": PKG_ATTRIBUTE_PROG})
+    fresh_cas()
+    result, _out = build(root, "prog.aout", expect_ok=False)
+    check(result.returncode != 0,
+          "`pkg.bump` bound against a package that declares nothing; the "
+          "trie is empty, so whatever it resolved to is not this package's")
+    text = result.stderr or result.stdout
+    check("pkg" in text,
+          f"the refusal does not name the package: {text.strip()[-300:]}")
+
+
+def test_a_package_that_declares_something_is_still_refused(tmpdir, _shared):
+    """The other side of the predicate, and it is three shapes.
+
+    `formal/build.py`'s branch fires on a package that declares NOTHING, so
+    each of these has to keep its own refusal: a generic-only body (one trie
+    entry cannot be two instantiations), a body whose only declaration is
+    private, and a body whose names are all C library symbols. Without the
+    `_declared_api_shape` test the branch swallowed all three, and
+    `test_a_module_with_no_boundary_symbol_is_refused` went red — which is why
+    that row exists and why the three are named here.
+
+    The program imports the package itself (`from pkg import widen`), which is
+    the spelling that makes the package's dylib get built at all; with
+    `import pkg.sub` there is no package library to refuse and the case would
+    pass vacuously.
+    """
+    cases = {
+        "gen": ("def widen[T: Intable](v: T) -> T:\n  return v\n", "GENERIC"),
+        "private": ("def _hidden(x):\n  return x\n", "private"),
+        "clib": ("def exit(x):\n  return x\n", "C library symbol"),
+    }
+    for tag, (body, expect) in sorted(cases.items()):
+        root = os.path.join(tmpdir, "notempty_" + tag)
+        os.makedirs(root)
+        write_tree(root, {"pkg/__init__.mojo": body,
+                          "prog.mojo": "from pkg import widen\n"
+                                      "def main():\n  return 0\n"})
+        fresh_cas()
+        result, _out = build(root, "prog.aout", expect_ok=False)
+        text = result.stderr or result.stdout
+        check(result.returncode != 0,
+              f"a package whose body is {tag!r} built; it declares a name a "
+              f"reader might have wanted to bind, which is a finding and not "
+              f"a namespace package")
+        check(expect in text,
+              f"the {tag!r} refusal does not say {expect!r}: "
+              f"{text.strip()[-300:]}")
+
+
 def test_reexport_of_an_unexported_name_is_refused(tmpdir, _shared):
     """A re-export nothing provides is refused, naming the name.
 
@@ -2882,6 +3032,14 @@ TESTS = [
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
      test_namespace_library_exports_nothing),
+    ("a docstring-only package builds and runs",
+     test_a_docstring_only_package_is_a_namespace_library),
+    ("a docstring-only package dylib is empty and says namespace",
+     test_a_docstring_only_package_dylib_is_empty_and_says_namespace),
+    ("a name the empty package does not declare is still refused",
+     test_a_name_the_empty_package_does_not_declare_is_still_refused),
+    ("a package that declares something is still refused",
+     test_a_package_that_declares_something_is_still_refused),
     ("a re-export nothing provides is refused by name",
      test_reexport_of_an_unexported_name_is_refused),
     ("an ALIASED re-export binds under both spellings",

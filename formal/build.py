@@ -13581,6 +13581,54 @@ def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
     return exported
 
 
+def _declares_nothing_but_a_package_body(source_paths: list) -> bool:
+    """A package `__init__` that DECLARES nothing — a namespace package.
+
+    Two conditions and both are load-bearing, and the second is the one that
+    took a test red when it was left out.
+
+    **Every source is a package `__init__`.** Spelled on the BASENAME, because
+    that is what makes it a statement about the module rather than about where
+    the file sits: `formal/imports.py` resolves a package by the same
+    `__init__.mojo` / `__init__.py` name (`_admitted_tier_conflicts` walks
+    `formal/hostmods` on it), and a module named `__init__.py` that is not a
+    package does not exist in this resolver.
+
+    **It declares no function, no type and no trait — private or public.** This
+    is the condition the gate's own refusal names ("declares no function and no
+    type at all"), read out of `_declared_api_shape`, which is the same reader
+    `no_public_api_reason` uses so the two cannot disagree about it. Without it
+    the branch swallowed three refusals that are RIGHT: a package whose only
+    public function is a GENERIC template (`test_a_module_with_no_boundary_
+    symbol_is_refused`'s `mylib/__init__.mojo`), one whose only declaration is
+    private, and one whose names are all C library symbols. Each of those has a
+    name a reader might have wanted to bind and no legal way to bind it, which
+    is a finding; a docstring has neither.
+
+    A module-level CONSTANT is not a declaration here and does not stop the
+    branch: a folded value needs no symbol, and `_namespace_library`'s
+    `constants` parameter is where the consumer reads it — which is the same
+    route `formal/hostmods/sys.mojo`'s `byteorder` already takes.
+    """
+    if not source_paths:
+        return False
+    for p in source_paths:
+        if os.path.basename(p) not in ("__init__.py", "__init__.mojo"):
+            return False
+        try:
+            with open(p) as f:
+                text = f.read()
+        except OSError:
+            return False
+        shape = _declared_api_shape(text)
+        # `any(shape.values())` rather than a list of buckets, so a bucket
+        # `_declared_api_shape` grows later is part of this question from the
+        # day it exists instead of from the day somebody remembers this line.
+        if any(shape.values()):
+            return False
+    return True
+
+
 def _declared_traits(source_paths: list) -> list:
     """The public TRAIT names `source_paths` declare at top level.
 
@@ -14626,11 +14674,58 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # about the file is worse than no message: it sends the reader looking for
     # a struct that isn't there.
     traits = _declared_traits(source_paths)
-    if not _export_entries(source_paths, module_prefixes) \
-            and not reexports and not traits:
+    entries = _export_entries(source_paths, module_prefixes)
+    # ── a package `__init__` whose body DECLARES NOTHING ────────────────────
+    #
+    # `_namespace_library` exists for a package whose whole API is
+    # re-exported, and it emits a real library with an EMPTY export trie
+    # because the names already resolve through the submodules on its link
+    # line. A package `__init__` that declares NOTHING is the same library for
+    # a stronger reason: there is no name to forward and none to declare, so
+    # there is nothing an importer could have bound here in the first place,
+    # and its API is its submodules' — which are libraries of their own.
+    #
+    # Measured, 2026-10-03 (`bugs/sweeps/sweep-arm-8.txt`): `formal/__init__.py`
+    # is five lines of docstring, and the gate below refused it as "declares no
+    # function and no type at all", which took out `test_formal_globals.py`,
+    # `test_formal_toplevel.py` and `test_x86_64_encoders.py` — every one of
+    # which imports a SUBMODULE (`from formal.build import globals_base`,
+    # `from formal.x86_64 import Reg`) and names nothing the package itself
+    # publishes. The file behind the measurement: adding one public `def` to
+    # that `__init__` moved all three off this refusal in the same build.
+    #
+    # What still refuses, and must: an importer that writes `pkg.name` finds an
+    # empty trie and gets `model`'s per-name refusal naming the package and
+    # listing what it does publish (`dylib_export_lookup`'s dotted arm, which
+    # reads the manifest's `module` — recorded by `_namespace_library` for
+    # exactly a table-less library). So the failure this gate prevents is still
+    # a build error with a message; what goes away is the refusal of an
+    # importer that never asked the package for anything.
+    if not entries and not reexports and not traits \
+            and _declares_nothing_but_a_package_body(source_paths):
+        if prove:
+            raise FormalBuildError(
+                f"{os.path.basename(source_paths[0])} is a package whose body "
+                f"declares nothing — no function, no type, no re-export — so it "
+                f"compiles to a library with no code and there is nothing to "
+                f"prove. Its API is its submodules, each of which is a library "
+                f"in its own right.")
+        return _namespace_library(
+            output, install_name, arch, {}, dylib_syms, dep_install,
+            linked, fmt=fmt,
+            source=source_paths[0],
+            module=(module_prefixes or {}).get(source_paths[0])
+            or _module_prefix(source_paths[0]),
+            constants=dict(constants),
+            variables=[],
+            traits=[])
+    if not entries and not reexports and not traits:
         raise FormalBuildError(no_public_api_reason(source_paths))
-    if not _export_entries(source_paths, module_prefixes) \
-            and (reexports or traits):
+    # `entries`, not a second `_export_entries` call: the gate above and this
+    # branch ask the same question, and two evaluations of it are two chances
+    # for the export table to disagree with itself about what the module
+    # publishes.
+    if not entries and (reexports or traits):
         # A proof is a property of CODE, and this library has none. Saying so
         # beats quietly returning a result with no `proof_path` in it: a
         # caller that asked for a checked proof and got a library would
