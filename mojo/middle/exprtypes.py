@@ -1218,13 +1218,23 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
     """`_mojo_elem_repr_<Struct>` for a CONTAINER-ELEMENT ctype, else ''.
 
     The one decision behind `mojo_list_set_elem_repr` (a list or tuple) and
-    `mojo_dict_set_val_repr` (a dict, via its `kind == 5` slots): is this value
-    a REGISTERED STRUCT this compile emitted a repr shim for? A shim exists for
-    every reflected struct with at least one field (module_gen.reflect_structs
-    emits it beside `_mojo_repr_<Struct>` and forward-declares it), which is
-    exactly `struct_field_types[struct]` being non-empty — the same condition
-    `reflect_structs` itself filters on, restated rather than queried so this
-    needs no new cross-module table.
+    `mojo_dict_set_val_repr` (a dict, via its `kind == 5` slots), and the one
+    place that RECORDS that a shim is wanted — because the name it returns is
+    written into the generated C at the store, so the reflection preamble has
+    no choice but to emit that symbol. Asking twice (once per container, with
+    the same ctype) is what makes the two drift, and one of the two copies
+    going stale is how `struct_field_types[struct]` being non-empty stopped
+    being the same question as "a shim exists": the emitter's `reflect_structs`
+    is narrower (it also requires the struct to be emitted and allocated here),
+    so the store named `_mojo_elem_repr_TrieNode` in a module that never emits
+    it and the self-host closure failed to LINK with
+    `'_mojo_elem_repr_TrieNode' undeclared` (ast_rewriter.py). The request is
+    therefore recorded in `gen._elem_repr_needed`, and `_emit_reflection_dispatch`
+    emits a shim for every struct in it — so the two cannot disagree.
+
+    A unit compiled with `emit_struct_defs=False` emits no reflection preamble
+    at all, so it must not name a shim either: that is why the answer is ''
+    there, checked BEFORE anything is recorded.
 
     Returns the shim's NAME, which the caller hands to the runtime as a
     function pointer; the runtime calls it with the slot's word. Empty string
@@ -1236,6 +1246,8 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
     first needed it: the two containers ask the same question about the same
     ctype, and a copy per container is how the two drifted before.
     """
+    if not getattr(gen, 'emit_struct_defs', False):
+        return ''
     if not ctype or not ctype.endswith(' *'):
         return ''
     sn = ctype[:-2].strip()
@@ -1243,6 +1255,7 @@ def struct_elem_repr_shim(gen, ctype: str) -> str:
         return ''
     if not gen.struct_field_types.get(sn):
         return ''
+    gen._elem_repr_needed.add(sn)
     return f'_mojo_elem_repr_{sn}'
 
 def _struct_type_id(name: str) -> int:

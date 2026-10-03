@@ -2173,6 +2173,25 @@ class GimpleGen:
         # same bargain `mojo_list_set_elem_repr` makes for a list, keyed by the
         # same `_dict_val_types` beside it and with the same lifetime.
         self._dict_val_repr: dict[str, str] = {}
+        # The structs whose element-repr shim (`_mojo_elem_repr_<Struct>`) the
+        # reflection preamble EMITTED for this module, published by
+        # module_gen's `_emit_reflection_dispatch` and read by
+        # `gimple_exprtypes.struct_elem_repr_shim` — the one predicate the list
+        # and dict store lowerings ask. Empty until that preamble is built
+        # (which is before any body is lowered) and, for a unit compiled with
+        # `emit_struct_defs=False`, empty for good: no shim, no reference.
+        self._elem_repr_shims: set = set()
+        # The structs a CONTAINER store has asked an element-repr shim for
+        # (`gimple_exprtypes.struct_elem_repr_shim` records there when it names
+        # one). `_emit_reflection_dispatch` emits a shim for every struct in
+        # this set in addition to the ones its own filter finds, because the
+        # NAME is written into the generated C at the store site: the store and
+        # the emission cannot be decided independently without the two
+        # disagreeing, and when they did the self-host closure failed to link
+        # with `'_mojo_elem_repr_TrieNode' undeclared`. Filled while the bodies
+        # are lowered, read after, so it is complete by the time the preamble
+        # is built.
+        self._elem_repr_needed: set = set()
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement

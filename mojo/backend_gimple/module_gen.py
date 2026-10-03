@@ -727,6 +727,20 @@ def _emit_reflection_dispatch(self, parts):
         _rsk = _as_str(_rsk)
         if _rsk in _es_str and _rsk in _san_str:
             _rs_names.append(_rsk)
+    # ...plus every struct a CONTAINER store asked an element-repr shim for
+    # (`_elem_repr_needed`, recorded by `struct_elem_repr_shim` at the store,
+    # where the shim's NAME went into the generated C). The filter above is
+    # NARROWER than "the struct has fields" on purpose — an imported struct a
+    # module only stores somewhere gets no `_mojo_repr_<sn>` here — so a store
+    # that named a shim the filter would have skipped left the module with an
+    # undefined-function reference, and the self-host closure failed to LINK
+    # with `'_mojo_elem_repr_TrieNode' undeclared` (ast_rewriter.py). The
+    # request and the emission therefore cannot be decided independently: this
+    # is the emitter answering what it was asked for.
+    for _ern in sorted(self._elem_repr_needed):
+        _ern = _as_str(_ern)
+        if _ern in self.struct_field_types and _ern not in _rs_names:
+            _rs_names.append(_ern)
     reflect_structs = _rs_names
     refl_parts = []
     # The structs this loop actually EMITS helpers for. Every dispatch table
@@ -925,6 +939,17 @@ def _emit_reflection_dispatch(self, parts):
         if _erep_ok:
             elem_repr_fwd_decls.append(f'extern char *{_erep} ({sn} *);\n')
         elem_repr_names.add(sn)
+        # Published on the emitter, because "is there a shim for this struct?"
+        # is asked from the STORE lowerings (a list or a dict literal /
+        # subscript store of this struct) and the emitter's condition is
+        # NARROWER than "the struct has fields" — `reflect_structs` above is
+        # `struct_field_types` filtered by `_emitted_structs` and
+        # `_struct_allocs_needed` too, so a struct with fields can still get no
+        # shim. Re-deriving that condition at the store site produced
+        # `'_mojo_elem_repr_TrieNode' undeclared` in ast_rewriter.py's
+        # self-host compile, i.e. an undefined-function reference at C link
+        # time; this list is the emitter's own answer.
+        self._elem_repr_shims.add(sn)
         refl_parts.append(
             f"static char * _mojo_elem_repr_{sn} (int64_t v) {{\n"
             f"  {sn} *o = ({sn} *)(intptr_t)v;\n"
@@ -6222,7 +6247,19 @@ def gen_module_impl(self, stmts):
             _dst = self._param_dict_val_types.setdefault(_callee, {})
             for _pname, _types in _pm.items():
                 if len(_types) == 1:
-                    _dst[_pname] = _as_str(next(iter(_types)))
+                    # `sorted(...)` + index, NOT `next(iter(...))`, and this
+                    # file's own reason for it: `next(<CallExpr>)` is REFUSED
+                    # outright by the self-hosted codegen ("`next(...)` on
+                    # next(CallExpr) has no lowering in this codegen"), which
+                    # made this module — and so the whole self-host closure —
+                    # uncompilable, while iterating a str-SET lowers to
+                    # `mojo_set_iter_val_int` (0 for every string slot) and so
+                    # cannot answer the question either. `sorted` on the same
+                    # set sorts string CONTENT and indexes like a list; this is
+                    # the same two lines the struct-evidence loop above uses for
+                    # the same set-of-observations question.
+                    _sole = sorted(_types)
+                    _dst[_pname] = _as_str(_sole[0])
                 else:
                     _dst[_pname] = ''      # disagreeing call sites → unknown
 
