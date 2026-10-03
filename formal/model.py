@@ -8847,6 +8847,18 @@ POINTEE_WIDTHS = {
     "Pointer": (8, False), "UnsafePointer": (8, False), "_CPointer": (8, False),
 }
 
+# The reverse of `POINTEE_WIDTHS` for the four widths it establishes: the pointee
+# that IS that width, so a refusal can NAME the declaration which would answer it
+# instead of interpolating the number into a type name.  That interpolation is
+# how `_offset_scale`'s advice came to read `Pointer[Int8]` for an EIGHT-byte
+# load (`Int8` is one byte — `POINTEE_WIDTHS` says so two hundred lines above)
+# and `Pointer[Int2]` for a two-byte one, where no `Int2` exists in any table
+# here: advice that declares a DIFFERENT width than the refusal is about.  The
+# signed spelling is the one used, because the widths it is asked about are the
+# signed loads (`Int16`/`Int32`/`Int64`); the width is what has to match, not
+# the signedness, and every row's unsigned twin is in `POINTEE_WIDTHS` beside it.
+WIDTH_POINTEES = {1: "Int8", 2: "Int16", 4: "Int32", 8: "Int64"}
+
 # Pointee base names that are refused BY NAME, with the reason, rather than
 # merely absent from POINTEE_WIDTHS.  A refusal that says "the pointee is not a
 # width I know" is true but unhelpful when the answer is a specific fact, and
@@ -9547,6 +9559,98 @@ def _is_integer_expression(fn, e, depth=0) -> bool:
     return False
 
 
+def _pointer_offset_scale(fn, e):
+    """`(scale, why)` — what the ALU will multiply this offset by, and if it
+    will not, the sentence that says which declaration is missing.
+
+    **`pointer_offset_scale` is this function's `[0]`, and it stays one
+    predicate**, because the width half is load-bearing in the direction that is
+    a wrong answer rather than a refusal (see that function's docstring).  What
+    this adds is the OTHER half, for the one reader that has to speak.
+
+    That is not decoration.  The refusal used to name the address's BASE for
+    every failure, so a program whose `p` is a perfectly good `Pointer[Int64]`
+    and whose `k` has no annotation — the case
+    `bugs/FORMAL_pointer_value_model.md` §9 calls "the remaining half of this
+    item" — was refused with the sentence
+
+        `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
+        element
+
+    which is FALSE, names the wrong variable, and sends the reader to declare
+    what is already declared.  The conditions are `pointer_offset_scale`'s, in
+    the order it lists them, and each answers a question about a DIFFERENT
+    name:
+
+      * not a `p ± k` — a call, a subscript, a container.  About the address,
+        not a declaration, and named by node type.
+      * the BASE — no annotation, or two that disagree, or one that names no
+        pointee, or a pointee whose width this model does not establish.  No
+        scale is emitted, so a hand-scaled offset is correct advice here.
+      * the OFFSET — the base is fine and `k` is not an integer by declaration.
+        Still no scale is emitted, so hand-scaling is correct advice here too,
+        and declaring the offset is the better one.
+      * none of the above, and the scale they establish is not the width the
+        reader's load wants.  `why` is None because the scale WAS established —
+        that is the case where the advice inverts, because the emitters are
+        scaling already and a hand-scaled offset would be scaled twice.
+
+    `why` is None exactly when the scale was established, which is what
+    `_offset_scale`'s branch reads; `_emit_binop` reads `[0]` and nothing else.
+    """
+    if not isinstance(e, F.BinaryOp) or e.op not in ("+", "-"):
+        return (None, f"the address is a {type(e).__name__}, not a `p ± k` this "
+                      f"path can scale")
+    left = e.left
+    if not isinstance(left, F.IdentExpr):
+        return (None, f"the address's base is a {type(left).__name__}, not a "
+                      f"NAME this path has a declared pointee for")
+    name = left.name
+    ann = _only_declared(fn, name)
+    if ann is None:
+        return (None, f"`{name}` is declared nothing, or two things that "
+                      f"disagree, so there is no pointee to scale by")
+    pointee, _why = pointee_of_type_text(ann)
+    if pointee is None:
+        return (None, f"`{name}` is declared {ann!r}, which does not name a "
+                      f"pointee, so there is no element width to scale by")
+    info = POINTEE_WIDTHS.get(pointee)
+    if info is None:
+        return (None, f"the pointee of `{name}` is {pointee}, a width this "
+                      f"model does not establish, so there is no element width "
+                      f"to scale by")
+    if info[0] == 1:
+        # Not a refusal on this path at all — `_offset_scale` returns before it
+        # asks when `width == 1`, because the identity scale is every
+        # `char *`'s.  It is here so the chain is total, not so this sentence
+        # is ever read.
+        return (None, f"the pointee of `{name}` is {pointee}, one byte wide, and "
+                      f"a one-byte element needs no scale")
+    if not _is_integer_expression(fn, e.right):
+        offset = _offset_text(e.right)
+        return (None,
+                f"the offset is `{offset}`, and this path scales only an offset "
+                f"it can establish as an INTEGER by declaration, so there is "
+                f"nothing to say whether `{offset}` counts ELEMENTS or BYTES — "
+                f"`{name} {e.op} {offset}` has the POINTER and the ELEMENT WIDTH "
+                f"off a declaration and only the offset is missing")
+    return (info[0], None)
+
+
+def _offset_text(e) -> str:
+    """The offset expression as a BARE token, for a message to wrap in code.
+
+    One reader, because a refusal that spells the offset two ways is a refusal
+    whose text and whose variable name can drift, and the name is the part the
+    reader has to act on.  Bare, because the caller composes it into the
+    sentence — the offset appears twice in this refusal and a value that carried
+    its own backticks made the first one read `` `p + `k` ``.
+    """
+    if isinstance(e, F.IdentExpr):
+        return e.name
+    return f"a {type(e).__name__}"
+
+
 def pointer_offset_scale(fn, e):
     """The width an integer offset in `p ± k` must be scaled by, or None.
 
@@ -9582,24 +9686,13 @@ def pointer_offset_scale(fn, e):
     which has scaled since before the pointer value model existed:
     `formal/arm64_codegen.py`'s `p[i]` emits `movz X2, #width; mul X1, X1, X2`
     before the add, and this is the `p + k` spelling of the same arithmetic.
+
+    `_pointer_offset_scale` is where the conditions live and this is its `[0]`.
+    Keeping the split is what lets the two readers share ONE decision while the
+    one that has to write a sentence can say which of the four refused, without
+    a second list of conditions to fall out of step with this one.
     """
-    if not isinstance(e, F.BinaryOp) or e.op not in ("+", "-"):
-        return None
-    left = e.left
-    if not isinstance(left, F.IdentExpr):
-        return None
-    ann = _only_declared(fn, left.name)
-    if ann is None:
-        return None
-    pointee, _why = pointee_of_type_text(ann)
-    if pointee is None:
-        return None
-    info = POINTEE_WIDTHS.get(pointee)
-    if info is None or info[0] == 1:
-        return None
-    if not _is_integer_expression(fn, e.right):
-        return None
-    return info[0]
+    return _pointer_offset_scale(fn, e)[0]
 
 
 def _offset_scale(fn, expr, width, seen=()):
@@ -9648,28 +9741,42 @@ def _offset_scale(fn, expr, width, seen=()):
                 return (False, why)
         return (True, None)
     if isinstance(expr, F.BinaryOp) and expr.op in ("+", "-"):
-        scaled = pointer_offset_scale(fn, expr)
+        scaled, why_not = _pointer_offset_scale(fn, expr)
         if scaled == width:
             return (True, None)
-        base = expr.left
-        named = base.name if isinstance(base, F.IdentExpr) else None
-        if named is None:
-            what = (f"{type(base).__name__} is not a NAME this path has a "
-                    f"declared pointee for")
+        # The sentence names the condition that refused, because the conditions
+        # are about DIFFERENT names and only one of those names is wrong.  And
+        # the ADVICE differs with them, which is why it cannot be one sentence
+        # appended to whatever the reason happened to be: the emitters scale
+        # only when the scale WAS established, so hand-scaling the offset is
+        # right when there is no scale and WRONG when there is one that is not
+        # this load's width — there `p + k * 8` would be scaled a second time
+        # on top of the scale already emitted.
+        element = WIDTH_POINTEES.get(width)
+        if why_not is None:
+            # Every condition held, so the emitters ARE scaling — by `scaled`,
+            # which is not the width this load wants.  The only branch where
+            # hand-scaling is wrong advice, and the only one that says so,
+            # because it is the only one where a scale exists.
+            what = (f"it scales by the element size {scaled} bytes, and this "
+                    f"load is {width} bytes wide")
+            advice = (f"Declare the pointee as the {width}-byte element this "
+                      f"load wants"
+                      + (f" (`p: Pointer[{element}]`)" if element else "")
+                      + f" — do NOT scale the offset by hand here, because this "
+                        f"path already scales it by {scaled}")
         else:
-            ann = _only_declared(fn, named)
-            what = (f"`{named}` is declared {ann!r}, which is not a pointer to "
-                    f"a {width}-byte element" if ann is not None else
-                    f"`{named}` is declared nothing, or two things that "
-                    f"disagree, so there is no pointee to scale by")
+            what = why_not
+            advice = (f"Scale it by hand (`p + k * {width}`)"
+                      + (f", or declare the pointer and the offset "
+                         f"(`p: Pointer[{element}]`, `k: Int`)" if element else "")
+                      + " so the arithmetic is one this path can do")
         return (False,
                 f"the address is `p {expr.op} k` and the load is {width} bytes "
                 f"wide, so the two have to agree about the element size — and "
                 f"this path only scales an integer offset it can read a "
                 f"POINTER and an ELEMENT WIDTH off a declaration for: {what}. "
-                f"Scale it by hand (`p + k * {width}`), or declare the pointer "
-                f"and the offset (`p: Pointer[Int{width}]`, `k: Int`) so the "
-                f"arithmetic is one this path can do — see "
+                f"{advice} — see "
                 f"bugs/FORMAL_pointer_value_model.md §9")
     if isinstance(expr, F.CallExpr) and isinstance(expr.func, F.SubscriptExpr) \
             and isinstance(expr.func.obj, F.MemberExpr) \

@@ -12483,9 +12483,12 @@ POINTER_DEREF_REFUSALS = [
     # the whole of what `pointer_offset_scale`'s `_is_integer_expression` buys:
     # a scaled offset the model cannot account for is a load at an address
     # nothing in the image vouches for, which is the defect the refusal exists
-    # to stop.  The message names the missing declaration instead of claiming
-    # the ALU adds a raw integer, which stopped being true when the scale
-    # landed.  (`bugs/FORMAL_pointer_value_model.md` §9's first item, fixed.)
+    # to stop.  The message names the MISSING declaration — the offset's — and
+    # the needle pins that, because the sentence used to name the address's
+    # BASE instead and so claimed that a `p` declared `Pointer[Int64]` "is not
+    # a pointer to a 8-byte element", which is false and tells the reader to
+    # declare the one thing that is already declared.  (`bugs/FORMAL_pointer_
+    # value_model.md` §9's first item, fixed; its "remaining half".)
     ("deref_refuse_offset_with_an_undeclared_offset",
      "def read_at(p: Pointer[Int64], k) -> Int:\n"
      "    var q = p + k\n"
@@ -12493,7 +12496,24 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
      "    return read_at(s, 1)\n",
-     "refuse:is not a pointer to a 8-byte element", None),
+     "refuse:scales only an offset it can establish as an INTEGER by "
+     "declaration", None),
+    # …and the OTHER half of the same message, which is a different program and
+    # a different missing fact: here the offset IS a declared `Int` and the scale
+    # is established, but the base's element is four bytes and the load wants
+    # eight, so the scale that IS emitted is the wrong one.  It is its own case
+    # because the advice inverts here — hand-scaling the offset would be scaled a
+    # second time on top of the first — and a needle that only pinned "the
+    # offset is not established" would pass on this sentence too.
+    ("deref_refuse_a_scale_of_the_wrong_element_width",
+     "def read_at(p: Pointer[Int32], k: Int) -> Int:\n"
+     "    var q: Pointer[Int64] = p + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s, 1)\n",
+     "refuse:do NOT scale the offset by hand here, because this path already "
+     "scales it by 4", None),
     # …and the same arithmetic on a ONE-BYTE pointee is ANSWERED, and this is the
     # guard for the case above: the scale must not fire where it is the identity,
     # because every `char *` in the corpus — `env.mojo`'s `getenv` result, every
