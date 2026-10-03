@@ -1,8 +1,10 @@
 # FORMAL_platform_reachable_row_measured: the `platform` row closed, and what the 30 files landed on
 
-**Status: CLOSED for `platform`; OPEN for `platform()` itself and for the two
-rows measured alongside it (`glob`, `collections`), which are recorded here
-because the numbers are the answer and the older docs' numbers are stale.**
+**Status: CLOSED for `platform`, and CLOSED for `platform()` as of 2026-10-02
+(§1 has the update and the measurement that changed the recommendation); OPEN
+for the two rows measured alongside it (`glob`, `collections`) and for
+`fnmatch`, which are recorded here because the numbers are the answer and the
+older docs' numbers are stale.**
 
 Written 2026-10-01 on the `module:platform+fnmatch+collections-rest` claim.
 What landed: `formal/hostmods/platform.mojo` (checked by
@@ -21,41 +23,66 @@ recommendation, and they are replaced below.
 
 ## 1. What `platform` is now, and the one absence that is NOT a host object
 
-`formal/hostmods/platform.mojo` answers everything CPython's `platform` can
-answer on an image that links libSystem and nothing else:
+**Superseded 2026-10-02 for `platform()` itself, which is now here.** §1's
+closing claim — "**`platform()` itself is not written, and it is one call
+away**" — was true when this section was written and is not true now. What
+landed, and what it cost:
 
-| CPython | here | source |
+* `platform(exe, aliased, terse)` in `formal/hostmods/platform.mojo`, plus
+  `platform_string(p0…p5)` for CPython's `platform._platform`. Checked by
+  `test_formal_platform.py`'s new `platform` group: 11 values and 11 join
+  corners against CPython's own `_platform`, on this host.
+* `str_strip`, `str_find`, `str_count` and `str_replace_all` in
+  `formal/hostmods/os/_syscalls.mojo`. `str_replace_all` is the helper §5 below
+  asked `fnmatch`'s `translate` to share, so that half of §5's next step is
+  done and the rest (`fnmatch.mojo` itself, and the `pathlib.mojo` refactor)
+  is not.
+* §1's "one `read` in `_syscalls.mojo` plus a `filetype` reader" — **already
+  landed before this update**, by the `construct:x86-byte-read-and-platform`
+  claim: `fs_read` and `fs_macho_field` are both in `_syscalls.mojo`, and
+  `architecture_bits`/`architecture_linkage` are the reader. §1 below was
+  written as if they were still missing.
+
+**The decision §1 got wrong is the one that matters, and it is a measurement
+rather than a preference.** §1 proposed wrapping libSystem's
+`_NSGetExecutablePath` and called it "the honest one and it is small". It is
+not available: **that function FAULTS on this host.** Four ways, one of them
+not this compiler at all:
+
+    cc -O0 -o e  e.c  && ./e      # SIGSEGV  (extern int _NSGetExecutablePath(..))
+    cc -O1 -o e1 e.c  && ./e1     # SIGSEGV
+    cc -O1 -o e2 e.c  && ./e2     # SIGSEGV, 64 KiB static buffer
+    python3 -c "… ctypes … _NSGetExecutablePath(buf, 65536)"   # SIGSEGV, from CPython
+
+and `getprogname()` — which does work — returns a bare basename
+(`./.tmp/plat/e3` → `e3`), not a path. So §1's *other* option is the one that
+happened: the executable path is a **PARAMETER**, which is already how
+`architecture_bits(exe)` and `architecture_linkage(exe)` are spelled in this
+module, so `platform(exe, aliased, terse)` is consistent with them rather than a
+new shape. The two flags have no defaults because a default argument is not
+applied across a dylib boundary, so a caller writes `platform(exe, 0, 0)`.
+
+**What is still absent, and none of it is a missing line of code:**
+
+| CPython | here | why |
 |---|---|---|
-| `system()`, `node()`, `release()`, `version()`, `machine()` | same names, `()` | the five `uname(3)` fields |
-| `uname().processor` | `uname_processor()` | always `""` — CPython's only other source is `uname -p` |
-| `mac_ver()[0]` | `mac_ver_release()` | `sysctlbyname("kern.osproductversion")` |
-| `mac_ver()[2]` | `mac_ver_machine()` | `uname` + CPython's `ppc` rewrite |
-| `system_alias(...)` | `system_alias_system/release/version` | pure |
+| `uname().processor` | `uname_processor()` → `""` | `uname -p`, a subprocess. CPython's own "cannot be determined" |
+| `libc_ver()` | — | needs to read a file and shell out |
+| `platform.processor()` | — | `sysctl kern.proc_translated` under Rosetta is not `uname -p` |
 
-Everything else is absent, and the module's docstring names the missing object
-for each. The one worth repeating here is the closest call in the module:
+`platform()`'s answer is CPython's **minus the one word `uname -p` produces**,
+and that is measured rather than argued: on this host CPython's
+`platform()` is `macOS-26.6.2-arm64-arm-64bit-Mach-O` and this is
+`macOS-26.6.2-arm64-64bit-Mach-O`.
 
-**`platform()` itself is not written, and it is one call away.** It composes
-`uname`, `mac_ver` and `system_alias` — all present — and is blocked on
-`architecture()` alone, which asks `file(1)` what the executable is.
-Hardcoding `('64bit', 'Mach-O')` from CPython's own `_default_architecture`
-table would be right on every image this backend produces and wrong on every
-other, which is the wrong `time.time()` shape that
-`formal/hostmods/time.mojo` refuses.
+Two things the old text also had right and are kept: `platform._platform`'s
+cleanup cannot be exercised by `platform()` itself on this host (none of the six
+parts contains a space, a slash, a colon or the word `unknown`), so the join's
+eleven steps are pinned by a corpus of their own rather than by the composition;
+and the oracle for `platform()` is CPython's `_platform` over this module's
+pieces, **not** `platform.platform()`.
 
-### The next step, exactly, for anyone taking it
-
-`architecture()` needs the executable's linkage format, which is in the Mach-O
-header's `LC_ID_DYLIB` / `filetype`. `formal/macho.py` already parses Mach-O on
-the Python side, so the capability exists as a COMPILER-side reader; what a Mojo
-module needs is a way to read a header field out of a file it opened, and
-`formal/hostmods/os/_syscalls.mojo` has `fs_open_ro`/`fs_lseek`/`fs_close` and
-**no read** (which is also why `libc_ver()`, `architecture()` and
-`freedesktop_os_release()` are all absent — see the stream argument in
-`bugs/FORMAL_glob_copy_collections_io_not_attempted.md`). So: one `read` in
-`_syscalls.mojo` plus a `filetype` reader is what `architecture()`, and then
-`platform()`, need. That is a capability, not a module, and it is the same
-`read` that `io`'s streams need.
+§2, §3, §4 and §5 below are unaffected by this and still stand.
 
 ## 2. The marginal effect of the module, measured: 30 files, 0 PASS, and 0 that could
 
@@ -190,7 +217,30 @@ the flag off. `fnmatch.filter` needs a run-time-length sequence and `iglob`/
 way every other collection here is. That is a half-day for one module plus a
 refactor, for zero files — which is why it is written down rather than done.
 
+**One third of that next step landed with `platform()` (2026-10-02): the
+`str_replace_all(s, from, to)` helper is now in
+`formal/hostmods/os/_syscalls.mojo`,** beside `str_find`, `str_count` and
+`str_strip`, because CPython's `platform._platform` is eleven string cleanups
+and `translate` is one. So the shared-machinery argument this section makes is
+settled and only the module and the `pathlib.mojo` refactor remain.
+
+`fnmatch.translate`'s one CPython subtlety, so the next person does not have to
+rediscover it, is that it is a FUNCTION-BUILDING function: CPython's
+`translate` returns a new function object, which is a construction of a type on
+a path where a type is not a value — so `translate` is absent for the same
+reason `collections.namedtuple` is, and `fnmatch.fnmatch`/`fnmatchcase` (which
+are pure) are the reachable two.
+
 ## 6. What was verified, and how
+
+The block below is the ORIGINAL author's measurements and is kept as the record
+of what the row said at the time. The 2026-10-02 re-run, after `platform()`
+landed, is in `git log` on the branch that landed it (`formal8-9`) and the
+numbers that moved are the two that name this module: `test_formal_platform.py`
+is 11/11 groups (was 8/8, and the three new ones are `platform` plus the
+`exports`/`absent` rows the new public names changed), `test_formal_imports.py`
+is PASS=52 (was 41, and the difference is other claims' host modules rather than
+this one), `test_formal_link_accounting.py` is 211 checks (was 170, same reason).
 
     python3 test_formal_platform.py -v        # 8/8 groups
     python3 test_formal_imports.py             # PASS=41 FAIL=0

@@ -383,6 +383,150 @@ def str_chr_from(s, i, c) -> str:
     return strchr(s + i, c)
 
 
+# The bytes CPython's `str.strip()` removes, as the SET `strspn` wants. Module
+# level because `str_strip` is the only reader and the spelling is the part that
+# has to be right: it is CPython's whitespace set restricted to characters a
+# single byte can hold. `\x1c`-`\x1f` are in it because `Py_UNICODE_ISSPACE`
+# says they are, and `str.isspace()` says so on this host's CPython — measured,
+# `' \t\n\r\v\f\x1c\x1d\x1e\x1f\x85a\x85 \t'.strip()` is `'a'`. `\x85` (U+0085
+# NEL) is deliberately NOT here: in UTF-8 it is the two bytes `\xc2\x85`, and a
+# byte-wise `strspn` cannot see it. That is a RECORDED DIVERGENCE rather than an
+# omission, and no caller in this tree strips a string that can hold one — the
+# only `strip` is `platform`'s, over `uname(3)` fields.
+_STR_WS = " \t\n\r\v\f\x1c\x1d\x1e\x1f"
+
+
+def str_strip(s) -> str:
+    """A fresh copy of `s` with leading and trailing whitespace removed.
+
+    The caller owns the result, as it does for every allocating function in
+    this module — `str.strip()` returns a NEW string in CPython and this is the
+    same contract, not an interior pointer into `s`.
+
+    Why it is written out rather than taken from the C library: `strspn` is
+    already here for `str_at`/`str_lead`, so the two ends are two scans over a
+    set the caller cannot index (`str_at` takes a SET because `strspn` takes a
+    NUL-terminated one), and the alternative — `strcspn` against a negated set,
+    which libc has — is a second spelling of the same question in the same file.
+    The whitespace SET is `str_strip`'s own `_STR_WS`, stated there.
+    """
+    n = str_len(s)
+    i = 0
+    while i < n and str_at(s, i, _STR_WS) == 1:
+        i = i + 1
+    j = n
+    while j > i and str_at(s, j - 1, _STR_WS) == 1:
+        j = j - 1
+    return str_copy(str_alloc(j - i), s + i, j - i)
+
+
+def str_find(s, pat, from_i) -> int:
+    """Index of the first occurrence of `pat` at or after `s[from_i]`, or -1.
+
+    A scan, for the same reason `str_rfind` is one, and the second reason is
+    this path's own: `strstr` returns a POINTER and every caller here wants an
+    OFFSET, and turning one into the other is `p - s` on a bare `char *` — a
+    difference of two words this value model has no shape for. The trap is
+    easy to fall into and was: `str_len(p)` is not the offset, it is the length
+    of the SUFFIX from `p` to the NUL, so `str_len(strstr(s, "bc"))` for
+    `"abcabc"` is 5 and the difference from `str_len(s)` is -1. Measured, on an
+    image built before this docstring said it.
+
+    `strrstr` is absent on this target either (`str_rfind`'s docstring), so one
+    bounded compare at each offset answers both questions, and `memcmp` does
+    bind.
+
+    **An EMPTY `pat` answers `from_i`, which is CPython's `str.find` and not
+    what the scan above would give by accident.** A zero-length compare matches
+    at every offset, so the first one IS `from_i`; saying so is better than
+    leaving it to be rediscovered. `str_count` and `str_replace_all` are the
+    two callers and both refuse an empty needle explicitly, because for THEM
+    CPython's empty-needle rules differ and neither is a scan (see
+    `str_replace_all`)."""
+    n = str_len(s)
+    m = str_len(pat)
+    if m == 0:
+        return from_i
+    i = from_i
+    if i < 0:
+        i = 0
+    while i + m <= n:
+        if str_eq_n(s + i, pat, m) == 1:
+            return i
+        i = i + 1
+    return 0 - 1
+
+
+def str_count(s, pat) -> int:
+    """How many non-overlapping occurrences of `pat` are in `s`.
+
+    Its own pass rather than a `realloc` loop in `str_replace_all`, and the
+    reason is the same one `platform.mojo`'s `_int_value`/`_int_ok` pair gives:
+    a number that cannot be a sentinel and a buffer that has to be sized before
+    it is written are two questions, and one function that answers both has to
+    carry the reallocation with it. This target has `malloc` and no `realloc`
+    worth using through this path, so "count, then allocate once, then fill" is
+    the shape that needs no allocator at all.
+    """
+    n = str_len(s)
+    m = str_len(pat)
+    if m == 0:
+        return 0
+    hits = 0
+    i = 0
+    while i + m <= n:
+        at = str_find(s, pat, i)
+        if at < 0:
+            break
+        hits = hits + 1
+        i = at + m
+    return hits
+
+
+def str_replace_all(s, frm, to) -> str:
+    """A fresh copy of `s` with EVERY occurrence of `frm` replaced by `to`.
+
+    The caller owns the result. EVERY occurrence and not the first: CPython's
+    `str.replace` has no count argument, and the one caller
+    (`platform._platform`) replaces a SINGLE CHARACTER, so a first-only version
+    would be indistinguishable from this one there and wrong everywhere else.
+    That is also why it is a substring replace and not a word-boundary test —
+    `platform` drops the word `unknown` from the MIDDLE of a component as
+    readily as from the whole of one, which is CPython's own behaviour
+    (`platform._platform('unknown-x')` is `'-x'`).
+
+    Occurrences are NON-OVERLAPPING and counted left to right, which is
+    `str.replace`'s rule: `str_replace_all('aaa', 'aa', 'b')` is `'ba'`, and a
+    scan that restarted one byte after a match would say `'ab'`.
+
+    **A RECORDED DIVERGENCE, and it is CPython's `str.replace` that is odd
+    here**: `s.replace("", "x")` in CPython inserts `x` at every position
+    INCLUDING both ends, because an empty needle matches at every offset. That
+    rule is not implemented — an empty `frm` returns `s` unchanged, and
+    `str_find`/`str_count` say so rather than reporting a match at every index.
+    No caller passes one (every needle in this tree is a non-empty literal), and
+    the rule is not expressible as a left-to-right scan of non-overlapping
+    matches at all: at offset 0 the empty match would have to be taken and the
+    scan then restarted one byte later, forever."""
+    n = str_len(s)
+    if str_len(frm) == 0:
+        return str_dup(s)
+    hits = str_count(s, frm)
+    if hits == 0:
+        return str_dup(s)
+    out = str_alloc(n - hits * str_len(frm) + hits * str_len(to) + 1)
+    used = 0
+    i = 0
+    while 1:
+        at = str_find(s, frm, i)
+        if at < 0:
+            used = str_put(out, used, s + i, n - i)
+            break
+        used = str_put(out, used, s + i, at - i)
+        used = str_put(out, used, to, str_len(to))
+        i = at + str_len(frm)
+    return out
+
 
 def fs_cwd() -> str:
     """The current working directory, in a fresh buffer the caller owns.
