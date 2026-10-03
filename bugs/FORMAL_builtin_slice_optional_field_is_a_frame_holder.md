@@ -245,6 +245,71 @@ have to land in are in
 `bugs/FORMAL_one_field_holder_of_a_frame_is_not_a_holder.md`; read that one for
 shape 2 and this one for shape 1.
 
+## Status, 2026-10-03 (`formal10-2`): the recorded terminal cause was ONE layer
+## too deep, and shape 1's boundary now has a test
+
+Two measurements, neither of which re-verifies anything the sections above say.
+The first corrects a pointer that is sending the next reader the wrong way; the
+second turns a promise the refusal message makes into something that is checked.
+
+**The row no longer stops where this document's last section says it does.** It
+says the terminal cause is `FORMAL_stdlib_optional_needs_a_representation` — the
+`self.step.or_else()` unwrap, whose tag lives in `Variant`. Measured on this
+tree, `builtin_slice.mojo` is refused **earlier**, identically on both backends:
+
+```console
+$ for a in arm64 x86_64; do python3 fire.py build --formal --no-prove \
+      --backend=$a -o .tmp/sl ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
+either: builtin_slice.mojo: StridedSlice___init__ returns a frame address, so
+it cannot be compiled into a dylib: the returned-frame convention needs the
+CALLER to reserve the block the object is built in, and an importer of this
+library is a compilation this build does not perform
+```
+
+That is `model.dylib_frame_return_refusal`, and it is
+`bugs/FORMAL_wide_receiver_by_reference.md`'s ("a frame-returning function
+offered at a module boundary: the hidden word is a property of ONE image's
+calling convention"). So the chain is now `dylib_frame_return_refusal` →
+`StridedSlice___init__` returns a frame → and only then, one layer below that
+and two layers below where this document pointed, the `Optional` unwrap. Both of
+those are other claims. **Nothing here is a `formal/` change on the struct-field
+path any more**, and a reader who starts at the `Optional` document is starting
+two layers from the refusal they will actually meet.
+
+Note what the message says about the fix direction, because it is the same
+shape as the answer to this document's own question: the returned-frame
+convention hands the caller a block to reserve, and a module boundary has no way
+to say which exports take one. `FORMAL_wide_receiver_by_reference.md` owns that.
+
+**Shape 1 is unchanged, and what the refusal is actually about is sharper than
+"what is a struct-typed field".** Measured on both backends: `Box(o)` with
+`self.inner = o` is refused with the message quoted in §"What was run"; the
+workaround the message names, `b.inner = mk(41)`, builds and prints `v=41 h=1`
+on arm64 and x86-64. The pair differs in ONE thing — **where the frame comes
+from.** `Box(o)` stores the CALLER's frame through the object, and a frame
+parameter outlives whatever the constructor does with it, so nothing at the
+store can say the two lifetimes agree; the working form stores a frame the
+CALLEE created, which the caller owns for the whole expression. So the
+obstacle in shape 1 is the assignment-from-a-parameter half of this document's
+own two-way question, and the two candidate answers it lists do not change it:
+the frame address needs the lifetime discipline the message names, and inline
+copies are a layout change.
+
+**And the classifier is not over-refusing.** `struct Word: var only: Int` — a
+ONE-field struct, so a WORD and not a frame — initialised from a constructor
+argument builds and prints `42` on both backends. Without that measurement the
+refusal reads as "a struct field from an argument is refused", which is false,
+and the next reader files the false version.
+
+All three are now cases in `test_formal_method_param_field.py` — the refusal
+with its exact wording, the workaround with a CPython oracle, and the one-field
+boundary — because the refusal message's advice is a PROMISE to the reader and a
+promise nobody checks is how a refusal sends readers after a non-bug. That is
+the failure mode this family documents itself as existing to prevent, and the
+message here names a specific alternative spelling, so the alternative has to
+keep working for the message to keep being true.
+
 ## The next step (as originally written)
 
 Answer that question in `FORMAL_wide_receiver_by_reference.md` — the field
