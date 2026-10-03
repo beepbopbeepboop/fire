@@ -2419,5 +2419,170 @@ class TestArmVsX86Parity(unittest.TestCase):
             self.assertIn("dyld cannot resolve", row.reason)
 
 
+class TestLibSystemBindSpelling(unittest.TestCase):
+    """A C name's SPELLING is the target's, and the probe was asking the host.
+
+    macOS's C library exports the whole directory-and-stat family twice — once
+    for a 32-bit `ino_t` and once for a 64-bit one (`readdir` and
+    `readdir$INODE64`) — and a program compiled for a 64-bit target, which is
+    every program clang builds for arm64 AND for x86_64, calls the `$INODE64`
+    one. A Mojo source spells the bare name and there is no header to redirect
+    it, so the binding is this backend's job: `model.target_libc_symbol`. That
+    is the whole design; this class is what holds the OTHER end of it, the probe
+    that decides whether the image's binds are resolvable.
+
+    It used to hand the bind name straight to `dlsym` on a handle on the HOST's
+    libSystem, so on this arm64 host every `$INODE64` name was reported as a
+    symbol nothing provides. Measured: it was the entire arm64-vs-x86-64
+    difference in the 2026-10-02 sweep — `formal/hostmods/os/_syscalls.mojo` is
+    `pass` on arm64 (it binds the bare names) and was
+    `not-answerable/unresolved-extern` on x86-64 (it binds five `$INODE64`
+    ones), and its image loads and runs under `arch -x86_64`.
+
+    Two builds of one real repository file, ~0.6 s each. Not a synthetic
+    fixture: the whole subject is what the backend does with THIS module, and a
+    hand-written fixture would be asserting the fixture.
+    """
+
+    SOURCE = "formal/hostmods/os/_syscalls.mojo"
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import tempfile
+        cls.subprocess = subprocess
+        cls._tmp = tempfile.TemporaryDirectory(prefix="fs_inode64_")
+        cls.images = {}
+        for arch in ("arm64", "x86_64"):
+            out = os.path.join(cls._tmp.name, f"syscalls.{arch}")
+            p = cls.subprocess.run(
+                [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
+                 "--formal", "--no-prove", f"--backend={arch}", "-o", out,
+                 os.path.join(S.REPO, cls.SOURCE)],
+                capture_output=True, text=True, cwd=S.REPO, timeout=600)
+            if p.returncode != 0 or not os.path.exists(out):
+                raise AssertionError(
+                    f"building {cls.SOURCE} for {arch} failed: "
+                    f"{(p.stderr or p.stdout).strip()[-400:]}")
+            with open(out, "rb") as f:
+                cls.images[arch] = (out, f.read())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _runs(self, arch):
+        """Run one image the way this host can; `(returncode, first stderr line)`.
+
+        `arch -x86_64` on an arm64 host, because that is the only thing that can
+        confirm the claim this class exists for — that dyld, in an x86-64
+        process, binds the five names an arm64 probe cannot see. A build that
+        only says "the image is fine" is the assertion this replaced.
+        """
+        out, _image = self.images[arch]
+        argv = [out]
+        if (arch == "x86_64" and S._host_arch_name() == "arm64"
+                and sys.platform == "darwin"):
+            argv = ["arch", "-x86_64", out]
+        p = self.subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        err = (p.stderr or "").strip().splitlines()
+        return p.returncode, (err[0] if err else "")
+
+    def test_the_two_arms_bind_different_spellings_of_the_same_functions(self):
+        # The precondition, and it is what makes the rest of this class about
+        # architecture rather than about a spelling: the same module, two
+        # targets, and the `$INODE64` names exist on one side only.
+        from formal import model as M
+        arm = {n for _o, n in S._binds(self.images["arm64"][1])}
+        x86 = {n for _o, n in S._binds(self.images["x86_64"][1])}
+        self.assertTrue(arm and x86)
+        self.assertFalse([n for n in arm if n.endswith(M.INODE64_SUFFIX)],
+                         f"arm64 has no 32-bit ino_t, so it binds the bare "
+                         f"names: {sorted(arm)}")
+        self.assertTrue([n for n in x86 if n.endswith(M.INODE64_SUFFIX)],
+                        f"precondition: the x86-64 image binds a $INODE64 "
+                        f"name, got {sorted(x86)}")
+        for name in sorted(n for n in x86 if n.endswith(M.INODE64_SUFFIX)):
+            self.assertEqual(M.libc_source_name(name),
+                             name[:-(len(M.INODE64_SUFFIX))].lstrip("_"),
+                             f"{name} is the target spelling of a name the "
+                             f"source spells bare")
+            self.assertEqual(M.target_libc_symbol(
+                M.libc_source_name(name), "x86_64", "macho"), name,
+                f"the backend chose {name} by the table, so the probe has to "
+                f"be able to ask about it")
+
+    def test_this_host_cannot_see_the_names_the_x86_64_image_binds(self):
+        # Why the old probe was wrong, pinned as a fact: the spelling is not
+        # missing everywhere, it is missing HERE. Without this the next reader
+        # could decide the normalisation is unnecessary on this machine.
+        import ctypes
+        from formal import model as M
+        host = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        for bare in ("lstat", "opendir", "readdir", "stat"):
+            self.assertTrue(hasattr(host, bare),
+                            f"precondition: this host does provide {bare}")
+            self.assertFalse(hasattr(host, bare + M.INODE64_SUFFIX),
+                             f"if this host exported {bare}{M.INODE64_SUFFIX} "
+                             f"there would be nothing to fix and this class "
+                             f"would be testing the host")
+
+    def test_both_arms_resolve_every_bind_they_record(self):
+        # The fix, on both architectures: the x86-64 image is no longer
+        # reported as needing five symbols nothing provides.
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(arch=arch):
+                self.assertEqual(S._unresolved_imports(self.images[arch][1]),
+                                 [], f"[{arch}] the probe reports binds that "
+                                 f"resolve")
+
+    def test_the_x86_64_image_loads_and_runs_with_nothing_forced(self):
+        # dyld's own answer, in an x86-64 process. A refused load prints the
+        # symbol it could not bind, so an empty stderr is the claim; the return
+        # code is the module's own (64 on arm64, 80 on x86-64 — a formal image
+        # with no `main`, and not a signal).
+        rc, err = self._runs("x86_64")
+        self.assertEqual(err, "", f"dyld refused the x86-64 image: {err}")
+        self.assertNotEqual(rc, -9, "the image was killed")
+        rc, err = self._runs("arm64")
+        self.assertEqual(err, "", f"dyld refused the arm64 image: {err}")
+
+    def test_a_name_this_process_loaded_for_itself_own_reasons_is_a_finding(self):
+        # The other direction, and the one the delegation fixed on the way: the
+        # probe used to answer libSystem questions through `CDLL(None)`, which
+        # searches this process's whole global namespace. `sqlite3_open` and
+        # `inflate` are visible there and are NOT in libSystem (measured, and
+        # `formal/build.py`'s `_libsystem_handle` docstring is the same
+        # measurement) — so a name like that read as resolvable when nothing on
+        # the image's link line defines it.
+        import ctypes
+        import platform
+        if platform.system() != "Darwin":
+            self.skipTest("the C library under test is libSystem")
+        glob = ctypes.CDLL(None)
+        witness = next((n for n in ("sqlite3_open", "inflate", "zlibVersion")
+                        if hasattr(glob, n)), None)
+        if witness is None:
+            self.skipTest("this python has loaded none of the witnesses, so "
+                          "the false pass cannot be reproduced here")
+        self.assertEqual(S._exports(S._LIBSYSTEM, witness),
+                         ("not-exported",
+                          f"{witness} is not exported by {S._LIBSYSTEM}"),
+                         "the global namespace is not the image's link line")
+
+    def test_the_probe_and_the_build_audit_agree_about_libsystem(self):
+        # One question, one implementation. `formal/build.py` refuses a build
+        # whose externs nothing provides, using `_is_libsystem`; the probe
+        # decides the post-build verdict with the same predicate. They used to be
+        # two answers to one question and they disagreed by an architecture.
+        from formal.build import _is_libsystem
+        names = sorted({n for _o, n in S._binds(self.images["x86_64"][1])})
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(S._exports(S._LIBSYSTEM, name)[0] == "exported",
+                                 _is_libsystem(name))
+
+
 if __name__ == "__main__":
     unittest.main()
