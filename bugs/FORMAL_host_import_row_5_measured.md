@@ -62,6 +62,29 @@ binding itself, the unknown-name refusal, the positional-and-keyword double
 binding refusal, the host-module reverse-order call, and the manifest-only
 binding. 30/30.
 
+**`glob` IS WRITTEN, AND IT IS BLOCKED BY A CODERGEN BUG RATHER THAN BY `**`
+(2026-10-03, `work/formal8-7-r2`).** `formal/hostmods/glob.mojo` exists on that
+branch's working tree and is not committed. `has_magic` and `escape` answer
+CPython's byte for byte on both architectures; the rest of the semantics were
+designed against CPython's own `glob` over 23 patterns (`*.py`, `*`, `**/*.py`,
+`a/**`, `**`, `?`, `[af]*`, `*/`, `a/`, `*/*/`, …) with the rules written down in
+the module: the hidden-name rule, `**` as zero-or-more-segments under
+`recursive`, the trailing `/` as a directory FILTER (not a decoration), and
+CPython's `**`-last spelling as `D + "/"`. **A caller of it gets an image that
+prints nothing and exits 1**, and a module whose callers bind and then compute
+nothing is worse than no module at all.
+
+**So the row's `glob` number changes shape, and the change is worth more than
+the module would have been.** This document sized `glob` as "0 to PASS and about
+4 files into `codegen`", with `**` as the hard part and everything else
+mechanical. The measurement is that `**` was not the hard part: the two halves
+this document already called mechanical (the listing, the matcher) really are
+mechanical, and what stands in the way is neither of them. Filed with a
+statement-level bisect and the list of shapes that are NOT the trigger as
+`bugs/FORMAL_container_returning_export_whose_body_calls_helpers_breaks_the_CALLERS_image.md`.
+Whoever fixes that gets `glob` by deleting that doc's blocker, and this row's
+number becomes the one written here.
+
 ## What landed from this claim
 
 | module | file | test | files moved to PASS |
@@ -217,7 +240,10 @@ argument. So a day for four findings and no pass — which is the `fnmatch`
 arithmetic in `FORMAL_platform_reachable_row_measured.md` §5, arrived at again
 from the other side. **The one dependency this row had — the keyword-argument
 capability — is measured and pinned as already present (§CORRECTION), so
-`glob` is no longer waiting on a compiler change and is waiting only on `**`.**
+`glob` is no longer waiting on that change.** What it IS waiting on, measured
+2026-10-03, is a different one this document did not predict: the cross-module
+call path, for a container-typed export whose body calls its own helpers. See
+the §CORRECTION addition above.**
 
 ## `copy` — 1 file, which imports it and does not use it
 
