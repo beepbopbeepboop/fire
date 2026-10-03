@@ -743,7 +743,7 @@ inductive MojoStmt where
   | pass
 
 inductive MojoFunc where
-  | mk (name : String) (param : String) (body : List MojoStmt) : MojoFunc
+  | mk (name : String) (params : List String) (body : List MojoStmt) : MojoFunc
 
 /-- Binary exponentiation matching codegen's runtime `**` (result starts at 1;
     while exp > 0: if exp odd: acc *= base; base *= base; exp >>= 1).  Fuel 64
@@ -878,12 +878,53 @@ def evalBodyEnv (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt
 def evalBody (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) : Option UInt64 :=
   (evalBodyEnv callFunc stmts env).1
 
-/-- Evaluate a function by setting up the environment and evaluating its body -/
-def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64) (arg : UInt64) : UInt64 :=
+/-- The environment a CALL'S ARGUMENTS make, by NAME.
+
+`MojoFunc.mk` carries the source's parameter NAMES and `evalFunc` the model's
+argument VALUES, and this pairs them: the i-th name binds the i-th value, a
+name with no value is 0, and a value with no name is unreachable.  Both
+fallbacks are what an unbound name evaluated to before, so every one-parameter
+program's answer is unchanged — which is the property `evalFunc_eq_mojo_all`
+and the generated proofs rest on.
+
+Two structural recursions rather than a `params.zip args` lookup, so that the
+term for ONE parameter is `fun name => if name == p₀ then v₀ else 0` after
+nothing at all — no `simp`, no `List.zip` — which is the term the generated
+proofs' hand-written `henv0`/`henv` lemmas already state and the reason those
+lemmas are unchanged.  A `zip` would be the same function and would have
+rewritten every one of them. -/
+def MojoEnv : List String → List UInt64 → String → UInt64
+  | [], _ => fun _ => (0 : UInt64)
+  | _, [] => fun _ => (0 : UInt64)
+  | p :: ps, v :: vs => fun name => if name == p then v else MojoEnv ps vs name
+
+/-- The i-th name binds the i-th value, and a name that is in neither list is 0.
+
+Both halves of what `MojoFunc.mk`'s single `param` could not say, and they are
+the statement `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is
+about: a two-parameter function binds BOTH of its names, each to its own
+argument, and a name no argument answers for is still 0 — which is what an
+unbound name evaluated to before, so every one-parameter program's answer is
+unchanged.  Decided rather than argued: both are `simp` on the definition. -/
+theorem mojoEnv_binds_by_position (p q : String) (u v : UInt64) (n : String)
+    (hfirst : ¬ (n == p)) (hn : n == q) : MojoEnv [p, q] [u, v] n = v := by
+  simp [MojoEnv, hfirst, hn]
+
+theorem mojoEnv_unbound_name_is_zero (p q : String) (u : UInt64) (n : String)
+    (h1 : ¬ (n == p)) : MojoEnv [p] [u] n = 0 := by
+  simp [MojoEnv, h1]
+
+/-- Evaluate a function by setting up the environment and evaluating its body.
+
+`args` is the model's ARITY: a two-parameter function binds two names, and the
+list is what says which value is which.  This is the whole of what
+`MojoFunc.mk`'s single `param` could not say, and it is what
+`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is about. -/
+def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64)
+    (args : List UInt64) : UInt64 :=
   match f with
-  | MojoFunc.mk _ param body =>
-    let env := fun name => if name == param then arg else (0 : UInt64)
-    match evalBody callFunc body env with
+  | MojoFunc.mk _ params body =>
+    match evalBody callFunc body (MojoEnv params args) with
     | some v => v
     | none => 0
 
@@ -1051,19 +1092,19 @@ theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False 
     Takes a function-specific hypothesis `h_result` (supplied by the per-program
     proof) and uses it to close the equality.
 -/
-theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64) (mojo_fn : UInt64 → UInt64) (arg : UInt64)
+theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64)
+    (mojo_fn : List UInt64 → UInt64) (args : List UInt64)
   (h_result : match f with
-    | MojoFunc.mk _ param body =>
-      let env := fun name : String => if name == param then arg else 0
-      match evalBody handler body env with
-      | some v => v = mojo_fn arg
-      | none => 0 = mojo_fn arg) : evalFunc f handler arg = mojo_fn arg := by
+    | MojoFunc.mk _ params body =>
+      match evalBody handler body (MojoEnv params args) with
+      | some v => v = mojo_fn args
+      | none => 0 = mojo_fn args) : evalFunc f handler args = mojo_fn args := by
   unfold evalFunc
   cases f
-  rename_i name param body
+  rename_i name params body
   dsimp at h_result
   dsimp
-  cases h_eq : evalBody handler body (fun name : String => if name == param then arg else 0) with
+  cases h_eq : evalBody handler body (MojoEnv params args) with
   | some v =>
     rw [h_eq] at h_result
     exact h_result
@@ -1291,6 +1332,55 @@ def arm64_set_reg (i : Nat) (s : Arm64State) (val : UInt64) : Arm64State :=
     arm64_reg j { s with nzcv := c } = arm64_reg j s := by
   cases j <;> rfl
 
+/-- `Rn` read the way the INSTRUCTION that names it reads it: register 31 is
+`SP` in the forms that HAVE an SP encoding, and `XZR` in the forms that do not.
+
+A64 register 31 is two registers.  `arm64_reg` above resolves it to zero, which
+is right for a DATA-PROCESSING form whose 31 is the zero register, and wrong
+for the forms where 31 is the stack pointer:  `ADD Xd, Xn, Xm` (shifted
+register) `0x8b000000`, `SUB Xd, Xn, Xm` `0xcb000000` and `CMP Xn, Xm`
+(shifted register) `0xeb000000` all read `SP` in `Rn`, and so do the 64-bit
+immediate forms and every memory form.  `arm64_reg 31 s = 0` made the model's
+step for `SUBS XZR, X31, X16` — `cmp sp, x16`, which is what a stack-floor guard
+compares with — compute `arm64_subs_flags 0 x16`: a proof about a different
+instruction than the one emitted, which typechecks and is false.
+
+Measured with clang's assembler (the split is architectural, not a convention):
+
+    cmp sp, x16      -> legal        and x2, xzr, x1 -> legal
+    add x0, sp, x16  -> legal        mul x3, sp, x1  -> invalid operand
+    sub x1, sp, x16  -> legal        neg x4, sp      -> invalid operand
+    cmp sp, #16      -> legal        add w0, sp, #16 -> invalid operand
+
+so the forms this is NOT for are the logical ones (`AND`/`ORR`/`EOR`/`ORN`,
+`0x8a000000` and friends), `MUL`, `NEG`, and the 32-bit immediate `ADD`/`SUB` —
+none of which has an SP encoding at all, and each of which therefore keeps
+`arm64_reg`, whose zero IS the right answer for them.  A single "31 means SP"
+rule applied to all of them would have made `and x0, xzr, x1` read the stack
+pointer, which is why the helper is named for what it is rather than for the
+number.
+
+The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`
+inline, in the unsigned-offset load/store cases, the unscaled LDUR/STUR ones,
+and the 64-bit ADD/SUB-immediate ones — all of which the emitter can already
+produce, and all of which had to be written out again by every form after them.
+-/
+def arm64_reg_or_sp (i : Nat) (s : Arm64State) : UInt64 :=
+  if i = 31 then s.sp else arm64_reg i s
+
+/-- The 31 case, which is the definition: `arm64_reg_or_sp 31 s` IS `s.sp`. -/
+@[simp] theorem arm64_reg_or_sp_31 (s : Arm64State) :
+    arm64_reg_or_sp 31 s = s.sp := by
+  simp [arm64_reg_or_sp]
+
+/-- Every register below 31 reads itself, so a generated proof that names a
+CONCRETE register number rewrites to `arm64_reg` with `decide` discharging the
+side condition — which is what lets the proof generator keep emitting the
+register it decoded and still match a model that reads through the helper. -/
+@[simp] theorem arm64_reg_or_sp_of_lt (i : Nat) (s : Arm64State) (h : i < 31) :
+    arm64_reg_or_sp i s = arm64_reg i s := by
+  simp [arm64_reg_or_sp, Nat.ne_of_lt h]
+
 /-- Setting register i, reading register j: same index reads the new value. -/
 @[simp] theorem arm64_set_reg_reg_eq (i : Nat) (s : Arm64State) (v : UInt64)
     (hi : i < 31) : arm64_reg i (arm64_set_reg i s v) = v := by
@@ -1460,18 +1550,22 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val := arm64_reg rn s
     some (arm64_set_reg rd s val)
   -- ADD Xd, Xn, Xm (register): 0x8b000000
+  -- `Rn` through `arm64_reg_or_sp`: A64's ADD (shifted register) reads SP in
+  -- `Rn`, and `cmp sp, x16` / `add x0, sp, x16` assemble (measured), so
+  -- reading register 31 as the zero register here made the model compute
+  -- `0 + Xm`.  `Xm` stays `arm64_reg`: this form has no SP encoding for it.
   else if (insn &&& 0xffe00000) = 0x8b000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let result := (arm64_reg rn s + arm64_reg xm s)
+    let result := (arm64_reg_or_sp rn s + arm64_reg xm s)
     some (arm64_set_reg rd s result)
   -- SUB Xd, Xn, Xm (register): 0xcb000000
   else if (insn &&& 0xffe00000) = 0xcb000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let result := (arm64_reg rn s - arm64_reg xm s)
+    let result := (arm64_reg_or_sp rn s - arm64_reg xm s)
     some (arm64_set_reg rd s result)
   -- MUL Xd, Xn, Xm: 0x9b007c00
   else if (insn &&& 0xffe07c00) = 0x9b007c00 then
@@ -1487,11 +1581,15 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let val := arm64_reg rn s
     let result := -val
     some (arm64_set_reg rd s result)
-  -- CMP Xn, Xm (register): 0xeb000000
+  -- CMP Xn, Xm (register): 0xeb000000 -- SUBS XZR, Rn, Xm
+  -- The form a stack-floor guard is built from: `cmp sp, floor` is
+  -- `SUBS XZR, X31, X16`, so `Rn` here has to read SP.  With `arm64_reg` the
+  -- model computed `arm64_subs_flags 0 X16` — a comparison against zero that
+  -- typechecks and is about a different instruction than the one emitted.
   else if (insn &&& 0xffe00000) = 0xeb000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some { s with nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_reg xm s) }
+    some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp rn s) (arm64_reg xm s) }
   -- AND Xd, Xn, Xm: 0x8a000000
   else if (insn &&& 0xffe00000) = 0x8a000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -1520,10 +1618,10 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     if rd = 31 then
-      let result := (if rn = 31 then s.sp else arm64_reg rn s) + UInt64.ofNat imm12
+      let result := (arm64_reg_or_sp rn s) + UInt64.ofNat imm12
       some { s with sp := result }
     else
-      let base := if rn = 31 then s.sp else arm64_reg rn s
+      let base := arm64_reg_or_sp rn s
       some (arm64_set_reg rd s (base + UInt64.ofNat imm12))
   -- SUB Xd, Xn, #imm12: 0x51000000 (32-bit) / 0xd1000000 (64-bit)
   else if (insn &&& 0xff800000) = 0x51000000 then
@@ -1537,16 +1635,19 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
     if rd = 31 then
-      let result := (if rn = 31 then s.sp else arm64_reg rn s) - UInt64.ofNat imm12
+      let result := (arm64_reg_or_sp rn s) - UInt64.ofNat imm12
       some { s with sp := result }
     else
-      let base := if rn = 31 then s.sp else arm64_reg rn s
+      let base := arm64_reg_or_sp rn s
       some (arm64_set_reg rd s (base - UInt64.ofNat imm12))
   -- CMP Xn, #imm12: 0xf1000000 (64-bit subs xzr, Xn, #imm)
+  -- SP-aware for the same reason the shifted-register CMP above is: `cmp sp, #16`
+  -- assembles, and `cmp sp, #0` is how a guard tests a register against a
+  -- literal floor.
   else if (insn &&& 0xff800000) = 0xf1000000 then
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let imm12 := ((insn >>> 10) &&& 0xfff).toNat
-    some { s with nzcv := arm64_subs_flags (arm64_reg rn s) (UInt64.ofNat imm12) }
+    some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp rn s) (UInt64.ofNat imm12) }
   -- B #offset: 0x14000000 (sign-extended 26-bit, x4)
   else if (insn &&& 0xfc000000) = 0x14000000 then
     let imm := (insn &&& 0x03ffffff)
@@ -1651,9 +1752,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rt2 := ((insn >>> 10) &&& 0x1f).toNat
     let imm7 := ((insn >>> 15) &&& 0x7f).toNat
     let addr := if imm7 ≥ 64 then
-                  (if rn = 31 then s.sp else arm64_reg rn s) - UInt64.ofNat ((128 - imm7) * 8)
+                  (arm64_reg_or_sp rn s) - UInt64.ofNat ((128 - imm7) * 8)
                 else
-                  (if rn = 31 then s.sp else arm64_reg rn s) + UInt64.ofNat (imm7 * 8)
+                  (arm64_reg_or_sp rn s) + UInt64.ofNat (imm7 * 8)
     let mem1 := mem_write_u64 s.mem addr.toNat (arm64_reg rt1 s)
     let mem2 := mem_write_u64 mem1 (addr + 8).toNat (arm64_reg rt2 s)
     some { s with sp := addr, mem := mem2 }
@@ -1663,7 +1764,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let rt2 := ((insn >>> 10) &&& 0x1f).toNat
     let imm7 := ((insn >>> 15) &&& 0x7f).toNat
-    let addr := if rn = 31 then s.sp else arm64_reg rn s
+    let addr := arm64_reg_or_sp rn s
     let val1 := mem_read_u64 s.mem addr.toNat
     let val2 := mem_read_u64 s.mem (addr + 8).toNat
     let s' := arm64_set_reg rt1 s val1
@@ -2196,7 +2297,7 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s + arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s + arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by native_decide)
@@ -2212,7 +2313,7 @@ theorem arm64_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s - arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s - arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by native_decide)
@@ -2251,6 +2352,74 @@ theorem arm64_step_mul (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
   unfold arm64_step
   rw [if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub, if_pos h_opc,
       h_rd, h_rn, h_xm]
+
+/-- The two halves of register 31, pinned on the WORDS the assembler produces.
+
+`formal/arm64.py`'s encoders are the other end of these two constants:
+`encode_cmp_xn_xm(31, 16)` is `0xeb1003ff` and `encode_and_xd_xn_xm(0, 31, 1)`
+is `0x8a0103e0`.  Both theorems are decided over a LITERAL word, so they are
+facts about the model rather than arguments about it, and they are here because
+they are the two a reader of `arm64_reg_or_sp` has to be able to CHECK rather
+than take on trust — and because the second is the half that is easy to break: a
+single "31 means SP everywhere" rule would leave the first passing and this one
+FAILING, which is the direction that matters, since `and x0, xzr, x1` is an
+instruction the tree emits.
+
+`cmp sp, x16` — the stack-floor guard's own comparison, `SUBS XZR, X31, X16`.
+With `arm64_reg 31` this theorem was false and the model computed
+`arm64_subs_flags 0 X16`. -/
+theorem arm64_step_cmp_sp_reads_sp (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = 0xeb1003ff) :
+    arm64_step s code
+      = some { s with nzcv := arm64_subs_flags s.sp (arm64_reg 16 s) } := by
+  have hne_ret : (0xeb1003ff : UInt32) ≠ 0xd65f03c0 := by native_decide
+  have hne_mov : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_add : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0x8b000000) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_sub : ¬ ((0xeb1003ff : UInt32) &&& 0xffe00000 = 0xcb000000) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_mul : ¬ ((0xeb1003ff : UInt32) &&& 0xffe07c00 = 0x9b007c00) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_neg : ¬ ((0xeb1003ff : UInt32) &&& 0xfffffc1f = 0xcb0003e0) := by
+    intro t; exact absurd t (by native_decide)
+  have hcmp : (0xeb1003ff : UInt32) &&& 0xffe00000 = 0xeb000000 := by native_decide
+  unfold arm64_step
+  rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
+      if_neg hne_mul, if_neg hne_neg, if_pos hcmp]
+  simp
+
+/-- …and `and x0, xzr, x1`, whose `Rn` is the ZERO register and not SP: the
+logical shifted-register forms have no SP encoding at all (measured — clang's
+assembler rejects `mul x3, sp, x1` and `neg x4, sp` for the same reason), so this
+is the case a blanket "31 means SP" change gets wrong. -/
+theorem arm64_step_and_xzr_reads_zero (s : Arm64State) (code : Nat → UInt8)
+    (pc : Nat) (hpc : s.pc = pc)
+    (hread : arm64_read_insn code pc = 0x8a0103e0) :
+    arm64_step s code
+      = some (arm64_set_reg 0 s ((0 : UInt64) &&& arm64_reg 1 s)) := by
+  have hne_ret : (0x8a0103e0 : UInt32) ≠ 0xd65f03c0 := by native_decide
+  have hne_mov : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_add : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x8b000000) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_sub : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0xcb000000) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_mul : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe07c00 = 0x9b007c00) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_neg : ¬ ((0x8a0103e0 : UInt32) &&& 0xfffffc1f = 0xcb0003e0) := by
+    intro t; exact absurd t (by native_decide)
+  have hne_cmp : ¬ ((0x8a0103e0 : UInt32) &&& 0xffe00000 = 0xeb000000) := by
+    intro t; exact absurd t (by native_decide)
+  have hand : (0x8a0103e0 : UInt32) &&& 0xffe00000 = 0x8a000000 := by native_decide
+  unfold arm64_step
+  rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
+      if_neg hne_mul, if_neg hne_neg, if_neg hne_cmp, if_pos hand]
+  -- `arm64_reg 31 s = 0` is the whole claim, and it is a `match` arm, so the
+  -- definition has to be unfolded for simp to see it.  The left-hand side is
+  -- left as the MODEL wrote it and the right-hand side as the ARCHITECTURE
+  -- says it, which is what makes this a pin rather than a restatement.
+  simp [arm64_reg]
 
 /-- Distribute an Option match over an if (used to close eval_eq_mojo). -/
 @[simp] theorem match_if_distrib {α β : Type} (C : Prop) [Decidable C]
@@ -2326,11 +2495,10 @@ def runF (fuel : Nat) (cf : String → UInt64 → UInt64)
 /-- Fuel-bounded function evaluation: source-level semantics including
 while loops.  Agrees with `evalFunc` on programs without whiles. -/
 def evalFuncF (fuel : Nat) (f : MojoFunc) (cf : String → UInt64 → UInt64)
-    (arg : UInt64) : UInt64 :=
+    (args : List UInt64) : UInt64 :=
   match f with
-  | MojoFunc.mk _ param body =>
-    let env := fun name => if name == param then arg else (0 : UInt64)
-    match runF fuel cf body env with
+  | MojoFunc.mk _ params body =>
+    match runF fuel cf body (MojoEnv params args) with
     | some (.ret v) => v
     | _ => 0
 
@@ -3713,7 +3881,7 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0x8b000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3725,7 +3893,7 @@ theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w 
 theorem work_step_sub_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xcb000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3767,7 +3935,7 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xeb000000) :
-    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3837,7 +4005,7 @@ theorem work_step_add_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_add_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0x91000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3878,7 +4046,7 @@ theorem work_step_sub_imm32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xd1000000) :
-    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
+    arm64_step s code = (if ((w &&& 0x1f).toNat) = 31 then some { s with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat) } else some (arm64_set_reg ((w &&& 0x1f).toNat) s ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -3900,7 +4068,7 @@ theorem work_step_sub_imm64 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (
 theorem work_step_cmp_imm (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff800000) = 0xf1000000) :
-    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)) } := by
+    arm64_step s code = some { s with nzcv := arm64_subs_flags (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) (UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4066,7 +4234,7 @@ theorem work_step_adrp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
 theorem work_step_stp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffc00000) = 0xa9800000) :
-    arm64_step s code = some { s with sp := (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)), mem := mem_write_u64 (mem_write_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s)) ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat (arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { s with sp := (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)), mem := mem_write_u64 (mem_write_u64 s.mem (if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)).toNat (arm64_reg ((w &&& 0x1f).toNat) s)) ((if (((w >>> 15) &&& 0x7f).toNat) ≥ 64 then (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((128 - (((w >>> 15) &&& 0x7f).toNat)) * 8) else (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8)) + 8).toNat (arm64_reg (((w >>> 10) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4098,7 +4266,7 @@ theorem work_step_stp (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_ldp_post (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffc00000) = 0xa8c00000) :
-    arm64_step s code = some { (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s).toNat)) (mem_read_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + 8).toNat)) with sp := (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8) } := by
+    arm64_step s code = some { (arm64_set_reg (((w >>> 10) &&& 0x1f).toNat) (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s).toNat)) (mem_read_u64 s.mem ((arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + 8).toNat)) with sp := (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 15) &&& 0x7f).toNat) * 8) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by

@@ -1766,6 +1766,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if isinstance(stmt.target, F.SliceExpr):
                 self._emit_slice_store(stmt.target, stmt.value)
                 return
+            # A STORE through a pointer's pointee, `p.value() = v`, and the
+            # plain-name branch below refuses a `CallExpr` target. The receiver
+            # question is asked first for arm64's reason: a `.value()` whose
+            # receiver this path knows to hold a string is not a pointer at all,
+            # and storing through the text section is a SIGBUS rather than a
+            # value.
+            store_obj = M.pointer_store_receiver(stmt.target)
+            if store_obj is not None:
+                if self._expr_str_kind(store_obj) == M.STR_KIND:
+                    raise CodegenError(M.read_only_text_store_refusal(
+                        _dotted(stmt.target.func), store_obj))
+                self._emit_pointer_store(stmt.target, stmt.value)
+                return
             if isinstance(stmt.target, F.TupleExpr):
                 self._emit_tuple_assign(stmt)
                 return
@@ -3138,6 +3151,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                           else encode_mov_r32_rm32(dst, base))
         else:
             self.asm.emit(encode_mov_r64_rm64(dst, base))
+
+    # ── the pointer value model: a STORE through a dereference ─────────────
+    #
+    # arm64's `_emit_pointer_store` is the same algorithm and the long-form
+    # reasoning; the DECISION is `model.pointer_store_lowering`, shared, so the
+    # two machines cannot disagree about how wide a store is — which for a
+    # store is not a diagnostic that differs but a `movb` on one side and a
+    # `movq` on the other over the same bytes, the second of which corrupts the
+    # seven bytes after a one-byte pointee.
+    #
+    #   ("store", 1, *)  mov [base], src8      88 /r      — UInt8/Byte/Int8
+    #   ("store", 2, *)  mov [base], src16     66 89 /r   — UInt16/Int16
+    #   ("store", 4, *)  mov [base], src32     89 /r      — UInt32/Int32
+    #   ("store", 8, *)  mov [base], src64     REX.W 89 /r — Int64/a pointer
+    #
+    # The value is spilled across the address computation in a 16-byte slot for
+    # the reason `_emit_subscript_store_reg` gives: `_emit_expr` builds an
+    # address in RAX out of RAX, R10 and R11, so a value left in RAX is the
+    # ADDRESS by the time the store is emitted.
+    def _emit_pointer_store(self, target, value) -> None:
+        obj = target.func.obj
+        how, why = M.pointer_store_lowering(
+            self._cur_fn, target, self._structs, self._functions, self._structs)
+        if how is None:
+            raise CodegenError(M.pointer_store_refusal(
+                target.func.member, why
+            ).format(dotted=_dotted(target.func)))
+        _store, width, _signed = how
+        self._emit_expr(value)                    # RAX = value
+        self._push_slot(Reg.RAX)
+        self._emit_expr(obj)                      # RAX = the address
+        self._pop_slot(Reg.R11)                    # R11 = the value
+        if width == 1:
+            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
+        elif width == 2:
+            self.asm.emit(encode_mov_rm16_r16(Reg.RAX, 0, Reg.R11))
+        elif width == 4:
+            self.asm.emit(encode_mov_rm32_r32(Reg.RAX, 0, Reg.R11))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
 
     # ── methods on a string ───────────────────────────────────────────────
     #

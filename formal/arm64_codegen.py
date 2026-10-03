@@ -2006,6 +2006,21 @@ dylib_exports: list = None, globals_base: int = None,
             if isinstance(stmt.target, F.SliceExpr):
                 self._emit_slice_store(stmt.target, stmt.value)
                 return
+            # A STORE through a pointer's pointee, `p.value() = v`. Asked
+            # here rather than left to the plain-name branch below, which
+            # refuses a `CallExpr` target — and the receiver question is asked
+            # FIRST because the read side asks it too: a `.value()` whose
+            # receiver this path knows to hold a string is not a pointer at all
+            # (527 of the corpus's 528 `.value()` sites are an enum, an iterator
+            # or a SIMD), and a store through the text section is a SIGBUS
+            # rather than a value.
+            store_obj = M.pointer_store_receiver(stmt.target)
+            if store_obj is not None:
+                if self._expr_str_kind(store_obj) == M.STR_KIND:
+                    raise CodegenError(M.read_only_text_store_refusal(
+                        _dotted(stmt.target.func), store_obj))
+                self._emit_pointer_store(stmt.target, stmt.value)
+                return
             if isinstance(stmt.target, F.MemberExpr):
                 name = _member_slot_key(stmt.target)
                 if name is None:
@@ -4919,6 +4934,59 @@ ctor_field_value=self._ctor_field_value_for(name),
                           else encode_ldr_wt_wn_imm(0, 0, 0))
         else:
             self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+
+    # ── the pointer value model: a STORE through a dereference ─────────────
+    #
+    # `p.value() = v` is `_emit_dereference`'s mirror, and the WIDTH is
+    # `model.pointer_store_lowering`'s — the same table, the same reader and
+    # the same refusal words as the load, because a store at a width the load
+    # does not use would make one pointee two different sizes on one machine
+    # and disagree with the other machine besides.  The four instructions:
+    #
+    #   ("store", 1, *)  STRB Wt, [Xn]      — UInt8/Byte/Int8/c_char
+    #   ("store", 2, *)  STRH Wt, [Xn]      — UInt16/Int16
+    #   ("store", 4, *)  STR  Wt, [Xn]      — UInt32/Int32/c_int
+    #   ("store", 8, *)  STR  Xt, [Xn]      — Int64/a pointer
+    #
+    # The signedness in the tuple is the pointee's declared signedness and is
+    # not consulted: a store has no result to sign-extend, and the width is what
+    # it truncates to.  Truncation rather than a refusal is the decision, and
+    # `model.py`'s section on it carries the argument — the short form is that
+    # `p[i] = v` over the same pointee has always emitted `strb` on both
+    # backends, so the two spellings of one store must answer alike, and
+    # `*(UInt8 *)p = v` is C.
+    #
+    # The register discipline is `_emit_subscript_store_reg`'s, and it is not
+    # tidiness: the address computation builds its answer in X0 out of X0..X4
+    # and X9, so the VALUE has to be across the stack before the address is
+    # computed or the address is what gets stored.  Measured on the subscript
+    # path: `xs[2] = 9` left a frame pointer at element 2.  The value comes back
+    # into X0 afterwards for the same reason it is put there first — every
+    # `_emit_expr` leaves its answer in X0, and a statement's value is what the
+    # next statement reads.
+    def _emit_pointer_store(self, target: F.CallExpr, value) -> None:
+        obj = target.func.obj
+        how, why = M.pointer_store_lowering(
+            self._cur_fn, target, self._structs, self._functions, self._structs)
+        if how is None:
+            raise CodegenError(M.pointer_store_refusal(
+                target.func.member, why
+            ).format(dotted=_dotted(target.func)))
+        _store, width, _signed = how
+        self._emit_expr(value)                    # X0 = value
+        self.asm.emit(encode_stp_sp_pre(0, 31))   # push the value
+        self._emit_expr(obj)                      # X0 = the address
+        self.asm.emit(encode_mov_zr_xn(9, 0))     # X9 = addr, out of the way
+        self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 0))   # X5 = the value
+        if width == 1:
+            self.asm.emit(encode_strb_wd_wn(5, 9, 0))
+        elif width == 2:
+            self.asm.emit(encode_strh_wt_wn_imm(5, 9, 0))
+        elif width == 4:
+            self.asm.emit(encode_str_wt_wn_imm(5, 9, 0))
+        else:
+            self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
+        self.asm.emit(encode_ldp_sp_post(0, 31))  # pop the value back into X0
 
     # ── methods on a string ───────────────────────────────────────────────
     #

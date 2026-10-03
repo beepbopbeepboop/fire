@@ -315,6 +315,43 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     return bytes([rex, 0x89, modrm]) + extra
 
 
+def encode_mov_rm32_r32(base: Reg, disp: int, src: Reg) -> bytes:
+    """mov [base + disp], src32 — 89 /r with NO REX.W, so four bytes.
+
+    The 4-byte member of the pointer value model's STORE set, and the store
+    counterpart of `encode_mov_r32_rm32`: the pointee widths are 1, 2, 4 and 8,
+    and this backend had encoders for the byte (`encode_mov_rm8_r8`) and the
+    qword (`encode_mov_rm64_r64`) only, so a `Pointer[Int32]`'s store had to be
+    an 8-byte store — which overwrites the four bytes after the pointee, a
+    silent corruption of a `malloc`'d buffer rather than anything that traps.
+
+    No REX.W, and that omission is the whole instruction: with it this is the
+    same opcode as the 8-byte store and writes eight.  A REX prefix is still
+    needed when either register is r8-r15, because that is what extends the
+    register field, and `_rex` emits exactly that.  Verified against clang:
+    `mov %r11d, (%rax)` = `44 89 18`.
+    """
+    modrm, extra = _mem_modrm(base, disp, src)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x89, modrm]) + extra
+
+
+def encode_mov_rm16_r16(base: Reg, disp: int, src: Reg) -> bytes:
+    """mov [base + disp], src16 — 66 89 /r, two bytes.
+
+    The 2-byte member of the same set, and the operand-size prefix `66` is the
+    whole difference from `encode_mov_rm32_r32`: same opcode, same ModRM, two
+    bytes written.  It goes BEFORE the REX prefix, which is the one ordering
+    rule x86-64 has that is easy to get backwards.  Verified against clang:
+    `mov %r11w, (%rax)` = `66 44 89 18`.
+    """
+    modrm, extra = _mem_modrm(base, disp, src)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    return bytes([0x66, rex, 0x89, modrm]) + extra
+
+
 def encode_movabs_r64(reg: Reg, imm: int) -> bytes:
     """`movabs reg, imm64` — load an ABSOLUTE address into a register, 10 bytes.
 

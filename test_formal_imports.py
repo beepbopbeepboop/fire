@@ -48,6 +48,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -782,6 +783,107 @@ def test_a_function_local_import_is_a_dependency(tmpdir, _shared):
           "module-level name of another module, and that sentence sent the "
           "reader to the register allocator for a fact about the import "
           f"graph; it is still there: {text.strip()[-400:]}")
+
+
+# The bound this case asserts, and why it is a bound rather than a stopwatch.
+# Measured 2026-10-03 on this tree: `bindings.mojo` builds (as a REFUSAL, in
+# 3.2 s) on arm64 and on x86-64. Measured 2026-10-02, before the import chain
+# was walked in dependency order: the same build never terminated — five
+# workers' copies of it were found still running, the oldest 1 day 15 hours,
+# each at about 55% of a core, and `tools/control.py guard` had to be given a
+# 120-minute kill for `fire.py build` because of it. So the number here is three
+# orders of magnitude below the failure and 40x below the guard: it is not a
+# performance budget, it is the assertion that the file is CLASSIFIED rather
+# than still converging, and it is here because a build that never terminates is
+# the one outcome the sweep has no verdict for.
+BOUNDED_BUILD_S = 120
+
+
+class _Skip(Exception):
+    """A case that cannot run HERE, reported and counted rather than failed.
+
+    One case needs it and it is this one: the stdlib is a sibling CHECKOUT, so
+    a tree without it has nothing to measure, and failing in that case would
+    make the suite red for a fact about the machine rather than about the
+    compiler.  A skip that is silent is the failure mode CLAUDE.md warns about
+    for an `expect=` marker, so it prints its reason and is counted in the
+    tally — see `main`'s `SKIP  <name>` line.
+    """
+
+
+def _stdlib_dir():
+    """The swept stdlib's root, or None when there is no checkout beside us."""
+    try:
+        from module_loader import STDLIB_PATH
+    except Exception:
+        return None
+    std = os.path.join(STDLIB_PATH, "std") if STDLIB_PATH else None
+    return std if std and os.path.isdir(std) else None
+
+
+def test_a_swept_stdlib_file_is_classified_in_a_bounded_time(tmpdir, _shared):
+    """The largest swept file is a build that TERMINATES, with a verdict.
+
+    `std/python/bindings.mojo` is 1,997 lines and the deepest import closure in
+    the sweep, and it is here because it used to be the one file whose build did
+    not come back at all: five workers' `fire.py build --formal --no-prove`
+    runs against it were found still going, the oldest a day and a half, each
+    burning about 55% of a core, and two `test_formal_math.py combperm` runs
+    were at 9-10 hours beside them. None of those were Lean — every one of them
+    was `--no-prove` — so it was a non-converging pass over the import closure
+    in this tier, and the only instrument that could have said so was the guard
+    that was added afterwards to kill it.
+
+    What is asserted here is the property that makes the sweep able to report
+    the file at all, and it is deliberately NOT "this file is refused": a
+    refusal is today's answer, a build would be a better one, and pinning
+    either would turn a future improvement into a test failure.  The three
+    outcomes that pass are a build that produced an image, a non-zero exit
+    whose message names the file and is not a traceback, and nothing else —
+    a timeout, a kill, or a traceback all fail, and each of those is the state
+    the sweep cannot classify.
+    """
+    stdlib = _stdlib_dir()
+    if stdlib is None:
+        raise _Skip("no stdlib checkout beside this tree, so there is no swept "
+                    "file to build")
+    src = os.path.join(stdlib, "python", "bindings.mojo")
+    check(os.path.isfile(src),
+          f"the stdlib checkout at {stdlib} has no python/bindings.mojo, so "
+          f"this case is not measuring the file it claims to measure")
+    for arch in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"bindings.{arch}.aout")
+        argv = ["build", "--formal", "--no-prove", f"--backend={arch}",
+                "-o", out, src]
+        started = time.monotonic()
+        try:
+            result = run_fire(argv, cwd=HERE)
+        except subprocess.TimeoutExpired:
+            raise TestFailure(
+                f"[{arch}] {src} did not finish within run_fire's own timeout "
+                f"— the non-converging build is back, or is close enough to it "
+                f"that the shared 600 s bound is what stops it") from None
+        took = time.monotonic() - started
+        text = result.stderr or result.stdout or ""
+        check(took <= BOUNDED_BUILD_S,
+              f"[{arch}] {src} took {took:.0f}s, over this case's "
+              f"{BOUNDED_BUILD_S}s bound. It used not to finish at all, and "
+              f"the two hanging commands in the report were one per "
+              f"architecture, so a per-architecture bound is the only one that "
+              f"could have told them apart: a build that takes minutes here is "
+              f"a pass that has started to converge again, and it is worth "
+              f"knowing before it is another day and a half")
+        check("Traceback (most recent call last)" not in text,
+              f"[{arch}] {src} raised rather than being classified: "
+              f"{text.strip()[-600:]}")
+        if result.returncode == 0:
+            check(os.path.isfile(out),
+                  f"[{arch}] {src} exited 0 and wrote no image at {out}")
+            continue
+        check("bindings.mojo" in text,
+              f"[{arch}] {src} was refused without naming itself, so a reader "
+              f"has no way to tell which of its imports the refusal is about: "
+              f"{text.strip()[-400:]}")
 
 
 def test_widening_the_imported_list_widens_nothing_else(tmpdir, _shared):
@@ -2830,6 +2932,8 @@ TESTS = [
      test_every_module_in_this_repository_survives_the_export_probe),
     ("the exclusion table does not change the export set",
      test_the_exclusion_table_does_not_change_the_export_set),
+    ("the largest swept file is classified in a bounded time",
+     test_a_swept_stdlib_file_is_classified_in_a_bounded_time),
 ]
 
 
@@ -2861,7 +2965,7 @@ def main():
               f"{platform.machine()}")
         return 0
 
-    passed = failed = expected = 0
+    passed = failed = expected = skipped = 0
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, fn in TESTS:
             expect = EXPECTED_FAILURES.get(name)
@@ -2872,6 +2976,10 @@ def main():
                 continue
             try:
                 fn(tmpdir, None)
+            except _Skip as e:
+                skipped += 1
+                print(f"  SKIP  {name}\n        {e}")
+                continue
             except TestFailure as e:
                 if expect is not None:
                     expected += 1
@@ -2908,7 +3016,8 @@ def main():
               f"— drop the marker")
         failed += 1
 
-    print(f"\nformal imports: PASS={passed} EXPECTED={expected} FAIL={failed}")
+    print(f"\nformal imports: PASS={passed} EXPECTED={expected} "
+          f"SKIP={skipped} FAIL={failed}")
     return 1 if failed else 0
 
 

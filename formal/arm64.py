@@ -117,6 +117,27 @@ def encode_strb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
     return struct.pack('<I', insn)
 
 
+def encode_str_wt_wn_imm(wt: int, wn: int, imm: int = 0) -> bytes:
+    """STR Wt, [Xn, #imm] — store 32 bits.
+
+    The store counterpart of `encode_ldr_wt_wn_imm`, and it exists because the
+    pointer value model's STORE needs one instruction per pointee width: the set
+    had the byte store (`encode_strb_wd_wn`), the halfword store
+    (`encode_strh_wt_wn_imm`) and the full one (`encode_str_xt_xn_imm`), and the
+    4-byte case had no encoder, so a `Pointer[Int32]`'s store would have had to
+    be either an 8-byte store (which overwrites four bytes the program never
+    wrote — silent corruption of a `malloc`'d buffer) or an 8-byte store
+    truncated afterwards, which is the same store plus a wasted instruction.
+
+    Writing Wt rather than Xt is what keeps the store 32 bits wide; the upper
+    half of Xt is not written, so the four bytes after the pointee are whatever
+    they were.  Verified against `as`: `str w0, [x0]` = 0xb9000000.
+    """
+    assert 0 <= wt <= 30 and 0 <= wn <= 31
+    assert 0 <= imm <= 16380 and imm % 4 == 0
+    return struct.pack('<I', 0xB9000000 | ((imm >> 2) << 10) | (wn << 5) | wt)
+
+
 def encode_br_xn(xn: int) -> bytes:
     """BR Xn. Unconditional branch to register.
     Encoding: 11010110000 11111 000000 00000 Rn

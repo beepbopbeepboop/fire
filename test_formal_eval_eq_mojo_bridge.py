@@ -5,10 +5,18 @@ The arm64 proof of a straight-line, always-returning, loop-free function rests
 on ONE theorem:
 
     theorem eval_eq_mojo (n : UInt64) :
-      evalFunc ast (fun name arg => if name = "f" then mojo arg else 0) n
+      evalFunc ast (fun name arg => if name = "f" then mojo arg else 0) [n]
         = mojo n
 
-proved by splitting on the function's own conditions (`by_cases h0 : <cond>`)
+`evalFunc`'s third argument is the model's ARGUMENT LIST: `MojoFunc.mk` carries
+the source's parameter NAMES and `evalFunc` the model's argument values, and
+the i-th name binds the i-th value (`MojoEnv`, whose two lemmas say so).  It
+was one `UInt64` while the bridge bound one name, which is the whole of
+`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`; the list is what
+makes a two-parameter model's AST faithful, and `_go_apply` still refuses to
+APPLY one because `mojo` itself is one-input.
+
+The bridge is proved by splitting on the function's own conditions (`by_cases h0 : <cond>`)
 and then letting `simp` close the goal.  That only works if the `by_cases`
 hypothesis IS the `if` test in the goal, and for a **signed** comparison there
 are two renderings of it:
@@ -224,6 +232,107 @@ class TestBridgeTypechecks(unittest.TestCase):
             with self.subTest(program=name):
                 self.assertTrue(ok, f"{name}: {detail}")
                 self.assertEqual(n, 0, f"{name}: the proof admits {n} `sorry`")
+
+class TestTheBridgeBindsEveryParameter(unittest.TestCase):
+    """`MojoFunc.mk` carries the source's parameter NAMES, and all of them.
+
+    `MojoFunc.mk` took ONE name and `evalFunc`'s environment answered 0 for
+    every other name, so a two-parameter function's AST was a function whose
+    second parameter was silently 0 — the bridge could not say what a
+    two-parameter model was even if the rest of the apparatus could apply one.
+    Both halves now carry a list, and this pins the emitted VALUE rather than
+    the mechanism: the generated `ast` names every parameter of the source.
+
+    It also pins what is still refused, because the two are the same fact seen
+    from both sides: `_go_apply` still refuses to APPLY a two-parameter model,
+    because `mojo` is one-input (`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`
+    step 5). A test that only checked the list would let someone lift that guard
+    believing the file were done.
+    """
+
+    def test_the_ast_value_names_every_parameter(self):
+        """`_param_list_lean` — the ONE reader both generators use."""
+        import formal.arm64_proof_gen as AP
+
+        class _P:
+            def __init__(self, *names):
+                self.params = [(n, None) for n in names]
+
+        self.assertEqual(AP._param_list_lean(_P("n")), '["n"]')
+        self.assertEqual(AP._param_list_lean(_P("n", "m")), '["n", "m"]')
+        self.assertEqual(AP._param_list_lean(_P("a", "b", "c")),
+                         '["a", "b", "c"]')
+        self.assertEqual(AP._param_list_lean(_P()), "[]")
+
+    def test_the_generated_ast_carries_a_name_list_and_the_sites_pass_one(self):
+        """The emitted TEXT of a one-parameter proof, which is what a reader of
+        a generated file sees.
+
+        `MojoFunc.mk "ifonly" "n"` became `MojoFunc.mk "ifonly" ["n"]`, and every
+        `evalFunc`/`evalFuncF` site now passes the argument LIST. Both are
+        invisible in a `PASS` — a proof that mentions an unknown constructor or
+        passes a `UInt64` where a `List` is expected does not elaborate, which
+        is a build failure the census reports as one, so this is a cheap text
+        check for the class of change that a `native_decide` cannot catch.
+        """
+        tmp = tempfile.mkdtemp(prefix="bridge-params-")
+        try:
+            src = "def oneparam(n):\n    if n > 0:\n        return 1\n    return 0\n"
+            p, err = _generate(tmp, src, "oneparam")
+            self.assertIsNone(err, err)
+            text = _read(p)
+            ast = [ln for ln in text.split("\n") if ln.startswith("def ast :")]
+            self.assertEqual(len(ast), 1,
+                             f"expected exactly one `def ast`, got {ast}")
+            self.assertIn('MojoFunc.mk "oneparam" ["n"]', ast[0],
+                          "the AST does not carry the parameter NAME as a list")
+            # The two statement shapes that carry the argument, spelled out
+            # rather than pattern-matched across lines: the universal theorem's
+            # `n` and one of the numbered `eval_eq_mojo_<v>` tests. The callFunc
+            # between `evalFunc ast` and the argument wraps over three lines,
+            # so a line-oriented check would be checking the wrong line.
+            for want in ("[n] = mojo n",
+                         "[(UInt64.ofNat 0)] = mojo (UInt64.ofNat 0)"):
+                self.assertIn(want, text,
+                              f"no `{want}` in the proof: an `evalFunc` site "
+                              f"still passes a bare argument where the bridge "
+                              f"now takes the model's argument LIST")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_two_parameter_model_is_still_refused_at_the_model_not_the_ast(self):
+        import formal.arm64_proof_gen as AP
+        with self.assertRaises(NotImplementedError) as cm:
+            AP._go_apply("def twoparam_go (a : UInt64) (b : UInt64) : UInt64 :=\n"
+                         "  a + b\n", "twoparam")
+        msg = str(cm.exception)
+        self.assertIn("2 parameters", msg)
+        self.assertIn("one-input", msg)
+        # …and it must NOT blame the AST bridge, which is no longer the
+        # obstacle: a refusal that names a cause that has been fixed sends the
+        # reader to widen something that is already wide.
+        self.assertNotIn("AST bridge binds one parameter", msg,
+                         "the refusal still blames the one-parameter AST "
+                         "bridge, which now carries every parameter NAME")
+
+    def test_prooflib_binds_by_position_and_leaves_an_unbound_name_at_zero(self):
+        """The two library lemmas, named — the bridge's contract in one line each.
+
+        They are `simp` on `MojoEnv`, so this asserts they EXIST rather than
+        proving them: a rename would break the generated proofs' simp sets and
+        this would name the new name instead of the old one.
+        """
+        lib = _read(PROOFLIB)
+        self.assertRegex(lib, r"theorem mojoEnv_binds_by_position",
+                         "lib/ProofLib.lean no longer states that the i-th name "
+                         "binds the i-th value")
+        self.assertRegex(lib, r"theorem mojoEnv_unbound_name_is_zero",
+                         "lib/ProofLib.lean no longer states that a name no "
+                         "argument answers for is 0")
+        self.assertRegex(
+            lib, r"\| mk \(name : String\) \(params : List String\)",
+            "`MojoFunc.mk` does not carry a parameter-NAME list, so the AST "
+            "cannot say what a two-parameter function takes")
 
 
 if __name__ == "__main__":
