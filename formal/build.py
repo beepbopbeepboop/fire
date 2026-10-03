@@ -1509,6 +1509,25 @@ def compile_formal(source_path: str, output: str = None,
         # distinction is the whole gate: a call that is word-shaped but not
         # exported is refused, and one that is exported is not.
         "runtime_calls": list(runtime_calls),
+        # The ADMITTED CONTRACTS this image's link line rests on, and nothing
+        # else about the host.  `formal/admitted.py`'s `Contract`s, one per
+        # `@admitted(...)` reachable through this file's import closure, sorted
+        # by `module.name` so two runs of the same file produce the same line.
+        #
+        # It is in the RESULT rather than printed by this module because this
+        # module prints nothing at all — every diagnostic it raises is an
+        # exception and `fire.py` is what renders one — and because the three
+        # consumers that need it (fire.py's `trust:` line, `tools/formal_sweep.py`'s
+        # class, `test_formal_admitted.py`'s count) each need it in a different
+        # process from each other.  A verdict that is not carrying this cannot
+        # answer "what does this build trust?", which is the question a
+        # built-with-admitted-contracts file raises.
+        #
+        # Computed ALWAYS, not only under `prove`: the sweep builds with
+        # `--no-prove` and still has to classify the file, and a trust report
+        # that appeared only when proofs were on would make the sweep's class and
+        # the build's line disagree for the same file.
+        "admitted": _admitted_summary(source_path),
     }
 
     if prove:
@@ -1516,13 +1535,24 @@ def compile_formal(source_path: str, output: str = None,
         # constructs a Program. fire has no ExternFunction nodes on this
         # path — pass [] and let _gen_extern_test's `ret_type_of.get`
         # default handle any recorded extern_calls.
+        #
+        # `admitted` is the third thing read off it, and it is what puts this
+        # file's claims of trust into the generated Lean as countable `sorry`s.
+        # It is the SAME list the result dict publishes and `fire.py` prints as
+        # its `trust:` line, computed once above, so the proof and the verdict
+        # cannot describe different admissions — which is the failure that would
+        # make the count meaningless: a proof with six holes and a `trust:` line
+        # naming three, or the reverse.
         if arch == "x86_64":
             from formal.x86_64_proof_gen import generate_x86_64_proof
             generate_proof = generate_x86_64_proof
         else:
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
-        prog = SimpleNamespace(functions=ordered, externs=[])
+        prog = SimpleNamespace(functions=ordered, externs=[],
+                               admitted=result["admitted"],
+                               admitted_calls=_admitted_calls(
+                                   source_path, result["admitted"]))
         proof = generate_proof(prog, code, info)
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
@@ -1543,6 +1573,96 @@ def compile_formal(source_path: str, output: str = None,
                 raise FormalBuildError(f"proof check failed: {detail}")
 
     return result
+
+
+def _admitted_summary(source_path: str) -> list:
+    """The admitted contracts `source_path`'s closure rests on, as plain dicts.
+
+    A list of `{name, assumes, lean_name, source, line}` rather than the
+    `formal/admitted.py` `Contract` objects themselves, and the reason is the
+    PROCESS this value is read in.  The sweep's classifier is a separate process
+    from the build that produced the verdict it is caching, and it reads this
+    out of a `pickle`-free `.result` blob written by an earlier run; an object
+    whose class lives in a module that later changes its `__slots__` would fail
+    to unpickle or, worse, come back with fields missing.  Dicts are what the
+    consumers actually need — `name` for the `trust:` line, `assumes` for the
+    sweep's class reason, `lean_name` and the location for the generated Lean —
+    and `Contract.__init__`'s signature is the one place they are built from, so
+    the two shapes are one declaration rather than two.
+
+    Never raises.  This is called while assembling a verdict for a build that
+    SUCCEEDED, and turning a bookkeeping failure into a build failure would mean
+    a sweep cannot classify a file because a note about it could not be written.
+    A failure here returns `[]` and says so in the value: `error` is set, the
+    list is empty, and the `trust:` line prints the error instead of claiming
+    the file trusts nothing — which is the claim that would be false and the one
+    nobody would check.
+    """
+    try:
+        from formal import imports as _imports
+        contracts = _imports.admitted_contracts(source_path)
+    except Exception as e:  # noqa: BLE001 — a verdict must still be returned
+        return [{"name": "(unreadable)", "assumes": "", "lean_name": "",
+                 "source": source_path, "line": 0,
+                 "error": f"{type(e).__name__}: {e}"}]
+    return [{"name": c.qualified, "assumes": c.assumes,
+             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+            for c in contracts]
+
+
+def _admitted_calls(source_path: str, admitted: list) -> dict:
+    """`{the spelling a call site uses: the contract's Lean name}`.
+
+    The map the SOURCE model uses when a call's value comes from an admitted
+    contract, so that the contract is the thing being trusted rather than a
+    declaration nothing reads.  Without it `formal/arm64_proof_gen.py`'s
+    `_call_go` refuses any call it has no `<fn>_go` for, and a file importing
+    `subprocess` gets no proof at all — which leaves the emitted `sorry`s
+    describing admissions no theorem in the file actually rests on.
+
+    Three spellings, because the source has three, and each is what
+    `formal/arm64_proof_gen.py`'s `_call_name` produces:
+
+      * `import subprocess` … `subprocess.run(…)`   → key `subprocess.run`
+      * `import subprocess as sp` … `sp.run(…)`     → key `sp.run`
+      * `from subprocess import run` … `run(…)`     → key `run`
+
+    All three come out of `formal/imports.py`'s `import_bindings`, which is the
+    reader the BUILD already uses to bind a call to a callee's declaration, so
+    this cannot bind a name to a different contract than the one the call
+    actually calls.  The qualified spelling is added as a key as well, because
+    `import_bindings` reports `sp -> ('subprocess','subprocess')` — the module,
+    not the member — for `import subprocess as sp`, and the member is only known
+    from the call site.
+
+    Every admitted contract in the closure gets its qualified name as a key even
+    when this file imports nothing that binds it.  That is the same deliberate
+    over-report `formal/imports.py`'s `admitted_contracts` states: a key that is
+    present and unused costs one dictionary entry, and a key that is MISSING for
+    a call the source really makes turns a proof into a refusal with a message
+    that names an extern instead of the contract that would have covered it.
+    """
+    out = {}
+    for c in admitted or []:
+        name = c.get("name") or ""
+        if not name or name.startswith("("):
+            continue                    # the unreadable-closure placeholder
+        out[name] = c.get("lean_name") or ""
+        if "." in name:
+            out[name.split(".")[-1]] = c.get("lean_name") or ""
+    try:
+        from formal import imports as _imports
+        from formal.build import parse_module as _parse
+        with open(source_path) as f:
+            stmts = _parse(f.read(), filename=source_path)
+        for local, (module, defining) in _imports.import_bindings(stmts).items():
+            for key in (f"{module}.{defining}", defining):
+                if key in out:
+                    out[local] = out[key]
+                    break
+    except Exception:  # noqa: BLE001 — an unreadable file gets the qualified
+        pass                             # keys only, which is the safe direction
+    return out
 
 
 def _formal_module_functions(source_path: str, link_dylibs: list = None,
@@ -12472,6 +12592,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         "info": info,
         "exports": exports,
         "backend": f"{arch}/macho-dylib",
+        # Same field, same meaning, same shape as the program path's: a module
+        # dylib whose source declares `@admitted` contracts is the library half
+        # of an admission — this is where `subprocess.run`'s body actually lands
+        # — so a `dylib --formal` verdict that omitted it would report a library
+        # carrying six admitted contracts as trusting nothing at all.
+        "admitted": _admitted_summary(source_paths[0]),
     }
 
     if prove:

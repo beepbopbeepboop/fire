@@ -427,6 +427,18 @@ def _imports_digest(path: str) -> str:
 # under a class the current rules would not assign it, because the current
 # rules are what assign it.
 CLASS_PASS = "pass"
+# BUILT, and it rests on ADMITTED HOST CONTRACTS.  A separate class from
+# `pass` because a `pass` is a claim this backend can make on its own -- the
+# image built and every symbol it binds is on its own link line -- and a file
+# that also needed a second process, a thread or a dynamic loader has not had
+# that claim made for it.  Counting it as a `pass` would make the headline rate
+# a measure of how much the sweep was willing to believe.
+#
+# It IS in ANSWERABLE, deliberately: the backend got to look at the file's
+# constructs and answered them.  What it is NOT is in the numerator, so the
+# rate can only go DOWN as more of the tree is admitted against, which is the
+# direction a rate about provability has to move in.
+CLASS_ADMITTED = "built-with-admitted-contracts"
 CLASS_CODEGEN = "codegen"
 CLASS_CODEGEN_DEP = "codegen/dependency"
 CLASS_HOST = "not-answerable/host-import"
@@ -440,9 +452,9 @@ CLASS_UNKNOWN = "unknown"
 
 # Report order: the findings first, then the reasons there is none, then the
 # buckets that mean the tool itself did not finish the job.
-CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
-               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_SYSCALL,
-               CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
+CLASS_ORDER = (CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN, CLASS_CODEGEN_DEP,
+               CLASS_HOST, CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET,
+               CLASS_SYSCALL, CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
 # ANSWERABLE = the classes in which the backend got to look at the file's
 # constructs and returned a verdict about them. `codegen/dependency` is in it
 # deliberately (see the position taken in the module docstring): a file whose
@@ -453,7 +465,8 @@ CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
 # the construct it was looking at, and letting it into the denominator would
 # report a compiler bug as a coverage gap (B4's 74-file sweep, in which every
 # one was a mid-edit artefact of another agent's work).
-ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP))
+ANSWERABLE = frozenset((CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN,
+                        CLASS_CODEGEN_DEP))
 # Classes that make the run exit non-zero. A codegen finding (in this file or
 # in a dependency it needs) is real; CLASS_CRASH is real too and is counted and
 # printed like any other finding, because a crash that is allowed to pass
@@ -882,6 +895,24 @@ def _in_reach_from_authority() -> frozenset:
 IN_REACH_HOST_MODULES = _in_reach_from_authority()
 
 
+def _admitted_host_modules() -> frozenset:
+    """Every host module that ANSWERS under a declared contract.
+
+    A third bucket, read from `formal/imports.py`'s own `host_module_tier`, and
+    separate because the two existing ones could not describe these: `subprocess`
+    is not a gap with an owner (it has a model) and it is not unreachable (it
+    builds), so a two-way split called it one or the other and both were false.
+    The reach line below reads it so a file that moved out of `host-import`
+    because its host module now answers is not silently missing from the report.
+    """
+    try:
+        from formal import imports as I
+        return frozenset(n for n in I.HOST_MODULES
+                         if I.host_module_tier(n) == 'admitted')
+    except Exception:
+        return frozenset()
+
+
 def _host_tiers() -> tuple:
     """(in_reach, unreachable, where) — the split, and which file said so.
 
@@ -897,8 +928,15 @@ def _host_tiers() -> tuple:
         return set(), set(), None
     try:
         from formal import imports as I
-        unreachable = frozenset(n for n in I.HOST_MODULES
-                                if I.host_module_tier(n) == 'unreachable')
+        unreachable = frozenset(
+            n for n in I.HOST_MODULES
+            if I.host_module_tier(n) == 'unreachable'
+            # An ADMITTED module is not unreachable: it has a model and it
+            # builds.  Counting it here would put it in the "permanent fact about
+            # the target" bucket of the reach line, which is the claim that made
+            # the sweep's largest bucket look unfixable, and it would be false of
+            # every one of the five.
+            and I.host_module_tier(n) != 'admitted')
     except Exception:
         unreachable = frozenset()
     return set(in_reach), set(unreachable), "formal/imports.py"
@@ -1186,6 +1224,57 @@ def _crash_cause(err: str):
             else CAUSE_DRIVER_CRASH)
 
 
+def _admitted_reason(path):
+    """Why this file is `built-with-admitted-contracts`, or '' if it is not.
+
+    The contracts are the BUILD's, read through the build's own walk:
+    `formal/imports.py`'s `admitted_contracts`, which is the same function
+    `formal/build.py` calls to fill `result["admitted"]` and the same one
+    `fire.py`'s `trust:` line renders.  Reading them here rather than computing a
+    second answer is the whole reason the three agree: a classifier that walked the
+    closure a second time could classify a file as trusting nothing while the
+    build's own line named six contracts, and the sweep is the one a reader would
+    believe over the build.
+
+    THE REASON WHY THE TRUST BOUNDARY IS A CLASS AT ALL, and not a note on the
+    `pass` line: a `pass` is this tool's claim that the image built and every
+    symbol it binds is on its own link line.  A file that also asked a second
+    process to answer a question has not had that claim made for it, and the
+    report's job is to say which of its rows rest on what.  The alternative --
+    folding these into `pass` and mentioning the contracts in prose -- is exactly
+    how a file that cannot be proved at all becomes indistinguishable from one
+    that can, which is the confusion `FORMAL_known_limits.md` records as "a false
+    PASS, the worst outcome this project has".
+
+    NOT CACHED with the verdict, and that is deliberate in the same direction.
+    `run_one`'s `.result` blob records `(ok, detail)` and `classify` re-derives
+    the class on every run INCLUDING a cache hit -- the rules are applied after
+    the cache, never inside it (the comment above `CLASS_PASS` says why).  So a
+    verdict recorded before this class existed is still classified correctly the
+    first time it is read, with no key change and no re-run.
+
+    A failure to walk is NOT a pass.  It returns '' and the caller falls through to
+    `CLASS_PASS`, which is the wrong answer, and it is the wrong answer the tool
+    already makes elsewhere when it cannot read a file (`CAUSE_UNREADABLE`).
+    Reading the build's OWN answer is what avoids that: a build that succeeded
+    published its `trust:` line, and this re-derivation can only disagree with it
+    if `formal/imports.py` changed, in which case `cas.formal_fingerprint()` has
+    moved and every `.result` is a miss anyway.
+    """
+    if not path:
+        return ''
+    try:
+        from formal import imports as I
+        contracts = I.admitted_contracts(path)
+    except Exception:                            # noqa: BLE001
+        return ''
+    if not contracts:
+        return ''
+    mods = sorted({c.module for c in contracts})
+    return (f"{len(contracts)} admitted host contract(s) from "
+            f"{', '.join(mods)}")
+
+
 def classify(ok: bool, detail: str, cause=None, source=None,
              path=None) -> tuple:
     """(class, reason) for one build outcome. Message matching is pure; the
@@ -1222,6 +1311,9 @@ def classify(ok: bool, detail: str, cause=None, source=None,
         dropping them from every rate is what made 204 files invisible.
     """
     if ok:
+        admitted = _admitted_reason(path)
+        if admitted:
+            return CLASS_ADMITTED, admitted
         return CLASS_PASS, ""
     if cause == CAUSE_BACKEND_CRASH:
         # Not `codegen`, and the difference is not cosmetic. A refusal is a
@@ -2556,6 +2648,12 @@ CLASS_BLURB = {
                 "loading that library where this host can, and by reading its "
                 "export trie (what dyld resolves against) where it cannot; the "
                 "summary below counts the ones read rather than loaded",
+    CLASS_ADMITTED: "built, and it ALSO rests on declared assumptions about a "
+                    "host this image does not have -- a second process, a "
+                    "thread, a dynamic loader for foreign code -- each named in "
+                    "its own `trust:` line and counted as a `sorry` in its "
+                    "proof. In the denominator, NOT in the numerator: a pass is a "
+                    "claim this backend made on its own",
     CLASS_CODEGEN: "THE FINDING: the backend refused a construct IN THIS FILE",
     CLASS_CODEGEN_DEP: "the backend refused a construct in a module this file "
                        "imports, so this file did not build either — a failure "
@@ -2642,8 +2740,14 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                                 CAUSE_TOOL_ERROR)
                 results[path] = v
                 if v.cls != CLASS_PASS:
-                    print(f"{v.cls.upper()}: {rel(path)}  ({v.detail})",
-                          flush=True)
+                    # `v.detail or v.reason`, because a class whose diagnosis is
+                    # not a build MESSAGE has an empty detail: `built-with-
+                    # admitted-contracts` is decided from the file's import
+                    # closure rather than from anything the build said, so
+                    # printing only the detail would print a line with nothing
+                    # in it for every admitted file.
+                    print(f"{v.cls.upper()}: {rel(path)}  "
+                          f"({v.detail or v.reason})", flush=True)
                 if stop.is_set():
                     return True
     finally:
@@ -2925,9 +3029,10 @@ def main():
             rows.append((rel(path), v.cls, v.reason, v.detail))
     total = len(files)
     passed = counts[CLASS_PASS]
+    admitted = counts[CLASS_ADMITTED]
     codegen = counts[CLASS_CODEGEN]
     codegen_dep = counts[CLASS_CODEGEN_DEP]
-    answerable = passed + codegen + codegen_dep
+    answerable = passed + admitted + codegen + codegen_dep
 
     # Every file that did not pass was already printed, one line each under its
     # class, by _stream_results as it was classified — so this block only
@@ -3000,6 +3105,20 @@ def main():
         if reach_files:
             print(f"    in reach, and therefore WORK rather than a permanent "
                   f"fact: {', '.join(reach_files)}")
+        admitted_mods = sorted(_admitted_host_modules())
+        if admitted_mods:
+            # Named here because the OTHER two halves of this line went quiet
+            # when these five modules got models: a file that used to be reported
+            # here stopped being reported anywhere, and a reader comparing two
+            # runs would see the bucket shrink with nothing to say where the
+            # files went.  They are not in `host-import` (they are not refused)
+            # and they are not in `in reach` (nothing is left to write), so this
+            # line is the only place their absence is explained.
+            print(f"    neither, and not in this count at all: "
+                  f"{', '.join(admitted_mods)} now have a formal/hostmods model "
+                  f"and answer under DECLARED CONTRACTS -- files importing them "
+                  f"are no longer refused, and a file that builds on one is "
+                  f"counted as `{CLASS_ADMITTED}`, never as a pass")
         # The two names that used to be hardcoded here, and why neither is any
         # more: they were a standing editorial claim that `os` and `sys` were
         # "most of it", which is a statement about the WORK and goes stale the
@@ -3098,12 +3217,24 @@ def main():
         print("codegen coverage: no file could be answered by this backend")
     print(f"  denominator: the {answerable} swept file(s) whose build could "
           f"have answered")
-    print(f"  ({passed} pass + {codegen} codegen + {codegen_dep} "
+    print(f"  ({passed} pass + {admitted} built-with-admitted-contracts + "
+          f"{codegen} codegen + {codegen_dep} "
           f"codegen/dependency = {answerable}), i.e. every "
           f"swept file EXCEPT the {una} in a not-answerable or tool class "
           f"[{una_parts}].")
     print("  A not-answerable file is a fact about the target, not a gap in "
           "the backend, so it neither raises nor lowers this number.")
+    if admitted:
+        # The line that makes the class cost something.  Without it the headline
+        # would read as though admitting trust were free, and it is not: these
+        # files are in the denominator and not in the numerator, so every one of
+        # them LOWERS the rate rather than raising it.
+        print(f"  {admitted} of those {answerable} BUILT but rest on declared "
+              f"assumptions about a host this image does not have, so they are "
+              f"counted here and NOT as passes. Each file's `trust:` line names "
+              f"them and each is a `sorry` in its proof; a file that builds with "
+              f"no such admission is a `pass` and a file that does not build at "
+              f"all is not in this denominator either.")
 
     # CAS accounting, complete: every input file lands in exactly one bucket.
     hits, misses = cas.stats["hits"], cas.stats["misses"]
