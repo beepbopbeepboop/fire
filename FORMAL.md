@@ -1077,9 +1077,9 @@ here checks in seconds to minutes, so those were non-terminating elaborations,
 and nothing would have stopped them: the launch sites that had a bound at all
 had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
 and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
-reduction, and `simp`'s congruence recursion — see
-`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`, where three
-separate budgets are measured failing to fire).
+reduction, and `simp`'s congruence recursion — three separate budgets measured
+FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
+in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 
 | what | bound | why that size |
 |---|---|---|
@@ -1100,22 +1100,58 @@ and the hole census for a killed elaboration is `None` — UNMEASURED — rather
 `0`. Re-measure any of the numbers above with `FORMAL_LEAN_TRACE=1`, which makes
 the launcher print wall/CPU/peak for every run it makes.
 
-**What is still switched off, and how to switch it back on.** On master
-(`3b9bb56e`, after this branch was cut) the eight gate tests that typecheck
-generated Lean are `disabled=` in `tools/suite.py` against
-`bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`, which says plainly
-that `formal7-lean-bound` owns the fix and that the doc is the switch: deleting
-it re-enables the tests, and `tools/suite.py` refuses to load the registry while
-a disabled test's doc is gone. The bound now exists, so the remaining step is
-mechanical and is **not** done here — `tools/suite.py` is a shared file and the
-one marker that needs a decision rather than an edit is `formal-dylib`, whose
-`default path emits a checked proof` case is the dylib contract whose
-`bv_decide` does not terminate and will now report the breach rather than a
-pass. To close it: drop the `disabled=` marker from `formal`,
+**What was switched off, and what switched it back on.** From `3b9bb56e` to
+`7d0ac990` the eight gate tests that typecheck generated Lean — `formal`,
 `formal-call-proofgen`, `formal-dylib`, `formal-imports`, `formal-sweep`,
-`formal-x86`, `formal-x86-endtoend`, `formal-x86-model`, and `git rm` the doc
-**in the same commit**. Measured per-unit costs for sizing that decision, all on
-an idle box with `FORMAL_LEAN_TRACE=1`:
+`formal-x86`, `formal-x86-endtoend`, `formal-x86-model` — were `disabled=` in
+`tools/suite.py` against
+`bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`, which said plainly
+that `formal7-lean-bound` owned the fix and that the doc was the switch: deleting
+it re-enabled the tests, and `tools/suite.py` refused to load the registry while
+a disabled test's doc was gone.
+
+Both halves are now in, and the doc is deleted:
+
+1. the launcher, above — `formal/lean.py::run_lean`, one bounded path for every
+   Lean run in the tree, sized from the measured slowest legitimate proof;
+2. the looping obligation, which was the per-export dylib contract in
+   `formal/arm64_proof_gen.py::_dylib_contract_proof`. It emitted the runner's
+   own pc bump as a **fourteen-fold nest** of `if <pc of the whole composed
+   state> = <pc of the whole composed state> then .. else ..`, and `bv_decide`'s
+   internal normalisation of that nest is what does not terminate — a case split
+   per level, in a `simp` the emitted file has no way to configure, with
+   `maxHeartbeats`, `maxSteps` and `maxRecDepth` all measured failing to fire.
+
+   The emitter already knows statically which steps move the pc — `_step_rhs`
+   writes the `pc` field exactly when the instruction does — so it emits the
+   `if` **resolved** for every one of them, which is the same function, because
+   `(st_i s).pc = s.pc` holds by `rfl` for a step whose effect is a record
+   update on `sp`. One `if` survives, at the closing `ret`, where `BlockCert`
+   quantifies over every state at the entry and the answer is genuinely
+   data-dependent; it never reaches `bv_decide` (`arm64_reg_pc` projects a
+   register read through both branches) and is decided for the start state by
+   `ret_ne`. Measured on the generated proof of `def triple(n): return n * 3`:
+   **9.0 s wall / 14.4 s CPU / 1.63 GB peak, rc 0, 0 holes**, against "did not
+   finish" (177.1 s CPU in 79.9 s wall before `RLIMIT_CPU` fired; and 79.7 s
+   wall / 296 s CPU even with `bv_decide` replaced by `sorry`, because
+   `noEarly`'s fifteen `simp only [S15…, st0…]` blocks were a second cost
+   centre — they are now one `omega` per step off a per-step `pc` lemma).
+
+   **What that fix was NOT.** The contract had never been checked, and checking
+   it found that it was wrong: `st_i` composed *itself* while `S_{i+1}` feeds it
+   the running state, so every step ran once per earlier step again and the
+   composed effect of `triple` was `n * 243` where the machine computes `n * 3`
+   — a `sorry` over a false claim, which is what §`OPUS-9` below is about. Also
+   wrong and also never elaborated: `body.step` was one step short of the block
+   it certifies, the `BlockCert` was an `instance` of a `structure … : Prop`
+   that is not a class, `runsTo0` was used but never emitted, and `noEarly`
+   split its `u` with `interval_cases`, a Mathlib tactic this toolchain does not
+   have. `test_formal_dylib.py`'s `a wrong spec is rejected, not believed` is
+   what keeps any of that from coming back: a proof that merely elaborates says
+   nothing, and `n * 243` elaborated.
+
+The per-unit costs behind the bound, all on an idle box with
+`FORMAL_LEAN_TRACE=1`:
 
 * `prooflib` — 112 s wall, 7.82 GB peak on a cold CAS, and **0.3 s** on a warm
   one (five CAS hits).
@@ -1123,7 +1159,9 @@ an idle box with `FORMAL_LEAN_TRACE=1`:
   eleven of the 45 `formal/examples/*.mojo` measured, the largest by SIZE are not
   the slowest (`wide_recv` is 703 KB and 93.4 s; `udivmod` is 437 KB and
   297.8 s), so size is not a usable proxy.
-* `formal-x86-endtoend` and `formal-x86-model` — **not measured**; their Lean
-  runs are `formal/x86_64_endtoend_test.py`'s and
-  `formal/x86_64_model_coverage_test.py`'s, now bounded at
-  `PROOF_WALL_S`/3600 s respectively.
+* `formal-x86-endtoend` and `formal-x86-model` — **still not measured**, and
+  named as such rather than left to be discovered: their Lean runs are
+  `formal/x86_64_endtoend_test.py`'s and
+  `formal/x86_64_model_coverage_test.py`'s, bounded at `PROOF_WALL_S`/3600 s.
+  One `make gate` replaces that sentence with a number, the same way it replaces
+  `prooflib`'s `module` class.
