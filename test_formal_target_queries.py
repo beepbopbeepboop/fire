@@ -273,6 +273,39 @@ EXECUTED = [
      "def main() -> Int32:\n"
      "    return g(20)\n",
      20 + HOST_POINTER_BITS),
+    # ── the CLASS-LEVEL position, and it is two positions ──
+    #
+    # `var w: Int = <query>` is a node in the struct's `fields`, and
+    # `comptime W = <query>` is not in the tree at all — `collect_module_symbols`
+    # parks it in a dict on the struct and `struct_class_constants` reads it back
+    # out. Both were refused before 2026-10-03 by a sentence about the wrong
+    # thing ("this path has no module-global storage to read it back out of"),
+    # which is false of a value that is one 64-bit literal. Two cases because
+    # they are two mechanisms: a fold that handled the one in the tree and not
+    # the one in the dict would pass one of these and fail the other, and the
+    # dict is the half the STDLIB writes (`_PLUGIN_COUNT`, `FPUtils.integral_type`,
+    # `_Null._mlir_type` are all `comptime` class attributes).
+    #
+    # `pointer_width`, so the expected value is the host's, measured above, and
+    # NOT a literal this file could have got wrong in the same direction as the
+    # implementation.
+    ("a_query_as_a_struct_fields_initializer_is_answered",
+     "struct S:\n"
+     "    var w: Int = " + query("pointer_width", "index", "index", "    ") + "\n"
+     "\n"
+     "def main() -> Int32:\n"
+     "    var s = S()\n"
+     '    printf("w=%d", s.w)\n'
+     "    return 0\n",
+     "w=%d" % HOST_POINTER_BITS),
+    ("a_query_as_a_comptime_class_attribute_is_answered",
+     "struct S:\n"
+     "    comptime W = " + query("pointer_width", "index", "index", "    ") + "\n"
+     "\n"
+     "def main() -> Int32:\n"
+     '    printf("w=%d", S.W)\n'
+     "    return 0\n",
+     "w=%d" % HOST_POINTER_BITS),
 ]
 
 # (name, source, needle) — every one must be REFUSED, and identically on both
@@ -375,6 +408,40 @@ REFUSED = [
      "    return n + f()\n"
      "def main() -> Int32:\n"
      "    return g(20)\n",
+     "has no 'triple' for this build to state"),
+    # ── the CLASS-LEVEL position: a query as a struct field's initializer ──
+    #
+    # The fourth position, and the one with the most room to be wrong about,
+    # because there are TWO of it and they are stored in two different places:
+    # `var w: Int = <query>` is a node in the struct's `fields`, and
+    # `comptime W = <query>` is not in the tree at all — `collect_module_symbols`
+    # parks it in a dict on the struct and `struct_class_constants` reads it back
+    # out. Before 2026-10-03 both were refused by a sentence about the wrong
+    # thing: "a class-level constant's value is written in the class body, and
+    # this path has no module-global storage to read it back out of", which is
+    # false of a value that is one 64-bit literal the evaluator hands over. Both
+    # now go through the same fold as every other position
+    # (`formal/build.py`'s `_fold_a_class_level_default`), so both are answered.
+    #
+    # The refusal half is what keeps that honest, and it is the same shape as
+    # every other position's: an UNANSWERABLE query in this position is refused
+    # with the evaluator's own sentence naming the missing fact (`triple`), not
+    # with the "no module-global storage" one. A fold that substituted a zero
+    # would have passed the two executed cases and failed nothing else.
+    ("an_unanswerable_query_in_a_class_level_initializer_is_refused",
+     "struct S:\n"
+     "    var w: Int = " + query("triple", "!kgen.string", "!kgen.string") + "\n"
+     "def main() -> Int32:\n"
+     "    var s = S()\n"
+     '    printf("w=%d", s.w)\n'
+     "    return 0\n",
+     "has no 'triple' for this build to state"),
+    ("an_unanswerable_query_in_a_comptime_class_attribute_is_refused",
+     "struct S:\n"
+     "    comptime W = " + query("triple", "!kgen.string", "!kgen.string") + "\n"
+     "def main() -> Int32:\n"
+     '    printf("w=%d", S.W)\n'
+     "    return 0\n",
      "has no 'triple' for this build to state"),
 ]
 

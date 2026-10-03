@@ -7793,6 +7793,53 @@ def _enum_member_refusal(struct_def, name: str, accessor: str, default):
             f"is the constant's spelling, not its value.")
 
 
+def _fold_a_class_level_default(struct_def, default, count: list) -> bool:
+    """Fold a target query in one class-level initializer, IN PLACE. True if it did.
+
+    In place, and by IDENTITY, because that is the only way the read sees it:
+    `model.struct_class_constants` hands out the very node object holding the
+    value, so a replacement has to go back into THAT slot or the next read of the
+    same constant re-derives the query and the fold is invisible. One walk to
+    find the holder, and it is the rare case by construction: this runs only
+    where the value is not already a literal.
+
+    The two return shapes of `_fold_target_queries_in` are both handled, and the
+    difference matters: a template at the TOP of the initializer comes back as a
+    replacement node and the original is untouched, while one NESTED inside it
+    (a call's keyword argument, say) is mutated in place and comes back as None.
+    Asking the walker for the node and then not writing it back is the silent
+    no-op this function exists to not be.
+
+    The walk is over the WHOLE `StructDef` and not over a `body`: there is no
+    `body` — a struct holds `fields` and `methods`, and a class-level constant
+    lives in the former — so a walk of `getattr(struct_def, "body", None)` finds
+    no holder, returns False, and the fold looks like it ran and did nothing.
+    Only a node whose `value` IS the node the caller holds is written, so the
+    method bodies the walk also passes through are not touched.
+
+    **`comptime_aliases` is asked FIRST and it is not a formality.** A `comptime`
+    class attribute's value is not in the tree at all: `collect_module_symbols`
+    parks it in a dict on the struct, and `struct_class_constants` reads it back
+    out of there, so the identity the caller holds belongs to that dict and not
+    to any node. Walking for it finds nothing, and the same silent no-op comes
+    back — for `comptime W = __mlir_attr[…]` where `W` is exactly the shape the
+    stdlib writes (`_PLUGIN_COUNT`, `integral_type`, `_Null._mlir_type`).
+    """
+    repl = _fold_target_queries_in(default, count)
+    if repl is None:
+        return False
+    for key, value in list((getattr(struct_def, "comptime_aliases", None)
+                            or {}).items()):
+        if value is default:
+            struct_def.comptime_aliases[key] = repl
+            return True
+    for node in M.iter_nodes(struct_def):
+        if getattr(node, "value", None) is default:
+            node.value = repl
+            return True
+    return False
+
+
 def _constant_literal(struct_def, name: str):
     """`(literal node or None, the initializer)` for a read of the constant `name`.
 
@@ -10216,6 +10263,34 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 raise CodegenError(_overridden_comptime_refusal(
                     st, node.member, f"{node.obj.name}.{node.member}"))
             literal, default = _constant_literal(st, node.member)
+            if literal is None and default is not None:
+                # A target QUERY in the class-level initializer, asked of the
+                # evaluator before the value is called unrepresentable. The fold
+                # is the same one every other position goes through
+                # (`_fold_target_queries_in`, i.e. `model.fold_target_template`
+                # and nothing else), so a query that IS answerable becomes the
+                # same literal it becomes everywhere else, and the read below
+                # substitutes it like any other class-level constant — which is
+                # measured to work on both architectures.
+                #
+                # Asked HERE rather than by adding the class body to
+                # `_fold_target_queries`'s input because of ORDER, and the order
+                # is load-bearing in the other direction: `_rewrite_class_constants`
+                # runs BEFORE `_fold_target_queries` (that call site says the fold
+                # is last on purpose), so this read is the first thing to see the
+                # initializer at all. Before this, a query in this position was
+                # refused by the sentence below — "a class-level constant's value
+                # is written in the class body, and this path has no module-global
+                # storage to read it back out of" — which is FALSE of it: the
+                # value is a 64-bit literal the evaluator hands over, and the
+                # program below builds and answers on arm64 and on x86-64. That is
+                # the same defect the default-parameter-value position had
+                # (`bugs/FORMAL_target_query_evaluator.md` §4): one position
+                # falling through to a DIFFERENT rule, so the diagnostic a reader
+                # got depended on where in the source they wrote the query.
+                folded = [0]
+                if _fold_a_class_level_default(st, default, folded):
+                    literal, default = _constant_literal(st, node.member)
             if literal is None:
                 spelling = f"{node.obj.name}.{node.member}"
                 declared = (f"a `comptime` class attribute" if kind == "comptime"

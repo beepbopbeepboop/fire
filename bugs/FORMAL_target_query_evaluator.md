@@ -19,6 +19,16 @@ parameter value) is FIXED and LANDED — see §4. Nothing else here moved:
 `std/sys/info.mojo` still does not build, for the two permanent refusals Blocker
 1 names, so the file stands for the residue and only §4 is closed.**
 
+**Updated 2026-10-03 (`work/formal10-6`): there was a SECOND gap of exactly §4's
+shape, and it is FIXED and LANDED — see §5. A query in a struct field's
+class-level initializer met none of the three walks, and it is two positions
+rather than one (a `comptime` class attribute is not even in the tree), so both
+were refused by a sentence about the wrong thing. Measured population: zero in
+the stdlib, as §4's was — the value is in what the evaluator now answers wherever
+the language lets a query be written, not in a coverage number. The residue is
+unchanged and is still the residue: Blocker 1's two permanent refusals and the
+`-mcpu=` feature of item 4.**
+
 The one-line answer: the target-query evaluator is not the next blocker. Two
 other constructs are, in this order, and each is outside the claim that landed
 the evaluator.
@@ -327,3 +337,58 @@ default that holds no query.
 permanent refusals in `std/sys/info.mojo` (the `!kgen.target` type binding, and
 `target_has_feature`), so the 37-file family still does not build. See §1 and
 "The order that would actually move files" above.
+
+## §5 — the second gap of §4's shape: a query in a CLASS-LEVEL initializer (closed 2026-10-03)
+
+§4 closed one position a query could be written in and not reach a walk. This is
+the other one, and it is **two** positions rather than one — which is why it took
+a measurement to find rather than a reading of the code.
+
+A struct's body holds a field list and a method list, and neither is anywhere
+`_fold_target_queries` looks: it walks `fn.body` and `fn.param_defaults`, and
+`collect_module_symbols` answers a module-level `comptime` binding. A query as a
+field's class-level initializer met none of the three:
+
+```mojo
+struct S:
+    var w: Int = __mlir_attr[
+        `#kgen.param.expr<target_get_field,`,
+        __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`,
+        `, "pointer_width" : index`, `> : index`]
+```
+
+| | before | after (both architectures) |
+|---|---|---|
+| `var w: Int = <query>`, read `s.w` | `s.w reads a class-level constant of S, whose value is `__mlir_attr[…]` — and a formal value is one 64-bit word with nowhere to keep a non-literal one: a class-level constant's value is written in the class body, and this path has no module-global storage to read it back out of` | builds, prints `w=64` |
+| `comptime W = <query>`, read `S.W` | the same refusal with the `comptime` half's reason ("often a CALL or a COMPUTATION rather than a literal, and this path has no comptime evaluator to run one") | builds, prints `w=64` |
+| either, with a query this build CANNOT answer (`triple`) | the same two sentences | **refused with the evaluator's own**: `this build cannot answer this target query: the current target arm64/darwin … has no 'triple' for this build to state` |
+
+The before column is the §4 defect again and not a wording problem: both
+sentences are about STORAGE — a class-level constant's value has nowhere to live
+— and both are false of a value that is one 64-bit literal the evaluator hands
+over. A `var w: Int = 64` in the same position builds and prints `64` on both
+architectures (measured), so the position is representable and only the fold was
+missing.
+
+**The second position is the one with the moving part.** A `comptime` class
+attribute's value is not in the tree at all: `collect_module_symbols` parks it in
+a dict on the struct and `struct_class_constants` reads it back out of there.
+So folding it means writing the replacement back into that dict, by identity —
+which is also the half the STDLIB needs, since `_PLUGIN_COUNT`,
+`FPUtils.integral_type` and `_Null._mlir_type` are all `comptime` class
+attributes. `formal/build.py`'s new `_fold_a_class_level_default` asks that dict
+first and then walks the struct for a `value` slot holding the same node, and
+`formal/model.py`'s `struct_class_constants` is what makes the identity exact.
+
+Asked **at the read** (`_apply_constant_sites`) rather than by adding the class
+body to `_fold_target_queries`'s input, because of ORDER and the order runs the
+other way: `_rewrite_class_constants` — which is what reaches `_apply_constant_sites`
+— runs BEFORE `_fold_target_queries`, whose call site says it is last on purpose.
+So this read is the first thing to see a class-level initializer at all.
+
+Four checks in `test_formal_target_queries.py` (32 now, was 28): two EXECUTED,
+one per position, each comparing against the host's own `pointer_width` rather
+than a literal this file could have got wrong in the same direction as the
+implementation; and two REFUSED, one per position, on **both** architectures. The
+refused half is what makes the executed half trustworthy — a fold that
+substituted a zero would have printed `0` and passed nothing else.
