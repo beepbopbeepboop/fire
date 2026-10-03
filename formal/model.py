@@ -9952,6 +9952,15 @@ DEREFERENCE_METHODS = {
                     "(see UNWRAP_METHODS, which is the other half of this)",
 }
 
+# `p.m(i)` — a dereference WITH an offset — is refused by name rather than by the
+# arity check inside `_emit_dereference`, because for `unsafe_load` the argument
+# is the ordinary spelling (`i = 0` is its default) and "takes no arguments"
+# would be a true statement sent to a reader who has written the ordinary form.
+# `p[i]` is the same program with the offset in the subscript, and that lowering
+# exists (`subscript_base_lowering`, the same width table); what it does not do
+# yet is answer a METHOD call, which is what this row's next step is.
+DEREFERENCE_OFFSET_METHOD_NAMES = frozenset({"unsafe_load"})
+
 # `value` on its own.  A name this path cannot resolve, for a reason that is
 # true of EVERY receiver and is not about dereferences at all:  an enum's
 # `value()` is its integral, an iterator's is the item it holds, a `SIMD`'s is
@@ -9974,6 +9983,34 @@ IDENTITY_VALUE_METHODS = {
              "an iterator and a SIMD each need a field list or an element type "
              "this path does not have, and they are three separate "
              "representations rather than one",
+    # Mojo's OWN name for the read `value` performs on a POINTER, and the
+    # spelling the stdlib actually uses: `UnsafePointer.unsafe_load(i = 0)` IS
+    # `p.value()` with the index defaulted to 0. It was in NEITHER table, so no
+    # backend routed it to `dereference_lowering` and the call reached
+    # `value_method_refusal`'s generic arm — which said "adding it to either
+    # table would be a guess about what it means on 'int'" about a receiver the
+    # source had annotated `Pointer[UInt8]`. Measured on both architectures:
+    # `def read8(p: Pointer[UInt8]) -> Int: return Int(p.unsafe_load())` is
+    # refused, and the receiver is reported as holding an `int`. 116 spellings
+    # of it in the stdlib, every one on a pointer, so the tables and the corpus
+    # disagreed about a NAME rather than about a construct.
+    #
+    # It belongs HERE and not in `DEREFERENCE_METHODS` because that table's arm
+    # in `dereference_refusal` claims "is a load from the address the receiver
+    # holds" even for a receiver that is NOT established to be a pointer — true
+    # of `unsafe_value`, which is genuinely ambiguous, and FALSE of a
+    # `def read_it(n: Int)` that calls it. This arm asks the receiver first and
+    # then says the receiver is not a pointer, which is the specific missing
+    # fact rather than a claim about an address that is not there.
+    "unsafe_load": "is Mojo's name for the UNCHECKED READ through a pointer — "
+                   "on a pointer the same operation `value()` is, at the same "
+                   "declared width, which is why it is in this table and reaches "
+                   "the same `dereference_lowering`. An ARGUMENT makes it a "
+                   "different construct: it reads at an offset from the "
+                   "receiver, and the address and the load are one decision "
+                   "there of which only the load half is answered, so "
+                   "`dereference_operands_refusal` names that rather than "
+                   "reporting an argument count",
 }
 
 # The method names the DEREFERENCE arm owns, as a set rather than as the keys of
@@ -10178,6 +10215,37 @@ def _sentence(text) -> str:
     """
     text = (text or "").strip()
     return text if (not text or text[-1] in ".!?:") else text + "."
+
+
+def dereference_operands_refusal(dotted: str, method: str, args) -> str | None:
+    """A dereference call carrying operands this arm does not take, or None.
+
+    `p.value()` takes none and `p[i]` carries the offset in the SUBSCRIPT, so a
+    method call that brings its own is refused — but the words have to say which
+    construct it is, because for `unsafe_load` the offset argument is the
+    ORDINARY spelling (`unsafe_load(i = 0)` is the declaration) and a bare "takes
+    no arguments" would send a reader who wrote the ordinary form looking for a
+    syntax error that is not there.
+
+    Shared, and for the reason every other refusal in this file is: the two
+    backends each spelled this one from a private f-string, so the machines could
+    describe one construct differently.
+    """
+    if not args:
+        return None
+    spelled = ", ".join(dotted_receiver(a) for a in args)
+    if method in DEREFERENCE_OFFSET_METHOD_NAMES and len(args) == 1:
+        recv = dotted.rsplit(".", 1)[0]
+        return (f"{dotted}({spelled}) reads at an OFFSET from the receiver, and "
+                f"this arm answers with the value AT the receiver's own address: "
+                f"the address and the load are one decision in "
+                f"`dereference_lowering`, and only the load half of it is "
+                f"answered so far. `{recv}[{spelled}]` is the same program with "
+                f"the offset in the subscript, which is the spelling both "
+                f"backends lower today")
+    return (f"{dotted}({spelled}) takes no arguments on this path: the "
+            f"dereference this is answers with the value AT the receiver, and an "
+            f"argument is not part of it")
 
 
 # ── the STORE side of the pointer value model ──────────────────────────────
@@ -20805,8 +20873,10 @@ def struct_init_shapes(struct_def) -> list:
     `required` counts the parameters with no default, EXCLUDING the receiver:
     `out self` is where the object is written, not something the caller passes,
     and counting it would make every arity in this file off by one.  The
-    receiver is recognised by `struct_receivers`, so a class spelling it `this`
-    is read the same as one spelling it `self`.
+    receiver is recognised per METHOD and by `method_declares_receiver`, so a
+    class spelling it `this` is read the same as one spelling it `self` and an
+    `@implicit` converting constructor — whose first parameter is an ordinary
+    argument, not a receiver — keeps it.
 
     `params` is `[(name, default_expression)]` in DECLARATION ORDER with the
     receiver removed, and it is the binding order: positional argument `i` is
@@ -20826,17 +20896,43 @@ def struct_init_shapes(struct_def) -> list:
     and what the positional construction lowers.  With one, `S(...)` calls it.
     """
     out = []
-    receivers = struct_receivers(struct_def)
     for m in struct_methods(struct_def):
         if m.name != "__init__":
             continue
         defaults = getattr(m, "param_defaults", None) or {}
         has_default = getattr(m, "param_has_default", None) or {}
         kwonly = set(getattr(m, "kwonly", None) or ())
+        # The receiver of THIS method, not of the class. Two things were wrong
+        # with asking `struct_receivers`, which is a class-wide SET:
+        #
+        #   * it is built from `method_receiver_name`, which takes the first
+        #     parameter's name whatever it is called, so an `@implicit`
+        #     CONVERTING constructor — `@implicit def __init__(_value: Int) ->
+        #     Cell`, which has no receiver at all and whose first parameter is an
+        #     ordinary argument — contributed `_value` to the set, and the loop
+        #     below then skipped that argument as "the receiver". The shape
+        #     counted 0 required parameters and 0 names, so it became
+        #     indistinguishable from `def __init__(out self)` and a `Cell()`
+        #     was refused as AMBIGUOUS between two constructors with different
+        #     arities;
+        #   * a set has no owner, so one overload's receiver name exempts the
+        #     same-spelled ordinary parameter of a DIFFERENT overload.
+        #
+        # `method_declares_receiver` is the reader that asks the question
+        # properly — the parameter must be spelled as a receiver
+        # (`RECEIVER_PARAMETER_SPELLINGS`), which is the same rule
+        # `_rewrite_method_calls` already refuses anything outside of, so a
+        # receiver spelled some other way never reached this loop working in the
+        # first place. Asking it per method is also what `method_receiver_name`'s
+        # own docstring requires ("a caller that needs the receiver of the
+        # method it is looking at must not answer a slightly different
+        # question").
+        recv = (method_receiver_name(m)
+                if method_declares_receiver(m) else None)
         names, params, required, optional = [], [], 0, 0
         for p in (getattr(m, "params", None) or []):
             pname = p[0] if isinstance(p, (tuple, list)) else p
-            if pname in receivers:
+            if recv is not None and pname == recv:
                 continue
             names.append(pname)
             params.append((pname, defaults.get(pname)))

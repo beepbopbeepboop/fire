@@ -8272,7 +8272,32 @@ def _return_the_receiver(fn, wb=None) -> None:
     "The related question" is the part it does NOT: a constructor that ASSIGNS a
     frame to its own one word (`self.inner = Inner(a, b)`) really does hand back
     a frame the callee built, and it stays refused.
+    The fourth thing, and the one this used to get wrong: **it does nothing at all
+    to a function that is not a one-field mutator, asked of that function.** The
+    caller looks the entry up by the LIFTED name, and one name serves every
+    overload of one method, so the entry a mutating `__init__(out self)` earned is
+    found again for a receiverless `@implicit __init__(x: Int) -> Cell`. Ordering
+    the guard first is what makes the refusal below say something true.
     """
+    recv = M.receiver_writeback_name(fn)
+    if recv is None:
+        # This function is not a one-field mutator, so there is no receiver to
+        # hand back — asked of THIS function, not of the entry the caller looked
+        # it up by, because the table is keyed by the LIFTED name and
+        # `method_function_name` gives one name to every overload of one method.
+        # So a mutating `__init__(out self)` and an `@implicit` converting
+        # `__init__(x: Int) -> Cell` are both `Cell___init__`, and the entry the
+        # first earned is found for the second, which has no receiver at all.
+        #
+        # Both of the arms below then fire on the wrong function. The refusal
+        # names a method that "both changes its receiver and returns a value"
+        # when it changes no receiver, which is the reason the reader is sent to
+        # split a method that was never a mutator; and the rewrite turns a bare
+        # `return` into `return self` plus an appended `return self`, naming a
+        # parameter this function does not have. Measured on
+        # `std/builtin/float_literal.mojo`, whose `@implicit __init__` converts
+        # an `IntLiteral` and has no `self`.
+        return
     if (getattr(fn, "return_type", None) is not None
             or any(isinstance(n, F.ReturnStmt) and n.value is not None
                    for n in M.iter_nodes(fn.body))):
@@ -8283,9 +8308,6 @@ def _return_the_receiver(fn, wb=None) -> None:
         raise CodegenError(M.mutating_receiver_return_refusal(
             getattr(wb, "owner", None) or fn.name,
             getattr(wb, "member", None) or fn.name))
-    recv = M.receiver_writeback_name(fn)
-    if recv is None:
-        return
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is None:
             node.value = F.IdentExpr(name=recv)

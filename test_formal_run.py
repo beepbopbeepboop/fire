@@ -6210,8 +6210,121 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return ping(5000)\n", 2, None),
-]
+    # `unsafe_load` is Mojo's OWN name for the read this path already lowers:
+    # `UnsafePointer.unsafe_load(i = 0)` is a pointer's `value()` with the index
+    # defaulted, and it was in NEITHER the dereference table nor the refusal
+    # tables — so `p.unsafe_load()` reached `value_method_refusal`'s generic arm
+    # and was reported as a method call on a receiver holding an `int`, on a
+    # parameter the source had annotated `Pointer[UInt8]`. Measured before the
+    # fix, both architectures, with a declared pointee.
+    #
+    # The five widths are the whole assertion. What must hold is not "it builds"
+    # but "`unsafe_load` answers EXACTLY what `value` answers at the same
+    # address", so the row reads one address five ways and each reading has to
+    # come back right on its own terms: 65 / 16961 / 1145258561 / 65 / 5208208757
+    # 389214273 are the little-endian readings of b"ABCDEFGH" at 1, 2, 4, 8-signed
+    # and 8-unsigned bytes — the same constants `deref_four_widths_at_one_address`
+    # states for `value`. The signed 1-byte read is 65 and not a sign-extended
+    # negative because 'A' has its top bit clear, so it cannot tell a
+    # sign-extend from a zero-extend; `deref_i8_signed` is the row that can.
+    ("both_arch_deref_unsafe_load_is_the_same_load_as_value",
+     "def read8(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read2(p: Pointer[UInt16]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read4(p: Pointer[Int32]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read8s(p: Pointer[Int8]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def read8u(p: Pointer[UInt64]) -> Int:\n"
+     "    return Int(p.unsafe_load())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    if read8(s) != 65:\n"
+     "        return 10\n"
+     "    if read2(s) != 16961:\n"
+     "        return 11\n"
+     "    if read4(s) != 1145258561:\n"
+     "        return 12\n"
+     "    if read8s(s) != 65:\n"
+     "        return 13\n"
+     "    if read8u(s) != 5208208757389214273:\n"
+     "        return 14\n"
+     "    return 1\n", 1, None),
 
+    # ONE NAME, TWO `__init__`s, only ONE of which has a receiver. Both halves of
+    # the defect this pins are about that collision, and each one alone leaves a
+    # different program refusing, which is why this is one row and not two.
+    #
+    # The source is `std/builtin/float_literal.mojo`'s own shape: an `@implicit`
+    # CONVERTING constructor is spelled with NO receiver parameter at all
+    # (`@implicit def __init__(_value: IntLiteral[_]) -> FloatLiteral[…]`), so
+    # its first parameter is an ordinary argument. Two defects followed from
+    # reading "first parameter" as "receiver":
+    #
+    #   * `struct_init_shapes` skipped `_value` as "the receiver" — it asked a
+    #     CLASS-WIDE set, and `struct_receivers` takes the first parameter's name
+    #     whatever it is called — so this overload counted ZERO required
+    #     parameters, `Cell()` was ambiguous against `__init__(out self)`, and
+    #     the message read "(0 required; 0 required)" for two constructors whose
+    #     arities are 0 and 1;
+    #   * `build._return_the_receiver` applied the mutating overload's write-back
+    #     entry to THIS one, because the entry is keyed by the lifted name and
+    #     `method_function_name` gives one name to every overload of one method.
+    #     It refused the file with "both changes its receiver and returns a
+    #     value" about a method that changes no receiver — measured on
+    #     `float_literal.mojo` before the fix, on both architectures.
+    #
+    # The answer is `7`, and what it pins is the ARITY READER: the zero-operand
+    # `__init__(out self)` is selected, which it could not be while the other
+    # overload counted zero required parameters too.
+    ("an_implicit_converting_init_next_to_a_mutating_one_is_not_a_mutator",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._value = 7\n"
+     "\n"
+     "    @implicit\n"
+     "    def __init__(_value: Int) -> Cell:\n"
+     "        return _value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     0, "7"),
+    # …and the WRITE-BACK half, which the row above does not reach: `Cell()` is
+    # a CONSTRUCTION, whose `__init__` body is inlined at the call site, so `7`
+    # above is carried by the inline and says nothing about a mutator handing its
+    # receiver back. `bump` is a plain method call, which is the shape the
+    # write-back exists for, and 9 is `_value = 7` plus the `+ 2` — 7 is what a
+    # dropped write-back prints. This row is also the regression guard for the
+    # fix itself: the new guard in `build._return_the_receiver` returns early for
+    # a function that is not a mutator, and a guard that matched on the LIFTED
+    # name instead of on the function would silence this row's write-back along
+    # with the false refusal.
+    ("a_mutating_init_keeps_its_write_back_beside_a_converting_one",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._value = 7\n"
+     "\n"
+     "    @implicit\n"
+     "    def __init__(_value: Int) -> Cell:\n"
+     "        return _value\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.bump(2)\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     0, "9"),
+]
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here
     # rather than deleted because it is the one the sweep named.
@@ -11551,6 +11664,48 @@ POINTER_DEREF_REFUSALS = [
      "    h = n\n"
      "    return h.unicorn()\n",
      "refuse:is not one of those methods of those receivers", None),
+    # `unsafe_load(i)` is a different CONSTRUCT from `unsafe_load()`: it reads at
+    # an OFFSET, and the address and the load are one decision in
+    # `dereference_lowering` of which only the load half is answered. `p[i]` is
+    # the same program and IS lowered today. What this pins is that the refusal
+    # says that, rather than reporting an argument count — `i = 0` is
+    # `unsafe_load`'s declared DEFAULT, so "takes no arguments" would be a true
+    # sentence sent to a reader who wrote the ordinary spelling and nothing
+    # wrong. Both architectures, identical words.
+    ("deref_refuse_unsafe_load_with_an_offset",
+     "def read_at(p: Pointer[UInt8], i: Int) -> Int:\n"
+     "    return Int(p.unsafe_load(i))\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s, 1)\n",
+     "refuse:reads at an OFFSET from the receiver", None),
+    # …and the bracket, which is refused by a DIFFERENT and pre-existing rule —
+    # the callee is a `SubscriptExpr` rather than a `MemberExpr`, so it never
+    # reaches the dereference arm at all and is named as a specialization this
+    # path cannot name a callee for. Pinned here because the two rules sit next
+    # to each other and a reader who has just seen `unsafe_load` answered will
+    # reasonably expect `unsafe_load[width=4]` to be answered too; what it must
+    # NOT do is reach a load, which is the outcome the bracketed-callee refusal
+    # exists to prevent.
+    ("deref_refuse_unsafe_load_bracketed_width",
+     "def read_at(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.unsafe_load[width=4]())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s)\n",
+     "refuse:Refused rather than emitted with the brackets dropped", None),
+    # A receiver that is NOT a pointer gets the four-questions message and NOT
+    # "is a load from the address the receiver holds" — which is what putting
+    # `unsafe_load` in `DEREFERENCE_METHODS` would have produced, and is false
+    # of a `def read_it(n: Int)`. This row is the reason the entry is in
+    # `IDENTITY_VALUE_METHODS` instead: the receiver is asked FIRST, and the
+    # specific missing fact named is that it is not established to be a pointer.
+    ("deref_refuse_unsafe_load_on_a_non_pointer_receiver",
+     "def read_it(n: Int) -> Int:\n"
+     "    return Int(n.unsafe_load())\n"
+     "def main(n: Int) -> Int:\n"
+     "    return read_it(7)\n",
+     "refuse:The receiver is not established to be a pointer here", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A
@@ -16285,6 +16440,7 @@ TYPE_APPLICATION_REFUSALS = [
      "    return 0\n",
      0, "n=0"),
 ]
+
 
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
