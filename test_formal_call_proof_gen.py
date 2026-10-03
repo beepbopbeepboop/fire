@@ -877,6 +877,30 @@ class TestStringValueInTheModel(unittest.TestCase):
                     f"strings interned address {addr}, so the AST and the "
                     f"model are two different words for one literal")
 
+    def test_a_returned_string_is_still_run_tested_on_x86_64(self):
+        """The workaround this made dead, asserted gone by what replaced it.
+
+        `x86_64_proof_gen.py` carried `_returns_string_literal` and a
+        `string_result` branch that suppressed the concrete run tests for any
+        function handing back a string, on the stated ground that "no numeric
+        model of `return "small"` is that address". That ground was the defect
+        above: the model now IS that address, so the suppression was hiding
+        theorems that are true and decidable. With the guard removed (it is
+        deleted rather than left switched off — a flag nobody reads is a second
+        thing to keep in step), `main_runs_n` and `main_terminates_n` are back
+        in the file, so a guard that returned would fail HERE rather than
+        silently reduce coverage.
+        """
+        text = self.proof_text.get(("x86_64", "return_literal"))
+        self.assertIsNotNone(text, "no x86-64 proof was generated")
+        self.assertNotIn("NO RUN TESTS", text,
+                         "the run tests are suppressed for a program whose "
+                         "model the machine agrees with")
+        for n in (0, 1, 2, 5, 10):
+            with self.subTest(input=n):
+                self.assertIn(f"theorem main_runs_{n} :", text)
+                self.assertIn(f"theorem main_terminates_{n} :", text)
+
     def test_a_string_outside_the_intern_table_is_refused_not_zeroed(self):
         """The negative guard, and the reason the default is a refusal.
 

@@ -116,81 +116,6 @@ def _generate_model(prog, fn, tc):
     go_defs = "\n\n".join(AP._go_defs_for(prog, fn, tc))
     return go_defs, list(AP._go_simp_lemmas(fn))
 
-def _returns_string_literal(fn) -> bool:
-    """Does the function hand back a string literal?
-
-    The run tests compare RAX against `mojo`, a numeric model of the source.
-    A function returning a string cannot be compared that way: the machine's
-    result is the ADDRESS of an interned literal, and no numeric model of
-    `return "small"` is that address.  The obligation would then fail for a
-    program that is entirely correct — worse than saying nothing about it.
-
-    Only a literal in return position counts, which is the shape these take in
-    practice (an if/elif chain of literals).  A function returning a VARIABLE
-    that holds a string is not caught here; its run test still fails, for the
-    same real reason, and the failure says so.
-    """
-    import fire_compiler as F
-
-    # fire_compiler has no `Var`; a bare name is an `IdentExpr`.
-    _NAME_NODES = (getattr(F, "IdentExpr", None),)
-
-    def is_str(node) -> bool:
-        return isinstance(node, F.StringLiteral)
-
-    def scan(node, in_return: bool) -> bool:
-        if node is None or isinstance(node, (str, int, float, bool, bytes)):
-            return False
-        if in_return and is_str(node):
-            return True
-        if _NAME_NODES and in_return and isinstance(node, _NAME_NODES):
-            # `return x` where x was assigned a literal above.
-            nm = getattr(node, "name", None)
-            if nm and nm in _str_assigned(fn):
-                return True
-        kids = getattr(node, "__dict__", {})
-        for key, val in kids.items():
-            if key in ("lineno", "col_offset", "end_lineno", "end_col_offset"):
-                continue
-            child_return = in_return or isinstance(node, F.ReturnStmt)
-            if isinstance(val, (list, tuple)):
-                if any(scan(v, child_return) for v in val):
-                    return True
-            elif scan(val, child_return):
-                return True
-        return False
-
-    body = getattr(fn, "body", None)
-    stmts = body if isinstance(body, list) else [body]
-    return any(scan(st, False) for st in stmts)
-
-
-def _str_assigned(fn):
-    """Names assigned a string literal anywhere in `fn`."""
-    import fire_compiler as F
-    out = set()
-
-    def walk(node):
-        if node is None or isinstance(node, (str, int, float, bool, bytes)):
-            return
-        d = getattr(node, "__dict__", {})
-        if isinstance(node, F.AssignStmt) and is_str(getattr(node, "value", None)):
-            for tgt in (getattr(node, "targets", None) or []):
-                nm = getattr(tgt, "name", None)
-                if nm:
-                    out.add(nm)
-        for key, val in d.items():
-            if key in ("lineno", "col_offset"):
-                continue
-            if isinstance(val, (list, tuple)):
-                for v in val:
-                    walk(v)
-            else:
-                walk(val)
-    walk(getattr(fn, "body", None))
-    return out
-
-
 def _first_sentence(e) -> str:
     """Why a probe raised, in one line, for the omission note that quotes it.
 
@@ -501,8 +426,7 @@ def _step_certificate_section(func_name: str, code_len: int, insns: list = None,
 
 
 def _run_tests_section(func_name: str, test_input: int, externs: list = None,
-                       placeholder: bool = False,
-                       string_result: bool = False) -> str:
+                       placeholder: bool = False) -> str:
     """Concrete run tests: the machine model on the real bytes, by evaluation.
 
     These are not `sorry` and not assertions — `native_decide` executes the
@@ -549,15 +473,6 @@ def _run_tests_section(func_name: str, test_input: int, externs: list = None,
             f"   machine against that placeholder and fail, which would say\n"
             f"   nothing about either.  Modelling this function's shape is what\n"
             f"   would close it. -/\n")
-
-    if string_result:
-        return (
-            f"/- NO RUN TESTS for {func_name}: it returns a string, and the\n"
-            f"   machine's result is the ADDRESS of an interned literal.  No\n"
-            f"   numeric model of `return \"small\"` is that address, so the\n"
-            f"   comparison would fail for a program that is entirely\n"
-            f"   correct.  Comparing string results needs the intern table in\n"
-            f"   the model, which is not there. -/\n")
 
     if externs:
         syms = ", ".join(sorted(set(externs)))
@@ -779,8 +694,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append(_run_tests_section(
         func_name, test_input,
         [e.get("sym") for e in (info.get("extern_calls") or [])],
-        placeholder=model_placeholder,
-        string_result=_returns_string_literal(fn)))
+        placeholder=model_placeholder))
     _certs, _total = _decode_function_body(code, info, func_offset)
     parts.append(_step_certificate_section(func_name, len(code), _certs, _total))
 
