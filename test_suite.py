@@ -2995,6 +2995,26 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
+    # CHEAP by CLAUDE.md's own measure — `python3 tools/memslot.py --gb 8 --
+    # python3 test_formal_proof_breadth.py`: 7 tests, 8.2 s wall, 1.4 GB peak,
+    # and NO Lean run at all (every assertion is about the census TOOL: that its
+    # 60-item workload is a function of the tree, one function per file, closed
+    # and parseable, and that three programs with known verdicts classify into
+    # the classes the census table depends on). So by the cost rule it wants a
+    # REGISTRATION and is listed rather than registered because this branch's
+    # subject is the proof layer and the task forbade touching the registry.
+    # Exact next step: `test('formal-proof-breadth-tool', [PY,
+    # 'test_formal_proof_breadth.py'], mem='tiny', deps=['preflight'],
+    # extra=['test_formal_proof_breadth.py', 'tools/formal_proof_breadth.py'],
+    # desc='the proof-breadth census instrument: deterministic, closed, and
+    # its classifier says what it means')` in the `proofs` bucket.
+    'test_formal_proof_breadth.py': 'The PROOF-BREADTH census instrument '
+        '(tools/formal_proof_breadth.py): 60 functions from this repository\'s '
+        'own *.py through compile_formal(prove=True, check=True) on both '
+        'architectures. This file checks the INSTRUMENT and runs no Lean, so it '
+        'is 8 s and 1.4 GB; the census itself is not a test and is not meant to '
+        'be gated.',
+
     'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
         'expansion, CR, an unterminated literal, and a backslash line '
         'continuation inside a raw literal \u2014 build-and-run against CPython '
