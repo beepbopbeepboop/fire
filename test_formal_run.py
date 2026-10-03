@@ -11806,6 +11806,63 @@ WAVE6_TRUTHY_CASES = [
      "    v = 0 - 3\n"
      "    printf(\"%d\", v)\n"
      "    return 0\n", 0, "-3"),
+    # ── a NEGATIVE CONSTANT beside a DECLARED UNSIGNED operand ────────────
+    #
+    # The four rows above are about a flexible value whose context says
+    # NOTHING about its sign: `cmp_signed` resolves `None` to the signed
+    # default, which is what makes them answer. This pair is the case that
+    # resolution cannot reach, because here the context DOES say — `x: UInt32`
+    # is a declared unsigned type, `common_type` treats the flexible operand as
+    # neutral, and the declared type is what decides. So `(0 - 3) < x` compares
+    # 0xFFFF...FD against 7 with unsigned condition codes and answers FALSE
+    # where CPython answers TRUE.
+    #
+    # `formal/types.py`'s `_negative_constant_type` is the fix and the ONE
+    # reader of the question: a value the build can FOLD and knows to be
+    # negative cannot be unsigned, whichever of the two spellings wrote it.
+    # Both rows below are that one rule on the two shapes it applies to, and
+    # the `x < …` half of each is the direction a "fix" that only ever
+    # special-cased the left operand would get backwards.
+    ("both_arch_a_negated_folded_constant_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if -(1 + 2) < x else 0, 1 if x < -(1 + 2) else 0,"
+     " 1 if -(1 + 2) == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # The BINARY spelling of the same value, which is the row the reduction of
+    # this family stopped at: `(0 - 3)` folds negative through `fold_literal_expr`
+    # rather than through the unary rule, and both spellings must land in the same
+    # place. It is here as the regression guard for the second reader of the one
+    # folder, not as a row that was ever wrong.
+    ("both_arch_a_folded_negative_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if (0 - 3) < x else 0, 1 if x < (0 - 3) else 0,"
+     " 1 if (0 - 3) == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # `~` is the OTHER unary spelling and the folder folds it, so the rule
+    # reaches it without a second test: `~3` is -4. Before, only `-` with a
+    # bare `IntLiteral` operand was answered, which is why `-3` was right and
+    # `-(1 + 2)` was not — the same value, two answers.
+    ("both_arch_a_bit_not_of_a_constant_beside_a_declared_unsigned_operand_is_signed",
+     "def main(n):\n"
+     "    x: UInt32 = 7\n"
+     "    printf(\"%d %d %d\", 1 if ~3 < x else 0, 1 if x < ~3 else 0,"
+     " 1 if ~3 == x else 0)\n"
+     "    return 0\n", 0, "1 0 0"),
+    # …and the guard, which is the row that decides the fix is a SIGN and not a
+    # blanket "constants are signed": a POSITIVE constant beside a declared
+    # unsigned operand takes that operand's type, and `x: UInt8 = 200` read as
+    # a SIGNED byte would be -56 — so this row answers 1 unsigned and 0 signed,
+    # and it is the row a fix that made every foldable operand signed 64-bit
+    # would move. (CPython cannot express the case — it has no `UInt8` — so the
+    # row asserts what the language says rather than what CPython prints, which
+    # is what makes it a guard on the promotion and not an oracle.)
+    ("both_arch_a_positive_constant_beside_a_declared_unsigned_operand_is_unsigned",
+     "def main(n):\n"
+     "    x: UInt8 = 200\n"
+     "    printf(\"%d\", 1 if (0 + 100) < x else 0)\n"
+     "    return 0\n", 0, "1"),
 ]
 
 

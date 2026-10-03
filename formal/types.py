@@ -160,6 +160,57 @@ def common_type(a, b):
     return IntType(max(a.width, b.width), a.signed or b.signed)
 
 
+def _negative_constant_type(node, t):
+    """The type a CONSTANT NEGATIVE expression has beside a `t` context.
+
+    **A negative value cannot be an unsigned one, however it is spelled, and
+    the spelling must not decide it.**  `infer_expr` returns `None` for an
+    expression with no declared type — a bare literal, or an operator whose
+    operands are all typeless — and `None` means "this value takes the type of
+    its context".  That is the right rule for a value whose type its context
+    can supply, and it is the WRONG rule for a value the build already knows is
+    negative: `x: UInt32 = 7` supplies `UInt32`, `common_type` treats the
+    flexible operand as neutral, the comparison is emitted with UNSIGNED
+    condition codes, and `(0 - 3) < x` is FALSE where CPython answers TRUE,
+    because the value is 0xFFFF...FD.  Measured on BOTH backends, for every
+    spelling this function recognises:
+
+        x: UInt32 = 7
+        1 if -(1 + 2) < x else 0     arm64 0   x86-64 0   CPython 1
+        1 if x < -(1 + 2) else 0     arm64 1   x86-64 1   CPython 0
+
+    The sign is decided by ONE reader of the question — `formal/model.py`'s
+    `fold_literal_expr`, the folder that answers "what does the build know
+    this expression is" and answers `None` for an opaque one, so a VARIABLE is
+    never mistaken for a constant.  Both spellings ask it here rather than
+    each carrying its own test, which is what makes the two of them agree: the
+    narrow `isinstance(operand, IntLiteral)` test that used to live in the
+    `UnaryOp` arm was right about `-3` and silent about `-(1 + 2)`, and a
+    value that is negative however it is written cannot be right in one
+    spelling and flexible in another.
+
+    `t` is the width the CONTEXT already decided, and only the SIGN is
+    flipped: `x: UInt8 = 7` beside `(0 - 3)` stays eight bits wide, so this
+    cannot widen a narrow declared type by answering a question about a
+    constant.
+
+    **What it does NOT decide, and it is a limit of the folder rather than of
+    this rule:** an operator `fold_literal_expr` does not fold leaves the sign
+    undecided, so `-(1 << 3)` and `-(2 % 5)` beside a `UInt32` are still
+    flexible.  That is deliberate and documented in the folder itself — every
+    operator added there is one more way for a fold to be wrong — and `%` is the
+    one that looks like an oversight and is not: Python's `%` is a FLOOR
+    modulus (sign follows the divisor) and the truncating division both emitters
+    lower is not, so folding it would answer a different question from the one
+    the emitters answer.  A constant expression this build cannot evaluate is
+    not a constant it may guess at.
+    """
+    folded = M.fold_literal_expr(node)
+    if isinstance(folded, int) and not isinstance(folded, bool) and folded < 0:
+        return IntType(resolve(t).width, True)
+    return None
+
+
 def infer_expr(e, vtypes: dict, call_types: dict = None):
     """Infer the type of a fire_compiler expression.
 
@@ -173,55 +224,27 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
         # A string expression evaluates to its address (pointer-sized).
         return DEFAULT_INT_TYPE
     if isinstance(e, F.UnaryOp):
-        # A negated literal is the one case where "no type yet" is not good
-        # enough. The bare-literal rule below returns None so a literal takes
-        # the type of its context, but a NEGATIVE value cannot be an unsigned
-        # one: with both operands typeless, `common_type` is None,
-        # `cmp_signed(None)` is False, and the comparison was emitted with
-        # unsigned condition codes -- so `if -3 < 2` was false, because -3 is
-        # 0xFFFF...FD as a UInt64. Reporting it signed is what Python and Mojo
-        # mean, and `common_type` treats None as neutral, so the signedness
-        # survives promotion against a typeless literal.
+        # One spelling of the rule `_negative_constant_type` states: `-3` and
+        # `-(1 + 2)` are the same negative value, and both cannot be unsigned.
+        # A negation of a VARIABLE is not a constant and recurses as before,
+        # which is what `-x` on an unsigned `x` needs — there the language says
+        # the subtraction wraps, and this path is not entitled to call that a
+        # signed subtraction.
         #
-        # Narrow on purpose: `0 - 3` is a BinaryOp and stays flexible, and a
-        # negation of a *variable* still recurses, so only a literal negative
-        # changes behaviour here. Both the CSET value path and the B.cond branch
-        # path read this one function, so they cannot disagree. A flexible type
-        # is no longer read as UNSIGNED by anything downstream (`cmp_signed`,
-        # below), which is what `0 - 3` relied on once this arm stopped being the
-        # only thing that knew a negative value cannot be unsigned.
-        if (e.op == "-" and isinstance(e.operand, F.IntLiteral)
-                and e.operand.value != 0):
-            return IntType(64, True)
-        return infer_expr(e.operand, vtypes, call_types)
+        # Both the CSET value path and the B.cond branch path read this one
+        # function, so they cannot disagree.
+        operand_t = infer_expr(e.operand, vtypes, call_types)
+        signed = _negative_constant_type(e, operand_t)
+        return operand_t if signed is None else signed
     if isinstance(e, F.BinaryOp):
         lt = common_type(infer_expr(e.left, vtypes, call_types),
                          infer_expr(e.right, vtypes, call_types))
-        # The same rule the negated-literal arm above states, for the OTHER way
-        # a negative value is written.  `0 - 4` is a BinaryOp of two literals,
-        # so both sides are typeless, `common_type` is None, and `cmp_signed`
-        # then answers False — the comparison is emitted with UNSIGNED
-        # condition codes and `17 <= (0 - 4)` is TRUE, because the value is
-        # 0xFFFF...FC.  Measured on BOTH backends, against CPython:
-        #
-        #     0 < (51 - 55)     arm64 1  x86-64 1  CPython 0
-        #     17 <= (0 - 4)      arm64 1  x86-64 1  CPython 0
-        #     (0 - 4) < 0        arm64 0  x86-64 0  CPython 1
-        #
-        # while the unary spelling of the very same value is right, which is
-        # what made this survive: `17 <= -4` answers 0 on both.  The old
-        # docstring here called the unary arm's narrowness deliberate and named
-        # this case as excluded; the exclusion is what was wrong, because a
-        # negative value cannot be unsigned however it is spelled.  Narrow
-        # still: only when BOTH sides are typeless (so only literal-only
-        # arithmetic), only for `+ - * //`, and only when the folded value is
-        # negative — so nothing that had a type changes type.
-        if lt is None:
-            folded = M.fold_literal_expr(e)
-            if isinstance(folded, int) and not isinstance(folded, bool) \
-                    and folded < 0:
-                return IntType(64, True)
-        return lt
+        # The other spelling: `0 - 4` is a BinaryOp of two literals, and
+        # `51 - 55` is a BinaryOp whose value is negative the same way.  Same
+        # folder, same rule, same answer — see `_negative_constant_type`, which
+        # is where the reasoning and the measurement live.
+        signed = _negative_constant_type(e, lt)
+        return lt if signed is None else signed
     if isinstance(e, F.CompareChain):
         # The chain's result is a boolean; operands share the common type
         # only insofar as each link needs it — report default.
