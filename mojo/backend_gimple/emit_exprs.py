@@ -5313,39 +5313,49 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         if kv.startswith('_slit_'):
             kv = gen._new_val('MojoBytes *', f"{kv}")
     elif kt != 'char *':
-        # A non-scalar key (tuple, list, or other struct/pointer type
-        # — e.g. `{('a', 'b'): ...}`, real Python code found in the
-        # stdlib's own _compat_pickle.py) used to fall into the SAME
-        # mojo_str_from_int(kv) call above unconditionally: `kt !=
-        # 'char *'` is true for ANY non-string key, not just an int,
-        # so a tuple key's MojoList* pointer got passed to a
-        # function expecting int64_t — "makes integer from pointer
-        # without a cast", a hard GCC error, so the file never
-        # compiled at all. Use the general-purpose repr-based
-        # stringification instead: it already dispatches correctly
-        # per-type (MojoList*/MojoDict*/other struct/float), giving
-        # a value-based string distinct tuple/list contents won't
-        # collide on — close enough to Python's own structural
-        # hashing for this string-keyed runtime, and at least
-        # compiles and round-trips consistently. Deliberately NOT
-        # used for the plain int/bool case above: _repr_value's
-        # int path (mojo_repr_int) returns a shared static buffer,
-        # safe only because mojo_dict_set_str's callee immediately
-        # strdup()s it — mojo_str_from_int's own heap-allocated
-        # buffer is the already-proven-safe, unchanged behavior for
-        # by far the most common dict-key type.
-        kv = gen._repr_value(kt, kv)
-        kt = 'char *'
+        # A non-scalar key — a tuple or a list, or any other struct/pointer
+        # type (`{('a', 'b'): ...}`, real Python code found in the stdlib's own
+        # _compat_pickle.py). This used to be stringified through
+        # `_repr_value`, and the subscript it had to agree with is keyed by the
+        # runtime's content key (`mojo_dict_key_for`, a length-delimited
+        # encoding), so `{(9, 9): "lit"}` followed by `lit[(9, 9)] = "lit2"`
+        # grew TWO entries and `lit[(9, 9)]` read the second one. Two
+        # spellings of one dict, from the same process.
+        #
+        # It used to be WORSE than a disagreement: the fallback it replaced
+        # applied to ANY non-string key, so `kt != 'char *'` reached
+        # `mojo_str_from_int(kv)` and a tuple key's MojoList* pointer was passed
+        # to a function expecting int64_t — "makes integer from pointer
+        # without a cast", a hard GCC error, so the file never compiled at
+        # all. `_repr_value` dispatches correctly per type and at least
+        # compiled; `mojo_cstr_or_int_str(..., word_ok=True)` — the DICT-KEY
+        # spelling every other dict-key site already uses (subscript
+        # get/set/augmented-assign, `in`, `d.get`, a comprehension's key) —
+        # hands over the raw WORD instead, so `_apply_kw_keys` selects the
+        # `_kw` twin and the runtime's own content-key builder is the single
+        # spelling. Deliberately NOT used for the plain int/bool case above:
+        # that key is a real integer, and `mojo_str_from_int`'s
+        # already-proven-safe conversion is what an int key has always got
+        # here (and what every other site gives it).
+        kt, kv = gen._char_to_cstr(kt, kv, True, True)
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
     if vt in gimple_ctypes._FLOAT_TYPES:
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
+        # Through `_emit_call`, NOT a raw `_emit`, and that is load-bearing
+        # rather than tidiness: `_emit_call` is where `_apply_kw_keys` runs, so
+        # it is what resolves the placeholder key `_char_to_cstr(...,
+        # word_ok=True)` handed out above into the `_kw` twin carrying the raw
+        # word — the same pair of decisions `_gen_compr_append`'s dict arm
+        # makes, for the same reason.
+        gen._emit_call('void', '', f"mojo_dict_set_{'bytes_' if _bytes_key else ''}double",
+                       [('MojoDict *', t), ('char *', kv), (vt, vv)])
     elif vt == 'char *':
         if vv.startswith('_slit_'):
             vv_tmp = gen._new_val('char *', f"{vv}")
             vv = vv_tmp
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
+        gen._emit_call('void', '', f"mojo_dict_set_{'bytes_' if _bytes_key else ''}str",
+                       [('MojoDict *', t), ('char *', kv), ('char *', vv)])
     else:
         # A bool stored as a dict value is indistinguishable from a genuine
         # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
@@ -5361,7 +5371,8 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             gen._emit(f"  mojo_mark_dict_bool_values ({t});")
         gen._note_dict_callable_ret(t, vv, vt)
         vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
+        gen._emit_call('void', '', f"mojo_dict_set_{'bytes_' if _bytes_key else ''}int",
+                       [('MojoDict *', t), ('char *', kv), ('int64_t', vv64)])
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
