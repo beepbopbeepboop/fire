@@ -23,9 +23,11 @@ python3 tools/memslot.py --gb 8 --label proofbreadth -- \
   python3 tools/formal_proof_breadth.py -j 2 -t 400      # 120 items
 ```
 
-**Tool:** `tools/formal_proof_breadth.py`. **Ledger:** every verdict, one JSON
-line each (`--ledger <path>`); every number below is that ledger, read with the
-three-line script the section headers name. **Machine:** 18 cores, load 13-40.
+**Tool:** `tools/formal_proof_breadth.py`. **Ledger: every verdict is committed**
+— `bugs/sweeps/proof_breadth_2026-10-03.jsonl`, one JSON line per item per
+architecture (120 lines), so every number below is a `Counter` over a file in
+the tree and a reader who disagrees with one can check it without re-running 120
+builds. **Machine:** 18 cores, load 13-40.
 **Cost:** a cold run is **~8 min wall, peak 7.8 GB** across 3 processes against
 the 8 GB reservation; a re-run with nothing changed is **17 s** for all 120
 verdicts, because every Lean verdict is content-addressed
@@ -256,6 +258,9 @@ python3 tools/memslot.py --gb 8 --label proofbreadth -- \
 python3 tools/formal_proof_breadth.py --arch x86_64 -j 1 -t 300 # one arch
 python3 test_formal_proof_breadth.py                            # the instrument
 ```
+
+The published run's ledger is committed, so re-deriving any count is a
+`Counter` over `bugs/sweeps/proof_breadth_2026-10-03.jsonl` and not a run.
 
 Every Lean run is content-addressed, so a re-run with nothing changed is a file
 read per item (17 s for all 120 above); changing anything under `formal/`,
