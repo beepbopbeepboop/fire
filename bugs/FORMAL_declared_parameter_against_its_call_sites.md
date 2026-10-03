@@ -1,6 +1,7 @@
 # FORMAL_declared_parameter_against_its_call_sites: the 13-file row, split by what each call site actually hands over
 
-**Status: MEASURED, and the decidable half is FIXED.** `frame_declared_parameter_refusal`
+**Status: MEASURED AGAIN (2026-10-03), and the row has moved off this refusal
+entirely: 0 of the 13 files now reach it.** `frame_declared_parameter_refusal`
 (`formal/model.py:7109`, raised from `formal/build.py`'s
 `_check_declared_parameter`) names 13 files in the 630-file arm64 sweep. The
 construct is `construct:declared-param-vs-call-sites`; this doc is its
@@ -15,6 +16,50 @@ things.** One group was a false refusal and is fixed and verified by execution
 group is a real defect in a neighbouring construct, filed separately (§5). The
 largest group is a word-versus-frame representation question that is not this
 construct's to answer (§3).
+
+**THE RE-MEASUREMENT (2026-10-03, this tree), and it is the only thing to read if
+you are picking this up.** §2–§5 below describe the state of the tree they were
+written on, and §4 and §5 have since been fixed by other work; the 13 files are
+now blocked EARLIER than this construct, so none of its per-file conclusions
+can be re-measured on them today. Measured with the sweep's own row tool, over
+exactly these 13 files, arm64:
+
+| class | n | what it is |
+|---|---|---|
+| `codegen/dependency` | 9 | a module the file IMPORTS is refused first — `std/collections/binary_heap.mojo` (8 files) and `std/collections/string/_unicode_lookups.mojo` (1), both refused as "a formal dylib has no public functions". Already recorded as a family in `bugs/FORMAL_known_limits.md` §1.1a; nothing new, and it is the same refusal nine times |
+| `not-answerable/host-import` | 4 | the four `.py` files import CPython host modules (`importlib` ×2, `copy`, `tempfile`) — a fact about the TARGET, not about this check |
+| **on `frame_declared_parameter_refusal`** | **0** | — |
+
+So the construct is correct, load-bearing, and currently unreachable in this
+row: fixing §3's call-site coercion would move 0 of these 13 files. What would
+move them is the §1.1a family (a module of module-level constants and generic
+struct templates exporting nothing under `doc/ABI.md`'s rules), and that is not
+this construct's to answer either.
+
+```console
+$ python3 tools/memslot.py --gb 8 --label row13 -- python3 tools/formal_sweep.py \
+      -j 3 -t 600 -M 4 formal/types.py elaborate.py mojo/middle/closures.py \
+      mojo/middle/offload.py $STD/{random/philox,python/python,base64/base64}.mojo …
+  [arm64] 13 files: PASS=0 not-pass=13
+         codegen/dependency              9
+         not-answerable/host-import      4
+  cas: 0 hit / 13 miss
+  verdict history: previous report 2026-10-01T13:23:35 [arm64], 13 files
+    codegen -> codegen/dependency: 9
+    codegen -> not-answerable/host-import: 4
+```
+
+**§4 and §5 are FIXED on this tree**, measured with the two reproducers §4 and
+§5 describe, both architectures:
+
+| reproducer | §4/§5 measured | now |
+|---|---|---|
+| `struct Python: def import_module(var module: String)`, called `Python.import_module("sys")` | refused as *"declares 'module' as String … passes a name, 'Python'"* — the RECEIVER compared against the first declared parameter | refused with *"too many positional arguments (2 for 1 parameter(s); the parameters are ['module'])"*, **identical on both architectures** — the accurate message, and the one the receiver-rewrite produces |
+| `@staticmethod def one_round(counter: Int)`, reached through an instance `r.one_round(c)` with `c = 3` | rewritten to `R__one_round(self, counter)` — two arguments to a one-parameter function | **computes `6`**, CPython's answer, on both architectures |
+
+So §5's neighbour (`@staticmethod` compiled as an instance method) no longer
+needs its own doc, and §4's "one line of diagnosis-quality work" is done by that
+same work rather than by anything here.
 
 | # | file | callee / parameter / declared | what the call site hands over | group |
 |---|---|---|---|---|
@@ -164,7 +209,7 @@ sum on purpose: a read at the wrong SLOT says which field moved (43, not 34).
 * **0 of 13 reach `pass`.** So the honest headline is: one false refusal removed
   and verified, thirteen files still blocked, and the reason is not this check.
 
-## 3. Group D — the word/frame question, 9 of the 13, and NOT this construct's to answer
+## 3. Group D — the word/frame question, 9 of the 13, and NOT this construct's to answer — **and, per the re-measurement above, not reachable on this row today**
 
 Nine files hand the parameter something this path **cannot place**, and in most of
 them the thing it cannot place is a **word** where the declaration compiled the
@@ -212,7 +257,7 @@ Until that exists, "this call site hands over a word" is true, and refusing is t
 answer this backend owes rather than a fault at an address it did not mean to
 touch. **The remaining 9 are worth that feature, not a relaxation of this check.**
 
-## 4. Group C — `std/python/python.mojo`: the refusal is TRUE and about the WRONG argument
+## 4. Group C — `std/python/python.mojo`: the refusal is TRUE and about the WRONG argument — **FIXED, see the re-measurement above**
 
 ```
 struct Python:
@@ -248,7 +293,7 @@ this a message-accuracy defect rather than a wrong diagnosis:
 So: one line of diagnosis-quality work, no coverage. Not fixed here; it is a
 property of the method-call rewrite, not of this check.
 
-## 5. Group B — `std/random/philox.mojo`: a `@staticmethod` is compiled as an instance method
+## 5. Group B — `std/random/philox.mojo`: a `@staticmethod` is compiled as an instance method — **FIXED, see the re-measurement above**
 
 ```
 struct Random:
