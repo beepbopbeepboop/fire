@@ -1194,20 +1194,32 @@ class X86_64Codegen:
                 f"{_MAX_INCOMING_ARGS} the formal x86-64 ABI passes "
                 f"({len(ARG_REGS)} in registers and "
                 f"{_MAX_INCOMING_ARGS - len(ARG_REGS)} on the stack)")
+        # Which incoming argument is the BY-REFERENCE RECEIVER, if this is such a
+        # function.  Not 0 unconditionally: a generic method's comptime
+        # parameters are LEADING arguments (`model.incoming_args`, and
+        # `_emit_call` prepends the bracket expressions), so
+        # `def bump[T: Int](out self, k: Int)` receives its cell in RSI.
+        recv_idx = (len(_comptime_param_names(f))
+                    if self._recv_ref_receiver is not None else None)
         for i, (pname, ptype) in enumerate(params):
             ptype_t = parse_type_name(ptype) or DEFAULT_INT_TYPE
             if i < len(ARG_REGS):
-                if i == 0 and self._recv_ref_receiver is not None:
-                    # A BY-REFERENCE RECEIVER: argument 0 is the ADDRESS of a
-                    # one-word cell the CALLER owns, not the receiver. Park the
-                    # address in a home (every exit needs it, and RDI is
-                    # caller-saved), then read the word out of the cell and put
-                    # THAT in the receiver's home — so the body's `self._value`
-                    # still rewrites to `self` and every lowering below is
-                    # unchanged.  R11 is the scratch both the returned-frame
-                    # hidden word and `_store_var`'s frame-slot path already use.
-                    self._store_var(_RECV_CELL_LOCAL, ARG_REGS[0])
-                    self.asm.emit(encode_mov_r64_rm64(Reg.R11, ARG_REGS[0], 0))
+                if i == recv_idx:
+                    # The receiver arrives as the ADDRESS of a one-word cell the
+                    # CALLER owns, not as the receiver.  Park the address in a
+                    # home (every exit needs it, and RDI..R9 are caller-saved),
+                    # then read the word out of the cell and put THAT in the
+                    # receiver's home — so the body's `self._value` still rewrites
+                    # to `self` and every lowering below is unchanged, which is
+                    # the point of doing it in the prologue rather than rewriting
+                    # the body's field accesses.  R11 is the scratch both the
+                    # returned-frame hidden word and `_store_var`'s frame-slot
+                    # path already use, and `_move_incoming_home` places a value
+                    # in a register home or a spill slot from any source
+                    # register — which is why this needs no special case for
+                    # `i == 0` the way arm64's does.
+                    self._store_var(_RECV_CELL_LOCAL, ARG_REGS[i])
+                    self.asm.emit(encode_mov_r64_rm64(Reg.R11, ARG_REGS[i], 0))
                     self._move_incoming_home(pname, Reg.R11, ptype_t)
                     continue
                 self._move_incoming_home(pname, ARG_REGS[i], ptype_t)

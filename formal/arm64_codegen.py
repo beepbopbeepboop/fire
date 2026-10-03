@@ -1285,27 +1285,49 @@ dylib_exports: list = None, globals_base: int = None,
                 f"{_MAX_INCOMING_ARGS} the formal arm64 ABI passes ("
                 f"{_ABI_ARG_REGS} in registers and "
                 f"{_MAX_INCOMING_ARGS - _ABI_ARG_REGS} on the stack)")
+        # Which incoming argument is the BY-REFERENCE RECEIVER, if this is such a
+        # function. Not 0 unconditionally: a generic method's comptime
+        # parameters are LEADING arguments (`model.incoming_args`, and
+        # `_emit_call` prepends the bracket expressions), so
+        # `def bump[T: Int](out self, k: Int)` receives its cell in X1.
+        recv_idx = (len(_comptime_param_names(f))
+                    if self._recv_ref_receiver is not None else None)
         for i, (pname, ptype) in enumerate(incoming):
+            if i == recv_idx:
+                # The receiver arrives as the ADDRESS of a one-word cell the
+                # CALLER owns, not as the receiver. Park the address in a home
+                # (every exit needs it, and X0..X7 are caller-saved), then read
+                # the word out of the cell into X19 — so the "already in X19 by
+                # the unconditional save above" invariant every other
+                # first-parameter path relies on still holds, and the body reads
+                # `self` as the VALUE it has always read. Every lowering below
+                # is then unchanged, which is the point of doing it in the
+                # prologue rather than rewriting the body's field accesses.
+                self._store_var(_RECV_CELL_LOCAL, i)
+                if i > 0:
+                    # X16, NOT X19: for a generic method the receiver is not
+                    # argument 0, and X19 already holds argument 0's value
+                    # because it IS argument 0's home — `def bump[T](out self)`
+                    # has `T` in X19, and loading the receiver there made the
+                    # callee add the receiver's value instead of the bracket's.
+                    # Measured, arm64: `c.bump[7](3)` printed `v=13` where the
+                    # source says 15. X16 is the address scratch every other
+                    # `_load_home_from_reg` caller borrows, so nothing else has
+                    # to know this path exists.
+                    self.asm.emit(encode_ldr_xt_xn_imm(16, i, 0))
+                    self._load_home_from_reg(pname, 16, ptype)
+                    continue
+                self.asm.emit(encode_ldr_xt_xn_imm(19, 0, 0))
+                if pname in self._var_spills:
+                    self._load_home_from_reg(pname, 19, ptype)
+                    continue
+                if ptype is None:
+                    continue     # a comptime parameter: already a full word
+                self._emit_extend(19, 19,
+                                  resolve(parse_type_name(ptype)
+                                          or DEFAULT_INT_TYPE))
+                continue
             if i == 0:
-                if self._recv_ref_receiver is not None:
-                    # A BY-REFERENCE RECEIVER: argument 0 is the ADDRESS of a
-                    # one-word cell the CALLER owns, not the receiver. Park the
-                    # address in a home (every exit needs it, and X0 is
-                    # caller-saved), then read the word out of the cell into X19
-                    # so the "already in X19 by the unconditional save above"
-                    # invariant every other first-parameter path relies on still
-                    # holds — the body then reads `self` as the VALUE it has
-                    # always read, and every lowering below is unchanged.
-                    #
-                    # X19 rather than the receiver's own home, because the
-                    # receiver's home may be a spill slot and this path's
-                    # no-parameter fallback reads X19; `_load_home_from_reg`
-                    # then parks X19 into a slot if that is where it lives.
-                    self._store_var(_RECV_CELL_LOCAL, 0)
-                    self.asm.emit(encode_ldr_xt_xn_imm(19, 0, 0))
-                    if pname in self._var_spills:
-                        self._load_home_from_reg(pname, 19, ptype)
-                        continue
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
                 # X19 and so still see the entry argument).

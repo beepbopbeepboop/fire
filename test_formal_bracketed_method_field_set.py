@@ -512,30 +512,6 @@ REFUSALS = [
      "    return 0\n",
      "outlives the frame it names"),
 
-    # THE ONE-FIELD MUTATOR THAT ALSO RETURNS A VALUE — the program
-    # `bracketed_method_call_does_not_invent_a_field` used to be before that row
-    # was reshaped, and it is here so the pair is one fact in two halves rather
-    # than a row that quietly stopped asking its question.
-    #
-    # `model.one_field_mutating_methods` is the rule: a one-field struct's
-    # mutator hands its receiver back on every path and the CALLER stores that
-    # back over the receiver expression, so the callee has one answer; one that
-    # also returns a value has two, and this path picks neither.  The bracketed
-    # specialization is beside the point and is kept because that is the shape
-    # the row was originally about — the refusal must not depend on the brackets.
-    ("refuse_a_one_field_mutator_that_also_returns_a_value",
-     "struct Cell:\n"
-     "    var _value: Int\n"
-     "    def bump[T: Int](out self, k: Int) -> Int:\n"
-     "        self._value = self._value + T + k\n"
-     "        return self._value\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    var c = Cell()\n"
-     "    c._value = 5\n"
-     '    printf("v=%d", c.bump[7](3))\n'
-     "    return 0\n",
-     "both changes its receiver and returns a value"),
 ]
 
 # ── x86-64's comptime ABI, pinned ───────────────────────────────────────────
@@ -559,6 +535,45 @@ REFUSALS = [
 # small here, and a `printf` channel is the one that also works for the cases in
 # `test_formal_x86_64_parity.py` whose answers are not.
 X86_ABI_PARITY = [
+    # The by-reference RECEIVER on the one shape the bracketing makes hardest,
+    # and the row that replaces the refusal this file used to pin here.
+    # `def bump[T: Int](out self, k: Int) -> Int` is a one-field mutator that
+    # both changes its receiver and returns a value AND has a comptime
+    # parameter, so its receiver is NOT argument 0: comptime parameters are
+    # LEADING arguments (`model.incoming_args`), the cell address arrives in X1,
+    # and X19 already holds the bracket's value.
+    #
+    # That last fact is what this row is for. The prologue reads the receiver
+    # out of the cell into X19, which is right when the receiver IS argument 0
+    # (X19 is argument 0's home, by the unconditional save) and wrong when it is
+    # not — the callee then added the receiver's value where the bracket's went
+    # and both machines printed `v=13` where the source says 15. So a row that
+    # only had the non-generic shape would have shipped that.
+    #
+    # `v=15 15` is the whole convention in one line: the declared value came back
+    # out of the specialization (the first number) AND the cell write-back
+    # reached the caller (the second), on both machines.
+    #
+    # Two statements rather than one `printf`, and that is not style: reading the
+    # receiver in the SAME argument list as the call that changes it is
+    # `model.mutating_receiver_order_refusal`, because this path evaluates a
+    # call's arguments before it makes the call. `test_formal_run.py`'s
+    # `one_field_mutator_read_in_its_own_argument_list_is_refused` is that
+    # program; this row is the same fact with the read moved out of the way.
+    ("x86_abi_a_bracketed_one_field_mutator_that_also_returns_a_value",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "    def bump[T: Int](out self, k: Int) -> Int:\n"
+     "        self._value = self._value + T + k\n"
+     "        return self._value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._value = 5\n"
+     "    var got = c.bump[7](3)\n"
+     '    printf("v=%d %d", got, c._value)\n'
+     "    return 0\n",
+     "v=15 15"),
     ("x86_abi_a_bracketed_specialized_method_call_builds_and_agrees",
      "struct Cell:\n"
      "    var value: Int\n"
