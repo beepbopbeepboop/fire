@@ -1849,11 +1849,20 @@ def test_an_imported_generic_is_refused_as_an_export_gap(tmpdir, _shared):
     the one a reader is most likely to have written, so it is the one that was
     worst served.
 
-    The BRACKETED spelling is in the same case because it is the same call, and
-    it is asserted only to refuse and to stay off the link line: which of the
-    two messages it should carry is
+    **The BRACKETED spelling is no longer in this case, and its leaving is the
+    whole of `formal/monomorph.py`.**  This test used to assert that
+    `widen[Int](5)` was refused too, on the reasoning that "which of the two
+    messages it should carry is
     `bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`'s
-    subject and its own claim, so this test does not decide it."""
+    subject and its own claim, so this test does not decide it" — i.e. it was
+    never sure the refusal was the right answer, only that it was a refusal.
+    The right answer is that a bracket says WHICH instantiation and a boundary
+    symbol per instantiation is what `doc/ABI.md` §Generics calls for: the module
+    now publishes `widen_Int`, the call binds it, and the program returns 5.
+    `test_formal_monomorph.py` is where that is pinned, with a CPython
+    differential; the case here is the half that stays refused, and it is the
+    half that cannot be answered by any amount of monomorphization: a BARE
+    `widen(5)` says no instantiation at all, so no trie entry could mean it."""
     root = os.path.join(tmpdir, "genericcallee")
     os.makedirs(root)
     write_tree(root, {
@@ -1868,27 +1877,32 @@ def test_an_imported_generic_is_refused_as_an_export_gap(tmpdir, _shared):
                         "  return widen[Int](5)\n"),
     })
     fresh_cas()
-    for program in ("guser", "gbrack"):
-        result = run_fire(["build", "--formal", "--no-prove",
-                           "-o", os.path.join(tmpdir, program + ".aout"),
-                           os.path.join(root, program + ".mojo")], cwd=root)
-        text = (result.stderr or "") + (result.stdout or "")
-        check(result.returncode != 0,
-              f"{program}.mojo BUILT: a call to a generic the exporting module "
-              f"keeps off the boundary cannot bind, so an image that compiled "
-              f"is an image with a dangling call in it")
-        check("binds 1 symbol(s) that nothing provides" not in text,
-              f"{program}.mojo reached the LINK AUDIT, which names the link "
-              f"line rather than the export rule that emptied it: "
-              f"{text.strip()[-400:]}")
-    # …and the BARE one, which is what this change is about, must name the rule.
     result = run_fire(["build", "--formal", "--no-prove",
                        "-o", os.path.join(tmpdir, "guser.aout"),
                        os.path.join(root, "guser.mojo")], cwd=root)
     text = (result.stderr or "") + (result.stdout or "")
+    check(result.returncode != 0,
+          f"guser.mojo BUILT: a call to a generic the exporting module keeps "
+          f"off the boundary cannot bind, so an image that compiled is an image "
+          f"with a dangling call in it")
+    check("binds 1 symbol(s) that nothing provides" not in text,
+          f"guser.mojo reached the LINK AUDIT, which names the link "
+          f"line rather than the export rule that emptied it: "
+          f"{text.strip()[-400:]}")
+    # …and it must name the rule.
     check("does not export it" in text and "widen" in text,
           f"a bare call to an imported generic must be refused as an export "
           f"gap naming the name: {text.strip()[-400:]}")
+    # …and the bracketed spelling of the SAME call, in the same file with the
+    # same import, must not be.  `doc/ABI.md` §Generics: a generic is not one
+    # symbol, each instantiation is; the bracket says which, so there is a symbol
+    # to bind and the two must not get the same verdict.
+    result = run_fire(["build", "--formal", "--no-prove",
+                       "-o", os.path.join(tmpdir, "gbrack.aout"),
+                       os.path.join(root, "gbrack.mojo")], cwd=root)
+    check(result.returncode == 0,
+          f"gbrack.mojo was refused, and `widen[Int](5)` names the "
+          f"instantiation it wants: {((result.stderr or '') + (result.stdout or '')).strip()[-400:]}")
 
 
 def test_a_bare_call_to_an_exported_name_still_binds(tmpdir, _shared):

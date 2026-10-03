@@ -196,15 +196,58 @@ unwound for real, while GIMPLE C code calls `mojo_raise()` itself. A callee on
 that boundary that is not a live GIMPLE C frame must not have its `longjmp`
 cross ordinary live C frames (`runtime/fire_runtime.h:240-249`).
 
-## Generics (forward-looking — Stage 5)
+## Generics
 
 A generic is not a single symbol; each instantiation is. The boundary symbol for
 `Generic[Args]` is the **monomorphized** function, mangled as
-`Generic__method__<mangled-type-args>`, keyed in the CAS by
-`hash(template-id, concrete type args, comptime params)`. The reflection table
-exposes the generic *template* plus a C-ABI `instantiate` entry point so a client
-(or another language) can request an instantiation that is then published into
-the shared CAS. Until Stage 5, generics are monomorphized inline by the codegen.
+`Generic__method__<mangled-type-args>`, keyed in the CAS by `hash(template-id,
+concrete type args, comptime params)`. The reflection table exposes the generic
+*template* plus a C-ABI `instantiate` entry point so a client (or another
+language) can request an instantiation that is then published into the shared
+CAS.
+
+**Implemented, 2026-10-03, on the formal dylib path** (`formal/monomorph.py`).
+A module dylib is compiled for the instantiations its importers ask for, each as
+a CONCRETE declaration under the mangled name — `struct Pair[Int]` becomes
+`struct Pair_Int` — compiled into that module's own library and exported with
+that module's qualifier, so the boundary symbols are
+`<module>_Pair_Int` and `<module>_Pair_Int_<method>`. Everything the export rule
+already knew how to say is unchanged; what changed is that a module declaring
+only a template now HAS something to export, and
+`formal/build.py::no_public_api_reason`'s "a parametric type has no single
+boundary layout either" no longer describes a module whose instantiations are
+known.
+
+Three properties are load-bearing and are worth stating here because the failure
+mode in each case is a program that builds and computes the wrong answer:
+
+* **A type argument must be a TYPE, and a name the reading scope does not bind
+  as a value.** `Pair[t]()` with `var t = Float64` is not an instantiation of
+  anything: the substitution would produce `var first: t` in a module that does
+  not declare `t`, and the build would not notice — a field's declared type is
+  not read by the framing decision — so `first + second` would compile as
+  integer addition and print `3` where the source says `4.0`. The demand is
+  dropped instead, and the call site keeps its brackets.
+* **The demand set is part of the artifact's identity**, in the cache key and in
+  the file name, for the same reason `arch` is: `Pair[Int]` and `Pair[String]`
+  are two different libraries, and a program handed the wrong one binds a
+  symbol it did not ask for.
+* **A template is never exported under its base name.** One trie entry cannot be
+  two instantiations.
+
+The mangling is `monomorphize.mangle` — `Pair_Int`, one underscore-joined
+suffix — which is what the compiled path's `Elaborator` computes and what its
+objects are named. That is the one place where this section's illustrative
+spelling (`Generic__method__<mangled-type-args>`) is not what is emitted, and it
+is spelled out here rather than left for a reader to discover: one mangling in
+the tree, two sections that could each be read as mandating their own, and a
+consumer that computed the other one would bind nothing.
+`bugs/FORMAL_generic_monomorph_scope.md` records what the mechanism does not yet
+cover.
+
+The compiled (GIMPLE) path continues to monomorphize generics inline in its
+codegen rather than through this module's demand set; the two are different
+engines on different backends and share the mangling and the substitution.
 
 ## Stability
 

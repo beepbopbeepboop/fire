@@ -4582,8 +4582,13 @@ def specialization_call_refusal(name: str) -> str:
 
       * the name is a generic of ANOTHER module. Its instantiation is the
         boundary symbol (doc/ABI.md §Generics), one per set of type arguments,
-        and this path has no monomorphization to key them, so there is no
-        callee here to pass leading arguments to.
+        and `formal/monomorph.py` compiles the ones an importer asks for into
+        that module's own library and REWRITES the call site to the mangled
+        name — so a call that arrives here is one whose brackets named no
+        instantiation: a bare call with no arguments, an argument that is a
+        value rather than a type, a dotted `module.name[…]`, or a template in
+        a type ANNOTATION rather than a callee position.
+        `bugs/FORMAL_generic_monomorph_scope.md` lists each with its next step.
       * the name is an ordinary VALUE and the brackets are a subscript. A
         subscript of a value is not a call this path can name at all.
 
@@ -4600,16 +4605,18 @@ def specialization_call_refusal(name: str) -> str:
     """
     return (
         f"{name}[…](…) calls a name this unit does not compile, so the "
-        f"brackets cannot be bound. A comptime specialization's brackets are "
-        f"the generic's comptime parameters, and on this path those are "
-        f"ordinary leading arguments the call site evaluates and passes "
-        f"first — a decision about a signature, which needs a declaration "
-        f"and there is none in hand. If `{name}` is a generic of another "
-        f"module then its instantiation is the boundary symbol, one per set "
-        f"of type arguments (doc/ABI.md §Generics), and this path does not "
-        f"monomorphize, so there is no callee here to pass them to; if it is "
-        f"an ordinary value then the brackets are a subscript, which is not "
-        f"a call this path can name. Refused rather than emitted with the "
+        f"brackets cannot be bound. If `{name}` is a generic of another module "
+        f"then its instantiation is the boundary symbol, one per set of type "
+        f"arguments (doc/ABI.md §Generics), and this path DOES instantiate the "
+        f"ones an importer asks for — `formal/monomorph.py` compiles each into "
+        f"that module's own library and rewrites the call to the mangled name — "
+        f"so a call arriving here asked for none: its brackets named no type "
+        f"argument, named a value rather than a type, or spelled the template "
+        f"as `module.{name}`. Write it as `{name}[<a type>](…)` and the library "
+        f"will carry the instantiation; the four ways this can still be reached "
+        f"are in bugs/FORMAL_generic_monomorph_scope.md. If `{name}` is instead "
+        f"an ordinary value then the brackets are a subscript, which is not a "
+        f"call this path can name at all. Refused rather than emitted with the "
         f"brackets dropped: that builds, runs, and returns a number the "
         f"source never wrote, with nothing on the link line to catch it"
     )
@@ -27115,11 +27122,25 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
     What it says instead is the reason the export set excludes the name, which
     is `reflect.collect_exports_src`'s rule and is the same rule the dylib
     build's own `no_public_api_reason` reports by: a leading `_`, a generic
-    template (each instantiation is its own symbol, and this path has no
-    monomorphization — `bugs/FORMAL_known_limits.md` §1.2), an overload (no one
+    template (each instantiation is its own symbol, compiled into the defining
+    module's library on demand — `formal/monomorph.py`), an overload (no one
     symbol denotes it) or a C library name. `_get_kgen_string` in
     `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
-    construct for nineteen swept files."""
+    construct for nineteen swept files.
+
+    **The generic clause is no longer a claim that this path cannot do the
+    thing** — it can, and it did so the moment it was asked, so saying so here
+    would be false in the direction this document opens with.  What is left is
+    narrower and is what the sentence now says: the call that arrives here has
+    NOT been resolved to an instantiation, and the three ways that happens are
+    all in `formal/monomorph.py::demands` — a BARE call names no type argument
+    at all, an argument that is a VALUE rather than a type (`Pair[t]()` with
+    `var t = Float64` above it) has no concrete spelling to mangle, and a
+    DOTTED application `mod.G[T]()` is refused by
+    `comptime.specialization_name` by design.  All three are listed with the
+    exact next step in `bugs/FORMAL_generic_monomorph_scope.md`, which is the
+    single home for what the mechanism does not cover.
+    """
     who = f"{fn_name}: " if fn_name else ""
     mod = getattr(sym, "module", None)
     return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
@@ -27132,9 +27153,15 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"name like `exit` or `write` is provided by libSystem. The "
             f"exclusion is measured and settled in "
             f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
-            f"Write the operation in this module, or call a public function "
-            f"that does it — which is the same program with a definition this "
-            f"image can bind")
+            f"A generic template's instantiations ARE compiled into that "
+            f"module's library when an importer asks for them "
+            f"(`formal/monomorph.py`), so this call is one that asked for "
+            f"none — it names no type argument, or names one that is a value "
+            f"rather than a type, or spells the template as `module.{name}`; "
+            f"spell it as `{name}[<a type>](…)` and the library will carry the "
+            f"instantiation. Write the operation in this module, or call a "
+            f"public function that does it — which is the same program with a "
+            f"definition this image can bind")
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,

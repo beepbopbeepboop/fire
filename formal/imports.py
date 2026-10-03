@@ -1347,6 +1347,33 @@ def module_statements(path: str) -> list:
     return stmts
 
 
+# Source TEXT, cached beside `_PARSED` on the same (path, content-digest) key and
+# for the same reason. `reflect.export_exclusions` — the one rule that says which
+# declared names are generic templates, and the one `collect_exports_src` filters
+# the export table through — is a function of the text, so the text is a first
+# class input to the export and specialization decisions and re-reading it per
+# question is what `module_statements` exists to stop. Unreadable is "" rather
+# than an exception, for `module_statements`'s own reason: every caller has a
+# better message for a module whose source has gone.
+_SOURCE_TEXT: dict = {}
+
+
+def module_source_text(path: str) -> str:
+    """The text of the module at `path`, or "" — cached per (path, content)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return ""
+    digest = cas.hash_parts(raw)
+    key = (os.path.abspath(path), digest)
+    hit = _SOURCE_TEXT.get(key)
+    if hit is None:
+        hit = raw.decode("utf-8", "replace")
+        _SOURCE_TEXT[key] = hit
+    return hit
+
+
 def external_declarations(linked: list) -> dict:
     """`{export symbol: FunctionDef}` for the linked libraries' function exports.
 
@@ -1493,6 +1520,80 @@ def module_struct_defs(path: str, project_root: str = None) -> list:
                 collect(dep)
 
     collect(path)
+    return out
+
+
+def module_templates_by_path(path: str, project_root: str = None) -> dict:
+    """`{module path: [generic template name, …]}` for `path`'s re-export closure.
+
+    The same walk as `module_struct_defs` and for the same reason: a package's
+    API is its re-exports, so a template an importer reaches through a package is
+    DECLARED by a sibling and has to be instantiated in that sibling's library —
+    the demand belongs to the module that owns the definition, not to the one
+    whose name the importer happened to import. `std/collections/__init__.mojo`
+    re-exporting `BinaryHeap` is the measured case, and it is 162 of the 165
+    files in `bugs/FORMAL_sweep_work_map_2026-10-03_b8.md` §3.1.
+
+    Which declared names are templates is `formal/monomorph.py`'s question and is
+    answered there by `reflect.export_exclusions` — the same rule the export
+    table is filtered through, so the set instantiated and the set excluded
+    cannot drift apart.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    out, visited = {}, set()
+
+    def collect(p):
+        key = os.path.abspath(p)
+        if key in visited:
+            return
+        visited.add(key)
+        names = MM.template_names(module_source_text(p))
+        if names:
+            out[key] = names
+        for st in module_statements(p):
+            if not isinstance(st, F.FromImportStmt):
+                continue
+            dep = resolve_module_path(st.module, relative_to=p,
+                                      project_root=project_root or p)
+            if dep:
+                collect(dep)
+
+    collect(path)
+    return out
+
+
+def instantiation_demands(module_path: str, consumer_src: str,
+                           project_root: str = None,
+                           own_templates=()) -> dict:
+    """`{module path: {template: [(type arg, …), …]}}` — what `consumer_src`
+    asks of `module_path`'s re-export closure.
+
+    `consumer_src` is ONE source's text, and the answer is keyed by the module
+    that DECLARES each template rather than by the module the consumer imported
+    the name from, because that is where the instantiation has to be compiled:
+    a boundary symbol lives in the library that defines the body.
+
+    ONE parse of `consumer_src` for the whole closure. `module_templates_by_path`
+    can reach thirty modules (a program importing `std.collections` pulls the
+    package and every sibling it re-exports), and re-parsing the consumer per
+    module made the cost of a demand set the product of the two. The unfiltered
+    set of bracketed callees is therefore computed once here and intersected per
+    module, which is also why the intersection is a plain set test rather than a
+    re-walk: `formal/monomorph.py::demands` is the one place that reads call
+    sites, and it reads them for the filtered set too.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    found = MM.all_instantiation_calls(consumer_src)
+    if not found:
+        return {}
+    out = {}
+    for p, names in module_templates_by_path(module_path,
+                                            project_root).items():
+        got = MM.demands_from_calls(found, names, own=own_templates
+                                    if os.path.abspath(p) ==
+                                    os.path.abspath(module_path) else ())
+        if got:
+            out[p] = got
     return out
 
 
@@ -2507,10 +2608,10 @@ def _dylib_lock(out: str):
 
 
 def module_dylib_path(out_dir: str, module_identity: str, source_path: str,
-                      arch: str) -> str:
+                      arch: str, dkey: str = "") -> str:
     """Where this module's library for `arch` lives, and why each part is here.
 
-    `<abi-prefix>.<source-digest>.<compiler-digest>.<arch>.dylib`.
+    `<abi-prefix>.<source-digest>.<compiler-digest>[.<demands-digest>].<arch>.dylib`.
 
     **The compiler digest is the one that was missing.** The CAS is one
     directory shared by every checkout on the machine, and sibling worktrees are
@@ -2526,6 +2627,22 @@ def module_dylib_path(out_dir: str, module_identity: str, source_path: str,
     `cas.formal_fingerprint()` hashes `formal/**` plus the parser and the middle
     tier — the set that decides the emitted bytes.
 
+    **The demands digest is the third, and it is about INSTANTIATIONS rather than
+    about inputs.** A module that publishes a generic template is asked for
+    particular instantiations by whoever imports it, and two builds of the same
+    source asked for different ones emit DIFFERENT libraries: the one built for
+    `Pair[Int]` exports `prefix_Pair_Int_*` and the one built for
+    `Pair[String]` exports `prefix_Pair_String_*`. So the request set is part of
+    the artifact's identity on the same terms `arch` is — it is a different
+    library rather than a different version of one, and handing a program the
+    wrong one produces a library that builds, links, and then fails to bind a
+    boundary symbol. It is `monomorph.demands_key` of the module's own demands
+    (`instantiation_demands`), and it is OMITTED ENTIRELY when there are none,
+    which is the property that makes it safe to add: a module that publishes no
+    generic template keeps the exact path it had before this parameter existed,
+    so nothing outside the generic path moves and no stale library becomes
+    unreachable.
+
     The other three parts: `abi_module_name` (not a second `re.sub` of the same
     rule — the manifest keys every export by this prefix and
     `dylib_export_module` resolves through it, so two copies of the
@@ -2535,18 +2652,26 @@ def module_dylib_path(out_dir: str, module_identity: str, source_path: str,
     library reachable under a name that looks current); and the architecture,
     which is a DIFFERENT artifact rather than a different version of one, so it
     is in the name as well as in `out_dir`.
+
+    Every digest here is in this ONE function for the reason the compiler digest
+    needed a function at all: the naming rule is what the build, the manifest
+    reader and `dylib_chain` must agree on, and a rule recomputed at each site
+    is three chances to disagree about where a library lives.
     """
     prefix = _model.abi_module_name(module_identity)
     with open(source_path, "rb") as f:
         src_digest = cas.hash_parts(f.read())[:12]
     comp_digest = cas.formal_fingerprint()[:12]
-    return os.path.join(out_dir,
-                        f"{prefix}.{src_digest}.{comp_digest}.{arch}.dylib")
+    dkey_part = f".{dkey}" if dkey else ""
+    return os.path.join(
+        out_dir,
+        f"{prefix}.{src_digest}.{comp_digest}{dkey_part}.{arch}.dylib")
 
 
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                        arch: str = "arm64", project_root: str = None,
-                       _stack=(), _parent: str = None) -> str:
+                       _stack=(), _parent: str = None,
+                       demands: dict = None) -> str:
     """Compile `source_path` in full into a dylib; return its path.
 
     "In full" = every public function the module defines. Its own imports are
@@ -2571,8 +2696,28 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     cached, in the one place where a stale hit is a wrong-architecture load
     rather than a slow rebuild. `out_dir` is per-architecture for the same
     reason (see `formal/build.py`'s `_resolve_imports`).
+
+    `demands` is `{module path: {template: [(type arg, …), …]}}` — the
+    INSTANTIATIONS of generic templates the importing chain asks for, attributed
+    to the module that declares each template (`instantiation_demands` above).
+    It is part of the artifact's identity, in BOTH keys, for the same reason
+    `arch` is: a library built for `Pair[Int]` exports `prefix_Pair_Int_*` and
+    one built for `Pair[String]` exports `prefix_Pair_String_*`, so they are two
+    different libraries that a program may not be handed for one another. Keying
+    on the source path alone would return the first one for the second request —
+    in-process a wrong-boundary-symbol library that still builds and links, and
+    on disk two builds writing over one path.
+
+    A module with no demands for its own templates is unaffected: the empty set
+    digests to the empty string and nothing is added to the name, so every
+    existing module dylib keeps the exact path it had before this parameter
+    existed.
     """
-    key = (arch, os.path.abspath(source_path))
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    here = os.path.abspath(source_path)
+    mine = (demands or {}).get(here) or {}
+    dkey = MM.demands_key(mine)
+    key = (arch, here, dkey)
     if key in _BUILT:
         return _BUILT[key]
     if os.path.abspath(source_path) in _stack:
@@ -2622,12 +2767,31 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # Build the dependencies first, and keep their dylibs: they go on THIS
     # library's link line, both so cross-module calls get the right exported
     # spelling and so the load commands that let dyld bind them exist.
+    #
+    # THIS module's own demands for ITS dependencies are computed here, from
+    # THIS module's source, and are one level of the closure rather than a
+    # fixpoint: a demand is a fact about one file's call sites, so each level
+    # answers for its own and the recursion carries the rest down. That is what
+    # makes `main → pkg → lib` work — `pkg`'s use of `lib`'s template is written
+    # in `pkg`'s source and only `pkg` can see it, so a set computed once at the
+    # top would miss it. The two sets are merged by path and the merge is
+    # idempotent, so the same demand reached by two routes is still one.
+    below = dict(demands or {})
+    for other, wanted in instantiation_demands(
+            source_path, module_source_text(source_path),
+            project_root=project_root or source_path,
+            own_templates=MM.template_names(module_source_text(source_path))
+            ).items():
+        merged = dict(below.get(other) or {})
+        for tmpl, args in wanted.items():
+            merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
+        below[other] = merged
     dep_dylibs = []
     for _mod, dep_path in depends:
         d = build_module_dylib(_mod, dep_path, out_dir, arch,
                                project_root=project_root or source_path,
                                _stack=_stack + (os.path.abspath(source_path),),
-                               _parent=module_identity)
+                               _parent=module_identity, demands=below)
         if d:
             dep_dylibs.append(d)
 
@@ -2679,14 +2843,13 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # are two jobs, so both read the one rule rather than one of them being a
     # copy of it.
     prefix = _model.abi_module_name(module_identity)
-    out = module_dylib_path(out_dir, module_identity, source_path, arch)
-    # The CONTAINER is `default_format(arch)` (see the `compile_formal_dylib`
-    # call below), not a hardcoded `fmt="macho"`. It used to be hardcoded, which
-    # meant a Linux host built Mach-O module libraries that no ELF loader can
-    # open: the module was compiled, audited (its symbols are `provided`, so
-    # `_audit_bound_symbols` passes) and then put NOWHERE, and the program died
-    # at load with an unresolved symbol for a function its own source imports --
-    # a finding the symbol audit could not see, because the audit asks "does
+    # …and the DEMANDS DIGEST is in the name too, which is the same argument one
+    # level over the compiler's: two builds of one source that were asked for
+    # different instantiations produce libraries with different exported symbols,
+    # so they are two artifacts.  `module_dylib_path` owns the naming rule and
+    # the reason each part of it is there; `dkey` is the empty string for a
+    # module with no demands, so nothing outside the generic path moves.
+    out = module_dylib_path(out_dir, module_identity, source_path, arch, dkey)
     # something on this link line DECLARE this name" and the question that
     # mattered was "will the loader OPEN this library". Both emitters exist now
     # (`formal.macho_linker.build_macho_dylib` and `formal.elf.build_elf_dylib`)
@@ -2745,9 +2908,27 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # rather than "a manifest describing a library that is not there yet".
     with _dylib_lock(out):
         try:
+            # The INSTANTIATIONS this module is asked for, as extra sources of
+            # this same compile unit and under this module's OWN ABI prefix.
+            #
+            # Generated source rather than a new emitter path, and the reason is
+            # that everything downstream already knows how to do this: the
+            # export table (`reflect.collect_exports_src` now finds a CONCRETE
+            # `Pair_Int` and its methods, where before it found only the excluded
+            # template), `no_public_api_reason`'s gate (a module with an
+            # instantiation has a boundary symbol, so the gate is not reached),
+            # `model.abi_method_symbol`'s naming and `_method_exports` all read
+            # an ordinary StructDef. A separate path for "monomorphized
+            # definitions" would have had to agree with every one of those, and
+            # the failure mode of disagreeing is a call that binds a symbol the
+            # library never emitted — so it goes through them instead.
+            extra_sources, extra_prefixes = _instantiated_sources(
+                source_path, mine, prefix)
             result = compile_formal_dylib(
-                [source_path], output=out, prove=False, check=False,
-                module_prefixes={source_path: prefix},
+                [source_path] + [p for _t, _m, _a, p in extra_sources],
+                output=out, prove=False, check=False,
+                module_prefixes=dict(
+                    {source_path: prefix}, **extra_prefixes),
                 link_dylibs=dep_dylibs, arch=arch,
                 fmt=default_format(arch),
                 reexports=_qualified_reexports(
@@ -2757,15 +2938,141 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
         except (FormalBuildError, CodegenError) as e:
             raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
         # Record the dependencies in the manifest so a program can link them
-        # without re-deriving this module's imports.
-        _record_depends(_manifest_path(out),
-                        [(m, p) for m, p in depends])
+        # without re-deriving this module's imports, each with the demands
+        # digest IT was built with, because `dylib_chain` looks a dependency up
+        # in `_BUILT` by (arch, path, digest) and a lookup that missed would
+        # leave the library off the link line altogether — see that function's
+        # own docstring for the measurement and for why the old claim that a
+        # miss was harmless was false.  This module's OWN digest is recorded
+        # beside them and read by whoever links against IT.
+        _record_depends(
+            _manifest_path(out),
+            [(m, p, _manifest_instantiations(d)) for (m, p), d
+             in zip(depends, dep_dylibs) if d],
+            dkey)
     _BUILT[key] = out
     return out
 
 
-def _record_depends(manifest_path: str, depends: list) -> None:
-    """Record this module's resolved imports in its own manifest.
+def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
+    """`([(mangled, args, path), …], {path: prefix})` — the instantiated
+    definitions `source_path` is asked to publish, written into the CAS.
+
+    A demand that cannot be satisfied is DROPPED here rather than raised, and
+    that is the design's whole error story rather than a shortcut: the two
+    readers of a missing instantiation both have a better question to ask about
+    it than this one does. `no_public_api_reason` can name the shape of the
+    module that asked for it (and its generic branch now says what would make
+    the symbol appear — an importer spelling the type argument), and
+    `formal/build.py`'s bracketed-callee check can name the call. Raising here
+    would report a demand's failure in place of both, which is the "a message
+    that is false about the file" defect `bugs/FORMAL_known_limits.md` opens
+    with — and it would do it on a module that HAS a concrete API and is
+    refused for a specialization of one line of it.
+
+    So a dropped demand lands the module exactly where it was before this
+    existed: refused, or built without that symbol and refused at the CALL that
+    wanted it. Neither is a silent wrong answer, because the mangled name a
+    dropped demand would have published is the name the importer would have
+    bound — so nothing can bind a body that was never emitted.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    if not wanted:
+        return [], {}
+    made, _failed = MM.instantiate_all(module_source_text(source_path), wanted)
+    return made, {p: prefix for _t, _m, _a, p in made}
+
+
+def imported_instantiations(source_path: str, stmts: list,
+                            project_root: str = None,
+                            linked_paths=()) -> dict:
+    """`{mangled name: StructDef}` for every generic template this file
+    instantiates out of a module it reaches — and REWRITES the call sites that
+    asked, in `stmts`.
+
+    **The declaration and the rewrite come from ONE table, and that is the whole
+    design.**  An importer writes `Pair[Int]()`; the boundary symbol it has to
+    bind is `prefix_Pair_Int___init__`, which is the symbol of a CONCRETE struct
+    named `Pair_Int`.  So the call has to reach the emitter spelled as a struct
+    this build has a declaration for, or it is a bracketed callee this unit does
+    not compile and is refused (`formal/build.py`'s bracketed scan).  Computing
+    the two separately would make it possible for the rewrite to name a struct
+    the declaration list does not have — a call lowered to a constructor nothing
+    declares — and for the declaration list to have a struct no call reaches,
+    which is merely waste.  One table, produced once, is what makes the two
+    agree by construction rather than by review.
+
+    The rewrite is on the AST and not on the TEXT, so `Pair[Int]` inside a
+    comment, a docstring or an MLIR literal is untouched: the parser has already
+    thrown those away, and a textual rewrite would have had to re-implement the
+    tokenizer's knowledge to avoid corrupting them.
+
+    A demand whose template cannot be instantiated leaves both halves out
+    together — no declaration and no rewrite — so the call site keeps its
+    brackets and is refused by the bracketed scan with the sentence that is true
+    of it (`formal/model.py::specialization_call_refusal`, or
+    `imported_callee_refusal` where the export rule is the real reason).  That
+    is the same "drop both or neither" rule `_instantiated_sources` follows on
+    the exporting side, and the two halves of one feature refusing at the same
+    demand for the same reason is the property that makes a partial failure
+    diagnosable.
+
+    `linked_paths` are libraries handed over with `--link-dylib`, which reach
+    declarations no import statement names (`formal/build.py::_imported_structs`
+    walks them for exactly this reason).  They are searched the same way, and a
+    template is attributed to whichever module declares it first, which is the
+    same precedence `_imported_structs` applies to the declarations themselves.
+    """
+    from formal import monomorph as MM            # lazy — pulls the middle tier
+    consumer = module_source_text(source_path)
+    if not consumer:
+        return {}
+    paths = []
+    for mod in imported_modules(stmts):
+        dep = resolve_module_path(mod, relative_to=source_path,
+                                  project_root=project_root or source_path)
+        if dep:
+            paths.append(dep)
+    paths.extend(linked_paths or ())
+    if not paths:
+        return {}
+    demap: dict = {}
+    out: dict = {}
+    for dep in paths:
+        for owner, wanted in instantiation_demands(
+                dep, consumer, project_root=project_root or source_path).items():
+            made, _failed = MM.instantiate_all(module_source_text(owner), wanted)
+            for base, mangled, args, gen_path in made:
+                demap.setdefault((base, args), mangled)
+                if mangled in out:
+                    continue
+                # The census is attached from the INSTANTIATED module's own
+                # statements, for `imported_struct_defs`'s reason: the evidence
+                # is "what does this unit write into a field", so the unit that
+                # has to answer is the one that declares the struct.
+                for st in module_struct_defs(gen_path,
+                                             project_root or source_path):
+                    _attach_declared_census(st, gen_path)
+                    out.setdefault(st.name, st)
+    if demap:
+        MM.rewrite_instantiation_calls(stmts, demap)
+    return out
+
+
+def _record_depends(manifest_path: str, depends: list,
+                    instantiations: str = "") -> None:
+    """Record this module's resolved imports in its own manifest, plus the
+    demands digest its own library was built with.
+
+    `instantiations` is `formal/monomorph.py::demands_key`'s answer for the
+    instantiations of generic templates THIS library publishes, and each entry
+    of `depends` is a `(module, source, instantiations)` triple carrying the same
+    field for the DEPENDENCY — read out of that library's own manifest by
+    `_manifest_instantiations` rather than recomputed, because `_BUILT` is keyed
+    on it and a digest the reader had to recompute from source it may not have is
+    a digest that can disagree with the build it is looking for.  `""` is a real
+    value, not an absence — it is the digest of the empty demand set, and it is
+    what every module that declares no generic template writes.
 
     Through `formal.build.update_dylib_manifest`, like every other manifest
     write, so the read-modify-write is atomic: this is the fourth of the four
@@ -2779,9 +3086,28 @@ def _record_depends(manifest_path: str, depends: list) -> None:
     from formal.build import update_dylib_manifest
 
     def _record(payload):
-        payload["depends_on"] = [{"module": m, "source": p} for m, p in depends]
+        payload["depends_on"] = [
+            {"module": m, "source": p, "instantiations": k}
+            for m, p, k in depends]
+        payload["instantiations"] = instantiations
 
     update_dylib_manifest(manifest_path, _record)
+
+
+def _manifest_instantiations(dylib_path: str) -> str:
+    """The demands digest `dylib_path`'s manifest records, or "".
+
+    "" for a manifest that is missing, unreadable or written before the field
+    existed, and every one of those is the same answer for a different reason: a
+    digest nobody recorded is a digest nobody looked up by, so the fallback in
+    `_built_lookup` is what has to carry it.
+    """
+    import json
+    try:
+        with open(_manifest_path(dylib_path)) as f:
+            return json.load(f).get("instantiations") or ""
+    except (OSError, ValueError):
+        return ""
 
 
 def dylib_chain(dylib_path: str, _seen=None) -> list:
@@ -2793,11 +3119,23 @@ def dylib_chain(dylib_path: str, _seen=None) -> list:
 
     The architecture is recovered from `dylib_path` (the `.N.dylib` suffix
     `build_module_dylib` writes) to look dependencies up in `_BUILT`, whose key
-    is (arch, path). Reading it back off the name rather than threading it
-    through every call is safe because the name is the only thing that decides
-    which library this is — and a suffix this function cannot parse yields no
-    match, i.e. an omitted dependency, which is the same behaviour as a
-    manifest with no `depends_on`, not a wrong one."""
+    is (arch, path, demands digest). Reading it back off the name rather than
+    threading it through every call is safe because the name is the only thing
+    that decides which library this is.
+
+    **The DEMANDS DIGEST comes from the manifest, not from the name**, and the
+    reason is that `_BUILT` is keyed on it and a lookup that missed would drop a
+    dependency from the link line.  It did, measured: adding the digest to
+    `_BUILT`'s key left this function's 2-tuple lookup finding nothing, so
+    `main → pkg → pairlib` linked `pkg` alone and the image bound
+    `Pair_Int_get_first` with nothing to bind it to.  Its docstring claimed the
+    miss was harmless — "an omitted dependency, which is the same behaviour as a
+    manifest with no `depends_on`, not a wrong one" — and that was false: a
+    manifest with no `depends_on` describes a module that imports nothing, while
+    this is a module that imports something and is being linked without it, which
+    is the one thing the link line exists to prevent.  So the manifest now
+    records the digest its build was made with, and a miss is a fallback rather
+    than a silent omission (see `_built_lookup`)."""
     _seen = set() if _seen is None else _seen
     key = os.path.abspath(dylib_path)
     if key in _seen:
@@ -2813,11 +3151,41 @@ def dylib_chain(dylib_path: str, _seen=None) -> list:
         depends = []
     out = []
     for dep in depends:
-        dep_dylib = _BUILT.get((arch, os.path.abspath(dep["source"])))
+        # Each dependency carries ITS OWN demands digest, not this module's:
+        # `_BUILT` is keyed on the digest of the module being looked up, and in
+        # one recursion every level computes a different set from its own
+        # source.  So the parent records what the child recorded, which is why
+        # the field sits on the dependency's entry rather than beside them.
+        dep_dylib = _built_lookup(arch, dep["source"],
+                                  dep.get("instantiations") or "")
         if dep_dylib:
             out.extend(dylib_chain(dep_dylib, _seen))
     out.append(dylib_path)
     return out
+
+
+def _built_lookup(arch: str, source: str, dkey: str = ""):
+    """The dylib `_BUILT` holds for (arch, source) under `dkey`, or None.
+
+    The exact key first, which is the normal case: the manifest of the library
+    that names this dependency records the same demands digest its own
+    dependency was built with, because the two are built in one recursion from
+    one set.  Then a UNIQUE fallback, because a manifest written before the
+    digest was recorded — or one whose build used a different demand set, which
+    is possible when two programs share a CAS directory — must not silently lose
+    a library from the link line.  With more than one candidate built for the
+    same module, there is no answer here that is not a guess, so it returns None
+    and the image's own symbol audit reports the dangling reference, which is a
+    true statement about a link line that is missing a library.  The alternative
+    — picking one — is the failure this whole function is arranged to avoid.
+    """
+    here = os.path.abspath(source)
+    hit = _BUILT.get((arch, here, dkey))
+    if hit is not None:
+        return hit
+    candidates = {v for (a, p, _k), v in _BUILT.items()
+                  if a == arch and p == here}
+    return candidates.pop() if len(candidates) == 1 else None
 
 
 def _arch_of_dylib(dylib_path: str) -> str:
