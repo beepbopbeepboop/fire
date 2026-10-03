@@ -1143,19 +1143,22 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2, 'coro-detached-async': 2,
-                     'coro-future-await': 17, 'formal-external-call': 2,
-                     'formal-module-attr': 1, 'formal-receiver-position': 3,
+                     'coro-future-await': 17,
+                     'formal-receiver-position': 3,
                      'gimple-async-runner': 36,
                      'mutable-async-capture': 2, 'nested-async-generic': 2,
                      'taskgroup': 3, 'transitive-closure-capture': 2,
                      'x86-containers': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
-          f'is for. `formal-toplevel` is NOT here and that is the mechanism '
-          f'working: its `expect=` ("2 of 70") was removed when the two rows '
-          f'it described were rewritten as build-and-RUN cases, so a pinned '
-          f'census that still listed it would be asserting a marker the tree '
-          f'no longer has.')
+          f'is for. `formal-toplevel`, `formal-module-attr` and '
+          f'`formal-external-call` are NOT here and that is the mechanism '
+          f'working: each `expect=` was removed when the rows it described '
+          f'were rewritten as build-and-RUN cases (the last one when '
+          f'`formal/model.py`\'s `type_position_nodes` answered the bracket-in-'
+          f'a-TYPE-position question the marker had been absorbing), so a '
+          f'pinned census that still listed any of them would be asserting a '
+          f'marker the tree no longer has.')
 
 
 # A Markdown table row that is unmistakably a status inventory: a pipe, a

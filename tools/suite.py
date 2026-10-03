@@ -2333,18 +2333,19 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # it was being asked the question at the wrong moment: `model.type_position_nodes`
 # now tells the module-symbols walk which brackets sit in a TYPE position, so it
 # stops asking what they mean at runtime.
+# NO `expect=`, and its removal is the anti-rot working rather than a coverage
+# hole: this row carried one for two cases (`a_nested_bracket_in_the_type_
+# argument_is_not_a_tuple_index` and `env_round_trip`, the same construct
+# asked at two moments) and the merged tree is `PASS=45 FAIL=0`, because
+# `formal/model.py`'s `type_position_nodes` now tells the module-symbols walk
+# which brackets sit in a TYPE position instead of asking what they mean at
+# runtime. A marker on a passing test is reported as a FAILURE, so it had to go;
+# and the doc it cited was gone already, which is the other half of the same
+# signal (`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`
+# is not in the tree, and `suite-self-test`'s "every bug doc a registered
+# reason cites exists" is what said so).
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md '
-            '— 2 of 30: a bracket inside the external_call bracket\'s TYPE '
-            'argument is refused as a value subscript. Both are that one '
-            'construct: `a_nested_bracket_in_the_type_argument_is_not_a_tuple'
-            '_index` is the case the doc is about, and `env_round_trip` is the '
-            'same `external_call["getenv", _CPointer[...]]` shape inside three '
-            'functions, split out so a regression names itself. The marker said '
-            '1 until 2026-10-01, when the stated count in an `expect=` reason '
-            'became checkable against the run; this row was the second it '
-            'caught.',
      extra=['test_formal_external_call.py', 'formal/build.py',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')

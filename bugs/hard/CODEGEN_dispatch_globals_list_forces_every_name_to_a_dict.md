@@ -186,18 +186,24 @@ Eleven errors, in four further defects, each with its own doc:
   `gen_module_impl`'s merged closure env
   (`gen_module_impl__is_foreign_main__mk_round_env`) declares three captured
   fields and both the allocator and the body write a fourth, `self`.
-* `bugs/CODEGEN_selfhost_annotated_init_field_typed_as_the_receiver.md` — 1
-  error. `fire_compiler.py`'s `self._comptime_rhs_failures: list = []` inside
-  `Parser.__init__` gives the struct field the type `struct Parser *`.
+* `bugs/CODEGEN_selfhost_class_field_type_comes_from_the_receiver.md` — 4
+  errors. One defect behind all four: a self-host class's struct field typed
+  with a pointer to the RECEIVER. `MojoFunction._interp`,
+  `_MojoBoundComptimeFunction._interp` and `MojoOverloadSet._interp` (three
+  "non-trivial conversion" errors, and gcc prints the construct for them via
+  `bootstrap-stage2-cc`) plus `Parser._comptime_rhs_failures`, which is
+  ANNOTATED `list` and still gets it.
 * `bugs/CODEGEN_myinterpreter_star_args_call_passes_kwargs_twice.md` — 2
   errors. `myinterpreter_MojoFunction___call__` is declared `(MojoFunction *,
-  MojoList *, MojoDict *)` and called with FOUR arguments; the 5 "non-trivial
-  conversion" errors in the same four `myinterpreter` functions are the same
-  investigation's other half.
+  MojoList *, MojoDict *)` and called with FOUR arguments.
 * `bugs/CODEGEN_compute_exc_descendants_call_site_return_temp_is_the_box.md` —
   1 error. The call `self._exc_descendants =
   _compute_exc_descendants(all_struct_defs)` declares its result temp `int64_t`
   while the definition and the table both say `MojoDict *`.
+
+`python3 tools/suite.py mojoc` reports the identical eleven: it builds the same
+self-host closure, and `bootstrap-stage2-cc` gets far enough to compile it only
+because the stage-1 dumps came from the pre-merge tree.
 
 ## Re-verify with
 

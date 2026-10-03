@@ -1,6 +1,6 @@
-# `f(a, b, *args, **kwargs)` lowers to a four-argument call of a three-parameter `__call__`, and five gimple conversions in `myinterpreter`'s own methods
+# `f(a, b, *args, **kwargs)` lowers to a four-argument call of a three-parameter `__call__`
 
-## Status: OPEN. Found 2026-10-03 while working
+## Status: OPEN. Two of the eleven errors `selfhost` now reports. Found 2026-10-03 while working
 ## `bugs/hard/CODEGEN_dispatch_globals_list_forces_every_name_to_a_dict.md`;
 ## pre-existing, and reachable only through the rollback that bug removed.
 
@@ -10,19 +10,9 @@
     # FAIL  selfhost  (110s)  exit 1
 
 and the generated-C error inventory described in that doc's "How it is measured
-now" section, which reports 7 of the 11 remaining errors, all inside
-`myinterpreter.py`'s own compiled bodies:
+now" section. Of the eleven remaining errors, TWO are this one; the other nine
+are four docs of their own.
 
-    fire_nl.ci:1118971:1: error: non-trivial conversion in 'var_decl'
-        in myinterpreter_MojoFunction___init__
-    fire_nl.ci:1119038:1: error: non-trivial conversion in 'component_ref'
-        in myinterpreter_MojoFunction___call__
-    fire_nl.ci:1123893:1: error: non-trivial conversion in 'component_ref'
-        in myinterpreter__MojoBoundComptimeFunction___call__
-    fire_nl.ci:1123923:1: error: non-trivial conversion in 'var_decl'
-        in myinterpreter_MojoOverloadSet___init__
-    fire_nl.ci:1124568:1: error: non-trivial conversion in 'component_ref'
-        in myinterpreter_MojoOverloadSet___call__
     fire_nl.ci:1125288:10: error: too many arguments to function
         'myinterpreter_MojoFunction___call__'; expected 3, have 4
         in myinterpreter_BoundMethod___call__
@@ -60,11 +50,17 @@ the keyword slot.
 
 The five "non-trivial conversion" errors are all reported at a function's
 closing `}` (gcc has no better position for a gimple-body error), so they name
-a function rather than a line. Each is a method of one of `MojoFunction`,
-`_MojoBoundComptimeFunction` or `MojoOverloadSet` — the three classes whose
-`__call__`/`__init__` are written in exactly this `*args`/`**kwargs` shape — so
-they are the same defect's other half: the star-args/keyword lowering of a
-method on a struct whose fields carry a `MojoList *`/`MojoDict *`.
+a function rather than a line — but `bootstrap-stage2-cc` prints the construct
+itself, and they are NOT part of this defect:
+
+    int64_t
+    struct MojoFunction *
+    _t2 = func->_interp;
+
+i.e. a struct FIELD whose declared type is the receiver's own struct pointer.
+That is `bugs/CODEGEN_selfhost_class_field_type_comes_from_the_receiver.md`
+(four errors of its own) and it is a different fix. What is left here is the
+`too many arguments` pair.
 
 ## Exact next step
 
@@ -82,7 +78,7 @@ emitted as a positional. Check the shape
 whether the receiver is a METHOD (the three classes above) or a free function —
 every reported instance is a method, which is the narrower thing to look at.
 
-For the five conversion errors, the next diagnostic step is to get gcc to name a
-line: compile the stripped `.ci` with `-fdiagnostics-show-caret` and one
-function at a time (delete the other bodies), or reproduce one of the three
-classes in a small `.mojo` file so the emitter's debug notes apply.
+Reproduce the shape in a small `.mojo` file first — a two-field struct whose
+`__call__` is `(self, *args, **kwargs)` and another whose method calls it as
+`f(a, b, *args, **kwargs)` — so the emitter's own debug notes apply and the
+four-argument emission is visible without a self-host build.
