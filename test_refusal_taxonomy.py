@@ -356,7 +356,7 @@ CAUSE_SAMPLES = [
     # old row's two markers were both IN that tail, and the row went to 0 files
     # on both arches without anything failing. This sample is what makes that
     # visible: it is a real message (quoted in full, with the file it came
-    # from, in `bugs/FORMAL_frame_receiver_handoff.md` §D2) and it classifies
+    # from) and it classifies
     # to the row that owns the construct.
     ("the slot would have to hold a frame address, and no type says so",
      "self.asm.org() hands the word in the slot self.asm to Assembler.org(), "

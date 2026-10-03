@@ -24,7 +24,7 @@ nothing here is module-shaped. Step 1 (a first-class function value) is a
 lowering in both backends plus a representation rule, and the representation
 question belongs with the owner of the value model rather than with a module
 author — `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
-and §4c of `FORMAL_frame_receiver_handoff.md` both name the same missing
+and `formal/model.py`'s copy-construction refusal both name the same missing
 capability, and whichever lands first unblocks this. Step 2 (decorator
 application) must land before any decorator is exported, and it is
 `bugs/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
@@ -115,7 +115,7 @@ Not a module. The root capability is **a first-class function value**, and it is
 the same one `collections` needs for a different reason and that
 `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` §2 already
 touches ("a shallow field-wise clone of a compile-time-known struct … is the
-same feature `FORMAL_frame_receiver_handoff.md` §4c already names as missing").
+same feature `formal/model.py`'s copy-construction refusal already names").
 Whichever of those lands first unblocks this; the module is then a transcription
 and not a design.
 

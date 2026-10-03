@@ -574,6 +574,44 @@ CASES = [
 # names the architectures a case is about, which the two whose premise is an
 # ABI's ARGUMENT BUDGET need, because that budget differs between the machines.
 DIFF_CASES = [
+    # A RECEIVED frame address handed back, through a COMPTIME-PARAMETERIZED
+    # callee, and it is here rather than in the receiver-position suite because
+    # that suite carried it as a REFUSAL until 2026-10-03 and the refusal was
+    # lifted by decision (`model.struct_returned_frame_sites`: the creator is
+    # an ancestor of the CALLER, so handing the address back is safe, and every
+    # channel that would let it outlive the creator is still refused). What is
+    # new here and was never covered is that a comptime parameter SHIFTS the
+    # argument positions — `incoming_args` puts it first — and the hidden
+    # trailing word the convention adds has to land after the LAST of them. A
+    # callee that read its `r` from the wrong slot would either refuse with a
+    # holder disagreement or return the block's address where the frame was
+    # meant.
+    ("received_frame_handed_back_through_a_specialized_parameter",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def stash[type: Int](x: Int, r: R) -> Int:\n"
+     "    return r\n\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     '    printf("a=%d,b=%d", stash[1](0, r).a, stash[1](0, r).b)\n'
+     "    return 0\n",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n\n"
+     "def stash(x, r):\n"
+     "    return r\n\n"
+     "def main():\n"
+     "    r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     '    print("a=%d,b=%d" % (stash(0, r).a, stash(0, r).b), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+
     # THE CONSTRUCT, in miniature: a factory that builds an object and returns
     # it.  `q.x * 10 + q.y` rather than a field read of `q` alone, so a block
     # that is the RIGHT SIZE and the right layout is the only thing that

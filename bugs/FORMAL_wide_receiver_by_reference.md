@@ -1238,7 +1238,7 @@ says 42.
 
 ## Wave 4 (D4): the hand-off, split by what the callee actually is
 
-`bugs/FORMAL_frame_receiver_handoff.md` has the full account, the
+`test_formal_run.py`'s `byref_*` cases are the account, and the
 measurements and the per-file table. What belongs here is the one-line summary
 and the thing that changes this document's own conclusions.
 

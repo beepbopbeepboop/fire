@@ -111,7 +111,7 @@ only class whose count is a gap in the backend". The backend did refuse a
 construct in this file, and it refused it for a reason that is true. Moving
 the file to a `not-answerable` class would move it out of the coverage
 denominator **without making it answerable** — which
-`bugs/FORMAL_frame_receiver_handoff.md` §16 and §25 both name as the drift
+`test_formal_frame_len.py` and the sweep's two measurements both name as the drift
 direction this sweep's accounting is arranged to resist. Leave it in `codegen`.
 
 ## Re-verified 2026-10-01 (`work/formal3-7`): every claim here still holds

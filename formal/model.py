@@ -9465,8 +9465,7 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 # PYTHON BUILTINS THIS PATH DOES NOT IMPLEMENT, and why each one has no answer
 # here. The values are the second half of the sentence they appear in.
 #
-# This is the table `bugs/FORMAL_frame_receiver_handoff.md` names as the thing
-# the `getattr`/`setattr` finding was waiting for — "a program that reaches one
+# This is the table the `getattr`/`setattr` finding was waiting for — "a program that reaches one
 # of them is a program with a Python builtin this backend does not implement,
 # which is a fact about the backend's surface rather than about the image, and
 # naming it needs a table of what the backend DOES implement" — which is the
@@ -13846,6 +13845,91 @@ def method_receiver_name(method) -> object:
     return None
 
 
+def method_declares_receiver(method) -> bool:
+    """Whether this method's DECLARATION spells a receiver as its first parameter.
+
+    The question `method_receiver_name` above answers "which name", and this one
+    answers "is it a receiver at all" — which is a different question and the
+    source of an argument-binding defect.
+
+    `method_receiver_name` returns the first parameter's name whatever it is
+    called, which is what makes `def __init__(this)` and `@classmethod def
+    is_float(cls, …)` work: `this` and `cls` are receiver SPELLINGS, and the
+    name is not how the language recognises a receiver, the first parameter's
+    position is. But a first parameter called `x` is not a receiver in any
+    spelling this language has, and treating it as one is not a harmless
+    generality:
+
+    * `formal/build.py`'s `_rewrite_method_calls` prepends the receiver to the
+      call's argument list for every method this returns True for, and
+      `function_param_shape` / `incoming_args` read `fn.params` verbatim. For a
+      method that DECLARED its receiver those agree — `params[0]` is the
+      receiver's slot and the prepended word lands in it. For a method that did
+      not, they do not: the prepended receiver lands on the first DECLARED
+      parameter and every argument after it is off by one, with one argument
+      too many.
+    * The safe direction held only by luck. Measured on this tree,
+      `struct Box: def run(x: Int, r: R)` called `bx.run(0, r)` is refused —
+      first by `check_holder_agreements` ("`r` … every call site hands it
+      something else: passes the literal 0", which is false: it passes `r`),
+      and, for the specialized spelling, by `bind_call_arguments` ("too many
+      positional arguments (3 for 2 parameter(s))"), which is also false. Both
+      are refusals for reasons that are not operating, on a program whose only
+      real problem is spelled in its own source.
+
+    **What the corpus says about the cost of refusing**, measured by walking
+    every `.mojo` file in the tree and asking this of every method that HAS
+    parameters: 118 files, 6 such methods, and all 6 spell the receiver `self`
+    (`bootstrap_test_classes.mojo`, `class_jit.mojo`,
+    `formal/examples/wide_recv.mojo`). A `@staticmethod` is excluded by its
+    decorator rather than by its first parameter, which is the shape
+    `std/python/python.mojo`'s `import_module` is (`FORMAL_staticmethod_is_compiled_
+    as_an_instance_method.md`'s other half). So refusing costs 0 files here.
+
+    The answer is deliberately about the SPELLING rather than about the count,
+    because a count cannot distinguish `def m(self, x)` from `def m(x, y)` and
+    the count is the thing that is already believed twice.
+    """
+    if "staticmethod" in _decorator_names(method):
+        return False
+    params = list(getattr(method, "params", None) or [])
+    if not params or not isinstance(params[0], (tuple, list)) or not params[0]:
+        return False
+    return params[0][0] in RECEIVER_PARAMETER_SPELLINGS
+
+
+def method_without_a_receiver_parameter_refusal(struct_name: str,
+                                                member: str) -> str:
+    """Why a method with parameters and no receiver parameter is not lowered.
+
+    The refusal for the shape `method_declares_receiver` rules out, and it
+    exists because both of the answers this path had for it were wrong in the
+    same direction: bind the receiver as if the method took one and every
+    argument after the first is off by one, or bind it as if the method took
+    none and the caller's receiver is silently dropped. Neither is a question
+    about the program, and a reader sent to either is sent to fix an argument
+    list that is correct.
+
+    The advice is the one that makes the program work, and it is spelled as the
+    source change rather than as a rule: put the receiver back.
+    """
+    return (f"{struct_name}.{member}() is declared with parameters and no "
+            f"receiver: its first parameter is an ordinary argument, so this "
+            f"path cannot tell whether a call passes the receiver before it "
+            f"or not — bind the receiver as an ordinary word would shift every "
+            f"argument after it by one, and ignore it would drop it. A method "
+            f"here takes its receiver as its FIRST parameter, named "
+            f"{'/'.join(sorted(RECEIVER_PARAMETER_SPELLINGS))}, which is the "
+            f"same program with an argument list this path can read")
+
+
+# The spellings a receiver parameter is written with. `struct_receivers`
+# derives the field-reading set from them and `method_declares_receiver` below
+# requires one, so the two cannot come apart; a method that writes it some
+# other name is refused by name rather than half-supported.
+RECEIVER_PARAMETER_SPELLINGS = frozenset({"self", "this", "cls"})
+
+
 def struct_declared_names(struct_def) -> list:
     """The class body's own names, in declaration order, `__slots__` expanded.
 
@@ -15262,7 +15346,8 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         there would be false in its first clause — the operand IS the bare name
         `h` — and it is reachable, measured: `return len(b, b)` on a `Bag`
         frame hits it.  A refusal whose stated reason is entirely false is the
-    worst outcome on this path (`bugs/FORMAL_frame_receiver_handoff.md` §4), so
+    worst outcome on this path (`test_refusal_taxonomy.py` is the standing
+    # check for it), so
     the arm is not there to be right about a case that should have a different
         message.
     """
@@ -19627,7 +19712,8 @@ def dylib_frame_return_refusal(module, names) -> str:
     measured one: `formal/build.py`'s `_method_exports` used to filter wide
     receivers out of the export set, the importer's call had nothing to bind
     to, and the symptom was reported as a layout problem (see
-    `bugs/FORMAL_frame_receiver_handoff.md` §1).  Silently changing a module's
+    `byref_cross_module_wide_receiver_reads` in `test_formal_run.py`).
+    # Silently changing a module's
     public API is the same defect with a different spelling."""
     return (f"module {module} exports {' and '.join(names)}, which "
             f"{'return' if len(names) == 1 else 'return'} a frame address, and "
@@ -20002,7 +20088,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
     """`recv.m[T](x)` where two structs in this image declare `m`.
 
     A refusal whose stated reason was **entirely false**, which is the defect
-    class §4 of `bugs/FORMAL_frame_receiver_handoff.md` is three examples of.
+    class `test_refusal_taxonomy.py` exists to hold this path to.
     It was refused as `b.run names 'run', which is a METHOD of Box … a
     value-position method reference is a bound method`, which is a claim about a
     program that has no such reference in it: `b.run[3](4)` is a CALL, the
@@ -20020,7 +20106,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
         that may be the other — a wrong answer with exit 0.
 
     So the reader's next step is in their own source, and this says which of the
-    two things they can do about it.  `bugs/FORMAL_frame_receiver_handoff.md`
+    two things they can do about it.  `formal/model.py`'s own
     §18 measured the shape across the corpus: it is what still refuses
     `std/runtime/_asyncrt.mojo` and `std/utils/index.mojo` of the eight files the
     sweep reported as value-position method references.
@@ -20103,7 +20189,8 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
     at this function and be reported by the second bullet above, which is false
     about it in every clause: it is a call and not a value-position reference,
     and `run` is a method of the receiver's OWN struct, which is the hand-off
-    `bugs/FORMAL_frame_receiver_handoff.md` §1 measures to be sound.  It has its
+    cross-module hand-off measures to be sound (`test_formal_run.py`'s
+    # `byref_cross_module_wide_receiver_writes`).  It has its
     own message, `ambiguous_method_specialization_refusal`, reached from
     `formal/build.py`'s `check_module_symbols` instead — which is where the
     BRACKET is examined, and therefore the only place the ambiguity is knowable

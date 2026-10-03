@@ -82,8 +82,8 @@ Identical for `ask(0, r)` and `ask[1](0, r)`. So the entry-return refusal now ru
 BEFORE the value-only-callee one, and it fires first for both spellings. Nothing
 about the specialization is wrong any more; the expectation names a construct the
 order of the checks no longer reaches. The check ORDER inside
-`check_module_symbols` is `bugs/FORMAL_frame_receiver_handoff.md`'s subject and is
-claimed (`bug:FORMAL_frame_receiver_handoff`, formal3-4-r2), so it is not moved
+`check_module_symbols` is `formal/build.py`'s subject and is
+claimed, so it is not moved
 here. **The needle should not simply be rewritten to the entry-return message:
 that would stop the case exercising the `origin_of` check at all, which is the
 thing the case exists for. Whichever way it is settled, the fix is in the ORDER.**
@@ -91,7 +91,7 @@ thing the case exists for. Whichever way it is settled, the fix is in the ORDER.
 **`refuse_a_specialized_parameter_returned` was never going to be fixed by these
 two guards, and the filing says so.** Its needle is `"returned from a function
 that did not create it"`, and the refusal for a RECEIVED holder that is returned
-is deliberately still parked — `FORMAL_frame_receiver_handoff.md` §D4 records the
+is deliberately still parked — `formal/build.py::_method_exports` records the
 decision and names the two channels that have to become refusals first. Measured
 here: `stash(0, r).a` and `stash[1](0, r).a` BOTH build, on both spellings, so the
 specialization is not what distinguishes them and the case cannot be closed by a
@@ -144,6 +144,6 @@ and `test_formal_run.py`'s five `ret_frame_*` rows.
    `call_callee_name`'s `None` already implies), or `_receiverless_methods`
    learns to answer for a static method. `FORMAL_method_call_on_a_subscripted_receiver.md`'s.
 3. **The received-holder return refusal** stays parked until the two channels it
-   waits on are refusals. `FORMAL_frame_receiver_handoff.md`'s.
+   waits on are refusals. `formal/build.py`'s.
 4. **`tools/suite.py`'s `expect=` reason** should be reworded to the 3-of-14 with
    the three causes. Integrator's file.

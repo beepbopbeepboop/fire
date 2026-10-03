@@ -10545,7 +10545,7 @@ WAVE7_G2_CASES = [
     # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
     # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
     # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
-    # makes (see `bugs/FORMAL_frame_receiver_handoff.md` §14).  A one-field
+    # makes (see `test_formal_frame_len.py`).  A one-field
     # struct is not a frame, `b` below is a plain word, and the `__len__` on it
     # is not reached at all — which is why this case still refuses, for the
     # field-value reason and not for a length reason.

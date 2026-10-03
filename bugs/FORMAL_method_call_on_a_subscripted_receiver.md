@@ -52,7 +52,8 @@ diagnostic is measurably *wrong* rather than merely incomplete.
 
 `formal/model.py`'s `call_callee_name` (the change that resolved the bare-name
 comptime specialization — see
-`bugs/FORMAL_frame_receiver_handoff.md` §19) moved three files onto a
+`formal/build.py::_method_call_target`, which looks through the bracket) moved
+three files onto a
 specialization of a **dotted** callee, which is a fifth shape and not this one:
 
 | file | the callee now named in its refusal |
@@ -241,6 +242,6 @@ capability, and its verification is the list below unchanged:
 
 ## Where the measurement lives
 
-`bugs/FORMAL_frame_receiver_handoff.md` §18 (the grouped table of all 25) and
+the sweep work map's grouped table of all 25 (`FORMAL_sweep_work_map_2026-09-30_r2.md`) and
 §20 (the sweep re-run). `construct:formal-value-model-gaps` is the neighbouring
 claim this depends on.

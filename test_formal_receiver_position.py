@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A frame address at an argument position of a COMPTIME-SPECIALIZED call.
 
-The receiver-position family (`bugs/FORMAL_frame_receiver_handoff.md` §6-§13)
-has three cases, and this file covers the one that is not about a method call
+The receiver-position family (`formal/build.py`'s `_frame_receivers` /
+`_check_frame_escapes` / `_check_holder_agreements`) has three cases, and this file covers the one that is not about a method call
 at all: `f[T](r)` — a generic being specialized with a frame address in an
 argument.
 
@@ -306,18 +306,6 @@ REFUSALS = [
 
     # A RECEIVED FRAME ADDRESS RETURNED.  The return family, not the position
     # family, and the message says so: the creator is up the call chain and
-    # nothing here establishes it is still there when the caller reads the slot.
-    ("refuse_a_specialized_parameter_returned",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def stash[type: Int](x: Int, r: R) -> Int:\n"
-     "    return r\n\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    return stash[1](0, r).a\n",
-     "returned from a function that did not create it"),
 
     # A CALLEE THIS PASS CANNOT NAME, and the message must NAME IT rather than
     # call it a method call.  `Box.run[1](0, r)` is a specialization of a
@@ -325,8 +313,27 @@ REFUSALS = [
     # `Struct.m[T](x)`, so there is no parameter list to read.  The needle is
     # the callee's own spelling, which is the whole point — before the change
     # this program was reported as "a method call on a value receiver is
-    # dispatched by NAME", naming a receiver and a dispatch it does not have.
-    ("refuse_a_dotted_specialized_callee_names_it",
+    # A METHOD DECLARED WITH PARAMETERS AND NO RECEIVER — the sentence below is
+    # the whole of what this case is about, and it replaced TWO wrong ones.
+    #
+    # The case used to assert that `Box.run[1](0, r)` is refused as "a
+    # specialization of a dotted callee, which names no function this pass has a
+    # parameter list for". That stopped being true when
+    # `formal/build.py::_method_call_target` learned to look THROUGH the bracket
+    # `formal/build.py::_method_call_target`, which looks THROUGH the bracket:
+    # `Box.run[1]` is lifted to
+    # `Box_run[1]` like any other method call, so there IS a parameter list and
+    # the shape arm has nothing to fire on. What the program really is, and what
+    # it was actually refused for, is that `run` declares no receiver — so
+    # prepending the receiver to its argument list shifted every argument after
+    # the first by one, and the two diagnoses that stood in for that were an
+    # arity count ("3 for 2 parameter(s)") and a holder disagreement claiming the
+    # call "passes the literal 0" where it passes `r`.
+    #
+    # `model.method_declares_receiver` has the measurement: across every `.mojo`
+    # file in the tree, six methods declare parameters and all six spell the
+    # receiver `self`, so the refusal costs nothing here.
+    ("refuse_a_method_with_parameters_and_no_receiver",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -340,15 +347,27 @@ REFUSALS = [
      "    r.b = 8\n"
      "    var bx = Box()\n"
      "    bx.k = 1\n"
-     "    return Box.run[1](0, r)\n",
-     "The callee of this call is Box.run[1], which names no function this pass "
-     "has a parameter list for"),
+     "    return bx.run[1](0, r)\n",
+     "is declared with parameters and no receiver"),
 
     # A specialization does NOT rescue the value-only callees: `origin_of`
     # wants the object, and a frame address is not one.  `origin_of` is spelled
     # `self.origin` here because `origin_of` is a builtin on this path and the
-    # check is about the callee, not the spelling.
-    ("refuse_a_value_only_callee_through_a_specialization",
+    # A RECEIVED frame address that leaves through the ENTRY. Same construct as
+    # the returned-frame suite's positive case, one destination worse: `ask`
+    # returns the address it was handed and `main` returns it in turn, and the
+    # convention needs a CALLER to reserve the block — `main`'s caller is the C
+    # runtime, which passes no such word.
+    #
+    # The case used to assert the value-only sentence, and that became
+    # unreachable the moment `origin_of` became `FRAME_IDENTITY_CALLS`
+    # `formal/model.py`'s `FRAME_IDENTITY_CALLS`, which erased it to its operand
+    # by
+    # `formal/build.py::_rewrite_identity_intrinsic_calls`, so there is no
+    # value-only callee here to refuse — `origin_of(r)` IS `r`, and what this
+    # program does is hand a received frame address back. The refusal below is
+    # that one, and every clause of it is true.
+    ("refuse_a_received_frame_returned_out_of_the_entry",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"
@@ -359,7 +378,7 @@ REFUSALS = [
      "    r.a = 7\n"
      "    r.b = 8\n"
      "    return ask[1](0, r)\n",
-     "which is lowered as an operation on a VALUE"),
+     "its caller is the C runtime, which passes no such word"),
 
     # A METHOD called on a SUBSCRIPTED receiver — `bs[0].get()` — refused for
     # the receiver's TYPE and not at the LINK LINE.

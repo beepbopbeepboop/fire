@@ -105,7 +105,7 @@ reachable by the same step.
    field-by-field copy, with references copied as references. That is a
    LOWERING in both backends plus a representation rule ("a clone of a framed
    struct is a fresh frame"), and it is the same feature
-   `bugs/FORMAL_frame_receiver_handoff.md` §4c already names as missing —
+   `formal/model.py`'s copy-construction refusal already names as missing —
    "`S(x)` — a copy construction — has no lowering, for any struct and any
    argument. A fresh block plus an `n`-slot copy is a feature in both backends."
    **Do these as one change**: they are one feature with two call sites, and

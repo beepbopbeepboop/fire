@@ -314,7 +314,7 @@ codegen 88, codegen/dependency 181, not-answerable 1, both runs). The 20
 the twenty-first (`std/gpu/host/func_attribute.mojo`, the one in-file finding)
 lands on the module-level symbol table gap, both recorded where they belong:
 `bugs/FORMAL_method_param_field_access.md` and
-`bugs/FORMAL_frame_receiver_handoff.md` §9.
+`formal/build.py::_check_frame_escapes`'s own argument loop.
 
 ## Two wrong answers found and fixed, both from running things
 
