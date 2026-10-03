@@ -2124,8 +2124,10 @@ def _libsystem_provides(name: str) -> bool:
     sweep: `formal/hostmods/os/_syscalls.mojo`, which binds five `$INODE64`
     names on x86-64 and none on arm64, was reported
     `not-answerable/unresolved-extern` on x86-64 and `pass` on arm64 — an image
-    that builds, loads and runs (`arch -x86_64`, exit 0 with the arm64 slice's
-    bare names and exit 80 here).
+    that builds, links and loads, measured by running it: `arch -x86_64` on the
+    x86-64 image exits with an empty stderr (the code is the module's own; the
+    arm64 one exits 64 and this one 80), where the refusal had said dyld could
+    not bind five of its symbols.
 
     Two things come with the delegation and both are wanted. The C library is
     asked through a handle on the library itself rather than through
