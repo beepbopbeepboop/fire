@@ -3214,9 +3214,42 @@ def _build_cfg(body) -> tuple:
                                  [t.index])
                 body_end = len(blocks)
                 arm_exits = list(body_exits)
-                for h in (getattr(s, "handlers", None) or []):
-                    arm_exits += run(getattr(h, "body", None) or [], loops,
-                                     [t.index])
+                # The HANDLER ARMS ARE NOT RUN, and not as a simplification:
+                # neither emitter emits them. `_emit_try` in
+                # `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`
+                # skips the arms outright and `RaiseStmt` flushes the pending
+                # `finally` clauses and then `exit(1)`s, so no edge runs from a
+                # raise site into an arm and no edge runs out of one — an arm
+                # contributes nothing to the image, and a graph that walks it
+                # describes a program nobody is going to run.
+                #
+                # What that cost, measured on this very shape:
+                #
+                #     def probe(n):
+                #         try:
+                #             p = 1
+                #         except ValueError:
+                #             pass
+                #         return p
+                #
+                # was REFUSED — "'p' is read at line 6 before anything in this
+                # function stores it, and CPython raises UnboundLocalError for
+                # that program" — with both halves false. CPython runs it and
+                # `p` is 1, and the emitted image would be right: the arm's
+                # `pass` stores nothing, so the path it contributed to the join
+                # was a path that stored nothing and nothing else.
+                #
+                # The premise the old shape rested on — "a handler that stores
+                # nothing is a path to the join that stores nothing, and nothing
+                # in the graph says the handler will not run" — is answered by
+                # the emitter: nothing CAN run it. And the direction it was
+                # protecting against is now unreachable from the other side,
+                # because `refuse_dropped_handler_arm` refuses an arm whose body
+                # stores anything before this walk is ever asked: the only arms
+                # that reach here are `pass`/`raise`/`continue`/`break` ones,
+                # which store nothing on either reading. So the two halves hold
+                # each other up, and each is the reason the other is safe.
+                #
                 # `else` runs only when the body did NOT raise and `finally`
                 # runs either way, so both are ARMS of the one statement
                 # rather than a chain. That is what makes a `return` inside
@@ -12475,6 +12508,49 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
     return (syms or {}).get(name, name)
 
 
+def module_spine_link_resolves(qualifier: str, by_module: dict,
+                               forwarded: dict) -> bool:
+    """Whether one link on a dotted callee's SPINE is a name that resolves.
+
+    `qualifier` is the chain's spelling from its root down to and including the
+    link — `os.path` for the object of `os.path.join(…)`, `os.environ` for the
+    object of `os.environ.get(…)`. Two facts make it resolve, and it needs
+    either:
+
+      * it names a LIBRARY on this link line (`os.path`, which has its own
+        dylib and its own export table). `_module_is_linked`'s own docstring is
+        why this half exists as a test rather than as an export lookup: "linked
+        and publishes nothing" and "not a module" both answer `{}` through
+        `dylib_export_module`;
+      * its LAST segment is an EXPORT of the module above it (`os.getenv_or`,
+        which is a function of `os` and not a submodule of it).
+
+    **The narrowing that is not this one**, and it is the reason this function
+    exists rather than a `name in table` test: "does the parent module publish
+    it" alone refuses `os.path.join`. `path` is NOT one of the 28 names the
+    formal `os` publishes (measured) — it is a SUBMODULE with its own library,
+    and it resolves through the module table, never through `os`'s.
+
+    A link that resolves is exempt from `check_module_symbols`' member-refusal
+    arm; one that does not is not, and the refusal that follows names the link
+    and prints what the parent module does publish. That is the whole of the
+    fix for `os.environ.get(k, '')`, which was reported as a string comparison
+    (`v == '1'`, `strcmp`, "the value of `v` as an address") because the
+    spine exemption was unconditional and the link-time symbol check lost the
+    race to a diagnostic raised during EMISSION.
+    """
+    if not qualifier or "." not in qualifier:
+        # A single-segment qualifier IS the root, and the root is a module by
+        # the time anything asks this (`dylib_module_reference` gates on it).
+        return True
+    parent, _, leaf = qualifier.rpartition(".")
+    if _module_is_linked(by_module, forwarded, qualifier):
+        return True
+    if leaf in dylib_export_module(by_module, parent):
+        return True
+    return leaf in dylib_export_module(forwarded, parent)
+
+
 def dylib_module_reference(node, imported) -> str:
     """The module a dotted chain reads THROUGH, or None if it is not one.
 
@@ -18870,10 +18946,29 @@ def rewrite_tree(node, visit):
         not is a BEHAVIOUR change, and a rewrite pass that starts refusing
         programs it used to build is not a refactor.
       * the node ITSELF — keep it, and descend into its children. The common
-        case for a walk whose work is in place (this is what both current callers
-        return for a node they had nothing to do with).
-      * any OTHER value — the replacement to put in the parent's slot, and
-        descend into it.
+        case for a walk whose work is in place (this is what every current caller
+        returns for a node they had nothing to do with).
+      * any OTHER value — the replacement to put in the parent's slot, and NOT
+        descended.
+
+    The last clause is the one that had to be measured rather than assumed, and
+    the reason is the sentence the `None` arm already argues: descending where the
+    previous version did not is a BEHAVIOUR change. A visit that hands back a
+    DIFFERENT node has already decided what that node is, and the node it was
+    built from is usually the very construct it consumed — `c.bump(4)` as a
+    statement of its own becomes `c = Cell_bump(c, 4)`, and the call inside that
+    new store is the one the rewrite exists to place. Descending offered the
+    replacement to the same rewrite that had just produced it, and that pass's
+    own value-position refusal fired on the store it had just written: every
+    one-field mutator call became "it is called here as a VALUE rather than as a
+    statement of its own" (`_apply_receiver_writeback`). A caller that wants the
+    walk to continue into a node it built mutates that node in place and hands
+    the NODE back; a caller that has consumed the construct hands back `None`.
+
+    Nothing that existed before this clause returned a replacement, so no walk
+    that was already on this function changes what it reaches — checked by
+    reading both callers (`_rewrite_method_calls`,
+    `_rewrite_one_word_field_method_calls`), which return `None` or the node.
 
     Descends into every dataclass field AND through `list` and `tuple`
     containers, so a caller cannot forget the `elifs` shape — that is the entire
@@ -18891,11 +18986,11 @@ def rewrite_tree(node, visit):
     replaced = visit(node)
     if replaced is None:
         return node
-    if replaced is not node:
-        return rewrite_tree(replaced, visit)
-    for name in node.__dataclass_fields__:
-        setattr(node, name, rewrite_tree(getattr(node, name), visit))
-    return node
+    if replaced is node:
+        for name in node.__dataclass_fields__:
+            setattr(node, name, rewrite_tree(getattr(node, name), visit))
+        return node
+    return replaced
 
 
 def struct_block_children(struct_def, decls: dict, base: int = 0,
@@ -20874,6 +20969,163 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         elif id(stmt) in kept:
             final.append(stmt)
     return final
+
+
+# The statements whose presence in a `try`'s handler arm costs the image
+# nothing, and the ONE list they are asked from.
+#
+# A handler arm is not EMITTED on this path — `formal/arm64_codegen.py`'s
+# `_emit_try` and `formal/x86_64_codegen.py`'s skip the arms outright, and
+# `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s, so
+# there is no edge from a raise site into an arm and no edge out of one — which
+# makes the four statements below the four whose absence changes nothing:
+#
+#   * `pass` — there is nothing to drop;
+#   * `raise` — the arm cannot run, and a `raise` here would have left the
+#     process, so dropping it changes no answer the image gives;
+#   * `continue`, `break` — control transfers out of an arm the image never
+#     enters.
+#
+# Anything ELSE in an arm is a store, a call or a statement the program wrote
+# and the image does not contain, which is why `refuse_dropped_handler_arm` is
+# asked about it rather than about the arm's mere existence: `except: pass` is
+# the commonest shape in the corpus and must keep building.
+_HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
+
+
+def unemitted_handler_arm(fn):
+    """The first handler arm of `fn` whose body is not in the image, or None.
+
+    `(handler, statement)` for the statement that made the arm worth refusing,
+    so the message can point at a line the reader wrote rather than at the arm.
+    `None` is the answer for every function without one — which is the answer
+    for the overwhelming majority, and the reason this is a walk and not a
+    per-`try` flag threaded through the emitters.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        for handler in (getattr(node, "handlers", None) or []):
+            for stmt in (getattr(handler, "body", None) or []):
+                if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
+                    return (handler, stmt, node)
+    return None
+
+
+def exception_type_spelling(handler) -> str:
+    """`ValueError`, `(TypeError, KeyError)`, `except:`, `except E as e`.
+
+    The arm's own catch clause, as the reader wrote it, because the refusal is
+    about ONE arm and a message that named only the `try` would send the reader
+    looking through the arms for the one at fault. A parser that produces a bare
+    string for one name and a LIST of them for the tuple form is why this is a
+    function: `except (A, B) as e` spelled with the parentheses and the `as` is
+    two attributes and one line.
+    """
+    exc = getattr(handler, "exc_type", None)
+    if not exc:
+        head = "a bare `except:`"
+    elif isinstance(exc, (list, tuple)):
+        head = "`(" + ", ".join(str(e) for e in exc) + ")`"
+    else:
+        head = f"`{exc}`"
+    alias = getattr(handler, "name", None)
+    return f"{head} as {alias}" if alias else head
+
+
+def refuse_dropped_handler_arm(fn, found) -> str:
+    """Why this `try`'s handler arm is not in the image, in the reader's terms.
+
+    `found` is `unemitted_handler_arm`'s `(handler, statement, try_stmt)`.
+
+    The refusal exists because the alternative was SILENCE, and this file has
+    been shown what that costs: a handler body can store, call and print, and
+    with nothing to say so the program built, ran, and was not the program that
+    was written — `except ValueError: printf("HANDLER RAN")` printed nothing and
+    exited 0, with no diagnostic on either stream. That is the failure class
+    CLAUDE.md names ("a wrong-but-exit-0 artifact that every other check is
+    structurally blind to"), and 921 arms in this repository's own 400 files
+    have a body.
+
+    So this refuses the arm BY NAME and says what the path actually does, which
+    is the only sentence that is true of both the language and the image: the
+    arm is not dead (CPython enters it whenever the body raises) and it is not
+    unreachable either (this backend has no unwinder), it is NOT OURS. The three
+    ways out are all named, because they are different edits:
+
+      * move the body into the `try` or after it, when it is really cleanup for
+        the success path — which is what most `except: log-and-carry-on` arms
+        are, and what a `finally` expresses;
+      * `raise` at the end of the arm, when the program means to fail: `raise`
+        IS emitted (it flushes the pending `finally` clauses and exits), so an
+        arm that only re-raises changes no answer;
+      * return the value the program wants on failure, in the arm's own `return`
+        — but note that a `return` is an effect too, so it is refused as well.
+        This is deliberate: a program whose answer DEPENDS on which arm ran is a
+        program this path cannot compute, and saying so is the point.
+    """
+    handler, stmt, _try = found
+    line = getattr(stmt, "line", 0) or 0
+    where = f"line {line}: " if line else ""
+    return (
+        f"{where}{exception_type_spelling(handler)} is a handler arm with a body "
+        f"this path cannot put in the image, so it is refused rather than "
+        f"dropped: `formal` has no exception unwinder, so no edge runs from a "
+        f"raise site into an arm — a `raise` flushes the enclosing `finally` "
+        f"clauses and exits the process — and every statement in this arm "
+        f"(`{type(stmt).__name__}`) would be absent from the program that runs. "
+        f"Its effects would be silently missing: the image would build, exit 0, "
+        f"and not be the program you wrote, which is the one failure a value "
+        f"this compiler cannot detect on its own. An arm whose body is `pass`, "
+        f"`raise`, `continue` or `break` still builds — nothing is lost by "
+        f"leaving it out. Otherwise: move the work into the `try` body or after "
+        f"the statement (a `finally` if it is cleanup for the success path), or "
+        f"end the arm with `raise` if the program is meant to fail there.")
+
+
+def call_result_frame_struct(call, functions: dict, decls: dict):
+    """The struct whose VALUE `call` evaluates to, when it is decidable, else None.
+
+    The one question a comparison rewrite asks about an operand that is a CALL
+    rather than a name, and it is asked the way `_rhs_pointee` asks the same
+    question about a pointer: from the CALLEE's own declaration, read out of this
+    image's function table. A call to something this image does not contain
+    answers None rather than guessing, which is the same conservative direction
+    every other type question on this path takes.
+
+    Three conditions, each load-bearing:
+
+      * the callee is a bare name in `functions` — a lifted method call
+        (`A_m`), a dotted call (`mod.f`) and an `external_call` all name
+        something whose return type is not stated here, and a receiver's own
+        declared type is a different question with a different answer;
+      * the declared return type's BASE name (`annotation_base_name`, which
+        reads `CStringSlice[ImmutOrigin[origin_of(self)]]` as `CStringSlice` and
+        an unannotated callee as nothing at all) names a struct of THIS image;
+      * that struct is one this path represents as a FRAME or as a single word
+        (`struct_is_framed` / `struct_is_one_word`), because the caller passes
+        the value straight to a method whose first parameter is a receiver and
+        the two representations are not interchangeable.
+
+    `None` is a refusal and never a zero: an unknown callee is a real function
+    whose return type this image does not state, and treating it as "not a
+    struct" would leave the caller with the address compare it is trying to
+    replace.
+    """
+    if not isinstance(call, F.CallExpr) or not isinstance(call.func,
+                                                        F.IdentExpr):
+        return None
+    callee = (functions or {}).get(call.func.name)
+    ann = getattr(callee, "return_type", None) if callee is not None else None
+    if not ann:
+        return None
+    base = annotation_base_name(ann)
+    st = (decls or {}).get(base) if base else None
+    if st is None:
+        return None
+    if struct_is_framed(st) or struct_fits_one_word(st):
+        return st
+    return None
 
 
 def module_body_refusal(stmt):

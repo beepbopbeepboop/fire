@@ -2181,6 +2181,30 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
     """
     declared = declared or {}
     name_defs = name_defs if name_defs is not None else {}
+    # `{id(site function): {id(call): ([struct], why)}}`, LAZILY.  It is the
+    # shared recogniser the emitters build their blocks from — a frame address
+    # reaches a callee through a construction (`f(Pair(3, 4))`) or through a
+    # call to a function that returns one (`f(make())`) as much as through a
+    # name — and the bucket test below used to count both of those as "not a
+    # frame", so two call sites that agreed handed this check one of each and
+    # it refused a program whose image is right.  Measured, both architectures:
+    # `mk(1) == t == mk(1)` lowered to two `A___eq__` calls, one with `t` at
+    # argument 0 and one with `mk(1)`, and the refusal said "something that is
+    # not a frame address at mk(1)" — false about the call, which returns a
+    # frame.
+    #
+    # Lazy because it walks a function body and the bucket test is only reached
+    # for a parameter the two sides disagree about, so the common case pays
+    # nothing for it.
+    frame_calls: dict = {}
+
+    def frames_of(site_fn):
+        got = frame_calls.get(id(site_fn))
+        if got is None:
+            got = frame_calls[id(site_fn)] = _frame_valued_calls(
+                site_fn, structs_by_name or {}, returns_frame, functions)
+        return got
+
     for fn in functions:
         hs = holders.get(_fn_key(fn)) or ()
         by_name = hstruct.get(_fn_key(fn)) or {}
@@ -2222,12 +2246,33 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
                     continue
                 _check_one_callee(functions, fn, callee, def_fn, params, node,
                                   hs, holders, hstruct, declared,
-                                  structs_by_name or {}, returns_frame)
+                                  structs_by_name or {}, returns_frame,
+                                  frames_of)
+
+
+def _argument_is_frame_address(arg, hs, frame_calls) -> bool:
+    """Whether `arg` is a frame address at this call site, by either spelling.
+
+    A NAME the holder analysis holds a frame for, or a CALL whose value is one —
+    a construction (`Pair(3, 4)`) or a call to a function that returns a frame
+    (`make()`), which is what `frame_calls` is
+    (`_frame_valued_calls`, the table both emitters reserve their blocks from).
+
+    One predicate because the bucket test it serves is a comparison of two KINDS
+    of value, and a test that recognises only the name spelling calls a frame
+    something else: `_check_holder_agreements` refused `mk(1) == t == mk(1)`,
+    whose two `A___eq__` call sites hand argument 0 a holder and a
+    frame-returning call, with the message asserting the call was "something
+    that is not a frame address" — a sentence about a call that returns one.
+    """
+    if isinstance(arg, F.IdentExpr):
+        return arg.name in hs
+    return id(arg) in frame_calls
 
 
 def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
                       holders, hstruct, declared, structs_by_name,
-                      returns_frame=None) -> None:
+                      returns_frame=None, frames_of=None) -> None:
     """One definition's worth of the holder-agreement check, for one call site.
 
     The body of `_check_holder_agreements`'s per-callee loop, split out so it
@@ -2240,7 +2285,8 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
         pname = params[position] if position < len(params) else None
         if not pname:
             continue
-        here = isinstance(arg, F.IdentExpr) and arg.name in hs
+        here = _argument_is_frame_address(arg, hs,
+                                         frames_of(fn) if frames_of else {})
         there = pname in (holders.get(_fn_key(def_fn)) or ())
         if pname in by_decl:
             _check_declared_parameter(
@@ -2268,17 +2314,31 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
                 for i, a, _k in _frame_argument_slots(site, params):
                     if i != position:
                         continue
-                    site_holder = isinstance(a, F.IdentExpr) \
-                        and a.name in holders.get(_fn_key(site_fn), ())
+                    site_holder = _argument_is_frame_address(
+                        a, holders.get(_fn_key(site_fn), ()),
+                        frames_of(site_fn) if frames_of else {})
                     spelling = _call_spelling(site, a, position, pname)
                     bucket = (holder_spellings if site_holder
                               else plain_spellings)
                     if spelling not in bucket:
                         bucket.append(spelling)
-                    for st in (hstruct.get(_fn_key(site_fn), {})
-                               .get(a.name) or ()) if site_holder else ():
-                        if st.name not in structs:
-                            structs.append(st.name)
+                    if site_holder:
+                        # The struct NAMES a frame site hands over, from the
+                        # same two tables either spelling is read out of: the
+                        # holder table for a name, and `_frame_valued_calls`'s
+                        # own entry for a construction or a frame-returning
+                        # call. The message names them, so it must not say
+                        # "A" for a site that passed something else.
+                        if isinstance(a, F.IdentExpr):
+                            names = [st.name for st in
+                                     (hstruct.get(_fn_key(site_fn), {})
+                                      .get(a.name) or ())]
+                        else:
+                            names = list((frames_of(site_fn)
+                                          .get(id(a)) or ((), ""))[0])
+                        for st_name in names:
+                            if st_name not in structs:
+                                structs.append(st_name)
         if not holder_spellings or not plain_spellings:
             continue
         raise CodegenError(M.frame_holder_disagreement_refusal(
@@ -2872,7 +2932,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
                                     holders, one_word)
-        _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word)
+        _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
+                                       one_word, structs_by_name)
         for fn in functions:
             fn._frame_holders = set()
             fn._frame_candidates = {}
@@ -3265,7 +3326,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         moved = (_rewrite_len_on_frame_receivers(functions, holders,
                                           hstruct)
                  + _rewrite_eq_on_frame_receivers(functions, holders,
-                                                 hstruct, one_word))
+                                                 hstruct, one_word,
+                                                 structs_by_name))
         if not (grew or moved):
             break
     else:
@@ -4587,45 +4649,39 @@ def _rewrite_one_word_nested_fields(fn, chains) -> None:
     did not name is either a value read (`outer` holds an `Int32`) or a nested
     frame read (`outer` holds a framed struct), both of which already lower
     through the tables this does not touch.
+
+    `model.rewrite_tree`, and it REPLACES the node rather than only rewriting its
+    children, because `o.in1.a` is the top of the expression at the places this
+    is reached — `return o.in1.a`, `o.in1.a + 1`. A walk that could only rewrite
+    in place would handle `o.in1.a + 1` and silently leave `return o.in1.a`
+    standing, which is the half that then reaches the emitter with no slot and is
+    refused by name.
+
+    The hand-rolled recursion this replaces descended lists but not tuples, so it
+    could not reach an `elif` arm — measured, it did not need to, because the
+    `iter_nodes` loop it was driven from hands it every node in the tree
+    including the ones inside the `(condition, body)` pairs, and a node whose
+    PARENT is a pair is the one shape it cannot replace (`elif o.in1.a:`, the
+    chain as the whole condition). That is a shape no rewrite should depend on
+    the driver for: two walks over one tree, one of which reaches the arms
+    because of how the other happens to iterate. `rewrite_tree` descends the
+    pair itself, so the answer does not depend on the caller.
     """
     spellings = {chain: outer for chain, outer in chains}
     if not spellings:
         return
-    for node in M.iter_nodes(getattr(fn, "body", None)):
-        for name in node.__dataclass_fields__:
-            if name in ("line", "col"):
-                continue
-            node.__setattr__(name, _rewrite_one_word_nested_field(
-                getattr(node, name), spellings))
+
+    def visit(n):
+        if isinstance(n, F.MemberExpr):
+            outer = spellings.get(_member_chain(n))
+            if outer is not None:
+                root, member = outer.split(".", 1)
+                return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
+        return n
+
+    M.rewrite_tree(getattr(fn, "body", None), visit)
 
 
-def _rewrite_one_word_nested_field(node, spellings):
-    """`_rewrite_one_word_nested_fields` for one subtree, returning the
-    replacement for `node` itself.
-
-    The recursion has to be able to REPLACE the node it is handed, not only its
-    children, because `o.in1.a` is the top of the expression at the places this
-    is reached — `return o.in1.a`, `o.in1.a + 1`. A rewrite that could only
-    rewrite in place would handle `o.in1.a + 1` and silently leave `return
-    o.in1.a` standing, which is the half that then reaches the emitter with no
-    slot and is refused by name.
-    """
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _rewrite_one_word_nested_field(x, spellings)
-        return node
-    if isinstance(node, F.MemberExpr):
-        chain = _member_chain(node)
-        outer = spellings.get(chain)
-        if outer is not None:
-            root, member = outer.split(".", 1)
-            return F.MemberExpr(obj=F.IdentExpr(name=root), member=member)
-    for name in getattr(node, "__dataclass_fields__", {}):
-        if name in ("line", "col"):
-            continue
-        setattr(node, name,
-                _rewrite_one_word_nested_field(getattr(node, name), spellings))
-    return node
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
     """`h.a.m(x)` → `A_m(h.a, x)`, for the fields `nested_fields` names.
 
@@ -4894,8 +4950,8 @@ def _replace_nodes(root, replacements: dict) -> None:
             _replace_nodes(child, replacements)
 
 
-def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
-                      hs, one_word=None) -> object:
+def _eq_dispatch_call(node, op: str, left, right, by_name, hs, one_word=None,
+                      call_frame=None) -> object:
     """The call that answers `left op right`, or None to leave the operator be.
 
     The decision is `model.struct_dunder_dispatch_candidates` and nothing here
@@ -4905,22 +4961,39 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     not touch, and each is a shape where the pre-existing lowering is either
     CORRECT or already refused by something closer to the mistake:
 
-      * an operand that is not a BARE NAME — `f(h) == h`, `h.x == h`.  The
-        holder table is keyed by name, and a name is the only thing here that can
-        say what a word holds; guessing past it is the bug this file exists to
-        stop;
+      * an operand that is not a BARE NAME and not a CALL of this image — `f(h)
+        == h`, `h.x == h`.  The holder table is keyed by name, and a name is the
+        only thing here that can say what a word holds; guessing past it is the
+        bug this file exists to stop;
       * a name with no candidates, which is a plain word, so its `==` is the
         word compare that has always run;
       * no candidate declaring the dunder, which is CPython's INHERITED
         identity `__eq__` — and a frame's address compare already IS that, so
         leaving it alone is the right answer and not a gap.
+
+    `call_frame` is `{id(call): struct}` for the CALL operands this rewrite may
+    dispatch, settled by the caller from `model.call_result_frame_struct` — the
+    callee's own DECLARED return type, which is a real interprocedural answer
+    read out of this image's function table and not an inference.  It is passed
+    in rather than computed here because the caller already walks the operands
+    and a chain's double-evaluation rule needs the same walk to say which of
+    them may be a call at all.
     """
+    if call_frame is None:
+        call_frame = {}
+    if isinstance(left, F.CallExpr) or isinstance(right, F.CallExpr):
+        return _eq_dispatch_on_call_operand(node, op, left, right, by_name, hs,
+                                            one_word, call_frame)
     if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
         return None
     if left.name in hs and right.name in hs:
-        # The frame case, and the one this rewrite was written for.
-        cands = list(by_name.get(left.name) or ()) + list(
-            by_name.get(right.name) or ())
+        # The frame case, and the one this rewrite was written for.  Both sides'
+        # candidate lists are read HERE, from the same table, rather than handed
+        # in by the caller: the call operand path below derives its own from the
+        # same two tables, and a caller-supplied pair is a third thing to keep in
+        # step with them.
+        cands_l = by_name.get(left.name) or ()
+        cands_r = by_name.get(right.name) or ()
     else:
         # At least one operand is not a frame HOLDER.  A struct of ONE field has
         # no frame at all — its construction binds a plain word that IS the
@@ -4940,17 +5013,78 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
         if one_word is None or left.name in hs or right.name in hs \
                 or left.name not in one_word or right.name not in one_word:
             return None
-        cands = list(one_word.get(left.name) or ()) + list(
-            one_word.get(right.name) or ())
         cands_l = one_word.get(left.name) or ()
         cands_r = one_word.get(right.name) or ()
+    return _eq_dispatch_decide(node, op, left, right, cands_l, cands_r)
+
+
+def _eq_dispatch_on_call_operand(node, op: str, left, right, by_name, hs,
+                                 one_word, call_frame):
+    """`left op right` where at least one operand is a CALL, or None.
+
+    The frame case with a call in it, and it is here rather than a widening of
+    the name-only path because the safety argument is the SAME one and rests on a
+    DIFFERENT fact: `a == mk(1)` compares a name the holder table holds a frame
+    for against the result of a call whose declared return type names the same
+    struct, and both words are frame addresses of that one struct — which is
+    every clause `_rewrite_eq_on_frame_receivers`' docstring gives for two
+    names. Before this, the operator stayed an address compare, so it answered
+    "are these the same object" where the language asks the method:
+
+        struct A:  var x: Int
+                   var y: Int
+                   def __eq__(self, other: A) -> Bool: …
+        def mk(v: Int) -> A: …
+
+        var t = mk(1)
+        if t == mk(1):  …     # CPython: True (equal fields)
+                            # this path, both architectures: False
+
+    Each operand is resolved to a candidate list by the SAME two tables the
+    name-only path reads, and a CALL contributes only what
+    `call_result_frame_struct` decided about its callee's declaration. An
+    operand that resolves to nothing, or to a different struct from the other
+    one, is `None` — the address compare, which is what this path always did for
+    a comparison it cannot dispatch.
+    """
+    sides = []
+    for expr in (left, right):
+        if isinstance(expr, F.CallExpr):
+            st = call_frame.get(id(expr))
+            sides.append([] if st is None else [st])
+        elif isinstance(expr, F.IdentExpr) and expr.name in hs:
+            sides.append(list(by_name.get(expr.name) or ()))
+        elif isinstance(expr, F.IdentExpr) and one_word is not None \
+                and expr.name in one_word and expr.name not in hs:
+            sides.append(list(one_word.get(expr.name) or ()))
+        else:
+            return None
+    cands_l, cands_r = sides
+    if not cands_l or not cands_r:
+        return None
+    return _eq_dispatch_decide(node, op, left, right, cands_l, cands_r)
+
+
+def _eq_dispatch_decide(node, op: str, left, right, cands_l, cands_r):
+    """Per-side candidates → the dispatch call, or None. Shared by both shapes.
+
+    Split out so the disagreement refusal, the "no dunder" answer and the
+    `!=`-negation are ONE implementation: the two operand shapes differ only in
+    how each side's candidate list is settled, and a copy of this tail per shape
+    is a second place for the two to disagree about which struct a comparison
+    belongs to.  The union is built here rather than by the caller for the same
+    reason — it is only the MESSAGE that wants it, and it wants it from the same
+    two lists the decision was made from.
+    """
+    cands = list(cands_l) + list(cands_r)
     if not cands:
         return None
     owner, dunder, negate, (disagree, rows) = \
         M.struct_dunder_dispatch_candidates(cands_l, cands_r, op)
     if disagree:
         raise CodegenError(M.eq_dispatch_candidates_disagree(
-            f"{left.name} {op} {right.name}",
+            f"{getattr(left, 'name', left)} {op} "
+            f"{getattr(right, 'name', right)}",
             sorted({st.name for st in cands}), rows))
     if owner is None:
         return None
@@ -4962,9 +5096,9 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     return F.UnaryOp(op="not", operand=call)
 
 
-def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
-                                   one_word=None) -> int:
-    """`a == b` → `Struct___eq__(a, b)`, for two names that hold the same frame.
+def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
+                                   structs_by_name=None) -> int:
+    """`a == b` → `Struct___eq__(a, b)`, for two operands holding the same frame.
 
     The COMPARISON half of what `_rewrite_len_on_frame_receivers` does for
     `len`, and it is here for exactly the reason that function's call site gives:
@@ -5005,11 +5139,17 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
 
     The chain spelling (`a == b == c`) is one `F.CompareChain` and lowers here
     as the `and` of its pairwise comparisons, which is what the language says a
-    chain is.  Only when EVERY operand is a bare name: the rewrite re-reads the
-    middle operands, and a name read twice is the same load twice, while an
-    operand with a call in it would be called twice where the language calls it
-    once.  A chain with a call in it is left alone — see the remainder named in
-    `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`.
+    chain is.  A call may stand at either END of the chain — `mk(1) == b` and
+    `b == mk(1)` are one link each, so the call is evaluated exactly where the
+    source put it — and NOT in the middle: `a == mk(1) == b` lowers to
+    `and(A___eq__(a, mk(1)), A___eq__(mk(1), b))`, which calls `mk` twice where
+    the language calls it once.  That middle case is the one shape left alone,
+    and the remedy for it is a STATEMENT-level rewrite — bind the operand to a
+    temporary in the enclosing statement first, which is what
+    `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` asks for and what this
+    deliberately does not do, because it needs its own round in the fixpoint
+    below and this change's argument is that a dispatch decision must not
+    introduce a store.
 
     Returns how many operators it rewrote, which is what lets the caller run
     this and the holder fixpoint as ONE fixpoint: a round that neither grew a
@@ -5017,6 +5157,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
     move one may have introduced a call the next round's fixpoint has to follow.
     """
     moved = 0
+    functions_by_name = {fn.name: fn for fn in functions
+                         if getattr(fn, "name", None)}
     for fn in functions:
         hs = holders.get(_fn_key(fn)) or ()
         by_name = hstruct.get(_fn_key(fn)) or {}
@@ -5030,14 +5172,12 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
             continue
         pending = []
         for node in M.iter_nodes(getattr(fn, "body", None)):
-            if isinstance(node, F.BinaryOp) and node.op in ("==", "!=") \
-                    and isinstance(node.left, F.IdentExpr) \
-                    and isinstance(node.right, F.IdentExpr):
+            if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
                 call = _eq_dispatch_call(
-                    node, node.op, node.left, node.right,
-                    by_name.get(node.left.name) or (),
-                    by_name.get(node.right.name) or (), by_name, hs,
-                    fn_one_word)
+                    node, node.op, node.left, node.right, by_name, hs,
+                    fn_one_word,
+                    _call_frame_structs(node, functions_by_name,
+                                        structs_by_name))
                 if call is not None:
                     pending.append((id(node), call))
                 continue
@@ -5045,14 +5185,20 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
                 continue
             if any(op not in ("==", "!=") for op in node.ops):
                 continue
-            if not all(isinstance(o, F.IdentExpr) for o in node.operands):
-                continue
+            call_frame = _call_frame_structs(node, functions_by_name,
+                                             structs_by_name)
             links, lowered = [], True
             for i, op in enumerate(node.ops):
                 left, right = node.operands[i], node.operands[i + 1]
+                if isinstance(left, F.CallExpr) and i > 0:
+                    lowered = False            # evaluated twice — see above
+                    break
+                if isinstance(right, F.CallExpr) and i + 1 < len(node.ops):
+                    lowered = False
+                    break
                 call = _eq_dispatch_call(
-                    node, op, left, right, by_name.get(left.name) or (),
-                    by_name.get(right.name) or (), by_name, hs, fn_one_word)
+                    node, op, left, right, by_name, hs, fn_one_word,
+                    call_frame)
                 if call is None:
                     lowered = False
                     break
@@ -5070,6 +5216,30 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
             _replace_nodes(fn.body, {node_id: call})
         moved += len(pending)
     return moved
+
+
+def _call_frame_structs(node, functions_by_name: dict, structs_by_name: dict):
+    """`{id(call): struct}` for the CALL operands `node` may dispatch.
+
+    Keyed by identity because the answer is about a NODE — the operand as
+    written, which appears once in a single comparison and twice in a chain's
+    middle — and because the walk that asks has already decided which of them may
+    be a call at all. `model.call_result_frame_struct` does the deciding, from
+    the callee's declared return type, and answers None for a call this image
+    does not contain: an entry with no struct is simply absent, which the
+    dispatch reads as "leave this operand alone".
+    """
+    out = {}
+    operands = ([node.left, node.right] if isinstance(node, F.BinaryOp)
+                else list(getattr(node, "operands", None) or ()))
+    for operand in operands:
+        if not isinstance(operand, F.CallExpr):
+            continue
+        st = M.call_result_frame_struct(operand, functions_by_name,
+                                        structs_by_name)
+        if st is not None:
+            out[id(operand)] = st
+    return out
 
 
 def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
@@ -7000,41 +7170,65 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     use for this question (`arm64_codegen._specialization_of` delegates to
     `comptime.specialization_name`), so the write-back and the call it rewrites
     now name the callee the same way.
+
+    `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
+    list of `(condition, body)` TUPLES, so the hand-rolled recursion below
+    descended every `if` body and every `else` and stopped dead at the first
+    `elif` — and the construct it then missed is a STORE, so what came out was
+    not a refusal but a program that computed the wrong number. Measured, both
+    architectures, `c.bump(5)` in an `elif` arm of a one-field struct:
+
+        if k > 100: c.bump(100)
+        elif k > 0: c.bump(5)          # 10 + 5 = 15, and the image says 10
+
+    with the `if`/`else` twin of the same program answering 15 on both. That is
+    `_apply_receiver_writeback`'s own docstring's recorded defect ("the program
+    built, ran, and printed the value the caller had") reached by a door the
+    rewrite had already closed everywhere else, so this is the LAST of the four
+    rewrites the `elif` walk reached; see
+    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+
+    The two `None` returns are the arm that means "handled, do not descend", and
+    each is the behaviour the hand-rolled walk had rather than a new decision:
+
+      * an `ExprStmt` is a STATEMENT, and nothing inside an expression is one —
+        this walk rewrites `c.bump(x)` into `c = Cell_bump(c, x)` only because it
+        is a statement whose value is a discarded call;
+      * a `CallExpr` is not descended either, so the calls this can refuse as a
+        value-position write-back are exactly the ones it used to refuse: a call
+        read out of a statement's own slot (`x = c.bump(5)`, `return c.bump(5)`).
+        A call nested in another call's ARGUMENTS is not among them, before or
+        after, and it does not need to be: the receiver is handed to the callee
+        by reference, so the store the mutator made is visible through the
+        caller's own binding — measured, `if k > 0: sink(c.bump(5))` leaves `c`
+        at 15 on both architectures.
     """
-    if isinstance(node, list):
-        i = 0
-        while i < len(node):
-            item = node[i]
-            if isinstance(item, F.ExprStmt) and isinstance(item.value,
-                                                          F.CallExpr):
-                call = item.value
-                wb = writebacks.get(M.call_callee_name(call.func))
-                if wb is not None:
-                    recv = call.args[0] if call.args else None
-                    if not isinstance(recv, F.IdentExpr):
-                        raise CodegenError(
-                            M.mutating_receiver_target_refusal(
-                                wb.owner, wb.member,
-                                _writeback_spelling(recv)))
-                    node[i] = F.AssignStmt(target=recv, value=call,
-                                           line=item.line)
-                    i += 1
-                    continue
-            _apply_receiver_writeback(item, writebacks)
-            i += 1
-        return
-    if isinstance(node, F.ExprStmt):
-        return                        # a statement: the list arm handled it
-    if isinstance(node, F.CallExpr):
-        wb = writebacks.get(M.call_callee_name(node.func))
-        if wb is not None:
-            recv = node.args[0] if node.args else None
-            raise CodegenError(M.mutating_receiver_value_refusal(
-                wb.owner, wb.member,
-                _writeback_spelling(recv) if recv is not None else "the receiver"))
-        return
-    for field in getattr(node, "__dataclass_fields__", {}):
-        _apply_receiver_writeback(getattr(node, field), writebacks)
+    def visit(n):
+        if isinstance(n, F.ExprStmt):
+            call = n.value
+            if not isinstance(call, F.CallExpr):
+                return None
+            wb = writebacks.get(M.call_callee_name(call.func))
+            if wb is None:
+                return None
+            recv = call.args[0] if call.args else None
+            if not isinstance(recv, F.IdentExpr):
+                raise CodegenError(
+                    M.mutating_receiver_target_refusal(
+                        wb.owner, wb.member, _writeback_spelling(recv)))
+            return F.AssignStmt(target=recv, value=call, line=n.line)
+        if isinstance(n, F.CallExpr):
+            wb = writebacks.get(M.call_callee_name(n.func))
+            if wb is not None:
+                recv = n.args[0] if n.args else None
+                raise CodegenError(M.mutating_receiver_value_refusal(
+                    wb.owner, wb.member,
+                    _writeback_spelling(recv) if recv is not None
+                    else "the receiver"))
+            return None
+        return n
+
+    M.rewrite_tree(node, visit)
 
 
 def _rewrite_self_fields(node, mapping: dict):
@@ -7056,7 +7250,7 @@ def _rewrite_self_fields(node, mapping: dict):
     rewrote the inner `b.inner` and returned `b.v` — one level short, a name
     in no register home and no frame slot, refused as a field access through a
     base the source never spelled. Matched on the whole chain, `b.inner.v` is
-    the local `b` and the program builds. `_rewrite_one_word_nested_field` a
+    the local `b` and the program builds. `_rewrite_one_word_nested_fields` a
     few hundred lines below is the frame-slot half of this same rewrite and
     has always matched the whole chain, for the same reason.
 
@@ -7065,19 +7259,37 @@ def _rewrite_self_fields(node, mapping: dict):
     a longer chain reads through a field whose declared type is a multi-field
     struct — a frame — and belongs to the nested-frame path rather than to
     this one.
+
+    `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
+    list of `(condition, body)` TUPLES, so the hand-rolled recursion descended
+    every `if` body and every `else` and stopped dead at the first `elif`. The
+    identity not firing is a REFUSAL rather than a wrong answer here, and the
+    message is one this file has already been shown to be false about the
+    program: measured, both architectures, a one-field struct's own field read
+    in an `elif` arm (`self.n` in `Cell.get`) was refused with
+
+        'self.n' is a field access through 'self', and this path has no way to
+        say what 'self' holds. … Bind the base from a constructor whose
+        declaration THIS IMAGE can see
+
+    with the `if`/`else` twin of the same program building and computing the
+    right answer. `self` is the field; the arm is the whole of it. See
+    `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`.
+
+    The replacement is handed back and not descended into, which is
+    `rewrite_tree`'s rule rather than a decision here: it is `F.IdentExpr(root)`,
+    a bare name, and the node it was built from — the chain — is precisely what
+    must not be offered to this rewrite a second time.
     """
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _rewrite_self_fields(x, mapping)
-        return node
-    if isinstance(node, F.MemberExpr):
-        root, _, path = _member_chain(node).partition(".")
-        sole = mapping.get(root)
-        if sole and _is_sole_field_prefix(path, sole):
-            return F.IdentExpr(name=root)
-    for name in getattr(node, "__dataclass_fields__", {}):
-        setattr(node, name, _rewrite_self_fields(getattr(node, name), mapping))
-    return node
+    def visit(n):
+        if isinstance(n, F.MemberExpr):
+            root, _, path = _member_chain(n).partition(".")
+            sole = mapping.get(root)
+            if sole and _is_sole_field_prefix(path, sole):
+                return F.IdentExpr(name=root)
+        return n
+
+    M.rewrite_tree(node, visit)
 
 
 def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
@@ -8145,74 +8357,82 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     publish is left alone, so `xs.count`, `struct.field` and a module's own
     function keep whatever answers they had.
 
-    ONE test, in `_rewrite_dotted_child`, used from every parent shape — and that is
-    the whole design. A child reached from a list element, from a dataclass
-    field, from a call's argument list and from a store's VALUE side are four
-    spellings of the same parent-directed rewrite, and a rewrite applied in
-    three of them and not the fourth is not a rewrite. Measured, that fourth
-    omission was live: `print(mod.K)` lowered (a call argument goes through
-    `_rewrite_dotted_child`) while `x = mod.K` and `var x = mod.K` were refused
-    with `mod_global_refusal` — the message that claims a dylib cannot publish a
-    VARIABLE, about a name that is a folded CONSTANT the module's own manifest
-    already carries. Both spellings were refused by the same walk with the same
-    message, so the construct looked like a storage gap in half its positions.
-    Hence the assignment below rather than a bare recursive call: the store's
-    value is a CHILD of the statement, so the replacement has to be written back
-    into the statement's slot, which is what `_rewrite_dotted_child` returns it
-    for.
+    ONE test, asked of every node the walk reaches, and that is the whole
+    design. A read reached from a list element, from a dataclass field, from a
+    call's argument list, from a store's VALUE side and from an `elif` arm's
+    condition are five spellings of the same rewrite, and a rewrite applied in
+    four of them and not the fifth is not a rewrite. Measured, the fourth was
+    live: `print(mod.K)` lowered (a call argument goes through the walk) while
+    `x = mod.K` and `var x = mod.K` were refused with `mod_global_refusal` —
+    the message that claims a dylib cannot publish a VARIABLE, about a name that
+    is a folded CONSTANT the module's own manifest already carries. Both
+    spellings were refused by the same walk with the same message, so the
+    construct looked like a storage gap in half its positions.
+
+    `model.rewrite_tree`, which is what puts the `elif` arm in the set as well:
+    `IfStmt.elifs` is a list of `(condition, body)` TUPLES and the hand-rolled
+    recursion here tested `isinstance(node, list)`, so it stopped at the first
+    `elif`. The fifth position was unreachable for a fourth reason that is worth
+    writing down, because it is not a property of this walk: `_fold_target_queries`
+    runs EARLIER in the same pipeline and normalizes every `elif` pair into a
+    LIST (`_fold_target_queries_in`'s own docstring says why: a tuple cannot be
+    assigned into). So this walk reached the arms by an accident of ANOTHER
+    pass's traversal, with nothing recording the dependency — and the two walks
+    that run before it, `_rewrite_self_fields` and `_apply_receiver_writeback`,
+    are still tuples by then and still miss every arm
+    (`bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`).
+
+    A store's TARGET and a call's CALLEE are the two positions a name must not be
+    rewritten in, and each is a node the walk HANDLES rather than descends:
+
+      * `mod.K = 5` writes another module's state, which has nowhere to live and
+        is refused by name (`bugs/FORMAL_module_state_no_storage.md`);
+        substituting it would trade a refused store for a dropped one. A `for`
+        target is a store too and is excluded for the same reason;
+      * `mod.f(...)` must not become `7(...)`, a call to a number, if some
+        module on the line also publishes a constant `f`.
+
+    The VALUE side of a store and both sides of a call's arguments go through
+    the walk, which is what the assignment in the store arm and the
+    `kwargs[i]` write-back below are for. A store's `type_ann` is not walked,
+    and that is the same rule `_apply_constant_sites` applies to a type position
+    and for the same reason: an annotation is not evaluated on this path, and a
+    literal substituted into one is a type the source never wrote.
     """
-    if isinstance(node, list):
-        done = 0
-        for i, child in enumerate(node):
-            node[i], n = _rewrite_dotted_child(child, tables, bound)
-            done += n
-        return done
-    if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
-        # The TARGET is a store and is left alone — `mod.K = 5` writes another
-        # module's state, which has nowhere to live and is refused by name
-        # (`bugs/FORMAL_module_state_no_storage.md`); substituting it would trade
-        # a refused store for a dropped one. The VALUE side is an ordinary read
-        # and goes through the ONE test.
-        value, n = _rewrite_dotted_child(getattr(node, "value", None),
-                                         tables, bound)
-        if hasattr(node, "value"):
-            node.value = value
+    done = [0]
+
+    def visit(n):
+        if isinstance(n, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
+            if hasattr(n, "value"):
+                # The ASSIGNMENT, not a bare call: `rewrite_tree` mutates a
+                # field in place only when the node it was handed is the node it
+                # hands back, so a replacement has to be written into the slot
+                # here. Reading the walk's return value and dropping it is how
+                # `x = mod.K` kept its `MemberExpr` while the walk reported one
+                # site rewritten — the count and the tree disagreeing, which is
+                # the shape this walk's own docstring calls a rewrite that
+                # silently did nothing.
+                n.value = M.rewrite_tree(n.value, visit)
+            return None
+        if isinstance(n, F.CallExpr):
+            M.rewrite_tree(n.args or [], visit)
+            for i, pair in enumerate(n.kwargs or []):
+                if not isinstance(pair, (tuple, list)) or len(pair) < 2:
+                    continue
+                value = M.rewrite_tree(pair[1], visit)
+                if value is not pair[1]:
+                    if isinstance(pair, list):
+                        pair[1] = value
+                    else:
+                        n.kwargs[i] = (pair[0], value)
+            return None
+        if _is_dotted_constant(n, tables, bound):
+            done[0] += 1
+            return _imported_constant_node(n, tables)
         return n
-    if isinstance(node, F.CallExpr):
-        # The callee is a SYMBOL, not a read of a value — the same rule the
-        # identifier rewriter follows, for the same reason: `mod.f(...)` must
-        # not become `7(...)`, a call to a number, if some module on the line
-        # also publishes a constant `f`.
-        done = _apply_imported_constant_sites(node.args or [], tables, bound)
-        for i, pair in enumerate(node.kwargs or []):
-            if not isinstance(pair, (tuple, list)) or len(pair) < 2:
-                continue
-            value, n = _rewrite_dotted_child(pair[1], tables, bound)
-            node.kwargs[i] = (pair[0], value)
-            done += n
-        return done
-    done = 0
-    for fname in getattr(node, "__dataclass_fields__", {}):
-        if fname in ("line", "col"):
-            continue
-        child, n = _rewrite_dotted_child(getattr(node, fname, None), tables, bound)
-        setattr(node, fname, child)
-        done += n
-    return done
 
-
-def _rewrite_dotted_child(child, tables: dict, bound: set):
-    """`(possibly-replaced child, sites rewritten)`.
-
-    The one test, and the one place a replacement is produced: a node this
-    rewrites is a node its PARENT holds, so the replacement is recorded in the
-    parent's slot. A rewrite that handed a new node back to a caller with
-    nowhere to put it would be a rewrite that silently did nothing."""
-    if child is None or isinstance(child, (str, int, float, bool)):
-        return child, 0
-    if _is_dotted_constant(child, tables, bound):
-        return _imported_constant_node(child, tables), 1
-    return child, _apply_imported_constant_sites(child, tables, bound)
+    M.rewrite_tree(node, visit)
+    return done[0]
 
 
 def _imported_constant_node(expr, tables: dict):
@@ -8927,6 +9147,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     struct_names = set(structs_by_name or {})
     # A read-before-store hit per function, raised after the loop: see the
     # ordering note where they are raised.
+    #
+    # The link line's module tables, ONCE, for the spine test inside the loop.
+    # `dylib_export_tables` is the same function both emitters resolve a callee
+    # through, so a link it says does not resolve is a link the emitter cannot
+    # bind either — the two cannot disagree about where the exemption stops
+    # because there is only one table. Built here rather than per function: it
+    # walks every manifest on the line, and a file with a hundred functions
+    # would build the same three dicts a hundred times (measured as a kill at
+    # the memory ceiling on `test_formal_os.py`'s `dirs` group).
+    _by_name, by_module, forwarded = M.dylib_export_tables(link_line)
     unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -9461,22 +9691,75 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     continue
                 link = c.func
                 while True:
-                    dotted_callees.add(id(link))
+                    # CONDITIONAL, and the condition is the fix: a link UNDER a
+                    # call's callee is skipped only while it RESOLVES — as a
+                    # module with a library on this link line, or as an export of
+                    # the module above it (`model.module_spine_link_resolves`,
+                    # which is the ONE place that question is asked).
+                    #
+                    # Unconditional, the exemption hid a name nothing publishes,
+                    # and the refusal that should have named it lost the race to
+                    # a diagnostic raised during EMISSION. Measured, arm64 and
+                    # x86-64 identically:
+                    #
+                    #     import os
+                    #     def probe(k):
+                    #         v = os.environ.get(k, '')
+                    #         return v == '1'
+                    #
+                    #     build: `v == '1'` compares a NUMBER with a string,
+                    #       and the string comparison this would lower to is
+                    #       `strcmp`, which DEREFERENCES both operands … it
+                    #       would be handed the value of `v` as an address.
+                    #
+                    # which is advice about a byte comparison, sent to a reader
+                    # whose line is an environment lookup. The right sentence is
+                    # the member refusal below — "os.environ reads 'environ'
+                    # out of the imported module `os` … What `os` publishes" —
+                    # and it is raised at the END of this function, before any
+                    # emission, so it wins on its own without an ordering rule.
+                    #
+                    # The other direction is the one that would break the tree:
+                    # `os.path.join(…)` is 532 measured call sites, and `path`
+                    # is NOT one of the 28 names the formal `os` publishes — it
+                    # is a SUBMODULE with its own library. Testing "does the
+                    # parent publish it" alone refuses every one of them.
+                    #
+                    # THE CALLEE'S OWN LINK IS NOT ASKED, and that is the
+                    # division of labour rather than an exception to it: a call
+                    # binds a SYMBOL, and `_extern_symbol` owns that question and
+                    # already answers it with the module's own export list —
+                    # `pkg.nosuchfunction(x)` on a package that forwards `twice`
+                    # is refused as "exports no `nosuchfunction` … What it does
+                    # export: twice", which is the more precise sentence and the
+                    # one `test_formal_module_attr.py` pins. The member arm's is
+                    # about a name the module cannot publish AS A VALUE, which
+                    # is the `os.environ` half and not this one.
+                    if link is c.func or M.module_spine_link_resolves(
+                            M.member_chain_text(link), by_module, forwarded):
+                        dotted_callees.add(id(link))
                     if not isinstance(link, F.MemberExpr):
                         break
                     link = link.obj
             for sub in M.iter_nodes(fn.body):
                 if not isinstance(sub, F.MemberExpr):
                     continue
-                # A CALL through the chain is the callee exemption's business
-                # and the emitter already resolves it from the module's export
-                # table; `_extern_symbol` refuses a name the module does not
-                # publish, with a message that already lists what it does
+                # A CALL through a RESOLVING chain is the callee exemption's
+                # business and the emitter already resolves it from the module's
+                # export table; `_extern_symbol` refuses a name the module does
+                # not publish, with a message that already lists what it does
                 # publish. Asking about it here too would pre-empt that with
                 # this one — and would REFUSE programs that build today, which
-                # is how both versions of this arm were caught. Every link on
-                # the callee's spine is skipped, `os.path` included: the spine
-                # is `dylib_export_module`'s question, not this one's.
+                # is how both versions of this arm were caught.
+                #
+                # A link that does NOT resolve is not that case, and skipping it
+                # unconditionally is what let `os.environ.get(k, '')` be
+                # reported as a string comparison: the chain never reaches
+                # `_extern_symbol` because nothing can bind it, and the check
+                # that would have said so never asked. So the skip is keyed on
+                # `dotted_callees`, which the loop above fills only for links
+                # that resolve — `os.path` and `os.getenv_or` are in it,
+                # `os.environ` is not.
                 if id(sub) in dotted_callees:
                     continue
                 root_name = M.dylib_module_reference(sub, imported)
@@ -10441,6 +10724,23 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
+    # A `try`'s handler arm with a BODY is refused here, before anything is
+    # rewritten or emitted, and in this function because it is the one pipeline
+    # both front ends go through — the two emitters' `_emit_try` skip the arms
+    # outright, so a refusal asked from either backend would be a second copy of
+    # one decision, and the executable and dylib paths would answer differently
+    # about the same source. The sentence and the test of what an arm may
+    # contain are `formal/model.py`'s (`refuse_dropped_handler_arm`,
+    # `unemitted_handler_arm`); what is HERE is only the loop, because the
+    # functions are not in hand any earlier.
+    #
+    # Why a refusal and not the arm being emitted: there is no unwinder to emit
+    # it into. See the docstring for the measurement — a `try` whose handler
+    # printed built, ran, printed nothing and exited 0.
+    for fn in functions:
+        found = M.unemitted_handler_arm(fn)
+        if found is not None:
+            raise CodegenError(M.refuse_dropped_handler_arm(fn, found))
     # NAMED for what it holds, because the two tables in this function have the
     # same SUBJECTS and incompatible SHAPES and were interchanged once already
     # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):

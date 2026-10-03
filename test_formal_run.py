@@ -6787,6 +6787,11 @@ ONE_WORD_FIELD_METHOD_REFUSALS = [
 # a case that only has the arm cannot tell a fix from a rewrite that stopped
 # emitting the branch: `a` alone and `a` + `b` are different numbers, and the
 # `comptime` pair differs by which arm the specialization takes.
+#
+# The four cases at the end of the group are the four remaining REWRITES that
+# stopped at an arm, and they are here for the reason the first two are: each is
+# paired with, or distinguished from, the answer the same program gives with the
+# arm turned into an `else`.
 CONDITIONAL_ARM_CASES = [
     # 9 = the `elif` arm's answer (diff 6 + lo 3). The `if` twin is 0, so a
     # rewrite that dropped the arm entirely would be caught by the exit status
@@ -6857,6 +6862,105 @@ CONDITIONAL_ARM_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return pick[2](15, 5, 30)\n", 45, None),
+    # ── the three remaining REWRITES that stopped at an `elif` ──
+    #
+    # `bugs/FORMAL_elif_arms_and_random_mojo_remainder.md`, Part 1. Four walks
+    # recursed on `isinstance(node, list)` and therefore missed every `elif` arm;
+    # two of them had been moved onto `model.rewrite_tree` already, and these are
+    # the other two. What the arm costs is DIFFERENT for each, which is why they
+    # are four cases and not one:
+    #
+    #   * a one-word struct's own field read (`self.n`) — a REFUSAL, and one this
+    #     file has seen before in a different walk: `model.field_access_refusal`
+    #     says it "has no way to say what 'self' holds", and in a method of a
+    #     one-field struct it is exactly the one thing the walk knows.
+    ("one_word_field_read_in_an_elif_arm_is_still_the_receiver",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        if self.n > 100:\n"
+     "            return 1\n"
+     "        elif self.n > 0:\n"
+     "            return 2\n"
+     "        else:\n"
+     "            return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 5\n"
+     "    return c.get()\n", 2, None),
+    # …and its `if`/`else` twin, which was already right: 2 here and 2 there, so
+    # the case above cannot pass by the walk being deleted rather than repaired.
+    ("one_word_field_read_in_an_if_arm_is_still_the_receiver",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        if self.n > 0:\n"
+     "            return 2\n"
+     "        else:\n"
+     "            return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 5\n"
+     "    return c.get()\n", 2, None),
+    # The one-field MUTATOR's write-back, which is the one that was a WRONG
+    # ANSWER rather than a refusal: `c.bump(5)` in an `elif` arm never became
+    # `c = Cell_bump(c, 5)`, so the call was computed and the value the callee
+    # handed back was discarded — which is the defect this pass's own docstring
+    # records as measured ("the program built, ran, and printed the value the
+    # caller had"). 15 is 10 + 5; the unfixed image exits 10, so this is a row
+    # that could not pass by accident. All three arms store, so a rewrite that
+    # dropped the `elif` outright would answer 1 and fail rather than pass.
+    ("one_field_mutator_in_an_elif_arm_stores_back",
+     "struct Cell:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def bump(mut self, by: Int):\n"
+     "        self.n += by\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.n = 10\n"
+     "    if n > 100:\n"
+     "        c.bump(100)\n"
+     "    elif n > 0:\n"
+     "        c.bump(5)\n"
+     "    else:\n"
+     "        c.bump(1)\n"
+     "    return c.get()\n", 15, None),
+    # The frame-slot half of the same identity (`o.in1.a` → `o.in1`). This one is
+    # a CONTROL and it is here because the other three were all live defects: it
+    # answers 2 before the change as well as after, because `_frame_receivers`
+    # runs after `_fold_target_queries`, which normalizes every `elif` pair into
+    # a list as a side effect of its own tuple handling. So the walk reached the
+    # arm by an accident of ANOTHER pass's traversal. It is pinned so the
+    # conversion of that walk onto `model.rewrite_tree` cannot be the thing that
+    # changes it, and so the accident is visible to the next reader rather than
+    # being rediscovered as a mystery.
+    ("nested_one_word_chain_as_an_elif_condition",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var in1: Inner\n"
+     "    var pad: Int\n"
+     "\n"
+     "def f(o: Outer, x: Int) -> Int:\n"
+     "    if x == 100:\n"
+     "        return 1\n"
+     "    elif o.in1.a:\n"
+     "        return 2\n"
+     "    else:\n"
+     "        return 3\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(Outer(Inner(5), 0), 0)\n", 2, None),
 ]
 
 # ── a DECLARED frame parameter handed a frame-RETURNING call ────────────────
@@ -11482,6 +11586,100 @@ EQ_DISPATCH_CASES = [
      "    var b = One(3)\n"
      "    printf(\"%d\\n\", 1 if a == b else 0)\n"
      "    return 0\n", 0, "1"),
+    # ── a CALL as one of the two operands ──────────────────────────────────
+    #
+    # The frame case's safety argument is about two words that are both frame
+    # ADDRESSES of one struct, and it was settled by asking the HOLDER TABLE,
+    # which is keyed by name — so an operand that is a call was never asked
+    # about, and the operator stayed a flag-setting compare of two addresses. For
+    # two names that is CPython's inherited `object.__eq__`; for a struct that
+    # DECLARES one it is a bypass, and a bypass of a field-wise `__eq__` on two
+    # DISTINCT objects with equal fields answers False where CPython answers
+    # True. Measured, both architectures, `eq=0` where CPython prints `eq=1` —
+    # and nothing refused it.
+    #
+    # The fix reads the CALL's struct off the callee's own DECLARED RETURN TYPE
+    # (`model.call_result_frame_struct`), which is an interprocedural fact
+    # rather than an inference, and leaves every operand it cannot resolve
+    # alone. `mk` is annotated, which is the point: an unannotated callee
+    # answers None and the address compare stands.
+    ("eq_operator_reaches_a_declared_eq_through_a_call_operand",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"eq=%d ne=%d diff=%d\", 1 if t == mk(1) else 0,\n"
+     "           1 if t != mk(1) else 0, 1 if t == mk(2) else 0)\n"
+     "    return 0\n", 0, "eq=1 ne=0 diff=0"),
+    # …and the CHAIN, whose ends may each be a call: `mk(1) == t == mk(1)` is
+    # two links and each `mk(1)` appears in ONE of them, so the call is evaluated
+    # where the source put it. This row exists because the first attempt at it
+    # produced a REFUSAL whose message was false about the file — the
+    # holder-agreement check counted a frame-returning call as "something that
+    # is not a frame address" — which is why that check now asks
+    # `_argument_is_frame_address` and reuses `_frame_valued_calls`, the table
+    # the emitters build their blocks from.
+    ("eq_chain_with_a_call_at_each_end",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"chain=%d\", 1 if mk(1) == t == mk(1) else 0)\n"
+     "    return 0\n", 0, "chain=1"),
+    # …and the call in a chain's MIDDLE, which stays an address compare, and is
+    # pinned as the ONE remaining shape rather than left to be discovered: the
+    # lowering reads each operand twice, so `t == mk(1) == u` would call `mk`
+    # three times where the source calls it twice. The remedy is a
+    # STATEMENT-level rewrite — bind the operand to a temporary in the enclosing
+    # statement, which needs its own round in the holder fixpoint — and it is
+    # written down in `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` rather
+    # than done here.
+    ("eq_chain_with_a_call_in_the_middle_stays_an_address_compare",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"chain=%d\", 1 if t == mk(1) == mk(1) else 0)\n"
+     "    return 0\n", 0, "chain=0"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this
@@ -12495,17 +12693,55 @@ REFUSAL_CASES = [
      "        p = 9\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
-    # Stored in every HANDLER of a `try`, which is a set of arms rather than a
-    # chain — the shape `bugs/FORMAL_read_before_store_dominating_store.md`
-    # names as one a partial rule gets wrong.
-    ("every_handler_stores_is_dominating",
+    # A `try`'s BODY store dominates after the statement. It used to be
+    # `every_handler_stores_is_dominating` — `except Exception: p = 2` — and the
+    # handler is gone from the program because a handler arm with a body is now
+    # REFUSED: neither emitter emits the arms (`_emit_try` skips them, `RaiseStmt`
+    # flushes the pending `finally` clauses and `exit(1)`s), so an arm's store is
+    # not in the image and the graph that walked it described a program nobody
+    # runs. The refusal is the next case down; this one keeps the RUNNING
+    # coverage of the dominance itself, which the `pass` arm does not weaken: the
+    # join is reached from the body's exits alone and `p` is in its IN set.
+    ("try_body_store_is_dominating_after_the_statement",
      "def f(n):\n"
      "    try:\n"
      "        p = 1\n"
      "    except Exception:\n"
-     "        p = 2\n"
+     "        pass\n"
      "    printf(\"p=%d\", p)\n    return 0\n",
      0, "p=1"),
+    # …and the refusal itself, on the shape this file already had: a handler
+    # that PRINTS. Built and run before the change, it printed nothing and
+    # exited 0 — the program silently is not the program that was written, with
+    # no refusal, no warning and nothing on stderr. 921 arms in this
+    # repository's own 400 files have a body.
+    ("refuse_handler_arm_with_a_body",
+     "def f(n):\n"
+     "    try:\n"
+     "        sink(n)\n"
+     "    except ValueError:\n"
+     "        printf(\"HANDLER RAN\")\n"
+     "    return 0\n"
+     "\n"
+     "def sink(v):\n"
+     "    printf(\"s=%d\", v)\n",
+     "refuse:is a handler arm with a body this path cannot put in the image",
+     None),
+    # …and the store in an arm, which is the shape `read_before_store` was
+    # answering wrongly: it reported `p` as read before any store, on the
+    # strength of a path the image does not have.
+    ("refuse_handler_arm_that_stores",
+     "def f(n):\n"
+     "    try:\n"
+     "        sink(n)\n"
+     "    except ValueError:\n"
+     "        p = 1\n"
+     "    printf(\"p=%d\", p)\n    return 0\n"
+     "\n"
+     "def sink(v):\n"
+     "    printf(\"s=%d\", v)\n",
+     "refuse:is a handler arm with a body this path cannot put in the image",
+     None),
     # A `try`'s `else` clause, which is the shape the whole clause exists for:
     # do the work where it can fail, and use the result only on the path where
     # it did not. It was REFUSED on both architectures — "'p' is read at line 7
@@ -12515,12 +12751,18 @@ REFUSAL_CASES = [
     # and CPython runs the program. The graph reached the clause from the try's
     # header, i.e. from the one path the language skips it on. Same program
     # shape as `test_struct_formal.py:603`, which is where it was measured.
+    #
+    # The handler arm was `except Exception: return 1`, and a `return` is an
+    # effect like any other — an arm whose body says what the program should
+    # answer on failure is a program whose answer DEPENDS on which arm ran, and
+    # this path cannot compute that. `pass` says the same thing about the
+    # clause's reach, which is what this row is for, and keeps running.
     ("try_else_clause_runs_only_when_the_body_completed",
      "def f(n):\n"
      "    try:\n"
      "        p = n + 1\n"
      "    except Exception:\n"
-     "        return 1\n"
+     "        pass\n"
      "    else:\n"
      "        printf(\"p=%d\", p)\n"
      "    return 0\n",

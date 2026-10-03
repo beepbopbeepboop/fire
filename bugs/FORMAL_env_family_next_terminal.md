@@ -1,176 +1,79 @@
-# FORMAL_env_family_next_terminal: `std/os/env.mojo` lowers, and 55 files land on an unbound `unsafe_ptr`
+# FORMAL_env_family_next_terminal: where the 55-file family stands, and what the next reader needs
 
-**Status: steps 1 and 2 below are FIXED (2026-10-02) and the family's terminal
-has MOVED, measured on `env.mojo` itself. Step 3 (the sweep re-measurement) is
-not done — a whole-tree sweep is not this session's to run — and the new
-terminal is recorded below.** The original filing follows.
-
-**What moved.** `env.mojo`'s own body and its three `external_call` calls now
-lower; the file gets past them and past `as_c_string_slice().unsafe_ptr()`, and
-the build stops one level further out:
+**Status: the family's own terminal has NOT MOVED since 2026-10-02, and it is a
+file whose own document was deleted for measuring at a ceiling of ZERO. What is
+left in this document is a measurement, not a defect.** Re-measured 2026-10-02 on
+`work/formal8-5`, arm64, on the real stdlib file:
 
 ```
-$ python3 fire.py build --formal --no-prove -o /tmp/env.out <stdlib>/std/os/env.mojo
+$ python3 tools/memslot.py --gb 8 -- python3 fire.py build --formal --no-prove \
+      --backend=arm64 -o .tmp/p/env_mojo.out \
+      <stdlib>/std/os/env.mojo
 build: env.mojo imports 'std.ffi', which cannot be built either:
-       binary_heap.mojo: formal dylib has no public functions: …
-       it declares only the generic struct template(s) BinaryHeap, and a
-       parametric type has no single boundary layout either.
+       binary_heap.mojo: formal dylib has no public functions:
+       binary_heap.mojo exports nothing under doc/ABI.md's rules: it declares
+       only the generic struct template(s) BinaryHeap, and a parametric type has
+       no single boundary layout either.
 ```
 
-`unsafe_ptr` is no longer in the message, and neither is
-`_CPointer[UInt8, UntrackedOrigin[…]]`. The blocker step 2 named — "a type
-argument in ANY bracketed generic position must not be read as a value" — is
-`model.type_position_nodes`: a bracket list in a TYPE position is now excluded
-from the runtime question rather than asked it and refused
-(`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, deleted
-with its fix).
+Identical to the terminal the previous Status recorded, `unsafe_ptr` and
+`_CPointer[UInt8, UntrackedOrigin[…]]` still absent from it. So the answer to
+"what is left here" is: **`binary_heap.mojo`**, whose `len(self._data)` on a
+`List[Self.T]` slot has no representable value.
 
-**The new terminal is a documented limit and not this family's work**:
-`binary_heap.mojo` is the row `FORMAL_dylib_export_gate_ceiling.md` measured at
-a ceiling of ZERO files across all three of its candidate fixes, which is why
-that document was deleted rather than worked — the family is now behind the
-module whose `len(self._data)` on a `List[Self.T]` slot has no representable
-value, which is `FORMAL_class_assigns_its_fields_in_init.md`'s neighbourhood.
+**And the document that recorded why that file is not worth working is gone.**
+`bugs/FORMAL_dylib_export_gate_ceiling.md` measured three candidate fixes for
+`binary_heap.mojo` at a ceiling of ZERO files across all three, and was deleted
+rather than worked — so the ceiling-zero measurement now lives only here, and
+this file is what a reader needs in order to know that `env.mojo` is not one
+patch away. It is worth being explicit about that, because the deletion rule
+("a doc for a fixed bug is deleted") reads as "the problem went away" and this
+one did not: it means the problem was measured and priced.
 
-**What is left here** is step 3 and nothing else: re-run the sweep below and
-read `not-answerable/unresolved-extern` and the top entry of
-`codegen/dependency by family`, which should now be `info.mojo`'s MLIR
-constructs rather than anything this document describes. The number to watch is
-the 56, and it is a sweep this session was not to run.
+## The three steps, and where each stands
 
----
+1. **DONE (2026-09-30, `4ad34f3`)** — `external_call["setenv", T]`'s bracket
+   list is a template application rather than a container index. This closed the
+   55-file family: `external_call` is what all 55 reach.
+2. **DONE (2026-10-02)** — a type argument in ANY bracketed generic position is
+   not read as a value: `model.type_position_nodes` excludes a bracket list in a
+   type position from the runtime question rather than asking it and refusing
+   (`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`,
+   deleted with its fix).
+3. **NOT DONE, and not this session's** — re-run
 
-**Filed 2026-09-29, immediately after the `external_call` tuple-subscript fix
-(`4ad34f3`).** The 55-file family named in this worker task is closed; the
-family has not become 55 passing files, and this is where it lands instead.
-Nothing here is a report about a *decision* — the construct now lowers, the
-image is correct, and what is left is a different construct this worker did not
-claim.
+   ```
+   python3 tools/formal_sweep.py --stdlib-subtrees=base64,bit,builtin <stdlib>/std
+   ```
 
-## What changed, measured
+   and read `not-answerable/unresolved-extern` (56 when the table was taken) and
+   the top entry of `codegen/dependency by family`, which should now be
+   `info.mojo`'s MLIR constructs rather than anything this document describes. A
+   whole-tree sweep is tens of minutes and hundreds of builds; it belongs to
+   whoever runs the gate.
 
-`python3 tools/formal_sweep.py --stdlib-subtrees=base64,bit,builtin <stdlib>/std`,
-arm64, on a `git worktree add --detach` of the parent commit and on this
-branch, both over the same 294 files:
+## The classification bug, which is still live and still not this file's
 
-| | parent (`5535925`) | this branch (`4ad34f3`) |
-|---|---|---|
-| pass | 24 | 24 |
-| codegen (in the file) | 88 | 87 |
-| codegen/dependency | 181 | 125 |
-| not-answerable/unresolved-extern | 1 | 56 |
-| codegen coverage | 24/293 = 8.2% | 24/236 = 10.2% |
-| `codegen/dependency by family`, top entry | `env.mojo: value with no representation x55` | `info.mojo: MLIR construct x36` |
+The sweep files any `symbol(s) that nothing provides` as
+`not-answerable/unresolved-extern` (`tools/formal_sweep.py`'s
+`_EXTERN_BUILD_MARK` rule), a class excluded from the coverage denominator and
+from `DIRTY`. Its comment is right about the case it was written for — a
+genuinely unlinkable image — and wrong about the one this family produced: the
+backend is NOT right to refuse, because the symbol was a method of a struct in
+the same image and the reason it was unbound was that a method call was never
+rewritten. So a real 55-file codegen gap sat in the class that says "a fact
+about the target, not a gap in the backend", and `codegen coverage` read 10.2%
+instead of something lower for the wrong reason.
 
-Diffing the two sweeps file by file: **57 files left the `codegen`/
-`codegen/dependency` classes, and 0 entered them, and 0 changed class inside
-them.** Two of the 57 are a sweep `-t 30` timeout on
-`std/gpu/host/device_context.mojo` (a direct method-call finding, unrelated),
-so the honest number is **55** — exactly the family.
+**A narrower form of the marker than a substring is the fix**, and it is still
+not written. It is in `tools/`, it is a classification rule rather than a
+construct, and no bug document claims it.
 
-## The next terminal, verbatim
+## What this worker verified about the construct itself
 
-```
-NOT-ANSWERABLE/UNRESOLVED-EXTERN: std/utils/numerics.mojo
-  (build: numerics.mojo imports 'std.sys', which cannot be built either:
-   env.mojo: env.mojo: the library would bind 1 symbol(s) that nothing
-   provides, so it could not be loaded: unsafe_ptr. …)
-```
-
-`std/os/env.mojo` now compiles. The symbol that fails to bind is
-`CStringSlice.unsafe_ptr`, reached from its own source:
-
-* `std/os/env.mojo:43,45,61` — `name.as_c_string_slice().unsafe_ptr()`
-* `std/collections/string/string.mojo:1442` —
-  `def as_c_string_slice(mut self) -> CStringSlice[ImmutOrigin(origin_of(self))]`
-* `std/ffi/cstring.mojo:211` — `def unsafe_ptr(self) -> UnsafePointer[Int8, Self.origin]`
-
-So the receiver of `.unsafe_ptr()` is the result of a call whose return type is
-a **generic struct instantiation written as a computed type expression**
-(`CStringSlice[ImmutOrigin[origin_of(self)]]`). The method-rewriting pass keys
-a method on a value receiver on the receiver's static type
-(`formal/build.py`'s `_rewrite_method_calls` / `_method_owners`), and a computed
-type expression gives it nothing to key on, so the call is not lifted to
-`CStringSlice_unsafe_ptr`. The image instead carries a bare reference to the
-name `unsafe_ptr`, which no library on the link line provides, and
-`formal/build.py`'s `_audit_bound_symbols` refuses it — correctly, and with a
-message that is honest about what it knows.
-
-The same refusal already exists in this tree for the receiver that is a plain
-local, and says the same thing for the same reason
-(`std/utils/static_tuple.mojo`: "a method call on a value receiver is dispatched
-by NAME, so `recv.m(x)` carries no type"). What is new here is only the
-instantiation in the middle.
-
-## Two things that make the next step awkward, and should be known before starting it
-
-**1. A minimal repro is blocked by an adjacent gap of the same shape.**
-Building a two-file version of this — `struct Wrap[t: Int]` with a method, and
-a caller — does not reach the bug. It is refused earlier:
-
-```
-$ python3 fire.py build --formal --no-prove mm/user4.mojo     # Wrap[Int].mk().get()
-build: main: 'Int' has no home: the module-level symbol table is empty for this
-unit, and the reading function declares no local or parameter by that spelling.
-```
-
-`Wrap[Int]` is a **single**-element subscript, so it is not a multi-index at
-all, and the type argument `Int` is a type expression being read as a runtime
-name. That is the identical defect the `external_call` fix just closed, in the
-generic-construction position instead of the template-application one, and
-`formal/build.py`'s `check_module_symbols` still has it: the exclusion added for
-`external_call`'s TYPE argument is keyed on
-`M.is_external_call_template`, deliberately, so nothing else is exempted by it.
-A generic's type argument is compile-time by exactly the same construction, and
-the repair is the same shape — but it belongs with the generic/monomorphization
-work (`bugs/FORMAL_known_limits.md` §1.2, "Stage 5"), which is a project and
-not a patch, and which this worker did not claim.
-
-**2. The family is now filed under a class that says it is not a gap.** The
-sweep's `_EXTERN_BUILD_MARK` rule (`tools/formal_sweep.py:393`) files any
-`symbol(s) that nothing provides` as `not-answerable/unresolved-extern`,
-which is excluded from the coverage denominator and from `DIRTY`. Its comment
-is right about the case it was written for — a genuinely unlinkable image — and
-wrong about this one: the backend is NOT right to refuse, because `unsafe_ptr`
-is a method of a struct that is in the same image and the reason it is unbound
-is that a method call was not rewritten. So a real 55-file codegen gap now
-sits in the class that says "a fact about the target, not a gap in the
-backend", and `codegen coverage` reads 10.2% instead of something lower for
-the wrong reason. Worth a second look at whether the marker needs a
-narrower form than a substring.
-
-## The exact next step
-
-**Steps 1 and 2 are DONE** — see the Status at the top. What follows is the
-original text, kept because step 3 is still open and because step 2's shape is
-what `model.type_position_nodes` had to be built to cover.
-
-1. Give the method-rewriting a type for a receiver that is a call result, by
-   reading the callee's DECLARED return type when the callee is a function of
-   this image (`M.pointer_pointee`'s existing pattern for reading a callee's
-   return annotation is the shape to follow) and reducing a type EXPRESSION
-   argument to its base name where the base names a struct of this image.
-   `CStringSlice[ImmutOrigin[origin_of(self)]]` → `CStringSlice` is the
-   reduction, and it is decidable: the base name names a struct whose layout is
-   already known to the frame analysis.
-2. That needs (1) of the two blockers above first, or at least a refusal
-   instead of a bare name: a type argument in ANY bracketed generic position
-   must not be read as a value, and a receiver whose type cannot be established
-   should be refused with the static-tuple message rather than emitted as a
-   dangling symbol.
-3. Then re-measure with the same command as the table above. The number to
-   watch is `not-answerable/unresolved-extern` (56) and
-   `codegen/dependency by family`'s top entry, which should stop being
-   `info.mojo`'s MLIR construct and start being whatever the 55 files reach
-   next.
-
-## What this worker verified about the construct itself, so the next reader does not re-derive it
-
-`test_formal_external_call.py` (29 cases, all passing) is the test of the closed
-half, and it includes the whole of `std/os/env.mojo`'s three functions
-transcribed, run and compared against `os.environ` in CPython. Removing the two
-imports from `env.mojo` (they pull in `std/sys/info.mojo`, whose module-level
-MLIR comptime binding is a separate construct, claimed elsewhere) and writing
-`as_c_string_slice().unsafe_ptr()` as the string it evaluates to on this path
-builds and runs correctly on **both** arm64 and x86-64 — so the file's own
-remaining blocker is a dependency, not its body.
+`test_formal_external_call.py` (29 cases) is the test of the closed half, and it
+includes the whole of `std/os/env.mojo`'s three functions transcribed, run and
+compared against `os.environ` in CPython — so the file's own remaining blocker is
+a dependency, not its body. **Re-measured here, unchanged**, which is the reason
+this document is a record and not a queue item: the family's own text is three
+constructs closer to building and the next construct is another file's.

@@ -338,16 +338,27 @@ CASES = [
     ("every_handler_stores_ok",
      "    try:\n        p = 1\n    except ValueError:\n        p = 2\n"
      "    return p\n", "ok"),
-    # A handler that stores nothing is a path to the join that stores nothing,
-    # and nothing in the graph says the handler will not run — so this refuses
-    # a program CPython runs, because the `try` body here does not raise. That
-    # is the conservative direction and it is pinned deliberately: a rule that
-    # assumed a handler is dead would report the far more common
-    # `except: pass` shape as a store, which is the wrong way round.
-    ("one_handler_stores_refused",
+    # A handler that stores nothing. This row was `one_handler_stores_refused`
+    # and asserted a REFUSAL, deliberately: the rule it pinned treated an arm as
+    # a path to the join, and a path that stores nothing made
+    # `try: p = 1 / except: pass / return p` a read before any store — a
+    # program CPython runs, refused with a sentence claiming CPython raises
+    # `UnboundLocalError` for it.
+    #
+    # Both halves of that refusal were false, and the premise they rested on —
+    # "nothing in the graph says the handler will not run" — is answered by the
+    # emitter: nothing CAN run it. `_emit_try` in both backends skips the arms
+    # and `RaiseStmt` flushes the pending `finally` clauses and then `exit(1)`s,
+    # so the graph walked a path no image has. The CFG does not walk the arms
+    # now, and `model.refuse_dropped_handler_arm` refuses an arm with a body
+    # before this walk is asked, so the "wrong way round" this row was
+    # protecting against — reporting an `except: p = 2` as a store — is refused
+    # BY NAME rather than analysed. The document this row's comment used to cite
+    # (`bugs/FORMAL_except_arm_is_never_emitted.md`) is deleted with its fix;
+    # `refuse_dropped_handler_arm` is what it became.
+    ("one_handler_stores_nothing_is_not_a_path_that_stores_nothing",
      "    try:\n        p = 1\n    except ValueError:\n        pass\n"
-     "    return p\n", "refuse",
-     "a handler is assumed reachable, and nothing says it will not run"),
+     "    return p\n", "ok"),
     ("try_else_and_handler_ok",
      "    try:\n        p = 1\n    except ValueError:\n        p = 2\n"
      "    else:\n        p = 3\n    return p\n", "ok"),
@@ -1049,19 +1060,24 @@ ENTRY_SHAPES = [
 # statement about the graph rather than about a verdict: a rule that got the
 # right answer by leaving `else` unreachable would pass every row in CASES.
 TRY_ELSE_SHAPES = [
-    # 0 entry, 1 the try (header), 2 the body's store, 3 the handler,
-    # 4 the `else`'s `sink(p)`.
+    # 0 entry, 1 the try (header), 2 the body's store, 3 the `else`'s `sink(p)`.
+    #
+    # There is no block for the HANDLER, and that is the change: neither emitter
+    # emits one (`_emit_try` skips the arms, `RaiseStmt` flushes and `exit(1)`s),
+    # so the graph must not walk an arm whose statements are in no image. Before,
+    # this row's block 3 WAS the handler and the `else` was 4 — which is why the
+    # enumeration in this comment used to name it.
     ("try_else_is_entered_from_the_body_not_the_header",
      "    try:\n        p = 1\n    except ValueError:\n        pass\n"
-     "    else:\n        sink(p)\n", 4),
+     "    else:\n        sink(p)\n", 3),
     # 0 entry, 1 `q = 1`, 2 the try (header), 3 the body's `if`, 4 `p = 1`,
-    # 5 the handler, 6 the `else`'s `sink(p)`: the clause is entered from the
-    # body's own exits — the branch's false edge and its storing arm — and from
-    # neither the header nor anything outside the body.
+    # 5 the `else`'s `sink(p)`: the clause is entered from the body's own exits
+    # — the branch's false edge and its storing arm — and from neither the
+    # header nor anything outside the body.
 ("try_else_is_entered_from_every_body_exit",
      "    q = 1\n    try:\n        if n:\n            p = 1\n"
      "    except ValueError:\n        pass\n    else:\n        sink(p)\n",
-      6),
+      5),
 ]
 
 

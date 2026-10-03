@@ -203,13 +203,19 @@ because the module-attribute check exempts every link on a dotted CALL's spine
 and `os.environ.get` is one — the same refusal, silently converted into advice
 about a byte subscript.
 
-**Filed, not fixed:** `bugs/FORMAL_dotted_callee_spine_exemption_hides_an_unpublished_name.md`,
-including the measurement that says the obvious fix is WRONG — `os` publishes 28
-names and `path` is not one of them (it is a submodule with its own library), so
-"exempt a spine link only if the module publishes it" refuses `os.path.join`,
-which builds today. The discriminator a fix needs is "resolves as an export OR
-as a submodule with a dylib on this link line", and it needs `compile_stdlib.py`
-to verify, which is the integrator's.
+**FIXED 2026-10-02 (`work/formal8-5`); the document is deleted with its fix.**
+The spine is now skipped only while the link RESOLVES, and the discriminator is
+the one this map predicted: an export of the module above it OR a submodule with
+a dylib on this link line (`model.module_spine_link_resolves`, over the tables
+`dylib_export_tables` builds — the ones both emitters resolve a callee through).
+`os.environ.get(k, '')` is refused by the module-attribute check and the
+string comparison is never reached; `os.path.join(…)` (532 call sites),
+`os.getenv_or(…)` and `pkg.sub.twice(…)` all still build. The callee's own link
+stays with `_extern_symbol`, whose message is the more precise one for a call.
+
+**Still to be measured by the integrator:** `compile_stdlib.py`'s `U` count,
+which is the only thing that covers the 664-file breadth. `os.path.*` is used by
+a large share of them and none is a candidate for a new refusal.
 
 **Note on the limit itself:** `os.environ` being absent is a TRUE limit and
 stays refused. `formal/hostmods/os/__init__.mojo` says so in its own module

@@ -648,6 +648,68 @@ def test_a_module_object_read_is_still_refused(tmpdir, _shared, verbose):
 # name that needs none, and it was the reported failure for six files on both
 # architectures.
 
+# ── a SPINE link that resolves, and one that does not ───────────────────────
+#
+# `os.environ.get(k, '')` is the measured instance: `environ` is not a name the
+# formal `os` publishes (28 of them, and it is not among them) and `os.environ`
+# is not a module with a library on the link line, so nothing can bind the call —
+# and the file was reported as a STRING COMPARISON, because the spine exemption
+# was unconditional and the diagnostic raised during emission beat the one
+# raised at the end of the symbol walk. The three shapes below are the two
+# answers plus the guard between them, because a fix that asked only "does the
+# parent module publish it" would refuse `pkg.sub.twice(…)` — a submodule with
+# its own library, whose name the parent does not publish at all.
+
+def test_a_spine_link_that_resolves_is_not_a_member_read(
+        tmpdir, _shared, verbose):
+    """`pkg.sub.twice(5)` and `pkg.twice(5)` — both build, both against CPython.
+
+    The guard half of the pair: a submodule is a LIBRARY (`pkg_sub`, its own
+    manifest) and a re-export is a forwarding recorded in the package's, and
+    neither is a name `pkg` publishes. Both are on a call's spine, so a
+    discriminator that tested only the parent's export table would refuse them.
+    """
+    prog = ("import pkg\n"
+            "import pkg.sub\n\n"
+            "def main():\n"
+            "  printf(\"%d %d|\", pkg.sub.twice(5), pkg.twice(5))\n"
+            "  return pkg.sub.twice(5) + pkg.twice(5)\n")
+    root = os.path.join(tmpdir, "spine_resolves")
+    os.makedirs(root)
+    files = write_tree(root, {"pkg/__init__.mojo": PKG,
+                              "pkg/sub.mojo": PKG_SUB, "prog.mojo": prog})
+    agrees_with_cpython(root, "prog", files, prog, verbose)
+
+
+def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
+        tmpdir, _shared, verbose):
+    """`pkg.nosuchattribute.twice(5)` — refused as the ATTRIBUTE, by name.
+
+    The failing half, and what the refusal has to say: `nosuchattribute` is not a
+    field of `pkg`, not a submodule with a library, and not a name `pkg`
+    publishes — so the chain binds nothing, and the honest report is about the
+    link rather than about whatever the rest of the expression happens to do
+    with the result. The message must print what `pkg` DOES publish, because
+    that is what separates "a capability `pkg` lacks" (`os.environ` is a
+    `char **` walk, `bugs/FORMAL_module_state_no_storage.md`) from "a name it
+    does not have".
+    """
+    prog = ("import pkg\n\n"
+            "def main():\n"
+            "  return pkg.nosuchattribute.twice(5)\n")
+    root = os.path.join(tmpdir, "spine_unresolved")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": PKG, "pkg/sub.mojo": PKG_SUB,
+                      "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("pkg.nosuchattribute" in text and "twice" in text,
+              f"{arch}: the refusal must name the unresolved link and print "
+              f"what the module DOES publish (its re-exports included), or a "
+              f"reader cannot tell a missing capability from a missing name: "
+              f"{text.strip()[-400:]}")
+
+
 def test_a_module_attribute_read_is_refused_as_an_attribute(
         tmpdir, _shared, verbose):
     """`mylib.ITEMS` — the refusal names the ATTRIBUTE, not the module.
@@ -824,9 +886,21 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
         "assign":    "  x = mylib.CONST\n",
         "augassign": "  x = 1\n  x += mylib.CONST\n",
         "vardecl":   "  var x: int = mylib.CONST\n",
+        # An `elif` ARM, the fifth position of the one test. `IfStmt.elifs` is a
+        # list of `(condition, body)` TUPLES, so the walk this replaced tested
+        # `isinstance(node, list)` and stopped at the first `elif`; it reached
+        # this position only because `_fold_target_queries` normalizes every pair
+        # into a list earlier in the same pipeline, for its own reasons. Nothing
+        # recorded the dependency, and the two walks that run BEFORE that
+        # normalization did miss their arms (`bugs/FORMAL_elif_arms_and_random_
+        # mojo_remainder.md`), so the position is asserted here rather than left
+        # to a pass that happens to run first.
+        "elif_arm":  "  if x == 1:\n    x = 2\n  elif x == 3:\n"
+                     "    x = mylib.CONST\n",
     }
     for label, body in shapes.items():
-        src = "import mylib\n\ndef main():\n" + body + "  return 0\n"
+        src = ("import mylib\n\ndef main():\n  var x = 0\n" + body
+               + "  return 0\n")
         stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
         fns, _structs, _syms, _slots = B._prepare_functions(
             stmts, synthetic=False)
@@ -845,6 +919,25 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
                   for v in values),
               f"{label}: no store's value is the module's literal, so the "
               f"constant did not cross: {values!r}")
+
+    # The same walk over an `elif` CONDITION, which is the one position whose
+    # node is not a store at all: there is no value slot to assert on, so the
+    # assertion is that the literal is anywhere in the arm. It is the shape the
+    # tuple container actually hid — the condition is the element of the pair
+    # itself rather than something inside the body list.
+    src = ("import mylib\n\ndef main():\n  var x = 0\n"
+           "  if x == 1:\n    x = 2\n  elif mylib.CONST:\n    x = 3\n"
+           "  return 0\n")
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
+    fns, _structs, _syms, _slots = B._prepare_functions(stmts, synthetic=False)
+    done = B._apply_imported_constant_sites(fns[0].body, tables,
+                                            B._names_bound_in(fns[0]))
+    lits = [n for n in B.M.iter_nodes(fns[0].body)
+            if isinstance(n, F.IntLiteral) and n.value == 41]
+    check(done == 1 and len(lits) == 1,
+          f"an `elif` CONDITION reading `mod.CONST` rewrote {done} site(s) and "
+          f"left {len(lits)} literal(s); expected 1 and 1 — an arm's condition is "
+          f"an ordinary expression position and the one the pair container hid")
 
     # …and the TARGET of a store to another module is still not rewritten.
     src = "import mylib\n\ndef main():\n  mylib.CONST = 5\n  return 0\n"
@@ -977,6 +1070,10 @@ TESTS = [
      test_a_module_root_is_not_reported_as_a_variable),
     ("a module-attribute read never reaches the emitter as a silent zero",
      test_a_module_attribute_read_is_never_a_silent_zero),
+    ("a spine link that resolves — a submodule, a re-export — still builds",
+     test_a_spine_link_that_resolves_is_not_a_member_read),
+    ("a spine link that resolves to nothing is refused as the attribute",
+     test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read),
     ("a published constant reads in EVERY position, including a store's value",
      test_a_published_constant_is_readable_in_every_position),
     ("every store kind tests its VALUE side, and a module store stays a store",
