@@ -3238,6 +3238,36 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    return 0\n",
      "refuse:reads a field of a field", None),
+    # The NEGATIVE half of `byref_delegating_constructor_stores_a_parameter_frame`
+    # in `BYREF_CASES`, and the case that keeps that rule from being written as
+    # "a method may store a frame in a field". The one fact that separates them
+    # is WHERE the frame was made: `r` arrived as a parameter, so the CALLER
+    # reserved it and it cannot outlive the slot; `t` is built here, in this
+    # method's own scratch, and the slot may well outlive the call — the object
+    # `h` is the caller's and `h.src` is read after `grab` has returned.
+    #
+    # Nothing reads `h.src` in this program on purpose. The store itself is the
+    # defect, so a case that also read the field would be decided by whichever
+    # of the two rules came first, and the needle here would be a sentence about
+    # a read.
+    ("byref_refuse_a_field_store_of_a_frame_built_here",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Holder:\n"
+     "    var src: R\n"
+     "    var n: Int\n\n"
+     "    def grab(out self):\n"
+     "        var t = R()\n"
+     "        t.a = 5\n"
+     "        t.b = 6\n"
+     "        self.src = t\n"
+     "        self.n = 1\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var h = Holder()\n"
+     "    h.grab()\n"
+     "    return h.n\n",
+     "refuse:is stored in the field 'self.src'", None),
     # A callee this module does not compile cannot know the frame's layout.
     # This is the ONE shape left of four (see the two cases below and the
     # cross-module one in CROSS_MODULE_CASES): `mojo_print` is defined nowhere
@@ -3783,6 +3813,53 @@ CROSS_MODULE_CASES = [
               "    p.b = 4\n"
               "    var r = bump(p, 5)\n"
               "    return p.a * 10 + p.b + r\n"}, 96, None),
+    # A DELEGATING CONSTRUCTOR: a method that stores its own PARAMETER into one
+    # of its fields, which is 13 of the 14 hand-written `recv.field = <a frame>`
+    # sites in this repository and the stdlib (`tools/formal_frame_field_census.py`).
+    # It used to be refused as "a S receiver is stored in the field 'self.src',
+    # so it outlives the frame it names", and that was false about it: the frame
+    # was reserved by the CALLER, in the caller's own scratch, so it cannot
+    # outlive the slot it is stored in — both are the caller's. What the refusal
+    # was right about is the OTHER lifetime, the one where the frame is built
+    # HERE (`byref_refuse_a_field_store_of_a_frame_built_here`), and the one
+    # where the slot is not a plain word (the placed nested frame, which
+    # `constr_refuse_an_init_store_over_a_placed_nested_frame` pins).
+    #
+    # It reads through the field by PASSING it, and the callee is in the other
+    # module, which is the only way this field can be read at all: a read
+    # through a nested frame of this module's own struct is a different
+    # construct with its own placement rules (`_nested_frame_levels`'s
+    # `_REASSIGNED` arm). So the assertion is the whole point — `peek` computes
+    # 7*10 + 8 = 78 from the frame it was handed, so a stored COPY, a
+    # re-created block, or any word other than the caller's `S` address leaves
+    # `n` alone and answers 1.  The multiplier is 2 rather than 10 so the
+    # expected exit status fits in a byte, which every case in this suite
+    # requires (see the retraction in BUG.md): CPython's answer is
+    # (7*10 + 8) * 2 + 1 = 157.
+    ("byref_delegating_constructor_stores_a_parameter_frame",
+     {"mod": "struct S:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def peek(s: S) -> Int:\n"
+             "    return s.a * 10 + s.b\n",
+      "main": "from byref_xmod import S, peek\n"
+              "\n"
+              "struct Holder:\n"
+              "    var src: S\n"
+              "    var n: Int\n"
+              "\n"
+              "    def fill(out self, r: S):\n"
+              "        self.src = r\n"
+              "        self.n = 1\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var r = S()\n"
+              "    r.a = 7\n"
+              "    r.b = 8\n"
+              "    var h = Holder()\n"
+              "    h.fill(r)\n"
+              "    return peek(h.src) * 2 + h.n\n"}, 157, None),
     # The NEGATIVE half, and the one that makes the positive case above worth
     # anything: the same shape with the two modules declaring the same NUMBER of
     # fields in a different ORDER. `Q.v` is slot 0 and the caller's slot 0 is

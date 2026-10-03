@@ -6489,6 +6489,10 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
         elif isinstance(node, F.AssignStmt) \
                 and isinstance(node.target, F.MemberExpr) \
                 and isinstance(node.value, F.IdentExpr):
+            if _frame_field_store_is_sound(
+                    fn, node.target, node.value, holders,
+                    (owners or {}).get(fn.name), structs_by_name):
+                continue
             _refuse_holder_use(
                 fn, node.value, holders, by_name,
                 f"is stored in the field {_member_chain(node.target)!r}, so it "
@@ -6826,6 +6830,71 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                 #    here: the call site that has to be caught can be in a
                 #    function that holds no frame at all, and those are skipped
                 #    by the `if not hs` guard above.
+
+
+def _frame_field_store_is_sound(fn, target, value, holders, owner,
+                                structs_by_name) -> bool:
+    """True when storing this frame address into this FIELD cannot outlive it.
+
+    The question the field-store refusal cannot answer from the SLOT, answered
+    from the VALUE instead. The hazard is a lifetime mismatch: a frame belongs
+    to the function that reserved its bytes, so an address that outlives those
+    bytes is a dereference of reclaimed stack. Which means the store is sound
+    exactly when the frame was created by a function that OUTLIVES whatever
+    holds the slot — and the one fact this path has about a frame's creator is
+    whether it ARRIVED or was BUILT here.
+
+    Three conditions, and each one is load-bearing:
+
+      * **THE SLOT IS AN ORDINARY WORD.** `model.struct_nested_frame_fields` is
+        the placement decision: when a field's declared type names a framed
+        struct of THIS module and nothing outside `__init__` writes it, the
+        constructor reserves a block for it in the object's own block and stores
+        that block's ADDRESS in the slot. A pointer stored over such a slot
+        leaves a word where every reader computes a frame base from it, which is
+        `model.construction_nested_slot_refusal`'s hazard seen from the store
+        side, and `constr_refuse_an_init_store_over_a_placed_nested_frame` pins
+        it. A field typed with an IMPORTED struct, or declared without a type
+        this module can place, is a plain word, and a plain word is all this
+        rule needs it to be.
+      * **THE VALUE IS A FRAME HOLDER**, or there is nothing here to judge: the
+        refusal below is this walk's business only for a name that holds a
+        frame.
+      * **THE VALUE IS A PARAMETER of this function — it ARRIVED, it was not
+        built here.** A frame that came in as an argument was reserved by the
+        CALLER, in the caller's own scratch, so it is at least as long-lived as
+        everything this function can reach: the receiver whose field is being
+        written is itself such a parameter, every object this function builds
+        dies before it returns (a returned frame is copied into the caller's
+        scratch by `model.struct_returned_frame_sites`, not aliased), and
+        nothing on this path is heap-allocated at all. So `self.f = <a
+        parameter>` — a DELEGATING CONSTRUCTOR, which is 13 of the 14 corpus
+        sites — stores the caller's own frame into the caller's own word, and
+        both die together.
+
+    **A local does not qualify, and that is the real case.**
+    `self.f = t` where `var t = R()` was BUILT here reserves `t`'s bytes in
+    THIS function's scratch, and the slot may well outlive the call. That is the
+    defect the refusal was written for and it stays refused.
+
+    `owner` is this method's struct (`None` for a plain function, where the rule
+    has no receiver to reason about and declines), and a target that is a CHAIN
+    longer than one field is declined too: `self.a.b = r` writes into the frame
+    at `self.a`, which is a different slot with a different lifetime.
+    """
+    if value.name not in holders or owner is None:
+        return False
+    if not isinstance(target, F.MemberExpr) \
+            or not isinstance(target.obj, F.IdentExpr):
+        return False
+    if target.obj.name not in M.struct_receivers(owner):
+        return False
+    if target.member in {name for name, _slot, _st
+                         in M.struct_nested_frame_fields(
+                             owner, structs_by_name or {})}:
+        return False
+    return value.name in {n for n, _ann in M.incoming_args(fn)
+                          if isinstance(n, str)}
 
 
 def _container_values(node) -> list:
