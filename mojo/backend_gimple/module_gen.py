@@ -9178,6 +9178,7 @@ def gen_module_impl(self, stmts):
             'extern double  __mojo_gen_send_d (int64_t);',
             'extern void    __mojo_gen_destroy (int64_t);',
             'extern void    __mojo_async_run_gen (int64_t);',
+            'extern _Bool   __mojo_async_iscoroutine (int64_t);',
             'extern void    __mojo_async_task_schedule (int64_t);',
             'extern int64_t __mojo_async_await_task (int64_t, int64_t);',
             '/* Awaitable protocol: Future/Event handles */',

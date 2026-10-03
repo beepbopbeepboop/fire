@@ -116,11 +116,48 @@ static void test_run_gen_rejects_non_handle(void)
     }
 }
 
+/* `asyncio.iscoroutine(x)` / `asyncio.isawaitable(x)` ask the SAME question
+   `__mojo_async_run_gen` asks before driving anything, and the answer is the
+   registry lookup rather than a cast -- so unlike the drive path it does not
+   raise, it returns 0, which is CPython's own answer for a value that is not
+   a coroutine. (`isawaitable` is deliberately NOT here: it is
+   `inspect.isawaitable` in CPython 3.14, so answering for it under the
+   `asyncio.` spelling would be the divergence.)
+
+   Driven here for the same reason as the case above, and with the same
+   property to protect: the positive case needs a REAL live handle (a value
+   the compiler produced is the only way to get one), and the negative cases
+   are shapes a cast would read as a pointer. The positive half is the
+   regression that matters — before the predicate existed, a value that WAS a
+   coroutine answered 0, so `if asyncio.iscoroutine(c):` took the else
+   branch, silently. */
+static void test_iscoroutine_answers_for_handles_and_non_handles(void)
+{
+    extern _Bool __mojo_async_iscoroutine(int64_t genHandle);
+
+    CHECK(__mojo_async_iscoroutine(0) == 0, "NULL is not a coroutine");
+    CHECK(__mojo_async_iscoroutine(12345) == 0, "small int is not a coroutine");
+    CHECK(__mojo_async_iscoroutine(0x7f0000000000LL) == 0,
+          "plausible pointer is not a coroutine");
+
+    int64_t g = __mojo_gen_new_2((int64_t)(intptr_t)&body_range, 0, 3);
+    CHECK(__mojo_async_iscoroutine(g) == 1,
+          "a live handle is a coroutine (got %d)", (int)__mojo_async_iscoroutine(g));
+    __mojo_gen_destroy(g);
+    /* Freed: the registry entry went with it, so the very same address is no
+       longer a coroutine. That is the property a stale registry would lose,
+       and the reason the check cannot be an address->type table. */
+    CHECK(__mojo_async_iscoroutine(g) == 0,
+          "a destroyed handle is not a coroutine (got %d)",
+          (int)__mojo_async_iscoroutine(g));
+}
+
 int main(void)
 {
     test_range();
     test_send();
     test_run_gen_rejects_non_handle();
+    test_iscoroutine_answers_for_handles_and_non_handles();
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all Layer 1 shim (mojo_coro_gen) tests passed\n");
     return 0;
