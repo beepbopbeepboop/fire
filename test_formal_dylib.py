@@ -596,18 +596,42 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
               f"one, proved or named")
         proved = (f"Contracts.agrees_of_body dylib_image {ident} bodyI" in text)
         named = bool(_re.search(rf"theorem {ident}_spec\b", text))
+        # The emitter's THREE states for an export's contract, and the
+        # difference between the last two is the whole point: "no claim, and it
+        # says so" is honest, and "no claim, and it does not" is the emitter
+        # having forgotten the export.  `NO SPEC DERIVED for <ident>` is the
+        # marker the first one carries.
+        declined = f"NO SPEC DERIVED for {ident}" in text
         check(proved != named,
               f"{ident} has "
               + ("both a proved contract and a named `_spec` obligation"
                  if proved and named else
-                 "neither a proved contract nor a named `_spec` obligation -- "
-                 "the emitter dropped the export's claim about its own result"))
+                 "neither a proved contract nor a named `_spec` obligation, and "
+                 "no `NO SPEC DERIVED` marker either -- the emitter dropped the "
+                 "export's claim about its own result without saying why"))
+        check(proved or named or declined,
+              f"{ident} has no contract claim and no reason for having none")
+    # NO obligation may be stated against a GUESSED spec.  This is the shape
+    # `formal/admitted.py`'s `OPUS-9` rule is about and the one this file
+    # emitted until 2026-10-03: `export_result_spec … (fun n => n) := by sorry`,
+    # i.e. a `sorry` over the claim that EVERY dylib export computes the
+    # identity.  That is false for every export in the tree except the ones
+    # that do -- `export_result dylib_image triple 7 = 21`, `add1 7 = 8` -- and
+    # the generated file states it without checking it, because a `Block` for a
+    # body with a branch is never emitted and so Lean never sees the claim.
+    check("(fun n => n) := by\n  sorry" not in text
+          and "(fun n => n)) := by\n  sorry" not in text,
+          "the generated proof states an obligation against a GUESSED identity "
+          "spec -- a `sorry` over a false claim, which is worse than no "
+          "obligation at all")
     # ... and the proved contract must be sorry-free, in its own namespace.
     # A `sorry` anywhere in the contract namespace is exactly the shape
     # `formal/admitted.py` counts, and a per-export grep is the only thing that
     # can see it: the census below reports a FILE total, which cannot say which
     # export admitted one.
     for ident in sorted(idents):
+        if f"namespace {ident}_contract" not in text:
+            continue
         ns = _re.search(rf"namespace {ident}_contract\n(.*?)\nend {ident}_contract",
                         text, _re.S)
         check(ns is not None,
@@ -745,6 +769,95 @@ def test_a_wrong_spec_is_rejected_not_believed(tmpdir, shared):
         check("counterexample" in detail or "unsolved goals" in detail,
               f"the {label} spec was rejected for the wrong reason, so this "
               f"test is not measuring what it claims: {detail[-300:]}")
+
+
+def test_several_exports_and_no_derivable_spec(tmpdir, shared):
+    """The REFUSALS, and they are the half of the emitter nothing else covers.
+
+    Every other case in this file is a ONE-export dylib whose spec is derivable
+    from its source, which is the one shape that gets a proved contract.  The
+    other two shapes went untested, and both were broken for the whole history
+    of this file without anything noticing:
+
+    * **several exports.** `Contracts.ExportBody`'s `atExit` is stated at
+      `image.base + image.codeSize` — the IMAGE's exit — so a `Block` for one
+      export of several cannot end where it must.  The emitter used to build one
+      anyway, over the WHOLE image's addresses, and the result did not
+      elaborate.
+    * **no derivable spec.** The fallback obligation was stated against
+      `(fun n => n)`: a `sorry` over the claim that every dylib export computes
+      the identity, which is false (`add1 7 = 8`) and which Lean never sees,
+      because there is no `Block` to check it against.
+
+    So: three exports, two with derivable specs and one without, and the
+    generated file must (a) name the derived specs in the obligations it does
+    emit, (b) guess nothing, (c) mark the export it declines, and (d) TYPECHECK.
+    (d) is the part that matters and the part a text check cannot do: three of
+    the four defects fixed on 2026-10-03 in that emitter were things that only
+    a `lean` run finds (`instance` on a non-class, `interval_cases`, `body.step`
+    one step short of the block it certifies).
+    """
+    import re as _re
+    from formal.lean import find_lean
+    root = HERE
+    src = os.path.join(tmpdir, "several.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(n):\n  return n + 1\n\n\n"
+                "def mul2(n):\n  return n * 2\n\n\n"
+                "def pick(n):\n  if n > 3:\n    return 1\n  return 0\n")
+    out = os.path.join(tmpdir, "several.dylib")
+    build_dylib(tmpdir, [src], "several.dylib")
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "add1", 41) == 42
+          and call_exported_by_name(out, "mul2", 21) == 42,
+          "the dylib does not compute what the specs will claim, so the "
+          "obligations below would be false and this test would be measuring "
+          "the wrong thing")
+    path = os.path.join(tmpdir, "several_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(
+            built["code"], built["info"], built["exports"],
+            {"add1": "(fun n => (n + (1 : UInt64)))",
+             "mul2": "(fun n => (n * (2 : UInt64)))"}))
+    text = open(path).read()
+    check("(fun n => n) := by\n  sorry" not in text,
+          "the generated proof still states an obligation against a guessed "
+          "identity spec")
+    # Two exports have a derived spec and are not the whole image, so each gets
+    # a NAMED obligation -- and the obligation must be about the DERIVED spec.
+    for ident, spec in [("dylib_export_0_add1", "n + (1 : UInt64)"),
+                        ("dylib_export_1_mul2", "n * (2 : UInt64)")]:
+        check(_re.search(rf"theorem {ident}_spec\b", text),
+              f"{ident}'s obligation is missing even though a spec was derived "
+              f"from its source")
+        check(spec in text,
+              f"{ident}'s obligation does not name the spec derived from its "
+              f"source ({spec}): the obligation is about something else")
+        check(_re.search(rf"theorem {ident}_contract\b", text),
+              f"{ident} has an obligation but no caller's theorem derived from "
+              f"it, so a caller has nothing to consume")
+    # `pick`'s body is not a single `return` of arithmetic over its parameter,
+    # so no spec is derivable and the emitter must SAY that rather than assert
+    # something.  `_dylib_spec_lean` used to count top-level returns and derive
+    # one ARM's spec — `(fun n => 0)` — for a body with a branch, which is
+    # false for `n = 7` and which Lean never checks.
+    pick = _re.search(r"def (dylib_export_\w*pick) : DylibExport :=", text)
+    check(pick is not None, "the branching export is not in the generated proof")
+    check(f"NO SPEC DERIVED for {pick.group(1)}" in text,
+          "the branching export has no spec and no marker saying so, so its "
+          "absence of a contract is indistinguishable from the emitter having "
+          "forgotten it")
+    check(not _re.search(rf"theorem {pick.group(1)}_spec\b", text),
+          "the branching export was given a contract obligation anyway")
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof
+    ok, detail = check_proof(path, repo_root=root)
+    check(ok, f"lean rejected the proof of a {len(built['exports'])}-export "
+              f"dylib: {detail[-400:]}")
 
 
 def test_overloads_do_not_collide(tmpdir, shared):
@@ -1090,6 +1203,8 @@ TESTS = [
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
     ("a wrong spec is rejected, not believed",
      test_a_wrong_spec_is_rejected_not_believed),
+    ("several exports, and one with no derivable spec",
+     test_several_exports_and_no_derivable_spec),
     ("overloads build and export once", test_overloads_do_not_collide),
     ("same name in two modules", test_same_name_in_two_modules),
     ("module with no public functions rejected", test_private_only_module_rejected),

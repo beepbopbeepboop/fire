@@ -8480,8 +8480,19 @@ def _dylib_spec_lean(fn) -> str:
 
     Returns Lean source for `fun n => <expr>`, or None when the body is not a
     single `return` of pure arithmetic over the parameter. That fallback is the
-    point: an export whose spec cannot be derived must stay a NAMED `sorry`
-    obligation, not acquire a contract that was guessed.
+    point: an export whose spec cannot be derived must acquire NO contract claim
+    at all, because the only spec available without one is `fun n => n` and
+    that is false for every export in the tree which is not the identity.
+
+    **The body must be EXACTLY that one `return`**, and the check is on the
+    statement LIST, not on the returns found in it.  It used to be `len(rets)
+    == 1` over the top-level statements, which silently derived one ARM's spec
+    for a body with branches: `def pick(n): if n > 3: return 1 else: return 0`
+    has one top-level `return`, so the spec came out `(fun n => 0)` -- false
+    for `n = 7`, and checked against nothing, because there is no `Block` for a
+    body with a branch and the contract is refused before Lean ever sees it.
+    A spec is a claim about the source, so a body the emitter read only part of
+    is worse than no spec.
 
     Only the shapes the ABI's word-shaped entry points actually have are
     handled, and an unrecognised node yields None rather than a partial
@@ -8502,9 +8513,9 @@ def _dylib_spec_lean(fn) -> str:
     if not isinstance(pname, str) or not pname:
         return None
     body = list(getattr(fn, "body", None) or [])
-    rets = [b for b in body if type(b).__name__ == "ReturnStmt"]
-    if len(rets) != 1:
+    if len(body) != 1 or type(body[0]).__name__ != "ReturnStmt":
         return None
+    rets = [body[0]]
 
     def go(node):
         kind = type(node).__name__
@@ -8970,15 +8981,17 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # is `_semantics_total` only, for an export with a loop or a call --
         # see `_dylib_total_proof`.
         #
-        # `_spec` is no longer among them, for an export whose spec
-        # `_dylib_spec_lean` can derive from its source: the contract is
-        # emitted PROVED, with `bv_decide` checking the machine against the
-        # source-derived spec.  An export whose body is not a single `return`
-        # of pure arithmetic over its parameter gets NO spec, and then the
-        # named `sorry` obligation is emitted exactly as before.  That
-        # asymmetry is deliberate: a spec is a claim about the source, and
-        # guessing one would turn an honest hole into a build failure or, worse,
-        # into a contract nobody checked.
+        # `_spec` is among them only for an export that HAS a spec.  An export
+        # whose spec `_dylib_spec_lean` derives from its source gets the
+        # contract PROVED, with `bv_decide` checking the machine against it; if
+        # the contract cannot be emitted (the export is not the whole image, or
+        # its body is not straight-line) the SAME spec becomes a named `sorry`
+        # obligation -- open, and true.  An export whose spec cannot be derived
+        # gets NO contract claim at all, because the only spec available without
+        # one is `fun n => n`, which is false for every export in the tree that
+        # is not the identity.  That asymmetry is deliberate: a spec is a claim
+        # about the source, and guessing one turns an honest absence into a
+        # believed falsehood.
         spec = specs.get(export["name"])
         entry = export["entry"]
         # The export's own extent, the same one `_dylib_total_proof` walks: the
@@ -8987,21 +9000,78 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         func_end = later[0] if later else base + len(code)
         contract = (_dylib_contract_proof(ident, base, entry, code, spec,
                                          func_end) if spec else "")
-        if not contract:
+        if not contract and spec:
+            # A spec WAS derived from the source and the contract still could
+            # not be emitted -- the export is not the whole image (so
+            # `Contracts.ExportBody`'s `atExit`, which is stated at the IMAGE's
+            # exit, is not this block's to satisfy), or its body is not
+            # straight-line.  The obligation is then stated against THAT spec,
+            # which is a true claim left open.
+            #
+            # It used to be stated against `(fun n => n)` here and in the
+            # no-spec case alike, which is a `sorry` over a FALSE claim --
+            # `export_result dylib_image add1 7 = 8`, and the whole reason
+            # [3]'s `dylib_export_contract_stub` was deleted.  Naming the
+            # derived spec costs nothing and is the difference between an open
+            # obligation and a believed falsehood.
             contract = (
-                f"/-- OBLIGATION, not proved: this export agrees with its\n"
-                f"    specification.  Its body is not a closed-form arithmetic\n"
-                f"    function of the argument, so no spec could be derived from\n"
-                f"    the source and none is guessed. -/\n"
+                f"/-- OBLIGATION, not proved: this export agrees with the\n"
+                f"    specification derived from its source.  The contract could\n"
+                f"    not be emitted -- `Contracts.ExportBody`'s `atExit` is\n"
+                f"    stated at the IMAGE's exit, so a block for one export of\n"
+                f"    several cannot end where it must, and a body with a branch\n"
+                f"    is not one function of one state -- so the claim is left\n"
+                f"    open rather than proved.  The spec is the source's own; none\n"
+                f"    is guessed. -/\n"
                 f"theorem {ident}_spec :\n"
-                f"    Refine.export_result_spec dylib_image {ident} (fun n => n) := by\n"
+                f"    Refine.export_result_spec dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
                 f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
                 f"    spec, the caller's contract follows. -/\n"
                 f"theorem {ident}_contract (n : UInt64) :\n"
-                f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
+                f"    Refine.DylibExportContract {ident}_prog {spec} n :=\n"
                 f"  Refine.dylib_export_contract_of_spec dylib_image {ident} "
-                f"(fun n => n)\n    {ident}_spec n")
+                f"{spec}\n    {ident}_spec n")
+        elif not contract:
+            # NO spec could be derived from the source.  There is then nothing
+            # honest to assert about the export's RESULT, and the emitter does
+            # not guess one: `export_result_spec image export_ spec` says the
+            # run leaves `spec n` in `x0`, and with `spec` unknown the only
+            # `(fun n => n)` available is a guess -- which is false for every
+            # export in the tree except the ones that compute the identity.
+            #
+            # So NO contract theorem is emitted for this export at all, rather
+            # than a named `sorry` over a falsehood.  What it still gets is the
+            # `Functional` half above, which is a real fact about a real run
+            # and does not mention a spec; and `formal/lean.py`'s census
+            # reports one FEWER `sorry`, which is the correct direction: a hole
+            # nobody filled is not an obligation, it is an absence, and the
+            # census counts obligations.
+            #
+            # This is the one asymmetry in the emitter, and it is deliberate:
+            # a spec is a claim about the source, and guessing one turns an
+            # honest absence into a build failure or, worse, into a contract
+            # nobody checked.
+            #
+            # The marker line is not decoration: it is how a reader -- and
+            # `test_formal_dylib.py` -- tells "the emitter decided no claim is
+            # honest here" from "the emitter forgot this export".  The
+            # alternative, a `def ... : Prop` holding the false claim, is
+            # worse on both counts: it is a vacuous declaration, which
+            # `vacuous_declarations` is built to report, and it still states
+            # the falsehood.
+            contract = (
+                f"/- NO SPEC DERIVED for {ident}, and so NO contract is claimed\n"
+                f"   for it: its body is not a single `return` of pure arithmetic\n"
+                f"   over its parameter, so `_dylib_spec_lean` cannot derive one\n"
+                f"   and the emitter does not guess.  A named `sorry` here would be\n"
+                f"   a `sorry` over a FALSE claim -- the only spec available without\n"
+                f"   one is `fun n => n`, and this export's result is whatever the\n"
+                f"   machine computed (`export_result dylib_image {ident} 7`).\n"
+                f"   Its termination is still an obligation above, and its result\n"
+                f"   is still the value the machine produced\n"
+                f"   (`{ident}_semantics_functional`, and\n"
+                f"   `Refine.export_result_run`). -/")
 
         proofs.append(
             f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"
