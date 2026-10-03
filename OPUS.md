@@ -436,6 +436,18 @@ down, and it is not a budget problem. See **§5.7**, which supersedes the
 "try `+decide`, then suspect the memory round trip" advice this paragraph used
 to give — that guess was wrong, and the real cause is the `fuel_lean` change.
 
+**AND FINALLY, 2026-10-03: this thread is closed, and the unfold was a
+symptom.** The emitter also composed each step into itself (`st_i` substituted
+`st{i-1}` while `S_{i+1}` feeds it the running state), so every step ran once
+per earlier step again — `triple` multiplied by 3 five times, `n * 243` against
+a machine computing `n * 3` — and it wrapped the whole composed state in the
+runner's own `if pc = pc then .. else ..`, one per step, which is what
+`bv_decide` cannot be configured out of normalising. Fixed in
+`formal/arm64_proof_gen.py`; `formal-dylib` is green and the generated proof
+checks in 9 s. `FORMAL.md` §12 and
+`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 have the numbers and
+what is still open (`OPUS-4`, `OPUS-5`, `OPUS-6`).
+
 ### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`
 
 [3]'s `IR-3-to-2-dylib-contract-emitter.md` reports three failures and says of
