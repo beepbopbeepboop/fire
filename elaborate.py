@@ -12,6 +12,7 @@ the concrete symbol + object + signature so the codegen can lower the call and
 record the object on the link line.
 """
 import re
+import subprocess
 
 import monomorphize as mm
 from fire_compiler import py_tokenize, Parser, FunctionDef, StructDef, TraitDef
@@ -739,6 +740,44 @@ def _elab_signature(concrete_src: str, name: str):
     return 'int64_t', []
 
 
+def _defined_symbols(obj: str) -> set:
+    """External symbols DEFINED (not undefined) by an object file, via `nm`.
+
+    This is how the elaborator learns what the instantiation TU actually NAMED
+    its methods, instead of re-deriving the names — which is impossible, and
+    was measured impossible (see the `FormatStruct` section of
+    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md:
+    the erasure that makes two `fields` overloads look identical is the same
+    erasure that destroys the function `overload_suffix_for` is computed from).
+
+    Cached by object path: the CAS objects are content-addressed and immutable,
+    so a path names exactly one symbol set forever. `nm` is the same tool
+    `build_stdlib_dylib._defined_symbols` already depends on for the same job.
+
+    An empty set means "could not read them" as well as "defines nothing"; both
+    make the caller fall back to what it did before, which is why the caller
+    must treat it as advisory rather than as proof."""
+    if obj in _SYMBOLS_CACHE:
+        return _SYMBOLS_CACHE[obj]
+    syms: set = set()
+    try:
+        out = subprocess.run(['nm', '-g', obj], capture_output=True,
+                             text=True).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U>
+            # <name>". Uppercase type letter = external AND defined.
+            if len(parts) >= 3 and parts[1] in ('T', 'D', 'S', 'B', 'C', 'I', 'R'):
+                syms.add(parts[2])
+    except Exception:
+        syms = set()
+    _SYMBOLS_CACHE[obj] = syms
+    return syms
+
+
+_SYMBOLS_CACHE: dict = {}
+
+
 class Elaborator:
     """Demand-driven, CAS-backed elaboration service."""
 
@@ -799,8 +838,18 @@ class Elaborator:
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods, anns = _struct_layout_anns(concrete, mangled)
+        # `symbols`: what the TU ACTUALLY defined (`nm`). The caller registers
+        # its externs and its `func_return_types` keys from this rather than
+        # from a re-derived name, so a declaration and its definition cannot
+        # disagree — which is not a hypothetical: an overloaded method is
+        # suffixed by a hash of its real C parameter types, and those are not
+        # recoverable from the erased view this module has. Empty set on a
+        # re-entrant (cycle) instantiation, where no object was built; the
+        # caller then falls back to the names it composes itself.
+        symbols = sorted(_defined_symbols(obj)) if obj else []
         return {'name': mangled, 'fields': fields, 'methods': methods,
-                'anns': anns, 'object': obj, 'cpp_object': cpp_obj}
+                'anns': anns, 'object': obj, 'cpp_object': cpp_obj,
+                'symbols': symbols}
 
     def elaborate_generic_struct_inferred(self, module_src: str, struct_name: str,
                                           arg_ctypes):

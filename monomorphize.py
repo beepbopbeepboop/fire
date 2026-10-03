@@ -321,7 +321,31 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         mfile = os.path.join(wd, mangled + '.mojo')
         with open(mfile, 'w') as f:
             f.write(concrete)
-        gen = GimpleGen(emit_entry_points=False, module_name=mangled, no_mangle={mangled})
+        # `module_name=''`, NOT `module_name=mangled`. This is load-bearing and
+        # was a real defect (measured 2026-10-02): a struct method's C symbol
+        # is composed as `{home-module}_{Struct}_{method}{overload_suffix}`
+        # (`mojo/middle/funcs_shared.py::_struct_method_qualifier`), and
+        # passing `mangled` as the module name made the instantiation TU emit
+        #
+        #     MoveOnly_Int64_MoveOnly_Int64___init__      <- what the TU defined
+        #
+        # while the CALLER — `_register_generic_struct`, which declares
+        # `extern void MoveOnly_Int___init__ (MoveOnly_Int *, int64_t);` and
+        # keys `func_return_types` on the same bare name, because a
+        # materialized generic struct has no entry in `_imported_struct_home`
+        # and therefore no qualifier — declared
+        #
+        #     MoveOnly_Int___init__                        <- what the caller wants
+        #
+        # Two names, one link. Verified by linking `test/collections/
+        # test_array.mojo`'s generated C against its own CAS instantiation
+        # object: `ld: undefined _MoveOnly_Int___init__`. So every generic
+        # struct this elaborator had ever materialized produced an artifact
+        # that could not link, and `compile_stdlib.py` (`gcc -fsyntax-only`)
+        # cannot see it. The top-level function needs no qualifier either and
+        # is protected by `no_mangle` below, so `''` changes nothing about it
+        # (`empty_Int` measures identical before and after).
+        gen = GimpleGen(emit_entry_points=False, module_name='', no_mangle={mangled})
         gen._current_filename = mfile
         c = gen.gen_module(Parser(py_tokenize(concrete)).with_filename(mfile).parse_module())
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')

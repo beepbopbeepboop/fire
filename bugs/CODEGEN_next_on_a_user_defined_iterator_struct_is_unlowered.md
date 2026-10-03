@@ -3,36 +3,103 @@
 
 ## Status
 
-OPEN. **Nothing here was fixed in the 2026-10-01 second session, and the reason
-is worth more than a fix would have been:** the family's real size was measured
-wrong by 4x, and the two sessions' measurements of it disagreed with each
-other. `tools/undef_import_census.py` reported "424 sites / 157 names / 194
-files" for this whole family; the true figure is **96 sites / 51 names / 60
-files** (108 before this session's fixes), because the instrument was counting
-the codegen's own guarded forward declaration for every imported name — called
-or not. So the next session starts from a number it can trust and a mechanism
-list that is 4x shorter, not from this document's original framing.
+OPEN, unchanged in scope: **still 22 files, still all 22 refused.** Nothing was
+removed from `EXPECTED_FAILURES`, because nothing was fixed. What landed is
+three defects found along the way, all of which this document's own analysis
+had assumed away, plus one experiment that WORKED and is documented here
+because the next session should not rebuild it.
 
-The three prerequisites below are still all missing; none was reached. What DID
-land is in `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`,
-which owns the family: a `comptime for` bare-literal codegen bug, a defaulted
-`[...]` bracket parameter treated as required, a generic struct constructed
-with no bracket arguments, and two measurement defects in the census itself.
+**1. The instantiation TU and its caller named the same function differently —
+so nothing this compiler had ever materialized could link.**
+`monomorphize.instantiate` built the monomorphized TU with
+`module_name=mangled`, and a struct method's C symbol is
+`{home-module}_{Struct}_{method}{overload_suffix}`, so it emitted
 
-**One thing this document's own "What it looks like" section should have said
-sooner.** The refusal `_lower_call` raises for an unresolved `next(<struct>)` is
-what keeps these 21 honest, and it is the reason none of them can be made to
-pass by elaborating `peekable` alone. `peekable(list)` needs, in order:
-dependent return types (`_PeekableIterator[type_of(iterable).IteratorOwnedType]`,
-which means resolving `List.IteratorOwnedType` = `_ListIterOwned[Self.T]` and
-so `Self.<comptime member>` from the struct's own `comptime` declarations);
-`Self.<member>` resolution, which fix #1 below deliberately does NOT do; in-TU
-instantiation, because `peekable`'s body is `return {iter(iterable)}` and `iter`
-is itself an excluded generic (the `.o` route cannot work); and trait-bounded
-overload selection that REFUSES on a residual tie. That is a type-inference
-layer, not a wiring change, and it is the same layer `size_of[T]()`'s use-site
-inference needs. Sequencing it against that larger problem is strictly better
-than sequencing it against 21 files.
+```
+MoveOnly_Int64_MoveOnly_Int64___eq__      <- what the TU defined
+MoveOnly_Int64___eq__                    <- what the caller declared
+```
+
+The caller has no module identity for a materialized generic struct (no
+`_imported_struct_home` entry), so it has no qualifier. Verified by linking
+`test/collections/test_array.mojo`'s generated C against its own CAS
+instantiation object: `ld: undefined _MoveOnly_Int___eq__`. Fixed by building
+the TU with `module_name=''`, the existing convention for "no module identity"
+(`_struct_method_qualifier`'s own docstring). The top-level function is
+unaffected — it is protected by `no_mangle`, and `empty_Int` measures identical
+before and after. This is invisible to every check the project runs, because
+`compile_stdlib.py` is `gcc -fsyntax-only`.
+
+**2. The elaborator now READS the TU's symbols instead of composing them.**
+`elaborate.elaborate_generic_struct` returns `symbols` (via `nm`, the tool
+`build_stdlib_dylib._defined_symbols` already depends on), and
+`_register_generic_struct` registers each method under the name the object
+ACTUALLY defines. That converts the "duplicate method name disqualifies the
+struct" rule from an inference into a measurement: `_Empty[T]`'s two `__iter__`
+overloads are reported as `_Empty_Int___iter___0120be` and `_0120be_2`, and
+because neither is the bare `_Empty_Int___iter__` a caller composes, the
+caller has nothing to dispatch to and the struct is refused — which is the
+honest state, and is now demonstrably so rather than merely asserted.
+
+**3. `_struct_name_of` was being used as an "is this a struct?" test.** It is a
+pure spelling operation — it strips `const` and the pointer star, so it answers
+`'int64_t'` for `'int64_t'`. The `next()` struct-protocol branch used
+`if _struct_name_of(_rit):` to decide "`__iter__` returns a different iterator
+type", so an `__iter__` whose erased return type is the scalar `int64_t` read as
+"yes" and the branch then dispatched `__next__` on `int64_t`. It is now
+`_struct_ptr_name`, which requires a trailing ` *`, excludes `_TYPE_MAP`'s
+scalar newtypes, and asks `struct_field_types`. **This hid the
+already-landed struct-protocol branch from exactly the family it was written
+for** — the branch could only ever have been exercised by a struct whose
+`__iter__` returns another struct.
+
+**4. Also landed, smaller:** a generic struct with NO FIELDS registers like any
+other (`struct _Empty[T]` has none, and refusing it on that ground alone is
+what kept `var it = empty[Int]()` typed as a boxed `int64_t`); a generic's
+RETURN annotation is now materialized the way a FIELD annotation already was
+(`_refine_generic_return_type`'s new `materialize` hook, with
+`_register_generic_structs_named` making the returned struct discoverable when
+the importer never names it); and the `next(...)` refusal names the RECEIVER'S
+C TYPE, because "no lowering for `next(IdentExpr)`" says the shape is
+unsupported when the real question is always "why did the receiver not type as
+a struct?".
+
+Pinned by `test_module_cache.py::test_generic_instantiation_symbol_agreement`
+(11 checks).
+
+### The experiment that worked, and is NOT landed — read this before building it again
+
+**In-TU instantiation is the right architecture and it was measured working.**
+`mojo/backend_gimple/elab_intu.py` was written in full: monomorphize to SOURCE,
+parse, splice into `imported_stmts` AND the module's own `stmts` before struct
+registration, rewrite the monomorphized return annotation to the concrete
+struct name, register the spliced function in `_extra_no_mangle`.
+
+With it, **`test/iter/test_empty.mojo` compiled and LINKED**: after a real
+`gcc -c`, the module's own object DEFINED both `empty_Int` and
+`_Empty_Int___next__` (`nm -g`), and a real link left no undefined
+`empty` / `_Empty_Int` / `next` symbol. One of the 22, genuinely fixed, with
+the evidence the gate step cannot produce.
+
+It was reverted because it **regressed five currently-compiling files**
+(`std/builtin/tuple.mojo`, `std/collections/string/string_span.mojo`,
+`std/python/_cpython.mojo`, `std/python/python_object.mojo`,
+`test/builtin/test_comparable.mojo`), all with the same gcc error —
+`error: conflicting types for '<name>'`, an in-TU DEFINITION with the host
+codegen's real parameter types beside an elaborated EXTERN with the
+elaborator's erased ones (`write_sequence_to_0`, `_affix_matches_0`,
+`param_OldImpl`, …).
+
+The root cause is understood and is a property of `monomorphize.mangle`, not of
+the pre-pass: **it keys only on the sorted bracket-parameter VALUES**, so two
+different templates selected for the same call — the pre-pass and the
+demand-driven route select independently, by arity, and a call with keyword
+arguments has no reliable arity discriminator — mangle two DIFFERENT functions
+to ONE name. Two restrictions were tried and each removed some of the five
+without removing all: refusing an OVERLOADED name (fixed `tuple.mojo`; the
+rest are single-definition) and refusing a name the CALLING module defines
+itself (fixed none of the remaining four). Whatever lands next must make the
+two routes share ONE template selection, not add a third guess.
 
 ## What it looks like
 
@@ -240,20 +307,47 @@ worse and is what this project has been removing one shape at a time.
 
 ## Next step
 
-Start at (1), and gate it on the artifact, not on the gate step: build one
-module that instantiates `peekable(list)` for a real list and check that the
-emitted C both DEFINES `peekable` and CALLS a real `_PeekableIterator___next__`.
-`compile_stdlib.py` cannot see either — that is this doc's original "Why it
-was green" — so a green `stdlib-syntax` here proves nothing on its own.
+**Nothing about the wiring is left; what remains is the type-argument inference
+and the mangling collision described above.**
 
-**Scope warning, measured 2026-10-01.** This doc's 21 files are not 21 bugs.
-`tools/undef_import_census.py` measures **424 sites / 157 names / 194 files**
-whose generated C calls an imported bracket-parametrized template that nothing
-defines, and it established that registration already works — `_imported_generics`
-contains the name and the elaborator is reached and correctly declines. A large
-share of those templates take **no arguments** (`size_of[T]()`, `align_of[T]()`,
-`bit_width_of[T]()` …), so their type argument is recoverable only by
-bidirectional, use-site-driven inference. See
-`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`, which
-owns that scope; the honest estimate for the whole family is a type-inference
-layer, not a wiring change.
+For the family itself, the two cheapest members first: `once(10)` and
+`repeat(42, times=3)` take their type argument from a LITERAL, whose Mojo type
+is exact rather than inferred, so they need no bidirectional inference at all —
+only for the elaborator to read the literal's type where the argument
+expression sits instead of requiring it to be written in brackets. Then
+`chain(l1, l2)` needs `IterableType` from a container's element type
+(`MojoList *` carries it in `gen._elem_types`) and the DEPENDENT return
+`_ChainedIterator[A.IteratorType[origin], B.…]`. That associated-type
+resolution is bounded and mechanical — read `comptime Name[...] : Trait =
+<expr>` from the struct's own source and substitute its type parameters
+(`List.IteratorOwnedType = _ListIterOwned[Self.T]` → `_ListIterOwned[Int64]`,
+`std/collections/list.mojo:361`) — and it is the same layer `size_of[T]()`'s
+use-site inference needs, so build it once, here, and share it.
+
+Before either: **land in-TU instantiation with ONE template selection shared
+between the pre-pass and the demand-driven route** (see the reverted experiment
+above). It is the only route that can serve this family at all — measured, EVERY
+iterator struct in `std/iter` overloads `__iter__` on `var self` / `ref self`
+(`_Empty`, `_Once`, `_PeekableIterator`, `_MapIterator`, `_ZipIterator`,
+`_ChainedIterator`, `_Enumerate`), both overloads erase to `(Struct *)`, and so
+`_register_generic_struct` cannot know which of the object's two suffixed
+`__iter__` symbols a call site means. That is the same wall `FormatStruct`'s two
+`fields` hit, and in-TU is where the host codegen names its own methods
+correctly and consistently instead.
+
+**Gate every step on the artifact, not on the gate step.** `compile_stdlib.py`
+is `gcc -fsyntax-only`: it cannot see a call to a symbol nothing defines, and
+this file's entire history is that history. For each file removed from
+`EXPECTED_FAILURES`, require that the module's own object DEFINES the
+instantiation and its `__next__` (`nm -g` after a real `gcc -c`) and that a
+real link leaves no undefined symbol for it. All three defects in this
+session's Status section were found exactly that way and by nothing else.
+
+**Scope note, measured 2026-10-02.** The "424 sites / 157 names / 194 files"
+figure quoted elsewhere in this file is the mis-measurement this document's own
+Status section corrects; the census reads **96 sites / 51 names / 60 files**,
+and it did NOT move in this session — expected, and worth stating rather than
+hiding: the census only counts files that COMPILE, and these 22 do not, so the
+two populations are disjoint. `FormatStruct` (15), `alloc` (10) and
+`ThinAllocation` (8) remain the census's largest names and are untouched by
+this work; see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.

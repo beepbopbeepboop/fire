@@ -4751,8 +4751,8 @@ class GimpleGen:
         return grsl._static_generic_return_ctype(self, func_name)
     def _elaborate_generic_call(self, node: CallExpr):
         return grsl._elaborate_generic_call(self, node)
-    def _refine_generic_return_type(self, info: dict, module_src: str, g: str, mangled_type_args: list, arg_count: int) -> None:
-        return grsl._refine_generic_return_type(self, info, module_src, g, mangled_type_args, arg_count)
+    def _refine_generic_return_type(self, info: dict, module_src: str, g: str, mangled_type_args: list, arg_count: int, materialize=None) -> None:
+        return grsl._refine_generic_return_type(self, info, module_src, g, mangled_type_args, arg_count, materialize=materialize)
     def _ensure_generic_struct(self, base_name: str, type_args: list) -> str | None:
         return grsl._ensure_generic_struct(self, base_name, type_args)
     def _elaborate_generic_struct_call(self, node: CallExpr):

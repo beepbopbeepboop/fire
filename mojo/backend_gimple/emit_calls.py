@@ -1639,7 +1639,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw == 'next' and len(node.args) >= 1 and _next_is_builtin:
         _recv_t, _recv_v = gen.lower_expr(node.args[0])
         _recv_t = gen._get_actual_type(_recv_t, _recv_v)
-        _rbase = gimple_exprtypes._struct_name_of(_recv_t or '')
+        _rbase = _struct_ptr_name(gen, _recv_t)
         if _rbase:
             # `gen._struct_method_csym`, the tree's ONE composer for a struct
             # method's C name, not an f-string `{Struct}___{method}__` spelled
@@ -1657,9 +1657,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _ritr = gen._struct_method_csym(_rbase, '__iter__', '')
             if _ritr in gen.func_return_types:
                 _rit = gen.func_return_types[_ritr]
-                if gimple_exprtypes._struct_name_of(_rit or ''):
+                _rnext_base = _struct_ptr_name(gen, _rit)
+                if _rnext_base:
                     _rnext = gen._struct_method_csym(
-                        gimple_exprtypes._struct_name_of(_rit), '__next__', '')
+                        _rnext_base, '__next__', '')
             if _rnext in gen.func_return_types:
                 return _lower_next_struct_iter(
                     gen, node, _recv_t, _recv_v, _rnext)
@@ -1689,8 +1690,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             type(node.args[0]).__name__
             if len(node.args) == 1
             else '%s, default' % (type(node.args[0]).__name__,))
+        # The receiver's C TYPE is the load-bearing half of this message and
+        # was missing: "no lowering for next(IdentExpr)" says the shape is
+        # unsupported, when the actual question is always "why did the
+        # receiver not type as a struct?". `int64_t` there means the value
+        # came from an un-elaborated imported generic (see
+        # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md),
+        # which is a different bug with a different fix than an unsupported
+        # shape. Re-lowering here is safe precisely because every branch
+        # above that lowers the receiver has already returned by now.
+        _rt_shape = ''
+        try:
+            _rt_shape = gen._get_actual_type(*gen.lower_expr(node.args[0])) or '?'
+        except Exception:
+            _rt_shape = '?'
         raise RuntimeError(
-            f"cannot compile module: `next(...)` on {_shape} has no lowering "
+            f"cannot compile module: `next(...)` on {_shape} "
+            f"(receiver typed `{_rt_shape}`) has no lowering "
             f"in this codegen — every fall-through here emitted a call to a "
             f"`next` symbol that does not exist, which fails at LINK rather "
             f"than here. Supported: next(<MojoGenerator*>), "
@@ -3036,6 +3052,33 @@ def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, 
     gen._emit(f"  goto {bb_done};")
     gen._emit_label(bb_done)
     return elem, result
+
+
+def _struct_ptr_name(gen, ctype) -> str:
+    """The struct `ctype` POINTS AT, or '' when it points at nothing this
+    compile registered — the test `struct_name_of` cannot be used for.
+
+    `_struct_name_of` is a pure spelling operation: it strips `const` and the
+    pointer star, so it answers `'int64_t'` for `'int64_t'`, `'char'` for
+    `'char *'`, and `''` only for the empty string. Every caller that wants to
+    know "is this a STRUCT" must therefore ask the registry, and the `next()`
+    struct-protocol branch did not: it used `_struct_name_of(_rit)` as a
+    boolean, so a `__iter__` whose erased return type is the scalar `int64_t`
+    read as "yes, a different iterator struct" and the branch then dispatched
+    `__next__` on `int64_t` — a symbol nothing defines, for the one family of
+    structs whose `__iter__` returns something other than a struct pointer.
+
+    A struct name in `_TYPE_MAP` is excluded too: the scalar newtypes (`Int`,
+    `UInt8`, `Bool`, …) really are `struct X` definitions in the stdlib and so
+    can appear in `struct_field_types`, but this codegen erases them to raw C
+    scalars on purpose, and that convention must win here or `alloc[Int64]`'s
+    return would be read back as a struct pointer."""
+    if not isinstance(ctype, str) or not ctype.endswith(' *'):
+        return ''
+    name = gimple_exprtypes._struct_name_of(ctype)
+    if not name or name in gimple_ctypes._TYPE_MAP:
+        return ''
+    return name if name in gen.struct_field_types else ''
 
 
 def _lower_next_struct_iter(gen, node: gimple_ctypes.CallExpr, recv_t: str,

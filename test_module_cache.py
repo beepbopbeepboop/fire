@@ -297,6 +297,17 @@ def test_elaboration_generic_call(wd):
     try:
         client = "from el_genlib import box\nfn main():\n    var y = box[Int64](42)\n"
         code, dylibs, objects, _cpp, _cxx = compile_linked(client)
+        # `len(objects) == 1` and the call names a concrete instantiation.
+        # NOTE (2026-10-02): an in-TU instantiation route was built and
+        # measured for this shape — see
+        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md
+        # — which would make `objects` 0 and the definition in-TU. It is NOT
+        # landed: it regressed five currently-compiling files, because
+        # `monomorphize.mangle` keys only on the sorted bracket-parameter
+        # values, so two templates selected for the same call can mangle two
+        # DIFFERENT functions to one name and gcc reports `conflicting types`.
+        # Until that is resolved the `.o` route stays, and this assertion is
+        # the contract it has to keep.
         check("elaborate: client emits extern + concrete call + records object",
               'extern int64_t box_Int64' in code and 'box_Int64 (' in code
               and len(objects) == 1)
@@ -1494,6 +1505,90 @@ def test_type_param_markers_and_simd_unification(wd):
                              ['int64_t']) is None)
 
 
+def test_generic_instantiation_symbol_agreement(wd):
+    """The instantiation TU's symbols and the caller's declarations must be the
+    SAME strings — and the only way to find out is to LINK, because
+    `compile_stdlib.py` runs `gcc -fsyntax-only` and cannot see a symbol that is
+    declared and never defined.
+
+    `monomorphize.instantiate` used to build the monomorphized TU with
+    `module_name=mangled`, and a struct method's C symbol is
+    `{home-module}_{Struct}_{method}{overload_suffix}`, so it emitted
+
+        MoveOnly_Int64_MoveOnly_Int64___eq__      <- what the TU defined
+        MoveOnly_Int64___eq__                    <- what the caller declared
+
+    The caller has no module identity for a materialized generic struct (no
+    `_imported_struct_home` entry), so it has no qualifier. Verified by linking
+    `test/collections/test_array.mojo`'s generated C against its own CAS
+    instantiation object: `ld: undefined _MoveOnly_Int___eq__` — i.e. EVERY
+    generic struct this compiler had ever materialized produced an artifact
+    that could not link, and no gate step can see it.
+
+    The second half is `_struct_name_of` being used as an "is this a struct?"
+    test. It is a pure spelling operation (`_struct_name_of('int64_t')` is
+    `'int64_t'`), so the `next(<struct>)` struct-protocol branch's
+    `if _struct_name_of(ret):` guard was true for the scalar `int64_t` too, and
+    it dispatched `__next__` on `int64_t` — a symbol nothing defines. That is
+    the family `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
+    unlowered.md` is about, and the guard has to consult the registry."""
+    import elaborate as el
+    from module_loader import STDLIB_PATH
+    import os as _os
+
+    iter_src_path = _os.path.join(STDLIB_PATH, 'std', 'iter', '__init__.mojo')
+    if not _os.path.exists(iter_src_path):
+        check("symbols#0: std/iter is reachable", False)
+        return
+    iter_src = open(iter_src_path).read()
+
+    # 1. The TU names its methods the way the caller's registry declares them.
+    info = el.Elaborator().elaborate_generic_struct(iter_src, '_Empty', ['Int'])
+    check("symbols#1: `_Empty[Int]` elaborates", bool(info and info['name']))
+    if not info:
+        return
+    # `nm` on Mach-O prints the object format's leading underscore; strip
+    # exactly one, so a C name that itself starts with one survives.
+    names = {s[1:] if s.startswith('_') else s for s in (info.get('symbols') or ())}
+    check("symbols#2: the object defines the UNQUALIFIED method name the caller "
+          "declares (`_Empty_Int___next__`, not "
+          "`_Empty_Int__Empty_Int___next__`)",
+          '_Empty_Int___next__' in names)
+    check("symbols#3: no symbol carries the mangled name as a module prefix",
+          not any(n.startswith('_Empty_Int__Empty_Int') for n in names))
+    check("symbols#4: an overloaded method is reported under its real suffixed "
+          "name and NOT under a bare name — the elaborator's view of two "
+          "overloads of `__iter__` is identical, so it cannot invent one, and "
+          "`_register_generic_struct` refuses such a struct rather than "
+          "declaring a symbol nothing defines",
+          '_Empty_Int___iter___0120be' in names
+          and '_Empty_Int___iter__' not in names)
+    _finfo = el.Elaborator().elaborate_generic_call(iter_src, 'empty', ['Int'])
+    check("symbols#5: `empty[Int]` elaborates to the bare symbol `empty_Int` "
+          "(the TU's module name does not reach the top-level function)",
+          bool(_finfo) and _finfo['symbol'] == 'empty_Int')
+
+    # 2. `_struct_name_of` is not a "is this a struct" predicate; the guard that
+    #    needs one must ask the registry.
+    import mojo.backend_gimple.emit_calls as ggc
+
+    class _G:
+        struct_field_types = {'It': {}}
+
+    check("symbols#6: a scalar return is not read as a struct",
+          ggc._struct_ptr_name(_G(), 'int64_t') == ''
+          and ggc._struct_ptr_name(_G(), 'char *') == '')
+    check("symbols#7: a registered struct pointer IS read as a struct",
+          ggc._struct_ptr_name(_G(), 'It *') == 'It')
+    check("symbols#8: an unregistered name is not either",
+          ggc._struct_ptr_name(_G(), 'Nope *') == '')
+    import mojo.middle.types as _t
+    _G.struct_field_types = {'Int': {}}
+    check("symbols#9: a scalar newtype that IS a real stdlib struct is still "
+          "erased to its C scalar (this codegen's `_TYPE_MAP` convention wins)",
+          ggc._struct_ptr_name(_G(), 'Int *') == '')
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1517,6 +1612,7 @@ def main():
         test_review_fixes_monomorphize_overload(wd)
         test_self_qualified_type_param_substitution(wd)
         test_type_param_markers_and_simd_unification(wd)
+        test_generic_instantiation_symbol_agreement(wd)
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)

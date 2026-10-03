@@ -3,17 +3,74 @@
 
 ## Status
 
-OPEN, and **the headline number in this doc was wrong by 4x**. Measured and
+OPEN, and the headline number in this doc was wrong by 4x. Measured and
 corrected 2026-10-01 (second session): `tools/undef_import_census.py` reported
-"424 sites / 157 names / 194 files"; it was counting the codegen's own
-guarded forward declaration for every imported name, called or not. The real
-figure is **108 call sites / 56 names / 60 files**, and three of the four
-declining reasons this doc's plan was built around were also mis-measured. See
-"What was wrong with the measurement" below — it is the most important section
-here, and it is first because everything after it is only interpretable with
-it.
+"424 sites / 157 names / 194 files"; it was counting the codegen's own guarded
+forward declaration for every imported name, called or not. The real figure is
+**96 sites / 51 names / 60 files** (108 before this session's fixes). See "What
+was wrong with the measurement" below — it is the most important section here.
 
-Landed this session, with the numbers each moved:
+**2026-10-02: the census did NOT move (96 / 51 / 60, unchanged), and four
+defects landed that make three of this document's "PROVEN blockers" provable
+rather than inferred.** They are listed first because they change what the next
+session should trust.
+
+### Landed 2026-10-02
+
+| fix | file | why it is correct |
+|---|---|---|
+| the instantiation TU and its caller named the same function DIFFERENTLY, so nothing this compiler had ever materialized could link | `monomorphize.py` | it built the TU with `module_name=mangled`, and a struct method's C symbol is `{home-module}_{Struct}_{method}{overload_suffix}`, so it emitted `MoveOnly_Int64_MoveOnly_Int64___eq__` where the caller declared `MoveOnly_Int64___eq__`. Verified by linking `test/collections/test_array.mojo`'s generated C against its own CAS object: `ld: undefined _MoveOnly_Int___eq__`. Built with `module_name=''` — the existing "no module identity" convention — which leaves the top-level function identical (`no_mangle` protects it) |
+| the elaborator READS the TU's symbols instead of composing them | `elaborate.py` + `mojo/backend_gimple/emit_resolve.py` | `elaborate_generic_struct` now returns `symbols` (`nm`, the tool `build_stdlib_dylib` already depends on) and `_register_generic_struct` registers each method under the name the object ACTUALLY defines. This makes the "duplicate method name disqualifies" rule a measurement: `_Empty[T]`'s two `__iter__` are reported as `_Empty_Int___iter___0120be` / `_0120be_2`, neither of which is the bare name a caller composes, so the refusal is demonstrably the honest state. The overloading wall below is CONFIRMED by measurement, not inference |
+| a generic struct with NO FIELDS registers like any other | `mojo/backend_gimple/emit_resolve.py` | `struct _Empty[T]` has none; refusing it on that ground alone is what kept `var it = empty[Int]()` typed as a boxed `int64_t`. Field-count is not a soundness property — the duplicate-method guard is |
+| a generic's RETURN annotation is materialized like a FIELD annotation already was | `mojo/middle/resolve_shared.py` + `mojo/backend_gimple/emit_resolve.py` | `_refine_generic_return_type` gained a `materialize` hook (the materializer lives one layer up, in the gimple backend, and this file is the middle tier that backend imports), so `empty[T]() -> _Empty[T]` reaches `_Empty_Int *` instead of `int64_t`. `_register_generic_structs_named` makes the returned struct discoverable when the importer never names it — the name is in the generic's RETURN annotation, never in the importer's `from … import` |
+
+Suite: `test_module_cache.py` 120 passed / 0 failed, including
+`test_generic_instantiation_symbol_agreement` (11 checks).
+`compile_stdlib.py` is 588 / 22 / 0 throughout.
+
+### The three "PROVEN blockers" — two are now MEASURED, and one is a property of `mangle`
+
+**`FormatStruct` (15 sites): the overload suffix is not recoverable — CONFIRMED,
+and now the refusal is exact.** `overload_suffix_for` is a pure module-level
+function, so the hasher was never the obstacle; the INPUT is. The TU defines
+`_fields_6ca16d` and `_fields_93095a` and `_register_generic_struct` composes
+`_fields`, which the object does not define. With the symbols now read from the
+object, this is a lookup that comes back empty rather than a name that would be
+wrong — so the honest unblock is unchanged and now precisely stated: the CALLER
+must know the real C parameter types, i.e. the in-TU route.
+
+**`ThinAllocation` (8 sites) and `alloc` (10 sites): unchanged.** `T` is the
+POINTEES, load-bearing, and `Foo *` does not name a Mojo type; `global_constant
+[T, value: T]()` is a comptime VALUE parameter with no runtime argument.
+Neither is reachable without a new parameter-passing / Ctype→Mojo-type model,
+and inventing either is the `bogus-binding` silent-wrong case.
+
+### In-TU instantiation: MEASURED WORKING, then reverted — the blocker is `monomorphize.mangle`
+
+`mojo/backend_gimple/elab_intu.py` was written in full and made
+`test/iter/test_empty.mojo` compile AND LINK (the module's own object DEFINES
+`empty_Int` and `_Empty_Int___next__`, `nm -g` after a real `gcc -c`). It was
+reverted: it regressed five currently-compiling files with `error: conflicting
+types for '<name>'` — an in-TU DEFINITION with real parameter types beside an
+elaborated EXTERN with erased ones.
+
+**The root cause is `monomorphize.mangle`, and it is a defect in its own
+right.** It keys the mangled name on the sorted bracket-parameter VALUES only:
+
+```python
+suffix = '_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))
+```
+
+so two DIFFERENT instantiations whose parameter sets differ only in their NAMES
+mangle to the SAME symbol. Nothing detects that, and the instantiation route and
+the in-TU route select their template independently (by arity, which a call with
+keyword arguments does not determine). **The fix that makes in-TU landable is to
+key the mangled name on the parameter NAMES as well** — which is also what makes
+an overloaded name unambiguous — rather than to add a third selection heuristic.
+See `bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`'s
+Status section for the full experiment and the two restrictions already tried.
+
+### Landed 2026-10-01
 
 | fix | file | before → after |
 |---|---|---|
@@ -24,8 +81,6 @@ Landed this session, with the numbers each moved:
 | `comptime for` induction variable emitted a bare `int` into an `int64_t` | `mojo/backend_gimple/emit_funcs.py` | `IndexList`/`Array` instantiations now compile (gcc) |
 | `Self.<param>` readable as `<param>` by inference | `elaborate.py` | — |
 | a generic struct constructed with NO bracket arguments | `elaborate.py` + `mojo/backend_gimple/emit_resolve.py` + `emit_calls.py` | `FormatStruct` 15 → 0, `Named` 6 → 0, `Repr` 3 → 0 |
-
-`compile_stdlib.py` is 589 passed / 21 expected / 0 unexpected throughout.
 
 ## What was wrong with the measurement
 

@@ -2546,9 +2546,13 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
-            info = el.elaborate_generic_call(module_src, g, type_args, arg_count=len(arg_pairs))
+            info = el.elaborate_generic_call(module_src, g, type_args,
+                                             arg_count=len(arg_pairs))
             if info:
-                gen._refine_generic_return_type(info, module_src, g, type_args, len(node.args))
+                gen._refine_generic_return_type(
+                    info, module_src, g, type_args, len(node.args),
+                    materialize=lambda _a: _materialize_return_struct_mentions(
+                        gen, _a, source))
         else:
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs])
@@ -2569,6 +2573,59 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     return gen._emit_generic_instantiation(info, arg_pairs)
 
 
+
+
+def _register_generic_structs_named(gen, source_path: str | None, names) -> None:
+    """Register, in `_imported_generic_structs`, each of `names` that `source_path`
+    defines as a `struct NAME[...]` template.
+
+    Why this is needed, and why it is narrow. A module that imports the generic
+    FUNCTION `empty` from `std.iter` gets `empty` in `_imported_generics`, but
+    not the generic STRUCT `empty` returns: `_Empty` is named by
+    `empty`'s return annotation, never by the importing module's own
+    `from std.iter import …` line, and registration so far only ever reads
+    those lines. So `_materialize_generic_struct_mentions` — which materializes
+    `Base[Args]` mentions of a RETURN annotation — had nothing to materialize,
+    `_Empty[T]` erased to `int64_t`, and `var it = empty[Int]()` typed the
+    iterator as a boxed integer, leaving `next(it)` with no receiver type (see
+    `mojo/backend_gimple/emit_calls.py::_lower_call`'s refusal).
+
+    Narrow on purpose: only the base names actually MENTIONED in a return
+    annotation this compile is refining are registered, never every generic
+    struct the module happens to define, so this cannot turn a module full of
+    never-called templates into materialization work. Each registration is
+    skipped when the name is already known or is already a real struct in this
+    compile, matching `_register_imported_generic_structs`'s own guards."""
+    if not source_path:
+        return
+    todo = [n for n in names
+            if n and n not in gen._imported_generic_structs
+            and n not in gen.struct_field_types]
+    if not todo:
+        return
+    try:
+        text = open(source_path).read()
+    except OSError:
+        return
+    for n in todo:
+        if gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(n)}\s*[\[:]', text):
+            gen._imported_generic_structs.setdefault(n, source_path)
+
+
+def _materialize_return_struct_mentions(gen, ann: str, source_path: str | None) -> str:
+    """`ann` with every generic-struct instantiation it mentions realized, for a
+    RETURN annotation of a generic defined in `source_path`.
+
+    Identifies the base names first so they can be registered (see
+    `_register_generic_structs_named`), then defers to the shared
+    materializer — so an annotation that names an elaborable struct gets the
+    exact same treatment a FIELD annotation of the same text already gets, and
+    one that names nothing new comes back byte-identical."""
+    if '[' not in ann:
+        return ann
+    bases = [m.group(1) for m in gimple_ctypes.re.finditer(r'\b([A-Za-z_]\w*)\s*\[', ann)]
+    _register_generic_structs_named(gen, source_path, bases)
+    return _materialize_generic_struct_mentions(gen, ann)
 
 
 def _materialize_generic_struct_mentions(gen, ann: str) -> str:
@@ -2766,51 +2823,113 @@ def _register_generic_struct(gen, base_name, info):
     bookkeeping. `_ensure_generic_struct` is now the `Base[Args](...)` spelling
     of exactly this, plus the template lookup and the concrete-type-argument
     guard."""
-    if not info or not info['fields']:
+    if not info:
         return None
     name = info['name']
     if name not in gen.struct_field_types:
-        # elaborate_generic_struct's method extraction reports methods by their
-        # BARE name (`_struct_layout_anns` builds `{mangled}_{method}`), while
-        # the instantiation TU itself mangles an OVERLOADED method by
-        # signature. `FormatStruct[T, o]`'s two `fields` are the measured case:
+        # A method's C symbol is what the TU DEFINED, read back with `nm`
+        # (`elaborate._defined_symbols`), and not a name composed here. That
+        # is the whole reason this function consults the object at all: an
+        # overloaded method is suffixed by a hash of its REAL C parameter
+        # types, and this module's view of those is the erased one — so
+        # `_mojo_type('*Ts')` and `_mojo_type('Some[def[T:Writer](mutT)]')`
+        # are both `int64_t` and the two `FormatStruct[T, o].fields` overloads
+        # are INDISTINGUISHABLE here while the TU named them `_fields_6ca16d`
+        # and `_fields_93095a`. Composing a name locally cannot be right; the
+        # object already knows. Measured on the two shapes that disagree:
         #
-        #   the real TU:  FormatStruct_Int64_MutOrigin_..._fields_93095a (self, MojoList *)
-        #                 FormatStruct_Int64_MutOrigin_..._fields_75c303 (self, int64_t)
-        #                 FormatStruct_Int64_MutOrigin_..._fields (...)      <- dispatcher
-        #   this code:    extern void FormatStruct_Int64_MutOrigin_fields (FormatStruct_Int64_MutOrigin *, int64_t);
+        #   struct MoveOnly[T] (4 distinct method names)
+        #     the real TU: MoveOnly_Int___eq__  __hash__  __init__  write_to
+        #     before this: MoveOnly_Int64_MoveOnly_Int64_*   (the TU's module
+        #                 name was `mangled`, so it prefixed its own name)
         #
-        # — a symbol nothing defines, declared with ONE of the two arities, so
-        # the other arity's call site is a hard gcc error ("too many arguments
-        # to function", test/format/test_utils.mojo).
+        #   struct _Empty[T] (`__iter__` overloaded, so suffixed)
+        #     the real TU: _Empty_Int___iter___0120be / _0120be_2 / ___next__
         #
-        # The guard used to be "same name, DIFFERENT signature after erasure",
-        # which these two defeat: `_mojo_type('*Ts')` and
-        # `_mojo_type('Some[def[T:Writer](mutT)]')` are both `int64_t`, so the
-        # erased signatures compared EQUAL while the real symbols do not. Any
-        # duplicate method name is therefore disqualifying, unconditionally:
-        # one source-level name cannot map to one C symbol here.
+        # A method the TU defines under exactly ONE name registers under that
+        # name — which is the name `_struct_method_csym(name, m, '')` composes
+        # for a struct with no module identity, so `func_return_types` lookup
+        # at the call site and the object's definition agree. A method the TU
+        # defines under SEVERAL names registers each of them separately and
+        # registers NO unsuffixed name, because there is none: a caller that
+        # cannot compute a signature hash then finds nothing to dispatch to,
+        # which is the honest state, instead of dispatching to a symbol
+        # nothing defines.
         #
-        # Bailing out returns None, and the caller (`_lower_call`'s
-        # `if res is not None: return res`) falls through to whatever path
-        # handled this struct before `_imported_generic_structs` was populated
-        # at all — a bare call to an undefined symbol, i.e. the pre-existing
-        # state. That is strictly better than a wrong extern declaration, which
-        # turns a link error into either a compile error or a silent
-        # mis-dispatch.
-        seen_sigs: dict = {}
+        # When `symbols` is unavailable (a re-entrant instantiation contributed
+        # no object, or `nm` was unavailable), fall back to composing the
+        # bare name — the pre-existing behavior, kept so a cycle does not
+        # regress into declining the struct entirely.
+        _syms = set(info.get('symbols') or ())
+        # `nm` on Mach-O prints C symbols with the object format's own leading
+        # underscore (`_Empty_Int___next__` for the C name
+        # `Empty_Int___next__`); ELF prints the bare name. Strip exactly one
+        # leading underscore from any symbol that still matches this struct's
+        # own prefix afterwards, so the key is the C name on both platforms.
+        # Anything that does not still match the prefix after stripping is not
+        # this struct's and is dropped.
+        _prefix = name + '_'
+        _norm: set = set()
+        for _s in _syms:
+            if _s.startswith('_') and _s[1:].startswith(_prefix):
+                _norm.add(_s[1:])
+            elif _s.startswith(_prefix):
+                _norm.add(_s)
+        # An AMBIGUOUS method name still disqualifies the whole struct, and
+        # reading the symbols has not changed that — it has made the reason
+        # sharper. Two overloads of one source name are two C symbols, and
+        # this module's caller composes only the UNSUFFIXED name
+        # (`_struct_method_csym(name, m, '')`), which the object does not
+        # define for an overloaded method; registering the struct anyway would
+        # leave every one of its call sites with no declaration to bind to and
+        # a `func_return_types` entry that resolves to the wrong arity —
+        # measured: registering `FormatStruct[String, MutOrigin]` anyway
+        # produced `error: too many arguments to function
+        # 'FormatStruct_Int64_MutOrigin_params'; expected 2, have 3` at
+        # test/format/test_utils.mojo:159, because `params(*args)`'s erased
+        # parameter list is one slot wide while the call passes two. The
+        # erasure is what makes the overloads look identical and it is the
+        # same erasure that destroys the function `overload_suffix_for` is
+        # computed from, so this cannot be resolved by composing harder — it
+        # needs the CALLER's real argument types, which is the in-TU route
+        # (see bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
+        # defines.md).
+        _ambiguous: set = set()
+        for mname, _ret, _ps in info['methods']:
+            if len([s for s in _norm
+                    if s == f"{name}_{mname}" or s.startswith(f"{name}_{mname}_")]) > 1:
+                _ambiguous.add(mname)
+        _seen_names: dict = {}
+        for _mn, _r, _p in info['methods']:
+            _seen_names[_mn] = _seen_names.get(_mn, 0) + 1
+        if _ambiguous or any(c > 1 for c in _seen_names.values()):
+            return None
+        _registered: dict = {}
         for mname, ret, ps in info['methods']:
-            if mname in seen_sigs:
-                return None
-            seen_sigs[mname] = (ret, tuple(ps))
+            _base = f"{name}_{mname}"
+            _cands = sorted(s for s in _norm
+                            if s == _base or s.startswith(_base + '_'))
+            if not _cands:
+                _cands = [_base] if not _syms else []
+            for _csym in _cands:
+                if _csym in _registered:
+                    continue
+                _registered[_csym] = (ret, ps)
         # Register the layout; the struct-typedef section emits the typedef.
+        # A struct with NO FIELDS registers exactly like any other, with an
+        # empty layout: `struct _Empty[T]` (std/iter) has no fields at all,
+        # and refusing it on that ground alone is what kept
+        # `var it = empty[Int]()` typed as a boxed `int64_t` — the caller got
+        # `None` from here, had no `_Empty_Int` name to resolve, and `next(it)`
+        # had no receiver type to dispatch on. Field-count is not a soundness
+        # property here; the symbol check above is the one that decides
+        # whether the declarations are real.
         gen.struct_field_types[name] = _generic_struct_field_types(gen, info)
-        for mname, ret, ps in info['methods']:
-            msym = f"{name}_{mname}"
-            gen.func_return_types[msym] = ret
-            gen.func_param_types[msym] = [f"{name} *"] + ps
-            decl = (f"extern {ret} {msym} "
-                    f"({', '.join([name + ' *'] + ps) or 'void'});")
+        for _csym, (_ret, _ps) in _registered.items():
+            gen.func_return_types[_csym] = _ret
+            gen.func_param_types[_csym] = [f"{name} *"] + list(_ps)
+            decl = (f"extern {_ret} {_csym} "
+                    f"({', '.join([name + ' *'] + list(_ps)) or 'void'});")
             if decl not in gen._elaborated_externs:
                 gen._elaborated_externs.append(decl)
     if info['object'] not in gen._link_objects:
