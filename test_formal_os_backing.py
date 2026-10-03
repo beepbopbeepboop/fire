@@ -842,6 +842,7 @@ ENV_VIEW_PROGRAM = """\
 from os import environ, environ_count, environ_key, environ_value
 from os import environ_find, environ_get, environ_get_or, environ_has
 from os import environ_set, environ_del, environ_items, environ_keys
+from os import environ_copy, environ_pop, environ_clear
 from os import environ_free, getenv, putenv
 from os._syscalls import str_replace_all
 
@@ -899,6 +900,45 @@ def main(n):
     # the keys, at both ends, after the pair that was appended is gone
     printf("keys-0 [%s]@@", show(environ_keys(e3, 0)))
     printf("keys-last [%s]@@", show(environ_keys(e3, environ_count(e3) - 1)))
+    # ── copy(): a DICT COPY, and the assertion is INDEPENDENCE ──
+    # A copy that shared the original's buffers would answer every count and
+    # every key below correctly and still be wrong: `environ_free` on either
+    # blob would free what the other hands out. So the copy is written to and
+    # the ORIGINAL is read back — which is the only way to see the two are two.
+    var ec = environ_copy(e3)
+    printf("copy-count %d@@", environ_count(ec))
+    printf("copy-0 [%s]@@", show(environ_key(ec, 0)))
+    printf("copy-last [%s]@@", show(environ_key(ec, environ_count(ec) - 1)))
+    var ec2 = environ_set(ec, "FORMAL_ENV_VIEW_PLAIN", "written-in-copy")
+    printf("copy-write [%s]@@", show(environ_get(ec2,
+                                                 "FORMAL_ENV_VIEW_PLAIN")))
+    printf("copy-original [%s]@@",
+           show(environ_get(e3, "FORMAL_ENV_VIEW_PLAIN")))
+    printf("copy-original-count %d@@", environ_count(e3))
+    printf("free-copy %d@@", environ_free(ec2))
+    # ── pop(k, default): the value outlives the pair ──
+    # The pair goes through `environ_del`, so a pop that returned the alias
+    # would hand back freed memory — and the count has to drop by one, which is
+    # what says the removal happened at all rather than the value being copied
+    # out and nothing removed.
+    printf("pop [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PLAIN",
+                                         "dflt")))
+    printf("pop-count %d@@", environ_count(e3))
+    printf("pop-has %d@@", environ_has(e3, "FORMAL_ENV_VIEW_PLAIN"))
+    printf("pop-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_PLAIN")))
+    printf("pop-absent [%s]@@", show(environ_pop(e3, "FORMAL_ENV_VIEW_PROBE",
+                                                "dflt")))
+    printf("pop-absent-count %d@@", environ_count(e3))
+    # ── clear(): every pair, and every variable, gone ──
+    # On a COPY, so the rest of this program still has a view to free — and
+    # `clear-getenv` is the half a view-only implementation would miss: CPython
+    # unsets each variable, so the C library stops seeing them too.
+    var ed = environ_copy(e3)
+    printf("clear %d@@", environ_clear(ed))
+    printf("clear-count %d@@", environ_count(ed))
+    printf("clear-getenv [%s]@@", show(getenv("FORMAL_ENV_VIEW_TAIL")))
+    printf("clear-free %d@@", environ_free(ed))
+    printf("clear-untouched %d@@", environ_count(e3))
     printf("free-view %d@@", environ_free(e3))
     return 0
 """
@@ -957,6 +997,32 @@ def _env_view_oracle():
         "del-getenv": "[]",
         "keys-0": f"[{items[0][0]}]",
         "keys-last": f"[{items[-1][0]}]",
+        # `copy()`: a dict copy holds the same pairs, so every count and key
+        # above is the answer for the copy too, and the value written into it
+        # is NOT the original's — which is what CPython's dict copy means and
+        # what an aliasing copy would fail.
+        "copy-count": str(n),
+        "copy-0": f"[{items[0][0]}]",
+        "copy-last": f"[{items[-1][0]}]",
+        "copy-write": "[written-in-copy]",
+        "copy-original": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_PLAIN']}]",
+        "copy-original-count": str(n),
+        "free-copy": "0",
+        # `pop(k, default)`: CPython returns the value and the key is gone —
+        # from the dict AND from `os.getenv`, because `__delitem__` unsets it.
+        "pop": f"[{ENV_VIEW_ENV['FORMAL_ENV_VIEW_PLAIN']}]",
+        "pop-count": str(n - 1),
+        "pop-has": "0",
+        "pop-getenv": "[]",
+        "pop-absent": "[dflt]",
+        "pop-absent-count": str(n - 1),
+        # `clear()`: the mapping is empty and every variable is unset, so
+        # `os.getenv` — the C library's answer — is empty too.
+        "clear": "0",
+        "clear-count": "0",
+        "clear-getenv": "[]",
+        "clear-free": "0",
+        "clear-untouched": str(n - 1),
         "free-view": "0",
     }
     for i, (k, v) in enumerate(items):

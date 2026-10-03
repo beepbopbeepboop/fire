@@ -903,18 +903,30 @@ def main() -> Int:
     return 0
 """
 
-# …and the same trap through `os`, whose `listdir` used to be declared `-> int`
-# — a declaration that was false about a value that is an address, and the reason
-# an unannotated `names[0]` answered 704698368 (a heap address) where
-# `listdir_len` says 2.  The declaration is `Pointer[Int64]` now, so the manifest
-# says `int64_t *` and this is refused for the same reason and with the same
-# repair.
+# …and the SAME SPELLING through `os`, where the callee SAYS what it produces.
+# This program used to sit in the REFUSAL table below, and it was asserting a
+# refusal for a declaration `listdir` no longer has.  It was written when
+# `listdir` was `-> int` — a declaration false about a value that is an address,
+# and the reason an unannotated `names[0]` answered 704698368 (a heap address)
+# where `listdir_len` says 2 — and then when it was `-> Pointer[Int64]`, where
+# the manifest said `int64_t *` and this was refused "for the same reason and
+# with the same repair".  It is `-> List[String]` now: one word pointing at
+# `[count][element]…`, which is item 1 of
+# `bugs/FORMAL_listdir_no_run_time_sequence.md`, so the word HAS a kind and the
+# subscript lowers.  The refusal it asserted could not survive that, and it did
+# not have to: it went red against `test_formal_os_backing.py`'s
+# `listdir_is_a_python_level_list`, which is the row that pins the answer.
+#
+# What is left here is the CONTRAST, and it is the half worth asserting: the
+# same three lines are REFUSED through `re.escape` above and ANSWERED through
+# `os.listdir`, and the only difference is whether the callee's own declaration
+# says something a manifest signature could not carry.
 BLOB_UNTYPED_LISTDIR_PROGRAM = """\
 from os import listdir, listdir_free
 
 def main() -> Int:
-    var names = listdir("{dirpath}")
-    printf("%d", names[0])
+    var names = listdir({dirpath})
+    printf("%s", names[0])
     listdir_free(names)
     return 0
 """
@@ -925,8 +937,6 @@ def main() -> Int:
 BLOB_STORE_REFUSAL = "`names[1]` writes into a blob os OWNS"
 BLOB_UNTYPED_REFUSAL = ("subscripts `r`, whose value came from `escape` in re "
                         "— and that export's own declaration is a POINTER")
-BLOB_UNTYPED_LISTDIR_REFUSAL = (
-    "subscripts `names`, whose value came from `listdir` in os")
 
 
 def build_blob_program(tmpdir):
@@ -1000,8 +1010,6 @@ def group_blob(tmpdir, verbose):
             ("os_blob_store_helper", BLOB_STORE_HELPER_PROGRAM,
              "`names[0]` writes into a blob os OWNS"),
             ("os_blob_untyped", BLOB_UNTYPED_PROGRAM, BLOB_UNTYPED_REFUSAL),
-            ("os_blob_untyped_listdir", BLOB_UNTYPED_LISTDIR_PROGRAM,
-             BLOB_UNTYPED_LISTDIR_REFUSAL),
     ):
         store_src = os.path.join(tmpdir, label + ".mojo")
         with open(store_src, "w") as f:
@@ -1018,10 +1026,51 @@ def group_blob(tmpdir, verbose):
                 return False, (f"{label} [{backend}]: refused, but not naming "
                                f"the store and its owner ({needle!r}): "
                                f"{text.strip()[-300:]}")
+    # …and the ANSWERED half of the contrast: the same unannotated subscript
+    # through a callee whose declaration says `-> List[String]`. Checked against
+    # the fixture's own entries rather than a recorded name, because `listdir`'s
+    # order is the C library's and this process's `os.listdir` is not obliged to
+    # match it — the membership is the claim, and it is the same claim the
+    # `entry0`/`entry1` rows above make through the accessors.
+    ld_src = os.path.join(tmpdir, "os_blob_untyped_listdir.mojo")
+    with open(ld_src, "w") as f:
+        f.write(BLOB_UNTYPED_LISTDIR_PROGRAM.replace("{dirpath}",
+                                                     mojo_string(d)))
+    for backend in ("arm64", "x86_64"):
+        ld_out = os.path.join(tmpdir, "os_blob_untyped_listdir." + backend)
+        rc, text = build(ld_src, ld_out, None, backend)
+        if rc != 0:
+            return False, (f"os_blob_untyped_listdir [{backend}]: refused, and "
+                           f"the callee is declared `-> List[String]`, so the "
+                           f"word has a kind and `names[0]` lowers "
+                           f"(`bugs/FORMAL_listdir_no_run_time_sequence.md`'s "
+                           f"item 1): {text.strip()[-300:]}")
+        # Run through the SAME wrapper `run_case` uses for the other
+        # architecture, because this file's `run` executes an image directly
+        # and an x86-64 one needs Rosetta to start at all — and a row that
+        # claims both machines and ran only one of them is the failure mode
+        # every both-architecture row in this tree is written against.
+        argv = (["arch", "-x86_64", ld_out] if backend == "x86_64"
+                else [ld_out])
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=RUN_TIMEOUT)
+        if proc.returncode != 0:
+            return False, (f"os_blob_untyped_listdir [{backend}]: exit "
+                           f"{proc.returncode}, stderr "
+                           f"{proc.stderr.strip()[:200]!r}")
+        printed = proc.stdout.strip()
+        if printed not in entries:
+            return False, (f"os_blob_untyped_listdir [{backend}]: printed "
+                           f"{printed!r}, which is not one of the fixture's "
+                           f"entries {entries} — `names[0]` read something "
+                           f"that is not an entry of the directory `listdir` "
+                           f"was asked about")
     if verbose:
         print(f"      9 blob facts; {len(entries)} directory entries, compared "
               f"as a set because listdir's order is the C library's; 2 stores "
-              f"and 2 untyped subscripts refused by name on both architectures")
+              f"and 1 untyped subscript refused by name on both architectures, "
+              f"and the same subscript ANSWERED through a callee that declares "
+              f"a list")
     return True, ""
 
 

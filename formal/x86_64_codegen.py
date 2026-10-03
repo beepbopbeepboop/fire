@@ -281,7 +281,14 @@ def _collect_var_names(f: F.FunctionDef) -> list:
             if n:
                 acc[0] = max(acc[0], depth + n - 1)
             for g in node.generators or []:
-                walk_compr(g.iterable, depth, acc)
+                # `depth + n`, for the emitter's reason and not Python's: this
+                # backend's `_emit_comprehension` raises `_compr_depth` to
+                # `d0 + len(gens)` for the whole walk, the iterable included,
+                # so a comprehension reached from a generator's iterable is
+                # EMITTED at `depth + n`. Reserving it at `depth` gave the
+                # allocator `_ci{d}` and left the emitter asking for
+                # `_ci{d+n}`, which it reports as "has no home".
+                walk_compr(g.iterable, depth + n, acc)
                 for c in g.conditions or []:
                     walk_compr(c, depth + n, acc)
             walk_compr(node.element, depth + n, acc)
@@ -1064,9 +1071,13 @@ class X86_64Codegen:
         # has to start above the lot or a blob would land on one.  Reading the
         # block from the shared model rather than summing frame bytes here is
         # what keeps the two backends reserving the same bytes in the same
-        # order.
+        # order — and it is `struct_constructor_site_bytes`, not
+        # `struct_frame_block_bytes`, because a ONE-FIELD struct whose sole field
+        # holds a frame reserves the NESTED block alone (there is no object: the
+        # value is the nested frame's address).  arm64's twin, and the same
+        # shared reader, so the two cannot reserve different amounts.
         self._frame_recv_bytes = sum(
-            M.struct_frame_block_bytes(st, self._structs)
+            M.struct_constructor_site_bytes(st, self._structs)
             for st, _off, _nested in self._frame_sites.values())
         # Blocks for frames this function RECEIVES from a callee that returns
         # one.  The same region as the constructor frames and for the same
@@ -6866,9 +6877,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         d0 = self._compr_depth
         self._compr_depth = d0 + len(gens)
+        # `_container_ctx` is AMBIENT — `_emit_binop` reads it at whatever depth
+        # it finds itself — so a comprehension reached from a container position
+        # (here, a parent generator's iterable; also a for-iterable and a
+        # membership RHS) lowered its OWN body under that position: `[x + i for
+        # x in [10, 20]]` inside a parent generator's iterable took the concat
+        # path, copied the integer 10 as a blob base and faulted (SIGSEGV,
+        # `movq (%rsi), %r8` with rsi = 10). Inside a comprehension `+` is
+        # arithmetic and the operands decide on their own
+        # (`_is_container_expr`), so the body is emitted outside the context and
+        # each generator's iterable re-establishes it below. arm64's twin.
+        saved_ctx = self._container_ctx
+        self._container_ctx = 0
         try:
             self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
         finally:
+            self._container_ctx = saved_ctx
             self._compr_depth = d0
         self._emit_blob_base(offset, Reg.RAX)
 
@@ -6914,7 +6938,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # 1 from the capacity guard instead of walking the text.
         self._refuse_string_iteration("a comprehension iterable",
                                       gen.iterable)
-        # Under container context so a BinaryOp `+` iterable means concat.
+        # Under container context so a BinaryOp `+` iterable means concat —
+        # `[x for x in a + b]` walks the concatenation. Bounded to this
+        # expression because the context is ambient and a nested comprehension's
+        # body is not a container position (`_emit_comprehension`).
         self._container_ctx += 1
         try:
             self._emit_expr(gen.iterable)
@@ -8481,7 +8508,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
-            self._emit_fresh_one_word(name, st)
+            self._emit_fresh_one_word(name, st, e)
             return
         self._emit_expr(value)
 
@@ -8733,7 +8760,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                                               Reg.RAX))
         self._emit_blob_base(base, Reg.RAX)
 
-    def _emit_fresh_one_word(self, name: str, st) -> None:
+    def _emit_fresh_one_word(self, name: str, st, e=None) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.
 
         The x86-64 twin of arm64's, and the shared half is the DECISION
@@ -8743,8 +8770,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         program that read the field without writing it first got a value the
         source never said — and, before this, a struct constructor was not even
         recognised here and became a `call _S` against a symbol nothing
-        defines."""
-        kind, payload = M.struct_default_word(st)
+        defines.
+
+        **AND THE FRAME-VALUED SOLE FIELD IS NOT A WORD OF ZEROS.**  When the
+        sole field holds a nested FRAME the value is an ADDRESS, and a fresh
+        zero word was a load from address 0 on the first field read — measured,
+        both architectures, SIGSEGV from a green build
+        (fixed 2026-10-03 in 4af77b16, where a one-field struct whose
+        sole field holds a frame brings that frame up instead of a null
+        word). The frame comes up here exactly as it does for a struct of
+        two or more fields — its own nested subtree first, then its own slots at
+        their defaults — and its address is the result. `e` is the construction
+        node, and it is what finds the site, whose bytes
+        `model.struct_constructor_sites` reserved in the prologue."""
+        kind, payload = M.struct_default_word(st, self._structs)
         if kind == M.DEFAULT_OPAQUE:
             raise CodegenError(
                 f"constructing {name} cannot bring its field {payload!r} up at "
@@ -8754,6 +8793,30 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"program with a representation)")
         if kind == M.DEFAULT_STRING:
             self._emit_expr(F.StringLiteral(value=payload))
+            return
+        if kind == M.DEFAULT_NESTED_FRAME:
+            field_name, nested = payload
+            site = self._frame_sites.get(id(e)) if e is not None else None
+            if site is None:
+                raise CodegenError(
+                    f"constructing {name} needs the frame its field "
+                    f"{field_name!r} holds, and no prologue reservation was "
+                    f"made for one: the frame has to exist before the body runs, "
+                    f"so it cannot be handed out by a bump pointer the way a "
+                    f"list blob is. This is a disagreement between the "
+                    f"construction's layout table and the body rather than a "
+                    f"limit of the path — a compiler bug.")
+            # `base` is the same arithmetic `_emit_frame_constructor` uses for a
+            # struct with a frame of its own, and the nested subtree goes up
+            # through `_emit_frame_nested` ITSELF rather than a second walk of
+            # the same rows: that helper reads only the struct and the offset
+            # out of the tuple it is handed, so passing the nested pair is the
+            # one way to bring a subtree up at an offset the layout chose.
+            base = self._blob_base + site[1]
+            self._emit_frame_nested((nested, site[1], ()))
+            self._emit_frame_defaults(nested, base)
+            # The ADDRESS last: every store above left something else in RAX.
+            self._emit_blob_base(base, Reg.RAX)
             return
         self._emit_mov_imm(Reg.RAX, int(payload or 0))
 

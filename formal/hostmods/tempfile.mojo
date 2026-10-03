@@ -15,9 +15,9 @@ The `TMPDIR` half is false: `formal/hostmods/os/__init__.mojo` has `getenv`,
 `getcwd`, `mkdir` and `os.path` has `isdir`, `join` and `abspath` — 75
 filesystem operations against the real filesystem are what
 `test_formal_os.py` runs — so a temporary directory is a directory, and a
-uniquely named one is eight random bytes and a `mkdir` that fails when the name
-is taken. That is the whole capability, it is the part 51 files in this
-repository's own corpus call, and it is what this module is.
+uniquely named one is a template of six `X`s and a `mkdtemp(3)` that fills them
+in and fails if the name is taken. That is the whole capability, it is the part
+51 files in this repository's own corpus call, and it is what this module is.
 
 THE RANKING THAT PUT THIS FILE FIRST, and what it cost to answer honestly
 -----------------------------------------------------------------------
@@ -84,13 +84,22 @@ WHAT IS HERE
   * `gettempdir` — CPython's candidate walk, `TMPDIR`/`TEMP`/`TMP` then
     `/tmp`, `/var/tmp`, `/usr/tmp`, then the working directory, with the
     writability test stated below because it is the one place this differs.
-  * `gettempprefix`, `TMP_MAX` — CPython's two constants, as functions, because
-    a module-level name is not exported as a word across a dylib boundary
-    (`formal/hostmods/os/__init__.mojo` says so). `gettempprefix` is the name
-    that says what `mkdtemp`'s prefix is when the caller does not give one, and
-    `TMP_MAX` is the budget `mkdtemp` spends; both are in CPython's `__all__`.
-  * `mkdtemp(prefix)` — a real directory, mode 448 (`0o700`), an eight-character
-    random name over CPython's own alphabet, and CPython's retry loop.
+  * `gettempprefix`, `TMP_MAX`, `CHARACTERS` — CPython's published names, as
+    functions where a function is the spelling that crosses the boundary
+    (`formal/hostmods/os/__init__.mojo` says why a module-level name does not),
+    because a caller in this corpus reads them. `gettempprefix` is the name that
+    says what `mkdtemp`'s prefix is when the caller does not give one, and
+    `TMP_MAX` and `CHARACTERS` are CPython's own two answers about ITS name
+    generator — which `mkdtemp` no longer is (see the bullet below).
+  * `mkdtemp(prefix)` — a real directory, mode `0o700`, a name of `prefix` plus
+    six characters the C library chose, and `mkdtemp(3)`'s own retry. **The
+    retry used to be spelled out here and could not be right**: this path cannot
+    read `errno`, so a loop here retried every failure as if it were a collision
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
+    `mkdtemp`'s own docstring is where the name's shape and what changed are
+    written down.
 
 THE TWO PLACES THIS IS NOT CPYTHON, EACH MEASURED
 --------------------------------------------------
@@ -109,7 +118,9 @@ THE TWO PLACES THIS IS NOT CPYTHON, EACH MEASURED
     refuses to write in — a full filesystem, a read-only mount reached through a
     writable-looking path — where CPython moves to the next candidate and this
     accepts one. `mkdtemp` into such a directory then returns `""` (see THE
-    RETURN-VALUE RULE), which is a reportable failure rather than a wrong path.
+    RETURN-VALUE RULE), which is a reportable failure rather than a wrong path —
+    and since it is `mkdtemp(3)` that fails, it fails on the FIRST attempt, which
+    is what CPython does with the same filesystem.
   * **NOTHING IS CACHED.** CPython computes the answer once per process, in the
     module global `tempdir`, behind a lock. A module-level name has no storage
     on this path (`bugs/FORMAL_module_state_no_storage.md`), so every call walks
@@ -177,9 +188,9 @@ WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
     `gettempdir` above implements.
 """
 
-from os import getenv_or, getcwd, mkdir
+from os import getenv_or, getcwd
 from os.path import isdir, abspath, join
-from os._syscalls import fs_access, fs_arc4random
+from os._syscalls import fs_access, fs_mkdtemp
 from os._syscalls import str_len, str_build
 from shutil import rmtree
 
@@ -189,6 +200,16 @@ from shutil import rmtree
 # string constant in a dylib is a `__DATA` slot the image lays out, and reading
 # its bytes needs the `Pointer[UInt8]` spelling below (`hashlib.mojo`'s
 # `HEX_DIGITS + (b >> 4)` is the same trick).
+#
+# **NOT THIS MODULE'S NAME ALPHABET ANY MORE, and that is a change of
+# implementation rather than a subtraction from the API.** CPython publishes
+# `tempfile.characters` and a caller in this corpus may read it, so it stays and
+# `test_formal_tempfile.py`'s `constants` group still compares it with this
+# interpreter's. The names `mkdtemp` makes stopped coming from it when `mkdtemp`
+# became one `mkdtemp(3)` call: the C library substitutes the template's six `X`s
+# from ITS OWN alphabet, so the name is `prefix` + six characters of `[A-Za-z0-9]`
+# and the alphabet below no longer describes it. `mkdtemp`'s docstring says so
+# where a reader of a name will land.
 CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789_"
 
 # CPython's `tempfile.template`, the default prefix of every name it makes.
@@ -216,20 +237,8 @@ def _W_OK() -> int:
     return 2
 
 
-def _char_at(i) -> int:
-    """The byte at index `i` of `CHARACTERS`.
-
-    A string is a bare `char *` into a read-only section, so a subscript on it
-    reads a blob count rather than a character
-    (`bugs/FORMAL_string_value_model.md`); the `Pointer[UInt8]` annotation is
-    the spelling that makes `p[i]` a one-byte load at one byte of width.
-    """
-    var p: Pointer[UInt8] = CHARACTERS + i
-    return p.value()
-
-
 def TMP_MAX() -> int:
-    """`tempfile.TMP_MAX`: how many names `mkdtemp` may spend before giving up.
+    """`tempfile.TMP_MAX`: how many names CPython's `mkdtemp` may spend.
 
     **20**, which is CPython's value on this interpreter and NOT the 10000 that
     `tempfile` carried for twenty years. CPython lowered it when it moved the
@@ -245,6 +254,16 @@ def TMP_MAX() -> int:
     `test_formal_tempfile.py` reads this interpreter's own `tempfile.TMP_MAX`
     and compares — which makes a change in CPython a RED TEST here rather than
     a constant nobody has looked at since.
+
+    **CPython's budget, published; NOT this module's any more.** `mkdtemp` below
+    is one `mkdtemp(3)` call, and the retry is the C library's — it retries on
+    `EEXIST` and gives up on anything else, which is the distinction this
+    module's own loop could not make
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
+    So the number stays because CPython publishes it, not because anything here
+    counts to it.
     """
     return 20
 
@@ -315,86 +334,63 @@ def gettempdir() -> str:
     return _usable(getcwd())
 
 
-def _name8() -> str:
-    """Eight random characters from CPython's alphabet, NUL-terminated.
-
-    `arc4random_buf(3)`, eight bytes, each reduced modulo the alphabet's length
-    — CPython's own alphabet, which is what makes the NAME this module produces
-    the same shape as CPython's: `prefix` + eight characters of
-    `[a-z0-9_]` + `suffix`, and a name length a caller can rely on.
-
-    The reduction is modulo 37 over a byte rather than CPython's
-    `floor(random() * 37)` over a 53-bit float, so the distribution over the
-    alphabet is not perfectly uniform (30 of the 37 characters come up 7 times
-    in 256 and 7 come up 6). The property `mkdtemp` needs is that a name is not
-    already taken, and that comes from the `mkdir` below failing when it is —
-    not from the distribution.
-
-    Returned in a buffer this module owns, so it is freed here rather than
-    leaked: `free`ing a string LITERAL is a SIGABRT that takes the process's
-    whole buffered stdout with it (`shutil.mojo`'s `copytree` records the
-    measurement), and a `str_append` onto this one is the only thing that reads
-    it.
-    """
-    var b: Pointer[UInt8] = str_alloc(9)
-    fs_arc4random(b, 8)
-    var i = 0
-    while i < 8:
-        var v = b[i]
-        # 37 = the alphabet's length, by repeated subtraction: integer division
-        # is not a spelling this path gives every int, and the loop runs at most
-        # six times for a byte.
-        var k = 0
-        while v >= 37:
-            v = v - 37
-            k = k + 1
-        b[i] = _char_at(k)
-        i = i + 1
-    return b
-
-
 def mkdtemp(prefix) -> str:
     """`tempfile.mkdtemp(prefix=…)`: a new directory's path, or `""`.
 
-    CPython's algorithm, in its order (`tempfile.mkdtemp` and `_mkstemp_inner`):
-    the directory is the one `gettempdir` names, the name is `prefix` + eight
-    random characters, the mode is 448 (`0o700`, so the directory is readable,
-    writable and searchable only by the user who made it), and a name that is
-    **already taken** is retried rather than reported — up to `TMP_MAX` times.
+    **ONE `mkdtemp(3)` CALL**, over a template of `prefix` + `XXXXXX` in the
+    directory `gettempdir` names. This used to be CPython's algorithm spelled
+    out here — draw eight characters, `mkdir`, retry on failure — and the retry
+    was the defect: this path cannot read `errno`, because the C library's error
+    accessor is `__error` and a leading underscore in a callee name is not a
+    symbol this image can bind (`formal/hostmods/os/_syscalls.mojo`'s header),
+    so every failure was treated as a collision. A directory that cannot be made
+    — a full filesystem, a read-only mount reached through a writable-looking
+    path — cost the whole `TMP_MAX` budget and answered `""` where CPython
+    raises on the first attempt
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
+    `mkdtemp(3)` makes the same distinction with the error code to itself: it
+    retries a name that is ALREADY TAKEN and fails immediately on anything else.
 
-    The retry loop is what makes the answer correct rather than likely, and it
-    is why the name generator's quality does not matter: a collision is a
-    `mkdir` that fails with `EEXIST`, which is CPython's own `FileExistsError`
-    arm, and the next draw is a different name. **This loop cannot SEE `EEXIST`**
-    — the C library's error accessor is `__error` and a leading underscore in a
-    callee name is not a symbol this image can bind
-    (`formal/hostmods/os/_syscalls.mojo`'s header), so every `mkdir` failure is
-    retried and the budget bounds it. On a host where the failure is not a
-    collision — the directory does not exist, or is not writable — this spends
-    the budget and returns `""` where CPython raises on the first attempt. The
-    first of those two is caught earlier instead: `gettempdir` returns `""` and
-    so does this, without drawing a name.
+    **WHAT CHANGED AND WHAT DID NOT**, because the two are easy to confuse and
+    the difference is the price of the fix:
 
-    `prefix` is REQUIRED and is the module docstring's subject: a call across a
-    dylib boundary cannot omit an argument
-    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`), so this is
-    `mkdtemp(prefix=…)` rather than CPython's three-parameter signature, and a
-    first POSITIONAL argument means the prefix here where it means the suffix in
-    CPython.
+      * the NAME is `prefix` + SIX characters of `[A-Za-z0-9]` — the C library's
+        alphabet, over the six `X`s of the template — where it was `prefix` +
+        eight characters of CPython's 37-character alphabet. `CHARACTERS` and
+        `TMP_MAX` are still published because CPython publishes them; neither
+        describes a name this function makes now.
+      * the MODE is still `0o700`, because `mkdtemp(3)` creates the directory
+        with exactly that mode — the assertion moved from "what this module
+        passes to `mkdir`" to "what the platform creates", and
+        `test_formal_tempfile.py`'s `mkdtemp` group still reads the mode back
+        with `os.stat` on both architectures.
+      * the SUFFIX parameter CPython takes is still absent, for the module
+        docstring's reason: a call across a dylib boundary cannot omit an
+        argument, so this is `mkdtemp(prefix=…)`, and a first POSITIONAL
+        argument means the prefix here where it means the suffix in CPython.
+      * `""` is still the answer for every failure, because there is no `raise`
+        on this path (FORMAL.md phase 7) — and it is now reached in ONE call
+        rather than after a budget of them.
+      * a prefix that makes the NAME ITSELF impossible still answers `""` where
+        CPython raises: `prefix="b-/"` puts a separator inside the template, so
+        the parent does not exist and no amount of retrying helps. That case is
+        `test_formal_tempfile.py`'s `name` group, and it is unchanged.
 
-    The returned path is `abspath` of what was created, as CPython's is.
+    The returned path is absolute because the template is: `gettempdir` answers
+    `abspath` of a candidate, so `join(base, …)` is already absolute and CPython
+    composes its answer the same way (`_mkstemp_inner` joins onto an
+    `abspath`'d directory). There is no second `abspath` call here, and the
+    `join` is the only path arithmetic: `base` is what the module says the
+    directory is, so a caller comparing `dirname(answer)` with `gettempdir()`
+    gets the same string on both sides.
     """
     var base = gettempdir()
     if str_len(base) == 0:
         return ""
-    var seq = 0
-    while seq < TMP_MAX():
-        var name = str_build(prefix, "", _name8())
-        var path = join(base, name)
-        if mkdir(path, 448) == 0:
-            return abspath(path)
-        seq = seq + 1
-    return ""
+    var tmpl = join(base, str_build(prefix, "XXXXXX", ""))
+    return fs_mkdtemp(tmpl)
 
 struct TemporaryDirectory:
     """`tempfile.TemporaryDirectory(...)` — a directory that is REMOVED on the

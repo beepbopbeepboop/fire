@@ -6079,6 +6079,76 @@ BOTH_ARCH_CASES = [
      "    b.inner.v = 41\n"
      "    b.inner.has = 1\n"
      "    return b.get()\n", 155, None),
+    # ── …AND THE ROW THAT DOES NOT WRITE THE FIELD FIRST ──────────────────────
+    #
+    # The two rows above are the SAME program with `b.inner = Opt()` in them, and
+    # that line is doing more work than it looks: `Box()` builds a one-field
+    # struct whose receiver IS its sole field's storage, and that storage is an
+    # ADDRESS (`model.one_word_sole_field_frame`). So `Box()` has to bring the
+    # `Opt` frame up, and it used not to: `model.struct_default_word` answered
+    # `("none", None)` — "no class-level initializer, so a fresh word of zeros is
+    # right" — which is true of every other field and false of this one, and the
+    # constructor emitted `mov X0, #0` / `mov eax, 0`. Every field read through
+    # it was then a load from address 0.
+    #
+    # **Measured on this tree before the fix, both architectures: SIGSEGV
+    # (exit 139) from a green build, with nothing on either stream.** The rows
+    # above cannot see it, which is why this is a separate row and not a variant
+    # of them: they never read through the null word.
+    #
+    # 0 is CPython's answer and it is a real assertion, not a weak one: the frame
+    # has to EXIST for the method's `self.inner.v` to read as 0, so a lowering
+    # that left the word null and a lowering that brought the frame up and
+    # initialized it to its defaults both have to agree on the reservation being
+    # there, and only one of them survives the fault.
+    ("one_word_holder_of_a_frame_read_before_it_is_written",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    return b.get()\n", 0, None),
+    # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
+    # cannot reach: the frame is reserved in the PROLOGUE, one block per call
+    # site, laid out in walk order by `model.struct_constructor_sites`, and the
+    # second site's block has to start above the first one's. A reservation that
+    # handed both sites the same offset would answer 9 twice where CPython says
+    # 9 and then 3 — the first object's fields overwritten by the second
+    # construction, which is a wrong answer on both machines and not a fault.
+    #
+    # So the numbers are the assertion: `bx` and `by` are separate
+    # constructions, `bx.setboth(4, 5)` writes through the FIRST site's frame and
+    # `by.setboth(1, 2)` through the second's, and 9 / 3 is what survives only if
+    # the two blocks are disjoint. CPython prints the same two numbers.
+    ("two_one_word_constructions_get_two_different_frames",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def setboth(out self, a: Int, b: Int):\n"
+     "        self.inner.v = a\n"
+     "        self.inner.has = b\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v + self.inner.has * 10\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var bx = Box()\n"
+     "    bx.setboth(4, 5)\n"
+     "    var by = Box()\n"
+     "    by.setboth(1, 2)\n"
+     "    printf(\"%d %d\", bx.get(), by.get())\n"
+     "    return 0\n", 0, "54 21"),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
@@ -6954,6 +7024,78 @@ BOTH_ARCH_CASES = [
      "    printf(\"%d\", c._value)\n"
      "    return 0\n",
      0, "9"),
+
+    # ── a comprehension INSIDE a generator's ITERABLE ──
+    #
+    # Refused on both architectures before the fix, with a message that names an
+    # internal table rather than the construct: "`_cb1` has no home: the
+    # register allocator collected no home for it, so the emitter and the
+    # allocation walk disagree about this function's locals". The disagreement
+    # was exactly one: `_emit_comprehension` raises `_compr_depth` to
+    # `d0 + len(gens)` for the WHOLE walk (the iterable included), while
+    # `_collect_var_names`' comprehension walk reserved a nested
+    # comprehension's `_ci{d}`/`_cb{d}` at the OUTER depth — so the emitter
+    # asked for `_ci1` and the collector had reserved `_ci0` only — the depth
+    # disagreement between `_emit_comprehension` and `_collect_var_names`, fixed
+    # 2026-10-03 in 232011b3: the two now walk a generator's ITERABLE at
+    # `depth + len(gens)`, which is the emitter's convention.
+    #
+    # In this group rather than `CASES` because the two conventions are the two
+    # backends' own (`_collect_var_names` is spelled twice, once per backend),
+    # and a row checked on the host alone would not have caught the x86-64 half.
+    #
+    # The four shapes in one program, because each reaches a different part of
+    # the walk: the nest in the FIRST generator's iterable (`2 11`), the nest in
+    # the SECOND generator's iterable of a two-generator comprehension (`4`),
+    # a three-deep nest where the middle generator's ELEMENT holds the inner
+    # one, and a DICT comprehension whose values are comprehensions. The `+` in
+    # an inner element is the second half of the fix, and without it this row
+    # is a fault rather than a wrong number: `_container_ctx` is ambient, so a
+    # comprehension reached from a container position lowered its own `+` as a
+    # list CONCAT and copied an integer as a blob base (SIGSEGV on x86-64,
+    # `movq (%rsi), %r8` with rsi = 10). The row below is that half on its own.
+    ("nested_comprehension_in_a_generator_iterable",
+     "def main() -> Int:\n"
+     "    var a = [y for y in [x + 1 for x in [10, 20]]]\n"
+     "    var b = [q for p in [1, 2] for q in [r * 2 for r in [5, 6]]]\n"
+     "    var c = [z for z in [y for y in [x for x in [7, 8]]]]\n"
+     "    var d = {k: [v for v in [1, 2, 3]] for k in [1, 2]}\n"
+     "    printf(\"%d %d %d %d\", len(a), a[0], len(b), b[3])\n"
+     "    printf(\" %d %d %d %d\", len(c), len(d), c[0],\n"
+     "           len([v for v in [1, 2, 3]]))\n"
+     "    return 0\n",
+     0, "2 11 4 12 2 2 7 3"),
+
+    # ── a comprehension's BODY is not a container position ──
+    #
+    # `_container_ctx` is read by `_emit_binop` at whatever depth it finds
+    # itself, so a comprehension reached from a for-iterable or a membership
+    # RHS inherited that position and concatenated its own arithmetic:
+    # `for y in [x + 1 for x in [10, 20]]` copied the integer 10 as a blob base
+    # and died with SIGSEGV on BOTH architectures. Inside a comprehension `+` is
+    # arithmetic, and the operands decide on their own (`_is_container_expr`).
+    #
+    # The last two lines are the other side of the same fix and are what keep it
+    # from over-correcting: a generator's ITERABLE *is* a container position, so
+    # `[x for x in a + b]` concatenates — which it must, and which on both
+    # architectures used to loop FOREVER on arm64 (no elevation there at all, so
+    # `a + b` took the ALU path and the generated walk never advanced) and on
+    # x86-64 only by way of the same ambient flag this row removes.
+    ("comprehension_body_is_not_a_container_position",
+     "def main() -> Int:\n"
+     "    var a = [1, 2]\n"
+     "    var b = [3, 4]\n"
+     "    var s = 0\n"
+     "    for y in [x + 1 for x in [10, 20]]:\n"
+     "        s = s + y\n"
+     "    if 32 in [x + 1 for x in [10, 20, 21]]:\n"
+     "        s = s + 100\n"
+     "    var r = [x for x in a + b]\n"
+     "    if 1 in [x for x in a + b]:\n"
+     "        s = s + 1000\n"
+     "    printf(\"%d %d %d %d\", s, len(r), r[3], len([x for x in [1, 2]]))\n"
+     "    return 0\n",
+     0, "1032 4 4 2"),
 ]
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here

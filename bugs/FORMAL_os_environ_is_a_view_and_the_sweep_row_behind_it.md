@@ -136,6 +136,34 @@ environment variable of a blob nothing had touched.
 Both facts are now in `formal/hostmods/os/_syscalls.mojo`'s header next to the
 `memmove`/`memset` calls they apply to.
 
+**Status 2026-10-03 (`work/formal16-5`): §4's first item is DONE — `copy()`,
+`pop(k, d)` and `clear()` are in the module, differentially tested against
+CPython over the same fixed environment on both architectures.** All three were
+"either the same blob with a different spelling or a second representation", and
+all three turned out to be the first kind. `environ_copy` duplicates every key
+and value (an ALIASING copy would answer every count and key correctly and still
+be wrong: `environ_free` on either blob would free buffers the other hands out —
+the double free `environ_keys`' own docstring records being measured the hard
+way). `environ_pop` is ONE call rather than the "two calls each" this section
+predicted, because `str_dup`-ing the value before `environ_del` releases the
+pair is what makes the answer survive the removal — the alias `environ_get`
+hands back a moment earlier is freed memory by the time a caller prints it.
+`environ_clear` is in place and answers a STATUS, the asymmetry with
+`environ_set` being the layout talking: adding a pair can move the allocation and
+removing pairs cannot.
+
+Counted over the tree, which is what decided the order: `get` 109 (already
+there), `pop` 11, `copy` 9, `setdefault` 6, `update` 2, `keys`/`items` 2 each
+(already there), `clear` 1. What is left in this section is `environb`,
+`update`, `popitem`, the exported slot, and the bare `os.environ` read — and
+`setdefault`/`update` stay two calls each, which is a limit of one-word returns
+and not a missing function.
+
+**The row's own verdict does not move: 4 files off the `os.environ` refusal and 0
+to `pass`**, because these are the SPELLINGS a file has to be rewritten into, not
+constructs it was waiting on. §2's two-line rewrites are still the whole of what
+a reader can do today.
+
 ## 4. What is still NOT modelled, and each one's cost
 
   * **An EXPORTED SLOT** — one view every importer shares rather than one per

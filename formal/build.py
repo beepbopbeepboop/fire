@@ -7301,9 +7301,29 @@ def check_subscript_through_an_unclassified_import(functions, link_line) -> None
     work (`var r: Pointer[UInt8] = escape("AB")` reads 65, 66); and a subscript
     through a name that is not bound from a cross-image call at all, which is the
     ordinary local this path has always answered.
+
+    **AND A RESULT WHOSE OWN DECLARATION SAYS IT IS A CONTAINER**, which is the
+    half this check was missing and the reason a program that used to build
+    stopped building. `os.listdir` is declared `-> List[String]` — one word
+    pointing at `[count][element]…`, which is exactly what the manifest
+    signature cannot say, because `-> List[String]` and `-> Int` are both
+    `int64_t` there. So the signature reads `MojoList *`, this check found a
+    POINTER with no kind behind it, and `names[0]` was refused for want of an
+    answer the CALLEE'S OWN SOURCE states
+    (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s item 1, and the row
+    `test_formal_os_backing.py`'s `listdir_is_a_python_level_list` pins —
+    measured red on `master`, both architectures, 0 of its ten answers).
+
+    The question is therefore asked through `model.imported_callee_kind`, which
+    reads the DECLARATION first and the signature second and is the one reader
+    both emitters use for the same question. Asking the signature alone here
+    meant this check and the emitters disagreed about the same export: the
+    emitter lowered the subscript through the container blob and this refused it,
+    so the program was told to annotate a name whose kind was already known.
     """
     by_name, by_module, forwarded = M.dylib_export_tables(
         dylib_export_lists(link_line))
+    declarations = _external_declarations(link_line)
     for fn in functions or ():
         # `{name: (callee, module, pointee)}` for the UNTYPED bindings only —
         # an annotated binding is the reader having said what the name holds, and
@@ -7324,6 +7344,13 @@ def check_subscript_through_an_unclassified_import(functions, link_line) -> None
             if not callee:
                 continue
             entry = M.dylib_export_lookup(by_name, by_module, callee, forwarded)
+            if M.imported_callee_kind(
+                    entry, declarations.get((entry or {}).get("symbol")),
+                    int_names=FT.TYPE_NAMES,
+                    string_names=FT.STRING_TYPE_NAMES) is not None:
+                # The callee says what it produces, so this word HAS a layout
+                # and the emitter's own lowering of the subscript is the answer.
+                continue
             pointee = M.dylib_export_pointer_pointee(entry)
             if pointee:
                 untyped[target] = (callee, (entry or {}).get("module") or callee,
