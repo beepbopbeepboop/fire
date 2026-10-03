@@ -6493,6 +6493,41 @@ print(d)
 bytes_keyed()
 """)
 
+    # What a dict's REPR makes of each value kind, against CPython. Three
+    # separate defects, one shared cause — the walker had a `val == 0` arm
+    # answering "None" (right for a NULL pointer slot) and no arm for `kind`,
+    # so it read every untagged word as if it were a pointer:
+    #
+    #   {'z': 0}            -> {'z': None}   a plain zero is not a None
+    #   print({'x': 1.5})   -> SEGFAULT      1.5's IEEE bits (4609434218613702656)
+    #                                       cleared 65536, so the bits were
+    #                                       dereferenced as an address
+    #   d['f'] = 1.5        -> {'f': 1}      the SUBSCRIPT store boxed the
+    #                                       float through _to_int64 while the
+    #                                       literal store used the double
+    #                                       setter, so one dict had two answers
+    #
+    # `None` now has its own slot kind (`mojo_dict_set_none`, kind 4), which is
+    # what lets a kind-0 zero print `0` in the same dict where a `None` prints
+    # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
+    # does not carry the slot kind anywhere — which is deliberately NOT pinned
+    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    test_gimple_matches_cpython("gimple_dict_repr_kinds_agree_with_cpython", """\
+d = {}
+d['n'] = None
+d['z'] = 0
+d['b'] = False
+d['f'] = 1.5
+d['s'] = 'v'
+d['c'] = [1, 2]
+d['d'] = {}
+print(d)
+print({'a': None, 'z': 0, 'b': True, 'f': 2.5, 's': 'q'})
+print({k: None for k in ['p', 'q']})
+print({k: 0 for k in ['p', 'q']})
+print('%s' % d)
+""")
+
     # A `bool`-ANNOTATED struct field. `_TYPE_MAP` maps `'bool'` to `'int'`
     # on purpose (see struct_bool_fields' docstring), so the field's lowered
     # C type is an ordinary integer and its LAYOUT carries no trace of the

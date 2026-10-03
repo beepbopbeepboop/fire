@@ -4509,23 +4509,43 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str,
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
-    """The one dict store of an integer-ish VALUE, shared by the dict literal
-    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`),
+    """The one dict store of a NON-STRING VALUE, shared by the dict literal
+    (`_emit_dict_pair_store`), the dict comprehension (`_gen_compr_append`),
     the subscript store `d[k] = v` and the two `d[k] = v` shapes that reach a
-    dict through an opaque int-typed receiver — five copies of the same three
-    lines, which is how they came to disagree.
+    dict through an opaque int-typed receiver — six copies of the same three
+    lines, which is how they came to disagree: five still spelled the store
+    against the deleted whole-dict marker `mojo_mark_dict_bool_values`, and the
+    sixth called a `gen._emit_dict_int_value_store` that was never a delegate.
 
-    A Python bool and the integer 1/0 are the same int64_t slot here (see
-    `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
-    expression can, and `is_python_bool_expr` is the one predicate that says
-    so. When it does, the store goes through `mojo_dict_set_bool`, which tags
-    THAT slot `_DictSlot.kind == 3` — the dict's repr then prints True/False
-    for that value alone. This replaced a whole-dict registry
-    (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
-    OTHER value in the same dict print as True/False too, so
-    `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    Three value shapes, three setters, and each one is chosen from something
+    the store site can still see:
 
-    `note_dict_callable_ret` runs first for both branches — a stored callable
+    * a FLOAT goes to `mojo_dict_set_double`, which stores the IEEE-754 bits
+      with `_DictSlot.kind == 1`. It used to be `_to_int64`'d into
+      `mojo_dict_set_int` on every path but the dict literal, so
+      `d['f'] = 1.5` stored the integer 1 (`print(d)` said `{'f': 1}`) and the
+      literal `{'f': 1.5}` stored 1.5 — one dict, two answers, decided by
+      which line wrote it. A C cast cannot be used here: `(double)` and
+      `(int64_t)` casts are not legal gimple operands, which is why the
+      conversion goes through the value's own declared type and a setter.
+    * a Python bool — which is the same int64_t slot as the integer 1/0 here
+      (see `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart
+      and only the EXPRESSION can — goes through `mojo_dict_set_bool`, which
+      tags THAT slot `kind == 3` and the dict's repr prints True/False for
+      that value alone. `is_python_bool_expr` is the one predicate that says
+      so. This replaced a whole-dict registry
+      (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
+      OTHER value in the same dict print as True/False too, so
+      `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+    * a bare `None` is int64_t 0 here and so is the integer 0, for the same
+      reason, and goes through `mojo_dict_set_none` (`kind == 4`) — which is
+      what lets `{'z': 0}` print `0` and `{'n': None}` print `None` from the
+      same generic value repr. `_is_none_literal` is the predicate, and it is
+      deliberately a bare-NAME check (`None` is parsed as `IdentExpr('None')`),
+      not a value check: an `x` that HAPPENS to be None at runtime is not
+      knowable here, and such a slot keeps the plain int kind.
+
+    `note_dict_callable_ret` runs first for all of them — a stored callable
     keeps its return type whatever its slot kind is.
 
     The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
@@ -4534,9 +4554,18 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
     gen._note_dict_callable_ret(dict_val, val)
+    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
+    if gen._is_none_literal(val_node):
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'none',
+                       [('MojoDict *', dict_val), (key_ctype, key_val)])
+        return
+    if val_ctype in gimple_ctypes._FLOAT_TYPES:
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + 'double',
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        ('double', val)])
+        return
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
-    _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
     gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,
                    [('MojoDict *', dict_val), (key_ctype, key_val),
                     ('int64_t', vv64)])

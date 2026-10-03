@@ -3157,18 +3157,17 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         elif kv.startswith('_slit_'):
             kv_tmp = gen._new_val('char *', f"{kv}")
             kv = kv_tmp
-        if vt in gimple_ctypes._FLOAT_TYPES:
-            gen._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
-        elif vt == 'char *':
+        if vt == 'char *':
             if vv.startswith('_slit_'):
                 vv_tmp = gen._new_val('char *', f"{vv}")
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
             # The ONE shared non-str dict store (see
-            # `_emit_dict_pair_store`'s call): `vt` alone can't tell a real
-            # bool from a genuine 0/1 int, so `is_python_bool_expr` decides
-            # and the value gets its own slot kind.
+            # `_emit_dict_pair_store`'s call): a float gets the float setter,
+            # and `vt` alone can't tell a real bool from a genuine 0/1 int, so
+            # `is_python_bool_expr` decides and the value gets its own slot
+            # kind.
             gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
 
 

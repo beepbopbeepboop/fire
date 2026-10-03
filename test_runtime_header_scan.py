@@ -282,6 +282,22 @@ def test_every_declaration_is_seen():
     # list/tuple literal whose element type is a registered struct) and
     # `mojo_list_repr_elem` (what both repr walkers ask per slot). Two,
     # taken from the call.
+    # 543 -> 545 (2026-10-02, `bugs4-6-c`), for a dict slot that holds a
+    # Python `None`: `mojo_dict_set_none` and its bytes-key twin
+    # `mojo_dict_set_bytes_none`. Two, not one, for the same reason
+    # `mojo_dict_set_bytes_bool` exists beside `mojo_dict_set_bool` — a bytes
+    # key is its own key domain (`_DictSlot.keykind`), so it needs its own
+    # setter. The value kind they tag (`kind == 4`) is what lets `{'z': 0}`
+    # print `0` while `{'n': None}` prints `None` from one generic value
+    # repr, whose `val == 0` arm has to answer "None" for a NULL pointer
+    # slot; before this, every plain zero in every dict printed as `None`.
+    #
+    # NOT 544 in between: neither of these two needs a `-bytes_` DOUBLE twin
+    # for its own sake, because the float setter that already existed is
+    # dispatched by the shared `emit_dict_int_value_store` on `key_ctype`
+    # (`mojo_dict_set_bytes_double` was in the header already). A new value
+    # KIND needs a new setter; a value shape that already had one does not
+    # get a second spelling of it.
     #
     # NOT 542 in between: `bugs3-codegen-1-r2` added
     # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
@@ -299,7 +315,7 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 543),
+    for header, want in (('fire_runtime.h', 545),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

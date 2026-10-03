@@ -4959,6 +4959,22 @@ void mojo_dict_set_bool(MojoDict *d, char *key, int v)
     _dict_set_raw(d, key, v ? 1 : 0, 3);
 }
 
+/* A Python `None` value is int64_t 0 here (see `_lower_IdentExpr`), which is
+ * the SAME slot the integer 0 stores — so it needs its own kind for exactly
+ * the reason mojo_dict_set_bool above does, and for the same reason it has to
+ * be a per-SLOT tag rather than a whole-dict flag.
+ *
+ * Without it, `print(d)` and `print({'z': 0})` disagreed the other way:
+ * `_mojo_generic_elem_repr`'s `val == 0` arm answers "None" (it exists for a
+ * NULL pointer slot), so every plain zero in every dict printed as `None` —
+ * `{'z': 0}`, `{'i': 0}`, `{k: 0 for k in ...}` — while a real `None` was
+ * right only by coincidence. Tagging the store is what lets both be right, and
+ * the tag is decided where the value is still an AST node. */
+void mojo_dict_set_none(MojoDict *d, char *key)
+{
+    _dict_set_raw(d, key, 0, 4);
+}
+
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
@@ -5036,6 +5052,11 @@ void mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v)
  * own key DOMAIN (see mojo_dict_set_bytes_int). */
 void mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v)
 { _dict_set_bytes_raw(d, key, v ? 1 : 0, 3); }
+
+/* ...and of mojo_dict_set_none, whose slot kind (4) is what separates a
+ * `None` value from the integer 0 it shares a representation with. */
+void mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key)
+{ _dict_set_bytes_raw(d, key, 0, 4); }
 
 static _DictSlot *_dict_lookup_bytes(MojoDict *d, MojoBytes *key)
 {
@@ -5169,6 +5190,12 @@ static char *_fmt_dict_val_str(int64_t v, int64_t kind, char *dblbuf, size_t dbl
          * nothing further needed for common values. */
         return dblbuf;
     }
+    /* kind 3 (bool) and 4 (None) are the two slots whose value is a Python
+     * object rather than a number: `'%(k)s' % {'k': True}` says True and
+     * `'%(k)s' % {'k': None}` says None in CPython, and both were 1/0 here
+     * because they fell through to mojo_str_from_int. */
+    if (kind == 3) return v ? "True" : "False";
+    if (kind == 4) return "None";
     return mojo_str_from_int(v);
 }
 

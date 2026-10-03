@@ -1570,7 +1570,8 @@ def _gen_stmt_AssignStmt(gen, node):
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
                 # The ONE shared non-str dict store, `emit_dict_int_value_store`
-                # (whose docstring is this arm's spec: the bool RHS routed
+                # (whose docstring is this arm's spec: a float through the
+                # double setter, a `None` through `mojo_dict_set_none`, a bool
                 # through `mojo_dict_set_bool` so THAT slot's repr says
                 # True/False, the stored callable's return type noted, the
                 # store through `_emit_call` so `_char_to_cstr`'s placeholder
@@ -1578,9 +1579,11 @@ def _gen_stmt_AssignStmt(gen, node):
                 # whole-dict marker `mojo_mark_dict_bool_values`, which the
                 # runtime DELETED when the per-slot kind replaced it — so
                 # `d['a'] = True` compiled to a call to a function that does
-                # not exist ("implicit declaration" in the generated C, a
-                # hard build failure). See
-                # bugs/CODEGEN_bytes_keyed_dict_store_calls_a_helper_that_does_not_exist.md.
+                # not exist ("implicit declaration" in the generated C, a hard
+                # build failure), and the bytes-keyed sibling two lines up
+                # called a `gen.` name that was never a delegate and raised
+                # AttributeError instead. Both were this arm's bug, and both
+                # are gone now that there is one spelling of the store.
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
                                               vtype, v, node.value)
         else:

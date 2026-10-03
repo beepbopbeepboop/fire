@@ -5269,9 +5269,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
-    if vt in gimple_ctypes._FLOAT_TYPES:
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
-    elif vt == 'char *':
+    if vt == 'char *':
         if vv.startswith('_slit_'):
             vv_tmp = gen._new_val('char *', f"{vv}")
             vv = vv_tmp

@@ -1085,7 +1085,8 @@ typedef struct {
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
                      * 2 = char * pointer, 3 = a Python bool (0/1, which is
                      * the same int64_t as case 0 and so is only separable
-                     * because the tag is per SLOT). Maintained by the typed
+                     * because the tag is per SLOT), 4 = a Python `None`
+                     * (also int64_t 0, same reason). Maintained by the typed
                      * setters below; zero-defaulted everywhere else. */
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
@@ -1172,6 +1173,12 @@ void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
  * still say True/False. Emitted by codegen wherever the stored expression is a
  * Python bool (see `is_python_bool_expr`). */
 void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
+/* A Python `None` stored as a dict VALUE: also int64_t 0, also only separable
+ * from the integer 0 by the per-slot tag, so it gets its own (`kind == 4`).
+ * Emitted by codegen wherever the stored expression is a bare `None`; without
+ * it every plain `0` in a dict printed as `None`, because the generic value
+ * repr answers "None" for a zero word. */
+void        mojo_dict_set_none(MojoDict *d, char *key);
 
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
@@ -1296,6 +1303,8 @@ void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
 void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
 /* The bytes-key twin of mojo_dict_set_bool. */
 void        mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v);
+/* ...and of mojo_dict_set_none. */
+void        mojo_dict_set_bytes_none(MojoDict *d, MojoBytes *key);
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
