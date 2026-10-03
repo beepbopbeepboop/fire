@@ -10943,28 +10943,32 @@ EQ_DISPATCH_CASES = [
     # written as "never rebind a receiver" would refuse all of these, and nine
     # real stdlib files with it.
     #
-    # 1. a parameter DECLARED as the receiver's own type is a copy of the same
-    #    address, so it is not a rebinding to a different word. This is the
-    #    case the bug doc singles out: "a rule of the form 'never rebind the
-    #    receiver' would break it for no reason".
+    # 1. `self = self` — an address moved onto itself. No store, no dropped
+    #    write, nothing for a rule to report, and the one spelling of this
+    #    statement that is a genuine no-op. A rule of the form "never assign a
+    #    receiver" breaks it for no reason.
     #
-    #    Deliberately checks only that it BUILDS and runs, and not what it
-    #    computes. The value a copy leaves behind is a separate question with
-    #    its own answer on this tree — see
-    #    bugs/FORMAL_receiver_copied_to_another_name_does_not_take_effect.md
-    #    — and pinning today's number here would make this row a claim about
-    #    that one, so what it asserts is the narrow thing it is a guard for.
-    ("receiver_rebound_to_a_same_type_parameter_still_builds",
+    #    This row was `receiver_rebound_to_a_same_type_parameter_still_builds`
+    #    until 2026-10-02, guarding the OTHER spelling (`self = other` with
+    #    `other: Self`) for the reason the bug doc gave. That doc is deleted: its
+    #    central claim was false, CPython does not copy on `self = other`
+    #    either, and the shape is now pinned with its VALUE by
+    #    `both_arch_receiver_copied_from_another_keeps_the_callers_value` in
+    #    `BOTH_ARCH_CASES`, which is a stronger row than a bare "it builds" and
+    #    would have made this one a second copy of the same program.
+    ("receiver_assigned_itself_still_builds",
      "struct R:\n"
      "    var a: Int\n"
      "    var b: Int\n"
-     "    def copy_from(out self, other: Self):\n"
-     "        self = other\n"
+     "    def noop(out self):\n"
+     "        self = self\n"
      "def main(n):\n"
      "    var r = R()\n"
-     "    r.copy_from(R())\n"
-     "    return r.a\n",
-     0, None),
+     "    r.a = 3\n"
+     "    r.noop()\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n",
+     0, "a=3"),
     # 2. a LOCAL is not a receiver, which is the other half of "the rule reads
     #    the receiver SET": a fix that matched by position rather than by name
     #    would refuse this.
