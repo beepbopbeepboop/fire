@@ -511,6 +511,20 @@ def _gen_stmt_VarDecl(gen, node):
             gen, vtype, actual_dst, node.value)
         if _reified is not None:
             vtype, v = actual_dst, _reified
+        # `var k = 3000000000` IS a store, so it goes through the SAME
+        # chokepoint the plain AssignStmt path and the tuple-declaration path
+        # already use. This method carried `_elem_types` / `_dict_val_types`
+        # / `_struct_slot_kinds` / the callable tables by hand across the
+        # statements above and was missing the one table that decides whether
+        # a value is a plain INTEGER — so `var k = 3000000000` (at any scope,
+        # local or module-level) left `k` unrecorded and `d[k] = 1` was
+        # handed to `mojo_dict_set_int_kw`, where the runtime's range-only
+        # discriminator calls address 3000000000 a `char *` and the program
+        # SIGSEGVs. The chokepoint's `discard` branch keeps it sound: a
+        # `var` whose initializer the codegen cannot vouch for clears the
+        # record instead of leaving a stale one. See
+        # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
+        gen._track_pointer_actual_type(node.name, actual_dst, v, vtype)
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
@@ -754,6 +768,19 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
                 gen._nested_elem_types[tname] = gen._nested_elem_types[v]
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
+    # The same carry, for the same reason, one table over: "this value is a
+    # plain integer" (`gen._int_word_vals`) has to survive the store or a
+    # module-level key is asked of the runtime's range-only discriminator,
+    # which calls every positive int64 in [2^31, 2^47) a `char *` — so
+    # `K = 3000000000` at module scope followed by `d[K] = 1` on the next
+    # line was a `strcmp` of address 3000000000. Same `discard`-on-unknown
+    # discipline as `_track_pointer_actual_type`, which is why `K = "s"` on
+    # the next line still clears it rather than leaving a stale record.
+    # See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
+    if v in gen._int_word_vals:
+        gen._int_word_vals.add(tname)
+    else:
+        gen._int_word_vals.discard(tname)
     ginf.carry_callable_ret_types(gen, v, tname)
     # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
     # writes the per-function tables, which are keyed by the lowered VALUE, and
@@ -1864,6 +1891,21 @@ def _gen_stmt_AugAssignStmt(gen, node):
             dst = gen._global_dst_ctype(tname)
         else:
             dst = gen._type_of(tname)
+        # `k += 1` IS an assignment, so it goes through the SAME chokepoint
+        # the plain AssignStmt path uses (`_track_pointer_actual_type` is
+        # what carries `_actual_types`, `_elem_types`, `_dict_val_types`
+        # and `_int_word_vals` from the value being stored onto the name
+        # being stored into). This path was the one write-side site that
+        # skipped it, which is silent rather than loud: `k = 3000000000`
+        # then `k += 1` loses the "this value is a plain integer" record
+        # that `_lower_IntLiteral` seeded, so `d[k] = 1` goes to
+        # `mojo_dict_set_int_kw` and the runtime's range-only
+        # discriminator calls address 3000000001 a `char *`
+        # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md) —
+        # a SIGSEGV in the middle of a perfectly ordinary increment loop.
+        # The chokepoint's own `discard` branch is what keeps it sound:
+        # `k += "x"` clears the record rather than leaving it.
+        gen._track_pointer_actual_type(tname, dst, v, vtype)
         gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
     elif isinstance(node.target, gimple_ctypes.MemberExpr):
         # `sys.argv = [...]` — a whole-list rebind. Reads lower to

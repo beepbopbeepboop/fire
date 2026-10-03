@@ -654,6 +654,20 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a plain integer" (`gen._int_word_vals`), the
+        # same hop and the same reason for the same reason-as-the-three-above:
+        # reading a global mints a FRESH temp, and the dict-key decision is
+        # keyed on the C expression it was handed. So `K = 3000000000` at
+        # module scope was recorded on `K`, the record stopped at the temp,
+        # and `d[K] = 1` on the next line went to `mojo_dict_set_int_kw` —
+        # where the runtime's range-only discriminator calls address
+        # 3000000000 a `char *` and the program SIGSEGVs.
+        # (`_int_word_vals` is per-function by design — temp names repeat
+        # across functions — so a global read from ANOTHER function still has
+        # no record. That is the cross-function inference gap this bug's own
+        # doc puts in `mojo/middle/`'s court, not a miss here.)
+        if name in gen._int_word_vals:
+            gen._int_word_vals.add(t)
         # Resolve the C decl type through the same own-overlay helper the
         # module-globals struct field freeze (gen_module_impl's
         # `_declared_globals` loop) and the assignment-site coercion
@@ -980,6 +994,18 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     gen._safe_coerce_emit(et, res_type, ev, result)
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
+    # A ternary over two operands this codegen already KNOWS are integers
+    # produces an integer — the same no-inference argument as every other
+    # producer on `gen._int_word_vals`, one expression wider. Gated on BOTH
+    # branch types being integer-shaped rather than on the joined
+    # `res_type` alone: `_quick_type` estimates without evaluating, so a
+    # branch that really lowers to a pointer can join to `int` and be
+    # truncated to an address, and marking THAT result "a plain integer"
+    # would be the opposite of the answer.
+    if res_type in ('int', 'int64_t') and tt in ('int', 'int64_t') \
+            and et in ('int', 'int64_t') \
+            and tv in gen._int_word_vals and ev in gen._int_word_vals:
+        gen._int_word_vals.add(result)
     return res_type, result
 
 
@@ -4421,6 +4447,19 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         ti = gen._new_val('int64_t', f"(int64_t){rv}")
         rv = ti
     t = gen._new_val('int64_t', f"__mojo_floordiv ({lv}, {rv})")
+    # Two operands this codegen already KNOWS are integers floor-divided
+    # produce an integer, with no inference: `__mojo_floordiv` returns
+    # int64_t for every input and both operands are plain integers here.
+    # Same no-inference argument (and the same monotone safety — a miss
+    # falls back to the runtime's discriminator, never to a crash) as
+    # `_lower_binary_tail`'s arithmetic tail, which is why `%` is already
+    # covered there and `//` needed its own site here: `//` never reaches
+    # that tail. `d[3000000000 // 2]` was a `strcmp` of address
+    # 1500000000 before this
+    # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md).
+    if lt in ('int', 'int64_t') and rt in ('int', 'int64_t') \
+            and lv in gen._int_word_vals and rv in gen._int_word_vals:
+        gen._int_word_vals.add(t)
     return 'int64_t', t
 
 
@@ -4447,6 +4486,15 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     gen._emit(f"  {t2} = (double) {rv_for_double};")
     t3 = gen._new_val('double', f"pow ({t1}, {t2})")
     t4 = gen._new_val('int', f"(int) {t3}")
+    # Integer `**` produces an integer: the `(int)` cast above makes that
+    # true for every input, so this needs no inference about the operands
+    # at all — the strongest form of the argument the other producers on
+    # `gen._int_word_vals` make. It is worth having because `**` is how a
+    # large key is usually COMPUTED rather than written: `3 ** 20` is
+    # 3486784401, inside the runtime discriminator's pointer window, and
+    # `d[3 ** 20] = 8` was a `strcmp` of address 3486784401 before this
+    # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md).
+    gen._int_word_vals.add(t4)
     return 'int', t4
 
 

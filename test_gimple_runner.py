@@ -6007,6 +6007,80 @@ def main():
 main()
 """, "7\n9\n3\n1\nFalse\nTrue\n")
 
+    # The STORE side of the same fact: a large key that is ASSIGNED to a name,
+    # rather than written at the subscript. `gen._int_word_vals` was carried
+    # across a plain assignment and a tuple unpack, and NOT across the two
+    # other ways a value reaches a name — `var x = ...` and `x += ...` — or
+    # across a module-global store, so every one of these lost the record the
+    # literal had seeded and asked the runtime's range-only discriminator
+    # instead (every positive int64 in [2^31, 2^47) is a "pointer" to it).
+    # Both are now the same chokepoint the plain-assignment path already used
+    # (`_track_pointer_actual_type`), which is what keeps them sound: its
+    # `discard` branch clears the record on an RHS the codegen cannot vouch
+    # for, and the case below pins that direction too (`s` is a string by the
+    # time it is used as a key, and must stay a string key).
+    #
+    # `//` is here because it never reaches the binary tail where `%` is
+    # already covered; `**` because it is the usual way a large key is
+    # COMPUTED rather than written (`3 ** 20` is 3486784401), and its
+    # `(int)` cast makes "this is an integer" true for every input, so it
+    # needs no inference at all; and the ternary because two known-integer
+    # branches produce an integer, gated on BOTH branch types being
+    # integer-shaped so a branch that really lowers to a pointer cannot be
+    # recorded as one.
+    #
+    # SIGSEGV (exit -11) on the tree before, at the third line (`1`, `2` and
+    # `3` printed, then the ternary's `d[...]` died).
+    test_gimple_stdout("gimple_assigned_large_dict_key_survives_every_store_shape", """\
+def main():
+    k = 2999999999
+    k += 1
+    d = {}
+    d[k] = 1
+    print(d[k])
+    e = {}
+    e[3000000000 // 2] = 2
+    print(e[3000000000 // 2])
+    f = {}
+    f[3 ** 20] = 3
+    print(f[3 ** 20])
+    g = {}
+    g[3000000000 if True else 1] = 4
+    print(g[3000000000 if True else 1])
+    var h: Int = 3000000000
+    h2 = {}
+    h2[h] = 5
+    print(h2[h])
+    s = 3000000000
+    s = "sk"
+    d2 = {}
+    d2[s] = 6
+    print(d2["sk"])
+main()
+""", "1\n2\n3\n4\n5\n6\n")
+
+    # …and the MODULE-GLOBAL half, which is a separate hop rather than the
+    # same one: storing into the globals struct is its own shared helper
+    # (`_note_global_store_types`), and READING a global mints a fresh temp
+    # whose record has to be carried across as well — without that second
+    # copy the record stops at the temp and the dict site, which is keyed on
+    # the value it was handed, sees nothing. Both spellings of the
+    # declaration are here because they take different stores: a bare
+    # assignment and a `var`.
+    #
+    # SIGSEGV (exit -11) on the tree before, printing nothing at all: the
+    # very first statement's `d[K] = 1` was a `strcmp` of address 3000000000.
+    test_gimple_stdout("gimple_module_scope_large_dict_key_survives_the_global_store", """\
+K = 3000000000
+d = {}
+d[K] = 1
+print(d[K])
+var V = 3000000001
+e = {}
+e[V] = 2
+print(e[V])
+""", "1\n2\n")
+
     # The CONSTRUCTOR half of the same cross-call struct contract
     # (the ctor-direction cross-call struct contract in `module_gen.py`'s
     # constructor observation pass). The receiver
