@@ -7366,24 +7366,42 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_star_splice(self, res_offset: int, cap: int) -> None:
         """X0 = source blob; append every element into the result.
 
-        Keeps source base in X9 and index in X3 across appends (append
-        uses X0-X4 and may push/pop, but does not touch X9/X3)."""
-        self.asm.emit(encode_mov_zr_xn(9, 0))       # src base
-        self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))  # src count
-        self.asm.emit(encode_movz_xd_imm(3, 0))       # i = 0
+        The source base, its count and the index live in X10/X11/X12 — NOT in
+        X9/X3, which is what this used and was wrong twice over:
+
+        * `_compr_append_elem` re-derives the RESULT base into X9 (`_emit_list_base`
+          writes X9 and nothing else) and puts its capacity flag in X3, so a
+          loop keeping the source in X9/X3 read the result blob's own elements
+          from the second iteration on. The comment here used to claim "append
+          uses X0-X4 and may push/pop, but does not touch X9/X3", which is
+          false about X3 outright and about X9 one call deeper.
+        * the exit test was inverted: `cset ge` sets the flag when the index has
+          REACHED the count, and this branched to `done` when the flag was
+          CLEAR — that is, exactly when the loop should run. So the body never
+          ran and `[*xs]` built an EMPTY list: it exited 0, and `len` of the
+          result was 0, and reading an element of it exited 1. Measured on
+          `def main(): a = [1, 2]; b = [*a]; printf("%d", len(b))` → `0`.
+
+        X10-X13 are caller-saved scratch this sequence and the append between
+        them all touch nothing of, which is the property the old pair did not
+        have; X5 was already the element address here and stays it.
+        """
+        self.asm.emit(encode_mov_zr_xn(10, 0))         # X10 = src base
+        self.asm.emit(encode_ldr_xt_xn_imm(11, 10, 0))  # X11 = src count
+        self.asm.emit(encode_movz_xd_imm(12, 0))       # X12 = i = 0
         self._while_counter += 1
         loop = f"{self.func_name}_spl{self._while_counter}"
         done = f"{self.func_name}_spd{self._while_counter}"
         self.asm.label(loop)
-        self.asm.emit(encode_cmp_xn_xm(3, 1))
-        self.asm.emit(encode_cset_xd_cond(4, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 4))
+        self.asm.emit(encode_cmp_xn_xm(12, 11))
+        self.asm.emit(encode_cset_xd_cond(13, "ge"))
+        self.asm.emit(encode_cbnz_xn(0, 13))
         self.asm.emit_label_rel(done, here_offset=-4)
-        self.asm.emit(encode_add_xd_xn_imm(5, 9, 8))
-        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
+        self.asm.emit(encode_add_xd_xn_imm(5, 10, 8))
+        self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 12))
         self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
         self._compr_append_elem(res_offset, cap)
-        self.asm.emit(encode_add_xd_xn_imm(3, 3, 1))
+        self.asm.emit(encode_add_xd_xn_imm(12, 12, 1))
         self._emit_b_to(loop)
         self.asm.label(done)
 
