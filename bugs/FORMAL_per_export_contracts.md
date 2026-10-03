@@ -1,15 +1,122 @@
 # [3] round 2: per-export contracts — library landed, per-export proof DOES NOT
 
-**Status: the §11.2 [3] Done-when is NOT met, and my previous turn said it was.
-That was wrong, and the error was mine in a way worth recording.**
+**Status, rewritten 2026-10-02: the §11.2 [3] Done-when is STILL not met, and
+the three claims this doc's own body ends on are now MEASURED rather than
+argued — two of them are wrong.** The §11.2 answer below is unchanged (it was
+never met); what changed is that the blocker is no longer "a HEARTBEAT limit
+that might lift". It is a CPU limit, it is inside `simp only` rather than
+`bv_decide`, and there is a **second** expensive declaration the doc does not
+mention. Everything the body says about the retraction, the stash and the
+`timeout`-that-does-not-exist is left in place as the record it is.
 
-| | |
-|---|---|
-| `lib/Contracts.lean` | **landed, verified, 0 admitted holes.** Compiles clean: `lean` exit 0, no `declaration uses 'sorry'`. |
-| Registering it in `formal/lean.py` | **landed.** |
-| Per-export spec, derived from source | **landed** in a stash, not emitted (see below). |
-| A real export carrying a proved non-identity spec | **NOT PROVED.** `bv_decide` cannot do it. |
-| A caller discharging against it | **NOT PROVED** — depends on the above. |
+## The five measurements, and the three claims they refute
+
+Subject: a three-line `def triple(n): return n * 3` built through
+`fire dylib --formal`. The generated file is 2,786 lines and the body's composed
+effect is a 15-step chain (`st0`…`st14`, `S1`…`S15`).
+
+    $ python3 tools/memslot.py --gb 8 --label pe -- \
+          python3 fire.py dylib --formal -o .tmp/pe/triple.dylib .tmp/pe/triple.mojo
+    [proof census: triple_proof.lean — hole census not measured, 0 vacuous …]
+    formal dylib: proof check failed: lean exceeded 1500s CPU (limit 1500s,
+      enforced by RLIMIT_CPU inside lean) — killed, and this is NOT a verdict
+      on the proof
+
+Every variant below is that file with one or two proofs replaced, run through
+`formal.lean.run_lean` with `LEAN_PATH=lib`, wall 1500 s and CPU 1500 s — the
+bounds `formal/lean.py` already enforces, so nothing here launched `lean`
+directly.
+
+| variant | what was replaced | result |
+|---|---|---|
+| **vC** | `hreg` → `True`, `noEarly` → `sorry` | **6.2 s**, 1.59 GB peak. **The rest of the file is cheap.** |
+| **vB** | `hreg` → `True` only | **> 1500 s CPU** (SIGKILL), 1.44 GB |
+| **vA** | `noEarly` → `sorry` only | **> 1500 s CPU** (SIGXCPU), 1.46 GB |
+| **vD** | `noEarly` → `sorry`, `hreg`'s `bv_decide` → `sorry` | **> 1500 s CPU** (SIGXCPU), 1.59 GB |
+| **vF** | vA plus `Arm64State.init` in the unfold set | **> 1500 s CPU** (SIGXCPU), 1.47 GB |
+
+Read across the rows:
+
+1. **`maxHeartbeats` is the wrong lever, which is the measurement the last
+   section of this doc asked for and the answer is NO.** The generated file sets
+   `maxHeartbeats 20000000` itself (line 7). The run is killed by
+   `RLIMIT_CPU`, not by a heartbeat timeout, so no heartbeat budget can extend
+   it: the process spends its whole life inside arithmetic and never approaches
+   the budget. Raising it would make the same arithmetic run 2x as long and die
+   of the same signal.
+2. **`bv_decide` is not where the time goes.** vD removes it entirely, leaving
+   `simp only [_UNF]` in place, and the file still does not check. So the
+   bit-blasting of the 64-bit multiply — which the doc names as the thing
+   "left to `bv_decide` after the memory round trip is discharged as its own
+   lemma" — is not the cost, and discharging the memory round trip first would
+   not have helped.
+3. **`noEarly` is a second, independent hog, and it is one of exactly two.**
+   vB neutralises `hreg` and still blows the bound; vC neutralises both and
+   finishes in 6.2 s. So the 100-odd decode lemmas, the 15 `runsTo` chains, the
+   15 `S*_pc` `omega` lemmas, `atExit`, the frame round trip and the `Total`
+   proof are all cheap — the file has a 1500x gap between its cheap 99% and its
+   expensive declarations, which is why the earlier "6 errors" and "12 errors"
+   readings could not see it.
+
+**One premise in the body is stale and changes the next step:** the memory model
+is NOT "a 6-entry memory list". `Arm64State.mem` is a function,
+`mem : Nat → UInt8`, and `Arm64State.init` sets it to `fun _ => 0`
+(`lib/ProofLib.lean:1244`). The frame addresses are constants too —
+`sp := 0xfffffffffffffff0` — so the round trip through `mem_read_u64` /
+`mem_write_u64` is at constant addresses and is NOT the obstruction the doc's
+option 2 assumes.
+
+## What the next step is, sharpened by the above
+
+The target is one call: `simp only [_UNF]`, where `_UNF` is thirty step
+definitions plus `body` plus `arm64_reg` / `arm64_set_reg` plus `_VALUE_SIMP`
+(`arm64_proof_gen.py`'s `_dylib_contract_proof`). Two shapes, neither tried
+here, both of which replace the whole-chain unfolding with a chain of
+one-step-at-a-time lemmas:
+
+* **a per-step value chain for `hreg`** — `hval0 : ∀ n, arm64_reg 0 (S0 (start
+  n)) = n` and `hval{i+1} : ∀ n, arm64_reg 0 (S{i+1} (start n)) = <a closed
+  term in n>`, each proved from the previous with ONE `st_i` in the simp set
+  rather than thirty. `hreg` is then `hval14`. The point is not elegance: it is
+  that a simp set of thirty rewrites over a fifteen-deep chain of
+  thirty-five-field records is what `simp` is being asked to normalise, and
+  fifteen lemmas each normalising one step is fifteen small obligations.
+* **a per-step exit lemma for `noEarly`** — the generator ALREADY has the
+  per-step pc lemmas (`S{k}_pc`) and ALREADY calls them, and the 15 branches
+  still each re-run the thirty-lemma `simp only [_UNF]`. A
+  `noExit{k} : ∀ (s : Arm64State), s.pc = entry → (S{k} s).pc ≠ exit` proved once
+  per `k` with `simp [S{k}]; omega`, and `noEarly` by `rw`, turns fifteen
+  unfoldings into none.
+
+What was NOT tried, and why: `Arm64State.init` added to the unfold set (vF,
+measured, no help), and removing `bv_decide` (vD, measured, no help). The first
+is the one-line change the doc's own one-instruction recipe suggests and it does
+not move the number, which is worth knowing before anyone tries it again.
+
+
+## Three statements in the body below that are now stale, named so nobody
+## re-derives them
+
+1. **"Stashed: `formal/arm64_proof_gen.py` + `formal/build.py` — the emitter,
+   the source-derived spec, and the three emitter bugs."** The emitter is
+   LANDED: `_dylib_spec_lean` and `_dylib_contract_proof` are in
+   `formal/arm64_proof_gen.py`, `formal/build.py:12652` calls the first and
+   passes its answer to the second, and the generated file for `triple`
+   contains `theorem spec : Refine.export_result_spec … (fun n => n * 3)` and
+   `theorem caller …`. The three emitter bugs are in too — `S0` is defined,
+   `st_i` is parenthesised, and `_dylib_spec_lean` returns `(fun n => …)`. So
+   the "not emitted" table row above is history, and this paragraph is the
+   only place the stash is still mentioned.
+2. **"Refined diagnosis: it is a HEARTBEAT limit, not just the abstraction"** —
+   superseded by measurement 1 above: the run is killed by `RLIMIT_CPU`, and the
+   file's own budget is 20 M heartbeats, so the heartbeat is not the binding
+   constraint and raising it cannot help.
+3. **"the memory addresses are all constants … so the list of memory writes is
+   short and closed"** — the addresses part is right and the list part is not:
+   `Arm64State.mem` is a FUNCTION (`mem : Nat → UInt8`, initialised to
+   `fun _ => 0`), not a list. The consequence is the same as far as this doc's
+   argument goes — nothing has to be invented about the memory — but it is why
+   the next step above is about the unfolding and not about the round trip.
 
 ## The retraction, first, because it is the load-bearing part
 
