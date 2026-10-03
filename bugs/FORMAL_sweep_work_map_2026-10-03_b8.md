@@ -27,13 +27,14 @@ Four things a reader should take away, in the order they matter:
   their import and hit a real construct refusal one level deeper. A file that was
   "a fact about the target" and is now "a gap in the backend" is **progress**, and
   the rate's job is to fall while it happens (§2.4).
-* **The largest unowned codegen row is 20 files and its next wall is measured, not
-  projected.** The 165-file row has a second wall behind it that is a project
-  (§3, row 1); the 20-file row's next refusal was measured by lifting its own check
-  and is `os.environ` — another row's project (§3, row 4). **Neither is a patch, and
-  that is the finding.** What was fixable in this row IS fixed: the 3-file
-  `formal/__init__.py` refusal, which was a docstring being refused as a dylib
-  (§2.3).
+* **The largest unowned codegen row is 20 files, and its next wall is measured
+  rather than projected.** The 165-file row has a second wall behind it that is a
+  project (§3 row 1, §4.1); the 20-file row's next refusal was measured by lifting
+  its own check and is `os.environ` — another row's project (§3 row 4, §4.2).
+  **Neither is a patch, and that is the finding.** The row this branch DID close is
+  smaller and was a false premise rather than a project: a package `__init__` that
+  declares nothing was being refused as a dylib, which took out every file that
+  imports the package (§2.3).
 
 ---
 
@@ -131,7 +132,7 @@ The classes that are neither "no verdict" nor coverage, with this run's counts:
 | class | n | what it is |
 |---|---|---|
 | `not-answerable/host-import` | 225 | imports a CPython module with no Mojo source. **114 import a module a Mojo-side implementation could in principle provide** and 111 need a host process, an embedded interpreter or a kernel object. By module: `importlib x52`, `glob x46`, `zlib x27`, `collections x21`, `copy x10`, `types x10`, `itertools x9`, `unittest x9`, `signal x6`. Not in any rate |
-| `not-answerable/unresolved-import` | 6 | `formal_sweep`, `formal_sweep_causes`, `lang_spec`, `mojo_compiler`, `pytest`, `tools` — five of the six are **this sweep's own tools**, which import each other |
+| `not-answerable/unresolved-import` | 6 | `formal_sweep`, `formal_sweep_causes`, `lang_spec`, `mojo_compiler`, `pytest`, `tools` — **two are this sweep's own tools**, which import each other; `lang_spec` is imported by `fe_reader.py` and in no module set; `mojo_compiler` is the pre-rename name of `fire_compiler` and exists only as an import |
 | `not-answerable/target-limit` | 5 | `mojo_sqlite3_open` in the five `test_sqlite3*.mojo` files |
 | `built-with-admitted-contracts` | 4 | `formal/hostmods/{concurrent/futures,ctypes,subprocess,threading}.mojo` build but rest on declared assumptions about a host this image does not have; counted in the denominator, never as passes |
 
@@ -198,7 +199,7 @@ Computed from the two logs' printed lines, path-for-path:
 | paths classified by `-8` | 548 | 548 |
 | common paths | **540** | **541** |
 | **class CHANGED** | **43** | **43** |
-| new paths (this tree's 11 new files) | 8 | 8 |
+| new non-pass rows (the scope grew by 11 files; 8 of the 11 are non-pass) | 8 | 8 |
 | paths that left the non-pass set (**now passing**) | 2 | 2 |
 
 | move | n |
@@ -262,12 +263,18 @@ it is stated in the row.**
 | 1 each | | 9 further single-file causes | | §4.7 |
 
 **The `-7` map's 165-file top row was "module exports no public functions". It is
-now 3 files, and the 162 that left it did not get fixed — they were re-filed under
+now 3 files, and the 163 that left it did not get fixed — they were re-filed under
 their real terminal.** `binary_heap.mojo`'s `len(self._data)` refusal is gone (the
-three `formal12-binary-heap` fixes), so the 163 rows that named it moved onto
-`BinaryHeap.pop()`, which is the next construct in that file. **That is the tool
+three `formal12-binary-heap` fixes), so the 163 rows that named that module moved
+onto `BinaryHeap.pop()`, the next construct in the same file. **That is the tool
 working: a cause row that shrinks because the refusal it named is gone, onto a
 cause that is bigger and more specific.** Nothing regressed and no file built.
+
+The row's other two members (`_unicode_lookups.mojo`, `stat.mojo`) never left it,
+and a **third** member it did not have at `-7` did: `formal/__init__.py`, which the
+intervening merges brought into the closure as `from formal import model as M`. That
+one was a false premise rather than a limit — a package body with nothing in it — and
+`861192ec` closes it (§2.3).
 
 ### 3.1 The `uses:` column is what sizes each row
 
@@ -308,35 +315,46 @@ tools/audit_selfhost_struct_fields.py, tools/bootstrap_verify.py,
 tools/memslot.py, tools/tu_grind.py
 ```
 
-all with `except subprocess.TimeoutExpired as e:` or `except … :` around a body —
-`formal8-5`'s `FORMAL_except_arm_is_never_emitted`. **Twenty-two repository files
-and one tool, for one missing unwinder**, and the sweep's family line did not have a
-name for it until this branch's classifier fix put it where the causes tool could
-rank it. That is the argument for the fix in `31f20dba` in one number.
+all of them **one construct behind seven different exception names** — and that is
+what makes the row a single finding rather than twenty-two: `subprocess.TimeoutExpired`
+×11, `Exception` ×4, `ValueError` ×2, `FileNotFoundError` ×2, `TestFailure`,
+`BuildRefused`, `OSError`. The refusal is `formal8-5`'s
+`FORMAL_except_arm_is_never_emitted` and it is about the ARM, not the type:
+`formal` has no exception unwinder, so no edge runs from a raise site into an arm,
+and every statement in a handler's body would be absent from the program that runs.
+**Eighteen repository files and four tools, for one missing unwinder**, and the
+sweep's own `codegen by family` line had no name for it — all 22 fell into "other
+refusal" — until this branch's classifier fix put them where the causes tool could
+rank them. That is the argument for the fix in `31f20dba` in one number.
 
-The other 38 in-file rows are 25 distinct shapes; the ones with a doc or a named
-owner are `std/format/repr.mojo` and `std/utils/_serialize.mojo` (a method call on a
-value receiver: `write_repr_to` is a `Writable` trait method with no body anywhere,
-and `unsafe_load` needs a pointee width), `std/collections/binary_heap.mojo` and
-`std/builtin/float_literal.mojo` (the one-field mutator, §4.1),
-`formal/x86_64_decode.py` (`field(default_factory=F)` — no per-instance storage, and
-`FORMAL_sweep_singles_second_half.md` §1 has measured that both repairs are large),
-`type_system.py` (§4.5),
-`regex_compile.py` (a slot holding a frame address rebound — measured to build, run
-and die with SIGSEGV 139 before the refusal), `map.mojo` (`func` is a call through a
-VALUE, and a formal value has no representation for a function), and
-`module_spec_gen.py` /
-`mojo/backend_gimple/spec_gen.py`, whose `__init__`-reads-`self` refusal is **gone**
-(the inliner now threads the fresh block's address as the receiver; both files are
-on the handler-arm row instead). **`unescape_c.py` is not on this list and its old
-row is not closed**: it reaches `sys.stdin` first (a §3 row), and the `len()` of a
-value classified as `int` is still standing behind that, which
+The other **38** in-file rows are the sweep's remaining eight family labels, and 25 of
+them are `other refusal` -- which is the label that means *this tool has no name for
+it*. The ones with a doc or a named owner are `std/format/repr.mojo` and
+`std/utils/_serialize.mojo` (a method call on a value receiver: `write_repr_to` is a
+`Writable` trait method with no body anywhere, and `unsafe_load` needs a pointee
+width), `std/collections/binary_heap.mojo` and `std/builtin/float_literal.mojo` (the
+one-field mutator, section 4.1), `formal/x86_64_decode.py` (`field(default_factory=F)`
+-- no per-instance storage, and `FORMAL_sweep_singles_second_half.md` section 1 has
+measured that both repairs are large), `type_system.py` (section 4.5),
+`regex_compile.py` (a slot holding a frame address rebound -- measured to build, run
+and die with SIGSEGV 139 before the refusal), and `map.mojo` (`func` is a call through
+a VALUE, and a formal value has no representation for a function).
+
+**`module_spec_gen.py` and `mojo/backend_gimple/spec_gen.py` are in the 22 above,
+not here**, and their old row is closed: the `__init__`-reads-`self` refusal that
+filed them under `construction_init_body_refusal` at `-7` is gone (the inliner now
+threads the fresh block's address as the receiver), and what they hit next is the
+handler arm.
+
+**`unescape_c.py` is not on this list and its old row is not closed**: it reaches
+`sys.stdin` first (a §3 row), and the `len()` of a value classified as `int` is still
+standing behind that, which
 `bugs/FORMAL_sweep_singles_second_half.md` §4 has measured with a four-line
 reproducer on both architectures.
 
 ---
 
-## 4. Next step per cause, and the three ceilings that are measured
+## 4. Next step per cause, and the ceilings that are measured
 
 Ordered by files blocked. **Every row above 10 files is either claimed, or measured
 here to be closure or to have a project behind it — which is the finding, not an
@@ -392,9 +410,9 @@ stores that frame's address. `self` (line 1011) is live; `_module_loader` (line
 type is a frame address would turn a refusal into a SIGSEGV**, which is why it has
 not been done and why the disagreement check is right to fire.
 
-**Measured, both architectures, what is behind it.** With `_check_one_callee`'s
-disagreement refusal lifted and nothing else changed (`.tmp/probe_after_two_kinds.py`,
-which reports the refusal it lifted so the number is not a guess):
+**Measured, what is behind it.** With `_check_one_callee`'s disagreement refusal
+lifted and nothing else changed (`.tmp/probe_after_two_kinds.py`, which prints each
+refusal it lifted so the number is a count and not an assertion):
 
 ```
 [lifted disagreement #1] ModuleLoader_load_module(self, module_name)   (in get_symbol_type)
@@ -406,6 +424,13 @@ build: _find_stdlib_path: os.environ reads 'environ' out of the imported module 
 own doc (`FORMAL_module_state_no_storage` §(4)) makes it an **exported slot** or a
 **command line** — a project. The same lesson `FORMAL_binary_heap_mojo_after_the_len_value.md`
 records, and the reason this row is a doc and not a patch.
+
+**The probe ran on arm64 and that is the whole architecture story**, for two
+reasons rather than one: the check it lifts is in `formal/build.py`, which both
+backends share, so the chain it walks is architecture-independent by construction;
+and the sweep logs already carry `os.environ` as `module_loader.py`'s terminal
+**byte-identically on both arms** (§2.2 is what establishes that). Re-running the
+probe under `--arch=x86_64` would re-derive the same sentence.
 
 What would actually make it work, in order: (a) a **static frame in `__DATA`** for a
 module-level global whose value is a construction of a multi-field struct — a new
@@ -486,6 +511,17 @@ python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-arm-8.txt          # §3
 python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-x86-8.txt
 python3 .tmp/cmp_logs.py bugs/sweeps/sweep-arm-7.txt bugs/sweeps/sweep-arm-8.txt   # §2.4
 ```
+
+`.tmp/cmp_logs.py` and `.tmp/probe_after_two_kinds.py` are **scratch, not
+committed** (`.tmp/` is git-ignored, and `…_b7.md` §2.4 did the same), so both are
+described rather than shipped. `cmp_logs.py` is three things: a regex
+`^([A-Z][A-Z0-9/ -]*): (\S+)` over each log's printed lines, a `dict` per log keeping
+the FIRST match per path (a file is printed once), and a set difference — the
+summary block is not parsed, because a killed run has none. `probe_after_two_kinds.py`
+wraps `formal.build._check_one_callee`, lets every `CodegenError` whose text
+contains `"One parameter, two kinds of value"` through, and prints each one it let
+through with the call site, so §4.2's number is a count of refusals lifted rather
+than an assertion that one was.
 
 **20 minutes for both arms together** (§1.1). The CAS is content-addressed and
 machine-wide, so a re-run with nothing changed reads a file per file; **editing
