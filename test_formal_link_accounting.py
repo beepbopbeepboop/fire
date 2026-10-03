@@ -238,6 +238,40 @@ def provided_modules():
     return set(I.FRONTEND_PROVIDED_MODULES) & set(PRE_SPLIT_HOST_MODULES)
 
 
+def _hostmod_names_on_disk():
+    """Every module name `formal/hostmods/` has a source for.
+
+    The third pool for `written_modules()`, and the only one that is not a
+    hand-kept list: it walks the directory, so a module lands in it by being
+    written. `os/_syscalls.mojo` becomes `os._syscalls` and
+    `os/path/__init__.mojo` becomes `os.path`, which are the names
+    `resolve_module_path` is asked for.
+
+    This exists because of a real miss, not a hypothetical one: `posixpath` was
+    classified into `HOST_MODELLED` on 2026-10-03 and then written, which took
+    it out of every tier, and a pool built only from tiers could not see it \u2014
+    so `test_host_tiers` reported `sym-diff ['posixpath']` for a module that was
+    sitting on disk with a test beside it.
+    """
+    root = os.path.join(HERE, "formal", "hostmods")
+    out = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        rel = os.path.relpath(dirpath, root)
+        for fn in filenames:
+            if not fn.endswith(".mojo"):
+                continue
+            if rel == ".":
+                out.add(fn[:-len(".mojo")])
+                continue
+            name = os.path.join(rel, fn[:-len(".mojo")])
+            name = name.replace(os.sep, ".")
+            if name.endswith(".__init__"):
+                name = name[:-len(".__init__")]
+            out.add(name)
+    return out
+
+
 def written_modules():
     """Every host-set name this tree can now ANSWER for, whatever became of it.
 
@@ -258,14 +292,37 @@ def written_modules():
     and `ADMITTED_HOST_MODULE_TESTS` below exists because the second kind makes a
     different claim and is kept honest by a different test.
 
-    `HOST_ADMITTED` is walked as well as `PRE_SPLIT_HOST_MODULES` because a
-    module can be in neither: it has no pre-split entry and it is not one of the
-    tiers' own members, so only the union finds it — and a derivation that missed
-    it would let a name go unaccounted, which is exactly the case the account is
-    for.
+    **EVERY TIER IS WALKED, not just `HOST_ADMITTED`.** This pool used to be
+    `PRE_SPLIT_HOST_MODULES | HOST_ADMITTED`, on the reasoning that a module can
+    be in neither and only the union finds it. That missed a THIRD kind, and
+    `posixpath` is the instance that found it:
+
+      * a name in `PRE_SPLIT_HOST_MODULES` \u2014 the historical `HOST_MODULES`
+        list, frozen in this file;
+      * a name in `HOST_ADMITTED` \u2014 a module that answers under a contract;
+      * **a name that was CLASSIFIED INTO a tier and then WRITTEN.** The
+        2026-10-03 ranking put `posixpath` in `HOST_MODELLED` (it was in no tier
+        at all), which is what a module with no source is; writing
+        `formal/hostmods/posixpath.mojo` then took it OUT of that tier, and a
+        name that has left every tier is in neither the pre-split list nor
+        `HOST_ADMITTED` \u2014 so the derivation did not find it and the account
+        reported `sym-diff ['posixpath']` for a module sitting on disk.
+
+    That is the failure the account exists to catch, happening to the account.
+    **So the pool also carries the hostmod DIRECTORY**, which is where the third
+    kind lives: a name that has left every tier is in no tier at all, so no union
+    of tiers finds it, and only the files themselves do. Every name that is in
+    no tier and is NOT in `PRE_SPLIT_HOST_MODULES` is exactly the set that walk
+    adds \u2014 which on this tree is `posixpath` and nothing else, and that is the
+    point: the walk is a derivation, so it finds the next such module by being
+    written rather than by being listed.
     """
     found = set()
-    pool = set(PRE_SPLIT_HOST_MODULES) | set(getattr(I, "HOST_ADMITTED", ()))
+    pool = (set(PRE_SPLIT_HOST_MODULES)
+            | set(getattr(I, "HOST_ADMITTED", ()))
+            | set(getattr(I, "HOST_MODELLED", ()))
+            | set(getattr(I, "HOST_UNREACHABLE", ()))
+            | _hostmod_names_on_disk())
     for name in sorted(pool):
         if I.is_frontend_provided(name):
             found.add(name)
@@ -342,6 +399,29 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
 # needs them. Hence its own table.
 PROVIDED_NEVER_A_HOST_MODULE = {
     "fcntl": "test_formal_fcntl.py",
+    # `posixpath` \u2014 a SPELLING of `os.path`, which is the same situation as
+    # `fcntl` and for the same reason it needed its own table: the 2026-10-03
+    # ranking put it in `HOST_MODELLED` and writing the module took it out of every
+    # tier, so it never LEFT a set this file can subtract from. Its test
+    # (`test_formal_posixpath.py`) checks it against CPython's own `posixpath`
+    # AND against `os.path` in the same image, which is the only way to tell a
+    # faithful forward from a broken one.
+    "posixpath": "test_formal_posixpath.py",
+}
+
+# The two `os` SUBMODULES, which are provided and are named by the file they are
+# written in rather than by a test of their own.
+#
+# `os._syscalls` and `os.path` are not host modules in CPython's sense at all
+# \u2014 they are parts of `os`, and CPython spells them `os.path` (a real name) and
+# nothing else. Each is checked by `test_formal_os.py` and `test_formal_os_backing.py`,
+# which are the tests that OWN `os`, so this file cannot name them in
+# `IMPLEMENTED_HOST_MODULE_TESTS` without claiming that `os` left the host set
+# twice. They are listed here because `_hostmod_names_on_disk` finds them and
+# `written_modules()` must account for every name it finds.
+SUBMODULE_HOST_MODULE_TESTS = {
+    "os.path": "test_formal_os.py",
+    "os._syscalls": "test_formal_os.py",
 }
 
 # …and the ADMITTED ones, which left the host set by being written under a
@@ -445,7 +525,27 @@ def test_host_tiers():
         # requiring that of one would be requiring a module that was never in
         # `orig` — `subprocess` and its four siblings — to have been there
         # before, which is the opposite of what admitting it did.
-        left = written_modules() - set(ADMITTED_HOST_MODULE_TESTS)
+        # `left` is "of the names that WERE in the host set, the ones no longer
+        # in it", so it is a subset of `orig` BY CONSTRUCTION and is intersected
+        # with it rather than being read straight off `written_modules()`.
+        #
+        # That intersection is not a weakening, it is what the check means, and
+        # it is what the pool widening made necessary: `written_modules()` now
+        # walks the hostmod directory as well as the tiers, so it returns
+        # `fcntl` and `posixpath` \u2014 names that were NEVER in `HOST_MODULES` and so
+        # never "left" anything. Before the widening it returned only pre-split
+        # names, which made `left` a subset of `orig` by ACCIDENT (the pool was
+        # a subset, not the check). A name can only leave a set it was in, so
+        # asking the subtraction about a name that was never there was asking a
+        # question with no answer, and it reported both as `unaccounted`.
+        left = (written_modules() & set(orig)) - set(ADMITTED_HOST_MODULE_TESTS)
+        check(not (written_modules() - set(orig) - set(ADMITTED_HOST_MODULE_TESTS)
+                   - set(PROVIDED_NEVER_A_HOST_MODULE)
+                   - set(SUBMODULE_HOST_MODULE_TESTS)),
+              'every provided module is either in the pre-split host set, an '
+              'admitted one, one that was never in the set, or an `os` '
+              'submodule \u2014 a name this file cannot account for is a module '
+              'nobody claims')
         check(left <= (orig - union),
               'every name that left the host set is one with real source '
               'behind it',
@@ -454,7 +554,9 @@ def test_host_tiers():
               'the account of what left the host set is exact',
               f'unaccounted {sorted((orig - union) ^ left)}')
         all_written = {**IMPLEMENTED_HOST_MODULE_TESTS,
-                       **ADMITTED_HOST_MODULE_TESTS}
+                       **ADMITTED_HOST_MODULE_TESTS,
+                       **PROVIDED_NEVER_A_HOST_MODULE,
+                       **SUBMODULE_HOST_MODULE_TESTS}
         check(set(all_written) == written_modules(),
               'every written module names the test that keeps it honest, and '
               'no other name claims one',

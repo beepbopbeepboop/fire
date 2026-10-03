@@ -492,21 +492,40 @@ HOST_MODELLED = frozenset((
     #     than a new capability. Both files that want it
     #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
     #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
-    #   `posixpath`  — **THE MODEL IS ALREADY WRITTEN AND THIS ENTRY IS A
-    #     SPELLING, not a capability.** `formal/hostmods/os/path/__init__.mojo`
-    #     IS CPython's `posixpath` (its own header says so) and answers
-    #     `abspath`, `basename`, `commonprefix`, `dirname`, `isabs`, `join`,
-    #     `normpath`, `realpath` and the rest, compared against CPython's own by
-    #     `test_formal_os.py`. What a file that writes `import posixpath` gets
-    #     instead is a module-RESOLUTION failure, because the resolver looks
-    #     for a source NAMED `posixpath`. One file wants it that way
-    #     (`test_formal_os.py`, measured — eight distinct `posixpath.` names), and
-    #     the fix is a `formal/hostmods/posixpath.mojo` that re-exports
-    #     `os.path`, which is what `os/__init__.mojo` already does for its own
-    #     five names. It is not written: `test_formal_os.py` spells `os.path`
-    #     everywhere else, so the one file is not evidence that CPython's
-    #     spelling is wanted.
-    "shlex", "html", "datetime", "resource", "posixpath",
+    "shlex", "html", "datetime", "resource",
+    #   `posixpath`  — `formal/hostmods/posixpath.mojo`, and it is **A SPELLING,
+    #     not a capability**: every one of its thirty functions is a one-line
+    #     forward to `formal/hostmods/os/path/__init__.mojo`, which IS
+    #     CPython's `posixpath` (its own header says so) and which
+    #     `test_formal_os.py` already checks against CPython's own on both
+    #     backends. What a file writing `import posixpath` got before this was a
+    #     module-RESOLUTION failure, because the resolver looks for a source
+    #     NAMED `posixpath`.
+    #
+    #     `test_formal_posixpath.py` checks it twice, against two different
+    #     oracles, because a spelling module has two ways to be wrong and CPython
+    #     can only see one of them: `forward` compares every answer with
+    #     CPython's own `posixpath`, and `same` runs `posixpath.f(x)` and
+    #     `os.path.f(x)` in the SAME IMAGE and requires them equal, element for
+    #     element. A forward that called the wrong name or dropped an argument
+    #     would agree with CPython on most of the corpus and disagree with
+    #     `os.path` on the rest; only the second comparison sees that.
+    #
+    #     The measurement that shaped the file is why it is thirty `def`s and
+    #     not six import lines: `reflect.collect_exports_src` publishes the
+    #     functions a module DEFINES, so a bare `from os.path import dirname`
+    #     re-export builds and then a QUALIFIED call through it has no symbol to
+    #     bind — and that is not specific to this module, it is what CPython's
+    #     own `os` gets for the names it forwards (`os.isfile(...)`). The call
+    #     inside each forward is therefore spelled `os.path.f(...)`: the bare
+    #     spelling shadows the import and recurses to a stack overflow, and an
+    #     ALIASED import binds a symbol the body cannot find at load. Both were
+    #     built and run; the module's docstring has the measurements.
+    #
+    #     One file wants this spelling (`test_formal_os.py`, measured — thirteen
+    #     distinct `posixpath.` names), and that same file spells `os.path`
+    #     everywhere else, so the row is ONE file and is reported as one rather
+    #     than as the capability it is not.
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
     #     over a source larger than its own copy buffer, `copy`/`copy2`'s

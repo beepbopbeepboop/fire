@@ -85,6 +85,13 @@ ADMITTED_COUNTS = {
     "os._syscalls": 0,
     "os.path": 0,
     "pathlib": 0,
+    # Every one of its thirty functions is a one-line forward to
+    # `formal/hostmods/os/path/__init__.mojo`, which is CPython's `posixpath`
+    # and admits nothing itself. It is a SPELLING, and a spelling has no host
+    # fact left over to admit \u2014 which is what the zero is measuring, and the
+    # reason `formal/hostmods/posixpath.mojo`'s own docstring carries the
+    # measurement about why each name is a `def`.
+    "posixpath": 0,
     "platform": 0,
     "re": 0,
     "shutil": 0,
