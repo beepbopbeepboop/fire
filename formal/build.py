@@ -10018,6 +10018,62 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
     return None
 
 
+def refuse_member_reads_through_a_literal_base(functions: list) -> None:
+    """Refuse `EXPR.<member>` in a VALUE position when `EXPR` is a literal.
+
+    **The narrowest member-access refusal there is, and the reason it can be
+    one is that a literal is not ambiguous.** Every other unclassified base
+    genuinely is — a one-field struct's receiver IS its field, a multi-field
+    struct's receiver is the address of a frame, an ordinary word is an integer
+    — so those cannot be refused without refusing real programs, which is why
+    they are left to each backend's own classification (`field_access_refusal`,
+    raised from the slot allocator's fall-through). A literal has no binding at
+    all, so there is nothing to classify and no program this costs: over the
+    610-file Mojo stdlib and this tree's own 118 `.mojo` files there is exactly
+    ONE value-position member read through a literal, and it is refused today by
+    x86-64's emitter for the same reason.
+
+    **Here, in the shared pass, rather than in two emitters**, for the reason
+    every other backend-independent refusal in this file is here: the two
+    architectures must not disagree about which programs they can answer, and a
+    member read is the construct where they did. arm64's arm evaluated the base
+    and answered the word 0 while x86-64's raised, so `(7).foo` printed `0` on
+    one machine and was refused on the other from the same source — the
+    "one architecture crashes and the other declines" shape
+    `bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`
+    measured. This pass refuses first, so both answer the same thing, and both
+    emitters keep an arm that refuses the same shape for a construct that
+    reached them by a route this pass does not model.
+
+    **A METHOD CALL on a literal is not this check's business**, and the
+    exclusion is `id()`-based through `_call_receivers` for the same reason
+    every other position test in this file is: `iter_nodes` has no parent, so
+    "is this node the callee of a call" is a set of identities collected in its
+    own walk and not a shape the node carries. 185 of the stdlib's literal-base
+    member expressions are exactly that — `"\n".join(...)` — and they are the
+    most ordinary method call there is, so a walk that could not tell a callee
+    from a value would refuse the standard library's own idiom.
+    """
+    for fn in functions:
+        call_recv = _call_receivers(fn)
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr) or id(node) in call_recv:
+                continue
+            # The BASE, not the chain: `(7).foo.bar` is a member read through a
+            # member read, and it is the OUTER hop that has no storage — its
+            # object is the member expression itself, which is not a literal.
+            # What the outer hop needs is a classification of `(7).foo`, and
+            # the refusal that names `7` is the inner one, reached first
+            # because `iter_nodes` yields parents before children.
+            if not M.is_literal_base(node.obj):
+                continue
+            raise CodegenError(
+                M.literal_base_member_refusal(
+                    node.obj, node.member, M.member_chain_text(node),
+                    fn.name))
+    return None
+
+
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
                        as_dylib: bool = False) -> tuple:
@@ -10246,6 +10302,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
                             _method_receiver_bases, method_owners)
+    # A member read through a LITERAL, refused here for the same reason the
+    # comparison above is: the two answers belong to different machines, and one
+    # of them used to be the word 0. No ordering constraint beyond "before the
+    # rewrites", and there is none to state — nothing below rewrites a literal
+    # base into something classifiable, which is the point.
+    refuse_member_reads_through_a_literal_base(functions)
     # The ONE-FIELD MUTATOR write-back, decided once for the whole module
     # because it is a property of the image rather than of one function: the
     # callee half is "return the receiver on every path" and the caller half is

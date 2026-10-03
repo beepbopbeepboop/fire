@@ -22151,6 +22151,91 @@ def field_access_refusal(name: str, fn_name: str, root: str,
             f"methods use would not be it")
 
 
+# ── A member read through a LITERAL base: no storage, so no field ────────────
+#
+# The one member base that needs no classification to rule out, and the two
+# recognisers that rule it out. `formal/build.py` refuses the access in the
+# SHARED pass and each backend's emitter refuses it again at the arm that used
+# to read 0, so a construct that arrives by a route the build pass does not
+# model is still stopped rather than answered; see
+# `bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`
+# for the measurement that made this a refusal on both architectures.
+
+
+#: Every literal node class, in ONE tuple, so the two recognisers below and
+#: every future reader agree on what "a literal" is. `StringLiteral` is in it
+#: and is the one member of the list whose attribute reads are NOT all
+#: AttributeErrors — `"ab".upper` is a bound method — which is why the message
+#: has an arm of its own rather than one sentence for the whole family.
+LITERAL_NODES = (F.IntLiteral, F.FloatLiteral, F.ImagLiteral, F.StringLiteral,
+                 F.TstringLiteral, F.BoolLiteral, F.EllipsisLiteral,
+                 F.NoneLiteral, F.DottedLiteral)
+
+
+def is_literal_base(expr) -> bool:
+    """True when `expr` is a literal, i.e. a base with no binding at all.
+
+    The narrowest possible answer to "what does this base hold", and the reason
+    it is worth its own recogniser: every OTHER unclassified base is genuinely
+    ambiguous here (a one-field struct's receiver IS its field, a multi-field
+    struct's receiver is a frame address, an ordinary word is an integer), so
+    the emitters cannot refuse those without refusing real programs. A literal
+    is not ambiguous — it is the base's own value, in the register or the
+    `__TEXT` slot it is spelled into — so there is no program this refusal
+    costs. Measured over the 610-file Mojo stdlib and this tree's own 118
+    `.mojo` files: exactly ONE value-position member read through a literal,
+    `std/_gpu/globals.mojo:111`'s `"nvvm.maxntid".value`, against 185 string
+    and 20 integer METHOD calls on a literal, which are calls and are not this
+    function's business (`_call_receivers`)."""
+    return isinstance(expr, LITERAL_NODES)
+
+
+def literal_base_member_refusal(base, member, chain, fn_name) -> str:
+    """Why `<literal>.<member>` cannot be answered: two sentences, one per kind.
+
+    **The two arms are the whole of this function**, because "a literal has no
+    fields" is true and useless on its own: for a string literal the read is a
+    BOUND METHOD, which exists and is a real Python value this path has no
+    representation for, and for a number it is either an AttributeError or one
+    of the number's own properties (`(7).real`, `(7).denominator`,
+    `(7).bit_length`) — which are properties OF THE VALUE and not fields of an
+    object, and which this path lowers in neither direction. Measured on this
+    tree before the refusal: `(7).foo` and `C.A.value` both printed `0` on
+    arm64 while CPython raises `AttributeError` for both, and `f = "ab".upper`
+    printed `(null)`.
+
+    Shared because both backends read it, and because the alternative is what
+    this replaced: x86-64's emitter arm and arm64's said the same thing about
+    the same program in different words, and one of them said nothing at all.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    if isinstance(base, (F.StringLiteral, F.TstringLiteral)):
+        return (
+            f"{who}{chain} is a METHOD REFERENCE on {spelled(base)} — "
+            f"{member!r} bound to a string — and a value-position method "
+            f"reference is a bound method, and a method is not a word: there is "
+            f"no slot to read it out of and nothing to store it in, so this path "
+            f"has no representation for it. Call it "
+            f"({spelled(base)}.{member}(...)), which is a receiver and a call "
+            f"— the method path, which decides what it can lower and refuses "
+            f"the rest — or write the operation out where it was used"
+        )
+    return (
+        f"{who}{chain} reads {member!r} through {spelled(base)}, which is a "
+        f"LITERAL: there is no object behind it, no storage and no fields, so "
+        f"there is no word here to read. Python's answer for a member a number "
+        f"does not have is an AttributeError, and the members it does have "
+        f"({spelled(base)}.real, {spelled(base)}.denominator, "
+        f"{spelled(base)}.bit_length, …) are properties OF THE VALUE rather "
+        f"than fields of an object, which this path lowers in neither "
+        f"direction — it has no attribute lowering for a number at all. This "
+        f"used to answer the word 0, which is a plausible-looking number and "
+        f"not the program's: put the value in a name and read the attribute "
+        f"from there, which is the same program where the attribute is a "
+        f"named thing rather than a silent zero"
+    )
+
+
 # ── How a call's arguments bind: the ONE shape, read by everything ─────────
 #
 # `FunctionDef.params` is a flat `[(name, type)]` list in which a variadic
