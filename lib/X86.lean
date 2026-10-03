@@ -1339,11 +1339,21 @@ theorem x86_step_xor_rr (s : X86State) (code : Nat → UInt8) (m : Nat)
     almost everything else here is general -- the corpus emits `48 99` and
     nothing else, and there is nothing to generalise over.
 
+    `x86_cqo`, and NOT `x86_sign_extend32`: `cqo` sign-extends bit **63** of RAX
+    across the whole word, while `x86_sign_extend32` is `movsxd`/`cdq` and keeps
+    the low 32 bits, so it returns RAX unchanged for every value whose bit 31 is
+    clear.  This theorem used to state `x86_sign_extend32` while the model's arm
+    computed `x86_cqo`, and the mismatch was not a missing proof: the two sides
+    differ for every RAX with bit 63 set, so the library did not elaborate and
+    no `--formal` build with a proof ran on either backend.  A lemma that states
+    a DIFFERENT INSTRUCTION from the one the model decodes is a wrong answer,
+    not a gap.
+
     `x86_cqo` is the WHOLE-WORD extension, which is the one that applies here:
-    `cqo` sign-extends bit 63 of RAX, not bit 31 and not bit 7 or bit 15, so
-    `x86_sign_extend32` (which extends bit 31) and the one-byte helpers are
-    all the wrong ones -- see `x86_cqo`'s own docstring for what the 32-bit one
-    costs on the `idiv` that always follows. -/
+    not bit 31, and not bit 7 or bit 15 either, so `x86_sign_extend32` (which
+    extends bit 31) and the one-byte helpers are all the wrong ones -- see
+    `x86_cqo`'s own docstring for what the 32-bit one costs on the `idiv` that
+    always follows. -/
 theorem x86_step_cqo (s : X86State) (code : Nat → UInt8) (m : Nat) (rex : UInt8)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x99)
     (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true) :
@@ -1353,7 +1363,14 @@ theorem x86_step_cqo (s : X86State) (code : Nat → UInt8) (m : Nat) (rex : UInt
   -- that has to happen first.  `h_rex` is what routes `x86_step` to the REX
   -- decoder at all, and there is no symbolic register index here for the two
   -- to interfere with.
-  simp [x86_step, x86_step_rex, x86_cqo,
+  --
+  -- `x86_cqo` IS in the set, and it has to be: the statement's left-hand side
+  -- is whatever the model computes, so without unfolding it the goal is
+  -- `x86_cqo s.rax = x86_cqo s.rax` and `simp` is entitled to close that on its
+  -- own -- which means an over-eager set could have hidden a real difference.
+  -- What is checked here is that both sides unfold to the same term, which is
+  -- the claim the theorem is actually about.
+  simp [x86_step, x86_step_rex, x86_cqo, x86_msb,
         h_rip, h_b0, h_b1, h_rex, h_w]
 
 /-! `shl` / `shr` / `sar` by an immediate byte (REX.W C1 /digit, mod=3).
@@ -1576,6 +1593,48 @@ theorem x86_step_mov_rm64_mem_disp8 (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
         h_dst, h_dst_lt]
 
+/-- `mov r64, qword [base + disp32]` (REX.W 8B /r, mod=2, rm != 4): the LOAD
+    direction of the disp32 store below, and the reason a stack argument past the
+    twentieth has a lemma at all.
+
+    The SysV stack-argument convention passes arguments 7..24 in the caller's
+    frame, and the callee's prologue reads them back with
+    `mov r11, [rbp + 16 + 8k]`.  `formal/x86_64.py`'s `_rm_disp` picks the
+    narrowest encoding, so those loads cross from disp8 to disp32 at argument
+    index 20 -- measured, argument 19 is `4c 8b 5d 78` and argument 20 is
+    `4c 8b 9d 80 00 00 00` -- and `_MAX_INCOMING_ARGS` (24) permits four of them.
+    Without this theorem the instruction is still STEPPED by the model (the
+    coverage suite asks the model to step everything the encoder can produce, and
+    it does), but there is no theorem about it, so `formal/x86_64_endtoend_test.py`
+    had to report `mov_r64_rm64_disp32` by name as an uncovered addressing mode
+    rather than prove it.
+
+    Everything else is the disp8 load's: the address is `x86_mem_addr`'s, the
+    destination is the CONCRETE `dst` because `x86_set_reg` is a `match` on its
+    index, and `rm != 4` is not optional for the reason the disp8 lemma gives.
+    The two differences from it are the four-byte displacement -- `read_i32_le`,
+    and therefore a lemma whose `disp` is SIGNED, which matters because every
+    spilled argument sits at a negative offset -- and the successor's `rip`, which
+    is `m + 7` rather than `m + 4` because the instruction is eight bytes.  The
+    `disp32` handling is copied from the store below rather than the load above
+    for exactly that reason. -/
+theorem x86_step_mov_rm64_mem_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg rm dst : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm)
+    (h_disp : read_i32_le code (m + 3) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = rm)
+    (h_rm_ne : rm ≠ 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
+    x86_step s code = some { x86_set_reg s dst (mem_read_bytes s.mem (Int.ofNat (x86_get_reg s (rm + x86_rex_b rex)).toNat + disp).toNat 8) with
+        rip := m + 7 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
+        h_dst, h_dst_lt]
+
 /-! The two store-direction `mov` shapes (opcode 89), mirroring the load ones
     above.  These are the STORE direction, and the field sense flips: the
     SOURCE is the reg field (+REX.R) and the DESTINATION is the rm field
@@ -1736,6 +1795,79 @@ theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
         h_rr]
+
+/-- `mov qword [rsp + disp8], r64` (REX.W 89 /r, ModRM 44: mod=1 rm=4, SIB 24:
+    scale 0, index none, base rsp) -- the CALLER half of the stack-argument
+    convention, and the reason `x86_step_mov_rm64_mem_disp32` is not enough on
+    its own.
+
+    A call site puts every argument past the register file into its own outgoing
+    area, and that store is `48 89 44 24 08` for the argument one slot above the
+    first one -- the ninth argument of a nine-argument call on SysV, whose first
+    six are registers: REX.W, `89 /r`, ModRM `44` (mod=1, rm=4 -- the SIB escape)
+    and the SIB byte `24`.  It cannot be spelled without the SIB byte, because at
+    mod=0 rm=5 means RIP-relative rather than `[rsp]`, so this is a DIFFERENT
+    instruction from the `mov [rbp + disp8]` above and not a special case of it.
+    Every call with a stack argument therefore emits one of these, and without a
+    lemma for it the end-to-end prover reported `mov_rm64_r64_sib_disp8` by name
+    as an uncovered addressing mode.  Nothing noticed for a long time because no
+    example in the corpus calls a function with seven or more arguments -- and
+    every call with a stack argument needs one of these two forms, so the gap was
+    in the WHOLE convention rather than in its widest corner.
+
+    General over the REX byte where `x86_step_mov_mem_sib_rsp` above is pinned to
+    0x48: the emitter uses `4c` (R set) for a source in r8..r15, and a prefix
+    pinned to 0x48 would leave every argument the compiler happens to keep in a
+    high register unproved.  The SIB byte IS pinned, to `24` (scale 0, index
+    none, base rsp), because that is the only SIB the backend emits and a general
+    SIB would be machinery nothing uses -- the same judgement the no-
+    displacement sibling records. -/
+theorem x86_step_mov_mem_sib_disp8 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
+    (h_disp : read_i8 (code (m + 4)) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 1) (h_rm : modrm.toNat &&& 7 = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s 4).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 5 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
+        h_rb]
+
+/-- `mov qword [rsp + disp32], r64` (REX.W 89 /r, ModRM 84: mod=2 rm=4, SIB 24).
+    The same store with a displacement too wide for the byte above, so it is
+    EIGHT bytes and the successor's `rip` is `m + 8`.
+
+    This is the form the last two arguments of a 24-argument call are written
+    with.  The outgoing area is 144 bytes and holds 18 slots, and a displacement
+    stops fitting in a signed byte at 128, so slot 16 (`48 89 84 24 80 00 00 00`)
+    and slot 17 are the two that need four bytes; measured over the whole image of
+    a 24-argument call, the caller emits 12 no-displacement SIB stores, 15 disp8
+    and 2 disp32, against the callee's 15 disp8 loads and 4 disp32 loads.  So the
+    caller's half of the convention crosses from disp8 to disp32 at the same place
+    the callee's half does, four arguments earlier only because the caller's area
+    starts eight bytes lower. -/
+theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat) (disp : Int)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
+    (h_disp : read_i32_le code (m + 4) = disp)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 2) (h_rm : modrm.toNat &&& 7 = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 0) :
+    x86_step s code = some { s with
+        mem := mem_write_bytes s.mem (Int.ofNat (x86_get_reg s 4).toNat + disp).toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
+        rip := m + 8 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read, x86_rm_write,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
+        h_rb]
 
 /-- `mov rax, qword [rsp + 0]` (REX.W 8B /r, ModRM 04: mod=0 rm=4, SIB 24:
     scale 0, index none, base rsp).  Every SIB operand the backend emits has

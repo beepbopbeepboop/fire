@@ -4810,6 +4810,31 @@ BOTH_ARCH_CASES = [
      "def main() -> int:\n"
      "    printf(\"wide=%d\", wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))\n"
      "    return 0\n", 0, "wide=107"),
+    # TWENTY-FOUR arguments, which is `_MAX_INCOMING_ARGS` on both backends and
+    # the one width where SysV's callee stops being able to read its own stack
+    # arguments in ONE byte of displacement.  The prologue's loads are
+    # `mov r11, [rbp + 16 + 8k]`, `_rm_disp` picks the narrowest encoding, and
+    # 16 + 8k crosses 127 at k = 14: argument index 19 is `4c 8b 5d 78` and
+    # argument index 20 is `4c 8b 9d 80 00 00 00` (measured).  So this row is the
+    # only one that executes the four-byte form, and `a23` is the parameter whose
+    # home is the widest of them.
+    #
+    # 241 is 24 + 21*10 + 7 — a23, a20 and a6, read from the last stack slot, a
+    # middle disp32 slot and arm64's last REGISTER argument respectively, so no
+    # single shifted index produces it.  Sixteen, the row above, is the largest
+    # count whose stack slots are all disp8; this is the rung that would have
+    # caught a call site writing the outgoing area with the disp8 encoder.
+    ("both_arch_twenty_four_arguments_arrive",
+     "def wide24(a0: int, a1: int, a2: int, a3: int, a4: int, a5: int,\n"
+     "              a6: int, a7: int, a8: int, a9: int, a10: int, a11: int,\n"
+     "              a12: int, a13: int, a14: int, a15: int, a16: int,\n"
+     "              a17: int, a18: int, a19: int, a20: int, a21: int,\n"
+     "              a22: int, a23: int) -> int:\n"
+     "    return a23 + a20 * 10 + a6\n\n"
+     "def main() -> int:\n"
+     "    printf(\"w24=%d\", wide24(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,\n"
+     "                          13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24))\n"
+     "    return 0\n", 0, "w24=241"),
     # The stack argument arriving from a CALLER'S PARAMETER rather than from a
     # literal, which is the direction a compiler can get wrong by FOLDING, and a
     # NESTED CALL in the ninth position, which is the direction it can get wrong

@@ -1132,17 +1132,20 @@ class X86_64Codegen:
         parameter's home can never land on the argument it is being loaded from
         — the same property arm64 gets from `[X29 + 16 + 8k]`.
 
-        R11 is the address scratch `_store_var` uses on the spill path, so the
+R11 is the address scratch `_store_var` uses on the spill path, so the
         load goes into R11 and the home assignment follows; it never borrows the
-        scratch for the address itself, which would overwrite the value before
-        the store.  The displacement grows at 8 bytes per argument and crosses
+        scratch for the address itself, which would overwrite the value before the
+        store.  The displacement grows at 8 bytes per argument and crosses
         127 at the FIFTEENTH stack argument — parameter index 20, measured:
         index 19 encodes `4c 8b 5d 78` and index 20 `4c 8b 9d 80 00 00 00` —
         so `formal/x86_64.py`'s `_rm_disp` emits a disp32 for the last four
         parameters a 24-argument function can have, and needs no change to do
-        it.  Nothing HERE has a step lemma for that load;
-        `bugs/FORMAL_x86_64_stack_argument_past_the_twentieth_needs_a_disp32_
-        lemma.md` is the gap and the instruction it affects.
+        it.  The disp32 LOAD that produces is `x86_step_mov_rm64_mem_disp32` in
+        `lib/X86.lean` (measured applicable at a real encoding by
+        `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
+        reachable by a generated end-to-end proof yet, because the path through
+        a call this wide does not close —
+        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))

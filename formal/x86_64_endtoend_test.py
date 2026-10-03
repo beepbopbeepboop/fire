@@ -161,6 +161,25 @@ _FORMS = {
     "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
                           "rm", "reg", "rb", "rr"]),
+    # The two SIB stores WITH a displacement, which is what a call site emits for
+    # every argument past the register file: the outgoing area is addressed
+    # through `rsp`, and at any displacement that needs the SIB byte, because
+    # mod=0 rm=5 is RIP-relative rather than `[rsp]`.  So these two are the
+    # CALLER half of the stack-argument convention, and without them no call with
+    # a stack argument could be proved at all -- every example in the corpus has
+    # fewer than seven arguments, which is why nothing said so until a 24-argument
+    # one existed.
+    #
+    # `disp` rather than `disp32` for the second one is the whole trap, and it is
+    # the same one `lea_r64_rm64_disp32` records: the list is in the lemma's own
+    # argument order, and the displacement is at `m + 4` here -- ONE byte further
+    # out than the non-SIB forms', because the SIB byte is in between.
+    "mov_rm64_r64_sib_disp8": ("x86_step_mov_mem_sib_disp8", False,
+                               ["rip", "b0", "b1", "b2", "b3", "disp", "rex",
+                                "w", "mod", "rm", "reg", "rb"]),
+    "mov_rm64_r64_sib_disp32": ("x86_step_mov_mem_sib_disp32", False,
+                                ["rip", "b0", "b1", "b2", "b3", "disp32",
+                                 "rex", "w", "mod", "rm", "reg", "rb"]),
     # `dst` is the CONCRETE destination register, which the lemma needs because
     # `x86_set_reg` is a `match` on its index and `simp` will not reduce one on
     # a non-literal.  See the note on the lemma.
@@ -172,6 +191,16 @@ _FORMS = {
     "mov_r64_rm64_disp8": ("x86_step_mov_rm64_mem_disp8", False,
                            ["rip", "b0", "b1", "b2", "disp", "rex", "w",
                             "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
+    # The same load through a FOUR-BYTE displacement, which is what a stack
+    # argument past the twentieth encodes to: `_rm_disp` picks the narrowest
+    # form, so `mov r11, [rbp+128]` is disp32 and `mov r11, [rbp+120]` is
+    # disp8.  `disp32` rather than `disp` in the side-condition list because the
+    # lemma reads FOUR bytes there and one here -- the list is in the lemma's own
+    # argument order, and a `disp` in this position would be a proof about the
+    # wrong byte.
+    "mov_r64_rm64_disp32": ("x86_step_mov_rm64_mem_disp32", False,
+                            ["rip", "b0", "b1", "b2", "disp32", "rex", "w",
+                             "mod", "rm", "rm_ne", "reg", "dst", "dst_lt"]),
     "mov_r64_rm64_nodisp": ("x86_step_mov_rm64_mem_nodisp", False,
                             ["rip", "b0", "b1", "b2", "rex", "w", "mod", "rm",
                              "rm_ne4", "rm_ne5", "reg", "dst", "dst_lt"]),
@@ -302,6 +331,32 @@ _FORMS = {
     "ret": ("x86_step_ret", False, ["rip", "b0"]),
 }
 
+#: The successor of a memory-operand LOAD through a displacement, for BOTH
+#: displacement widths.  `$disp` is the decoded number and `$next` is the literal
+#: address after the instruction, so a disp8 and a disp32 load differ only in the
+#: values substituted for those two; one string for both rows of `_SUCCS` is
+#: therefore one statement of the model's semantics rather than two that have to
+#: be checked against it separately.
+_LOAD_WITH_DISP_SUCC = (
+    "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
+    "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat 8) "
+    "with rip := $next }")
+
+#: The successor of a SIB-addressed STORE through a displacement, for both
+#: displacement widths: write 8 bytes at `rsp + disp`.  `$disp` and `$rex` are the
+#: decoded values and `$next` the literal address after the instruction, so the
+#: two widths differ only in what is substituted -- one string for both rows of
+#: `_SUCCS`, for the reason `_LOAD_WITH_DISP_SUCC` gives.
+#:
+#: `x86_get_reg 4` and not `$s.rsp`: the model's base for a SIB operand is the
+#: SIB byte's own base field, and the lemma says the byte is `24`, so the two
+#: agree.  Writing `$s.rsp` here would be a second place that has to be right
+#: about what the SIB byte means.
+_SIB_STORE_WITH_DISP_SUCC = (
+    "{ $s with mem := mem_write_bytes $s.mem "
+    "(Int.ofNat (x86_get_reg $s 4).toNat + $disp).toNat "
+    "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }")
+
 #: Successor expressions, matching each lemma's conclusion.  `$s` is the
 #: predecessor.  Kept beside `_FORMS` deliberately: a new form needs both, and
 #: a mismatch between them is a proof failure rather than a silent gap.
@@ -345,6 +400,10 @@ _SUCCS = {
     "mov_rm64_r64_sib":
         "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
         "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $next }",
+    "mov_rm64_r64_sib_disp8":
+        _SIB_STORE_WITH_DISP_SUCC,
+    "mov_rm64_r64_sib_disp32":
+        _SIB_STORE_WITH_DISP_SUCC,
     # The three displacement modes, load and store.  The base is the rm field
     # extended by REX.B, so it is `$rm + x86_rex_b $rex` rather than the `5 +
     # …` this table used to hard-code for `rbp`.
@@ -354,10 +413,16 @@ _SUCCS = {
     # `base + disp` on a `Nat` would be a different expression that happens to
     # agree for a non-negative displacement and does not for a negative one --
     # and every spilled argument is at a negative offset.
+    #
+    # ONE string for both displacement widths, because the successor does not
+    # mention the width: `$disp` is the decoded number and `$next` is the
+    # literal address after the instruction, so a disp8 and a disp32 load differ
+    # only in the values substituted for those two and a second copy of this text
+    # would be a second thing to keep in step with the model.
     "mov_r64_rm64_disp8":
-        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem "
-        "(Int.ofNat (x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat 8) "
-        "with rip := $next }",
+        _LOAD_WITH_DISP_SUCC,
+    "mov_r64_rm64_disp32":
+        _LOAD_WITH_DISP_SUCC,
     # No displacement at all: the address is the base register itself, so the
     # `Int.ofNat … + 0` round trip is gone and the instruction is one byte
     # shorter.
@@ -488,7 +553,17 @@ _SUCCS = {
     "alu_rr:test":
         "{ $s with rip := $next, zf := ($fl).zf, sf := ($fl).sf, "
         "cf := ($fl).cf, of_ := ($fl).of_ }",
-    "cqo": "{ $s with rdx := x86_sign_extend32 $s.rax, rip := $next }",
+    # `x86_cqo`, and NOT `x86_sign_extend32`: this row was a second copy of the
+    # model's semantics and it kept the OLD one.  `da151f0c` corrected the model's
+    # `cqo` arm to `x86_cqo` (the sign extension of the whole 64-bit RAX) and
+    # left this successor naming `x86_sign_extend32`, which is `movsxd`/`cdq` --
+    # so the row disagreed with the model and with `x86_step_cqo`, and every
+    # `cqo` step in a generated proof was a proof of a different instruction.
+    # Nothing noticed because the only example with a `cqo` is `udivmod`, and
+    # `udivmod` was already reported as `no lemma: group3:idiv` before reaching
+    # it.  A successor table is a copy of the model, so the model was changed in
+    # three places and this was the fourth.
+    "cqo": "{ $s with rdx := x86_cqo $s.rax, rip := $next }",
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $next }",
@@ -499,7 +574,18 @@ _SUCCS = {
 
 
 def _body(code, info):
-    """The entry function's own instruction stream, or None if it won't decode."""
+    """The entry function's own instruction stream, or None if it won't decode.
+
+    The lower bound is `entry` and it has to stay there, which is worth writing
+    down because it is not obvious: `emit` (the value theorem) chains the decoded
+    instructions LINEARLY from the first one, with no tree, so a range that began
+    earlier would put the entry trampoline -- `push rbp; mov rbp, rsp; call main;
+    pop rbp; ret` -- at the head of the chain and prove the theorem about the
+    wrong function.  Widening this is therefore half of what a call to a function
+    the compiler emitted BEFORE its caller needs, and not all of it; the other
+    half, and what is left after this, is in
+    `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+    """
     base, entry = info["base_addr"], info["func_offset"]
     strs = [a for n, a in (info.get("labels") or {}).items()
             if n.startswith("str_")]
@@ -745,6 +831,24 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         modrm = raw[2]
         extra_args = " %d %d" % (modrm, (modrm >> 3) & 7)
         extra_succ = {"$reg": str((modrm >> 3) & 7)}
+    elif form in _SIB_STORE_WITH_DISP_FORMS:
+        # `mov qword [rsp + disp], r64`: ModRM `4_` (mod=1 or 2, rm=4), the SIB
+        # byte at `m + 3`, and the DISPLACEMENT at `m + 4` -- one byte further
+        # out than the non-SIB forms', which is the whole reason this is its own
+        # branch rather than a reuse of the one above with a different suffix.
+        # The REX is an ARGUMENT here (these two lemmas are general over it, so a
+        # source in r8..r15 and its `4c` prefix are covered) where the
+        # no-displacement sibling above pins it to 0x48 in the statement itself.
+        modrm, rex = raw[2], raw[0]
+        reg = (modrm >> 3) & 7
+        if form == "mov_rm64_r64_sib_disp32":
+            disp = int.from_bytes(raw[4:8], "little", signed=True)
+        else:
+            disp = raw[4] - 256 if raw[4] > 127 else raw[4]
+        # Parenthesised, for the reason the memory branch gives: an unparenthesised
+        # negative literal swallows the hypothesis that follows it.
+        extra_args = " %d %d %d (%d)" % (rex, modrm, reg, disp)
+        extra_succ = {"$reg": str(reg), "$rex": str(rex), "$disp": str(disp)}
     elif form in _MEMORY_DISP_FORMS:
         # Every memory-operand `mov`/`lea` shape except the two SIB ones, and
         # they all take their arguments in the same order: REX, ModRM, reg (the
@@ -772,8 +876,7 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
             disp_succ = {"$disp": str(disp)}
         head = " %d %d %d %d" % (rex, modrm, reg, rm)
         dst_succ = {"$dst": str(reg + rex_r)}
-        if form in ("mov_r64_rm64_disp8", "mov_r64_rm64_nodisp",
-                    "lea_r64_rm64_disp32"):
+        if form in _LOAD_MEMORY_FORMS:
             extra_args = head + " %d" % (reg + rex_r) + darg
         else:
             extra_args = head + darg
@@ -849,13 +952,30 @@ _MEMORY_FORMS = ("mov_r64_rm64", "mov_rm64_r64", "lea_r64_rm64")
 #: only one where the meaning depends on the `rm` field as well -- hence `_rip`.
 _MEM_MODE = {0: "nodisp", 1: "disp8", 2: "disp32"}
 
+#: The LOAD direction: the ones whose lemma takes a CONCRETE `dst` argument and
+#: whose successor writes a register.  `lea` is in it for the same reason it is
+#: in `_MEMORY_FORMS` below -- its address computation is `x86_mem_addr`'s and
+#: only its RESULT differs.  The two tuples are derived from each other so they
+#: cannot drift apart: adding a load mode to one without the other produced a
+#: call with a `dst` argument the lemma does not take, which reads as an arity
+#: error naming neither the form nor the instruction.
+_LOAD_MEMORY_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_disp32",
+                      "mov_r64_rm64_nodisp", "lea_r64_rm64_disp32")
+
 #: The memory-operand shapes `_resolve` supplies arguments for.  The two SIB
 #: ones are absent deliberately: they have their own `_resolve` branches above,
 #: because a SIB byte puts the displacement one byte further out and its base is
 #: read from the SIB rather than from the ModRM's rm field.
-_MEMORY_DISP_FORMS = ("mov_r64_rm64_disp8", "mov_r64_rm64_nodisp",
-                      "mov_rm64_r64_disp8", "mov_rm64_r64_nodisp",
-                      "mov_rm64_r64_disp32", "lea_r64_rm64_disp32")
+_MEMORY_DISP_FORMS = _LOAD_MEMORY_FORMS + (
+    "mov_rm64_r64_disp8", "mov_rm64_r64_nodisp", "mov_rm64_r64_disp32")
+
+#: The SIB-addressed stores WITH a displacement.  Not in `_MEMORY_DISP_FORMS`
+#: above even though they are memory forms with a displacement, because their
+#: displacement is at `m + 4` rather than `m + 3` and they have their own
+#: `_resolve` branch for exactly that reason; putting them in that tuple would
+#: silently read the SIB byte as the low byte of a displacement.
+_SIB_STORE_WITH_DISP_FORMS = ("mov_rm64_r64_sib_disp8",
+                              "mov_rm64_r64_sib_disp32")
 
 
 _BRANCH_FORMS = frozenset(("jcc_rel32", "jcc_rel8", "jmp_rel32", "jmp_rel8",
@@ -933,17 +1053,32 @@ class _Node:
 def _tree(code, info, shapes):
     """The path tree from the entry, or None if it loops or leaves the body.
 
-    A loop is reported as None rather than walked: the chain proves one path, so
-    a back edge has no finite unfolding here.  Four of the examples have one and
+    A loop is reported as None rather than walked: the chain proves one path, so a
+    back edge has no finite unfolding here.  Four of the examples have one and
     they are named in the test output as needing induction.
+
+    **A loop is a REVISITED ADDRESS, not a length.**  The test for it used to be
+    `depth > 64`, one frame per instruction, which conflated "this path is long"
+    with "this path is cyclic" and so reported a straight-line function of 65
+    instructions as a loop.  The corpus stayed under it by luck -- the longest
+    example is 60 instructions -- and it is what stopped the first program here
+    that calls a function with more than a handful of arguments: a 24-argument
+    call is 24 `mov imm32; sub rsp; mov [rsp]` triples in the caller and 24 loads
+    in the callee, about 130 instructions on one path, and the message was
+    "body loops, or branches out of the fun" for a program with no loop in it.
+
+    What is left of the budget bounds PYTHON's stack, not the program: `build`
+    is one Python frame per instruction, so the honest limit is the interpreter's
+    own recursion limit less what the caller already occupies.
     """
     base, entry = info["base_addr"], info["func_offset"]
     by_addr = {base + i.offset: (i, f, r) for i, f, r in shapes}
-    counter = [0]
+    deep = max(256, sys.getrecursionlimit() - 200)
 
-    def build(addr, state, depth):
-        if depth > 64:
+    def build(addr, state, depth, seen):
+        if depth > deep or addr in seen:
             return None
+        seen = seen | {addr}
         got = by_addr.get(addr)
         if got is None:
             return None
@@ -957,8 +1092,8 @@ def _tree(code, info, shapes):
             n = 6 if form == "jcc_rel32" else 2
             nxt = addr + n
             node = _Node(insn, form, raw, addr, "jcc", state, nxt)
-            taken = build(addr + n + off, None, depth + 1)
-            fell = build(nxt, None, depth + 1)
+            taken = build(addr + n + off, None, depth + 1, seen)
+            fell = build(nxt, None, depth + 1, seen)
             if taken is None or fell is None:
                 return None
             # `by_cases h : P` presents the `P` case FIRST, so the taken path
@@ -970,7 +1105,7 @@ def _tree(code, info, shapes):
                    if form == "jmp_rel32"
                    else int.from_bytes(raw[1:2], "little", signed=True))
             node = _Node(insn, form, raw, addr, "jmp", state, addr + off)
-            node.kids = [build(addr + off, None, depth + 1)]
+            node.kids = [build(addr + off, None, depth + 1, seen)]
             return None if node.kids[0] is None else node
         if form == "call_rel32":
             # A CALL IS A JUMP, and the tree has to follow the TARGET.  It used
@@ -989,20 +1124,34 @@ def _tree(code, info, shapes):
             # so.  `count`, `fact`, `fib`, `pow2`, `sqsum` and `sum` are the
             # six that recurse, so their target is a back edge and the honest
             # answer is `loops`; the non-recursive callers get a real proof.
+            #
+            # What the path does NOT get is the instruction AFTER the callee
+            # returns: the node's successor is the target, so the continuation
+            # in the caller is never built.  That is a real limit and it is
+            # invisible today because it only costs anything when the
+            # continuation itself calls something, which no example in the corpus
+            # does.
             off = int.from_bytes(raw[1:5], "little", signed=True)
             node = _Node(insn, form, raw, addr, "jmp", state, addr + 5 + off)
-            node.kids = [build(addr + 5 + off, None, depth + 1)]
+            node.kids = [build(addr + 5 + off, None, depth + 1, seen)]
             return None if node.kids[0] is None else node
         if form == "ret":
             return _Node(insn, form, raw, addr, "ret", state, None)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
-        node.kids = [build(addr + insn.length, None, depth + 1)]
+        node.kids = [build(addr + insn.length, None, depth + 1, seen)]
         return None if node.kids[0] is None else node
 
-    root = build(entry, "i0", 0)
+    try:
+        root = build(entry, "i0", 0, frozenset())
+    except RecursionError:
+        # One Python frame per instruction, so a straight line longer than the
+        # interpreter's own limit cannot be walked at all.  `None` is the answer
+        # a loop gets, which is what a path this long looked like before the loop
+        # test became a revisited address -- and it is a graceful "no tree"
+        # rather than an exception that takes the whole suite with it.
+        return None
     if root is None:
         return None
-    counter[0] = 0
     return root
 
 
