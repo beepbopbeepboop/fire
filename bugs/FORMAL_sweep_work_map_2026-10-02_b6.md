@@ -92,7 +92,14 @@ tool now refuses to start on an interpreter that cannot import the backend.
 ### 1.3 Scope
 
 **652 files**: this worktree's own 400 `*.py`/`*.mojo` plus the 252 under
-`../new-modular/Mojo/stdlib/std`. The `-5` baseline swept **644** (392 repo +
+`../new-modular/Mojo/stdlib/std`.
+
+**The tree this measures is `master` at `4384e756`** (the merge-base of this
+branch), which is what `formal6-sweep` was sweeping and what this session
+inherited. `master` has since moved to `3edcfb11`, so every verdict here is
+against `4384e756`; a re-run on the newer master is a re-run, not a correction,
+and the CAS keys will not carry these over (`formal_fingerprint()` covers
+`formal/**`, which those merges touched). The `-5` baseline swept **644** (392 repo +
 252 stdlib): the repository grew by 8 files between 10:15 and now, and that is
 the whole of the scope delta. It matters for §2 — the two runs' denominators are
 not the same population.
