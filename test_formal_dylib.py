@@ -1228,6 +1228,96 @@ def test_refusal_names_the_real_reason(tmpdir, shared):
               f"wording, which is false for it: {text}")
 
 
+def test_a_proved_dylib_is_an_arm64_artifact_and_says_so(tmpdir, shared):
+    """`arch` is honoured for the CODE and refused for the PROOF, by name.
+
+    `a dylib is built for the requested arch` already pins that `arch` reaches
+    the code generator, for both architectures. What it does not reach is the
+    proof layer, and there the two used to disagree in the worst possible way:
+    `compile_formal_dylib(arch="x86_64", prove=True)` fed x86-64 machine code to
+    `formal/arm64_proof_gen.py`, which raised `KeyError 4294967948` out of
+    `_gen_run_cert` -- the generator decoding x86-64 words as arm64 and not
+    finding one. No refusal, no message, a raw traceback.
+
+    And on the command line it was worse than a crash: `--backend` is a GLOBAL
+    flag and `dylib --formal` never read it, so `fire.py dylib --formal
+    --backend=x86_64` built an **arm64** image and printed `Built:`. Both files
+    read `Mach-O 64-bit dynamically linked shared library arm64`. On a command
+    whose entire subject is a PER-EXPORT contract that is the silent-wrong-answer
+    shape: a reader measuring the x86-64 boundary would get an arm64 answer and
+    conclude "the same argument applies", which is exactly the hypothesis
+    `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §OPUS-6 says must be
+    measured rather than assumed.
+
+    So: the refusal has to be at the function (every caller goes through it, and
+    `formal/imports.py`'s `build_module_dylib` does), and the CLI's own check is
+    only there because its message is better. Both are exercised.
+    """
+    from formal.build import compile_formal_dylib, FormalBuildError
+    src = os.path.join(tmpdir, "archproof.mojo")
+    with open(src, "w") as f:
+        f.write("def triple(n):\n  return n * 3\n")
+
+    # The CODE for x86-64 builds and is an x86-64 image -- asserted on the
+    # Mach-O header, because "it built" is not the claim.
+    out = os.path.join(tmpdir, "archproof_x86.dylib")
+    r = compile_formal_dylib([src], output=out, prove=False, check=False,
+                             arch="x86_64")
+    check(not r.get("proof_path"),
+          "prove=False produced a proof path, so the refusal below would be "
+          "testing nothing")
+    with open(out, "rb") as f:
+        head = f.read(16)
+    check(struct.unpack_from("<I", head, 0)[0] == MH_MAGIC_64
+          and struct.unpack_from("<I", head, 4)[0] == CPU_TYPE_X86_64,
+          f"the x86_64 dylib is cputype "
+          f"{struct.unpack_from('<I', head, 4)[0]}, so this case is not testing "
+          f"what it claims: the point is that the CODE builds and the PROOF "
+          f"does not")
+
+    # The PROOF for x86-64 is refused, by name, and the message says which half
+    # is missing -- a reader who concluded "x86-64 dylibs are unsupported"
+    # would be wrong about the image.
+    try:
+        compile_formal_dylib([src], output=out + ".2", prove=True,
+                             check=False, arch="x86_64")
+        check(False, "arch=x86_64 with prove=True was accepted; the arm64 "
+                     "generator will be handed x86-64 machine code")
+    except FormalBuildError as e:
+        msg = str(e)
+        check("generate_dylib_proof" in msg and "DylibExport" in msg,
+              f"the refusal does not name the missing generator or the model "
+              f"it is stated over, so a reader has to find that out "
+              f"separately: {msg[:200]}")
+        check("prove=False" in msg,
+              f"the refusal does not say how to ASK for the x86-64 image that "
+              f"does build: {msg[:200]}")
+
+    # The CLI, which is where the silent arm64 answer was.
+    def cli(*args):
+        return subprocess.run([sys.executable, FIRE, *args],
+                              capture_output=True, text=True, timeout=600,
+                              cwd=HERE)
+    p = cli("dylib", "--formal", "--no-prove", "--backend=x86_64",
+            "-o", os.path.join(tmpdir, "cli_x86"), src)
+    check(p.returncode != 0,
+          "dylib --formal --backend=x86_64 exited 0, so it either built "
+          "something or the flag never reached the branch that refuses it")
+    check("Built:" not in p.stdout,
+          f"the CLI printed Built: for --backend=x86_64 -- stdout: "
+          f"{p.stdout[-300:]}")
+    check("generate_dylib_proof" in (p.stderr or ""),
+          f"the CLI's refusal does not name the missing generator: "
+          f"{p.stderr[-300:]}")
+    # And the plain path, which has no formal backend to select at all.
+    p = cli("dylib", "--backend=arm64", "-o", os.path.join(tmpdir, "cli_g"),
+            src)
+    check(p.returncode != 0,
+          "dylib --backend=arm64 (no --formal) exited 0: the gimple path "
+          "compiles for the HOST's architecture, so that request is right only "
+          "by coincidence on an arm64 host")
+
+
 def test_dylib_is_built_for_the_requested_arch(tmpdir, shared):
     """`compile_formal_dylib` honours `arch` for BOTH the code and the header.
 
@@ -1491,6 +1581,8 @@ TESTS = [
     ("the refusal names the real reason", test_refusal_names_the_real_reason),
     ("a dylib is built for the requested arch",
      test_dylib_is_built_for_the_requested_arch),
+    ("a proved dylib is an arm64 artifact, and says so",
+     test_a_proved_dylib_is_an_arm64_artifact_and_says_so),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
     ("a frame parameter's contract is published, not empty",
