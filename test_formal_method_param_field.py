@@ -694,6 +694,137 @@ CASES = [
      None, None, None,
      "passes a Q frame from make_q()"),
 
+    # ── a struct-typed FIELD, initialised from a constructor ARGUMENT ─────────
+    #
+    # `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`, shape 1.
+    # The refusal and the workaround its own message names, as ONE pair, because
+    # the message makes a promise to the reader — "Assign the field after
+    # `Box(…)`, which is the same program" — and a promise nobody checks is how a
+    # refusal sends readers after a non-bug, which is the failure mode this
+    # whole family documents itself as existing to prevent. If the workaround
+    # regressed, the refusal would still be refusing and the advice would still
+    # be wrong.
+    #
+    # The refusal is the lifetime half, and the pair says which half: the two
+    # programs differ in ONE thing — where the frame comes from. `Box(o)` stores
+    # the CALLER's frame through the object, and a frame parameter outlives
+    # whatever the constructor does with it, so nothing at the store can say the
+    # two lifetimes agree. The working form stores a frame the CALLEE created
+    # (`mk`'s own block, returned), which the caller owns for the whole
+    # expression.
+    #
+    # Both spellings of the same source are given, so neither case can pass by
+    # agreeing with a wrong expectation — and the transcriptions are oracles,
+    # not tables.
+    ("refuse_a_struct_field_initialised_from_a_constructor_argument",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, o):\n"
+     "        self.inner = o\n"
+     "\n"
+     "o = Opt()\n"
+     "o.v = 41\n"
+     "o.has = 1\n"
+     "b = Box(o)\n"
+     "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
+     None, None,
+     "constructing Box with argument 'o' as field 'inner'"),
+    ("a_struct_field_assigned_after_construction_is_the_same_program",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(41)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def mk(v):\n"
+     "    o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "b = Box()\n"
+     "b.inner = mk(41)\n"
+     "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
+     0, "v=41 h=1", None),
+    # The boundary the pair above turns on, as its own case: a ONE-FIELD struct
+    # is a WORD and not a frame, so the same constructor shape BUILDS. Without
+    # this the pair would read as "a struct field from an argument is refused",
+    # which is false, and the next reader would file the false version.
+    ("a_one_field_struct_field_from_an_argument_is_a_word_not_a_frame",
+     "struct Word:\n"
+     "    var only: Int\n"
+     "\n"
+     "struct BoxW:\n"
+     "    var inner: Word\n"
+     "\n"
+     "    def __init__(out self, w: Word):\n"
+     "        self.inner = w\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Word()\n"
+     "    w.only = 42\n"
+     "    var b = BoxW(w)\n"
+     "    printf(\"only=%d\", b.inner.only)\n"
+     "    return 0\n",
+     "class Word:\n"
+     "    def __init__(self):\n"
+     "        self.only = 0\n"
+     "\n"
+     "class BoxW:\n"
+     "    def __init__(self, w):\n"
+     "        self.inner = w\n"
+     "\n"
+     "w = Word()\n"
+     "w.only = 42\n"
+     "b = BoxW(w)\n"
+     "print(\"only=%d\" % b.inner.only, end=\"\")\n",
+     0, "only=42", None),
+
     # ── a `@staticmethod` gets NO receiver, on either side of a call ──────────
     #
     # `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. Two

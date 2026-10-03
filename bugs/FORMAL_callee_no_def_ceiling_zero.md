@@ -408,10 +408,47 @@ own last section names as `FORMAL_module_state_no_storage`'s.
 is worth recording: four other bug docs and two sweep work maps cite it, so
 deleting it would dangle references in files this task does not own — which is
 worse than a document that records a construct whose refusal is landed and whose
-ceiling is zero by design. What remains open in it is §4's TASK 2 (the loop-aware
-termination bound) and §A4 on the x86-64 side, both of which are Lean work in
-`bugs/FORMAL_contract_work_handoff.md`'s subject and neither of which is a
-`formal/` change.
+ceiling is zero by design.
+
+**What is open, and where each piece went (2026-10-03).** This section used to
+point at "§4's TASK 2 (the loop-aware termination bound)" and "§A4 on the
+x86-64 side", and **neither section exists in this document** — the references
+were left behind by the rounds that rewrote it, so a reader following them found
+nothing. Both are answered elsewhere now, and the pointers are:
+
+* **The loop-aware termination bound.** A dylib export whose body loops still
+  gets a NAMED obligation rather than a proof of `Total`, because
+  `DylibExport.total_of_halts` consumes an acyclic, call-free CFG walk. Scoped
+  and measured (four exports classified by the method the frame-bounds document
+  prescribed) in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §5-§6. It
+  is a scheme extension — a ranking function or a fuel invariant — and it is
+  `formal/` work on the emitter side plus Lean work in the library, not a change
+  to the classifier this document is about.
+* **The x86-64 side.** Answered, and the answer was a defect rather than a data
+  point: `fire.py dylib --formal --backend=x86_64` built an **arm64** image
+  (`--backend` is a global flag the `dylib` command never read) and
+  `compile_formal_dylib(arch="x86_64", prove=True)` raised `KeyError` out of
+  the arm64 generator. Both are now refused by name. Recorded with the
+  measurement in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §3, and
+  pinned by `test_formal_dylib.py`'s `a proved dylib is an arm64 artifact, and
+  says so`.
+
+**And the clause every arm keeps now has a test.** §3 says the five arms all
+open with `which is a name with no definition in hand` and that this is
+load-bearing, because two taxonomies key on that exact substring while the
+message itself begins `a X receiver is passed to …` — the receiving family's own
+opening. It also records that the first version of the split had four arms that
+did **not** keep it. Nothing tested it, so the same edit could be made again
+silently. `test_refusal_taxonomy.py`'s `_no_def_callee_arm_checks` now asks the
+question at the source rather than at a sample: one callee per arm (there are
+**six** on this tree, not five — `UNIMPLEMENTED_BUILTINS` was added after this
+document was written), three assertions each — the clause is present, both
+tables classify the arm as `callee has no definition on this path`, and the
+texts are pairwise distinct, since a shared text is the pre-split defect
+returning and would pass the first two. Verified by breaking one arm's clause in
+process: it produces exactly the predicted failure, both tools moving that arm
+to `receiver passed as an argument` / `receiver passed to a call, position not
+stated`.
 
 ## 6. How to reproduce the measurement
 

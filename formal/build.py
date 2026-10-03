@@ -13653,6 +13653,33 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     """
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
+    # `prove` with an `arch` the PROOF LAYER does not model.  The image is fine
+    # -- `compile_formal_dylib(arch="x86_64", prove=False)` builds and links --
+    # but the per-export contract's emitter is `formal/arm64_proof_gen.py` and
+    # `DylibExport` in `lib/ProofLib.lean` is stated over the arm64 machine
+    # (`arm64_go_exit`, `arm64_step`, `arm64_runs`).  Fed x86-64 machine code it
+    # does not degrade, it raises: measured 2026-10-03, `KeyError
+    # 4294967948` from `_gen_run_cert`'s `words[pc]`, i.e. the generator
+    # decoding x86-64 words as arm64 and not finding one.
+    #
+    # Refused here rather than in the CLI, because this is the function that
+    # has the conflict and the CLI is one caller of it (`fire.py dylib --formal`
+    # checks too, for a better message, but `formal/imports.py`'s
+    # `build_module_dylib` and any other caller go straight through here).
+    if prove and arch != "arm64":
+        raise FormalBuildError(
+            f"a proved dylib is an arm64 artifact here: arch={arch!r} was "
+            f"asked for with prove=True, and the per-export contract's "
+            f"generator (formal/arm64_proof_gen.py::generate_dylib_proof) and "
+            f"the `DylibExport` model in lib/ProofLib.lean are stated over the "
+            f"arm64 machine only -- `arm64_go_exit`, `arm64_step`, "
+            f"`arm64_runs`. There is no {arch} counterpart of either, so this "
+            f"is a missing generator and not a missing request: the CODE for "
+            f"this architecture builds fine (arch is honoured by "
+            f"`_make_codegen`), and `prove=False` is how to ask for it. The "
+            f"x86-64 PROGRAM path is separate and does have a generator, "
+            f"formal/x86_64_proof_gen.py, reached through "
+            f"`build --formal --backend=x86_64`.")
     # `fmt` selects the CODEGEN, which is real — there is an x86-64 code
     # generator. What has no x86-64 (or ELF) form here is the CONTAINER:
     # `build_macho_dylib` is the only emitter on this path, and
