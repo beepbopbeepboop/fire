@@ -102,6 +102,11 @@ ADMITTED_COUNTS = {
     # `HOST_UNREACHABLE` on 2026-10-03 for that reason — the placement was under
     # "a terminal", which is about `TMPDIR`, and `TMPDIR` is a variable.
     "tempfile": 0,
+    # `textwrap` is 0 because `dedent` and `indent` are pure string
+    # computation over primitives `_syscalls.mojo` already has — the
+    # `fcntl` situation. Five files in this repository import it, spelling
+    # `dedent` 78 times and `indent` twice, with no keywords.
+    "textwrap": 0,
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
     "time": 0,
     "typing": 0,

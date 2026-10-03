@@ -407,18 +407,21 @@ HOST_MODELLED = frozenset((
     #     name `Counter` is the approximation
     #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
     "collections",
-    "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
+    "heapq", "bisect", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
-    #   `shlex`  — a state machine over a string, the same shape as `re` and
-    #     `fnmatch`, which are written. `split`, `quote` and `join` are pure
-    #     computation over bytes a value already is; the streaming `shlex.shlex`
-    #     reader is a GENERATOR over `readline`, which is the `fnmatch.iglob`
-    #     shape, so it is not in reach by the same argument. It is here because
-    #     it is a standard-library module, and a name in NEITHER tier made
-    #     `unresolvable_import_error` say "not a stdlib or sibling module" —
-    #     a false statement about the target, and the one diagnostic in this
-    #     family that misidentifies what kind of thing the name is.
+    #   `textwrap`  — a state machine over a string, the same shape as `re` and
+    #     `fnmatch`.  LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`:
+    #     `dedent` and `indent` are pure string computation over the
+    #     `str_len`/`str_lead`/`str_find`/`str_cmp` that
+    #     `formal/hostmods/os/_syscalls.mojo` already has, checked case for
+    #     case against CPython's own by `test_formal_textwrap.py` — including
+    #     the row that discriminates CPython's lexicographic min/max margin
+    #     from the minimum-of-run-lengths that looks equivalent and is not.
+    #     `wrap`, `fill` and `shorten` are absent: a rendering WIDTH is the
+    #     subject and no file here asks for one.  Five files in this
+    #     repository import it, spelling `dedent` 78 times and `indent`
+    #     twice; what of it is absent is at the top of the module.
     "shlex",
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`

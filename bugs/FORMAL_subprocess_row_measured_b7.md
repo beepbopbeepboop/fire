@@ -191,6 +191,78 @@ random characters cannot be compared between two processes.
 **Zero admitted contracts**, which is why `tempfile` is in no tier at all rather
 than in `HOST_ADMITTED`: it is `fcntl`'s situation, not `subprocess`'s.
 
+### What it moved, measured
+
+Over the 128 files in this repository that import `tempfile`, `-j 4 -t 60`,
+arm64:
+
+| | before | after |
+|---|---|---|
+| refused for `tempfile` | **128** | **0** |
+| `codegen` (a finding in the file) | 0 | **6** |
+| `codegen/dependency` (a finding one level down) | 0 | **15** |
+| `not-answerable/system-module-call` | 0 | **9** |
+| `not-answerable/host-import` | 128 | 95 |
+| `pass` | 0 | **0** |
+
+**0 passes, as every host-import row in this project predicts** — none of those
+128 files is a small program. What moved is that 21 of them are now in the
+ANSWERABLE denominator and counted as findings, instead of being reported as a
+fact about the target. The new top blocker for that row is `glob` x28,
+`zlib` x12, `itertools` x8, `unittest` x7.
+
+And the knock-on, over the 143 files that import `subprocess`, the same way:
+
+| | before `tempfile` | after |
+|---|---|---|
+| `not-answerable/host-import` | 136 | **106** |
+| `codegen/dependency` | 2 | **17** |
+| `codegen` | 3 | **8** |
+| **files that changed class** | | **29** |
+
+29 of the 103 files both runs classified moved — 15 to `codegen/dependency`, 5 to
+`codegen`, 9 to `system-module-call`. **`tempfile` was the top blocker for 79 of
+the 143, and 6189ec2f made `subprocess` bindable; neither could show up in a
+count until both had landed**, which is the strongest argument this map has for
+the order the two fixes went in.
+
+### What is next, re-ranked
+
+The rows below `tempfile`, from the two slices above (128 + 143 files, the union
+of everything `subprocess` and `tempfile` used to block). The b7 log's own order
+is the same one; these two are what it looks like from here.
+
+| module | tempfile slice | subprocess slice | reachable? | owner |
+|---|---|---|---|---|
+| **`glob`** | **28** | **31** | the listing half is in the tree (`os.walk`), `**` segment matching is not; `recursive=True` is a KEYWORD and binds now | `FORMAL_glob_copy_collections_io_not_attempted` (`formal10-3`) |
+| `zlib` | 12 | 15 | **0** — a library outside libSystem, and the premise forbids linking it | — |
+| `itertools` | 8 | 8 | generators over lists, and a list is a frame blob (`FORMAL_listdir_no_run_time_sequence`) | — |
+| `copy` | 5 | 6 | **0** — `copy.copy` would be the identity | `FORMAL_glob_copy_collections_io_not_attempted` |
+| `collections` | 3 | 5 | `namedtuple` only; the record wants a `struct` | `FORMAL_glob_copy_collections_io_not_attempted`, `module:…collections-rest` (`hostmods-platform`) |
+| `importlib` | 5 | 5 | **0** — an embedded CPython | — |
+| `signal` | 3 | 5 | **0** — a process-wide host object | — |
+| `types` | 3 | 4 | **0** — a type factory (`FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time`) | `formal8-1` |
+| `textwrap` | 4 | 3 | **YES — pure string computation**, and `formal/hostmods/os/_syscalls.mojo` already has `str_find`, `str_replace_all`, `str_len`, `str_at`, `str_starts`, `str_rstrip_len` | **unclaimed** |
+| `random` | 3 | 3 | `arc4random_buf` is in libSystem | — |
+| `inspect` | 2 | 2 | flagged as considered, not missed | — |
+| `socket` | 2 | 2 | **0** | — |
+| `unittest`, `functools`, `shlex`, `traceback`, `uuid`, `warnings`, `unittest.mock` | 1-7 | 1-2 | see `HOST_MODELLED` | `formal10-3` for `functools` |
+
+**`glob` is next by 4x and it is already someone's** —
+`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` is claimed by
+`formal10-3`, whose claim names glob, copy, collections and io together. It is
+also the row the recorded recommendation points at, and that recommendation is
+now one step further along than when it was written: the keyword capability it
+was waiting on landed in 6189ec2f and `glob.recursive=True` binds now, so what
+is left is the `**` segment walk and nothing else.
+
+**`textwrap` is the next row that is unclaimed and reachable**, and it is the
+one this task's "then do the same for the next largest host-import modules"
+resolves to. It is pure computation over strings — `wrap`, `fill`, `dedent`,
+`indent`, `shorten`, `dedent` — with no host object anywhere in it, and the
+string primitives are already in `_syscalls`. Its ceiling to PASS is 0 for the
+reason every row here is: the 7 files that want it are test drivers.
+
 Two things this row cost that are worth knowing before the next one:
 
   * **`mkstemp` is reachable and is NOT written**, because its only failure
