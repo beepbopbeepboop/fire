@@ -15556,6 +15556,53 @@ def field_type_one_word_struct(structs, name, decls: dict):
     return st
 
 
+def one_word_sole_field_frame(struct_def, decls: dict):
+    """The FRAMED struct a ONE-FIELD struct's sole field holds, or None.
+
+    **The one fact two callers need for opposite reasons, and neither of them
+    can derive it.**
+
+    A one-word struct's receiver IS its field: `struct_is_framed` is False, so
+    every frame table in the tree skips it and the word the caller hands it is
+    that field's storage. That storage can be a FRAME ADDRESS rather than a
+    value, and the two consequences pull opposite ways:
+
+      * `formal/build.py::_frame_receivers` seeds a method of such a struct as a
+        HOLDER of that frame. Without it, `self.v` has no home: the receiver is
+        not in the holder set, the field analysis has no case for a word that is
+        both a receiver and an address, and the emitter reports
+        `field_access_refusal` about an expression the source never spells.
+      * `formal/build.py::_collect_receiver_rebinds` must NOT grant its
+        one-field exemption there, because `self = <a word>` overwrites the
+        frame address the CALLER still holds. The method's own later reads then
+        read the caller's object and its store never reaches its caller, which
+        is a wrong answer on both machines rather than a crash.
+
+    So the answer is read ONCE, here, and both callers' predicates are opposites
+    of each other: `struct_is_one_field(owner) and this is None` is a plain
+    word, `not None` is an address. Two copies of the question would be two
+    places for them to disagree about which kind of receiver a struct has, and
+    that disagreement is a segfault rather than a wrong message.
+
+    Read off the DECLARED type through `frame_field_type_candidates` — the same
+    agree-or-refuse reader every other declared-type question on this path goes
+    through — so a field two candidates annotate differently answers None rather
+    than a pick. None is also the answer for a sole field that is a value, for
+    a field whose type names no struct of this module, and for an owner that is
+    not one field at all; the caller that needs the "agreed and a value" case
+    apart from the "disagreed" one asks `field_type_is_value`, as
+    `frame_field_type_candidates`' own docstring says its callers should.
+    """
+    if not struct_is_one_field(struct_def):
+        return None
+    sole = struct_sole_field_name(struct_def)
+    if sole is None:
+        return None
+    nested, (disagree, _rows) = frame_field_type_candidates([struct_def], sole,
+                                                            decls)
+    return None if disagree else nested
+
+
 def one_word_nested_sole_field_refusal(slot: str, st) -> str:
     """`slot.f` where `f` is not the one field of the one-word struct in `slot`.
 

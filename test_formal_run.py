@@ -4909,6 +4909,79 @@ BOTH_ARCH_CASES = [
      "    o.inner.a = 20\n"
      "    o.inner.b = 22\n"
      "    return o.get()\n", 42, None),
+    # ── A ONE-FIELD STRUCT WHOSE SOLE FIELD IS A FRAME ────────────────────────
+    #
+    # `Box` declares ONE field, `inner`, whose declared type is the framed
+    # `Opt`. So `Box`'s receiver IS its field's storage, and that storage is an
+    # ADDRESS — `self.inner.v` is one load at `self + 8*slot(v)` for Opt's
+    # layout, not two. The frame analysis had no case for a word that is both a
+    # receiver and an address: `Box` is not framed, so nothing seeded `self` as
+    # a holder, and the read half was refused by
+    # `_check_method_receiver_types` with a message about `Box`'s layout that
+    # the callee does not use.
+    #
+    # The seeding and the refusal below it are ONE change, and the row that
+    # proves it is the next one: with only the seeding, a method that STORES
+    # its sole field (`self.inner = o`, which the identity rewrites to
+    # `self = o`) overwrites the frame address the CALLER still holds, so the
+    # store never reaches the caller and every later `self.v` in the method
+    # reads the caller's object — measured as SIGSEGV on both architectures.
+    # `_collect_receiver_rebinds` withdraws its one-field exemption for exactly
+    # these owners, and both halves read `model.one_word_sole_field_frame`, so
+    # they cannot disagree about which receivers are addresses.
+    #
+    # 155 is `41 * 10 + 1`, and `two_field_holder_reads_its_nested_frame_through
+    # _a_method` — the control, immediately below — computes the SAME number by
+    # the other route, so a lowering that read the wrong slot, or read through
+    # the holder's own layout instead of `Opt`'s, would have to be wrong in
+    # exactly the way both agree on to pass. The two rows differ by one `var pad:
+    # Int` and nothing else, which is the whole of the boundary: a two-field
+    # struct has storage of its own, so its receiver is an address and the
+    # analysis already had a case for it; a one-field struct has none.
+    ("one_word_holder_of_a_frame_reads_through_its_method",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.inner.v = 41\n"
+     "    b.inner.has = 1\n"
+"    return b.get()\n", 155, None),
+    # THE CONTROL, and it is what makes the row above an assertion about a
+    # boundary rather than about a program: `Box` here declares TWO fields, so
+    # `Box`'s receiver is the ADDRESS of a frame of its own and `b.get()` was
+    # always answerable. The bodies, the nested writes and the expected 155 are
+    # identical, and the only variable is the `var pad: Int`. A change that had
+    # answered the one-field case by making the analysis permissive about frame
+    # receivers generally would move this row's number too, and a change that had
+    # special-cased "one field" would leave it green and prove nothing about the
+    # case it was written for.
+    ("two_field_holder_reads_its_nested_frame_through_a_method",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var pad: Int\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.inner.v = 41\n"
+     "    b.inner.has = 1\n"
+     "    return b.get()\n", 155, None),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
@@ -11818,6 +11891,49 @@ REFUSAL_CASES = [
      "    p.b = 4\n"
      "    return p.zz + n\n",
      "refuse:is a host module (CPython standard library)", None),
+    # THE WRITE HALF of the one-word-holder-of-a-frame pair. The read half is
+    # `BOTH_ARCH_CASES`'s `one_word_holder_of_a_frame_reads_through_its_method`
+    # and it builds and answers 155, because a method handed `b`'s frame
+    # address may READ `self.inner.v` as one load at `self + 8*slot(v)`. What it
+    # may not do is STORE it: `self.inner = o` is `self = o` after the identity
+    # a one-word struct's field and receiver share, so the method overwrites the
+    # address the CALLER still holds — the caller's `b` keeps pointing at the
+    # original frame, every later `self.v` in the method reads the caller's
+    # object, and the program answers a number no source wrote. Measured as
+    # exit 139 on BOTH architectures in the window between the two halves.
+    #
+    # So it is here and not in the answered group: the assertion is that it does
+    # not build, and a positive row cannot say that. `_collect_receiver_rebinds`
+    # is where the refusal comes from, and it is the same check whose one-field
+    # EXEMPTION has to be withdrawn for these owners —
+    # `refuse_a_one_field_mutator_that_also_returns_a_value` in
+    # `test_formal_bracketed_method_field_set.py` is the exemption still being
+    # right for a one-word struct whose field is a plain value, so the two rows
+    # together are the whole rule rather than one half of it.
+    ("refuse_a_one_word_holder_of_a_frame_stored_through_its_receiver",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def mk(k: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = k\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def set(self, o: Opt) -> Int:\n"
+     "        self.inner = o\n"
+     "        return self.inner.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner = Opt()\n"
+     "    b.set(mk(41))\n"
+     "    return b.inner.v\n",
+     "refuse:self is assigned o in Box_set()", None),
     # The CONTROL, and it is the half that makes the case above mean something:
     # the SAME program without the import is refused by the frame clause, on
     # both architectures. Without this row a change that deleted the frame

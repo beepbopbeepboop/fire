@@ -2964,6 +2964,29 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             for recv in M.struct_receivers(owner):
                 holders[_fn_key(fn)].add(recv)
                 hstruct[_fn_key(fn)][recv] = [owner]
+        # A one-word struct's receiver IS its field, so the branch above skips
+        # it — and the field can be a FRAME, which makes the receiver an address
+        # after all. `self.v` is then one load at `self + 8*slot(v)`, and the
+        # holder table is what says so: without this the analysis has no case
+        # for a word that is both a receiver and an address, and the read half
+        # is refused by name about an expression the source never spells.
+        #
+        # Only the READ half becomes answerable, and that is a property of what
+        # is being asked rather than of the order: the WRITE half
+        # (`self.<sole> = x`, which is `self = x` after the identity) overwrites
+        # the frame address the caller still holds, so
+        # `_collect_receiver_rebinds` withdraws its one-field exemption for
+        # exactly these owners — which is the other half of this pair and the
+        # reason the seeding cannot land without it. Both read the same
+        # `model.one_word_sole_field_frame`, so they cannot disagree about which
+        # receivers are addresses.
+        elif owner is not None and M.struct_is_one_field(owner) \
+                and M.method_receiver_name(fn) is not None:
+            inner = M.one_word_sole_field_frame(owner, structs_by_name)
+            if inner is not None:
+                for recv in M.struct_receivers(owner):
+                    holders[_fn_key(fn)].add(recv)
+                    hstruct[_fn_key(fn)][recv] = [inner]
         # Every parameter of every function, not only a method's: a free
         # function's `def f(r: S)` is the same construct as `def __eq__(self,
         # other: Self)`, the declaration is the same kind of evidence, and
@@ -4155,7 +4178,18 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
         # everywhere else.  Decided by `struct_is_one_field`, the same predicate
         # the rewrite that makes `self.<field>` mean `self` is decided by, so
         # the two cannot disagree about which receivers are values.
-        if M.struct_is_one_field(owner):
+        #
+        # **…unless that one field is a FRAME.**  A one-word struct's receiver
+        # is its field's storage, and that storage can be an address; `self =
+        # <a word>` then overwrites the frame address the CALLER still holds, so
+        # the method's store does not reach its caller and every later `self.v`
+        # in the method reads the caller's object instead. Measured on both
+        # architectures as a SIGSEGV, and with the read half seeded by
+        # `_frame_receivers` it is reachable at all — which is why the two halves
+        # of `model.one_word_sole_field_frame` have to land together, and why
+        # they read it from one place.
+        if M.struct_is_one_field(owner) \
+                and M.one_word_sole_field_frame(owner, structs_by_name) is None:
             continue
         receivers = M.struct_receivers(owner)
         # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
@@ -5923,6 +5957,21 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
     is only known once the fixpoint has run, which is after the rewrite.  So
     the check reads the REWRITTEN call: a `S_m` whose first argument is a
     holder of a struct that is not `S`.
+
+    **…except when `S` is ONE FIELD and its field is a frame, because then the
+    callee was not compiled to believe its receiver is an `S` at all.**  A
+    one-word struct's receiver IS its field, so `_frame_receivers` seeds the
+    method's receiver as a holder of whatever frame that field holds, and the
+    layout the callee writes through is that frame's.  `b.get()` where `b` is
+    an `Opt` frame and `Box`'s sole field is an `Opt` is therefore the one call
+    this check must not refuse, and refusing it named an expression the source
+    does not contain ("`Box_get()` writes its own struct's fields at `base +
+    8k` for Box's layout") about a program that is about to compute the right
+    answer.  So the comparison is against what the CALLEE was compiled to
+    believe — `model.one_word_sole_field_frame`, the same function that seeded
+    it — and not against the callee's own struct name.  It is a generalization
+    rather than an exception: for every other callee the two are the same
+    struct, so nothing that is accepted here was accepted before.
     """
     for node in M.iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.CallExpr) or not node.args:
@@ -5941,9 +5990,13 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
         recv = node.args[0]
         if not isinstance(recv, F.IdentExpr) or recv.name not in holders:
             continue
-        cands = [st.name for st in (by_name.get(recv.name) or [])]
-        if not cands or owner in cands:
+        # What the CALLEE writes through, which is its own layout for every
+        # callee but a ONE-FIELD one — see the docstring's last paragraph.
+        want = M.one_word_sole_field_frame(st, structs_by_name) or st
+        cands = [s.name for s in (by_name.get(recv.name) or [])]
+        if not cands or want.name in cands:
             continue
+        owner = want.name
         raise CodegenError(
             f"{recv.name}.{named[1]}() is dispatched to {owner}.{named[1]}() by "
             f"method NAME, and the receiver is a "
