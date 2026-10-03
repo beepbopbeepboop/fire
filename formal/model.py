@@ -12356,6 +12356,35 @@ def _pair_value_kind(node):
     return _kind_of_simple(node)
 
 
+def _kind_of_nested_elements(elems) -> str | None:
+    """`_kind_of_elements` with the nested-container arm, so a WALKER'S TARGET
+    is classified one level deeper than a flat literal is.
+
+    The same question and the same evidence as `_pair_value_kind`, from the
+    second reader that needs it: a container literal's element word holds a
+    container when the element written there is one, and a loop variable's word
+    is exactly such an element word — written by the literal and by nothing
+    else, which is the evidence `_pair_value_kind`'s docstring requires before
+    it claims the nesting. It is kept beside that function rather than folded
+    into `_kind_of_elements` for the reason that docstring gives: the flat
+    reader is read by the module-global classification, where the dict's VALUES
+    are taken out of a slot's initializer with no check that a subscripted key
+    is one of them.
+
+    Measured, both architectures, before this existed — and it is the
+    comprehension row of `bugs/FORMAL_string_value_model.md`, found with the
+    `for` row beside it: a `for` target over `["p", "", "q"]` classified as
+    `list:str` and the empty string was TRUTHY, because the count-field load
+    reads the eight bytes of `__TEXT` that follow the terminating NUL. The kind
+    was the list's, not the element's; see `_iterable_own_shape`.
+    """
+    kinds = {_pair_value_kind(el) for el in (elems or [])}
+    kinds.discard(None)
+    if not kinds:
+        return None
+    return kinds.pop() if len(kinds) == 1 else None
+
+
 def dict_literal_key_value_kind(node, index):
     """What `node[<index>]` yields for a LITERAL key, or None when it cannot say.
 
@@ -12960,28 +12989,59 @@ class ValueKinds:
                 self._bind(s.name, self._return_kind(s))
 
     def _iterable_kind(self, iterable):
-        """What a `for`/`in` binds from `iterable`.
+        """What a `for`/`in` binds from `iterable` — ONE ELEMENT of it.
 
-        A container literal knows its own element kind; `range` yields
-        integers; anything else is a blob whose elements this path treats as
-        words (types.function_var_types says the same about loop variables)."""
+        A container literal knows its own element kind; `range` yields integers;
+        anything else is a blob whose elements this path treats as words
+        (types.function_var_types says the same about loop variables). Never the
+        container's own kind; `_iterable_own_shape` carries the measurement of
+        what that cost."""
         return self._iterable_own_shape(iterable) or INT_KIND
 
     def _iterable_own_shape(self, iterable):
         """`_iterable_kind` without its final fallback, or None.
 
-        The same three shapes `_iterable_kind` decides on its own evidence and
-        then `or INT_KIND`, kept apart because the fallback is not a claim.  A
-        loop variable over a name — `for row in rows: row[0]`, where `rows` is a
-        parameter — is the ordinary way to walk a list of lists, and
-        `_iterable_kind` answers INT_KIND for it because there is nothing else
-        to answer.  That answer is a word, not an integer, so anything reading
-        it as evidence that the source says "integer" refuses a correct
-        program; see `own_shape_kind`, which is what reads this."""
+        The kind of the name a `for` (or a comprehension generator) over
+        `iterable` BINDS — which is one ELEMENT of it, and never the container.
+
+        **It used to answer the container's kind, and that was a wrong ANSWER on
+        both architectures, not a missing refusal.** `["p", "", "q"]` is
+        `list:str`, so the loop variable was classified `list:str` and every
+        reader of a container took it at its word:
+
+          * `if x:` → `truthy_lowering`'s `TRUTHY_FROM_BLOB_FIELD`, which is one
+            load from offset 0. For a `char *` that load reads the eight bytes
+            of `__TEXT,__text` that FOLLOW the terminating NUL, so whether the
+            empty string came out truthy depended on which other string the
+            linker happened to intern next to it. Measured on both machines,
+            `for x in ["p", "", "q"]: if x: c = c + 1` returned 3 where CPython
+            returns 2, and a two-element `["p", ""]` with an `else` returned 101
+            — which is right only because the two strings happened to land
+            adjacent to their own NULs;
+          * `len(x)` → the same load, so it returned the low half of the
+            address's own neighbourhood: 2013266032 (0x78000070, which is `p\0`
+            and the first three bytes of the next interned string) for `"p"`.
+
+        One element is what the target holds, so the element kind is what is
+        returned, and `subscript_element_kind` is what already turns a container
+        kind into an element kind for `x[i]`. The nested arm is
+        `_kind_of_nested_elements` rather than `_kind_of_elements` because
+        `for row in [[1, 2], [3, 4]]` is ordinary and its target IS a blob:
+        without the arm the target kind would fall to the word default and
+        `len(row)` — which works today and which the corpus uses — would start
+        refusing.
+
+        The fallback is a word, and a word is not a claim that the source says
+        "integer": `for row in rows: row[0]` over a parameter is the ordinary
+        way to walk a list of lists and `_iterable_kind` answers INT_KIND for it
+        because there is nothing else to answer. So the fallback is kept out of
+        `own_shape` (this function returns None for it), which is what
+        `own_shape_kind` reads; see that method for the three correct programs
+        that depend on it."""
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return list_kind(_kind_of_elements(iterable.elements))
+            return _kind_of_nested_elements(iterable.elements)
         if isinstance(iterable, F.Comprehension):
-            return list_kind(_kind_of_simple(iterable.element))
+            return _pair_value_kind(iterable.element)
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
         return None
@@ -12993,6 +13053,63 @@ class ValueKinds:
         if ann in self._string_names:
             return STR_KIND
         return None
+
+    def comprehension_generator_scopes(self, comp) -> list:
+        """The names a comprehension's generator targets bind, per level.
+
+        `scopes[i]` is what a site INSIDE generator `i` of `comp` sees: every
+        name the generators `0 … i` bound, with the kind each one's own
+        iterable says. `scopes[i-1]` — not `scopes[i]` — is therefore what
+        generator `i`'s OWN ITERABLE sees, which is Python's rule and the reason
+        the emitters push the level's scope just after the target store rather
+        than on entry (see `formal/arm64_codegen.py::_emit_compr_gen`).
+
+        **An overlay and not a `_bind` into `locals`, and the difference is
+        SCOPE.** A comprehension is its own scope in Python 3, so `var x = 5`
+        beside `[x for x in ["a", "b"]]` is two bindings of one name that do not
+        meet, and a `_bind` would file them as a conflict — `locals[x] = None`,
+        a word — which costs the OUTER `x` an answer it had and buys the
+        comprehension's nothing. Worse in the other direction: a `_bind` makes
+        the comprehension's target visible to every site in the function, so
+        `printf("%s", x)` after a comprehension that binds `x` and nothing else
+        emits instead of refusing a read CPython answers with `NameError`.
+
+        So this is consulted only from inside the comprehension, and only for a
+        bare NAME (a generator target is a name or a tuple of names, and a
+        tuple target's per-element kind is one level deeper than the iterable's
+        — see `_bind_target`, which has the same limit on the `for` statement).
+        Nothing else changes: `own_shape_kind` deliberately does NOT read this,
+        because it answers "did a STATEMENT OF THIS FUNCTION bind this name to
+        a shape of its own" and a comprehension's target is bound by no
+        statement of the function.
+
+        The kind is `_iterable_own_shape`, never `_iterable_kind`, so an
+        iterable this cannot describe claims nothing and the name falls through
+        to the function's own map — which is what happened to every comprehension
+        target before this existed, and is why a comprehension over a PARAMETER
+        behaves exactly as it always has.
+        """
+        scopes: list = []
+        bound: dict = {}
+        conflicted: set = set()
+        for gen in (getattr(comp, "generators", None) or []):
+            own = self._iterable_own_shape(getattr(gen, "iterable", None))
+            if own is not None:
+                for nm in _comprehension_target_names(
+                        getattr(gen, "target", None)):
+                    if nm in conflicted:
+                        continue
+                    if bound.get(nm, own) != own:
+                        # Two generators of one comprehension, one name, two
+                        # kinds: the same unanimity rule `locals` follows, and
+                        # for the same reason (the map is flow-insensitive, so
+                        # two statements that disagree say nothing).
+                        conflicted.add(nm)
+                        bound.pop(nm, None)
+                        continue
+                    bound[nm] = own
+            scopes.append(dict(bound))
+        return scopes
 
     # ── querying ───────────────────────────────────────────────────────
 
@@ -13137,8 +13254,21 @@ class ValueKinds:
         # say the source does not say what its operand holds.
         return (TYPE_KIND if type_tag_for_name(name) is not None else None)
 
-    def kind_of(self, e):
-        """What `e` evaluates to, or None when the source does not say."""
+    def kind_of(self, e, scopes=()):
+        """What `e` evaluates to, or None when the source does not say.
+
+        `scopes` is the comprehension scope STACK (`ValueKinds`.
+        `comprehension_generator_scopes`, outermost first) and is empty
+        everywhere except on a site inside a comprehension. A bare name the
+        innermost such scope binds is answered by that scope and by nothing
+        else — see `scope_lookup` for why it does not fall through, and
+        `comprehension_generator_scopes` for why the scopes exist rather than
+        being a `_bind` into `locals`.
+        """
+        if scopes and isinstance(e, F.IdentExpr):
+            found, scoped = scope_lookup(scopes, e.name)
+            if found:
+                return scoped
         k = _kind_of_simple(e)
         if k is not None or isinstance(e, (F.StringLiteral, F.IntLiteral,
                                            F.BoolLiteral, F.FloatLiteral)):
@@ -14341,6 +14471,51 @@ def dylib_aliased_export_refusal(callee: str, aliases: dict,
 def _target_names(target):
     from mojo.middle.boundnames import _lbn_target_names
     return _lbn_target_names(target) if isinstance(target, str) else []
+
+
+def _comprehension_target_names(target) -> list:
+    """The names ONE generator target binds, in source order.
+
+    A comprehension's target is a `str` (`fire_compiler.ComprehensionFor`
+    carries it as one), an `IdentExpr`, or a tuple/list of them for a nested
+    generator — the three shapes `_bind_target` already splits, and the same
+    three `_lbn_target_names` reads for a `for` statement. It is spelled out
+    here rather than called so that a target this cannot describe contributes
+    NO name: a scope that claimed a name it cannot classify would be a claim
+    about a slot whose element it never looked at.
+
+    A tuple target's names all get the ITERABLE's element kind, which is one
+    level too coarse for `[[1, 2], [3, 4]]` unpacked into `a, b` (each of them
+    holds an integer). That limit is the `for` statement's too and for the same
+    reason — deriving it needs the element's own element kind, which
+    `_kind_of_nested_elements` collapses — so it is left as one imprecision
+    rather than two.
+    """
+    if isinstance(target, str):
+        return [target]
+    if isinstance(target, F.IdentExpr):
+        return [target.name]
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        return [e.name for e in (getattr(target, "elements", None) or [])
+                if isinstance(e, F.IdentExpr)]
+    return []
+
+
+def scope_lookup(scopes, name: str):
+    """`(found, kind)` for `name` in a stack of comprehension scopes.
+
+    INNEST first, and the order is the whole of the answer: a nested
+    comprehension's target shadows the enclosing one's for every site inside it,
+    which is the same rule `comprehension_generator_scopes`' cumulative maps
+    encode and the reason the emitters keep a STACK rather than one merged map.
+    A scope that has the name and cannot say what it holds returns `(True, None)`
+    rather than falling through, because falling through would answer about the
+    enclosing scope's binding of a name the inner one has already rebound.
+    """
+    for scope in reversed(scopes):
+        if name in scope:
+            return True, scope[name]
+    return False, None
 
 
 # ── Constructs that are no-ops in the value flow ──────────────────────────

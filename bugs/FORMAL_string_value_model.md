@@ -9,12 +9,13 @@ found the same defect class in **eleven more operators** — every one measured,
 every one refused. Wave 6 closed the three it left (`~`, the truthiness
 conversion, and a slice of a string) and found **three more** in the same family
 that no list had recorded: `if []:`, a short-circuit chain used as a condition,
-and an x86-64 `assert` that always failed. 2026-10-03 closed the last item in
-"what was found while looking" that had a decidable fix — the unannotated
-parameter's fabricated truthiness, which is the call site's argument kind
-propagated into the callee — and the one next to it, the comprehension over a
-list of strings, is re-measured as still open with its scope question named,
-because it is a different hook and not a smaller version of the same one. What
+and an x86-64 `assert` that always failed. 2026-10-03 closed the unannotated
+parameter's fabricated truthiness — the call site's argument kind propagated
+into the callee — and, on `work/formal13-6`, the comprehension guard and the
+`for`-loop variable's kind beside it, which was the last open item in the "what
+was found while looking" section with a decidable fix (the comprehension case
+re-measured as still open at the time, with its scope question named, and it was
+a different hook rather than a smaller version of the same one). What
 is still NOT fixed, and is the larger thing, is the collision between that
 representation and the stdlib's own `String` struct — which is what all 16 of
 the "a String receiver is returned/passed" refusals in the stdlib sweep actually
@@ -578,37 +579,99 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   252-file stdlib sweep on x86-64 reports "unchanged: 252" — 18 pass, 13 codegen,
   219 codegen/dependency, identical family counts. It is a wrong-answer fix with
   no new refusal surface.
-- **A comprehension over a list of STRINGS does not filter on truthiness. STILL
-  OPEN, and it is a DIFFERENT hook from the bullet above.**
-  `[x for x in ["p", "", "q"] if x]` keeps all three (measured again 2026-10-03:
-  exit 33, where CPython says 22), and re-measuring it after the fix above
-  confirms it did not move — correctly, because the fix is a PARAMETER hook and
-  this is the `for`-target kind. `ValueKinds._scan` binds `F.ForStmt`'s target
-  from `_iterable_kind` and has no `F.Comprehension` arm at all, so a
-  comprehension's loop variable is never in the map the guard is asked against.
+- **A comprehension over a list of STRINGS does not filter on truthiness. FIXED
+  2026-10-03 (`work/formal13-6`) — and the fix found a SECOND row beside it,
+  which no list had recorded, plus a capability the row was refused for.**
+  `[x for x in ["p", "", "q"] if x]` kept all three (exit 3, where CPython says
+  2), and the re-measurement confirmed it had not moved after the parameter fix
+  above — correctly, because that one was a PARAMETER hook and this is the
+  `for`-target kind. `ValueKinds._scan` binds `F.ForStmt`'s target from
+  `_iterable_kind` and has no `F.Comprehension` arm at all, so a comprehension's
+  loop variable was in no kind map and `if x:` fell to `TRUTHY_NONZERO` — a null
+  test on the ADDRESS of the empty string.
 
-  **Next step, and it is smaller than the bullet above made it look:** the
-  iterable's element kind is already computed — `_iterable_own_shape` answers
-  `list_kind(_kind_of_elements(...))` for a list literal — so the arm is a bind,
-  not a derivation.
+  **The scope shape this bullet predicted is the one that landed**, and
+  `formal/build.py`'s `_comprehension_scoped_names` is the reader of its two
+  halves. It is an OVERLAY rather than a `_bind` into `locals`, and the reason is
+  the same one that function was written for: a comprehension has its own scope
+  in Python 3, so `var x = 5` beside `[x for x in ["a", "b"]]` is two bindings
+  that do not meet, and a `_bind` would file them as a conflict — costing the
+  OUTER `x` an answer it had and buying the comprehension nothing. So:
 
-  **The thing to get right is SCOPE, and master now has the reader for it.**
-  A comprehension has its own scope in Python 3, so binding its target into
-  `ValueKinds.locals` — the FUNCTION's map — would let `var x = 5` beside
-  `[x for x in ["a", "b"]]` move `x`'s kind, and the conflict rule's answer to
-  that is "undecidable", which is a word and not the integer the outer `x`
-  holds. `formal/build.py`'s `_comprehension_scoped_names(fn)` (landed on master
-  in `92175ec0`, "a comprehension is its own scope") is exactly the predicate
-  that question needs — "bound by a comprehension target and NOTHING else" — and
-  the two facts it distinguishes are the two facts a kind bind needs here: a name
-  only a comprehension binds may take the comprehension's element kind, and a
-  name an ordinary statement also binds may not.
+  | | where |
+  |---|---|
+  | the maps, one per generator level and cumulative | `model.ValueKinds.comprehension_generator_scopes` |
+  | the innermost-first lookup, and why a hit does not fall through | `model.scope_lookup` |
+  | the consulted choke point, with `scopes=` | `ValueKinds.kind_of` |
+  | the two emitters' stacks, pushed after each generator's target store | `formal/arm64_codegen.py`, `formal/x86_64_codegen.py`: `self._compr_scopes` |
 
-  So the shape is: an overlay consulted only by the sites inside a comprehension,
-  keyed by the comprehension node, rather than a `_bind` into `locals`. It was not
-  done in the same commit as the parameter fix because it is a second change to a
-  second hook and its blast radius is every comprehension in the corpus rather
-  than every annotated call.
+  The push is placed AFTER the target store because that is Python's rule and
+  not a convenience: generator `gi`'s own ITERABLE is evaluated in the scope of
+  generators `0 … gi-1`, and the parent frame has already pushed exactly that
+  and has not popped it. So the iterable reads the enclosing scope and
+  everything from the target store down — conditions, element, key, and every
+  nested comprehension inside them — reads this generator's own.
+
+  `own_shape_kind` deliberately does NOT read the overlay, and that is a
+  decision rather than an omission: it answers "did a **statement of this
+  function** bind this name to a shape of its own", and a comprehension's target
+  is bound by no statement of the function.
+
+  Nine cases in `test_formal_run.py`, eight in `PRINTF_TEXT_CASES` and one in
+  `BOTH_ARCH_CASES` (`both_arch_loop_and_comprehension_variable_hold_an_element`,
+  because the cause is one table in `model.py` that both backends ask and what
+  needs proving is that they come out the same). Seven of the nine FAIL on the
+  pre-change tree; two are guards that pass both ways (`for row in [[1, 2],
+  [3, 4]]: len(row)`, and a comprehension over a parameter). The
+  capability row: `len(k)` over a comprehension target was **refused** — "the
+  source does not say what this operand holds" — and is a `strlen` now.
+  `test_formal_run.py` PASS=791 FAIL=0 after, PASS=782 FAIL=0 before.
+
+  ### The `for`-target row beside it, which no list had either, and it CRASHED
+
+  The same fix had to change what `_iterable_own_shape` returns, because it was
+  answering the CONTAINER's kind for a name that holds ONE ELEMENT. `["p", "",
+  "q"]` is `list:str`, so a `for` target over it was classified `list:str` and
+  every reader of a container took it at its word:
+
+  | source | before (both backends) | after |
+  |---|---|---|
+  | `for x in ["p", "", "q"]: if x: c = c + 1` | **3**, where CPython says 2 | 2 |
+  | `for x in ["p", ""]: if x: … else: c += 100` | **2** — right only because the two strings happened to land adjacent to their own NULs | 101 |
+  | `len(x)` over the same | **2013266032** (0x78000070 = `p\0` and the first three bytes of the next interned string) | the `strlen` this document decided a string's length is — `sum(len(x) for x in ["p","abc"])` is 4 on both |
+  | `for x in [1, 0, 2]: if x: c = c + 1` | **SIGSEGV, exit 139** — the count-field load is `LDR [x, #0]` with X0 holding the integer 1 | 2 |
+
+  The string half is the same defect this document has been about for six waves:
+  a `char *` has no count word at offset 0, and reading eight bytes there reads
+  the eight bytes of `__TEXT,__text` that FOLLOW the terminating NUL — so
+  whether the empty string came out truthy depended on which other string the
+  linker interned next to it. The integer half is the same load dereferencing
+  an integer, which is a hard crash rather than a plausible number. `_emit_len`'s
+  own docstring already named the failure for the unclassified case
+  (`LEN_FROM_BLOB_FIELD` over a word "invents a length"); this is the same
+  defect reached through a kind that was confidently WRONG instead of absent.
+
+  The element kind needs the nested-container arm (`model._kind_of_nested_elements`,
+  `_pair_value_kind`'s question from the second reader that needs it) because
+  `for row in [[1, 2], [3, 4]]` is ordinary and its target IS a blob — without
+  the arm the target kind falls to the word default and `len(row)`, which has
+  always worked, starts refusing. That row is a guard case for exactly that
+  reason.
+
+  **What it does not do.** A TUPLE target's names still all get the iterable's
+  element kind, which is one level too coarse for `[[1, 2], [3, 4]]` unpacked
+  into `a, b` (each holds an integer). That is the `for` statement's pre-existing
+  limit and it is left as one imprecision rather than two; it is also why a
+  comprehension over a **parameter** is unchanged — `_iterable_own_shape`
+  answers None there, so the overlay claims nothing and the name falls through
+  to the function's own map, which is exactly what happened before.
+
+  **One thing found while looking, filed not fixed:**
+  `bugs/FORMAL_nested_comprehension_generator_temps_are_not_collected.md` — a
+  comprehension inside a comprehension's ITERABLE has no `_ci1`/`_cb1`, because
+  the collector and the emitter disagree by one about the nesting counter, and
+  every nested comprehension is refused on both machines today. Re-measured with
+  the patch above reverted, so it is not a regression from it.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String

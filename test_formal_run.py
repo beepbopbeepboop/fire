@@ -5997,6 +5997,41 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return ping(5000)\n", 2, None),
+    # ── A LOOP VARIABLE'S KIND, ON BOTH ARCHITECTURES ──────────────────────
+    #
+    # Every other row of this change is in PRINTF_TEXT_CASES and runs on the
+    # host only, which is the wrong economy here: the subject is one table in
+    # `formal/model.py` that both backends ask (`ValueKinds._iterable_own_shape`
+    # for the kind, `truthy_lowering` for the conversion), so what needs proving
+    # is that they come out the SAME, and that is what this row is for.
+    #
+    # The pre-change answers were a WRONG NUMBER on both machines and both were
+    # wrong in the same direction, which is the failure mode nothing else here
+    # catches: `a` (a `for` over three strings, one of them empty) was 3 and
+    # `b` (a comprehension over four of them, one empty) was 4, both where
+    # CPython says 2 and 3. `c` and `d` are the two guards — the outer `x` stays
+    # an integer beside a comprehension that rebinds `x`, and `len` of a
+    # comprehension target is a `strlen` rather than a refusal (which is what
+    # made `d` answerable at all).
+    #
+    # Every number printed is distinct, and the trailing `5` is a constant in the
+    # format so a formatter that dropped an argument would still print five of
+    # them.
+    ("both_arch_loop_and_comprehension_variable_hold_an_element",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 0\n"
+     "    for t in [\"p\", \"\", \"q\"]:\n"
+     "        if t:\n"
+     "            a = a + 1\n"
+     "    var b = len([y for y in [\"p\", \"\", \"q\", \"r\"] if y])\n"
+     "    var x = 5\n"
+     "    var c = 0\n"
+     "    if x:\n"
+     "        c = c + 1\n"
+     "    var lens = [len(k) for k in [\"a\", \"bb\", \"ccc\", \"dddd\"]]\n"
+     "    var d = lens[3]\n"
+     "    printf(\"%d %d %d %d %d\", a, b, c, d, 5)\n"
+     "    return 0\n", 0, "2 3 1 4 5"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -10256,6 +10291,135 @@ WAVE6_TRUTHY_CASES = [
      "    b = [x for x in a if x]\n"
      "    printf(\"%d\", len(b))\n"
      "    return 0\n", 0, "3"),
+    # ── THE LOOP VARIABLE'S KIND: an ELEMENT, not the container ────────────
+    #
+    # The row above is over a NAME, so it says nothing about what a loop
+    # variable holds — and that is the gap these two close. `ValueKinds`
+    # classified the target of `for x in ["p", "", "q"]` as `list:str`, the
+    # LIST's kind, so every reader of a container took it at its word:
+    #
+    #   * `if x:` → `truthy_lowering`'s TRUTHY_FROM_BLOB_FIELD, which is ONE
+    #     LOAD FROM OFFSET 0. For a `char *` that load reads the eight bytes of
+    #     `__TEXT,__text` that FOLLOW the terminating NUL — so whether the
+    #     empty string came out truthy depended on which other string the
+    #     linker happened to intern next to it. Measured on both backends
+    #     before the fix, `for x in ["p", "", "q"]: if x: c = c + 1` returned
+    #     3 where CPython returns 2.
+    #   * `len(x)` → the same load, so it returned a number made of the string's
+    #     own bytes: 2013266032 = 0x78000070 for "p", which is `p\0` and the
+    #     first three bytes of the next interned string.
+    #
+    # 3 and 2 are the only two small answers available, and the pre-change
+    # number is on the other side of the one-byte boundary from the correct
+    # one, so a fixed build cannot reach it by accident.
+    ("truthy_for_loop_variable_over_strings",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [\"p\", \"\", \"q\"]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "2"),
+    # The `else` half, because the two-element list is where the pre-change
+    # build was ACCIDENTALLY right: the empty string's interned bytes happened
+    # to be adjacent to their own NUL, so offset 0 read zero and the else arm
+    # ran. 101 is `then` once and `else` once; 2 or 200 would mean the guard
+    # never moved.
+    ("truthy_for_loop_variable_else_arm",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [\"p\", \"\"]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "        else:\n"
+     "            c = c + 100\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "101"),
+    # The INTEGER row, and it is the one that CRASHED rather than answered
+    # wrongly: with the target classified `list:int`, `if x:` took the count
+    # field — `LDR [x, #0]` with X0 holding the integer 1 — so
+    # `for x in [1, 0, 2]: if x:` died of SIGSEGV on both backends. An integer
+    # is 0 or it is not, so the identity test is the answer and it is what the
+    # element kind restores.
+    ("truthy_for_loop_variable_over_ints",
+     "def main(n):\n"
+     "    var c = 0\n"
+     "    for x in [1, 0, 2]:\n"
+     "        if x:\n"
+     "            c = c + 1\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", 0, "2"),
+    # GUARD, and the reason it passes on the pre-change tree too: the target of
+    # `for row in [[1, 2], [3, 4]]` IS a blob, and `len(row)` answers from its
+    # count field. The nested-container arm of the element kind is what keeps it
+    # that way — without it the target kind would fall to the word default and
+    # `len` of a program that has always worked would start refusing.
+    # 2 + 2 = 4.
+    ("truthy_nested_loop_variable_keeps_its_blob",
+     "def main(n):\n"
+     "    var s = 0\n"
+     "    for row in [[1, 2], [3, 4]]:\n"
+     "        s = s + len(row)\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n", 0, "4"),
+    # ── THE COMPREHENSION'S OWN SCOPE ──────────────────────────────────────
+    #
+    # A comprehension has its own scope in Python 3, so its loop variable is
+    # not a local of the enclosing function and `ValueKinds.locals` must not
+    # answer for it. It did not answer at all: `_scan` binds a `for` statement's
+    # target and has no `Comprehension` arm, so the target was in no kind map
+    # and `if x:` fell to TRUTHY_NONZERO — a null test on the ADDRESS of the
+    # empty string. Measured on both backends before the fix, exactly as the
+    # `for` row above:
+    # `[x for x in ["p", "", "q"] if x]` had THREE elements where CPython
+    # builds two.
+    #
+    # It is an OVERLAY rather than a `_bind` into `locals`, and this row is why
+    # that matters: binding `x` into the function's map beside `var x = 5` would
+    # file two bindings that do not meet as a conflict, cost the OUTER `x` the
+    # integer kind it has here, and leave the comprehension with a word. The
+    # outer `x` must stay an integer (c = 1) and the comprehension must still
+    # filter (r = 2), and both are asserted here.
+    ("comprehension_target_is_its_own_scope",
+     "def main(n):\n"
+     "    var x = 5\n"
+     "    var r = [x for x in [\"p\", \"\", \"q\"] if x]\n"
+     "    var c = 0\n"
+     "    if x:\n"
+     "        c = c + 1\n"
+     "    printf(\"%d %d\", len(r), c)\n"
+     "    return 0\n", 0, "2 1"),
+    # The SAME scope read by the ELEMENT rather than by the guard, and it is a
+    # capability as well as a correctness row: `len(k)` over a comprehension
+    # target used to be REFUSED for want of a kind ("the source does not say
+    # what this operand holds"), and it is a `strlen` now. 2 + 0 + 3 = 5.
+    ("comprehension_target_kind_is_visible_to_the_element",
+     "def main(n):\n"
+     "    var r = [len(k) for k in [\"aa\", \"\", \"bbb\"]]\n"
+     "    printf(\"%d %d %d\", len(r), r[0], r[2])\n"
+     "    return 0\n", 0, "3 2 3"),
+    # A DICT comprehension's KEY is the element and its VALUE is `.key` (the
+    # parser's swap), so both sites are inside the scope — and `len(k)` in the
+    # value position is the one that would be missed if only the element were
+    # routed. 3 pairs, d["aa"] = 2, d["bbb"] = 3.
+    ("comprehension_scope_reaches_both_dict_spellings",
+     "def main(n):\n"
+     "    var d = {k: len(k) for k in [\"aa\", \"\", \"bbb\"]}\n"
+     "    printf(\"%d %d %d\", len(d), d[\"aa\"], d[\"bbb\"])\n"
+     "    return 0\n", 0, "3 2 3"),
+    # GUARD: a comprehension over an iterable this path cannot describe is
+    # exactly as unanswerable as it was before the overlay — the overlay claims
+    # a kind only from `_iterable_own_shape`, so `for x in a` over a parameter
+    # falls through to the function's own map and then to TRUTHY_NONZERO. That
+    # is the right answer for integers and the reason the row is 3 and not a
+    # refusal.
+    ("comprehension_over_a_parameter_is_unchanged",
+     "def pick(n, a):\n"
+     "    var b = [x for x in a if x]\n"
+     "    return len(b)\n"
+     "\n"
+     "def main(n):\n"
+     "    return pick(0, [1, 0, 2])\n", 2, None),
     # A short-circuit chain. The one that is NOT just the left operand: `and`/
     # `or` return an OPER operand, and the operand that survives can be the
     # empty string or the empty list, whose zeroness as a returned VALUE is the
