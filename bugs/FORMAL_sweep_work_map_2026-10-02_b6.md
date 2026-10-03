@@ -83,6 +83,32 @@ tool now refuses to start on an interpreter that cannot import the backend.
 the whole of the scope delta. It matters for §2 — the two runs' denominators are
 not the same population.
 
+### 1.4 How long a full sweep of this scope is, measured
+
+The scope is walked in sorted order, so a run's progress is readable off its
+own output: this run reached `../new-modular/Mojo/stdlib/std/math/__init__.mojo`
+— file **145 of the stdlib's 252** — **68 minutes** after it started, with 142
+non-pass files classified on the arm64 arm and 143 on x86_64.
+
+| | measured | projected for the full 652-file scope |
+|---|---|---|
+| the stdlib half (252 files) | 145 files in 68 min | **~2 h** |
+| the whole scope (652 files) | — | **~4-6 h per arm**, ~8 h of wall clock with both arms at once |
+
+The repository's own 400 files come second (absolute paths sort
+`.../new-modular` before `.../work-249`) and are heavier per file, not lighter,
+so the upper half of that range is the honest one.
+
+**This is why the b6 sweep was cut short, and it is the single most reusable
+number here:** a fresh sweep of this scope on both architectures is a multi-hour
+job on a loaded box, not a session-length one. That is what the formal4 batch
+worked around by splitting the same scope into nine claimed slices
+(`sweep:repo-a/b/c`, `sweep:std-a/b/c`, `sweep:x86-a/b`), and it is why this map's
+numbers are over the part of the scope that was reached (§2.3) rather than over
+all of it. It also means the CAS is what makes the work add up rather than
+restart: every file answered by any of the four runs is a file read on the next
+one.
+
 ## 2. Class counts
 
 ### 2.1 The `-5` baseline (10:15 today, `-t 30`, 18 workers)
