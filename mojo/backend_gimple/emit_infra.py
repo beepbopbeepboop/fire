@@ -4500,10 +4500,13 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str,
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                               val_ctype: str, val: str, val_node) -> None:
     """The one dict store of an integer-ish VALUE, shared by the dict literal
-    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`),
-    the subscript store `d[k] = v` and the two `d[k] = v` shapes that reach a
-    dict through an opaque int-typed receiver — five copies of the same three
-    lines, which is how they came to disagree.
+    (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`), the
+    subscript store `d[k] = v`, the same store under a bytes key, and the two
+    `d[k] = v` shapes that reach a dict through an opaque int-typed receiver —
+    six call sites, which is how six copies of the same three lines came to
+    disagree (five had the per-slot bool kind, one had the deleted dict-wide
+    marker; one had `mojo_dict_set_int` and its `_kw` twin disagreed about an
+    integer key).
 
     A Python bool and the integer 1/0 are the same int64_t slot here (see
     `_lower_BoolLiteral`), so the store's TYPE cannot tell them apart; the
@@ -4514,6 +4517,11 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     (`mojo_mark_dict_bool_values`, since deleted): one bool value made every
     OTHER value in the same dict print as True/False too, so
     `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
+
+    `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
+    `_DictSlot.keykind`), which is what the `bytes_` prefix selects — the
+    same prefix the dict literal's float and str arms use, so the two halves of
+    one literal cannot disagree about which domain a key is in.
 
     `note_dict_callable_ret` runs first for both branches — a stored callable
     keeps its return type whatever its slot kind is.

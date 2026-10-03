@@ -3200,15 +3200,12 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # comprehension as element=key_expr, key=val_expr (see the comment
             # above `kt, kv = gen.lower_expr(node.element)`).
             #
-            # The PER-SLOT store carries the kind, in place of the dict-wide
-            # `mojo_mark_dict_bool_values` marker this replaces (deleted; it made
-            # one bool value render every other value in the dict as
-            # True/False).
-            _suffix = ('bool' if gimple_exprtypes.is_python_bool_expr(
-                gen, node.key) else 'int')
-            gen._note_dict_callable_ret(res, vv, vt)
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_{_suffix} ({res}, {kv}, {vv64});")
+            # The one store, as in the dict literal: the per-slot bool kind it
+            # decides is the whole-dict `mojo_mark_dict_bool_values` marker's
+            # successor (deleted; it made one bool value render every OTHER
+            # value in the dict as True/False), and its `_emit_call` is what
+            # resolves the placeholder key `_char_to_cstr` just handed out.
+            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
 
 
 

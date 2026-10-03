@@ -1511,7 +1511,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', obj_v), ('MojoBytes *', idx_v), ('char *', v)])
                 else:
                     gen._emit_dict_int_value_store(obj_v, 'MojoBytes *', idx_v,
-                                                  vtype, v, node.value)
+                                                    vtype, v, node.value)
                 key_tmp = None
             else:
                 _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
@@ -1521,26 +1521,19 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
-                # A Python bool RHS goes through `mojo_dict_set_bool`, which
-                # tags THAT slot so the dict's repr says True/False for it and
-                # leaves every other value alone — see
-                # `emit_dict_int_value_store`'s docstring. A literal RHS was
-                # the only shape recognised, so `d['a'] = b` for a `b = True`
-                # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
-                # `print(b)` and `repr(b)` were already right; the one shared
-                # predicate is `is_python_bool_expr`, which the dict LITERAL
-                # store and the print dispatch use too.
-                gen._note_dict_callable_ret(obj_v, v, vtype)
-                # Pass actual vtype so _emit_call can coerce pointers to int64_t.
-                # `mojo_dict_set_bool`, not the int twin plus a
-                # `mojo_mark_dict_bool_values`: the marker was a dict-WIDE
-                # flag that made one bool value render every other value in
-                # the dict as True/False, and it is deleted. The kind travels
-                # on the SLOT here, as it does in `emit_dict_int_value_store`.
-                _store = ('bool' if gimple_exprtypes.is_python_bool_expr(
-                    gen, node.value) else 'int')
-                gen._emit_call('void', '', 'mojo_dict_set_' + _store,
-                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
+                # The one dict store of an integer-ish value, not a third
+                # spelling of it. A literal RHS used to be the only shape whose
+                # bool-ness was recognised, so `d['a'] = b` for a `b = True` and
+                # `d['a'] = 1 == 1` both printed `{'a': 1}` while `print(b)` and
+                # `repr(b)` were already right; `is_python_bool_expr` is the one
+                # predicate for that, and the store that follows is the one that
+                # carries the kind -- `mojo_dict_set_bool` tags THIS slot, in
+                # place of the dict-WIDE `mojo_mark_dict_bool_values` flag that
+                # made one bool value render every other value in the dict as
+                # True/False (deleted). Passing `vtype` as the value's declared
+                # type is what lets `_emit_call` coerce a pointer to int64_t.
+                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
+                                                vtype, v, node.value)
         else:
             # Opaque int-typed container: check if it's a list or dict
             if ot in ('int', 'int64_t'):
@@ -1591,16 +1584,10 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    gen._note_dict_callable_ret(dp, v, vtype)
-                    # Pass actual vtype so _emit_call can coerce pointers to int64_t
-                    # The PER-SLOT store carries the kind; the dict-wide
-                    # `mojo_mark_dict_bool_values` marker it replaced is
-                    # deleted, and it made one bool value render every other
-                    # value in the dict as True/False.
-                    _st = ('bool' if gimple_exprtypes.is_python_bool_expr(
-                        gen, node.value) else 'int')
-                    gen._emit_call('void', '', 'mojo_dict_set_' + _st,
-                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                    # The same one store the statically-typed arm above uses;
+                    # only the dict handle is a coerced int here.
+                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
+                                                    vtype, v, node.value)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2906,15 +2893,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
-                gen._note_dict_callable_ret(obj_v, v, vtype)
-                    # The PER-SLOT store carries the kind; the dict-wide
-                    # `mojo_mark_dict_bool_values` marker it replaced is
-                    # deleted, and it made one bool value render every other
-                    # value in the dict as True/False.
-                _st = ('bool' if gimple_exprtypes.is_python_bool_expr(
-                    gen, node.value) else 'int')
-                gen._emit_call('void', '', 'mojo_dict_set_' + _st,
-                                [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
+                gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
+                                                vtype, v, node.value)
             elif ot in ('int', 'int64_t'):
                 actual_type = gen._get_actual_type(ot, obj_v)
                 # Same read/write-symmetry rule as the other two subscript
@@ -2939,14 +2919,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
-                    gen._note_dict_callable_ret(dp, v, vtype)
-                    # The PER-SLOT store carries the kind, in place of the
-                    # dict-wide `mojo_mark_dict_bool_values` marker this
-                    # replaces (deleted; see emit_infra's identical note).
-                    _st = ('bool' if gimple_exprtypes.is_python_bool_expr(
-                        gen, node.value) else 'int')
-                    gen._emit_call('void', '', 'mojo_dict_set_' + _st,
-                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                    gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
+                                                    vtype, v, node.value)
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
                 # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's
