@@ -1776,25 +1776,33 @@ theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
         h_dst, h_dst_lt]
 
-/-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM 04, SIB 24: scale 0, index
-    none, base rsp) -- the store counterpart of `mov rax, [rsp]` below, and
-    general over the source register.  This is the shape a computed value takes
-    on its way to the stack frame. -/
+/-- `mov qword [rsp + 0], r64` (REX.W 89 /r, ModRM mod=00 rm=100, SIB 24: scale
+    0, index none, base rsp) -- the store counterpart of
+    `x86_step_mov_rm64_sib_rsp` below.  This is the shape a computed value takes
+    on its way to the stack frame.
+
+    General over the REX byte, for the reason the load above gives and the two
+    disp siblings below already do: the SOURCE register is the ModRM `reg` field
+    extended by `REX.R`, and `_push_slot(Reg.R11)` emits `4c 89 1c 24`. A
+    statement pinned to `0x48` — which this one was, through `h_rr :
+    x86_rex_r 0x48 = 0` as well — cannot be applied to that at all, so the
+    generator's side-condition guard admitted the step rather than reporting it.
+    The destination of a store is memory, so there is no `dst` here and nothing
+    for `x86_set_reg` to reduce. -/
 theorem x86_step_mov_mem_sib_rsp (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (modrm : UInt8) (reg : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x89)
+    (m : Nat) (rex modrm : UInt8) (reg : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x89)
     (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
-    (h_rex : x86_is_rex 0x48 = true) (h_w : x86_rex_w 0x48 = true)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
     (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b 0x48 = 0) (h_rr : x86_rex_r 0x48 = 0) :
+    (h_rb : x86_rex_b rex = 0) :
     x86_step s code = some { s with
-        mem := mem_write_bytes s.mem s.rsp.toNat (x86_get_reg s (reg + x86_rex_r 0x48)) 8,
+        mem := mem_write_bytes s.mem s.rsp.toNat (x86_get_reg s (reg + x86_rex_r rex)) 8,
         rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
         x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
-        h_rr]
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb]
 
 /-- `mov qword [rsp + disp8], r64` (REX.W 89 /r, ModRM 44: mod=1 rm=4, SIB 24:
     scale 0, index none, base rsp) -- the CALLER half of the stack-argument
@@ -1869,18 +1877,52 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
         h_rb]
 
-/-- `mov rax, qword [rsp + 0]` (REX.W 8B /r, ModRM 04: mod=0 rm=4, SIB 24:
-    scale 0, index none, base rsp).  Every SIB operand the backend emits has
-    this shape, so the general SIB case would be machinery nothing uses. -/
-theorem x86_step_mov_rax_sib_rsp (s : X86State) (code : Nat → UInt8) (m : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x8b)
-    (h_b2 : code (m + 2) = 0x04) (h_b3 : code (m + 3) = 0x24)
-    (h_w : x86_rex_w 0x48 = true) (h_rex : x86_is_rex 0x48 = true) :
+/-- `mov r64, qword [rsp + 0]` (REX.W 8B /r, ModRM mod=00 rm=100, SIB 24: scale 0,
+    index none, base rsp).
+
+    **The ADDRESS is the only part of a SIB operand the backend keeps uniform.**
+    The old statement here pinned the REX to `0x48` and wrote the destination as
+    the literal field `rax`, on the reasoning that "every SIB operand the backend
+    emits has this shape" — which is true of the SIB *byte* and false of the
+    instruction: `formal/x86_64_codegen.py`'s `_pop_slot(Reg.R11)` emits
+    `4c 8b 1c 24`, a `mov r11, [rsp]`, and that is the same form with a different
+    REX byte and a different ModRM `reg` field.
+
+    That is B2 one level up, and it failed SILENTLY in the worst way available:
+    the generator applies this lemma by FORM NAME, so `4c 8b 1c 24` was proved as
+    `48 8b 04 24`. The step did not go through — its two byte hypotheses are
+    `code m = 0x48` and `code (m + 2) = 0x04`, and the real bytes are `4c` and
+    `1c` — so the side-condition guard admitted them, and `augassign` reported
+    `terminates: proved, 1 sorry` about a chain containing a step that is not the
+    instruction the machine runs. Measured: 5 such instructions across the
+    45-example corpus (`augassign`, `subscript_var`, `sum_range`).
+
+    So the destination is the CONCRETE `dst`, with `reg + x86_rex_r rex = dst`
+    beside it, for exactly the reason `x86_step_mov_rm64_mem_disp8` above takes
+    one: `x86_set_reg` is a `match` on its index and `simp` will not reduce a
+    match on a non-literal. `h_dst_lt` is not needed to close the goal — the
+    successor names `x86_set_reg s dst …` either way — and is kept because it is
+    the fact that the index is a REGISTER at all, checked by the caller.
+
+    `h_rm : modrm.toNat &&& 7 = 4` is what SELECTS the SIB byte (rm=4 is the
+    escape), so it is pinned to 4 here rather than carried as a parameter, and
+    `h_rb : x86_rex_b rex = 0` is what makes the SIB's base field `4` mean RSP
+    rather than R12. -/
+theorem x86_step_mov_rm64_sib_rsp (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (rex modrm : UInt8) (reg dst : Nat)
+    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8b)
+    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x24)
+    (h_rex : x86_is_rex rex = true) (h_w : x86_rex_w rex = true)
+    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : modrm.toNat &&& 7 = 4)
+    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
+    (h_rb : x86_rex_b rex = 0)
+    (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some
-      { s with rax := mem_read_bytes s.mem s.rsp.toNat 8, rip := m + 4 } := by
-  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg,
-        x86_mem_addr, x86_rm_read,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_w, h_rex]
+      { x86_set_reg s dst (mem_read_bytes s.mem s.rsp.toNat 8) with rip := m + 4 } := by
+  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
+        x86_rm_read,
+        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_w, h_mod, h_rm, h_reg, h_rb,
+        h_dst]
 
 /-! The two disp8 memory forms every spilled-argument function uses.  These are
 the instructions that make a proof about the stack need the separation lemmas

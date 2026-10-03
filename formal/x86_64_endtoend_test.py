@@ -37,10 +37,24 @@ step lemma for that this can state a successor expression for.  A function
 using anything else is reported as uncovered, with the form named, rather than
 skipped silently -- the point is to know what is and is not proved.
 
-  Measured 2026-10-01 over all 45 examples: **terminates proved with no sorry
-  31, proved with a sorry 2, no finite tree 12 (10 loops and two that leave the
+  Measured 2026-10-02 over all 45 examples: **terminates proved with no sorry
+  32, proved with a sorry 1, no finite tree 12 (10 loops and two that leave the
   function), failing 0**; value 3 proved and 12 open.  It was 10 / 14 / 19 / 0
   and value 3 / 0 when the twenty-odd forms below were wired.
+
+  The last step from 2 to 1 was NOT a new lemma but a re-generalised one, and it
+  is the shape B2 describes one level up: `mov_r64_rm64_sib` is a form NAME that
+  covers `mov <any r64>, [rsp]`, and it was wired to `x86_step_mov_rax_sib_rsp`,
+  a single register pair whose statement pins the REX byte to `0x48` and the
+  destination to the literal field `rax`. So the `4c 8b 1c 24` that
+  `_pop_slot(Reg.R11)` emits — five of them in this corpus — was proved as
+  `48 8b 04 24`. Its two byte hypotheses were FALSE, the side-condition guard
+  admitted them, and `augassign` reported `terminates: proved, 1 sorry` about a
+  chain containing a step that is not the instruction the machine runs. Both
+  no-displacement SIB lemmas are now general over the REX byte and over the
+  register named, which is what the two disp siblings already were, and both
+  now have rows in `formal/x86_64_model_coverage_test.py` — which they did not
+  have, and that omission is why nothing said so.
 
   The `sorry` count fell from 25 to 2 for a reason that is worth stating on its
   own, because it is a sentence in `X86.lean` that was wrong: the memory
@@ -172,11 +186,27 @@ _FORMS = {
     "mov_r64_rm64_reg": ("x86_step_mov_rm64_r64_reg", False,
                          ["rip", "b0", "b1", "b2", "rex", "w", "mod",
                           "reg", "rm"]),
-    "mov_r64_rm64_sib": ("x86_step_mov_rax_sib_rsp", False,
-                         ["rip", "b0", "b1", "b2", "b3", "w", "rex"]),
+    # The two SIB forms with NO displacement, load and store.  `[rsp]` has no
+    # non-SIB encoding (at mod=0 rm=5 is RIP-relative), so the SIB byte is
+    # `m + 3` and there is no displacement after it.
+    #
+    # BOTH are general over the REX byte and over the register the instruction
+    # names, and that is not tidiness: the previous statements pinned the REX to
+    # `0x48` and the load's destination to the literal field `rax`, on the
+    # reasoning that "every SIB operand the backend emits has this shape". That
+    # is a fact about the SIB BYTE and not about the instruction, and
+    # `_pop_slot(Reg.R11)` emits `4c 8b 1c 24`. Applied by form name, the r11
+    # load was proved as `48 8b 04 24`: its two byte hypotheses were false, the
+    # guard admitted them, and `augassign` reported `terminates: proved, 1
+    # sorry` about a chain with a step that is not the one the machine runs.
+    # The condition lists are the lemmas' own hypothesis order, so `dst`/`dst_lt`
+    # come last on the load and there is no `rr` on the store at all any more.
+    "mov_r64_rm64_sib": ("x86_step_mov_rm64_sib_rsp", False,
+                         ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
+                          "rm", "reg", "rb", "dst", "dst_lt"]),
     "mov_rm64_r64_sib": ("x86_step_mov_mem_sib_rsp", False,
                          ["rip", "b0", "b1", "b2", "b3", "rex", "w", "mod",
-                          "rm", "reg", "rb", "rr"]),
+                          "rm", "reg", "rb"]),
     # The two SIB stores WITH a displacement, which is what a call site emits for
     # every argument past the register file: the outgoing area is addressed
     # through `rsp`, and at any displacement that needs the SIB byte, because
@@ -412,10 +442,11 @@ _SUCCS = {
         "{ x86_set_reg $s ($reg + x86_rex_r $rex) "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)) with rip := $next }",
     "mov_r64_rm64_sib":
-        "{ $s with rax := mem_read_bytes $s.mem $s.rsp.toNat 8, rip := $next }",
+        "{ x86_set_reg $s $dst (mem_read_bytes $s.mem $s.rsp.toNat 8) with "
+        "rip := $next }",
     "mov_rm64_r64_sib":
         "{ $s with mem := mem_write_bytes $s.mem $s.rsp.toNat "
-        "(x86_get_reg $s ($reg + x86_rex_r 0x48)) 8, rip := $next }",
+        "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
     "mov_rm64_r64_sib_disp8":
         _SIB_STORE_WITH_DISP_SUCC,
     "mov_rm64_r64_sib_disp32":
@@ -844,9 +875,26 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)
         extra_succ = {"$cc": str(op2 - 0x90), "$rmv": str(modrm & 7)}
     elif form == "mov_rm64_r64_sib":
-        modrm = raw[2]
-        extra_args = " %d %d" % (modrm, (modrm >> 3) & 7)
-        extra_succ = {"$reg": str((modrm >> 3) & 7)}
+        # `mov qword [rsp], r64`: the REX is an ARGUMENT (the lemma is general
+        # over it, so a source in r8..r15 and its `4c` prefix are covered) and
+        # the SOURCE is the ModRM `reg` field extended by REX.R -- the field
+        # sense is the store direction's, the reverse of the load's.
+        modrm, rex = raw[2], raw[0]
+        reg = (modrm >> 3) & 7
+        extra_args = " %d %d %d" % (rex, modrm, reg)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg)}
+    elif form == "mov_r64_rm64_sib":
+        # `mov r64, qword [rsp]`: the same addressing, and the DESTINATION is
+        # the ModRM `reg` field extended by REX.R.  `dst` is what the successor
+        # names, because `x86_set_reg` is a `match` on its index and `simp` will
+        # not reduce one on a non-literal -- so the concrete value comes from
+        # the ENCODING here, with the lemma's `reg + x86_rex_r rex = dst` beside
+        # it as the equation that ties the two together.
+        modrm, rex = raw[2], raw[0]
+        reg = (modrm >> 3) & 7
+        dst = reg + (8 if rex & 4 else 0)
+        extra_args = " %d %d %d %d" % (rex, modrm, reg, dst)
+        extra_succ = {"$rex": str(rex), "$reg": str(reg), "$dst": str(dst)}
     elif form in _SIB_STORE_WITH_DISP_FORMS:
         # `mov qword [rsp + disp], r64`: ModRM `4_` (mod=1 or 2, rm=4), the SIB
         # byte at `m + 3`, and the DISPLACEMENT at `m + 4` -- one byte further

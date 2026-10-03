@@ -459,12 +459,13 @@ def _memory_samples():
     """
     R = X.Reg
 
-    def load(lemma, label, enc):
+    def load(lemma, label, enc, sib=False):
         """A memory form whose successor WRITES a register, so its lemma takes the
         concrete destination -- read out of the encoding here, which is where the
-        check is supposed to get its facts from."""
+        check is supposed to get its facts from.  `sib` marks the rows whose
+        encoding carries a SIB byte."""
         return (lemma, label, enc, ((enc[2] >> 3) & 7) + (8 if enc[0] & 4 else 0),
-                False)
+                sib)
 
     def store(lemma, label, enc):
         """A memory form whose successor writes MEMORY, so its lemma has no `dst`
@@ -477,7 +478,41 @@ def _memory_samples():
         than spelled."""
         return (lemma, label, enc, None, True)
 
+    def sib_load(lemma, label, enc):
+        """A LOAD through a SIB operand — `load` with the SIB byte marked, so the
+        check adds the two facts a SIB encoding carries and a `[rbp+disp]` one
+        does not: the SIB byte itself at `m + 3`, and `REX.B = 0`."""
+        return load(lemma, label, enc, sib=True)
+
     return [
+        # The two SIB forms with NO displacement, load and store.
+        #
+        # These are the pair this list carried NO ROW for, and that omission is
+        # the whole reason a statement pinned to `0x48`/`rax` could sit here
+        # unchallenged: `x86_step_mov_rax_sib_rsp` said "every SIB operand the
+        # backend emits has this shape", which is a fact about the SIB BYTE and
+        # not about the instruction — `_pop_slot(Reg.R11)` emits `4c 8b 1c 24`.
+        # Applied by form name, that was proved as `48 8b 04 24`, its byte
+        # hypotheses were false, and the generator's side-condition guard
+        # admitted them instead of reporting them: `augassign` read
+        # `terminates: proved, 1 sorry` about a chain with a step that is not
+        # the one the machine runs.
+        #
+        # So both rows come in pairs, REX.R clear and set, because `rex` bit 4 is
+        # exactly what moves the named register out of r0-r7 and into r8-r15 and
+        # the generalisation is about `reg + x86_rex_r rex` covering both.  A
+        # third load row at r15 is the top of the register file, which is where
+        # an off-by-one in the REX extension would show.
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov rax, [rsp]",
+                 X.encode_mov_r64_rm64(R.RAX, R.RSP, 0)),
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov r11, [rsp]",
+                 X.encode_mov_r64_rm64(R.R11, R.RSP, 0)),
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov r15, [rsp]",
+                 X.encode_mov_r64_rm64(R.R15, R.RSP, 0)),
+        sib_store("x86_step_mov_mem_sib_rsp", "mov [rsp], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 0, R.RAX)),
+        sib_store("x86_step_mov_mem_sib_rsp", "mov [rsp], r12",
+                  X.encode_mov_rm64_r64(R.RSP, 0, R.R12)),
         load("x86_step_mov_rm64_mem_disp8", "mov rax, [rbp+8]",
              X.encode_mov_r64_rm64(R.RAX, R.RBP, 8)),
         load("x86_step_mov_rm64_mem_disp8", "mov r12, [rbp-8]",

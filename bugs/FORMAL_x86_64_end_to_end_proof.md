@@ -1,5 +1,72 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
+## Status (2026-10-02 — the last admitted SIDE CONDITION is closed; one `hrip` sorry, ten loops and `group3:idiv` left)
+
+| | 2026-09-26 | 2026-10-01 | 2026-10-02 |
+|---|---|---|---|
+| `formal/x86_64_model_test.py` — model vs hardware | 43/43 agree | 44 agree, 1 WRONG (`udivmod`) | unchanged (not re-measured; not touched) |
+| `formal/x86_64_model_coverage_test.py` | 151 samples over 57 forms, all steppable | 151/57, plus step-lemma APPLICABILITY at 17 lemmas x 38 real encodings, 354 hypotheses | 151/57, applicability at **22 lemmas x 48 real encodings, 482 hypotheses** |
+| `formal/x86_64_endtoend_test.py` — terminates, no sorry | **10** | **31** | **32** |
+| `formal/x86_64_endtoend_test.py` — terminates, a sorry | 14 | **2** | **1** (`wide_recv`) |
+| no finite path tree | 19 (4 loop, 15 uncovered form) | **12** (10 loop, 2 not) | **12** (10 loop, 2 not) |
+| value theorem — proved / open | 3 / 0 | 3 proved, 12 open | 3 proved, 12 open |
+| failing | 0 | **0** | **0** |
+
+**B24. A form name covering every SIB load, wired to one register pair.** Fixed
+2026-10-02, `work/formal8-14`.
+
+`mov_r64_rm64_sib` is what `_shapes` calls *every* no-displacement SIB memory
+load, and `_FORMS` wired it to `x86_step_mov_rax_sib_rsp`, whose statement pins
+the REX byte to `0x48` and writes the destination as the literal field `rax`.
+The lemma's docstring defended that with a true statement about the wrong thing:
+"every SIB operand the backend emits has this shape". That is the SIB **byte**.
+It is false of the instruction — `formal/x86_64_codegen.py`'s
+`_pop_slot(Reg.R11)` emits `4c 8b 1c 24`, a `mov r11, [rsp]`.
+
+So this is **B2's mechanism at the level of a whole addressing mode**, and it
+failed in the one way B1 says is the worst available: not silently, and not as a
+proof failure either. The step lemma was applied by form name, its two byte
+hypotheses (`code m = 0x48`, `code (m + 2) = 0x04`) were **false** at that
+encoding, and the per-step side-condition guard — `try (…) <;> all_goals sorry`,
+the same guard B23 describes — **admitted** them. Five such instructions exist in
+the 45-example corpus (`augassign`, `subscript_var`, `sum_range`), and
+`augassign` reported `terminates: proved, 1 sorry` about a chain containing a
+step that is not the instruction the machine runs. `failing` was 0 throughout:
+an inapplicable step is admitted, not reported.
+
+Both no-displacement SIB lemmas are now general over the REX byte and over the
+register the instruction names, which is exactly the treatment the two `disp`
+siblings already had (`x86_step_mov_mem_sib_disp8` / `_disp32` take `rex` as an
+argument; only the no-displacement pair pinned it, and only the load's pinned
+destination). The load's destination is the concrete `dst` with
+`reg + x86_rex_r rex = dst` beside it, for B10's reason — `x86_set_reg` is a
+`match` on its index and `simp` will not reduce one on a non-literal. The store
+lost its `h_rr : x86_rex_r 0x48 = 0` hypothesis entirely, which was a statement
+that the source register is in r0–r7.
+
+**And the check that would have said so was not run, because both lemmas had no
+row in `formal/x86_64_model_coverage_test.py`.** That file's whole subject is
+"a step lemma is covered only when a REAL ENCODING satisfies every one of its
+hypotheses, checked by `native_decide` on each" — and the two forms the backend
+emits most often (95 `mov [rsp], rax` and 90 `mov rax, [rsp]` in this corpus)
+were absent from it. Five rows are now there, three for the load at rax / r11 /
+r15 and two for the store at rax / r12, so both REX.R settings and the top of
+the register file are covered. Measured, the check has teeth: pointed at the
+same `4c 8b 1c 24` encoding with the old pinned `dst`, it reports
+``hypothesis 10 `3 + x86_rex_r 76 = 0` does not hold at 4c 8b 1c 24 — the lemma
+is vacuous there``.
+
+`augassign` is the whole visible effect: **31 → 32 proved with no sorry, 2 → 1
+with a sorry**, over the same 45 examples, with `failing` at 0. `wide_recv` is
+the remaining one and is a different problem (below).
+
+The general lesson, and it is B2's own: **a form NAME is a promise about every
+encoding that reaches it**, so the applicability check has to be keyed on the
+generator's form names and not on a hand-written list of lemmas. A lemma with
+no row is a lemma nobody is asking about.
+
+Everything below is the 2026-10-01 state and is left as written.
+
 ## Scope of this doc
 
 Every x86-64 bug found and fixed while building the Lean formal layer for the
@@ -565,7 +632,9 @@ side condition `simp` has to discharge by `Decidable` made *no progress at all*
 on these goals, while `rw` with an explicit `by decide` peels every layer. The
 two look equivalent and are not.
 
-**The 2 remaining sorries, and they are different problems.**
+**The 2 remaining sorries, and they are different problems.** *(written
+2026-10-01, before B24; `augassign` is closed — see the Status at the top — so
+there is 1 left.)*
 
 * `wide_recv` — the residual goal contains a `mem_read_bytes` whose ADDRESS is
   itself a `mem_read_bytes`: `mem_read_bytes (… .toNat) 8`, where the inner read
@@ -573,12 +642,24 @@ two look equivalent and are not.
   `decide` to give it, and no amount of repeating helps. This is the real form of
   B18, and closing it needs the separation lemma parameterised over a symbolic
   address with the inner read's own separation supplied — a two-level statement,
-  not a repeat count.
+  not a repeat count. **STILL OPEN, and now the only `terminates` sorry in the
+  corpus.**
 * `augassign` — a single admitted SIDE CONDITION on a `mov rax, [rsp]` step (the
   SIB form), not a `hrip`. `simp [read_i32_le, read_i8, hb]` reports `False`, so
   one of that instruction's byte facts is not in `all_bytes`. Worth ten minutes:
   it is the only remaining case where the report cannot say which of the two
   kinds of sorry this is.
+  **CLOSED as B24, and the entry's own diagnosis was wrong in an instructive
+  way.** The byte fact was in `all_bytes`; the instruction was simply not the one
+  the lemma describes. Read `simp …` reporting `False` as "a byte fact is
+  missing" and the next question is always "which instruction is this lemma
+  actually about" — a missing fact and a mismatched one fail identically here,
+  and only one of them is a missing hypothesis. Measured: three
+  `x86_step_mov_rm64_sib_rsp` steps in `augassign`, each with two false
+  hypotheses (`code m = 0x48` against `0x4c`, `code (m + 2) = 0x04` against
+  `0x1c`), and the report said `proved, 1 sorry` — which is B21's failure with a
+  new coat of paint, since a step that is not the one the machine runs is a
+  *wrong proof* and not a missing one.
 
 **The 10 loop examples** — `countdown`, `sum_range`, `wdiff`, `wge`, and the six
 RECURSIVE ones (`count`, `fact`, `fib`, `pow2`, `sqsum`, `sum`). The chain walks
@@ -661,14 +742,27 @@ are fixed too; see the two commits on `work/codegen-old-divergences`.
 
 `make check-formal-x86-endtoend` is the gate, and it reports both theorems
 separately with a per-example breakdown, so a regression in either is visible
-immediately. The number to watch is **terminates proved with no sorry** (15 as
-of 2026-10-01) — a change that pushes it down has taken a real proof away even
+immediately. The number to watch is **terminates proved with no sorry** (32 as
+of 2026-10-02, 31 before B24) — a change that pushes it down has taken a real
+proof away even
 if the file still builds, which is precisely the failure mode B1 and B11 had and
 B21 now makes visible. The second number to watch is **`failing`, which must be
 0**: every form added since has first shown up as a failure at some later step
 (`call_rel32` twice, `$imm` once, the value theorem's unguarded closing facts
 once), and a report that says `FAIL` at a step far from the cause is the one
 thing this generator is bad at.
+
+**And the third is a `sorry` that was counting a WRONG PROOF.** `augassign`'s
+one remaining `sorry` was not missingness at all: it was an inapplicable step
+the guard admitted, so the "proof" included a step that was not the instruction
+the machine runs. Generalising the lemma is what took it off the list — the
+count did not go down because something was proved that was not, it went down
+because something false stopped being counted as proved. A `sorry` is therefore
+not a uniform unit of missingness, and the count is a bound and nothing more.
+B24 is the shape to look for when the count will not move: take the generated
+file, replace `all_goals sorry` with `all_goals trace_state`, and read the goal.
+It is `⊢ False`, and the question is never "which byte fact is missing" but
+"which instruction is this lemma about".
 
 If you are adding a form: the four places that must agree are `_FORMS` (lemma,
 `takes_imm`, side conditions), `_SUCCS` (the successor shape), the branch in
