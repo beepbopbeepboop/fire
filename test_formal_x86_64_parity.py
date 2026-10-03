@@ -352,11 +352,74 @@ CASES = [
      "def main():\n"
      "    printf(\"%d %d %d %d %d\", 3 ** 3, 3 ** 4, 3 ** 5, 2 ** 8, 3 ** 8)\n"
      "    return 0\n",
-     "import sys\n\ndef main():\n"
+"import sys\n\ndef main():\n"
      "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
      "                                            2 ** 8, 3 ** 8))\n"
      "    return 0\n"),
-    # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
+     # A COMPUTED exponent, which is a different path and not a variation: the
+     # case above is the unroll over a literal, and arm64's binary
+     # exponentiation loop — the path every exponent that is not a literal in
+     # `0..64` takes, and the one `**=` shares — answered 0 for every
+     # non-negative exponent because both of its conditional branches tested a
+     # CSET flag with the wrong sense (`CBZ` where the flag being ZERO is the
+     # loop continuing), so every non-negative exponent took the negative exit
+     # and every positive one left the loop on its first test.  The one defect
+     # `test_formal_run.py`'s `run_case` could not see is that it builds the
+     # HOST's architecture, which on this repository's CI is arm64 — the
+     # architecture that was wrong.
+     #
+     # Exponents 1, 2 and 5 over two bases, because the loop halves the
+     # exponent and 1 is the one value a `result = 1` seed that is never
+     # multiplied cannot get right, and a base of 0 or 1 hides a wrong squaring
+     # entirely.  `3 ** 5` is the one that needs two loop iterations, so a loop
+     # that ran its body once and left would answer 3 where the source says 243.
+     ("variable_exponent_power",
+     "def main():\n"
+     "    var n = 1\n"
+     "    printf(\"%d \", 2 ** n)\n"
+     "    n = 2\n"
+     "    printf(\"%d \", 3 ** n)\n"
+     "    n = 5\n"
+     "    printf(\"%d %d \", 2 ** n, 3 ** n)\n"
+     "    printf(\"%d\", 1 ** n)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    n = 1\n"
+     "    out = \"%d \" % (2 ** n)\n"
+     "    n = 2\n"
+     "    out += \"%d \" % (3 ** n)\n"
+     "    n = 5\n"
+     "    out += \"%d %d \" % (2 ** n, 3 ** n)\n"
+     "    out += \"%d\" % (1 ** n)\n"
+     "    sys.stdout.write(out)\n"
+     "    return 0\n"),
+     # The exponent as a PARAMETER, which is the distinction this defect turns
+     # on and a different route to the exponent than a local: a parameter is
+     # read out of the caller's frame rather than out of a local's home, and a
+     # `**=` writes the accumulator back through `_store_var` where the binary
+     # form leaves it in a register.
+     ("variable_exponent_through_a_parameter_and_an_augmented_power",
+     "def power(k: Int) -> Int:\n"
+     "    return 2 ** k\n"
+     "def main():\n"
+     "    var n = 4\n"
+     "    var a = 2\n"
+     "    a **= n\n"
+     "    var b = 3\n"
+     "    b **= n\n"
+     "    printf(\"%d %d %d\", power(n), a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    def power(k):\n"
+     "        return 2 ** k\n"
+     "    n = 4\n"
+     "    a = 2\n"
+     "    a **= n\n"
+     "    b = 3\n"
+     "    b **= n\n"
+     "    sys.stdout.write(\"%d %d %d\" % (power(n), a, b))\n"
+     "    return 0\n"),
+     # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
     # not a variation: a plain name loads and stores a local, while `self.x`
     # goes through `_member_slot_key` into the frame's slot array, and
     # `_emit_div_mod`/`_emit_pow` reach the target through `_emit_expr` /

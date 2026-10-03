@@ -7210,14 +7210,23 @@ dylib_exports: list = None, globals_base: int = None,
             # X0 = exp
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self.asm.emit(encode_cset_xd_cond(1, "lt"))
-            self.asm.emit(encode_cbz_xn(0, 1))
+            # X1 is a CSET flag, so "exp < 0" is X1 NON-zero: the negative exit
+            # is a CBNZ, and the loop head below is the same. Both were CBZ,
+            # which asks the flag for `exp >= 0` and `exp > 0` respectively and
+            # therefore took the NEGATIVE exit for every non-negative exponent
+            # and the loop exit on the first iteration — `2 ** n` for a local
+            # `n` answered 0 on arm64 for every exponent, where x86-64's loop
+            # (which tests the flags the same way) was right. The third branch
+            # here, over `exp & 1`, is a CBZ and is right: the multiply is the
+            # thing to SKIP when the bit is clear.
+            self.asm.emit(encode_cbnz_xn(0, 1))
             self.asm.emit_label_rel(neg, here_offset=-4)
             # result = 1 in X2; keep exp in X0, base on stack
             self.asm.emit(encode_movz_xd_imm(2, 1))
             self.asm.label(loop)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self.asm.emit(encode_cset_xd_cond(1, "le"))
-            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit(encode_cbnz_xn(0, 1))
             self.asm.emit_label_rel(done, here_offset=-4)
             self.asm.label(body)
             # if exp & 1: result *= base  (X1 = exp & 1; skip if zero)
@@ -7238,12 +7247,22 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_b_to(loop)
             self.asm.label(done)
             self.asm.emit(encode_mov_zr_xn(0, 2))
-            self.asm.emit(encode_ldp_sp_post(0, 31))     # drop base
+            # Drop the base into the two registers the body had scratch for
+            # (X4 = the mask 1, X5 = the multiply temp), NOT into (0, 31).
+            # LDP-post into X0 is the shape the literal unroller uses above to
+            # DISCARD the popped base, and it is right there because x0 holds
+            # the answer. Here x0 has just been given the answer too, so
+            # popping into it overwrote the result with the base — and
+            # `2 ** n` for a local `n` answered 0 (or the base) on arm64 for
+            # every exponent, while x86-64's loop, which pops into a scratch,
+            # was right. X4 and X5 are dead at `done`: the body writes them and
+            # reads neither after the last LSR.
+            self.asm.emit(encode_ldp_sp_post(4, 5))     # drop base
             self._emit_trunc(common_type(self._ttype(e.left),
                                          self._ttype(e.right)))
             self._emit_b_to(f"{fn}_pow{pid}_end")
             self.asm.label(neg)
-            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_ldp_sp_post(4, 5))
             self.asm.emit(encode_movz_xd_imm(0, 0))
             self.asm.label(f"{fn}_pow{pid}_end")
             return
