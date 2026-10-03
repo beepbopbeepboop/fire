@@ -25669,10 +25669,19 @@ class GlobalSlot:
     def is_address(self) -> bool:
         """True when this slot's initializer is an ADDRESS, not a value.
 
-        The one question the linker asks about a slot, and asking it here is
-        what keeps the two containers from disagreeing: Mach-O answers it with a
-        dyld rebase opcode and ELF with an `R_X86_64_RELATIVE`, and both are
-        correct only for the words this property selects."""
+        The classification the linker needs about a slot: Mach-O answers it with
+        a dyld rebase opcode and ELF with an `R_X86_64_RELATIVE`, and both are
+        correct only for the words this property selects.
+
+        `("frame", …)` is on it — a slot pointing at a struct frame in `__DATA`
+        carries an address exactly as `("blob", …)` does — but the property is
+        NOT the mechanism, and saying otherwise would send a reader looking for a
+        relocation emitted from here. The relocation comes from
+        `build_data_image`'s `fixups` list, which each address-valued kind
+        appends to (`build_data_image`'s `("blob", "frame")` branch is one
+        append for both), and which both emitters walk in `_emit_global_init`.
+        So the two kinds cannot disagree about which words need one: there is
+        one append, not two predicates."""
         return self.init[0] in ("blob", "str", "frame")
 
     def __repr__(self):
