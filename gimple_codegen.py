@@ -2699,6 +2699,36 @@ class GimpleGen:
         # while compiling THIS module's own body — no sharing needed, and
         # sharing is exactly what caused the bug.
         self._own_imported_func_home: dict = {}
+        # The VALUE half of `_own_imported_func_home` above: the bare name a
+        # `from b import K` (module-level, this gen_module call's own
+        # top-level stmts) binds, -> the module whose `_<mod>_globals` struct
+        # actually declares the field, and -> that field's name (different
+        # from the bare name under `from b import K as J`). Two dicts rather
+        # than one `local -> (module, field)` 2-tuple because a 2-tuple lowers
+        # to a MojoList on the self-hosted compiled path, so every reader of
+        # it boxes its slots to int64_t (see `_module_global_field_type`'s own
+        # closing note, which reads the same triples by index for this reason).
+        #
+        # Why it exists at all, when `_global_to_module` already maps a bare
+        # name to its owning module: that map is whole-transitive-tree and
+        # name-keyed, so a bare `K` in THIS module's body could be resolved
+        # through it to a SIBLING's `K` that this module never imported — the
+        # `filename` mis-resolution `_lower_IdentExpr`'s gate documents. This
+        # dict answers the stricter question "did THIS module's own source
+        # import it, and from where", which is the only question whose YES
+        # makes a bare read mean another module's field (real Python: `from
+        # b import K` binds b's object into this module's namespace, so `K`
+        # here IS b's K).
+        #
+        # The qualified `b.K` spelling never needed it: `_lower_MemberExpr`
+        # reads `_module_global_field_type(bound_module, member)` and the
+        # owning module's own `(name, c_type, g_mtype)` triple, so the field
+        # and its type agree by construction. This is the bare-name half of
+        # that same pair, and both are needed or the two spellings of one
+        # name disagree — the argument `_module_global_field_type` already
+        # makes for the homonym case.
+        self._own_imported_global_home: dict = {}
+        self._own_imported_global_field: dict = {}
         # Per-lexical-scope import tracking: a stack of {bare_name ->
         # module_qualifier} dicts, innermost scope LAST. Frame 0 is this
         # gen_module call's own module scope, populated (in statement order,

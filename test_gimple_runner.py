@@ -7584,6 +7584,52 @@ def main():
                           "main()\n",
     }, 'colln4_main.py')
 
+    # `from b import K` at MODULE level, with `K` read from a function body
+    # in the importing module: the value is b's, so the read is
+    # `_b_globals.K`, and before the fix it was `_root_globals.K` — a field
+    # the importing module's own `<module>_toplev` never declares, so gcc
+    # refused the whole program ("'struct _root_toplev' has no member named
+    # 'K'"). The self-host closure had 26 such names across 15 modules
+    # (bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md's 58-error
+    # family); the qualified `b.K` spelling of the same value was already
+    # correct, so this is the bare-name half of that pair.
+    _check_agrees_with_cpython("imported_module_constant_reads_the_owners_field", {
+        'fgi_b.py': "K = 'abc'\n\ndef f():\n    return 1\n",
+        'fgi_a.py': "from fgi_b import K\n\ndef main():\n    print(K)\nmain()\n",
+    }, 'fgi_a.py')
+
+    # A container global crosses the boundary the same way, and the read has
+    # to take its ELEMENT type from the owner's field triple rather than from
+    # the importing module's own (empty) overlay — a bare int64_t address for
+    # the list when it did not.
+    _check_agrees_with_cpython("imported_module_list_constant_keeps_its_elements", {
+        'fgj_b.py': "L = [1, 2, 3]\n",
+        'fgj_a.py': "from fgj_b import L\n\ndef main():\n    print(L)\n    print(len(L))\nmain()\n",
+    }, 'fgj_a.py')
+
+    # `from b import N as J`: the LOCAL spelling is `J` and the owner's FIELD
+    # is still `N`, so both halves of the binding have to be tracked — a
+    # single "local name == field name" shortcut answers here.
+    _check_agrees_with_cpython("imported_module_constant_alias_reads_the_owners_field", {
+        'fgk_b.py': "N = 7\n",
+        'fgk_a.py': "from fgk_b import N as J\n\ndef main():\n    print(J)\nmain()\n",
+    }, 'fgk_a.py')
+
+    # The two rows that must NOT be re-routed, i.e. the gates
+    # `_gmi_scan_imported_global_homes` exists to enforce. A module-level
+    # `N = ...` rebinds the name in THIS module's namespace (Python
+    # semantics), so the bare read afterwards is this module's own field; and
+    # a function-local `N` shadows the import outright. Both printed the
+    # imported side's value when the routing was unconditional.
+    _check_agrees_with_cpython("own_module_global_beats_the_imported_homonym", {
+        'fgl_b.py': "N = 'b-side'\n",
+        'fgl_a.py': "from fgl_b import N\nN = 'a-side'\n\ndef main():\n    print(N)\nmain()\n",
+    }, 'fgl_a.py')
+    _check_agrees_with_cpython("local_beats_the_imported_module_global", {
+        'fgm_b.py': "N = 'b-side'\n",
+        'fgm_a.py': "from fgm_b import N\n\ndef main():\n    N = 'local'\n    print(N)\nmain()\n",
+    }, 'fgm_a.py')
+
     # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
     # and str(container) read the container's raw header bytes as a C
     # string (`_stringify_value` had no container branch at all, unlike

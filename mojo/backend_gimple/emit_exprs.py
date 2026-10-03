@@ -602,9 +602,39 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # to a fresh "root" string and always failed — the bare-name global
     # read then fell to `(int64_t)0` (`import sys` receivers in
     # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
-    if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod or _owned_here) and \
-            (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
-        gtype = gen._global_var_types[name]
+    # `_imp_home`: the module this one IMPORTED the bare `name` from with a
+    # top-level `from b import K`, or '' when there is no such import. This is
+    # the ONE case in which a bare name is legitimately not this module's own
+    # field and still has to load a globals struct: real Python binds b's
+    # object into this module's namespace, so `K` here IS `_b_globals.K`. It
+    # is deliberately NOT derived from `_global_to_module` — that map is
+    # whole-tree and name-keyed, so it would also answer for a sibling's
+    # same-named global this module never imported, which is precisely the
+    # mis-resolution the `_owned_here` gate above exists to refuse (the
+    # `filename` case in its own comment). The recorded home is additionally
+    # required by `_gmi_scan_imported_global_homes` to be a module whose
+    # struct provably DECLARES the field, so this cannot route a read to a
+    # field that does not exist.
+    #
+    # `_as_str` on both halves for the same reason as everywhere else in this
+    # file: a boxed `char *` read back out of a dict compares unequal to every
+    # real name on the self-hosted compiled path.
+    _imp_home = _as_str(getattr(gen, '_own_imported_global_home', {}).get(name) or '')
+    _imp_field = _as_str(getattr(gen, '_own_imported_global_field', {}).get(name) or '')
+    # The owner's own `(c_type, mojo_type)` triple — the exact pair its struct
+    # typedef, its initializer and its `_<mod>_mojo_global_get_<name>`
+    # accessor were generated from, so the load agrees with the field BY
+    # CONSTRUCTION. Same source, and the same argument, as the `submod.GLOBAL`
+    # branch of `_lower_MemberExpr` further down; this is the bare-name half
+    # of that pair. `None` when the name is not an imported value, and then
+    # everything below behaves exactly as it did before.
+    _imp_fields = gen._module_global_field_type(_imp_home, _imp_field) \
+        if (_imp_home and _imp_field) else None
+    if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod
+            or _owned_here or _imp_fields is not None) and \
+            (name in gen._func_declared_globals or name not in gen.var_types) \
+            and (name in gen._global_var_types or _imp_fields is not None):
+        gtype = _imp_fields[1] if _imp_fields is not None else gen._global_var_types[name]
         # Globals are stored at C level as int64_t (boxed pointers) except
         # for char * and simple int globals whose C type matches the Mojo type.
         if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
@@ -667,8 +697,15 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # dict, then every `aliased_encoding = _aliases.get(...)` receiver
         # load emitted a bare `int64_t t = MojoDict * field;`
         # -Wint-conversion error).
+        # `_imp_fields[0]` FIRST when there is one: for a name this module
+        # imported, this module's own overlay says nothing (and after
+        # `_phase17_set_gtype`'s own-scope split, deliberately nothing) about
+        # the field being loaded, so the owner's own triple is the only
+        # answer that can be right.
         c_decl_type = gen._own_overlay_global_ctype(name)
-        if c_decl_type is None:
+        if _imp_fields is not None:
+            c_decl_type = _imp_fields[0]
+        elif c_decl_type is None:
             c_decl_type = gen._global_c_decl_types.get(name, ctype)
         # Access global from THIS module's own struct — the same routing the
         # WRITE side already uses, deliberately, at every one of its sites
@@ -701,8 +738,23 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # conversion in 'component_ref'" (bugs/COMPILE_FAIL_Tools_c-analyzer_
         # c_analyzer_info.md). With the write already pinned to this module,
         # making the read agree is what closes the pair.
-        safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
-        field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
+        #
+        # The ONE exception, and it is not an exception to the reasoning above
+        # but its consequence: a name this module IMPORTED (`_imp_fields`) has
+        # no field on this module's struct at all, so "this module's own
+        # struct" is not an answer for it — the owner's is. Real Python agrees
+        # (`from b import K` binds b's object here), and the owner's field
+        # triple above is where the read's type comes from, so the load and
+        # the type cannot disagree. `_c_field_name(_imp_field)`, not of
+        # `name`: under `from b import K as J` the local spelling is `J` and
+        # the field is still `K`.
+        if _imp_fields is not None:
+            safe_module = gimple_ctypes._c_field_name(_imp_home)
+            _field_name = gimple_ctypes._c_field_name(_imp_field)
+        else:
+            safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
+            _field_name = gimple_ctypes._c_field_name(name)
+        field_ref = f"_{safe_module}_globals.{_field_name}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
             # GIMPLE: must load pointer into matching-type local, then cast via void* → int64_t.

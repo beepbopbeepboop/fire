@@ -61,7 +61,7 @@ from mojo.middle.module_shared import (
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
     _collect_import_modules, _collect_import_modules_rec, _cpp_method_receiver_name, _extract_init_expr, _gmi_all_stmts_nonfunc, _gmi_as_str, _gmi_collect_global_stmts,
     _gmi_collect_return_values, _gmi_collect_self_assigns, _gmi_container_ctype, _gmi_find_comptime_one, _gmi_global_init_code, _gmi_phase17_collect_appends, _gmi_prefold_toplevel_comptime,
-    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
+    _gmi_scan_cpp_nested_imports, _gmi_scan_func_body_for_self_attr, _gmi_scan_import_modules, _gmi_scan_imported_global_homes, _gmi_scan_try_imports, _gmi_self_member, _import_targets,
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
@@ -8066,11 +8066,31 @@ def gen_module_impl(self, stmts):
             else:
                 return 'int64_t'
 
-    def _phase17_set_gtype(_gname: str, _ctype: str):
-        """Record a Phase 1.7 global-type conclusion into BOTH the
-        whole-program-shared dict and THIS instance's own overlay (see
-        `_own_global_var_types`/`_global_dst_ctype` for why the overlay
-        must exist alongside the shared dict).
+    def _phase17_set_gtype(_gname: str, _ctype: str, _own: bool = True):
+        """Record a Phase 1.7 global-type conclusion into the
+        whole-program-shared dict, and — only when the statement is THIS
+        module's own — into its own overlay too (see
+        `_own_global_var_types`/`_global_dst_ctype` for why the overlay must
+        exist alongside the shared dict).
+
+        The `_own` split is the same distinction the callers already draw for
+        `_global_to_module` three lines below each of these call sites, via
+        `id(stmt) in _phase17_own_ids` — this function's own docstring says
+        why `_phase17_stmts` deliberately includes `imported_stmts`: the
+        SHARED table has to be a superset so cross-module `mod.attr` reads
+        resolve. `_own_global_var_types` has no such cross-module purpose. It
+        is read by `_lower_IdentExpr` as the answer to "is this bare name
+        THIS module's own global", and an imported module's top-level
+        `STDLIB_PATH = ...` is emphatically not — writing it there made a
+        bare `STDLIB_PATH` in the importing module's body load
+        `_build_stdlib_dylib_globals.STDLIB_PATH`, a field that module never
+        declares ("'struct _build_stdlib_dylib_toplev' has no member named
+        'STDLIB_PATH'", one per read site, 26 distinct names across 15
+        modules of the self-host closure —
+        bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md). The bare read
+        now routes such a name to its OWNER's field via
+        `_own_imported_global_home`, which this split is what lets it
+        distinguish from a same-named global this module never imported.
 
         `_gname: str` is load-bearing: without it the self-hosted compiler
         typed the param int64_t and `_own_global_var_types[_gname] = ...`
@@ -8078,9 +8098,10 @@ def gen_module_impl(self, stmts):
         and a `var counter: Int = 0` module global was declared `int` (the
         IntLiteral default) instead of `int64_t` (the annotation)."""
         self._global_var_types[_gname] = _ctype
-        self._own_global_var_types[_gname] = _ctype
+        if _own:
+            self._own_global_var_types[_gname] = _ctype
 
-    def _phase17_infer_global_type(_gname, _value):
+    def _phase17_infer_global_type(_gname, _value, _own: bool = True):
         """Infer & record a global's C type (self._global_var_types,
         plus element type for list/tuple literals) from its assigned
         RHS value. Factored out of the AssignStmt branch below so
@@ -8096,7 +8117,7 @@ def gen_module_impl(self, stmts):
         bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
-        _phase17_set_gtype(_gname, _phase17_value_type(_value))
+        _phase17_set_gtype(_gname, _phase17_value_type(_value), _own)
         if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
             _elt = self._quick_type(_value.elements[0])
             for _e in _value.elements[1:]:
@@ -8357,6 +8378,15 @@ def gen_module_impl(self, stmts):
         return out
 
     for _scan_stmt in _phase17_stmts:
+        # "_phase17_stmts" deliberately spans this module's OWN top-level
+        # statements AND every inline-compiled imported module's (the SHARED
+        # `_global_var_types` has to be a superset so cross-module `mod.attr`
+        # reads resolve at all). `_phase17_own_ids` is the boundary, and it
+        # gates BOTH things an "is this name MINE" question feeds: the
+        # `_global_to_module` claim (each branch below) and, since this
+        # commit, the `_own_global_var_types` overlay `_phase17_set_gtype`
+        # writes. Named once so the two can never drift apart again.
+        _scan_own = id(_scan_stmt) in _phase17_own_ids
         if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
             _gname = _scan_stmt.target.name
             if (isinstance(_scan_stmt.value, CallExpr)
@@ -8370,9 +8400,9 @@ def gen_module_impl(self, stmts):
             if _gname in _pre_declared_globals:
                 continue
             _pre_declared_globals.add(_gname)
-            if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+            if _gname not in self._global_to_module and _scan_own:
                 self._global_to_module[_gname] = _phase17_mod
-            _phase17_infer_global_type(_gname, _scan_stmt.value)
+            _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, MultiAssignStmt):
             for _tgt in _scan_stmt.targets:
                 if not isinstance(_tgt, IdentExpr):
@@ -8381,31 +8411,31 @@ def gen_module_impl(self, stmts):
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_infer_global_type(_gname, _scan_stmt.value)
+                _phase17_infer_global_type(_gname, _scan_stmt.value, _scan_own)
         elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
             _pre_declared_globals.add(_scan_stmt.name)
             if _scan_stmt.name not in self._global_to_module:
                 self._global_to_module[_scan_stmt.name] = _phase17_mod
             if _scan_stmt.type_ann:
                 _resolved = self._resolve_type(_scan_stmt.type_ann)
-                _phase17_set_gtype(_scan_stmt.name, _resolved)
+                _phase17_set_gtype(_scan_stmt.name, _resolved, _scan_own)
                 if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
             else:
                 if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
                     if isinstance(_scan_stmt.value, DictExpr):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoDict *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoDict *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, SetExpr):
-                        _phase17_set_gtype(_scan_stmt.name, 'MojoSet *')
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoSet *', _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, StringLiteral):
-                        _phase17_set_gtype(_scan_stmt.name, 'char *')
+                        _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                     elif (isinstance(_scan_stmt.value, CallExpr)
                             and isinstance(_scan_stmt.value.func, IdentExpr)
                             and _scan_stmt.value.func.name in ('dict', 'Dict', 'list', 'List', 'set', 'Set', 'frozenset')):
@@ -8414,54 +8444,54 @@ def gen_module_impl(self, stmts):
                             'list': 'MojoList *', 'List': 'MojoList *',
                             'set': 'MojoSet *', 'Set': 'MojoSet *',
                             'frozenset': 'MojoSet *',
-                        }[_scan_stmt.value.func.name])
+                        }[_scan_stmt.value.func.name], _scan_own)
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, CallExpr):
                         if isinstance(_scan_stmt.value.func, IdentExpr):
                             ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
                             if ret and ret.endswith(' *'):
-                                _phase17_set_gtype(_scan_stmt.name, ret)
+                                _phase17_set_gtype(_scan_stmt.name, ret, _scan_own)
                             elif ret == 'char *':
-                                _phase17_set_gtype(_scan_stmt.name, 'char *')
+                                _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                             else:
-                                _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                                _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member in ('read', 'readline')
                                 and not _scan_stmt.value.args):
-                            _phase17_set_gtype(_scan_stmt.name, 'char *')
+                            _phase17_set_gtype(_scan_stmt.name, 'char *', _scan_own)
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
-                            _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
+                            _phase17_set_gtype(_scan_stmt.name, 'MojoList *', _scan_own)
                         else:
-                            _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                            _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t')
+                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t', _scan_own)
                 else:
-                    _phase17_set_gtype(_scan_stmt.name, 'int64_t')
+                    _phase17_set_gtype(_scan_stmt.name, 'int64_t', _scan_own)
         elif isinstance(_scan_stmt, TryStmt):
             for _gname, _gtype in _phase17_scan_try_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_set_gtype(_gname, _gtype)
+                _phase17_set_gtype(_gname, _gtype, _scan_own)
         elif isinstance(_scan_stmt, IfStmt):
             for _gname, _gtype in _phase17_scan_if_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                if _gname not in self._global_to_module and _scan_own:
                     self._global_to_module[_gname] = _phase17_mod
-                _phase17_set_gtype(_gname, _gtype)
+                _phase17_set_gtype(_gname, _gtype, _scan_own)
         elif (isinstance(_scan_stmt, ComptimeVarStmt)
                 and isinstance(_scan_stmt.value, (ListExpr, TupleExpr))
                 and _scan_stmt.target not in _pre_declared_globals):
             _pre_declared_globals.add(_scan_stmt.target)
-            if _scan_stmt.target not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+            if _scan_stmt.target not in self._global_to_module and _scan_own:
                 self._global_to_module[_scan_stmt.target] = _phase17_mod
-            _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value)
+            _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value, _scan_own)
 
     _phase17_append_hits: dict = {}
     _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
@@ -8580,6 +8610,18 @@ def gen_module_impl(self, stmts):
         self._global_c_decl_types[_rgname] = 'int64_t'
         _mgk.add(_rgname)
     self._multi_kind_globals = _mgk
+
+    # Which of THIS module's bare names are really another module's globals
+    # field. Placed HERE, after every writer of the two tables its answer is
+    # built from — the Phase 1.7 scan above is what populates
+    # `_global_to_module`/`_own_global_var_types`, and the multi-kind global
+    # join immediately above is the last writer of the overlay — and before
+    # the first function-body emission below, because the bare-name reads it
+    # fixes live in those bodies. `stmts`, NEVER the `imported_stmts`
+    # concatenation: the question is "did THIS module import it", and a
+    # sibling's own `from c import K` says nothing about what this module's
+    # `K` means.
+    _gmi_scan_imported_global_homes(self, stmts)
 
     func_parts: list[str] = []
 
