@@ -2,12 +2,70 @@
 
 **Found 2026-10-01 while re-measuring what the argument-registers filing's next
 step actually costs; that filing (`bugs/FORMAL_x86_64_argument_registers.md`) is
-deleted as of 2026-10-02, its emitters half landed on both backends and its
-`RETURNED_FRAME_MAX_ARGS` half decided. NOT FIXED here beyond a generator guard
-that stops the ill-typed proof from being written; the real fix is in
-`lib/ProofLib.lean`. Status: open, with the measurement, the generated text, and
-the exact next step — and it is now the WHOLE of what is left of that filing, so
-this is the only document that owns it.**
+deleted as of 2026-09-30, its emitters half landed on both backends and its
+`RETURNED_FRAME_MAX_ARGS` half decided. It is now the WHOLE of what is left of
+that filing, so this is the only document that owns it.**
+
+## Status: STEPS 1, 2 AND 4 LANDED (2026-10-03) — the AST bridge carries every
+## parameter; `mojo` and the run tests are still one-input, which is why a
+## two-parameter program is still refused
+
+`MojoFunc.mk` now takes `params : List String` and `evalFunc`/`evalFuncF` take
+`args : List UInt64`, paired by position through one new definition:
+
+```lean
+def MojoEnv : List String → List UInt64 → String → UInt64
+  | [], _ => fun _ => (0 : UInt64)
+  | _, [] => fun _ => (0 : UInt64)
+  | p :: ps, v :: vs => fun name => if name == p then v else MojoEnv ps vs name
+```
+
+Two structural recursions rather than a `params.zip args` lookup, so the term
+for ONE parameter is `fun name => if name == p₀ then v₀ else 0` after nothing at
+all — which is why every generated proof's hand-written `henv0`/`henv` lemma is
+UNCHANGED, and why the one-parameter answer is unchanged (a name no argument
+answers for is still 0). `mojoEnv_binds_by_position` and
+`mojoEnv_unbound_name_is_zero` are the two library statements of it, both `simp`
+on the definition.
+
+Both generators now emit the whole list, through one shared reader
+(`_param_list_lean`, imported by the x86-64 one), and the generated text changed
+in exactly three places per proof: `MojoFunc.mk "f" ["n"]`, `evalFunc ast cf [n]`
+and `evalFunc ast cf [(UInt64.ofNat v)]`. `MojoEnv` was added to the four simp
+sets that unfold `evalFunc`, and the three hand-written env-lemma sites now
+`simp only [… MojoEnv]`.
+
+**What is NOT done, and it is the part that still refuses the program:** step 3
+and step 5 below. `mojo` is still `def mojo (n : UInt64) : UInt64`, `eval_eq_mojo`
+still quantifies over one `n`, and every run test's entry state is still one word
+(`Arm64State.init test_input base`), so `_go_apply` still refuses a
+two-parameter model — now with a message that says so and does NOT blame the AST
+bridge, which is no longer the obstacle. Step 3's driver half is the real
+remainder: `compile_formal`'s `test_input=` is one integer, and the multi-parameter
+form needs a tuple, so `formal/build.py` and every `n`-quantifying theorem move
+together or not at all.
+
+Verified on both backends with FRESH Lean runs (a throwaway `GMOJO_HOME`, because
+the shared CAS at `~/.gmojo` already holds verdicts for most of
+`formal/examples/`, so a `test_formal.py` run after a library change can report
+verdicts the session never computed):
+
+| shape | arm64 | x86-64 |
+|---|---|---|
+| straight-line `if` bridge (`ifonly`) | ok, 0 `sorry` | ok |
+| structural recursion, `evalFuncF` + hand-written `henv0` (`count`) | ok, 0 `sorry` | ok |
+| decrement-while, `_gen_dec_while_block` (`wdiff`) | ok, 0 `sorry` | — |
+| for-range, bridge omitted (`sum_range`) | ok, 2 pre-existing `TODO(range)` | ok |
+
+plus `test_formal_call_proof_gen.py` 21/21, `test_formal_recursion_contract.py`
+5/5 (three fresh Lean runs), `test_formal_dylib.py` 16/16, and the library itself
+(ProofLib 90.5 s / 7.69 GB, rc=0).
+
+**The consequence worth stating plainly: no two-parameter program is provable
+yet, and this change did not make one provable.** What it removed is the first
+two of the three one-input assumptions in the table below, which is the part
+that was a `lib/ProofLib.lean` change and the part the doc itself identified as
+the real fix.
 
 ## What I ran
 

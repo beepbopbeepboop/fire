@@ -200,8 +200,12 @@ def _ast_value(fn, func_name: str) -> str:
     typecheck."""
     from formal import arm64_proof_gen as AP
     body = "[" + ", ".join(AP._stmts_ast(fn.body)) + "]"
-    param = fn.params[0][0] if fn.params else ""
-    return f'MojoFunc.mk "{func_name}" "{param}" ({body})'
+    # `AP._param_list_lean` and not a local spelling of the parameter list:
+    # `MojoFunc.mk` carries the source's parameter NAMES and this backend's
+    # `eval_eq_mojo` is the statement that the AST model and the source model
+    # are the same function, so the two generators cannot each decide what the
+    # AST says a function takes.
+    return 'MojoFunc.mk "%s" %s (%s)' % (func_name, AP._param_list_lean(fn), body)
 
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
@@ -233,8 +237,8 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     call_types = {}
     conds = AP._collect_conds(fn, param, env, vtypes, call_types)
     simp_lems = ", ".join(["mojo", "%s_go" % func_name, "ast", "evalFunc",
-                           "evalBody", "evalBodyEnv", "evalExpr", "u64pow",
-                           "u64powGo", "sKey"] + list(go_lemmas or []))
+                           "MojoEnv", "evalBody", "evalBodyEnv", "evalExpr",
+                           "u64pow", "u64powGo", "sKey"] + list(go_lemmas or []))
     if not conds:
         proof = f"simp +decide [{simp_lems}]"
     else:
@@ -252,7 +256,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     _cf = AP._call_func_lean(func_name, admitted)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast {_cf} n = mojo n := by\n"
+            f"  evalFunc ast {_cf} [n] = mojo n := by\n"
             f"  {proof}\n")
 
 

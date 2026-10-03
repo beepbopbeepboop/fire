@@ -743,7 +743,7 @@ inductive MojoStmt where
   | pass
 
 inductive MojoFunc where
-  | mk (name : String) (param : String) (body : List MojoStmt) : MojoFunc
+  | mk (name : String) (params : List String) (body : List MojoStmt) : MojoFunc
 
 /-- Binary exponentiation matching codegen's runtime `**` (result starts at 1;
     while exp > 0: if exp odd: acc *= base; base *= base; exp >>= 1).  Fuel 64
@@ -878,12 +878,53 @@ def evalBodyEnv (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt
 def evalBody (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) : Option UInt64 :=
   (evalBodyEnv callFunc stmts env).1
 
-/-- Evaluate a function by setting up the environment and evaluating its body -/
-def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64) (arg : UInt64) : UInt64 :=
+/-- The environment a CALL'S ARGUMENTS make, by NAME.
+
+`MojoFunc.mk` carries the source's parameter NAMES and `evalFunc` the model's
+argument VALUES, and this pairs them: the i-th name binds the i-th value, a
+name with no value is 0, and a value with no name is unreachable.  Both
+fallbacks are what an unbound name evaluated to before, so every one-parameter
+program's answer is unchanged — which is the property `evalFunc_eq_mojo_all`
+and the generated proofs rest on.
+
+Two structural recursions rather than a `params.zip args` lookup, so that the
+term for ONE parameter is `fun name => if name == p₀ then v₀ else 0` after
+nothing at all — no `simp`, no `List.zip` — which is the term the generated
+proofs' hand-written `henv0`/`henv` lemmas already state and the reason those
+lemmas are unchanged.  A `zip` would be the same function and would have
+rewritten every one of them. -/
+def MojoEnv : List String → List UInt64 → String → UInt64
+  | [], _ => fun _ => (0 : UInt64)
+  | _, [] => fun _ => (0 : UInt64)
+  | p :: ps, v :: vs => fun name => if name == p then v else MojoEnv ps vs name
+
+/-- The i-th name binds the i-th value, and a name that is in neither list is 0.
+
+Both halves of what `MojoFunc.mk`'s single `param` could not say, and they are
+the statement `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is
+about: a two-parameter function binds BOTH of its names, each to its own
+argument, and a name no argument answers for is still 0 — which is what an
+unbound name evaluated to before, so every one-parameter program's answer is
+unchanged.  Decided rather than argued: both are `simp` on the definition. -/
+theorem mojoEnv_binds_by_position (p q : String) (u v : UInt64) (n : String)
+    (hfirst : ¬ (n == p)) (hn : n == q) : MojoEnv [p, q] [u, v] n = v := by
+  simp [MojoEnv, hfirst, hn]
+
+theorem mojoEnv_unbound_name_is_zero (p q : String) (u : UInt64) (n : String)
+    (h1 : ¬ (n == p)) : MojoEnv [p] [u] n = 0 := by
+  simp [MojoEnv, h1]
+
+/-- Evaluate a function by setting up the environment and evaluating its body.
+
+`args` is the model's ARITY: a two-parameter function binds two names, and the
+list is what says which value is which.  This is the whole of what
+`MojoFunc.mk`'s single `param` could not say, and it is what
+`bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md` is about. -/
+def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64)
+    (args : List UInt64) : UInt64 :=
   match f with
-  | MojoFunc.mk _ param body =>
-    let env := fun name => if name == param then arg else (0 : UInt64)
-    match evalBody callFunc body env with
+  | MojoFunc.mk _ params body =>
+    match evalBody callFunc body (MojoEnv params args) with
     | some v => v
     | none => 0
 
@@ -1051,19 +1092,19 @@ theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False 
     Takes a function-specific hypothesis `h_result` (supplied by the per-program
     proof) and uses it to close the equality.
 -/
-theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64) (mojo_fn : UInt64 → UInt64) (arg : UInt64)
+theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64)
+    (mojo_fn : List UInt64 → UInt64) (args : List UInt64)
   (h_result : match f with
-    | MojoFunc.mk _ param body =>
-      let env := fun name : String => if name == param then arg else 0
-      match evalBody handler body env with
-      | some v => v = mojo_fn arg
-      | none => 0 = mojo_fn arg) : evalFunc f handler arg = mojo_fn arg := by
+    | MojoFunc.mk _ params body =>
+      match evalBody handler body (MojoEnv params args) with
+      | some v => v = mojo_fn args
+      | none => 0 = mojo_fn args) : evalFunc f handler args = mojo_fn args := by
   unfold evalFunc
   cases f
-  rename_i name param body
+  rename_i name params body
   dsimp at h_result
   dsimp
-  cases h_eq : evalBody handler body (fun name : String => if name == param then arg else 0) with
+  cases h_eq : evalBody handler body (MojoEnv params args) with
   | some v =>
     rw [h_eq] at h_result
     exact h_result
@@ -2454,11 +2495,10 @@ def runF (fuel : Nat) (cf : String → UInt64 → UInt64)
 /-- Fuel-bounded function evaluation: source-level semantics including
 while loops.  Agrees with `evalFunc` on programs without whiles. -/
 def evalFuncF (fuel : Nat) (f : MojoFunc) (cf : String → UInt64 → UInt64)
-    (arg : UInt64) : UInt64 :=
+    (args : List UInt64) : UInt64 :=
   match f with
-  | MojoFunc.mk _ param body =>
-    let env := fun name => if name == param then arg else (0 : UInt64)
-    match runF fuel cf body env with
+  | MojoFunc.mk _ params body =>
+    match runF fuel cf body (MojoEnv params args) with
     | some (.ret v) => v
     | _ => 0
 
