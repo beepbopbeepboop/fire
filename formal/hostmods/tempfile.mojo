@@ -95,7 +95,9 @@ WHAT IS HERE
     six characters the C library chose, and `mkdtemp(3)`'s own retry. **The
     retry used to be spelled out here and could not be right**: this path cannot
     read `errno`, so a loop here retried every failure as if it were a collision
-    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
     `mkdtemp`'s own docstring is where the name's shape and what changed are
     written down.
 
@@ -257,7 +259,9 @@ def TMP_MAX() -> int:
     is one `mkdtemp(3)` call, and the retry is the C library's — it retries on
     `EEXIST` and gives up on anything else, which is the distinction this
     module's own loop could not make
-    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
     So the number stays because CPython publishes it, not because anything here
     counts to it.
     """
@@ -343,7 +347,9 @@ def mkdtemp(prefix) -> str:
     — a full filesystem, a read-only mount reached through a writable-looking
     path — cost the whole `TMP_MAX` budget and answered `""` where CPython
     raises on the first attempt
-    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
     `mkdtemp(3)` makes the same distinction with the error code to itself: it
     retries a name that is ALREADY TAKEN and fails immediately on anything else.
 

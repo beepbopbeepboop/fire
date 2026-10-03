@@ -24420,8 +24420,9 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
     is the nested block alone. Without this row the construction emitted
     `mov X0, #0` / `mov eax, 0` and every field read through it was a load from
     address 0 — a green build, a SIGSEGV on the first read, and no diagnostic
-    (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
-    word.md`).
+    (fixed 2026-10-03 in 4af77b16, where a one-field struct whose
+        sole field holds a frame brings that frame up instead of a null
+        word).
 
     A FLAT list cannot carry the parent of each row, which is why the emitters
     read `struct_block_direct_children` for placement and recurse on it rather
@@ -25255,8 +25256,9 @@ def struct_default_word(struct_def, decls: dict = None) -> tuple:
     Measured on both architectures: `struct Box1: var inner: Inner` with
     `bx = Box1(); bx.inner.a = 1` built, ran, and died with SIGSEGV (exit 139)
     on the first field read, with no diagnostic anywhere
-    (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
-    word.md`).
+    (fixed 2026-10-03 in 4af77b16, where a one-field struct whose
+        sole field holds a frame brings that frame up instead of a null
+        word).
 
     `decls` is what makes the question answerable at all — it is the module's
     struct table, which is how the field's declared type is read — so it is a

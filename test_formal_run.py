@@ -6992,8 +6992,10 @@ BOTH_ARCH_CASES = [
     # `d0 + len(gens)` for the WHOLE walk (the iterable included), while
     # `_collect_var_names`' comprehension walk reserved a nested
     # comprehension's `_ci{d}`/`_cb{d}` at the OUTER depth — so the emitter
-    # asked for `_ci1` and the collector had reserved `_ci0` only.
-    # `bugs/FORMAL_nested_comprehension_generator_temps_are_not_collected.md`.
+    # asked for `_ci1` and the collector had reserved `_ci0` only — the depth
+    # disagreement between `_emit_comprehension` and `_collect_var_names`, fixed
+    # 2026-10-03 in 232011b3: the two now walk a generator's ITERABLE at
+    # `depth + len(gens)`, which is the emitter's convention.
     #
     # In this group rather than `CASES` because the two conventions are the two
     # backends' own (`_collect_var_names` is spelled twice, once per backend),

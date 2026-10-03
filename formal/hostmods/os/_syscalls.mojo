@@ -936,7 +936,9 @@ def fs_mkdtemp(tmpl) -> str:
     could not be right: this path cannot read `errno` (`__error`'s leading
     underscore, this module's own header), so every failure was a "collision"
     and a directory that could not be made cost the whole budget
-    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
+    (fixed 2026-10-03 in 8c311e87, where `mkdtemp` became one
+    `mkdtemp(3)` call: a loop over `mkdir` here cannot read `errno`, so it retried
+    every failure as if it were a collision).
     Two consequences recorded where they are paid rather than here: the name is
     `prefix` + six characters of `[A-Za-z0-9]` where it was `prefix` + eight of
     CPython's alphabet, and the mode is the platform's `0o700` rather than a

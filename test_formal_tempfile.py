@@ -39,8 +39,7 @@ here is a recorded string. What is compared is:
     `tempfile.characters` itself. It has to be one call — a loop over `mkdir`
     here cannot tell a name that is ALREADY TAKEN from a name that could not be
     made at all, because the reason is in `errno` and this path cannot bind
-    `__error` (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_
-    for.md`). So the two name-shape rows compare against the SHAPE of what
+    `__error`. So the two name-shape rows compare against the SHAPE of what
     `mkdtemp(3)` writes (`NAME_RANDOM_LEN`, `NAME_ALPHABET`) rather than against
     this interpreter's own alphabet, and the `mkdtemp3` group exercises the
     binding directly — it had no caller at all until this change, which is the
@@ -104,7 +103,8 @@ MODE_700 = 0o700
 # CPython, because it is not CPython's: `tempfile.characters` describes a name
 # generator this tree no longer has (the module is one `mkdtemp(3)` call now,
 # because a loop over `mkdir` here cannot tell a collision from a failure — see
-# `bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`), and
+# `formal/hostmods/tempfile.mojo`'s `mkdtemp`, fixed 2026-10-03 in 8c311e87),
+# and
 # the C library's alphabet is not published by anything on this host. So the
 # length is the template's, which is a fact about `mkdtemp(3)`'s interface, and
 # the alphabet is the shape of what it writes, which these rows check on every
@@ -386,8 +386,8 @@ def group_mkdtemp(tmpdir, archs, verbose):
         with nothing else in it — the length and the alphabet of the name
         `mkdtemp(3)` substitutes over the template's `XXXXXX`, which is what
         `mkdtemp` is since this module stopped drawing its own eight
-        (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`:
-        a loop over `mkdir` here cannot tell a COLLISION from a FAILURE,
+        (fixed 2026-10-03 in 8c311e87: a loop over `mkdir` here could not tell
+        a COLLISION from a FAILURE,
         because reading the reason means reading `errno`). It is checked as a
         SHAPE and not against this interpreter's `tempfile.characters`, which
         describes a name generator this module no longer has;
@@ -596,7 +596,7 @@ def group_mkdtemp3(tmpdir, archs, verbose):
     with no evidence behind it, which is the state `bugs/UNTESTED.md` is about,
     and it stayed that way because switching `tempfile.mojo` onto it was a
     rewrite of a measured module and its four assertions rather than a commit
-    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md` §3).
+    (fixed 2026-10-03 in 8c311e87, which is that rewrite).
     Now that the module calls it, the binding is exercised directly, so the two
     halves cannot drift: this group asks what `mkdtemp(3)` does, and `mkdtemp`
     asks what the module does with it.
@@ -707,8 +707,8 @@ def _full_filesystem_base(scratch, label="FORMALFULL"):
     """A directory that `access(W_OK)` ACCEPTS and the filesystem refuses to
     create anything in. `(path, detach, skip_reason)`.
 
-    The state `bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`
-    §1 names and no ordinary directory can be: `mkdtemp`'s candidate walk asks
+    The state the `mkdtemp` docstring above names and no ordinary directory
+    can be: `mkdtemp`'s candidate walk asks
     `isdir` and `access(W_OK)`, so the case that reaches `mkdtemp`'s own failure
     arm is one that PASSES both and still cannot be created in — a full
     filesystem, or a read-only mount reached through a writable-looking path.
@@ -928,9 +928,7 @@ def group_one_call(tmpdir, archs, verbose):
           f"`tempfile.mkdtemp`'s body does not call `fs_mkdtemp`: {body!r}. The "
           f"module's retry loop cannot tell a name that is ALREADY TAKEN from a "
           f"name that could not be made at all — the reason is in `errno`, and "
-          f"this path cannot bind `__error` "
-          f"(`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_"
-          f"for.md`)")
+          f"this path cannot bind `__error`")
     check('"XXXXXX"' in body,
           f"`tempfile.mkdtemp`'s body does not build a template ending in "
           f"XXXXXX: {body!r}. `mkdtemp(3)` substitutes the last six bytes of "

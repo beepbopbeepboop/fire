@@ -8544,8 +8544,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         sole field holds a nested FRAME the value is an ADDRESS, and a fresh
         zero word was a load from address 0 on the first field read — measured,
         both architectures, SIGSEGV from a green build
-        (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
-        word.md`). The frame comes up here exactly as it does for a struct of
+        (fixed 2026-10-03 in 4af77b16, where a one-field struct whose
+        sole field holds a frame brings that frame up instead of a null
+        word). The frame comes up here exactly as it does for a struct of
         two or more fields — its own nested subtree first, then its own slots at
         their defaults — and its address is the result. `e` is the construction
         node, and it is what finds the site, whose bytes

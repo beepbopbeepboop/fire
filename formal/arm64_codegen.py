@@ -7201,8 +7201,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         was a null pointer.** When the sole field holds a nested FRAME, this word
         is an ADDRESS: a fresh word of zeros is a load from address 0 on the
         first field read, from a green build, with no diagnostic
-        (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
-        word.md`). So the nested frame is brought up here, exactly as
+        (fixed 2026-10-03 in 4af77b16, where a one-field struct whose
+        sole field holds a frame brings that frame up instead of a null
+        word). So the nested frame is brought up here, exactly as
         `_emit_frame_constructor` brings up a struct of two or more fields'
         nested frames — its defaults, then its own nested subtree, deepest
         first — and its ADDRESS is the value. `e` is the construction node, and
