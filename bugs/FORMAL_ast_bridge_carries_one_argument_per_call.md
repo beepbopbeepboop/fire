@@ -1,12 +1,75 @@
 # `MojoExpr.call` carries ONE argument, so a call with two arguments has no faithful AST and `eval_eq_mojo` is false
 
-**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN — not fixed, and
-step 1 below is now MEASURED as blocked on a Lean limitation this doc did not
-anticipate (see "Status: step 1 is blocked", below, for the error, the two
-routes that could still do it, and the diff that was written and measured
-against them). The minimal reproduction below still stands, and the smallest
-possible one is TWO arguments.** Found 2026-10-02 while wiring the SysV
+**Area:** FORMAL (the proof layer's AST bridge). **Status: OPEN, and RE-MEASURED
+2026-10-03: the minimal reproduction below is STALE — the program now builds,
+runs and omits the AST bridge with an accurate one-line reason instead of
+emitting a false theorem — so what is left is a PROVABILITY gap, not a
+soundness one. Step 1 below is still blocked on the Lean limitation measured in
+"Status: step 1 is blocked".** Found 2026-10-02 while wiring the SysV
 stack-argument convention's proof half.
+
+## Status: the reproduction is stale (2026-10-03)
+
+The same source, on this tree, both architectures:
+
+```
+$ cat .tmp/tw/two.mojo
+def f(a: int, b: int) -> int:
+    return a + b
+
+def main() -> int:
+    return f(1, 2)
+
+$ python3 fire.py build --formal --backend=x86_64 -o .tmp/tw/two.x86 .tmp/tw/two.mojo
+  [proof census: two_proof.lean — 2 declaration(s) admitted a `sorry`, 0 vacuous]
+Built: .tmp/tw/two.x86  [x86_64/macho]
+Proof: .tmp/tw/two_proof.lean  [2 declaration(s) ADMITTED a sorry …]
+$ ./.tmp/tw/two.x86 ; echo $?
+3
+```
+
+and the file says, in a comment where `eval_eq_mojo` would have been:
+
+```
+/- AST bridge omitted: eval_eq_mojo: the AST bridge cannot state this function's
+call — `f` with 2 arguments — `MojoExpr.call` carries ONE `MojoExpr` and
+`callFunc` is `String → UInt64 → UInt64`, so a call of any other arity has no
+faithful AST … Correctness would have to come from the machine value flow alone. -/
+```
+
+**So `⊢ False` is gone, and it is gone because of `_ast_bridge_gaps`**, which
+post-dates this doc and refuses a call of any arity but one BEFORE `_expr_ast`
+can drop arguments silently.  That check is the reason this doc's closing
+paragraph — "an emitted proof that cannot hold is worse than a refusal" — no
+longer describes the tree: the refusal is what happens.
+
+What the two `sorry`s above are is the pre-existing x86-64 trust boundary
+(`compile_correct` and `compiles_correctly`), which every x86-64 proof in the
+tree carries and which
+`bugs/FORMAL_x86_64_end_to_end_proof.md` owns.  On arm64 the same program is
+REFUSED, by a different and larger gap: the CFG walk is per-function, so a call
+to a second function in the same image cannot be followed at all
+(`universal theorem: the call at … targets … a second function in the same
+image`).  So a two-argument call is unprovable for two independent reasons and
+neither is this doc's.
+
+**What is left here is therefore exactly step 1 plus step 2, and both are still
+the same two pieces of work**: widen `MojoExpr.call` to carry a `List MojoExpr`
+(the Lean nested-inductive problem measured below), and make `callFunc` the
+model's own function table instead of a stub.  Neither is a soundness fix any
+more; they are what makes such a program PROVABLE rather than merely honest
+about not proving it.
+
+**One interaction this branch introduced, recorded here because it is the same
+limit seen from the other side.**  `formal/arm64_proof_gen.py::_call_func_lean`
+now takes the entry's arity, and at arity > 1 it gives the proved function's own
+name NO branch: `mojo` is a function of several arguments and `callFunc` is
+handed exactly one value, so any rendering would have to invent the rest.  The
+name therefore falls to the `else 0`, which is TRUE, and
+`_ast_bridge_gaps`' unresolvable-callee gap then REFUSES a program whose AST
+calls its own multi-parameter entry by name — the same refusal, reached through
+the same mechanism, for a callee that used to be "resolvable".  A one-argument
+entry is unchanged, byte for byte.
 
 **Sibling, not duplicate, of `bugs/FORMAL_ast_bridge_binds_only_the_first_parameter.md`.**
 That one is about a function's own PARAMETER LIST: `MojoFunc.mk`'s single
