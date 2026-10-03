@@ -8645,6 +8645,136 @@ CONSTRUCTION_CASES = [
      "    return 7\n", 7, None),
 ]
 
+# ── a one-field HOLDER's CONSTRUCTOR store: which refusal answers it ──
+#
+# `Box` below has exactly one field and that field is a FRAME, so
+# `_rewrite_self_fields` collapses `self.inner` onto `self` before any late pass
+# reads the store — which made the receiver-rebind rule answer a CONSTRUCTOR,
+# with a message that says the source rebinds `self` (it does not), that CPython
+# rejects the shape (it does not: `def __init__(self, o): self.inner = o` is the
+# most ordinary constructor in Python), and that names `Box___init__`, a symbol
+# `_fieldwise_ctor_synthesized` invented.
+#
+# The rule now stands down when the method IS the constructor
+# (`formal/build.py`'s `_collect_receiver_rebinds`), because this path never
+# CALLS one: `model.init_body_stores` inlines a constructor's `self.<field> =
+# …` stores into the fresh block at the CONSTRUCTION SITE, so there is no
+# callee-local `self` whose rebinding could drop a store.  These three rows are
+# the measurement of what answers each spelling instead, and they are the reason
+# the exemption is safe to land: every one of them is still refused, and each by
+# the rule whose question it actually is.
+#
+# (a) is formal10-2's original needle and the pair it belongs to is
+# `test_formal_method_param_field.py`'s
+# `refuse_a_struct_field_initialised_from_a_constructor_argument` plus
+# `a_struct_field_assigned_after_construction_is_the_same_program` (the
+# workaround, `v=41 h=1` on both architectures).
+SOLE_FIELD_CTOR_STORE_CASES = [
+    # (a) THE ARGUMENT.  The frame that reaches the object's block is the
+    # CALLER's, which is the construction-argument hazard and the sentence the
+    # reader can act on.
+    ("sole_field_ctor_store_of_an_argument_is_the_construction_argument",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:constructing Box with argument 'o' as field 'inner'", None),
+    # (b) A frame built HERE, which the receiver rule already stood down from
+    # (`_value_may_be_a_frame` recognises the construction) and which another
+    # rule answers — the field read at the call site, not the store.  It is a
+    # row because "unchanged" is an answer worth pinning: the exemption must not
+    # change which rule answers this one.
+    ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:'b.v' is a field access through 'b'", None),
+    # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
+    # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
+    # right-hand side, because only a bare parameter has the caller's own
+    # expression standing in for it at the construction site, and a call is not
+    # one.  Recorded as measured rather than as hoped: the honest answer is that
+    # the constructor is refused with the STATEMENT spelled out, which is the
+    # same refusal any other un-inlinable body gets and a different question
+    # from the receiver's.
+    ("sole_field_ctor_store_of_a_call_is_the_inlining_rule",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = mk(41)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:whose body this path does not inline", None),
+    # THE CONTROL for the exemption: the same store in an ordinary METHOD, which
+    # is not a constructor and keeps the receiver refusal — with the measured
+    # SIGSEGV behind it (`refuse_a_one_word_holder_of_a_frame_stored_through_its_
+    # receiver`, which is this program's `_fieldwise_ctor_synthesized` twin).
+    # Without this row an over-broad exemption — "skip one-field owners whose
+    # sole field is a frame", ignoring WHICH method it is — would pass every
+    # row above.
+    ("a_method_not_the_constructor_still_gets_the_receiver_refusal",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "    def set(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box()\n"
+     "    b.set(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "refuse:self is assigned o in Box_set()", None),
+]
+
 CONSTRUCTION_REFUSALS = [
     # ── a declared `__init__`, which makes `S(...)` a CALL ──
     #
@@ -16166,6 +16296,7 @@ def main():
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
+                  + SOLE_FIELD_CTOR_STORE_CASES
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES

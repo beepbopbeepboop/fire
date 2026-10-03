@@ -4456,8 +4456,39 @@ def _collect_receiver_rebinds(functions, structs_by_name: dict) -> None:
         # `_frame_receivers` it is reachable at all — which is why the two halves
         # of `model.one_word_sole_field_frame` have to land together, and why
         # they read it from one place.
+        #
+        # **…and a CONSTRUCTOR is not the case this rule is about.**  The
+        # premise is that the method's `self` is a NAME the callee can rebind,
+        # so the store it makes into a field never reaches the caller.  An
+        # `__init__` has no such name: this path never CALLS a constructor —
+        # `model.init_body_stores` inlines its `self.<field> = …` stores into the
+        # fresh block AT THE CONSTRUCTION SITE, in the CALLING function — so the
+        # store lands in the object's own block and there is nothing to drop.  A
+        # constructor whose body is not a straight line of stores is refused by
+        # `init_body_stores` itself, with the offending statement spelled out, so
+        # this exemption cannot open the shape where a rebinding would be real:
+        # there is no spelling of an `__init__` this path RUNS as a method.
+        #
+        # What the exemption exposes is the rule that DOES apply to a
+        # constructor's store, and it is a different question with a different
+        # reader: `self.inner = o` from a constructor ARGUMENT is the
+        # construction-argument hazard (`construction_arg_frame_value`), because
+        # the frame that reaches the object's block is the CALLER's, and the
+        # message names `Box(o)` — the call the reader wrote — rather than a
+        # rebinding of `self` the source never mentions.  Measured, both
+        # architectures, and the three spellings are in
+        # `test_formal_run.py`'s SOLE_FIELD_CTOR_STORE_CASES:
+        # `self.inner = o` is refused as `constructing Box with argument 'o'
+        # as field 'inner'`; `self.inner = Opt()` is answered by another rule
+        # entirely; and `self.inner = mk(41)`, whose frame the CALLEE made,
+        # builds and prints `v=41 h=1` on both.
+        #
+        # `method_member_name` rather than `fn.name.endswith("___init__")`, for
+        # the reason it exists: which method this is has to be read from the
+        # struct, not from the spelling the lift happened to produce.
         if M.struct_is_one_field(owner) \
-                and M.one_word_sole_field_frame(owner, structs_by_name) is None:
+                and (M.one_word_sole_field_frame(owner, structs_by_name) is None
+                     or M.method_member_name(owner, fn) == "__init__"):
             continue
         receivers = M.struct_receivers(owner)
         # A receiver rebound to ANOTHER RECEIVER is a copy of the same address,
