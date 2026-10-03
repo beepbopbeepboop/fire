@@ -2103,6 +2103,42 @@ def _macho_symbol(bind_name: str) -> str:
     return "_" + bind_name
 
 
+def _libsystem_provides(name: str) -> bool:
+    """Whether the C library provides `name`, asked the way the build asks.
+
+    Delegated rather than re-implemented, and the delegation is the point: there
+    were two answers to this question on this tree, and they disagreed on
+    exactly one architecture's worth of names. `formal/build.py`'s
+    `_is_libsystem` asks about `model.libc_source_name(name)` — the name the
+    SOURCE spells — because macOS's C library exports the whole
+    directory-and-stat family twice (`readdir` and `readdir$INODE64`) and which
+    one a given target's calls bind is the TARGET's choice, decided in
+    `model.target_libc_symbol`. This probe used to hand the bind name straight
+    to `dlsym`, and on this host that is the host's libSystem, so every
+    x86-64 image was asked about a spelling the host does not have. Measured,
+    and it is the whole of the arm64-vs-x86-64 difference in the 2026-10-02
+    sweep: `formal/hostmods/os/_syscalls.mojo`, which binds five `$INODE64`
+    names on x86-64 and none on arm64, was reported
+    `not-answerable/unresolved-extern` on x86-64 and `pass` on arm64 — an image
+    that builds, links and loads, measured by running it: `arch -x86_64` on the
+    x86-64 image exits with an empty stderr (the code is the module's own; the
+    arm64 one exits 64 and this one 80), where the refusal had said dyld could
+    not bind five of its symbols.
+
+    Two things come with the delegation and both are wanted. The C library is
+    asked through a handle on the library itself rather than through
+    `ctypes.CDLL(None)`, which searches this process's whole global namespace —
+    the false-PASS direction `_libsystem_handle`'s own docstring measures on
+    this machine (`sqlite3_open` and `inflate` are visible there and are not in
+    libSystem). And every C function name in a real formal image answers the
+    same on both handles, measured, so nothing that passed before stops
+    passing; only the names this process loaded for its own reasons change
+    answer, and those are exactly the ones that should.
+    """
+    from formal.build import _is_libsystem
+    return _is_libsystem(name)
+
+
 def _exports(path: str, name: str, static: bool = False):
     """`(state, why)` for whether the library at `path` exports `name`.
 
@@ -2119,8 +2155,8 @@ def _exports(path: str, name: str, static: bool = False):
     reason it exists (2026-10-02; before that, an x86-64 image probed from an
     arm64 host got no verdict at all, see the block comment above).
 
-    The name goes to dlsym EXACTLY as the image's bind stream spells it, and
-    that is the whole contract. The stream already carries the C name —
+    A DYLIB's name goes to dlsym EXACTLY as the image's bind stream spells it,
+    and that is the whole contract. The stream already carries the C name —
     `macho_linker._bind_info` takes off the single leading underscore that is
     dyld's rather than the name's, and dyld puts it back on when it forms the
     symbol it looks up — so the name read back out of the image is already the
@@ -2135,14 +2171,12 @@ def _exports(path: str, name: str, static: bool = False):
     The sweep then reported a load failure for an image that loads: measured on
     `formal/hostmods/os/__init__.mojo` and `formal/hostmods/os/path/__init__.mojo`,
     both classified `unresolved-extern` on a build that links and runs. See
-    `bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md`. Neither arm
-    normalises, and that is now the whole rule: the dlopen arm because `ctypes`
-    already performs the one prepend that IS correct on macOS, and the static arm
-    because it performs exactly that same prepend and nothing else
-    (`_macho_symbol`). Measured on `formal/hostmods/ast.mojo`: a static arm
-    without it reported all three of the image's binds as "not exported" by a
-    dylib that exports all three — a false finding, in the direction this
-    instrument has a documented history of getting wrong.
+    `bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md`. A dylib's name is
+    therefore still not normalised, and the static arm still applies exactly the
+    one mapping that IS correct on macOS (`_macho_symbol`).
+
+    libSystem is the exception, and for the opposite reason: its name is not
+    this project's to spell. See `_libsystem_provides`.
 
     `macho_dylib_exports` lists ORDINARY exports only, and the omission is
     deliberate rather than tidy: a thread-local or an absolute is not something
@@ -2155,20 +2189,18 @@ def _exports(path: str, name: str, static: bool = False):
     with flags 0, `EXPORT_SYMBOL_FLAGS_KIND_REGULAR`, and that is the only
     emitter of a dylib on this link line. So the gap is documented, closed, and
     would need reopening only if a re-exporting library ever entered the path.
-
-    libSystem is the one exception to "the library at `path`": it is answered
-    from the HOST process (see the block comment above for why that is the same
-    library), and CDLL(None) searches the global namespace.
     """
     if static:
         exports, why = _static_exports(path)
         if exports is None:
             return "unprovable", why
         found = _macho_symbol(name) in exports
+    elif path == _LIBSYSTEM:
+        found = _libsystem_provides(name)
     else:
         key = (path, name)
         if key not in _MEMO:
-            lib = ctypes.CDLL(None) if path == _LIBSYSTEM else ctypes.CDLL(path)
+            lib = ctypes.CDLL(path)
             _MEMO[key] = hasattr(lib, name)
         found = _MEMO[key]
     if found:

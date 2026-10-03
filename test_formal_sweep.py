@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 import cas
 import formal_sweep as S
+import formal_sweep_parity as P
 import procrun
 
 # ── The messages this classifies, verbatim ───────────────────────────────────
@@ -2171,6 +2172,416 @@ class TestSweepLock(unittest.TestCase):
             if saved_held is not None:
                 os.close(saved_held)
             mod._HELD_LOCK = None
+
+class TestArmVsX86Parity(unittest.TestCase):
+    """`tools/formal_sweep_parity.py`: two arms' logs, compared per FILE.
+
+    The comparison was a hand-run scratch script in every map in this series, and
+    the claim it supports — "the two architectures are the same sweep" — is the
+    one that decides whether anyone spends a session on the x86-64 machine
+    subset. So what is under test is the whole of the reporting layer: that a
+    file missing from one arm's log is read as a PASS there (a pass prints
+    nothing, so a plain diff of two logs cannot see the pass differences at
+    all), that an architecture LABEL in a refusal is folded while an architecture
+    name inside a FILE NAME is not, and that the differences the tool prints add
+    up to the pass-count delta rather than being a list nobody has checked.
+
+    No builds and no CAS: the unit under test reads two text files.
+    """
+
+    # Two messages the folding rule has to tell apart, both quoted from the
+    # committed 2026-10-02 logs.
+    ARM_LABEL = ("print() cannot tell whether SubscriptExpr is a string or a "
+                 "number on the formal arm64 path, and guessing would print an "
+                 "address as if it were text")
+    X86_LABEL = ARM_LABEL.replace("arm64", "x86-64")
+    # …which is what produced 10 on arm64 and 0 on x86-64 for one source) — a
+    # refusal that names BOTH machines in one sentence, which is why the
+    # reporting arm's own name cannot be all that gets folded.
+    BOTH_MACHINES = ("This path has no MLIR, so it lowers a Mojo program to a "
+                     "Mach-O image whose only value is a 64-bit word. Refused "
+                     "rather than read out of a register, which is what produced "
+                     "10 on arm64 and 0 on x86-64 for one source")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="fs_parity_")
+        self.addCleanup(self._tmp.cleanup)
+
+    def _log(self, arch, rows, files=4, passed=None):
+        """Write one sweep log and return its path.
+
+        `rows` is `[(rel, cls, detail)]`. The `PASS=` figure in the summary is
+        derived from what is left over unless a test asks for another one, so a
+        fixture cannot state a pass count that disagrees with its own rows —
+        which is the arithmetic the tool checks.
+        """
+        passed = files - len(rows) if passed is None else passed
+        body = ["memcap: parity -- ceiling 8.0 GB across the process tree",
+                f"Sweeping {files} files through build --formal [{arch}] "
+                f"(1 workers, 120s timeout, 4 GB per-file ceiling)..."]
+        for rel, cls, detail in rows:
+            body.append(f"{cls.upper()}: {rel}  ({detail})")
+        body.append(f"[{arch}] {files} files: PASS={passed} "
+                    f"not-pass={files - passed}")
+        path = os.path.join(self._tmp.name, f"sweep-{arch}.txt")
+        with open(path, "w") as f:
+            f.write("\n".join(body) + "\n")
+        return path
+
+    def _compare(self, arm_rows, x86_rows, files=4):
+        """`(changed, only_arm, only_x86, reasoned)` over two synthetic logs."""
+        return P.compare(
+            P.read_log(self._log("arm64", arm_rows, files))[1],
+            P.read_log(self._log("x86_64", x86_rows, files))[1])
+
+    def _printed(self, arm_rows, x86_rows, files=4):
+        """What the tool prints for two synthetic logs."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            P.report(self._log("arm64", arm_rows, files),
+                     self._log("x86_64", x86_rows, files))
+        return out.getvalue()
+
+    # ── what a missing row means ──────────────────────────────────────────
+    def test_a_file_only_one_arm_printed_a_row_is_a_pass_on_the_other(self):
+        # The case a text diff cannot find, and the one the class counts point
+        # at: in the committed logs `formal/hostmods/os/_syscalls.mojo` passes
+        # on arm64 and is `not-answerable/unresolved-extern` on x86-64, which is
+        # 126 pass against 125. A pass prints NO line, so the file is simply
+        # absent from the ARM log — and "what is in log A but not log B" has
+        # the opposite answer in each direction, which is why both are checked.
+        changed, only_arm, only_x86, reasoned = self._compare(
+            [], [("a.py", "codegen", "build: refused")], files=1)
+        self.assertEqual(changed, [])
+        self.assertEqual(reasoned, [])
+        self.assertEqual(only_arm, [])
+        self.assertEqual([p for p, _ in only_x86], ["a.py"])
+        self.assertEqual(only_x86[0][1].cls, "codegen")
+        changed, only_arm, only_x86, reasoned = self._compare(
+            [("a.py", "codegen", "build: refused")], [], files=1)
+        self.assertEqual((changed, reasoned, only_x86), ([], [], []))
+        self.assertEqual([p for p, _ in only_arm], ["a.py"])
+
+    def test_the_one_sided_rows_account_for_the_whole_pass_delta(self):
+        # …in both directions, and as arithmetic the report prints. A
+        # difference list that does not add up to the pass-count delta means a
+        # row was lost or printed twice, so the list is not the whole story and
+        # the report has to say so rather than look finished.
+        self.assertIn("accounted for",
+                      self._printed([("a.py", "codegen", "build: refused")],
+                                    [], files=1))
+        self.assertIn("accounted for", self._printed([], [], files=1))
+        # A log whose summary claims a pass its own printed rows do not support:
+        # 4 files with no rows is 4 passes, whatever the summary says, and every
+        # file missing from a partial log looks exactly like a pass on the other
+        # arm — the one class of difference this report must never invent.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            P.report(self._log("arm64", [], files=4, passed=1),
+                     self._log("x86_64", [], files=4))
+        self.assertIn("INCONSISTENT LOG", out.getvalue())
+        self.assertIn("partial, or two runs in one file", out.getvalue())
+
+    # ── class changes ─────────────────────────────────────────────────────
+    def test_a_class_that_moved_is_named_in_both_directions(self):
+        changed, only_arm, only_x86, reasoned = self._compare(
+            [("a.py", "codegen", "build: refused here")],
+            [("a.py", "not-answerable/host-import",
+              "build: a.py imports 'os', which is a host module")])
+        self.assertEqual([p for p, _, _ in changed], ["a.py"])
+        self.assertEqual(changed[0][1].cls, "codegen")
+        self.assertEqual(changed[0][2].cls, "not-answerable/host-import")
+        self.assertEqual((only_arm, only_x86, reasoned), ([], [], []))
+
+    # ── reasons, and the one normalisation ────────────────────────────────
+    def test_an_architecture_aware_refusal_is_the_same_refusal_on_both_arms(self):
+        # The measured instance: `test_llm/dumb_gemm.mojo` is `codegen` on both
+        # arms for a print() it cannot classify, and the two messages name their
+        # own architecture. Compared as text that is a REASON CHANGED row on
+        # every sweep, forever, and it is a difference in the reader rather than
+        # in the backend.
+        _changed, _arm, _x86, reasoned = self._compare(
+            [("dumb_gemm.mojo", "codegen", "build: " + self.ARM_LABEL)],
+            [("dumb_gemm.mojo", "codegen", "build: " + self.X86_LABEL)])
+        self.assertEqual(reasoned, [])
+
+    def test_a_refusal_naming_both_machines_is_one_message(self):
+        # From stdlib/sys/debug.mojo. Folding only the reporting arm's own name
+        # leaves `0 on x86-64` facing `0 on <arch>`, which is a difference the
+        # reader invents for itself.
+        _changed, _arm, _x86, reasoned = self._compare(
+            [("debug.mojo", "codegen", "build: " + self.BOTH_MACHINES)],
+            [("debug.mojo", "codegen", "build: " + self.BOTH_MACHINES)])
+        self.assertEqual(reasoned, [])
+
+    def test_an_architecture_name_inside_a_file_name_is_not_a_label(self):
+        # 12 of the 542 shared rows in the committed logs are messages that
+        # name a FILE whose name contains an architecture —
+        # `test_arm64_emission.py`, `formal/x86_64_codegen.py`, `jit/arm64.py`,
+        # `test_formal_x86_64_parity.py`. Folding those renames the file the
+        # row is filed under, and both arms fold their own copy of the same
+        # string, so two identical rows come out different.
+        for name in ("test_arm64_emission.py", "formal/x86_64_codegen.py",
+                     "jit/arm64.py", "test_formal_x86_64_parity.py",
+                     "tools/arm64_insn_audit.py"):
+            with self.subTest(name=name):
+                detail = f"build: {name} imports 'tempfile', which is a host module"
+                self.assertEqual(P.fold_arch(detail), detail,
+                                 f"{name} is a file name, not a machine label")
+                _c, _a, _x, reasoned = self._compare(
+                    [(name, "not-answerable/host-import", detail)],
+                    [(name, "not-answerable/host-import", detail)])
+                self.assertEqual(reasoned, [])
+
+    def test_a_real_difference_of_reason_is_not_hidden_by_the_folding(self):
+        # The other direction, and what keeps the normalisation from becoming a
+        # way to stop seeing things: the same class and a genuinely different
+        # refusal, which is what a `codegen` on both arms looks like when one
+        # arm refused a subscript and the other a slice.
+        _changed, _arm, _x86, reasoned = self._compare(
+            [("a.py", "codegen", "build: a slice with a step is not lowered")],
+            [("a.py", "codegen",
+              "build: a subscript read of a String is not lowered")])
+        self.assertEqual([p for p, _, _ in reasoned], ["a.py"])
+
+    def test_the_refusing_module_is_compared_too(self):
+        # Two dependency chains whose terminal message is the same sentence from
+        # two different modules are two different gaps, and the class is
+        # `codegen/dependency` on both — so the refuser is a third fact and not a
+        # fourth reading of the reason.
+        _changed, _arm, _x86, reasoned = self._compare(
+            [("a.mojo", "codegen/dependency",
+              "build: a.mojo imports 'b', which cannot be built either: "
+              "tile.mojo: refused here")],
+            [("a.mojo", "codegen/dependency",
+              "build: a.mojo imports 'b', which cannot be built either: "
+              "map.mojo: refused here")])
+        self.assertEqual([p for p, _, _ in reasoned], ["a.mojo"])
+        self.assertEqual(reasoned[0][1].refuser, "tile.mojo")
+        self.assertEqual(reasoned[0][2].refuser, "map.mojo")
+
+    # ── what is not comparable at all ─────────────────────────────────────
+    def test_two_logs_of_one_architecture_are_refused(self):
+        path = self._log("arm64", [])
+        with self.assertRaises(SystemExit) as caught:
+            P.report(path, path)
+        self.assertIn("both logs are [arm64]", str(caught.exception))
+
+    def test_a_file_that_is_not_a_sweep_log_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            junk = os.path.join(td, "not-a-sweep.txt")
+            with open(junk, "w") as f:
+                f.write("hello\n")
+            with self.assertRaises(SystemExit) as caught:
+                P.report(junk, self._log("x86_64", []))
+        self.assertIn("NOT A SWEEP LOG", str(caught.exception))
+
+    def test_two_sweeps_of_different_scopes_are_refused(self):
+        # Every difference would then include the files only one of them swept,
+        # which is a statement about the roots and not about either machine.
+        with self.assertRaises(SystemExit) as caught:
+            P.report(self._log("arm64", [], files=4),
+                     self._log("x86_64", [], files=5))
+        self.assertIn("not over the same scope", str(caught.exception))
+
+    # ── and the two logs this repository actually has ─────────────────────
+    def test_the_committed_arms_classify_every_shared_file_identically(self):
+        # The claim in bugs/FORMAL_sweep_work_map_2026-10-02_b7.md §2.5, read
+        # off the two committed logs rather than believed: 542 files classified
+        # on both arms and NOT ONE of them with a different class. That is the
+        # sentence which decided the x86-64 machine subset was not where the
+        # remaining coverage was, so it is pinned against the logs themselves,
+        # and a new divergence in either direction turns this red instead of
+        # waiting to be noticed in a count.
+        arm = os.path.join(S.REPO, "bugs/sweeps/sweep-arm-7.txt")
+        x86 = os.path.join(S.REPO, "bugs/sweeps/sweep-x86-7.txt")
+        for path in (arm, x86):
+            if not os.path.exists(path):
+                self.skipTest(f"{path} is not in this checkout")
+        arm_arch, arm_rows, _ac, arm_files, _ap = P.read_log(arm)
+        x86_arch, x86_rows, _xc, x86_files, _xp = P.read_log(x86)
+        self.assertEqual((arm_arch, arm_files), ("arm64", 668))
+        self.assertEqual((x86_arch, x86_files), ("x86_64", 668))
+        changed, only_arm, only_x86, reasoned = P.compare(arm_rows, x86_rows)
+        self.assertEqual([p for p, _, _ in changed], [],
+                         "a file's CLASS differs between the two arms")
+        self.assertEqual([p for p, _, _ in reasoned], [],
+                         "a file is refused for a different reason on each arm")
+        # What IS there, in those logs: one file passes on arm64 and is
+        # `not-answerable/unresolved-extern` on x86-64. Asserted as a SHAPE and
+        # not as a name, because a re-sweep against a probe that asks the right
+        # question must be able to empty this list without a test edit; the
+        # identity and its cause are in
+        # bugs/FORMAL_sweep_x86_64_libsystem_probe_asks_the_host.md.
+        self.assertEqual(only_arm, [])
+        for path, row in only_x86:
+            self.assertEqual(row.cls, "not-answerable/unresolved-extern")
+            self.assertIn("dyld cannot resolve", row.reason)
+
+
+class TestLibSystemBindSpelling(unittest.TestCase):
+    """A C name's SPELLING is the target's, and the probe was asking the host.
+
+    macOS's C library exports the whole directory-and-stat family twice — once
+    for a 32-bit `ino_t` and once for a 64-bit one (`readdir` and
+    `readdir$INODE64`) — and a program compiled for a 64-bit target, which is
+    every program clang builds for arm64 AND for x86_64, calls the `$INODE64`
+    one. A Mojo source spells the bare name and there is no header to redirect
+    it, so the binding is this backend's job: `model.target_libc_symbol`. That
+    is the whole design; this class is what holds the OTHER end of it, the probe
+    that decides whether the image's binds are resolvable.
+
+    It used to hand the bind name straight to `dlsym` on a handle on the HOST's
+    libSystem, so on this arm64 host every `$INODE64` name was reported as a
+    symbol nothing provides. Measured: it was the entire arm64-vs-x86-64
+    difference in the 2026-10-02 sweep — `formal/hostmods/os/_syscalls.mojo` is
+    `pass` on arm64 (it binds the bare names) and was
+    `not-answerable/unresolved-extern` on x86-64 (it binds five `$INODE64`
+    ones), and its image loads and runs under `arch -x86_64`.
+
+    Two builds of one real repository file, ~0.6 s each. Not a synthetic
+    fixture: the whole subject is what the backend does with THIS module, and a
+    hand-written fixture would be asserting the fixture.
+    """
+
+    SOURCE = "formal/hostmods/os/_syscalls.mojo"
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import tempfile
+        cls.subprocess = subprocess
+        cls._tmp = tempfile.TemporaryDirectory(prefix="fs_inode64_")
+        cls.images = {}
+        for arch in ("arm64", "x86_64"):
+            out = os.path.join(cls._tmp.name, f"syscalls.{arch}")
+            p = cls.subprocess.run(
+                [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
+                 "--formal", "--no-prove", f"--backend={arch}", "-o", out,
+                 os.path.join(S.REPO, cls.SOURCE)],
+                capture_output=True, text=True, cwd=S.REPO, timeout=600)
+            if p.returncode != 0 or not os.path.exists(out):
+                raise AssertionError(
+                    f"building {cls.SOURCE} for {arch} failed: "
+                    f"{(p.stderr or p.stdout).strip()[-400:]}")
+            with open(out, "rb") as f:
+                cls.images[arch] = (out, f.read())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _runs(self, arch):
+        """Run one image the way this host can; `(returncode, first stderr line)`.
+
+        `arch -x86_64` on an arm64 host, because that is the only thing that can
+        confirm the claim this class exists for — that dyld, in an x86-64
+        process, binds the five names an arm64 probe cannot see. A build that
+        only says "the image is fine" is the assertion this replaced.
+        """
+        out, _image = self.images[arch]
+        argv = [out]
+        if (arch == "x86_64" and S._host_arch_name() == "arm64"
+                and sys.platform == "darwin"):
+            argv = ["arch", "-x86_64", out]
+        p = self.subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        err = (p.stderr or "").strip().splitlines()
+        return p.returncode, (err[0] if err else "")
+
+    def test_the_two_arms_bind_different_spellings_of_the_same_functions(self):
+        # The precondition, and it is what makes the rest of this class about
+        # architecture rather than about a spelling: the same module, two
+        # targets, and the `$INODE64` names exist on one side only.
+        from formal import model as M
+        arm = {n for _o, n in S._binds(self.images["arm64"][1])}
+        x86 = {n for _o, n in S._binds(self.images["x86_64"][1])}
+        self.assertTrue(arm and x86)
+        self.assertFalse([n for n in arm if n.endswith(M.INODE64_SUFFIX)],
+                         f"arm64 has no 32-bit ino_t, so it binds the bare "
+                         f"names: {sorted(arm)}")
+        self.assertTrue([n for n in x86 if n.endswith(M.INODE64_SUFFIX)],
+                        f"precondition: the x86-64 image binds a $INODE64 "
+                        f"name, got {sorted(x86)}")
+        for name in sorted(n for n in x86 if n.endswith(M.INODE64_SUFFIX)):
+            self.assertEqual(M.libc_source_name(name),
+                             name[:-(len(M.INODE64_SUFFIX))].lstrip("_"),
+                             f"{name} is the target spelling of a name the "
+                             f"source spells bare")
+            self.assertEqual(M.target_libc_symbol(
+                M.libc_source_name(name), "x86_64", "macho"), name,
+                f"the backend chose {name} by the table, so the probe has to "
+                f"be able to ask about it")
+
+    def test_this_host_cannot_see_the_names_the_x86_64_image_binds(self):
+        # Why the old probe was wrong, pinned as a fact: the spelling is not
+        # missing everywhere, it is missing HERE. Without this the next reader
+        # could decide the normalisation is unnecessary on this machine.
+        import ctypes
+        from formal import model as M
+        host = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        for bare in ("lstat", "opendir", "readdir", "stat"):
+            self.assertTrue(hasattr(host, bare),
+                            f"precondition: this host does provide {bare}")
+            self.assertFalse(hasattr(host, bare + M.INODE64_SUFFIX),
+                             f"if this host exported {bare}{M.INODE64_SUFFIX} "
+                             f"there would be nothing to fix and this class "
+                             f"would be testing the host")
+
+    def test_both_arms_resolve_every_bind_they_record(self):
+        # The fix, on both architectures: the x86-64 image is no longer
+        # reported as needing five symbols nothing provides.
+        for arch in ("arm64", "x86_64"):
+            with self.subTest(arch=arch):
+                self.assertEqual(S._unresolved_imports(self.images[arch][1]),
+                                 [], f"[{arch}] the probe reports binds that "
+                                 f"resolve")
+
+    def test_the_x86_64_image_loads_and_runs_with_nothing_forced(self):
+        # dyld's own answer, in an x86-64 process. A refused load prints the
+        # symbol it could not bind, so an empty stderr is the claim; the return
+        # code is the module's own (64 on arm64, 80 on x86-64 — a formal image
+        # with no `main`, and not a signal).
+        rc, err = self._runs("x86_64")
+        self.assertEqual(err, "", f"dyld refused the x86-64 image: {err}")
+        self.assertNotEqual(rc, -9, "the image was killed")
+        rc, err = self._runs("arm64")
+        self.assertEqual(err, "", f"dyld refused the arm64 image: {err}")
+
+    def test_a_name_this_process_loaded_for_itself_own_reasons_is_a_finding(self):
+        # The other direction, and the one the delegation fixed on the way: the
+        # probe used to answer libSystem questions through `CDLL(None)`, which
+        # searches this process's whole global namespace. `sqlite3_open` and
+        # `inflate` are visible there and are NOT in libSystem (measured, and
+        # `formal/build.py`'s `_libsystem_handle` docstring is the same
+        # measurement) — so a name like that read as resolvable when nothing on
+        # the image's link line defines it.
+        import ctypes
+        import platform
+        if platform.system() != "Darwin":
+            self.skipTest("the C library under test is libSystem")
+        glob = ctypes.CDLL(None)
+        witness = next((n for n in ("sqlite3_open", "inflate", "zlibVersion")
+                        if hasattr(glob, n)), None)
+        if witness is None:
+            self.skipTest("this python has loaded none of the witnesses, so "
+                          "the false pass cannot be reproduced here")
+        self.assertEqual(S._exports(S._LIBSYSTEM, witness),
+                         ("not-exported",
+                          f"{witness} is not exported by {S._LIBSYSTEM}"),
+                         "the global namespace is not the image's link line")
+
+    def test_the_probe_and_the_build_audit_agree_about_libsystem(self):
+        # One question, one implementation. `formal/build.py` refuses a build
+        # whose externs nothing provides, using `_is_libsystem`; the probe
+        # decides the post-build verdict with the same predicate. They used to be
+        # two answers to one question and they disagreed by an architecture.
+        from formal.build import _is_libsystem
+        names = sorted({n for _o, n in S._binds(self.images["x86_64"][1])})
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(S._exports(S._LIBSYSTEM, name)[0] == "exported",
+                                 _is_libsystem(name))
 
 
 if __name__ == "__main__":
