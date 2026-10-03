@@ -262,7 +262,7 @@ query. So nothing real was affected and nothing real was fixed either — the
 answer is that a construct the build handles is refused in one of the three
 positions it can be written in.
 
-**Landed 2026-10-02 (`3f4c1a7b`).** `_fold_target_queries` now walks
+**Landed 2026-10-02 (`417b9833`).** `_fold_target_queries` now walks
 `fn.param_defaults` as well as `fn.body`, and `_fold_target_queries_in` handles
 a `dict` (mutating it in place, never replacing it; keys are parameter NAMES and
 a name is not an expression). Nothing about what the emitter substitutes changed
