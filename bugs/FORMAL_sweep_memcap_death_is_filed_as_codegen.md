@@ -1,5 +1,9 @@
 # FORMAL_sweep_memcap_death_is_filed_as_codegen: a build whose wrapper died is published to the CAS as a backend gap
 
+**Status: FIXED on `work/formal6-sweep-r2` (commit `6febd26e`), for the
+misclassification. What killed the wrapper is still not established** — that is
+the part of this doc that remains open, and it is the last section.
+
 **Class:** instrument defect (`tools/formal_sweep.py` + `tools/procrun.py`).
 **Effect:** a machine fact enters the `codegen` class — the class whose count is
 a gap in the backend, the class that fails a run, and the class
@@ -139,7 +143,29 @@ What killed the wrapper is **not established here**. `tools/control.py guard`
 worktree once their sum passes its budget, and it was running throughout; that
 is a candidate, not a conclusion, and this doc does not claim it.
 
-## The exact next step
+## The fix, as landed
+
+All four steps below are in `6febd26e`, with five cases in
+`test_formal_sweep.py::TestWrapperDied` (84 tests pass there; 33 in
+`test_formal_sweep_truth.py` and 5 groups in `test_formal_sweep_cache_key.py`
+also pass). What the commit does differently from the sketch below:
+
+* `memcap_verdict` keeps its `(breached, peak)` contract — three other tools read
+  it as a pair (`tools/suite.py`, `tools/ab_run_one.py`) — and the third state is
+  a sibling predicate, `procrun.memcap_wrapper_died`, sharing ONE definition of
+  "memcap reported an outcome" (`memcap_accounted`) with the breach reader rather
+  than adding a second parser.
+* `BuildRun` gained a `wrapper_died` field, and the branch fires only when the
+  BUILD printed nothing either (`build_lines` is empty), so a build that refused
+  a construct and then had its wrapper killed still reports the refusal. That case
+  is pinned by a test, because getting it wrong trades one misfiling for another.
+* the same branch stops a silent death's `detail` from being memcap's
+  `done … child exit -9` line. The CLASS is deliberately unchanged: the
+  silent-death fallback is a documented choice (a refusal whose message went to
+  stdout is common) and the fix is about not putting the wrapper's bookkeeping in
+  the file's mouth.
+
+## The exact next step, as specified before the fix
 
 1. **`tools/procrun.py::memcap_verdict`** — return a third state instead of a
    `(breached, peak)` pair, or a small sibling predicate beside it: a
