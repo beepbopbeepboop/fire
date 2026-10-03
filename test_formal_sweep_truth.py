@@ -520,11 +520,28 @@ class TestSweepReach(unittest.TestCase):
 
 
 class TestSystemModuleCall(unittest.TestCase):
-    # `math` and not `json`: `json` used to be the host module named here, and
-    # `formal/hostmods/json.mojo` landed in 2026-09-30, so a `json` that is
-    # "not available here" is no longer a fact about anything. `math` has no
-    # Mojo source in this tree, so the message this rule reads is still true.
-    SRC = "import os\nimport math\n\ndef main():\n    pass\n"
+    # `socket` and not `json`, and not `math`: `json` used to be the host module
+    # named here and `formal/hostmods/json.mojo` landed in 2026-09-30; then
+    # `math` was named here, on the same reasoning, and `formal/hostmods/math.
+    # mojo` landed too. A name in this slot is a CLAIM that it has no Mojo
+    # source, and the claim stops being true the day the module is written — at
+    # which point the name leaves HOST_MODULES entirely (it is not refused at
+    # all any more) and this test fails on the tool being right. The premise is
+    # therefore asserted below rather than trusted: a fixture that has quietly
+    # stopped being an example of anything is a silent hole in a suite whose
+    # whole subject is the difference between a fact about the target and a gap
+    # in the backend.
+    SRC = "import os\nimport socket\n\ndef main():\n    pass\n"
+
+    def test_the_example_is_still_a_host_module_with_no_reach(self):
+        # Read from the tool's own tables, not from this comment: the rule
+        # under test is structural (`mod in HOST_MODULES`, and the file imports
+        # it), so its premise is a fact about two sets that this tree edits
+        # whenever a hostmod is written.
+        from formal.imports import HOST_MODULES
+        self.assertIn("socket", HOST_MODULES)
+        self.assertNotIn("socket", S.IN_REACH_HOST_MODULES)
+        self.assertTrue(S._source_imports(self.SRC, "socket"))
 
     def test_a_self_describing_message_is_a_target_fact(self):
         got = S._system_module_call(
@@ -534,9 +551,9 @@ class TestSystemModuleCall(unittest.TestCase):
 
     def test_a_message_naming_a_host_member_is_a_target_fact(self):
         got = S._system_module_call(
-            "build: math.floor() cannot be lowered: math is not available here",
-            self.SRC)
-        self.assertEqual(got, "math")
+            "build: socket.recv() cannot be lowered: socket is not available "
+            "here", self.SRC)
+        self.assertEqual(got, "socket")
 
     def test_a_construct_refusal_is_not(self):
         """The negative that matters most, because the fallback is `codegen`.
@@ -560,10 +577,13 @@ class TestSystemModuleCall(unittest.TestCase):
 
         A diagnostic that happens to contain `socket.recv` does not make the
         file a system-module call; a file that never mentions `socket` cannot
-        be one.
+        be one. The source is spelled out here rather than taken from SRC
+        because SRC deliberately DOES import the name the rule reads, and a
+        negative that reused it would be testing the opposite of what it says.
         """
         self.assertEqual(
-            S._system_module_call("build: socket.recv cannot be lowered", self.SRC),
+            S._system_module_call("build: socket.recv cannot be lowered",
+                                  "import os\n\ndef main():\n    pass\n"),
             "")
 
     def test_classify_routes_it_out_of_codegen(self):

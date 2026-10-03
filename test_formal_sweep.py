@@ -18,8 +18,11 @@ cached result from a different set would be a different answer.
 import io
 import os
 import re
+import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -354,6 +357,38 @@ class TestDyldProbe(unittest.TestCase):
                     "fn main() -> Int:\n"
                     "    var x: Int = twice(21)\n    return x\n")
         cls.relative_img = cls._fire("relpkg/__init__.mojo", "arm64")
+        # A second relative-import fixture whose ABI prefix ITSELF begins with an
+        # underscore, which is the shape the `lstrip("_")` normalisation cannot
+        # survive. A relative import's prefix used to begin with one (`._helper`
+        # inside no package was `__helper`), then stopped when a relative import
+        # began carrying its parent's identity (`relpkg` above), and the fixture
+        # that used to reproduce the defect quietly stopped doing so.
+        #
+        # The parent has to be a module whose own NAME begins with an underscore,
+        # because that is the only place one survives: `abi_module_name` flattens
+        # the dots (`a.b` -> `a_b`) and `macho_linker._bind_info` takes OFF the
+        # single leading underscore of the C name when it writes the bind stream.
+        # So a prefix of `_pkg__helper` exports `_pkg__helper_twice_…`, binds
+        # `_pkg__helper_twice_…` (leading underscore), and `lstrip("_")` turns
+        # that into `pkg__helper_twice_…`, which no library on the link line
+        # exports — a load failure reported for an image that loads. A prefix of
+        # `_helper` (an absolute `from _helper import`) is NOT enough: it binds
+        # `helper_twice_…`, with no leading underscore, and the normalisation is
+        # a no-op. Measured, both shapes, before this fixture was chosen.
+        with open(os.path.join(d, "_helper.mojo"), "w") as f:
+            f.write("fn twice(a: Int) -> Int:\n    return a + a\n")
+        with open(os.path.join(d, "__pkg.mojo"), "w") as f:
+            f.write("from ._helper import twice\n\n"
+                    "fn main() -> Int:\n"
+                    "    var x: Int = twice(21)\n    return x\n")
+        # BOTH architectures, and the reason is not symmetry: the x86-64 half is
+        # the one that goes through the export TRIE on this host (dlopen loads
+        # only this process's own architecture), and `_macho_symbol` — the
+        # function that replaced the `lstrip` — exists for that arm alone. An
+        # end-to-end fixture for the normalisation defect that only ran natively
+        # would leave the code that replaced it untested.
+        cls.leading_underscore = {arch: cls._fire("__pkg.mojo", arch)
+                                  for arch in ("arm64", "x86_64")}
         # The image the post-build probe still has to be able to catch, built
         # the way a dylib-path build produces one: one external bind, and a
         # dylib that IS on the link line and loadable but does not define the
@@ -504,6 +539,66 @@ class TestDyldProbe(unittest.TestCase):
                                 f"name, so no normalisation could break it")
         self.assertEqual(S._unresolved_imports(self.relative_img), [])
         rc, err = self._runs(self.relative_img, "rel")
+        self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
+        self.assertEqual(rc, 42, "main() returns twice(21)")
+
+    def test_a_bind_name_that_itself_begins_with_an_underscore_resolves(self):
+        """The normalisation defect, end to end, on the shape that reproduces it.
+
+        The case above can no longer make the original defect reproduce: its bind
+        is `relpkg__helper_twice_…`, which begins with no underscore, so
+        `lstrip("_")` is a no-op and any normalisation passes by accident. This
+        fixture is the shape where the normalisation IS observable — the ABI
+        prefix begins with an underscore — and it is what restores the end-to-end
+        coverage the doc recorded as missing
+        (`bugs/FORMAL_sweep_relative_import_bind_name_shape_moved.md`).
+
+        Three things are asserted, in the order they matter:
+
+        * **the precondition**: the bind name really does begin with an
+          underscore, and the export really does begin with two. Without that
+          this test would pass for the same reason the other one does — it would
+          be exercising a normalisation that changes nothing;
+        * **the normalisation is wrong here, and wrong in the direction that
+          reports a failure**: the stripped name, mapped through `_macho_symbol`,
+          is not what the library on the link line exports. That is the exact
+          false answer the old probe gave — "this image needs a symbol nothing
+          provides" — for an image that loads;
+        * **the image resolves and runs**: on BOTH architectures. The x86-64 half
+          goes through the export trie, which is the only place `_macho_symbol`
+          is used, so an arm64-only fixture would leave the function that
+          replaced the `lstrip` untested.
+        """
+        from formal import build as FB
+        for arch, image in self.leading_underscore.items():
+            names = [name for _ordinal, name in S._binds(image)]
+            self.assertTrue(names, f"[{arch}] precondition: the image binds "
+                                   f"something")
+            dylibs = S._load_dylib_names(image)
+            foreign = next((d for d in dylibs
+                            if "libSystem" not in os.path.basename(d)), None)
+            self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
+                                          f"the link line: {dylibs}")
+            exports = set(FB.macho_dylib_exports(foreign))
+            for name in names:
+                self.assertTrue(
+                    name.startswith("_"),
+                    f"[{arch}] precondition: the bind {name!r} does not begin "
+                    f"with an underscore, so lstrip('_') cannot change it and "
+                    f"this fixture tests nothing (the shape to reach for is a "
+                    f"relative import from a module whose own NAME begins with "
+                    f"an underscore)")
+                self.assertIn(S._macho_symbol(name), exports,
+                              f"[{arch}] the image binds {name!r} and the "
+                              f"library exports {sorted(exports)}")
+                self.assertNotIn(
+                    S._macho_symbol(name.lstrip("_")), exports,
+                    f"[{arch}] the lstrip normalisation is expected to be "
+                    f"wrong for {name!r} — if the two agree, the fixture has "
+                    f"stopped reproducing the defect it exists for")
+            self.assertEqual(S._unresolved_imports(image), [],
+                             f"[{arch}] the probe must resolve every bind")
+        rc, err = self._runs(self.leading_underscore["arm64"], "lead")
         self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
         self.assertEqual(rc, 42, "main() returns twice(21)")
 
@@ -1147,6 +1242,64 @@ class TestReport(unittest.TestCase):
         self.assertIn("cas: 2 hit / 0 miss / 1 not cached (3 files)", out)
         self.assertIn("got no verdict at all", out)
 
+    def test_the_tool_bucket_is_split_by_cause_with_its_share_of_the_scope(self):
+        # `bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`:
+        # one lumped "N files got no verdict (timeout/unreadable/memory-killed/
+        # tool error) … a too-small -t is the usual cause" is what let a file
+        # whose build CRASHES at 42 s read as a file that is merely slow, and the
+        # crash never reached the ledger at all. So each cause is named, each
+        # carries its share of the scope, and the timeout row says the answer is
+        # unknown rather than absent.
+        rows = [("p.py", True, "", None), ("h.py", False, HOST_MSG, None),
+                ("t.py", False, "timeout (> 30s)", S.CAUSE_TIMEOUT),
+                ("m.py", False, "killed at the 4.0 GB ceiling",
+                 S.CAUSE_MEMORY),
+                ("w.py", False, "memcap: big.mojo -- ceiling 4.0 GB across the "
+                 "process tree", S.CAUSE_WRAPPER_DIED),
+                ("u.py", False, "[Errno 2] No such file", S.CAUSE_UNREADABLE)]
+        out, _code, _pub = self._main(rows)
+        # Every cause in the bucket has its own line, and each says how much of
+        # the classified scope it is — one file in six is 16.7%, which is the
+        # fact that separates "one unknown file" from "most of this run is
+        # unknown".
+        flat = " ".join(out.split())
+        self.assertIn("4 of the 6 classified file(s) (66.7%) got no verdict",
+                      flat)
+        for cause in (S.CAUSE_TIMEOUT, S.CAUSE_MEMORY, S.CAUSE_WRAPPER_DIED,
+                      S.CAUSE_UNREADABLE):
+            self.assertRegex(out, rf"{cause}\s+1 file\(s\) \(16\.7% of the "
+                                 r"classified scope\)")
+        # The timeout row says what the file's answer is: unknown at this -t.
+        self.assertIn("unknown at this -t", out)
+        # And it hands over the command that answers it, rather than leaving the
+        # reader to reconstruct one. The paths are named while they are few, and
+        # the -t it suggests is not the one that just failed.
+        self.assertIn("re-answer them with a larger -t: python3 "
+                      "tools/formal_sweep.py --arch arm64 -t 90 t.py", flat)
+        self.assertNotIn("-t 30 t.py", flat)
+        # The memory row must not read as "raise -t": it names the ceiling.
+        self.assertIn("4 GB per-file ceiling", out)
+
+    def test_a_tool_bucket_with_no_timeout_says_no_retry_command(self):
+        # The command is for the one cause a reader can act on immediately;
+        # printing it for a memory kill would tell a reader to wait longer for a
+        # build that is too big.
+        out, _code, _pub = self._main([
+            ("p.py", True, "", None),
+            ("m.py", False, "killed at the 4.0 GB ceiling", S.CAUSE_MEMORY)])
+        self.assertNotIn("re-answer them", out)
+
+    def test_many_timed_out_files_name_the_rows_rather_than_a_long_line(self):
+        # Nine paths would be a 700-character summary line, and the paths are
+        # already on the output as `timeout` rows — so past a handful the line
+        # says where to find them instead of repeating them.
+        rows = [("p.py", True, "", None)]
+        rows += [(f"slow{i}.py", False, "timeout (> 30s)", S.CAUSE_TIMEOUT)
+                 for i in range(9)]
+        out, _code, _pub = self._main(rows)
+        self.assertIn("the paths are the `timeout` rows above", out)
+        self.assertNotIn("slow0.py slow1.py", out)
+
     def test_history_accounts_for_a_file_changing_class(self):
         # The requirement: a file that used to be reported FAIL and now sits
         # in another class must be named, not silently recategorised.
@@ -1545,8 +1698,107 @@ class TestWrapperDied(unittest.TestCase):
             "build: some.construct cannot be lowered: ...\n"),
             "no memcap line at all means the ceiling was off (-M 0)")
 
+    def test_the_row_names_the_signal_that_killed_the_wrapper(self):
+        # "What killed the wrapper" was an OPEN QUESTION for this state — six
+        # files per architecture in the 2026-10-02 sweep, and
+        # bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md recorded the
+        # candidates without concluding. The wrapper's own exit status answers
+        # it, so the row says which signal rather than leaving a reader to
+        # guess, and the SIGKILL case names the one thing in this repository
+        # that sends one.
+        v = self._run_with(S.BuildRun(-9, self.BANNER, "", False, None, True),
+                           tag="sigkill")
+        self.assertIn("killed by SIGKILL", v.detail)
+        self.assertIn("tools/control.py guard", v.detail)
+        # A SIGTERM could not produce this state at all — memcap handles it,
+        # reports `interrupted` and kills its tree — so if one ever shows up
+        # here it is a different story and the row must not claim the guard.
+        v = self._run_with(S.BuildRun(-15, self.BANNER, "", False, None, True),
+                           tag="sigterm")
+        self.assertIn("killed by signal 15", v.detail)
+        self.assertNotIn("control.py guard", v.detail)
+        # And a wrapper that exited without a signal (a machine that reported
+        # something else) says so rather than inventing a cause.
+        v = self._run_with(S.BuildRun(1, self.BANNER, "", False, None, True),
+                           tag="nosig")
+        self.assertIn("exit status says nothing about how", v.detail)
+
+    def test_memcap_handles_a_sigterm_so_it_cannot_produce_that_state(self):
+        """The other half: remove the state rather than explain it.
+
+        memcap installs a SIGTERM/SIGINT handler that takes the tree down and
+        PRINTS the outcome, so a signalled wrapper is never the silent one. This
+        runs the real binary rather than calling `main()`: what is under test is
+        a signal delivered to a process with a child of its own, and the only
+        faithful way to ask is to send one. Three properties, all of which the
+        silent-death reader depends on:
+
+          * it prints an outcome `procrun.memcap_accounted` recognises, so
+            `memcap_wrapper_died` is False for the output a SIGTERM produces —
+            the word is `interrupted`, which is the one in that set;
+          * it exits 143 (128+15), so the caller can tell a terminated run from
+            an interactive interrupt at 130;
+          * the child is gone. A wrapper that dies on a TERM without killing
+            its tree recreates the runaway the ceiling exists to prevent.
+        """
+        import signal as _signal
+        import subprocess
+        import time as _time
+        with tempfile.TemporaryDirectory() as td:
+            marker = os.path.join(td, "grandchild.pid")
+            child = os.path.join(td, "slow.py")
+            with open(child, "w") as f:
+                f.write("import os, subprocess, sys, time\n"
+                        "kid = subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(600)'])\n"
+                        f"open({marker!r}, 'w').write(str(kid.pid))\n"
+                        "time.sleep(600)\n")
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(S.REPO, "tools", "memcap.py"),
+                 "--limit-gb", "4", "--label", "sigterm", "--", sys.executable,
+                 child],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                deadline = _time.time() + 20
+                while _time.time() < deadline and not os.path.exists(marker):
+                    _time.sleep(0.1)
+                self.assertTrue(os.path.exists(marker),
+                                "the workload under memcap never started")
+                with open(marker) as f:
+                    pid = int(f.read())
+                proc.send_signal(_signal.SIGTERM)
+                out, _ = proc.communicate(timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 143,
+                         f"a SIGTERMed wrapper exits 128+15; got "
+                         f"{proc.returncode} with output {out!r}")
+        self.assertIn("memcap: interrupted", out)
+        self.assertTrue(procrun.memcap_accounted(out),
+                        f"a signalled wrapper must report an outcome; "
+                        f"got {out!r}")
+        self.assertFalse(procrun.memcap_wrapper_died(out),
+                         f"this output must not read as a silent wrapper "
+                         f"death: {out!r}")
+        # The child, gone. Polled rather than checked once, because it is
+        # reparented to init when the workload dies and init takes a moment.
+        alive = True
+        deadline = _time.time() + 10
+        while alive and _time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                alive = False
+                break
+            _time.sleep(0.2)
+        self.assertFalse(alive,
+                         f"the workload (pid {pid}) survived the wrapper's "
+                         f"SIGTERM, which is the runaway the ceiling exists "
+                         f"to prevent")
+
     def test_memcap_accounting_is_never_the_files_own_refusal(self):
-        # A build that printed NOTHING leaves memcap's `done ... child exit -9`
         # as the last line of the captured text. The namedtuple's docstring
         # promises nothing downstream can match a `memcap:` line as if the build
         # had printed it; this is the line that promise is about. The CLASS is
@@ -1641,15 +1893,17 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
         err = io.StringIO()
         try:
             with redirect_stderr(err):
-                mod._report_partial("arm64", files, results)
+                mod._report_partial("arm64", files, results, 600, 4.0)
         finally:
             mod.publish_ledger = saved
         text = err.getvalue()
         self.assertIn("INTERRUPTED: 2 of 3 files classified", text)
         self.assertIn("nothing is claimed about them", text)
-        # The memory kills are named as their own count, not folded into a
-        # generic tool tally that reads as "raise -t".
-        self.assertIn("1 hit this tool's per-file memory ceiling", text)
+        # The memory kill is named as its own cause, with the ceiling this run
+        # used, and NOT folded into a generic `tool` tally that reads as "raise
+        # -t" — the two causes want opposite responses.
+        self.assertIn("memory-killed", text)
+        self.assertIn("4 GB per-file ceiling", text)
         self.assertEqual(published, {"a.py": mod.CLASS_PASS, "b.py": mod.CLASS_TOOL})
         self.assertEqual(partial_flags, [True],
                          "a partial run must publish under its own key")
@@ -1676,6 +1930,150 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
                          "a partial run must publish under its own extension")
         self.assertEqual(looked_up, [mod.LEDGER_EXT],
                          "load_ledger must only ever ask for a COMPLETE ledger")
+
+
+class TestAStoppedRunStopsBuilding(unittest.TestCase):
+    """A sweep told to stop stops BUILDING, and keeps what was in flight.
+
+    `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`. Every file is
+    submitted to the pool up front, so the executor's queue is the whole run;
+    returning from the reporting loop used to leave the `with` block, whose
+    `__exit__` calls `shutdown(wait=True)` with `cancel_futures=False`, and each
+    worker then pulled the next queued file until it reached the sentinel
+    `shutdown` appends. Measured on the b6 sweep: thirteen children ten minutes
+    after the signal, every one of them younger than it, and a second SIGTERM
+    needed to end the run.
+
+    The second half of the same bug is the numbers. `run_one` publishes to the
+    CAS before it returns, so a build that ran during that shutdown left a
+    verdict in the cache that the run's own ledger never mentioned — which is why
+    the b6 work map reconstructs a run's classes from the CAS instead of reading
+    its log. So the drain collects the `-j` builds that were already running.
+
+    These are the mechanics, driven through the real executor and a real signal,
+    because a test that patches the pool away cannot tell "cancelled the queue"
+    from "never queued it". The signal is a genuine SIGINT sent from inside a
+    build: that is what the handler is for, and it is the only way to exercise
+    the path between "a build finished" and "the loop notices it should stop".
+    """
+
+    def _stopped_run(self, names, jobs=1, signal_from=None, hold=None):
+        """Run `_stream_results` over `names`, SIGINTing it mid-run.
+
+        `signal_from` names the file whose build raises the stop signal, once
+        `hold` (the name of a second build) is running — so with `jobs=2` the
+        run really is interrupted while a second build is in flight, which is the
+        case the drain exists for. The signal is sent from a WORKER thread and
+        handled in the MAIN thread, exactly as a SIGTERM from outside is.
+
+        `hold`'s build blocks until the pool has been told to cancel its queue
+        (`drained`), which is the event under test and also the only thing that
+        can let that build finish: it stands in for a build that is a few
+        seconds from a verdict, so it must be waited for rather than killed. A
+        broken fix then fails the assertion instead of hanging the suite.
+
+        Returns `(results, out, started, shutdowns)` where `shutdowns` is what
+        the pool was asked to do, as `(wait, cancel_futures)` pairs.
+        """
+        import formal_sweep as mod
+        import concurrent.futures as cf
+
+        started, shutdowns = [], []
+        running, drained = threading.Event(), threading.Event()
+
+        class RecordingExecutor(cf.ThreadPoolExecutor):
+            def shutdown(self, wait=True, *, cancel_futures=False):
+                shutdowns.append((wait, cancel_futures))
+                if cancel_futures:
+                    drained.set()
+                return super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+            name = mod.rel(path)
+            started.append(name)
+            if name == hold:
+                running.set()
+                drained.wait(15)
+            elif name == signal_from:
+                if hold:
+                    running.wait(15)
+                os.kill(os.getpid(), signal.SIGINT)
+                # The handler runs in the MAIN thread, which is at that moment
+                # blocked waiting for a verdict, so give it the moment it needs
+                # to notice — a real build does not finish in the same instant
+                # the signal arrives, and this race is the one being pinned.
+                time.sleep(0.2)
+            return mod.Verdict(False, "build: refused", None, True,
+                               mod.CLASS_CODEGEN, "other refusal")
+
+        saved = mod.run_one
+        mod.run_one = fake_run_one
+        files = [os.path.join(mod.REPO, n) for n in names]
+        results, buf = {}, io.StringIO()
+        try:
+            with mock.patch.object(mod.concurrent.futures,
+                                   "ThreadPoolExecutor", RecordingExecutor):
+                with redirect_stdout(buf):
+                    interrupted = mod._stream_results(
+                        files, jobs, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertTrue(interrupted, "the run must report itself interrupted")
+        return results, buf.getvalue(), started, shutdowns
+
+    def test_the_files_that_never_started_are_not_built(self):
+        # Three files, one worker, the signal raised by the first build while it
+        # is still holding the worker. The old behaviour built all three: the
+        # single worker pulled b and c in turn while `__exit__` waited.
+        results, out, started, shutdowns = self._stopped_run(
+            ["a.py", "b.py", "c.py"], jobs=1, signal_from="a.py")
+        self.assertEqual(started, ["a.py"],
+                         "a stopped sweep must not build the rest of its scope")
+        self.assertEqual(sorted(results), [os.path.join(S.REPO, "a.py")])
+        self.assertIn("CODEGEN: a.py", out)
+        self.assertNotIn("b.py", out)
+        self.assertIn((False, True), shutdowns,
+                      "the queue must be cancelled, not walked")
+
+    def test_the_builds_already_in_flight_are_kept_and_reported(self):
+        # Two workers, so the signal arrives while a SECOND build is running.
+        # That build publishes its verdict to the CAS before it returns, so
+        # dropping it would leave the cache and the log disagreeing — the half of
+        # the bug that made a run's numbers have to be reconstructed.
+        results, out, started, shutdowns = self._stopped_run(
+            ["a.py", "b.py", "c.py"], jobs=2, signal_from="a.py", hold="b.py")
+        self.assertEqual(sorted(started), ["a.py", "b.py"],
+                         "the queued third file must be the one that is dropped")
+        self.assertEqual(sorted(os.path.basename(p) for p in results),
+                         ["a.py", "b.py"])
+        self.assertIn("CODEGEN: b.py", out,
+                      "a build that finished during the drain must still print")
+        self.assertIn((False, True), shutdowns)
+
+    def test_an_unsignalled_run_classifies_every_file_and_is_not_a_drain(self):
+        # The half that is NOT changed: nothing here is stopped, so no future is
+        # cancelled, every file is classified, and the pool is shut down only by
+        # its own `__exit__`.
+        import formal_sweep as mod
+        started = []
+        saved = mod.run_one
+        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB: (
+            started.append(mod.rel(p)) or
+            mod.Verdict(False, "build: refused", None, True,
+                        mod.CLASS_CODEGEN, "other refusal"))
+        files = [os.path.join(mod.REPO, n) for n in ("a.py", "b.py", "c.py")]
+        results, buf = {}, io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                interrupted = mod._stream_results(
+                    files, 2, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertFalse(interrupted)
+        self.assertEqual(sorted(started), ["a.py", "b.py", "c.py"])
+        self.assertEqual(len(results), 3)
+        for n in ("a.py", "b.py", "c.py"):
+            self.assertIn(f"CODEGEN: {n}", buf.getvalue())
 
 
 class TestSweepLock(unittest.TestCase):

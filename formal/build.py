@@ -8107,7 +8107,7 @@ def _rewrite_child(child, sites: dict, stores: set):
 
 
 def _fold_target_queries(functions: list) -> int:
-    """Replace every `#kgen.param.expr<…>` target query in a body with its value.
+    """Replace every `#kgen.param.expr<…>` target query with its value.
 
     Returns the number of sites folded.
 
@@ -8123,6 +8123,23 @@ def _fold_target_queries(functions: list) -> int:
     instruction selectors — sees an ordinary `StringLiteral` and needs to know
     nothing about MLIR at all.
 
+    A function has THREE places a query can be written, and all three are here,
+    because the fold is the thing that makes a query a literal everywhere or
+    nowhere:
+
+      * the BODY, which is the case this pass was written for;
+      * a DEFAULT PARAMETER VALUE (`fn.param_defaults`, which the parser fills
+        for every `def f(x = …)`). A default is compile-time by construction —
+        it is evaluated by the callee's own compilation and substituted into the
+        call — so a query written there is exactly as constant as one in the
+        body. It met neither walk before, and the emitter's refusal for it was
+        the multi-index MLIR wording ("assembles an MLIR attribute from a
+        template of backtick-quoted literal fragments"), which is FALSE of a
+        query `formal/model.py` answers everywhere else;
+      * a MODULE-LEVEL `comptime` binding, which `collect_module_symbols`
+        answers before this runs. Named here because it is the reason the other
+        two are the only two: those three positions are the whole population.
+
     PRE-ORDER, and it does NOT descend into a query it folded (that subtree is
     gone with it) nor into one it did not. The second half is the part that is
     not an optimisation: `std/_plugin/selector.mojo` nests a
@@ -8133,11 +8150,13 @@ def _fold_target_queries(functions: list) -> int:
     is the honest answer, so the walk leaves it whole."""
     done = 0
     for fn in functions:
-        body = getattr(fn, "body", None)
-        if not isinstance(body, list):
-            continue
         count = [0]
-        _fold_target_queries_in(body, count)
+        body = getattr(fn, "body", None)
+        if isinstance(body, list):
+            _fold_target_queries_in(body, count)
+        defaults = getattr(fn, "param_defaults", None)
+        if isinstance(defaults, dict):
+            _fold_target_queries_in(defaults, count)
         done += count[0]
     return done
 
@@ -8149,7 +8168,26 @@ def _fold_target_queries_in(node, count: list):
     through its parent while a single-attribute child has to be replaced
     through `setattr`, and one walk serves both — so the number of sites folded
     comes back through a box rather than as a return value that only one of the
-    two shapes could carry."""
+    two shapes could carry.
+
+    A DICT is walked too, mutating it in place and never returning a
+    replacement for it, because a function's `param_defaults` is a dict and a
+    default is the one place outside a body where a query can be written (see
+    `_fold_target_queries`). A walk that stopped at lists and tuples went
+    straight past every default value and left the query for the emitter to
+    refuse, which is how one position answered a construct and another refused
+    it. Keys are left alone: they are parameter NAMES, and a name is not an
+    expression."""
+    if isinstance(node, dict):
+        for key, child in list(node.items()):
+            if M.is_mlir_template(child):
+                folded = M.fold_target_template(child)
+                if folded is not None:
+                    node[key] = M.folded_literal_node(folded, child)
+                    count[0] += 1
+                continue
+            _fold_target_queries_in(child, count)
+        return None
     if isinstance(node, (list, tuple)):
         # A tuple as well as a list, and not as a generality: a call's KEYWORD
         # arguments are a list of `(name, value)` pairs (`CallExpr.kwargs`),

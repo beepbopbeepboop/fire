@@ -1,12 +1,16 @@
-# FORMAL_sweep: the default `-t 30` turned a real backend crash into a non-finding, and the repo's own files are as large a unit as the stdlib's
+# FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files: the `tool` bucket now says what it does not know
 
-**Area:** FORMAL (`tools/formal_sweep.py`, the `-t` default and its help text).
-**Status: OPEN — a default that suppressed a finding this repository's own test
-suite was already reporting. NOT FIXED HERE: the value is a judgement about what
-the common case costs, and the sweep is being run concurrently by six other
-workers right now, so changing a default under them is not mine to do. Filed by
-the `sweep:repo-b` worker, which is the first slice to be made of the
-repository's own top-level files rather than the stdlib.**
+**Area:** FORMAL (`tools/formal_sweep.py`, the `-t` default and its help text,
+and the summary's `tool` block).
+
+**Status: the REPORTED half is FIXED (commit `e0dc0e0a`) — the `tool` bucket is
+split by cause, each cause carries its share of the scope, and a timeout row
+says the file's answer is UNKNOWN at this `-t` rather than absent, together with
+the command that answers it. The DEFAULT ITSELF is unchanged, and §2 below is
+the measurement that says why the proposed replacement cannot do the job it was
+proposed for. The crash this doc was filed about (`AttributeError: 'str' object
+has no attribute 'name'`) is fixed at the source too, in `7b1f2643`, so nothing
+in this repo hides behind a `tool` row on that account any more.**
 
 ## What I ran
 
@@ -27,12 +31,11 @@ At `-t 600`, the same file on the same tree, with nothing else changed:
 ```
 
 `AttributeError: 'str' object has no attribute 'name'` is a **compiler defect**,
-not a coverage limit, and it was the same defect
-`test_dataclasses_formal.py`'s corpus case was failing on for `formal/build.py`
-the whole time (now fixed, in `7b1f2643`). So the default timeout was not
-merely slow on this file — it was **hiding a crash that another suite in this
-repository was already reporting**, and the only reason this slice found it is
-that it re-ran with a bigger `-t`.
+not a coverage limit, and it was the same defect `test_dataclasses_formal.py`'s
+corpus case was failing on for `formal/build.py` the whole time (now fixed, in
+`7b1f2643`). So the default timeout was not merely slow on this file — it was
+**hiding a crash that another suite in this repository was already reporting**,
+and the only reason this slice found it is that it re-ran with a bigger `-t`.
 
 ## What I expect
 
@@ -43,12 +46,67 @@ which bound the run happened to hit first, and the crash is simply not in the
 ledger.
 
 That ordering is not a bug in itself — a timeout has to be able to stop a build,
-and no default is a substitute for `-t`. What is a bug is the **default**: it is
-tuned for the population the tool's own `--help` describes ("the much larger
-stdlib modules" is the one escape it offers), and the repository's own files are
-a second population with a structurally different reason to be slow.
+and no default is a substitute for `-t`. What was a bug is that the report
+**could not express the difference**: one lumped sentence said "N file(s) got no
+verdict at all (timeout/unreadable/memory-killed/tool error) … a too-small `-t`
+is the usual cause", over a bucket holding files that crash, files that do not
+fit in the ceiling, and files the tool could not read. A reader had no way to
+tell how much of the scope was unknown, or which files, or what would answer
+them.
 
-## Why the repo's own files are not the same population
+## What was done (`e0dc0e0a`)
+
+`_report_tool_causes` — one shared reporter, called by the complete run's
+summary and by an interrupted run's, because they answer the same question and
+two copies would be two wordings for a reader to be told two things by:
+
+```
+  note: 4 of the 6 classified file(s) (66.7%) got no verdict at all and are in
+  NO rate. Each one is a file this run says NOTHING about, which is not the same
+  as a file it has cleared:
+    timeout             1 file(s) (16.7% of the classified scope) — the build
+      did not finish inside -t, so what it WOULD have answered is unknown at
+      this -t. A file that turns out to crash says so in `backend-crash`
+      instead, and that is never cached, so it re-measures every run; a file
+      that is merely slow to build is the other reading
+    memory-killed       1 file(s) (16.7% of the classified scope) — killed at
+      this tool's 4 GB per-file ceiling — a real cost finding about that file
+      (see bugs/PERF_memory_over_4gb_is_a_bug.md), NOT something a wider run
+      fixes, and not cached, so re-running re-measures it
+    …
+  re-answer them with a larger -t: python3 tools/formal_sweep.py --arch arm64
+  -t 90 t.py
+```
+
+Four properties worth naming, because each replaces something a reader could
+previously get wrong:
+
+* **the fraction is of the CLASSIFIED scope**, which is the denominator every
+  count above it is over — an interrupted run has already said how much of the
+  scope it never reached, so reporting against the whole scope would mix two
+  different "unknown"s into one percentage;
+* **`timeout` is the only cause that gets a command**, because it is the only one
+  a reader can act on immediately; the suggested `-t` is twice the bound that
+  just failed (or a minute more than it), never the bound that just failed, and
+  the paths are named while there are eight or fewer and otherwise pointed at
+  from the `timeout` rows already on the output;
+* **`memory-killed` and `wrapper-died` keep their distinct wording**, because
+  they are told apart by evidence (a breach is memcap saying the ceiling fired;
+  the other is memcap saying nothing at all) and lumping them sends a reader
+  looking for a memory bug in a build that was never measured against a ceiling;
+* **`-t`'s help text and `CLASS_BLURB['tool']`** now say what a `tool` row is
+  NOT — no claim in either direction about that file — because the old wording
+  ("never as a pass or a finding") is true and useless: the failure mode was not
+  a reader believing the row, it was a reader not being told what to do about
+  it.
+
+Tests: `TestReport.test_the_tool_bucket_is_split_by_cause_with_its_share_of_the_scope`,
+`…_with_no_timeout_says_no_retry_command`,
+`…_many_timed_out_files_name_the_rows_rather_than_a_long_line`, and the
+interrupted-run report case, which now asserts the cause line and the ceiling
+rather than a count. `test_formal_sweep.py` 92 tests OK.
+
+## §1 — why the repo's own files are a second population
 
 A stdlib module imports a few stdlib modules. A repository-root `.py` imports
 **the repository's other root `.py` files**, so one file's build is the sum of
@@ -64,45 +122,64 @@ its import closure's builds. Measured on this slice:
 | `myinterpreter.py` | 5 572 | timeout | timeout |
 
 `imports.py` is **185 lines** and takes over 30 s, while `generated_dispatch.py`
-at 135 lines passes inside it. Line count is not the predictor; **closure
-depth** is — `imports.py` imports `cas`, which imports `subprocess`, and the
-build walks the whole thing before it can refuse anything. A slice made of
-repo-root files therefore has a different cost distribution from a slice made of
-stdlib files, at every file size.
+at 135 lines passes inside it. Line count is not the predictor.
 
-## The next step
+## §2 — and why the closure-proportional `-t` cannot be the fix
 
-1. **Do not silently change the default** — six workers are sweeping
-   concurrently and a default that moves under them changes what their
-   denominators mean. The safe change is the *reported* one: when a run's
-   `tool` count is non-zero, print the **fraction of the scope it reached** next
-   to the class counts, so a `tool` row is read as "this file is unknown at this
-   `-t`" rather than as "this file is not a finding". The summary already says
-   "a too-small `-t` is the usual cause"; it does not say how much of the scope
-   that costs.
-2. **A per-closure default, not a per-file one.** The honest predictor is the
-   size of the file's import closure, which `_imports_digest` already computes
-   for the CAS key. A `-t` proportional to closure size would put `imports.py`
-   above the bound and `generated_dispatch.py` below it for the right reason,
-   and it is the only version of this that does not make the two largest files
-   in the repository unanswerable (§3).
-3. **The slice convention is worth writing down regardless**, because six
-   workers are choosing flags independently right now: the repo-b map
-   (`bugs/FORMAL_sweep_work_map_2026-10-02_repo-b.md` §1) settled on `-t 900`,
-   which classifies 6 of its 8 files and still leaves the two largest
-   unclassified. If repo-a and repo-c used a different `-t`, their coverage
-   numbers are not comparable and the comparison between slices is an artefact
-   of the flags.
+The original proposal was "a per-closure default, not a per-file one", because
+the honest predictor looked like the size of the file's import closure. Measured
+on this tree with the tool's own resolver (`imported_modules` +
+`resolve_module_path`, the pair `import_closure_digest` walks, so these are the
+modules a build would compile):
+
+| file | modules in closure | closure lines |
+|---|---|---|
+| `imports.py` | 67 | 119 812 |
+| `monomorphize.py` | 67 | 119 812 |
+| `reflect.py` | 67 | 119 812 |
+| `gimple_codegen.py` | 67 | 119 812 |
+| `myinterpreter.py` | 69 | 126 065 |
+| `cas.py` | 9 | 7 943 |
+| `module_loader.py` | 7 | 5 103 |
+| `module_spec_gen.py` | 7 | 8 069 |
+| `mlir.py` | 1 | 344 |
+| `generated_dispatch.py` | 1 | 135 |
+
+`imports.py`'s closure and `gimple_codegen.py`'s are the **same set of paths**:
+the symmetric difference is empty, module for module. So the four files that
+could not be told apart by line count — one that crashes inside 600 s, two that
+pass inside 30 s, and the two that no `-t` answers — **share one closure of
+identical size**, and a `-t` proportional to closure size cannot separate them.
+It would raise the bound for `monomorphize.py` and `reflect.py`, which do not
+need it (they finish inside 30 s, so the bound is not spent), and it would not
+answer `gimple_codegen.py` or `myinterpreter.py` (§3).
+
+What is left is that per-file wall time on this machine is set by the CPU share
+the scheduler gives one build, not by the file: a single `std/bit/mask.mojo`
+build measured in the b6 sweep took **3 m 37 s wall for 56 s of user CPU**
+(`bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §1.2), and at `-j 6 -t 120` the
+same sweep timed out **29 of its first 42 files**. A static default is therefore
+a guess about the load, and the one thing that is not a guess is the file list.
+
+**So the remaining decision, for whoever wants to make it, is a policy and not a
+formula:** either the default stays 30 s and the population that needs more is
+named in the help (it now is: "the much larger stdlib modules, and this
+repository's own root files, which are a different population"), or the tool
+grows a `-t per population` flag so a repo-root sweep and a stdlib sweep have
+their own default and their coverage numbers are comparable by construction. The
+second is a real feature; it is not a bug fix, and the numbers this doc's table
+came from are the argument for it.
 
 ## §3 — the part that is not a timeout problem
 
 `gimple_codegen.py` (5 645 lines) and `myinterpreter.py` (5 572 lines) time out
-at `-t 30`, at `-t 900`, and — as of this writing — are still running at
+at `-t 30`, at `-t 900`, and — as of the original writing — were still running at
 `-t 5400`. Both are **CPU-bound, not memory-bound**: the whole 8-file sweep
 peaked at **0.3 GB** across 6 processes, and memcap's 4 GB per-file ceiling was
-never approached.
+never approached. A bigger `-t` and a closure-proportional `-t` both leave them
+exactly where they are.
 
-So for those two the answer is not a bigger number. Either
+So for those two the answer is not a number. Either
 
 * **a finer unit** — construct coverage is a property of a file's *functions*,
   and the sweep's unit is a file; or

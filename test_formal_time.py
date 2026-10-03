@@ -32,7 +32,10 @@ Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image, and an entire class of Mach-O emission bug
 can be green there; every case here exits with a status this file checks.
 
-Groups: `clocks`, `sleep`, `convert`, `limits`. With no argument, all of them.
+Groups: `clocks`, `sleep`, `convert`, `limits`, `structroute`. With no
+argument, all of them. `limits` asserts the names this module does NOT answer,
+and `structroute` measures WHICH HALF of the capability behind those refusals
+exists, so the two cannot disagree about why they are absent.
 """
 import argparse
 import math
@@ -417,11 +420,166 @@ def group_limits(tmpdir, verbose):
     return True, f"{len(absent)} absent names refused"
 
 
+# ── group: the struct route, measured ───────────────────────────────────────
+
+# The read happens INSIDE a module, which is where `localtime`'s would: a
+# pointer that arrives as a callee ARGUMENT has no recorded pointee, so a
+# program reading libc's bytes through another module's pointer is a different
+# question with a different answer. `getenv` is the instrument because it hands
+# back an address whose bytes the test chose, so a wrong width or a wrong offset
+# shows up as a wrong number rather than a plausible one.
+READ_MODULE = """\
+def env_byte(name, k) -> int:
+  var p: Pointer[UInt8] = external_call["getenv", Pointer[UInt8]](name)
+  var q: Pointer[UInt8] = p + k
+  return q.value()
+"""
+
+READ_PROGRAM = """\
+import tmrow
+
+def main() -> int:
+  printf("b0=%d@@", tmrow.env_byte("MOJO_STRUCT_ROUTE", 0))
+  printf("b1=%d@@", tmrow.env_byte("MOJO_STRUCT_ROUTE", 1))
+  printf("b7=%d@@", tmrow.env_byte("MOJO_STRUCT_ROUTE", 7))
+  return 0
+"""
+
+# The two refusals, in modules of their own because one refused function refuses
+# its whole module — a module with both the read and the refusal in it would
+# make the reading case fail for the refusal's reason.
+WIDE_MODULE = """\
+def env_byte_wide(name) -> int:
+  var p: Pointer[Int32] = external_call["getenv", Pointer[Int32]](name)
+  return p.value()
+"""
+
+POKE_MODULE = """\
+def poke(p: Pointer[UInt8]) -> int:
+  p.value() = 1
+  return 0
+"""
+
+
+def _build(tmpdir, mod_name, src, tag, program=None, arch=None):
+    """Write one module and a program that calls into it; build and return.
+
+    `program` is the whole program when the caller has one (the reading case,
+    which prints three records); otherwise a program that CALLS the module's one
+    function and returns its value, which is enough to make a refusal the build
+    reports. `arch` adds the backend flag, so a case can also assert that the
+    measurement is the same one on both architectures — which for the reading
+    case is a BUILD, since an x86-64 Mach-O needs Rosetta to launch here.
+    """
+    with open(os.path.join(TEMP, mod_name + ".mojo"), "w") as f:
+        f.write(src)
+    prog = os.path.join(TEMP, tag + ".mojo")
+    if program is None:
+        fn = re.search(r"def (\w+)\(", src).group(1)
+        args = "" if src is WIDE_MODULE else '"MOJO_STRUCT_ROUTE", 0'
+        program = (f"import {mod_name}\n\ndef main() -> int:\n"
+                   f"  return {mod_name}.{fn}({args})\n")
+    with open(prog, "w") as f:
+        f.write(program)
+    out = os.path.join(TEMP, tag + (f".{arch}" if arch else ""))
+    argv = [sys.executable, FIRE, "build", "--formal", "--no-prove"]
+    if arch:
+        argv.append(f"--backend={arch}")
+    return prog, subprocess.run(argv + ["-o", out, prog], capture_output=True,
+                                text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+
+
+def group_structroute(tmpdir, verbose):
+    """Which half of the `struct tm` route exists, measured on both backends.
+
+    `bugs/FORMAL_time_struct_shaped_answers.md` says the five absent names are
+    absent because "a `struct tm` cannot cross a module boundary, and cannot be
+    constructed by one". That is true and it is NOT the whole reason, and the
+    difference decides what a fix looks like. Measured here, on both
+    architectures:
+
+      * **reading** a C library's struct through a `Pointer[UInt8]` pointee
+        WORKS — byte loads at `p + k`, which is what every field of a
+        `struct tm` is made of (nine `int`s, read as four little-endian bytes
+        each). The annotation has to be on the local holding the address AND on
+        the one holding `p + k`;
+      * a **wider** pointee on an address that came from a call is refused **by
+        name** (the load's width must be established, and a callee that
+        returned `p + k` hides its scale);
+      * **writing** through a pointee is refused outright — `p.value() = 1` is
+        "assignment target must be a plain name" — so a module can neither build
+        the `time_t` that `localtime`/`gmtime` take a POINTER to, nor the
+        `struct tm` that `mktime`/`strftime` take.
+
+    So the blocker is the WRITE side and the argument it needs, not the struct
+    crossing. Which is worth a standing test rather than a paragraph in a bug
+    doc: it is the fact a reader has to check before deciding whether the fix is
+    the layout table that doc's step 1 describes (not what is missing) or a
+    store through a pointee (which is) — and the refusals here are the pin that
+    says so the day the store lands.
+    """
+    prog, r = _build(tmpdir, "tmrow", READ_MODULE, "structroute",
+                     program=READ_PROGRAM)
+    check(r.returncode == 0,
+          f"reading a C library's bytes through a UInt8 pointee did not "
+          f"build: {(r.stderr or r.stdout).strip()[-400:]}")
+    # The same read on the other backend, as a BUILD: this group is the standing
+    # statement that the read half of the `struct tm` route exists, and "on the
+    # machine's own architecture" would be a weaker claim than the doc it backs.
+    _p2, r2 = _build(tmpdir, "tmrow", READ_MODULE, "structroute_x86_64",
+                     program=READ_PROGRAM, arch="x86_64")
+    check(r2.returncode == 0,
+          f"the UInt8-pointee read did not build for x86_64 either: "
+          f"{(r2.stderr or r2.stdout).strip()[-400:]}")
+    ran = subprocess.run([os.path.join(TEMP, "structroute")],
+                         capture_output=True, text=True, timeout=RUN_TIMEOUT,
+                         cwd=HERE,
+                         env=dict(os.environ, MOJO_STRUCT_ROUTE="Zq7!vB2x"))
+    check(ran.returncode == 0,
+          f"the image exited {ran.returncode}: "
+          f"{(ran.stderr or '').strip()[-300:]}")
+    got = dict(re.findall(r"(b[0-9]+)=([^@]*)" + REC, ran.stdout))
+    want = {"b0": "90", "b1": "113", "b7": "120"}   # ord() of Z q 7 ! v B 2 x
+    check(got == want,
+          f"byte loads through a UInt8 pointee returned {got}, expected "
+          f"{want} — the bytes of the value this process put in the "
+          f"environment")
+
+    # The refusal words are per-architecture, and the pair is itself part of the
+    # measurement: the two backends write this one refusal differently ("must be
+    # a plain name" vs "is not lowered ... only a plain name has a home"), so a
+    # needle that matched only one of them would have let the other drift.
+    for mod_name, src, needle, why in (
+            ("tmwide", WIDE_MODULE, "the load's width is the pointee's",
+             "a 4-byte load from an address a call returned"),
+            ("tmpoke", POKE_MODULE, "assignment target must be a plain name",
+             "a store through a pointee, which is what every absent `time` "
+             "name needs first")):
+        for arch, words in (("arm64", needle), ("x86_64", needle)):
+            if arch == "x86_64" and mod_name == "tmpoke":
+                words = "only a plain name has a home"
+            _p, rr = _build(tmpdir, mod_name, src, f"refused_{mod_name}",
+                            arch=arch)
+            check(rr.returncode != 0,
+                  f"[{arch}] {why} BUILT, so this measurement is out of date — "
+                  f"and the capability the absent `time` names are waiting for "
+                  f"has landed")
+            msg = rr.stderr or rr.stdout
+            check(words in msg,
+                  f"[{arch}] {why} was refused, but not with the words "
+                  f"{words!r}: {msg.strip()[-300:]}")
+
+    if verbose:
+        print("    byte-wise reads work; a wider pointee and any store do not")
+    return True, "read yes / store no"
+
+
 GROUPS = {
     "clocks": group_clocks,
     "sleep": group_sleep,
     "convert": group_convert,
     "limits": group_limits,
+    "structroute": group_structroute,
 }
 
 TEMP = None

@@ -247,6 +247,17 @@ kill undiagnosable. A partial run publishes a ledger under its own extension
 and marks itself partial, so the next run's history diff is against the last
 COMPLETE run and a missing file is never reported as a verdict that changed.
 
+And a run that is TOLD to stop must stop, which is a different property and was
+also false: every file is submitted up front, so the executor's queue is the
+whole run, and a plain `return` from the reporting loop let `__exit__`'s
+`shutdown(wait=True)` walk that queue to the end (measured: builds still
+starting ten minutes after the signal, and a second SIGTERM needed to die).
+SIGINT/SIGTERM now cancels what has not started, refuses to start a build once
+the flag is set, and then collects the `-j` builds that were in flight — which is
+the half that keeps the partial ledger and the CAS from disagreeing about how
+far the run got, since `run_one` publishes before it returns. See
+`_stream_results`.
+
 Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
 formal backend's own sources + the interpreter + the build flags + this tool's
 own bytes — see _criteria_id — + the IMPORT CLOSURE the build reads, see
@@ -2545,14 +2556,36 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
                 # timeout and a memory kill are not: it is a fact about this
                 # run's machine, and a verdict published under this key would
                 # pin the file here until the key changed.
+                #
+                # The signal is NAMED, read off the wrapper's own exit status,
+                # because "what killed the wrapper" used to be an open question
+                # for exactly this state (six files per architecture, 2026-10-02,
+                # `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`) and an
+                # exit status answers it without anybody reproducing it. memcap
+                # handles SIGTERM and SIGINT (it reports `interrupted`, kills its
+                # tree and exits 130/143), so the only signal that can leave this
+                # state behind is SIGKILL — and in this repository the only thing
+                # that sends one is `tools/control.py guard`, aimed at the largest
+                # process in a worker tree once the tree's RSS sum passes its
+                # budget. So the row now names its own cause instead of leaving
+                # a reader to guess which of the two it was.
+                sig = (-proc.returncode if proc.returncode is not None
+                       and proc.returncode < 0 else None)
+                who = ("killed by SIGKILL, which nothing here can catch: in this "
+                       "tree that is tools/control.py guard, aimed at the "
+                       "largest process in a worker worktree once the tree's "
+                       "RSS sum passes its budget"
+                       if sig == 9 else
+                       f"killed by signal {sig}" if sig else
+                       "gone, and its exit status says nothing about how")
                 return verdict(
                     False,
                     f"the {mem_gb:g} GB per-file wrapper (tools/memcap.py) died "
-                    f"before it reported an outcome — its banner is in the "
-                    f"output and no breach and no completion, so this build's "
-                    f"own verdict was never observed. A fact about this run's "
-                    f"machine, not about the source; not cached, so re-running "
-                    f"re-measures it",
+                    f"before it reported an outcome — {who} — so its banner is "
+                    f"in the output with no breach and no completion and this "
+                    f"build's own verdict was never observed. A fact about this "
+                    f"run's machine, not about the source; not cached, so "
+                    f"re-running re-measures it",
                     CAUSE_WRAPPER_DIED, False)
             # No message at all still counts as the build's own verdict: with
             # no traceback there is no evidence of a crash, and a silent death
@@ -2748,9 +2781,12 @@ CLASS_BLURB = {
                  "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
-    CLASS_TOOL: "no verdict reached: the build timed out, blew this tool's "
-                "per-file memory ceiling, was unreadable, or the sweep or build "
-                "driver raised",
+    CLASS_TOOL: "no verdict reached, and therefore NO CLAIM either WAY about the "
+            "file: the build timed out (its answer is unknown at this -t, not "
+            "absent), blew this tool's per-file memory ceiling, its wrapper "
+            "died before reporting, was unreadable, or the sweep or build "
+            "driver raised. The summary splits this bucket by cause, with each "
+            "cause's share of the scope and what answers it",
 }
 
 
@@ -2765,13 +2801,31 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
 
     A signal handler rather than only a `try`, because the two interruptions are
     not the same event. SIGINT/SIGTERM is a person or a watchdog asking the run
-    to stop, and the handler turns it into a clean drain: the pool is shut down
-    without waiting for the builds still in flight (they are the slow part, and
-    the caller has already decided they are not wanted), whatever had finished
-    is published, and the exit status says the run was cut short. A SIGKILL
-    cannot be caught at all — that is why the per-file ceiling above exists, to
-    make sure the only thing a SIGKILL can take is the tool's OWN process and
-    not a build that had already been classified and thrown away.
+    to stop, and the handler turns it into a clean drain: the files that had NOT
+    started building are cancelled, the `-j` builds already in flight are waited
+    for and their verdicts recorded and printed, and the exit status says the
+    run was cut short. A SIGKILL cannot be caught at all — that is why the
+    per-file ceiling above exists, to make sure the only thing a SIGKILL can
+    take is the tool's OWN process and not a build that had already been
+    classified and thrown away.
+
+    What the drain does is chosen, not incidental, and it is the opposite of what
+    this used to do. Every file is submitted up front, so the executor's queue is
+    the WHOLE run; a plain `return` left the `with` block, whose `__exit__` calls
+    `shutdown(wait=True)` with `cancel_futures=False`, so each worker kept
+    pulling the next queued file until it reached the sentinel `shutdown` appends
+    — a stopped sweep built every file it had been told to stop building, which
+    is what `ps` showed ten minutes after the signal (children younger than it,
+    each with almost no CPU). Cancelling the queue alone is not enough either,
+    because a worker that returns from one file picks up the next immediately
+    while the main thread is still waiting to hear that it should stop, so
+    `build` refuses to START a file once the flag is set. It is also why the
+    numbers had to be reconstructed from the CAS: `run_one` publishes before it
+    returns, so those builds wrote verdicts that `results` never heard about.
+    Hence the collection of what was in flight — that is what makes the log and
+    the cache agree again. What remains is the delay the builds in flight cost
+    (bounded by one `-t`), which is the honest price of not throwing away a build
+    that may be seconds from a verdict AND of not losing its published verdict.
     """
     stop = threading.Event()
 
@@ -2790,10 +2844,40 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
         signal.signal(sig, _on_signal)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futs = {ex.submit(run_one, p, timeout, flags, mem_gb): p
-                    for p in files}
-            for fut in concurrent.futures.as_completed(futs):
+            def build(path):
+                """One file's build, unless the run was told to stop first.
+
+                The check is HERE, at the one place a build is launched, and not
+                only in the reporting loop, because the loop's own cancellation
+                cannot be prompt enough on its own: a worker that returns from
+                one file picks up the next one immediately, and the main thread
+                only learns that it should stop when a verdict arrives. Without
+                this, a signal landing mid-build still buys one more file per
+                worker — measured as "thirteen children ten minutes after the
+                signal" on the b6 sweep. `None` means not reached, which the
+                caller records as nothing at all rather than as a verdict.
+                """
+                if stop.is_set():
+                    return None
+                return run_one(path, timeout, flags, mem_gb)
+
+            futs = {ex.submit(build, p): p for p in files}
+
+            def collect(fut):
+                """One build's verdict: recorded in `results` and printed.
+
+                One function for the streaming loop and for the drain below, so
+                a verdict that arrives during the drain is reported exactly like
+                one that arrived during the run — `run_one` published both to the
+                CAS, and a run whose log and cache disagree is the state this
+                whole function exists to prevent.
+                """
                 path = futs[fut]
+                if fut.cancelled():
+                    # Never built, so there is nothing to record. Reaching here
+                    # means the queue was drained after a stop, which is the
+                    # queue being thrown away rather than walked.
+                    return None
                 try:
                     v = fut.result()
                 except Exception as e:
@@ -2803,6 +2887,11 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                     v = Verdict(False, f"sweep worker raised: {e}"[:200],
                                 CAUSE_TOOL_ERROR, False, CLASS_TOOL,
                                 CAUSE_TOOL_ERROR)
+                if v is None:
+                    # The build declined to start because the run was stopped;
+                    # nothing is claimed about this file, which is what
+                    # _report_partial's "not reached" has to mean.
+                    return None
                 results[path] = v
                 if v.cls != CLASS_PASS:
                     # `v.detail or v.reason`, because a class whose diagnosis is
@@ -2813,7 +2902,19 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                     # in it for every admitted file.
                     print(f"{v.cls.upper()}: {rel(path)}  "
                           f"({v.detail or v.reason})", flush=True)
+                return v
+
+            for fut in concurrent.futures.as_completed(futs):
+                collect(fut)
                 if stop.is_set():
+                    # Stop BUILDING the rest of the scope, then keep what was
+                    # already running. Both halves are needed: the queue is the
+                    # whole run, so cancelling it is what makes a stopped sweep
+                    # stop, and collecting the in-flight builds is what keeps the
+                    # partial ledger and the CAS from disagreeing about how far
+                    # the run got.
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    _drain_in_flight(futs, collect)
                     return True
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -2821,7 +2922,126 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
     return False
 
 
-def _report_partial(arch, files, results) -> None:
+def _drain_in_flight(futs, collect) -> None:
+    """Record the builds that were ALREADY RUNNING when the run was stopped.
+
+    Called after `shutdown(cancel_futures=True)`, so every future that had not
+    started is already cancelled and this only ever waits on the `-j` builds the
+    pool had taken. Each of those publishes its verdict to the CAS before
+    `run_one` returns, so a drain that ignored them would leave verdicts in the
+    cache that the run's own output never mentions — which is what forced
+    `bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §2.3 to reconstruct a run's
+    numbers from the cache instead of reading its log.
+
+    Waited for rather than killed, and the cost is bounded: each in-flight build
+    has its own `-t` already running, so the drain costs at most one more `-t`.
+    That is the price of not discarding a build that may be seconds from a
+    verdict, and of not losing the verdict it is about to publish.
+    """
+    running = [f for f in futs if not f.done() and not f.cancelled()]
+    if not running:
+        return
+    concurrent.futures.wait(running)
+    for fut in running:
+        collect(fut)
+
+
+def _report_tool_causes(done, results, timeout, mem_gb, arch, emit,
+                        indent="  "):
+    """The `tool` bucket, one line per CAUSE, each with its share of the scope.
+
+    The bucket is "no verdict was reached", and lumping it into one sentence is
+    what made it read as a verdict: `bugs/FORMAL_sweep_default_timeout_hides_a_
+    crash_on_the_repos_own_files.md` measured a real backend crash
+    (`AttributeError: 'str' object has no attribute 'name'`, the same defect
+    `test_dataclasses_formal.py` was failing on) that never appeared in the
+    ledger at all, because its file hit the default `-t 30` first and the tool
+    said "21 files got no verdict" about it in the same breath as the files that
+    genuinely have none. A `tool` row is a file this run says NOTHING about; the
+    cause says what stopped the answer, and the causes want opposite responses
+    (raise `-t`, write the module, look at the machine, look at the file).
+
+    So each line carries three things the reader cannot otherwise get: the count
+    by cause, that count as a FRACTION OF THE CLASSIFIED SCOPE (a `tool` row
+    read as "not a finding" is a very different claim over 3 files than over
+    300), and what the file's answer therefore is. `timeout` gets the command
+    that answers it, because it is the one cause a reader can do something about
+    immediately.
+
+    Shared by the complete run's summary and by an interrupted run's, because
+    they answer the same question and a second copy is a second wording for a
+    reader to be told two things by. The fraction is over the files this run
+    CLASSIFIED, because that is the denominator every count above it is over; an
+    interrupted run has already said how much of the scope it never reached.
+
+    Counted from `results` by CAUSE, never by matching the detail text: the
+    cause is a field the classifier set, and re-deriving it from the message it
+    formatted would be the second implementation of the same question.
+    """
+    by_cause = collections.Counter(results[p].cause for p in done
+                                   if results[p].cls == CLASS_TOOL)
+    if not by_cause:
+        return False
+    scope = len(done)
+    emit(f"{indent}note: {sum(by_cause.values())} of the {scope} classified "
+         f"file(s) ({_pct(sum(by_cause.values()), scope)}) got no verdict at all "
+         f"and are in NO rate. Each one is a file this run says NOTHING about, "
+         f"which is not the same as a file it has cleared:")
+    for cause in (CAUSE_TIMEOUT, CAUSE_MEMORY, CAUSE_WRAPPER_DIED,
+                  CAUSE_UNREADABLE, CAUSE_TOOL_ERROR):
+        n = by_cause.get(cause, 0)
+        if not n:
+            continue
+        emit(f"{indent}  {cause:<22} {n:>4} file(s) "
+             f"({_pct(n, scope)} of the classified scope) — "
+             f"{_CAUSE_BLURB[cause].format(mem_gb=f'{mem_gb:g}')}")
+    if by_cause.get(CAUSE_TIMEOUT):
+        timed_out = [rel(p) for p in done if results[p].cause == CAUSE_TIMEOUT]
+        paths = " ".join(timed_out) if len(timed_out) <= 8 else ""
+        # Twice the bound, or a minute more than it, whichever is larger: the
+        # point is a NUMBER THAT IS NOT THE ONE THAT JUST FAILED, and a run
+        # that used no `-t` at all still gets a usable one.
+        bigger = max(int(timeout or 0) * 2, int(timeout or 0) + 60)
+        cmd = _RETRY_CMD.format(arch=arch, timeout=bigger, paths=paths)
+        emit(f"{indent}  re-answer them with a larger -t: {cmd}"
+             + ("" if paths else "  [the paths are the `timeout` rows above]"))
+    return True
+
+
+def _pct(n, total):
+    return f"{100.0 * n / total:.1f}%" if total else "n/a"
+
+
+# What each `tool` cause means for the file it is on. One sentence each, and
+# each says what the run does NOT know — which is the whole point of the split.
+_CAUSE_BLURB = {
+    CAUSE_TIMEOUT:
+        "the build did not finish inside -t, so what it WOULD have answered is "
+        "unknown at this -t. A file that turns out to crash says so in "
+        "`backend-crash` instead, and that is never cached, so it re-measures "
+        "every run; a file that is merely slow to build is the other reading",
+    CAUSE_MEMORY:
+        "killed at this tool's {mem_gb} GB per-file ceiling — a real cost "
+        "finding about that file (see bugs/PERF_memory_over_4gb_is_a_bug.md), "
+        "NOT something a wider run fixes, and not cached, so re-running "
+        "re-measures it",
+    CAUSE_WRAPPER_DIED:
+        "this tool's per-file memory wrapper died before it reported an "
+        "outcome, so no peak was ever measured against the ceiling and this is "
+        "not a memory finding — a fact about the machine, not cached, "
+        "re-measured by re-running",
+    CAUSE_UNREADABLE:
+        "the file could not be read, so nothing about it was asked",
+    CAUSE_TOOL_ERROR:
+        "this tool or the build driver raised, so the run lost the answer it "
+        "would otherwise have had",
+}
+
+_RETRY_CMD = ("python3 tools/formal_sweep.py --arch {arch} -t {timeout} "
+              "{paths}")
+
+
+def _report_partial(arch, files, results, timeout=0, mem_gb=0.0) -> None:
     """Say what an interrupted run managed to classify, and publish it.
 
     The counts are over the files that were classified, NOT over `files`, and
@@ -2843,16 +3063,8 @@ def _report_partial(arch, files, results) -> None:
     for cls in CLASS_ORDER:
         if counts.get(cls):
             print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
-    if counts.get(CLASS_TOOL):
-        print(f"  of the {counts[CLASS_TOOL]} in `tool`, "
-              f"{sum(1 for p in done if results[p].cause == CAUSE_MEMORY)} "
-              f"hit this tool's per-file memory ceiling", file=sys.stderr)
-        wrapper_deaths = sum(1 for p in done
-                             if results[p].cause == CAUSE_WRAPPER_DIED)
-        if wrapper_deaths:
-            print(f"  of the {counts[CLASS_TOOL]} in `tool`, {wrapper_deaths} "
-                  f"had this tool's memory wrapper die before it reported an "
-                  f"outcome", file=sys.stderr)
+    _report_tool_causes(done, results, timeout, mem_gb, arch,
+                        emit=lambda s: print(s, file=sys.stderr))
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
     # be read as a complete run's history by the next one. Same shape, so
@@ -2925,9 +3137,17 @@ def main():
     ap.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help="per-file build timeout in seconds "
                          f"(default {DEFAULT_TIMEOUT}; raise it for the "
-                         "much larger stdlib modules). A file that hits it is "
-                         "reported in the `tool` class — counted, printed, "
-                         "and in no rate — never as a pass or a finding")
+                         "much larger stdlib modules, and for this repository's "
+                         "own root files, which are a different population: "
+                         "one of them imports the other, so its build is the "
+                         "sum of its closure's). A file that hits the bound is "
+                         "reported in the `tool` class — counted, printed, and "
+                         "in no rate — and it means THIS RUN SAYS NOTHING "
+                         "ABOUT THAT FILE, never that the file is not a "
+                         "finding: a build that would have CRASHED inside the "
+                         "bound is reported in `backend-crash` instead, and "
+                         "the summary's `tool` block names the timeout files "
+                         "and the command that answers them")
     ap.add_argument("--arch", default="arm64",
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
@@ -3087,7 +3307,7 @@ def main():
         # killed it" and "it found something" and "it never started" are three
         # different facts and a caller that has to tell them apart should not
         # have to read the log to do it.
-        _report_partial(arch, files, results)
+        _report_partial(arch, files, results, args.timeout, mem_gb)
         sys.exit(3)
 
     # Every file gets exactly one class, and the classes sum to the file count
@@ -3324,36 +3544,15 @@ def main():
               f"rebuilt every run on purpose: the dylib is not in the cache "
               f"key, so publishing their verdict could outlive the dylib it "
               f"was measured against")
-    if counts[CLASS_TOOL]:
-        print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
-              f"(timeout/unreadable/memory-killed/tool error) and are in NO "
-              f"rate; a too-small -t is the usual cause — this run used "
-              f"-t {args.timeout}")
-    # Counted from `results` by CAUSE, not by matching the detail text: the
-    # cause is a field the classifier set, and re-deriving the count from the
-    # message it formatted is the second implementation of the same question.
-    mem_killed = sum(1 for p in files
-                     if results[p].cause == CAUSE_MEMORY)
-    if mem_killed:
-        # Said separately and by name, because the causes in that bucket need
-        # opposite responses and lumping them tells a reader to raise -t for a
-        # file whose problem is that its build does not fit in the ceiling.
-        print(f"  of those, {mem_killed} hit THIS TOOL's per-file memory "
-              f"ceiling of {mem_gb:g} GB and were killed — one file's build "
-              f"cannot take the run down; each is a real cost finding about "
-              f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
-              f"NOT cached, so re-running re-measures it")
-    wrapper_died = sum(1 for p in files
-                       if results[p].cause == CAUSE_WRAPPER_DIED)
-    if wrapper_died:
-        # Its own line because the two machine causes in that bucket are told
-        # apart by EVIDENCE, and lumping them would tell a reader to go looking
-        # for a memory bug in a build that was never measured against the
-        # ceiling.
-        print(f"  of those, {wrapper_died} were killed with this tool's "
-              f"per-file wrapper itself dying before it reported an outcome — "
-              f"no breach was measured, so this is not a memory finding; each "
-              f"is a machine fact, is NOT cached, and re-running re-measures it")
+    # The `tool` bucket, by cause, with each cause's share of the scope — one
+    # shared reporter with an interrupted run's, because it is the same question
+    # and two copies of it would be two wordings for a reader to be told two
+    # things by. The old single lumped sentence ("N file(s) got no verdict at
+    # all (timeout/unreadable/memory-killed/tool error) … a too-small -t is the
+    # usual cause") is what let a file whose build CRASHES at 42 s read as a file
+    # that is merely slow at the default `-t 30`: the crash never reached the
+    # ledger and the count said nothing about which files were unknown.
+    _report_tool_causes(files, results, args.timeout, mem_gb, arch, print)
     foreign_arch = sum(1 for p in files
                        if results[p].cause == CAUSE_FOREIGN_ARCH)
     if foreign_arch:

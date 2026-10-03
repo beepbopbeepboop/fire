@@ -286,10 +286,19 @@ BUF_CAP = 8192
 
 # ── separators, as BYTES and not as spellings ────────────────────────────────
 #
-# A string literal on this path is interned verbatim and its escapes are NOT
-# unescaped — measured: `"a\nb"` is four bytes, and `sys.mojo` says so at its
-# writers — so a newline cannot be written as a literal and every separator
-# below is a byte value written with `memset`/`memmove`.
+# A newline cannot reach a caller through a printf-style format, so every
+# separator below is a byte value written with `memset`/`memmove` rather than a
+# character in a literal. That reason is CURRENT. The reason this file used to
+# give — "a string literal on this path is interned verbatim and its escapes are
+# NOT unescaped, measured: `"a\nb"` is four bytes, and `sys.mojo` says so at its
+# writers" — is NOT, and had stopped being true at `9023031b` (the decoder every
+# engine now shares), which `sys.mojo`'s writers and
+# `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too` both pin:
+# a literal IS decoded, inside a module as well as inside a program, on both
+# architectures. The idiom below is kept because it is correct and because these
+# separators are written at a computed offset anyway;
+# `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" is what
+# simplifying the rest of the tree's corpora would take.
 
 # A BYTE WRITTEN WITH `memset` IS SPELLED INLINE, and these names are only for
 # the places module-constant folding does reach (a call argument, a return). The

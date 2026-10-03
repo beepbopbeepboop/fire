@@ -1173,10 +1173,16 @@ CASES = [
     # something these methods introduce, and it is not this file's business to
     # fix. What these cases check is the VALUE, via printf.
 
-    # The basic left-strip, with the leading run being all three of tab/space
-    # and the result observed on stdout. `\t` here is a literal BACKSLASH and a
-    # `t` — string literals on this path are not unescaped — so it must NOT be
-    # treated as a tab, and this case is what pins that down.
+    # The basic left-strip: a three-character run of spaces, and the two
+    # degenerate operands beside it, all observed on stdout through printf.
+    #
+    # This comment used to describe a leading run of "all three of tab/space"
+    # and to explain that a `\t` in it reached the image as a backslash and a
+    # `t`, because string literals were not unescaped on this path. Neither is
+    # true: the case below holds three SPACES and no tab, and a literal's
+    # escapes are decoded (`9023031b`; see the `str_lstrip_all_whitespace`
+    # comment below, which is where the tab case lives and which carries the
+    # measurement).
     ("str_lstrip_prints",
      "def main(n):\n"
      "    printf(\"[%s][%s][%s]\\n\", \"   hi\".lstrip(), \"hi\".lstrip(),\n"

@@ -51,6 +51,35 @@ POLL_SECONDS = 0.5
 # samples for the 3.5x margin to matter.
 
 
+def _on_term(signum, _frame):
+    """SIGTERM/SIGINT: take the tree down and REPORT it, in the handler.
+
+    Installed rather than left to the default disposition, and the reason is
+    the shape of this file's own contract: every outcome memcap can have is a
+    line it prints, and a caller reads them to decide what happened
+    (`procrun.memcap_verdict`, `procrun.memcap_wrapper_died`). A SIGTERM's
+    default action skips all of that — the wrapper dies mid-poll with its
+    banner on stdout and nothing else, which reads to every reader as "the
+    wrapper was killed by something that left no trace", AND leaves the
+    workload running unmonitored, which is the exact failure the ceiling
+    exists to prevent.
+
+    Who sends one: `tools/control.py reap` (SIGTERM to leftovers in finished
+    workers' trees) and any operator or watchdog with the pid. Measured
+    2026-10-02: six files per architecture reported a bare
+    `memcap: <label> -- ceiling …` as their `codegen` "refusal" in a sweep,
+    with the killer not established. Whether or not that run was one of these,
+    handling the signal removes a whole class of the state rather than
+    explaining one instance of it — and SIGKILL, the only signal that cannot be
+    handled, is the only thing that can still produce it.
+
+    Raising `KeyboardInterrupt` rather than returning: the `except` clauses
+    below already do the tree-kill and the reporting for it, and a signal
+    handler that raises keeps the cleanup in ONE place instead of two.
+    """
+    raise KeyboardInterrupt(signum)
+
+
 def main(argv):
     ap = argparse.ArgumentParser(
         prog="memcap", description=__doc__.split("\n")[0],
@@ -76,6 +105,11 @@ def main(argv):
     # signal as a unit. procrun.kill_tree's walk is the precise path; the
     # group kill is the belt-and-braces fallback for a pid we lose track of.
     proc = subprocess.Popen(cmd, start_new_session=True)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Installed AFTER the child exists: a SIGTERM arriving before this point
+        # would kill memcap with no tree to kill, which is the safe direction, and
+        # the window is microseconds wide.
+        signal.signal(sig, _on_term)
     peak, peak_n = 0, 0
     try:
         while True:
@@ -105,10 +139,29 @@ def main(argv):
                       % (peak / GB, peak_n, args.limit_gb, rc), flush=True)
                 return rc
             time.sleep(POLL_SECONDS)
-    except KeyboardInterrupt:
-        print("\nmemcap: interrupted, killing %s" % label, flush=True)
+    except KeyboardInterrupt as exc:
+        # The tree goes down and the outcome is REPORTED, in that order: the
+        # point of the handler is that a signalled wrapper is not a silent one,
+        # and a reader (`procrun.memcap_accounted`) is looking for a line that
+        # says how this run ended. 130 for an interrupt, 143 for a SIGTERM —
+        # the conventional 128+signum, so a caller that reads the exit code sees
+        # "terminated by a signal" rather than "exited 130" for the case that was
+        # not an interactive interrupt. Both are handled by the same `except`,
+# so which one it was is carried in the MESSAGE.
+        signum = getattr(exc, "args", [None])[0]
+        # The outcome WORD is `interrupted` and not `terminated`, and that is
+        # load-bearing rather than a style choice: `procrun.memcap_accounted`
+        # reads a run's end off a line beginning `memcap: interrupted`, and a
+        # word outside its set would leave a signalled wrapper still reading as
+        # a silent one — the state this handler exists to remove. The signal
+        # number and the exit code carry which signal it was.
+        how = ("interrupted" if signum in (None, 2)
+               else f"interrupted by signal {int(signum)}")
+        print(f"\nmemcap: {how}, killing {label} -- nothing below this "
+              f"wrapper is left running, and this run was NOT accounted for by "
+              f"any ceiling", flush=True)
         procrun.kill_tree(proc.pid)
-        return 130
+        return 130 if signum in (None, 2) else 143
     except BaseException as exc:            # noqa: BLE001
         # Fail CLOSED. This is a safety tool, so a bug in the watchdog must
         # not leave an unbounded, unmonitored process running -- that is the

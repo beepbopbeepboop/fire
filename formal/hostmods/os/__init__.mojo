@@ -146,19 +146,27 @@ def pathsep() -> str:
 def linesep() -> str:
     """The line separator: a single newline byte.
 
-    BUILT, not written `"\\n"`. A string literal on this path is interned
-    verbatim and its escapes are not unescaped, so a literal `"\n"` is the two
-    characters `\` and `n` — measured, and recorded in
-    bugs/FORMAL_pointer_value_model.md as a pre-existing `printf`
-    string-escape question. A `memset` of the byte value is the way to say
-    "newline" on this target, and the buffer is already a `str_alloc`'d one, so
-    it is zeroed and then one byte of it is set.
+    A LITERAL, `"\\n"`, and it is worth saying why that is not the obvious
+    spelling here: this function used to allocate a buffer and `memset` the
+    byte 10 into it, because a string literal on this path was interned
+    VERBATIM and its escapes were not decoded — so `"\\n"` really was the two
+    characters `\\` and `n`. That stopped being true at `9023031b`, which gave
+    the formal backends `fire_compiler.decode_c_escapes`, the decoder every
+    other engine already called, and `formal/hostmods/*.mojo` are compiled into
+    dylibs, so the question is whether a literal is decoded INSIDE A MODULE and
+    not only inside a program. Measured, on both architectures, and pinned by
+    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`:
+    `sys.write_stderr("a\\nb")` called from inside a module writes three bytes
+    and returns 3.
 
-    The caller owns the buffer, like every other string here.
+    This is the function three other modules cited as the measurement of the old
+    rule (`ast.mojo`'s character sets, `re.mojo`'s `nl`), so it is the one place
+    that must not keep asserting a limitation that is gone. Their corpora keep
+    the `str_alloc` + `memset` idiom for now — it is correct, and
+    `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" says what
+    simplifying them would take.
     """
-    var b: Pointer[UInt8] = str_alloc(1)
-    memset(b, 10, 1)
-    return b
+    return "\n"
 
 
 def devnull() -> str:
