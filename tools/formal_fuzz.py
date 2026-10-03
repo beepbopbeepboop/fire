@@ -1030,9 +1030,8 @@ def main(argv=None):
     print(f"  diverged    {counts['DIVERGED']}  "
           f"({sum(known.values())} attributed to a known construct, "
           f"{len(findings)} unexplained)")
-    if counts["TRAPPED"]:
-        print(f"  trapped     {counts['TRAPPED']}  (the stack-floor guard; CPython "
-              f"ran these — see `formal/model.py`'s `STACK_TRAP_STATUS`)")
+    print(f"  trapped     {counts['TRAPPED']}  (the stack-floor guard; CPython "
+          f"ran these — see `formal/model.py`'s `STACK_TRAP_STATUS`)")
     print(f"  errors      {counts['ERROR']}")
     if known:
         print("  known constructs blamed (the MINIMAL set that explains each):")
