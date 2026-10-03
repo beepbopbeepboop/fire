@@ -1,5 +1,16 @@
 # FORMAL_listdir_no_run_time_sequence: a run-time-length blob is answerable; a run-time-length LIST is not
 
+**Status 2026-10-03 (`work/formal16-5`): item 1 was DONE AND HAD GONE RED ON
+`master` — a newer refusal could not see the callee's own declaration, so
+`names[0]` stopped building while the row that pins it was failing in the suite.
+Fixed at the root (the check now asks the one reader both emitters ask), and
+`test_formal_os.py`'s `os_blob_untyped_listdir`, which asserted a REFUSAL for a
+declaration `listdir` no longer has, now asserts the ANSWER — the contrast with
+`os_blob_untyped`, which is the same three lines through a callee whose
+declaration says nothing a manifest signature can carry, is the half worth
+having. Items 2 and 3 below are unchanged and remain Phase 6's tagged-value
+convergence. Everything under this line is the history the document grew.**
+
 **Status: the directory half is fixed, the sequence half is MOSTLY fixed — items
 1 and 4 of "What is still missing" landed 2026-10-02 (`work/formal8-7`) and items
 2 and 3 did not.** `os.listdir` and `os.walk` exist in `formal/hostmods/os`, are
@@ -122,6 +133,33 @@ Pinned by `test_formal_os_backing.py`'s `listdir_is_a_python_level_list` (ten
 answers over two directory shapes, against `os.listdir` in this process, both
 architectures) and by the `len`/`for`/subscript rows in
 `test_formal_globals.py`. 54/54 in that file.
+
+**…and that pin was RED when this round started, on `master`, on both
+architectures, with 0 of its ten answers — while this document said it was
+pinned.** The measurement:
+
+    build: names[0] subscripts `names`, whose value came from `listdir` in os —
+    and that export's own declaration is a POINTER (`MojoList *`), which this
+    path does not carry into an unannotated local.
+
+`formal/build.py`'s `check_subscript_through_an_unclassified_import` asks "what
+does an UNTYPED local bound from this cross-image call hold?" and it asked the
+MANIFEST SIGNATURE alone. The signature cannot answer it for this callee: `->
+List[String]`, `-> Int` and `-> Bool` are all `int64_t` on the C side, so the
+signature says `MojoList *`, the check found a pointer with no kind behind it,
+and the value was refused for want of an answer the callee's own source states
+in the declaration this module already reads. So the emitter lowered the
+subscript through the container blob and a build-pass check refused the same
+program: the two disagreed about one export, and the refusal is what a user saw.
+
+The repair is one question asked through the reader that already exists —
+`model.imported_callee_kind(entry, declaration)`, declaration first and
+signature second, which is what both `_callee_kind`s use for exactly this — plus
+the declarations table the check now asks for. `test_formal_os.py`'s
+`os_blob_untyped` (through `re.escape`, declared `-> Pointer[UInt8]`, which the
+signature genuinely cannot classify) still refuses by name on both
+architectures, which is the assertion that says the check is narrower rather than
+gone.
 
 **What is still missing is items 2 and 3, and both are the same project:**
 
