@@ -12,6 +12,16 @@ census only counts files that COMPILE, and these three did not before, so
 there was never a census row to remove. The census will not move until the
 remaining 19 do.
 
+**2026-10-03: item 1 below (`test_count.mojo`) is BUILT, compiles all 592
+files with 0 unexpected, and was REVERTED because its artifact links to
+nothing.** It is a four-edit change to a real defect — a wrong signature, not
+a missed optimization — and it is blocked BEHIND items 2 and 3, because
+`std/itertools/itertools.mojo` does not compile at all, so `count` and
+`_CountIterator.__next__` exist in no object. The full measurement, the
+per-side `nm -g` evidence, both blockers, and the reusable findings are in
+item 1. `test_count.mojo` therefore REMAINS in `EXPECTED_FAILURES` and the
+sweep is unchanged at **591 / 19 / 0, exit 0**.
+
 ### Landed 2026-10-03: in-TU instantiation, and 3 of the 22 with it
 
 `mojo/backend_gimple/elab_intu.py` (new) + one call site in
@@ -151,7 +161,7 @@ is not a guess.
 | `test/itertools/test_product.mojo` | `product` (three arities) |
 | `std/itertools/itertools.mojo`, `std/collections/string/iterators.mojo` | the whole family, module-wide |
 | `test/collections/test_span.mojo` | `enumerate`, `iter` |
-| **`test/itertools/test_count.mojo`** | **neither — see below** |
+| **`test/itertools/test_count.mojo`** | **neither — but see item 1 below: it is DOWNSTREAM of `std/itertools/itertools.mojo` compiling, not independent of it** |
 | `test/os/path/test_getsize.mojo` | neither — the unrelated `getsize` `gcc -c` failure already documented |
 
 1. **A concrete imported function whose return annotation names a struct in its
@@ -168,6 +178,119 @@ is not a guess.
    real-struct risk the in-TU widening measured above, so it wants the
    `test/itertools/test_count.mojo` artifact as its acceptance bar (its object
    must define `_CountIterator___next__`), not a green syntax check.
+
+   ### Item 1 is BUILT and measured, and it is BLOCKED AT THE LINK — reverted, not landed
+
+   2026-10-03. The three-part change is written, it compiles all 592 files
+   with **0 unexpected**, it makes `test/itertools/test_count.mojo` pass
+   `gcc -fgimple -fsyntax-only` for the first time, and it was **reverted**
+   because the acceptance bar this very section sets is not met. Reverted with
+   `git stash push` (recoverable; nothing was discarded) rather than landed,
+   because landing it would have removed `test_count.mojo` from
+   `EXPECTED_FAILURES` on the strength of a green SYNTAX check whose artifact
+   links to nothing — the exact trade this project rejects.
+
+   **What it is, and each half is a real defect rather than a guess.**
+
+   - **`_imported_func_return_struct` asked two questions in the wrong order,
+      and with the wrong test.** It looked for `def count` in the module the
+      import STATEMENT names, and then gated the result on
+      `_rbase[0].isupper()`. Both are wrong for every stdlib package. (a)
+      `from std.itertools import count` names `std/itertools/__init__.mojo`,
+      which is a docstring plus a `from .itertools import (count, cycle, …)`
+      re-export list and defines no function at all, so the lookup found
+      nothing. It now resolves the DEFINING module first
+      (`_find_symbol_home_module(..., want_abs=True)` → `std.itertools.itertools`;
+      `want_abs` because the answer is used to open a file and the default
+      spelling is the bare relative ref `.itertools`, which no resolver
+      accepts standalone — measured). (b) `isupper()` is a naming convention
+      the stdlib's own iterator structs break: the return struct is
+      `_CountIterator`, so `count` was declined while a public non-underscore
+      twin was accepted. Replaced with `_find_imported_struct`, i.e. the real
+      parse tree — strictly stronger than capitalization, and the same
+      predicate `_materialize_imported_struct` applies next.
+   - **The struct a function RETURNS was never materialized, because the
+     registration loop only fires when the imported NAME is itself a struct.**
+     `_locally_constructed[_ret_struct]` was dead: nothing looked up that key,
+     because it is not an imported name. New block consumes it, scoped to
+     "the call's result is ASSIGNED to a name" (a bare in-place use is
+     excluded on purpose — see the UTF8Chunks measurement at
+     `_locally_constructed`'s own definition).
+   - **The recorded return type was the text scan's erasure, and that is a
+     WRONG SIGNATURE, not a missed optimization.** `module_loader` scans text
+     and erases every struct to `int64_t`, so `count` arrives as
+     `c_return_type: 'int64_t'` while the defining module emits
+     `_CountIterator *`. Both declaration sites (`_emit_stdlib_import_externs`
+     and `_register_sym`) now correct it from the defining module's parse,
+     gated on `struct_field_types` already holding the struct — i.e. only when
+     some earlier pass in THIS compile resolved its real field layout.
+
+   **Measured result.** `test_count.mojo` goes from a compile-time refusal to
+   `gcc rc=0`, `it` typed `_CountIterator *`, the call reading
+   `_t1 = std_itertools___init___count_2dbb98 (_t2, _t3); _t4 =
+   std_itertools_itertools__CountIterator___next__ (it);`.
+
+   **The symbol agreement it bought is real and was checked from both sides**
+   (`tools/linkcheck.py`, new, and `tools/dumpc.py`, new):
+
+       caller  : extern int64_t std_itertools_itertools__CountIterator___next__ (_CountIterator *);
+       definer : nm -g -> T _std_itertools_itertools__CountIterator___next__      AGREE
+       caller  : extern _CountIterator * std_itertools___init___count_2dbb98 (int64_t, int64_t);
+       definer : nm -g -> T _std_itertools_itertools_count_2dbb98                DISAGREE
+
+   **Why it is reverted — two blockers, both outside `test_count.mojo`, both
+   pre-existing, and the second one decisive.**
+
+   1. `count`'s own symbol qualifier names the RE-EXPORTING package, not the
+      defining module: the caller composes `std_itertools___init___count_…`
+      from `std/itertools/__init__.mojo`, the definer emits
+      `std_itertools_itertools_count_…`. Measured as pre-existing (the
+      unmodified tree emits the same `std_itertools___init___count_2dbb98`),
+      and it is filed separately as
+      `bugs/CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md`
+      (`bugs/hard/README.md`). Not fixed here: `_func_qualifier`'s tier-2
+      `_own_imported_func_home` is load-bearing for two documented miscompiles,
+      and re-deriving it reaches every `from <pkg> import f` across the 51
+      stdlib packages — not landable without the gate.
+   2. **`std/itertools/itertools.mojo` does not compile at all**, so `count`
+      and `_CountIterator.__next__` exist in NO object.
+      `nm -gU build/libmojostdlib.arm64.dylib | grep itertools` returns exactly
+      two symbols (`__std_itertools___init___toplevel`,
+      `_std_itertools___init___init`) — the module was never built. Its own
+      failure is `next(self._inner_a)` at line 140, inside `_Product2.__next__`
+      — a MemberExpr whose receiver is the generic struct FIELD
+      `_inner_a: IteratorTypeA`, i.e. a TYPE PARAMETER, which is item 2/3
+      below. So `test_count.mojo` is DOWNSTREAM of the whole remaining family,
+      not independent of it. This is what round 2's itemisation did not
+      measure.
+
+   **Consequence for the next session, stated as the precise next step.** Item
+   1 is four edits in four files and is not the bottleneck; it is blocked
+   BEHIND items 2 and 3. Do items 2/3 first. When `std/itertools/itertools.mojo`
+   compiles, item 1 applies and `test_count.mojo` should then be checked with
+   `tools/linkcheck.py test/itertools/test_count.mojo`, whose remaining
+   undefined symbol must be `count`'s qualifier alone — at which point that is
+   the re-export bug, not this one.
+
+   **Also measured while building it, and reusable.** Correcting a recorded
+   return type to a real struct pointer collides with the `extern` block that
+   is flushed BEFORE the struct typedefs (`_link_import_decl_list` at
+   `gen_module_impl`, ahead of the `struct_field_types` typedef loop), and the
+   collision has two distinct shapes that need two different fixes:
+   `error: unknown type name '_CountIterator'` (the type is not yet complete)
+   and `error: conflicting types for
+   'std_python_bindings_lookup_py_type_object'; have 'PythonObject *(void)'`
+   (two same-named externs of different types). The second is the subtle one:
+   the predicate that decides "does this declaration name a struct" must be
+   evaluated at the FLUSH, keyed on the symbol's CURRENTLY RECORDED type and
+   matched through the tree's one `_func_csym` composer — not at queue time and
+   not against the declaration's own text. Evaluated at queue time it sees a
+   `struct_field_types` that is not yet complete, because
+   `_register_imported_structs` runs early and the `_register_sym`
+   FromImportStmt walk runs much later; the two sites then disagree. Building
+   the set at the flush also has to snapshot `func_return_types` first
+   (`list(...)`): `_func_csym` can register into it, and iterating directly
+   raises `dictionary changed size during iteration` on `std/pwd/pwd.mojo`.
 2. **Overload selection on a trait bound**, which is the dominant blocker in the
    table: `peekable`'s `Some[Iterable]` vs `Some[IterableOwned]`, `map`'s and
    `take_while`'s thin-vs-owned pairs, `product`'s three arities, `zip`'s pair.
