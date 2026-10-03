@@ -57,8 +57,12 @@ from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWOR
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.module_shared import *  # noqa: F401,F403
 # `import *` skips underscore-prefixed names, and this one is the single
-# list the three dispatch-global sites below read (see its definition).
-from mojo.middle.module_shared import _DISPATCH_TABLE_GLOBAL_NAMES
+# list the three dispatch-global sites below read. From `mojo.middle.types`
+# rather than `module_shared`, which `gimple_codegen` imports at ITS line 70:
+# reading it from there would close the cycle
+# `module_gen -> module_shared -> gimple_codegen -> module_gen`, and the
+# name would be unavailable at the moment the import ran.
+from mojo.middle.types import _DISPATCH_TABLE_GLOBAL_NAMES
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,

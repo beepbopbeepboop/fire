@@ -629,6 +629,28 @@ _LIBM_FN_RETVALS = {
     'isnan': 'int', 'isinf': 'int', 'isfinite': 'int',
 }
 
+# The dispatch-table and type-table MODULE GLOBALS, with the C type each one
+# needs. ONE list, because three sites need this same fact and each used to
+# carry its own hand-written copy -- and the copies drifted the moment the
+# globals moved from `gimple_codegen.py` into `mojo/middle/types.py` under the
+# module split, which is how "struct _mojo_middle_types_toplev has no member
+# named '_TYPE_MAP'" happened.
+#
+# The VALUE is the C declaration type, which is the thing a consumer needs: the
+# cdecl the home module emits and the shim's accessor must agree on, and
+# `int64_t` for a boxed container that has no typed accessor.
+_DISPATCH_TABLE_GLOBAL_NAMES = (
+    '_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+    '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT',
+    '_C_KEYWORDS', '_C_RESERVED_FUNCS', '_FORCE_RENAME_RESERVED',
+    '_CPP_KEYWORD_FIELDS', '_C_PARAM_EXTRA_KEYWORDS',
+    '_CPP_CALLABLE_CTYPE', '_CPP_CALLABLE_CTYPE_1ARG',
+    '_PSEUDO_DUNDER_ATTRS', '_LIST_RETURNING_METHODS',
+    '_STR_RETURNING_METHODS', '_LIBM_FN_RETVALS', '_UNKNOWN_FIELD_CTYPE',
+    '_SCALAR_INT_TYPES', '_SCALAR_FLOAT_TYPES',
+    '_FIXED_ARRAY_ANN_RE', '_SELFHOST_EXTRA_FIELD_CACHE',
+)
+
 _SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
