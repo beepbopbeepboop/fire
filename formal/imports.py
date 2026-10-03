@@ -157,7 +157,7 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis", "builtins",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal. `tempfile` WAS here too — under this heading, for the
+# A terminal. `tempfile` WAS here too — under this heading, for the
     # `TMPDIR`-derived half of it rather than the terminal half — and left on
     # 2026-10-03, because both halves were measured away: the terminal one is
     # still true and is why `formal/hostmods/tempfile.mojo` asks for nothing
@@ -168,6 +168,13 @@ HOST_UNREACHABLE = frozenset((
     # `os` can already do the thing the entry names. `shutil`'s
     # `get_terminal_size` is the half that survived the same removal and is
     # absent in that module with the reason at its own definition.
+    #
+    # What is still missing of `tempfile` is the OBJECT half —
+    # `TemporaryDirectory`, `NamedTemporaryFile`, `TemporaryFile`: a context
+    # manager, a class and a stream, none of which is a value on this path. That
+    # is a fact about a DIFFERENT capability from the `TMPDIR` one above, and it
+    # is written down at the top of the module rather than here, so a reader
+    # asking "why is most of this row still refused" has one place to look.
     "getpass", "webbrowser",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else. `zlib` and `gzip`
@@ -441,7 +448,7 @@ HOST_MODELLED = frozenset((
     #     name `Counter` is the approximation
     #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
     "collections",
-    "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
+    "heapq", "bisect", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `shlex`  — a state machine over a string, the same shape as `re` and
@@ -495,6 +502,18 @@ HOST_MODELLED = frozenset((
     # does for its own five. `test_formal_os.py` runs its whole path corpus
     # through BOTH spellings and compares both against CPython, so the
     # re-export is measured rather than asserted.
+    #   `textwrap`  — a state machine over a string, the same shape as `re` and
+    #     `fnmatch`.  LEFT on 2026-10-03 for `formal/hostmods/textwrap.mojo`:
+    #     `dedent` and `indent` are pure string computation over the
+    #     `str_len`/`str_lead`/`str_find`/`str_cmp` that
+    #     `formal/hostmods/os/_syscalls.mojo` already has, checked case for
+    #     case against CPython's own by `test_formal_textwrap.py` — including
+    #     the row that discriminates CPython's lexicographic min/max margin
+    #     from the minimum-of-run-lengths that looks equivalent and is not.
+    #     `wrap`, `fill` and `shorten` are absent: a rendering WIDTH is the
+    #     subject and no file here asks for one.  Five files in this
+    #     repository import it, spelling `dedent` 78 times and `indent`
+    #     twice; what of it is absent is at the top of the module.
     "shlex", "html", "datetime", "resource",
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`

@@ -2953,6 +2953,14 @@ UNREGISTERED = {
     'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
     'test_formal_stat.py': _FORMAL_SUITE_REASON,
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
+    # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
+    # when they landed on 2026-10-03, and are REGISTERED now (`formal-tempfile`
+    # and `formal-textwrap` in the `proofs` bucket) — which is what this
+    # branch's own note said the registering commit would do. 0.051 GB / 35.8 s
+    # and 0.050 GB / 15.8 s, measured one at a time, which is the cost class of
+    # `formal-core-hostmods` and `formal-pathlib`: cheap enough that an excuse
+    # for them was a permanent one, and they are the only coverage that diffs
+    # those two modules' answers against CPython on both backends.
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
     'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,

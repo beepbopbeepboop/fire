@@ -502,6 +502,12 @@ MEASURED_PEAK_GB = {
     # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
     # under `tools/memslot.py --gb 8` before being named, like the two above.
     'formal-core-hostmods':  (0.1,  'measured'),   # 25 s, 6 groups
+    # …and the two `work/formal12-hostmods-subprocess` brought in, measured the
+    # same way one at a time under `tools/memslot.py --gb 8` on 2026-10-03:
+    # `tempfile` 35.8 s over 7 groups and `textwrap` 15.8 s over 4, both
+    # building and RUNNING a formal image per group on both architectures.
+    'formal-tempfile':       (0.051, 'measured'),
+    'formal-textwrap':       (0.050, 'measured'),
     # …and the one `work/formal13-1` brought in, a pure SOURCE check over
     # `HOST_OWNED_BLOBS` and the `hostmods` it describes: 0.036 GB and 0.63 s,
     # the same cost class as the two below it and measured the same way one at a
@@ -2502,6 +2508,31 @@ test('formal-blob-contract', [PY, 'test_formal_blob_contract.py'],
      extra=['test_formal_blob_contract.py', 'formal/imports.py',
             'formal/hostmods/os/__init__.mojo'],
      desc="HOST_OWNED_BLOBS is checked against the hostmods' own source")
+# The two the `work/formal12-hostmods-subprocess` merge brought in, both of which
+# that branch listed in `test_suite.py`'s `UNREGISTERED` with the note that the
+# registering commit is the one that deletes the excuse. Registered rather than
+# excused for the reason every other host-module suite here is: they build and
+# RUN a formal image per group on BOTH architectures and diff every answer
+# against this interpreter's own module, which is the coverage that catches a
+# mirror drifting, and the deciding number is the cost.
+#
+# Measured 2026-10-03 one at a time under `tools/memslot.py --gb 8`, arm64 host,
+# peak read by polling `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` over the
+# same run: `formal-tempfile` **0.051 GB, 35.8 s** (7 groups, 128 differential
+# cases), `formal-textwrap` **0.050 GB, 15.8 s** (4 groups). Both are the cost
+# class of `formal-core-hostmods` (25 s, 0.1 GB) and `formal-pathlib` (15 s,
+# 0.08 GB), which are both registered, so `tiny` is from the measurement.
+test('formal-tempfile', [PY, 'test_formal_tempfile.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_tempfile.py', 'formal/hostmods/tempfile.mojo',
+            'formal/hostmods/os/_syscalls.mojo', 'formal/hostmods/os/path',
+            'formal/hostmods/shutil.mojo'] + FORMAL_BUILD_INPUTS,
+     desc="tempfile's directory half, diffed against CPython on both backends")
+test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
+            'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
+     desc="textwrap's dedent and indent, diffed against CPython on both backends")
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2745,7 +2776,14 @@ BUCKETS = {
                 # a source check with no image and no Lean, so there is no
                 # argument for `check` that does not apply equally to
                 # `formal-typed-flag`.
-                'formal-blob-contract'],
+                'formal-blob-contract',
+                # …and the two `work/formal12-hostmods-subprocess` brought,
+                # which that branch excused in `test_suite.py` and this merge
+                # registers instead. `proofs` rather than `check` for
+                # `formal-core-hostmods`'s reason and not `check`'s: they build
+                # and EXECUTE a formal image per group on both backends, so
+                # 35.8 s and 15.8 s is real work rather than an analysis.
+                'formal-tempfile', 'formal-textwrap'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

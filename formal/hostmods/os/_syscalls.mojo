@@ -800,6 +800,52 @@ def fs_mkdir(p, mode) -> int:
     return mkdir(p, mode)
 
 
+def fs_mkdtemp(tmpl) -> str:
+    """`mkdtemp(tmpl)`: the path of a fresh directory, with `tmpl` REPLACED.
+
+    **`mkdtemp(3)` rather than `mkdir` in a loop**, and the reason is `errno`:
+    CPython's `mkdtemp` retries `TMP_MAX` times when a candidate name is already
+    taken, and telling "already taken" from "could not be made" means reading
+    `__error`, whose leading underscore is not a symbol this path can bind (see
+    this module's own docstring). The C library's call does that retry with the
+    error code to itself, so one call here is EXACT where a loop here could only
+    be an approximation of it.
+
+    A TEMPLATE and not a prefix/suffix pair, because that is the C library's
+    interface: the last six bytes must be `XXXXXX`, the C library replaces them
+    with the name it chose and writes the whole path back through the pointer.
+    So this DUPLICATES the caller's string, calls with the copy, and returns the
+    copy — a fresh writable buffer, which is why `str_dup` and not the input.
+    That is the whole reason this wrapper exists at all: a `char *` the C
+    library rewrites has to be writable, and a string literal on this path is in
+    a read-only text section.
+
+    The empty string when no name could be made, which is what every other
+    failure here is (there is no exception on this path — FORMAL.md phase 7).
+
+    The six random characters are THE C LIBRARY'S, so what comes back is a real
+    answer about a real directory rather than a value this tree chose.
+
+    **NOT YET THE BODY OF ANY CALLER, and the exact next step is written down
+    rather than left as a reader's exercise.**
+    `formal/hostmods/tempfile.mojo`'s `mkdtemp(prefix)` is the one function that
+    wants this and it still draws its own eight characters and retries `mkdir`,
+    so its loop cannot tell a collision from a failure
+    (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
+    It was not switched here because that module's `mkdtemp` is pinned against
+    CPython by `test_formal_tempfile.py` for four things `mkdtemp(3)` would
+    change — the mode, the eight-character name over CPython's own alphabet,
+    `TMP_MAX` as the retry budget and `gettempprefix` — and rewriting a merged,
+    measured module and its test is not a merge's business. So this is a
+    correct binding of a real libSystem call with no caller yet, which is a
+    smaller thing than a module that guesses.
+    """
+    b = str_dup(tmpl)
+    if mkdtemp(b) == 0:
+        memset(b, 0, 1)
+    return b
+
+
 def fs_open_ro(p) -> int:
     """`open(p, O_RDONLY)`: a descriptor, or -1.
 
