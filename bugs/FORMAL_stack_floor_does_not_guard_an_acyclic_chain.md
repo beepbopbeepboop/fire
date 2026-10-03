@@ -1,20 +1,99 @@
-# FORMAL_stack_floor_does_not_guard_an_acyclic_chain: a runaway recursion is a refusal on both backends, and so is a chain of DISTINCT functions
+# FORMAL_stack_floor_does_not_guard_an_acyclic_chain: CLOSED for programs — every prologue of an image that has an entry carries the guard
 
 **Area:** FORMAL (the stack-floor guard, both architectures).
-**Status: MEASURED and WIDENED, 2026-10-03 (`work/formal13-6`).** The guard
-landed 2026-10-03 (`formal/model.py`: `STACK_TRAP_STATUS`,
-`STACK_FLOOR_BUDGET_BYTES`, `stack_floor_address`,
-`stack_floor_guarded_names`; `formal/arm64_codegen.py` and
-`formal/x86_64_codegen.py`: `_emit_stack_floor_guard`) and it fixed the defect its
-predecessor doc recorded — recursion past the fixed frame size is `exit(2)` and
-not a SIGSEGV, on both machines. The cycle-only rule left the acyclic chain open,
-and §"The measurement" below is the number that decided it: **the deepest single
-image in this corpus is 76 frames against the 60 an arm64 budget affords.** So
-the guard is now emitted on a call-graph cycle **OR** in every body that already
-contains a conditional branch, which is free — a body that already branches had
-no per-export contract to lose — and leaves a residual of **7 frames, median 3**,
-which is the chain of bodies with no branch at all and which only
-`lib/Refine.lean` can close.
+**Status: MEASURED, WIDENED and then CLOSED (2026-10-03, `work/formal13-6` then
+`work/formal16-6`).** The guard landed in `formal/model.py`
+(`STACK_TRAP_STATUS`, `STACK_FLOOR_BUDGET_BYTES`, `stack_floor_address`,
+`stack_floor_guarded_names`) and in both emitters (`_emit_stack_floor_guard`),
+and it fixed the defect its predecessor doc recorded — recursion past the fixed
+frame size is `exit(2)` and not a SIGSEGV, on both machines. The cycle-only rule
+left the acyclic chain open; the measurement decided to widen it to every body
+that already branches; and §0.2 closes the rest, because **the residual was not
+a missing rule at all — it was the FLOOR's own reference point.**
+
+| image | rule | straight-line chain of 600 |
+|---|---|---|
+| program (a startup stub, so no exports) | **every function** (§0.2) | **`exit 2`, both architectures** — was `exit 139`, a SIGSEGV with no output |
+| module dylib (every function may be an export with a proved per-export contract) | cycle ∪ body-with-a-branch | unchanged: a straight-line chain is unbounded here, and `tools/formal_call_depth_census.py` still measures it (max 7 over this corpus, median 3) |
+
+## 0.2 The residual closed, and it was the floor, not the rule
+## (`work/formal16-6`)
+
+**The measurement that decided it, and it is one line of the guard's own
+sequence.** `_emit_stack_floor_guard` writes the floor **once**:
+
+```
+ADRP+ADD X17, &floor ; LDR X16, [X17]      the floor word
+CBNZ X16, done                             ALREADY STORED — someone else set it
+ADD X16, SP, #0 ; SUB X16, X16, #BUDGET    the first caller sets it
+STR X16, [X17]
+done:  ADD X17, SP, #0 ; CMP X17, X16 ; B.HS ok ; movz x0, 2 ; svc #0x80
+```
+
+So the reference point is **the SP of the first GUARDED function to run**, not
+the image's base and not the current function's entry. Two consequences, and the
+second one is the whole of this section:
+
+1. **A guarded function deep in a chain sets the floor too deep for that chain.**
+   `f1 → … → f80 → g`, every body straight-line and `g` the only one with a
+   branch: `g` sets the floor at 80 frames down and immediately compares SP
+   against SP − 7.5 MiB, which passes. The chain has already spent its stack by
+   then. **Widening the guarded SET cannot fix this** — the doc's second rule
+   widens the set, and the set does not decide where the floor is written.
+2. **so the rule that does fix it is "every prologue", and the only question is
+   what it costs.** For a program image it costs nothing: `main` is the entry,
+   there are no exports, and the per-export contract
+   (`arm64_proof_gen._dylib_contract_proof`) is a MODULE-DYLIB artefact. For a
+   module dylib it costs a proved contract per straight-line export, which is
+   exactly the cost the cycle-or-branch rule was written to avoid.
+
+Which is why the rule is a **parameter** and not a replacement:
+`model.stack_floor_guarded_names(functions, structs, every_function=False)`, and
+both emitters pass `every_function=emit_startup` — the same fact, since an image
+with a startup stub has an entry and an image without one is a module dylib.
+
+**Guarding the ENTRY alone does not do it, and that is worth stating because it is
+the obvious cheaper half.** The check runs once, in `main`'s prologue, where the
+stack is one frame deep. It is the whole set that has to be guarded.
+
+Measured, both architectures, on the shape that is the residual exactly — 601
+straight-line functions, no cycle and no branch anywhere:
+
+```
+before   exit 139        SIGSEGV, no output, no status a caller can read
+after    exit 2          STACK_TRAP_STATUS, on arm64 and x86_64
+```
+
+(the row is `test_formal_run.py`'s
+`both_arch_a_straight_line_chain_past_the_floor_is_a_status`, which REPLACES
+`guard_a_straight_line_chain_is_left_alone` — the row that used to say this out
+loud, and which the fix turns from a confession into the pin.)
+
+**The proof side, checked rather than argued,** because the guard is now in every
+prologue of every program image and the whole of what could break is the emitted
+proof:
+
+| | result |
+|---|---|
+| `test_formal_run.py` | **PASS=905 FAIL=0** — every formal image in the suite builds and RUNS with the guard in every prologue, on both architectures |
+| `formal/examples/absval.mojo`, arm64, `fire.py build --formal` | proof emitted and **accepted by Lean** (3.1 GB peak, exit 0) |
+| `formal/examples/absval.mojo`, x86-64, same | proof emitted and **typechecks at exactly 2 admitted `sorry`** — that generator's design floor, unchanged |
+| `test_formal_run.py`'s stack-floor probes | 26 PASS, 0 FAIL — the 23 cycle/branch probes plus 3 new ones for the third rule, which pin BOTH halves: `every_function=True` covers the straight-line chain, and `every_function=False` leaves the module-dylib answer exactly where it was |
+
+`formal/examples/count.mojo` still fails its arm64 proof, **before and after** —
+it is the dec1 `x30` family (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`),
+which `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §4 records as
+`lean-rejected` on this tree. It is not this change's regression and it is named
+here so a reader who runs it does not have to re-derive that.
+
+**What is left, and it is the module dylib.** A module dylib's exports are entries
+in the only sense that matters — a host calls them at an arbitrary depth — and
+their straight-line chain is still unguarded, still bounded by the corpus at 7
+frames (median 3, `tools/formal_call_depth_census.py`, which now asks the
+question of the module-dylib rule on purpose and says so in its own comment).
+Closing THAT is the `lib/Refine.lean` project below: a guarded prologue is a
+two-way conditional, `Refine.Block.step` is one function of one state, and an
+export with a branch has no `Block` to certify.
 
 ## What is fixed, and what it cost
 
@@ -109,8 +188,10 @@ measurement says is reachable:
 budget affords 480 frames and a 61-deep chain is correctly INSIDE it — a single
 depth cannot show the defect on both machines, and a case that fires on one is a
 case about the frame size rather than about the guard.
-`test_formal_run.py`'s `both_arch_an_acyclic_chain_past_the_floor_is_a_status`,
-with `guard_a_straight_line_chain_is_left_alone` beside it as the negative.
+`test_formal_run.py`'s `both_arch_an_acyclic_chain_past_the_floor_is_a_status`.
+The negative beside it was `guard_a_straight_line_chain_is_left_alone`, and §0.2
+is what turned that negative into a second positive: the straight-line chain it
+used to leave alone now traps too.
 
 **What it costs, measured rather than argued:** `test_formal_run.py` PASS=806
 FAIL=0 (782 before this pair of changes, +15 stack-floor probes, +7 guard
@@ -119,16 +200,16 @@ actually running — 1 m 5 s at 3.1 GB peak, so the CAS verdicts were a cache MI
 on the new proof bytes rather than a replay, which is the measurement that says
 "no export lost a contract".
 
-## What is still not fixed, and it is the proof side
+## What is still not fixed, and it is the proof side — a MODULE DYLIB only
 
-A chain of bodies with **no** branch at all is still unguarded, and the corpus
-says that chain is at most **7 frames** deep (median 3) against arm64's 60 — so
-it is a bounded residual rather than an open hole, and 600 straight-line
-functions in a chain still walk off the end of the stack. That is stated by
-`test_formal_run.py`'s `guard_a_straight_line_chain_is_left_alone` rather than
-papered over.
+**For a program image this is closed (§0.2): every prologue carries the guard and
+600 straight-line functions in a chain exit 2 instead of dying.** What is left is
+the module dylib, whose exports are entries in the only sense that matters — a
+host calls them at an arbitrary depth — and whose straight-line chain the corpus
+bounds at **7 frames** (median 3) against arm64's 60.
 
-Closing it is not an emitter decision:
+Closing it is not an emitter decision, and §0.2 says exactly why it is not one
+for an image that HAS exports:
 
 * `formal/arm64_proof_gen.py::_dylib_contract_proof` returns `""` for an export
   whose body contains ANY conditional branch, and the guard's own `cbnz`/`b.hs`
@@ -147,9 +228,21 @@ Closing it is not an emitter decision:
   either way `Contracts.ExportBody.atExit`, which is stated at
   `image.base + image.codeSize`, has to be re-derived for a body that can leave
   through two addresses. That is a proof-side project with the `prooflib` build
-  in front of it, and the two `lib/*.lean` files carry `sorry`s at `InImage` and
-  `Semantics` today (see the note at the bottom of
-  `bugs/FORMAL_string_value_model.md`).
+  in front of it.
+  **One of the two blockers this section used to name is GONE**, which is worth
+  recording because it is the kind of fact that costs a reader an hour: the
+  `sorry`s at `InImage` and `Semantics` are no longer there —
+  `lib/ProofLib.lean:5285` records that "the old `in_image_stub` was `by sorry`
+  over" a false statement and that `native_decide` now closes it. So the standing
+  obstacle is the two-way `Block` alone, which is a smaller project than this
+  section described.
+* **And the schema is more ready than it was.** `lib/Refine.lean`'s control-flow
+  layer already has `Edge.cbz (bi) (reg) (taken) (target)` — a conditional branch
+  with a DECIDED outcome — and the step lemmas are emitted PER INSTRUCTION with
+  both arms discharged by `by_cases` + `simp` (see the `idx == 51` /
+  `idx in (16, 17)` arms of the generator's tactic chain, whose comment names
+  the stack-floor guard's own `B.HS` as the case it was measured on). What is
+  missing is a `Block` per arm plus the join, not a way to state a branch.
 
 The cheaper third option this document used to offer — "on a cycle, or reachable
 from one" — is **dominated** by what landed and is not worth taking: a DAG with

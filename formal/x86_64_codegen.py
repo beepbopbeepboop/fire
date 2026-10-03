@@ -840,8 +840,15 @@ class X86_64Codegen:
         # whole image before any function is emitted (the guard is decided per
         # function, so it cannot be answered while a prologue is being written).
         # The x86-64 twin of arm64's, from the same shared function.
+        # `every_function` is `emit_startup`, and the two are the same fact: an
+        # image with a startup stub has an ENTRY and therefore no exports, so
+        # every prologue can carry the guard and nothing loses a per-export
+        # contract (`model.stack_floor_guarded_names` carries the measurement).
+        # A module dylib has no entry function and every function may be an
+        # export, so it keeps the cycle-or-branch rule.
         self._guarded_names = M.stack_floor_guarded_names(
-            self._functions.values(), self._structs)
+            self._functions.values(), self._structs,
+            every_function=emit_startup)
 
         # A NAME is not an ADDRESS, and this is arm64's rule read from the same
         # shape: every DEFINITION gets an entry label of its own and the NAME is

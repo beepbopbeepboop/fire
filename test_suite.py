@@ -3231,6 +3231,15 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
+    'test_formal_declared_param_census.py': 'The declared-parameter census '
+        "TOOL: a parse and a walk over one `.mojo` file, with no build and no "
+        'Lean (0.1 s for its 15 cases). It is not registered because this '
+        "session's task says not to register anything, and it is listed here "
+        'because the estate check below exists to make an unaccounted-for test '
+        "file impossible — it covers `tools/formal_declared_param_census.py`'s "
+        'six type readers, the three shapes that must stay undecided, and the '
+        'two stdlib declaration bugs the readers found.',
+
     # `test_formal_proof_breadth.py` was listed here when it landed on
     # 2026-10-03 with the note that the registering commit deletes the excuse,
     # and is REGISTERED now (`formal-proof-breadth-tool` in the `proofs`

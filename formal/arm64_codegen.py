@@ -903,8 +903,15 @@ dylib_exports: list = None, globals_base: int = None,
         # `values(self._functions.values())`, not `functions`: the guard reads
         # the same set of FunctionDefs either way, and this is the table the
         # emitters dispatch on.
+        # `every_function` is `emit_startup`, and the two are the same fact: an
+        # image with a startup stub has an ENTRY and therefore no exports, so
+        # every prologue can carry the guard and nothing loses a per-export
+        # contract (`model.stack_floor_guarded_names` carries the measurement).
+        # A module dylib has no entry function and every function may be an
+        # export, so it keeps the cycle-or-branch rule.
         self._guarded_names = M.stack_floor_guarded_names(
-            self._functions.values(), self._structs)
+            self._functions.values(), self._structs,
+            every_function=emit_startup)
 
         # A NAME is not an ADDRESS, and this is where that stops being true by
         # accident. `self._functions[f.name] = f` above means a name with two
