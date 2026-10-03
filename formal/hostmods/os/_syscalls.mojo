@@ -86,6 +86,37 @@ out rather than guessed at:
     `char *` this module received is refused. `str_len` is `strlen`, which is
     the same computation with no kind to guess.
 
+  * **`p + k` IS BYTE ARITHMETIC, AND THE ONLY THING THAT STOPS IT BEING A
+    SILENT WRONG ANSWER IS THE SUBSCRIPT.** `p[i]` on a base with a declared
+    pointee scales by that pointee's width — that is `p[i]` at the width, and
+    `listdir`'s `b[1 + n]` depends on it — but `p + k` adds the RAW INTEGER, on
+    every architecture, for every pointee width. Measured here, both
+    architectures, over five spellings of the same arithmetic so that the shape
+    of the expression is not what decides it:
+
+        var b: Pointer[Int64] = malloc(8 * 64)      # base
+        b + 1              -> base + 1     (not base + 8)
+        b + n              -> base + n     (not base + 8n)
+        b + 1 + 2 * n      -> base + 1 + 2n
+        b + (1 + 2 * n)    -> base + 1 + 2n
+        b + 8 * (1 + n)    -> base + 8 + 8n
+
+    `bugs/FORMAL_pointer_value_model.md` §9 records this as open with the next
+    step (`_emit_binop` is the hottest site in both backends and scaling there
+    wants its own diff), and what is written there is about a DEREFERENCE: the
+    guard refuses `q = p + k` when the pointee is wider than a byte AND
+    something dereferences `q`. **Passing the same expression as an ARGUMENT is
+    not a dereference, so nothing refuses it** — `memset(b + 1 + 2 * n, 0, 16)`
+    on an `Int64` blob compiles, links, runs, and zeroes sixteen bytes at
+    offset 107 of a blob whose pairs live at 8-byte offsets. That is not a
+    second defect; it is this one with the guard out of the way, and it is worth
+    a paragraph here because the trap is invisible: `formal/hostmods/os/
+    __init__.mojo`'s `environ_set` had that memset for one build and the image
+    corrupted a heap-allocated blob at a word that no line of the source
+    mentions. **So: address a wider-than-byte blob with `b[i]`, never with
+    `b + i`,** and every `memmove`/`memset`/`strchr` call below that offsets a
+    `Pointer[UInt8]` is fine as it stands because byte is the scale there.
+
   * `ord`/`chr`/`str`. There is no builtin by those names here; a call to one
     is an unbound extern, and `str(65)` segfaults.
 
@@ -619,6 +650,78 @@ def fs_setenv(name, value, overwrite) -> int:
 def fs_unsetenv(name) -> int:
     """`unsetenv(name)`: 0 on success, -1 on failure."""
     return unsetenv(name)
+
+
+def fs_environ_vec() -> Pointer[Pointer[UInt8]]:
+    """The process's `char **environ`, or 0 when the host will not say.
+
+    THE ONE WAY THIS PATH REACHES THE ENVIRONMENT AS A LIST OF NAMES, and it is
+    here rather than in `os/__init__.mojo` because it is the only place in this
+    file that is not a direct libc call: everything above it is `return f(...)`,
+    and this one computes.  `getenv` answers ONE key and the question "what
+    keys are there" needs the array, so this is where the two halves meet.
+
+    **WHY `dlsym` AND NOT `_NSGetEnviron`.** libSystem has a function that
+    returns this array — `_NSGetEnviron()` — and it is the obvious spelling,
+    and it does not lower on this path: a callee whose name begins with `_`
+    cannot be bound.  `model.libc_source_name` strips the leading underscore
+    before asking the C library whether it provides the name, and macOS's
+    `dlsym` does NOT add the underscore back — measured:
+
+        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib')._NSGetEnviron   # OK
+        >>> ctypes.CDLL('/usr/lib/libSystem.B.dylib').NSGetEnviron    # dlsym: not found
+
+    so the audit asks about a name that does not exist and refuses the build
+    with "the image would bind 1 symbol(s) that nothing provides:
+    _NSGetEnviron".  The defect is real and it is written down, with its two
+    one-line repairs, in
+    `bugs/FORMAL_libc_call_whose_name_starts_with_an_underscore.md`; this is
+    not that fix and does not touch the linker, because a light change to
+    `_bind_info` on both architectures is not a light change.
+
+    So the array is reached the way every other program reaches a DATA symbol
+    it was not linked against — by asking the dynamic loader for it at RUN
+    time.  `dlopen(0, 0)` is a handle to this very image (`NULL` is the main
+    program, and `0` is the flags), and `dlsym` on that handle searches it and
+    the libraries it was linked against, which includes libSystem; `environ` is
+    a global data symbol libSystem exports.  Measured on both architectures:
+
+        $ python3 fire.py build --formal --no-prove -o p .tmp/probe.mojo
+        $ ./p
+        E0 [MANPATH=…] len=372@@E1 [TERM_PROGRAM=Apple_Terminal] len=27@@
+
+    The alternative spelling `dlsym(-2, name)` — `RTLD_DEFAULT`, a Darwin
+    extension whose value is literally `(void *) -2` — binds too and is one
+    call shorter, and it is not used: a magic negative pointer is a fact about
+    one library's header rather than about the loader, and the handle form says
+    the same thing in a way both platforms spell the same way.
+
+    **THE THREE POINTER TYPES ARE THE WHOLE OF THIS FUNCTION.** `environ` is
+    declared `char **`, so the address of it is `char ***`, and the value is
+    `char **`:
+
+        char ***at_environ = dlsym(handle, "environ");   # the slot
+        char **envp      = *at_environ;                  # the array
+
+    and this path's subscript reads at the width the ANNOTATION says, so the
+    annotation on the local is not documentation: `var q: Pointer[UInt8] =
+    dlsym(…)` then `q[0]` is a ONE-BYTE load and the program dies of SIGSEGV
+    on the first `envp[i]` — measured, arm64, and the image built and ran to
+    get there.  `Pointer[Pointer[Pointer[UInt8]]]` is what says "this word
+    points at a word which points at a word".
+
+    0 rather than a crash when the loader will not name it, which is the same
+    answer `fs_opendir` gives for a directory that is not there, and for the
+    same reason: there is no exception to raise (the note at the top of
+    `formal/hostmods/os/__init__.mojo`).
+    """
+    var h: Pointer[UInt8] = dlopen(0, 0)
+    if h == 0:
+        return 0
+    var at_environ: Pointer[Pointer[Pointer[UInt8]]] = dlsym(h, "environ")
+    if at_environ == 0:
+        return 0
+    return at_environ[0]
 
 
 def fs_lseek(fd, off, whence) -> int:
