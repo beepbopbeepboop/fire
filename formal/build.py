@@ -3461,10 +3461,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # `method_owners` is keyed by the LIFTED name
                 # `<Struct>_<method>`, and this is the BARE name the source
                 # spells, so the lookup is `by_method`.  A name two structs declare is genuinely
-                # ambiguous, and `_rewrite_method_calls` already refused to
-                # rewrite it, so there is nothing to say about it here that it
-                # has not said — hence the `== 1` and not a pick.
-                declared = by_method.get(node.member) or ()
+                # ambiguous on the SPELLING, and `_rewrite_method_calls`
+                # already refused to rewrite it — but the RECEIVER is not
+                # spelled, it is bound, and a binding that names one struct of
+                # the two settles it. `_owner_from_receiver_type` is that
+                # question; asking it before the `== 1` is what stops a
+                # depth-2 chain from needing the name to be unique when the
+                # field's declared type already says who the callee is.
+                declared = _owner_from_receiver_type(
+                    by_method.get(node.member) or (), base, chain, depth,
+                    cands, structs_by_name)
                 if len(declared) == 1:
                     ost = declared[0]
                     if depth > 1:
@@ -5076,6 +5082,53 @@ def _type_rows(cands, name, decls=None):
     first, and a refusal that misreports why it fired is worse than one that
     does not report at all."""
     return M.field_type_rows(cands, name, decls)
+
+
+def _owner_from_receiver_type(declared, base, chain, depth, cands,
+                              structs_by_name):
+    """The structs among `declared` that the RECEIVER's own type names.
+
+    **The narrow form of `model`'s rule that "a field is lowered three ways and
+    which one applies is decided by the BINDING of the base, not by a type",
+    applied to a METHOD NAME rather than to a field access.**  `recv.m(x)`
+    carries no type on this path, which is why `by_method` is a
+    `{bare name: [struct, …]}` and why the loop above reads `len(declared) ==
+    1` — for a depth-1 receiver, a name two structs declare is genuinely
+    ambiguous and refusing is right.  It is not right for a depth-2 chain: the
+    receiver is a FIELD, and a field's declared type names the struct the word
+    in the slot belongs to.
+
+    Two depths, because they are two different facts:
+
+      * depth 1 — the receiver IS the frame the base holds, so the candidate
+        structs are the ones `hstruct` already agreed for `base`;
+      * depth > 1 — the receiver is the word in slot `outer`, so the fact is
+        `model.frame_field_type_candidates`, the SAME reader
+        `_typed_nested_frame` uses, and a disagreement is `_NOT_TYPED`'s answer
+        here too.
+
+    Only ever NARROWS.  A name nothing narrows, a type that does not settle it,
+    a field with two candidates that disagree, and a candidate set that does
+    not contain the type's struct all return `declared` unchanged — so the
+    `== 1` in the caller is still the gate and this can never turn an
+    ambiguous name into a chosen one on its own.  That is the property that
+    makes it safe to run on every call receiver rather than only on the ones
+    measured here.
+    """
+    declared = tuple(declared)
+    if len(declared) <= 1:
+        return declared
+    if depth > 1:
+        outer = chain.split(".")[-2]
+        nested, (disagree, _rows) = M.frame_field_type_candidates(
+            cands, outer, structs_by_name)
+        if disagree or nested is None:
+            return declared
+        names = {nested.name}
+    else:
+        names = {st.name for st in (cands or ())}
+    kept = tuple(st for st in declared if st.name in names)
+    return kept if len(kept) == 1 else declared
 
 
 def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
@@ -6809,9 +6862,62 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
+def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> dict:
+    """`{name: struct}` for a local whose construction bindings all AGREE.
+
+    **The same evidence `_one_word_field_map` reads, without the one-word
+    filter, and reduced to the case where it is unambiguous.** Both are read
+    from the binding rather than inferred — a local initialised from `S()`
+    holds an `S`, and nothing else on this path produces such a value — and
+    `_one_word_field_map` keeps the last struct while this keeps the LIST and
+    then throws the name away unless there is exactly one. That asymmetry is
+    deliberate and it is `_constructor_bindings`' reason restated for the one
+    question this table answers: `x = A()` on one path and `x = B()` on another
+    is one name with two layouts, and lifting `x.m()` to either one of them is a
+    wrong answer chosen by ordering.
+
+    `_constructor_bindings` is the implementation rather than a second walk of
+    the same bindings, and it is called with a `framed` map derived from
+    `structs_by_name` so the list it returns is over exactly the constructions
+    it was written for. The `type_constructor_kind` guard and the
+    `call_lowers_as_framed_construction` guard are therefore both this table's,
+    not re-derived — a call the emitters route to a type CONVERSION produces a
+    plain word that is not an `S`, and naming it one would lift `x.m()` to a
+    method of a struct `x` does not hold.
+
+    `owner` adds the method's own receiver, under whatever SPELLING that struct
+    uses (`M.struct_receivers`, because the receiver set is not the literal
+    `self` — a table that hard-coded one spelling would answer for `this` on the
+    strength of the other). It is the same fact by a different route: a method's
+    receiver IS its owner's struct, declared rather than bound. A ONE-field
+    owner is left out because `one_word` already carries it and holds it as a
+    plain word rather than as a frame, so a name in both is a name whose two
+    meanings would disagree — the same precedence `_seed_one_word_bindings`
+    states when a name appears in both of its tables.
+
+    `_one_word_field_map` is not merged into this, and the reason is that its
+    one-word filter and this table's agreement test answer different questions:
+    a one-word struct cannot be on a frame table at all
+    (`_one_word_constructor_bindings`' docstring says so), so a name this table
+    drops for two layouts is still a name that table records, and folding them
+    together would make the older table's verdict depend on this one's
+    conservatism.
+    """
+    framed = {name: st for name, st in (structs_by_name or {}).items()
+              if M.struct_is_framed(st)}
+    out = {name: cands[0]
+           for name, cands in _constructor_bindings(
+               fn, framed, functions).items()
+           if len(cands) == 1}
+    if owner is not None and M.struct_is_framed(owner):
+        for recv in M.struct_receivers(owner):
+            out.setdefault(recv, owner)
+    return out
+
+
 def _rewrite_one_word_field_method_calls(node, one_word: dict,
                                          structs_by_name: dict,
-                                         receiverless=()) -> None:
+                                         receiverless=(), bound=None) -> None:
     """`recv.f.m(x)` -> `F_m(recv.f, x)`, where `recv.f` is a ONE-WORD field.
 
     **This runs before `_rewrite_self_fields`, and it has to.** That rewrite is
@@ -6887,12 +6993,13 @@ def _rewrite_one_word_field_method_calls(node, one_word: dict,
         lambda n: None if (isinstance(n, F.CallExpr)
                            and isinstance(n.func, F.MemberExpr)
                            and _lift_one_word_field_method(
-                               n, one_word, structs_by_name, receiverless))
+                               n, one_word, structs_by_name, receiverless,
+                               bound))
         else n)
 
 
 def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
-                                receiverless) -> bool:
+                                receiverless, bound=None) -> bool:
     """The one call `_rewrite_one_word_field_method_calls` lifts. True if it did.
 
     Split out so the walk above stays a walk: the conditions are five facts about
@@ -6930,7 +7037,20 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     func = call.func
     obj = func.obj
     if isinstance(obj, F.IdentExpr):
-        st = one_word.get(obj.name)
+        # `one_word` FIRST: it is the more specific of the two, and a name in
+        # both is a name whose field IS the receiver, which is a different
+        # identity from the one that made the binding (`_seed_one_word_bindings`
+        # reads `holders` for the same reason).
+        #
+        # `bound` is the bare-receiver half and it only ever answers a name
+        # `_rewrite_method_calls` DECLINED, which is what makes it safe: this
+        # runs after that pass, so a call it could lift has already been lifted
+        # and its callee is an `IdentExpr` rather than a `MemberExpr`.
+        # Reaching here therefore means the name-only path had no single owner —
+        # i.e. the name is declared by two structs of this image or by none. The
+        # first is answerable from the binding and the second is not, because
+        # the `struct_methods` test below is what rejects it.
+        st = one_word.get(obj.name) or (bound or {}).get(obj.name)
         if st is None or not any(m.name == func.member
                                  for m in M.struct_methods(st)):
             return False
@@ -10290,8 +10410,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # (`_rewrite_one_word_field_method_calls` has the three refusals and the
         # measurement; `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the
         # source of the shape).
-        _rewrite_one_word_field_method_calls(fn.body, one_word,
-                                             structs_by_name, receiverless)
+        #
+        # `bound` is the same lift asked of a BARE receiver whose binding names
+        # the owner, which is the one case `one_word` cannot answer because the
+        # struct is a frame rather than a one-word word. Dispatch here is by NAME
+        # and `_method_owners` pops every ambiguous name precisely so
+        # `_rewrite_method_calls` cannot pick one — but every lowering decision
+        # on this path is made from the BINDING of a base rather than from its
+        # type (`model`'s own rule for a field), and `var o = Outer2()` names
+        # the owner of `o.get()` as plainly as the source spells it.
+        _rewrite_one_word_field_method_calls(
+            fn.body, one_word, structs_by_name, receiverless,
+            _bound_receiver_structs(fn, structs_by_name,
+                                    [f.name for f in functions], st))
         mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
                    for name, one in one_word.items()}
         _rewrite_self_fields(fn.body, mapping)

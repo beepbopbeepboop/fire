@@ -4803,6 +4803,112 @@ BOTH_ARCH_CASES = [
      "    var w = c.n\n"
      "    printf(\"c=%d d=%d e=%d direct=%d\", x, y, z, w)\n"
      "    return 0\n", 0, "c=20 d=203 e=20 direct=20"),
+    # ── A METHOD CALL THROUGH A ONE-WORD STRUCT'S OWN FIELD ───────────────────
+    #
+    # `o.inner.get()` where `Outer` declares ONE field and `Inner` is a framed
+    # two-field struct. The identity this path relies on everywhere is that a
+    # one-word struct's field and its receiver are the SAME storage, so
+    # `_rewrite_self_fields` turns `o.inner` into `o`. That is right for a READ
+    # and it is unbounded recursion for a CALL RECEIVER: the rewrite keeps the
+    # method NAME and throws away the struct that name was looked up in, so
+    # `Inner.get(o)` became `Outer.get(o)` — a call to a different function that
+    # calls itself.
+    #
+    # Nothing caught it except a check that reads the tree AFTER the rewrite and
+    # so reports an expression the source never spells ("`self.write_to` is not
+    # a field of StridedSlice … so in Python this expression is the bound
+    # method"), and a check that reads it BEFORE. Both had to be right about a
+    # shape neither could see, and the one that reads before is what fixes it:
+    # `_rewrite_one_word_field_method_calls` lifts `recv.f.m(x)` to `F_m(recv.f,
+    # x)` while `f`'s DECLARED type can still be read, and only when the field's
+    # struct actually DECLARES `m`. The lift must come BEFORE the collapse, and
+    # the argument it passes (`o.inner`) is the collapse's own output (`o`) —
+    # which is correct, because at that point `o`'s word IS the `Inner` frame
+    # address: `o.inner = Inner()` has itself collapsed to `o = Inner()`.
+    #
+    # So this row is two rewrites in an order, and each alone is wrong in a
+    # different direction: the lift without the collapse is an unresolved
+    # symbol, and the collapse without the lift is infinite recursion. 42 is
+    # `20 + 22`, so a collapse that recursed would exit on a signal instead of
+    # answering, and a lift that named the wrong struct would answer something
+    # else. MEASURED: with `_rewrite_one_word_field_method_calls` removed this
+    # refuses on BOTH architectures ("o.get() is a method call on a value …").
+    #
+    # `o.inner = Inner()` before the field writes is not decoration: it is the
+    # placement the program needs, and a row that omitted it is refused by
+    # `field_access_refusal` for a different reason and would pass for the wrong
+    # one.
+    ("both_arch_one_word_struct_method_call_through_its_field",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.inner = Inner()\n"
+     "    o.inner.a = 20\n"
+     "    o.inner.b = 22\n"
+     "    return o.inner.get()\n", 42, None),
+    # ── AN AMBIGUOUS METHOD NAME, SETTLED BY THE RECEIVER'S OWN BINDING ──────
+    #
+    # `get` is declared by BOTH structs here, which is the ordinary situation in
+    # a module of any size: dispatch on this path is by BARE NAME, and
+    # `_method_owners` pops every ambiguous name precisely so
+    # `_rewrite_method_calls` cannot pick one. The refusal that follows is
+    # "`o.get()` is a method call on a value … 'get' is not one of those methods
+    # of those receivers" — a diagnostic about a C library, for a call that is
+    # plainly `Outer2.get`.
+    #
+    # TWO rewrites, and neither alone is enough, which is why this row is here
+    # rather than a paragraph in a commit message:
+    #
+    #   * the receiver is a LOCAL. `var o = Outer2()` is the binding, and
+    #     `_constructor_bindings` already computes it — as a LIST, because `x =
+    #     A()` on one path and `x = B()` on another is one name with two
+    #     layouts. So the lift reads that table and fires only when the
+    #     candidates AGREE (`_bound_receiver_structs`).
+    #   * the receiver is a FIELD of the holder, inside the holder's own
+    #     method: `self.inner.get()` is a depth-2 chain, where the fact that
+    #     settles it is the field's DECLARED type rather than the binding
+    #     (`_owner_from_receiver_type`). `self`'s own binding settles the first
+    #     hop and `self.inner`'s declared `Inner` settles the second.
+    #
+    # The order matters and it is the order the code is in: a lift that put the
+    # name back to the OUTER struct would be unbounded recursion (this program's
+    # `Outer2.get` calls `self.inner.get()`), and one that put it back to the
+    # INNER struct for `o.get()` would compute on the wrong layout. 42 is
+    # `20 + 22`, so neither of those answers 42.
+    #
+    # MEASURED: without both rewrites this refuses on arm64 and on x86-64
+    # ("`o.get()` is a method call on a value …"), and with only the local one
+    # it gets one line further and refuses on `self.inner.get()` instead — which
+    # is why the row covers both halves rather than one.
+    ("both_arch_ambiguous_method_name_settled_by_the_receiver",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Outer2:\n"
+     "    var pad: Int\n"
+     "    var inner: Inner\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.get()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer2()\n"
+     "    o.inner.a = 20\n"
+     "    o.inner.b = 22\n"
+     "    return o.get()\n", 42, None),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
