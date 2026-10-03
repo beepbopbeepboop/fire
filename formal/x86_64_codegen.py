@@ -2636,24 +2636,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
     def _emit_list(self, expr) -> None:
         """A list/tuple/set literal → its blob address in RAX.
 
-        Elements are int64s, string addresses or inner-blob addresses. `*xs`
-        has no compile-time length and raises; `*literal` is expanded
-        statically.
+        Elements are int64s, string addresses or inner-blob addresses. A `*`
+        operand is expanded statically when it is a literal and spliced at run
+        time when it is not — the second shape routes to `_emit_list_star`,
+        which is arm64's answer to the same construct reached the same way
+        rather than a second implementation of it.
 
         The blob is allocated with CAPACITY slots, not `n` of them, when the
         function appends to this literal (see `_scan_list_caps`): the count
         field still starts at `n`, so every reader of the blob is unchanged,
         and the slots past the count are the room `append` writes into."""
+        if any(isinstance(el, F.UnaryOp) and el.op == "*"
+               for el in (expr.elements or [])):
+            self._emit_list_star(expr)
+            return
         elements = list(expr.elements)
         flat = []
         for el in elements:
             if isinstance(el, F.UnaryOp) and el.op == "*":
-                if isinstance(el.operand, (F.ListExpr, F.TupleExpr)):
-                    flat.extend(el.operand.elements)
-                    continue
-                raise CodegenError(
-                    "star-unpack of a non-literal into a list is not "
-                    "lowered on the formal x86-64 path")
+                flat.extend(el.operand.elements)
+                continue
             flat.append(el)
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
@@ -2668,6 +2670,113 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_blob_base(offset, Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
         self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_list_star(self, expr) -> None:
+        """List literal containing `*iterable` splats — reserve, then append.
+
+        The x86-64 twin of arm64's `_emit_list_star`, over the same
+        `M.dynamic_splat_capacity` and the same three-way element walk (a
+        literal operand expands, a dynamic one is spliced, anything else is
+        one element), so one source reserves the same blob and produces the
+        same list on both machines.
+
+        The result blob is built by APPENDING rather than by storing into
+        pre-counted slots, which is what a run-time length forces: `*xs` has
+        no compile-time count, so the count field starts at 0 and
+        `_compr_append_elem` increments it once per element. That is the
+        comprehension's own construction (`_emit_comprehension`), and it is why
+        the capacity is a reservation rather than a length.
+
+        `_list_caps` is honoured here as it is on the non-splat path: `xs =
+        [*a]` followed by `xs.append(v)` needs room the splice cap does not
+        promise, and `_scan_list_caps`'s number of append SITES is the bound.
+        """
+        cap = M.dynamic_splat_capacity(expr.elements,
+                                       M.literal_splat_operand_is_static)
+        cap = max(cap, self._list_caps.get(id(expr), 0))
+        offset = self._reserve_blob(8 * (1 + cap), "list unpack")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+
+        for el in (expr.elements or []):
+            if isinstance(el, F.UnaryOp) and el.op == "*":
+                op = el.operand
+                if M.literal_splat_operand_is_static(op):
+                    for sub in op.elements:
+                        self._emit_expr(sub)
+                        self._compr_append_elem(offset, cap)
+                else:
+                    self._emit_expr(op)
+                    self._emit_star_splice(offset, cap)
+            else:
+                self._emit_expr(el)
+                self._compr_append_elem(offset, cap)
+
+        self._emit_blob_base(offset, Reg.RAX)
+
+    def _emit_star_splice(self, res_offset: int, cap: int) -> None:
+        """RAX = source blob; append every element into the result.
+
+        The x86-64 twin of arm64's `_emit_star_splice`, and the register
+        choice is the whole difficulty. The loop has to carry a source base,
+        the source's count and an index across `_compr_append_elem`, and that
+        append speaks for R11 (the result blob), R10 (its count), RDI (the
+        element address), R8 (its capacity flag) and RAX (the element). Every
+        caller-saved register is therefore spoken for, and the callee-saved
+        ones hold this function's own locals — arm64 has X10-X13 free because
+        its local file stops at X9, and x86-64's has no such gap.
+
+        So the state goes on the STACK, as pushed slots, which is what
+        `_compr_append_elem` itself does with the element it is appending.
+        Two slots, pushed once around the whole loop and released after it, so
+        nesting (`[*a, *[*b]]`, and a comprehension inside a spliced operand)
+        costs a deeper push rather than a colliding name — the alternative,
+        a named frame slot per nesting depth, is what `_emit_compr_gen` needs
+        because its loop body emits ARBITRARY expressions, and a push/pair
+        here is strictly simpler where it does not.
+
+        The exit test is `setae` + `jne`, and the reason it is that pair and
+        not a `je` on the inverted flag is arm64's own bug: this loop branched
+        to `done` when the flag was CLEAR, which is exactly when it should
+        have run, so `[*xs]` built an EMPTY list, exited 0, and `len` of the
+        result was 0. `_emit_compr_gen`'s test is the one to copy, down to the
+        `_emit_jcc_bool` that re-establishes flags from the SETcc result.
+        """
+        self._push_slot(Reg.RAX)              # the source blob base
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 0))
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))   # its count
+        self._push_slot(Reg.R10)               # count
+        self._emit_mov_imm(Reg.R10, 0)        # i = 0
+        self._push_slot(Reg.R10)               # index
+
+        self._while_counter += 1
+        wid = self._while_counter
+        fn = self.func_name
+        loop = f"{fn}_spl{wid}"
+        done = f"{fn}_spd{wid}"
+        self.asm.label(loop)
+        # Three live slots: [rsp+0] the index, [rsp+16] the count, [rsp+32]
+        # the base. Re-loaded every iteration rather than held in registers,
+        # because the append below overwrites every register there is.
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))       # i
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 16))      # count
+        self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R10))
+        # R8, not R11: R11 holds the blob base and the element address below
+        # is relative to it.
+        self._emit_setcc_bool(Reg.R8, "setae")
+        self._emit_jcc_bool(Reg.R8, COND_NE, done)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.RSP, 32))      # base
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 0))       # i
+        self._emit_elem_addr(Reg.R11, Reg.RAX, Reg.RDI)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RDI, 0))
+        self._compr_append_elem(res_offset, cap)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, 0))
+        self.asm.emit(encode_add_r64_imm8(Reg.R10, 1))
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.R10))
+        self._emit_jmp(loop)
+        self.asm.label(done)
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, 3 * _SLOT))
 
     def _emit_len(self, e) -> None:
         """`len(x)` — a blob's count field, or a string's `strlen`.
@@ -4244,7 +4353,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         against it below, so an under-estimate fails loudly instead of
         overrunning the frame."""
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return len(e.elements)
+            # `list_literal_reserved_slots`, NOT `len(e.elements)`: a literal
+            # with a `*` operand builds its blob by appending and so occupies
+            # the cap it reserved, while `len(elements)` counts the `*a` as ONE
+            # element. Measured: `[1, 2] + [*c]` with `c = [7, 8, 9]` estimated
+            # 3 elements for a 5-element result, and x86-64 — which checks the
+            # run-time total against this estimate rather than trusting it —
+            # stopped at the overflow guard. One rule with the two other places
+            # a splat literal's size is needed.
+            return M.list_literal_reserved_slots(e)
         if isinstance(e, F.DictExpr):
             return len(e.pairs)
         if isinstance(e, F.SliceExpr):
@@ -7056,7 +7173,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             literals = _list_literals_bound_to(fn, name)
             if not literals:
                 continue
-            want = min(len(lit.elements) for lit in literals) + count
+            # `list_literal_reserved_slots`, not `len(lit.elements)`: a
+            # literal with a `*` operand builds its blob by appending and
+            # occupies the cap it reserved, so counting the `*` as ONE
+            # element made `xs = [*a]; xs.append(3)` overflow the guard
+            # with `a` of length 2. One rule, read by both backends.
+            want = min(M.list_literal_reserved_slots(lit)
+                       for lit in literals) + count
             for literal in literals:
                 prev = by_node.get(id(literal))
                 by_node[id(literal)] = want if prev is None else min(prev, want)
@@ -7552,6 +7675,28 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._emit_blob_base(self._blob_base + self._ret_frame_base
                                  + sret_site[1], Reg.RAX)
             self._push_slot(Reg.RAX)
+            # The slot is the hidden word's own argument-register index, which
+            # is the ORDINARY GPR the callee reads it from — the same
+            # `ARG_REGS[len(params)]` its prologue names, one line above
+            # `_store_var(_SRET_LOCAL, …)`. So `"sret"` is in `reg_plan` only
+            # to carry that index, and it takes the same move as every `"gpr"`
+            # entry below.
+            #
+            # It used to `continue` past it, on the reasoning that being the
+            # FIRST register argument popped put it in RAX already. RAX is not
+            # an argument register on this ABI (arm64's X0 is, which is where
+            # the argument came from), and every ordinary argument popped after
+            # it overwrites it, so the word was dropped on the floor and the
+            # callee read whatever the previous call left in RDX. The symptom
+            # was a SIGSEGV rather than a wrong value because that word is a
+            # callee-SAVED register, so it survives the prologue and the
+            # callee dereferenced it as a block address: `make(1, 2)` copying
+            # its result frame through a stale RDX. It only reached an argument
+            # position when the returned struct's FIELD was read, because the
+            # call's own result register is the block base either way and
+            # `r.give().x` re-derives the block from the site — which is why
+            # the storage, the field read and a struct built locally were each
+            # correct on their own and only the composition faulted.
             reg_plan.append((len(args), "sret", len(reg_plan)))
         # An SSE argument goes STRAIGHT from the pop into its XMM register and
         # never through a GPR, because SysV AMD64 passes a `double` in
@@ -7570,12 +7715,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         nxmm = 0
         for _j, c, slot in reversed(reg_plan):
             self._pop_slot(Reg.RAX)
-            if c == "sret":
-                # The hidden word is the LAST register argument and the first
-                # one popped, so it is already in RAX. Every ordinary argument
-                # that follows it in argument order is popped after it and
-                # overwritten by its own pop.
-                continue
             if c == "xmm":
                 self.asm.emit(encode_movq_xmm_rm64(slot, Reg.RAX))
                 nxmm = max(nxmm, slot + 1)

@@ -58,12 +58,19 @@ class DecodeError(Exception):
 class Insn:
     """One decoded instruction.
 
-    `form` is the stable identity of the instruction — two instructions with
-    the same form have the same effect shape, so the model only has to
+`form` is the stable identity of the instruction — two instructions with the
+    same form have the same effect shape, so the model only has to
     implement each form once. Register fields are already REX-extended (0-15)
     and `mem_base`/`mem_disp` are resolved for a memory operand (`mem_base` is
     None for a register operand and for the RIP-relative form, whose
     displacement is in `rip_rel` and is relative to the NEXT instruction).
+
+    **`xmm` is the exception to "already REX-extended", and it has to be.** For
+    every other form `reg` is a GPR index and REX.R widens it to 0-15; for
+    `movq_xmm_rm64` the `reg` field names an SSE register, and there is no
+    `XMM8` in SysV AMD64, so applying REX.R to it would name a register this
+    backend cannot encode. So the XMM number lives in its own field, taken from
+    the raw ModRM byte, while `rm` stays the REX.B-extended GPR index.
     """
     offset: int
     length: int
@@ -79,6 +86,7 @@ class Insn:
     mem_base: int | None = None
     mem_disp: int = 0
     rip_rel: int = 0
+    xmm: int = 0            # SSE register number, REX.R NOT applied (0-7)
 
     @property
     def next_offset(self) -> int:
@@ -151,6 +159,23 @@ def decode_one(code: bytes, off: int) -> Insn:
     if byte(0) & 0xF0 == REX:
         rex = byte(0)
         p = 1
+    # The `0x66` OPERAND-SIZE prefix, read BEFORE the REX byte because that is
+    # the order the encoder writes them (`66 REX.W 0F 6E /r`). Reading them the
+    # other way round puts the REX test on the prefix byte, finds no REX, and
+    # then compares the prefix itself against every opcode below — which is a
+    # refusal naming `0x66`, not the instruction.
+    #
+    # Only one form lives behind it, because only one is emitted:
+    # `encode_movq_xmm_rm64`, the GPR-to-SSE move a floating `printf` needs.
+    # `lib/X86.lean::x86_step_op66` holds the same restriction and the same
+    # reason, and the two have to agree about LENGTH as well as about which
+    # opcode: five bytes, prefix included.
+    op66 = byte(0) == 0x66
+    if op66:
+        p += 1
+        if byte(p) & 0xF0 == REX:
+            rex = byte(p)
+            p += 1
     op = byte(p)
     w = bool(rex & W)
 
@@ -176,6 +201,28 @@ def decode_one(code: bytes, off: int) -> Insn:
         return insn(1, "nop")
     if op == 0x99 and w:
         return insn(2, "cqo")
+
+    # ── `0x66`-prefixed forms ─────────────────────────────────────
+    # `movq xmm, r64` — the direction the backend emits. `0F 6E` is XMM in
+    # ModRM.reg and the GPR in rm; `0F 7E` is the reverse, which assembles and
+    # links and quietly loads whatever was already in XMM0 into RDI, so it is
+    # NOT decoded here and `lib/X86.lean`'s arm refuses it too. REX.W is
+    # required because `0F 6E` without it is `MOVD`, which drops all but the low
+    # 32 bits and so moves a different VALUE rather than a different placement
+    # of the same one.
+    #
+    # `reg` is the XMM number and carries no REX.R — there is no XMM8 in SysV
+    # AMD64 and `encode_movq_xmm_rm64` asserts `0 <= xmm <= 7` — while `rm` is a
+    # GPR and does carry REX.B. `_modrm_fields` applies REX.R to `reg`
+    # unconditionally, so the XMM number is read off the raw ModRM byte here
+    # rather than taken from the helper's `reg`.
+    if op66 and op == 0x0F and byte(p + 1) == 0x6E and w:
+        mod, _reg, rm, extra, _b, _d, length = modrm_at(2)
+        if mod != 3:
+            raise DecodeError("movq xmm, m64 with a memory operand is not emitted")
+        return insn(length, "movq_xmm_rm64", mod=mod,
+                    xmm=(byte(p + 2) >> 3) & 7, reg=(byte(p + 2) >> 3) & 7,
+                    rm=rm)
 
     # ── REX-less forms the backend emits ──────────────────────────
     if op == 0x31 and not w:

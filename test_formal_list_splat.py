@@ -33,15 +33,15 @@ after the first would have been read out of the result blob. Both are fixed
 together, and the fixed version keeps that state in X10-X13, which nothing in
 the sequence touches.
 
-**WHAT THIS DOES NOT CLAIM TO FIX.** A dynamic splat reserves a fixed 8 slots
-for its operand, so a source longer than 8 appends past the reservation and the
-capacity guard exits 1. That limit is the append path's, shared with every
-comprehension (`_compr_append_elem`), and it predates this change — before it,
-the same program exited 0 and answered wrongly, so this is the direction that
-leaves a wrong answer behind. `bugs/FORMAL_x86_64_dynamic_list_splat_is_refused.md`
-holds the x86-64 half: the construct is refused there rather than wrong, which
-is the safe direction and is why the x86-64 half of each case below asserts
-"right answer OR a refusal", never a number.
+**WHAT THIS DOES NOT CLAIM TO FIX.** A dynamic splat reserves a fixed
+`model.DYNAMIC_SPLAT_SLOTS` (8) slots for its operand, so a source longer than
+that appends past the reservation and the capacity guard exits 1. That limit is
+the append path's, shared with every comprehension (`_compr_append_elem`), and
+it predates this change — before it, the same program exited 0 and answered
+wrongly, so this is the direction that leaves a wrong answer behind. It is
+measured on BOTH backends and is one number in one place
+(`model.dynamic_splat_capacity`), because a cap the two backends state
+separately is a program that builds on one machine and dies on the other.
 
     python3 test_formal_list_splat.py [-v] [--list]
 """
@@ -59,13 +59,16 @@ BUILD_TIMEOUT = 600
 RUN_TIMEOUT = 120
 BACKENDS = ("arm64", "x86_64")
 
-# The refusal the x86-64 backend uses, or a phrase of it. Matched on a
-# substring rather than the whole sentence so a wording improvement does not
-# turn this file red; what must not change is that the construct is named.
-X86_REFUSES = "star-unpack of a non-literal into a list is not lowered"
-
 # (name, mojo source, CPython source) — the same program twice, so the
 # expectation is computed rather than asserted.
+#
+# EVERY case below now demands the RIGHT ANSWER FROM BOTH BACKENDS. It used to
+# accept a refusal from x86-64 ("star-unpack of a non-literal into a list is not
+# lowered"), which is the safe direction and so looked like coverage — but it
+# is coverage of nothing, and it is how thirteen SIGSEGVs and a construct that
+# was half a feature both sat in the tree without a report. A case that accepts
+# two outcomes cannot fail when one of them is a refusal, and a refusal is what
+# a backend emits when it does not know the construct.
 CASES = [
     # The control: a literal operand, expanded at compile time. It has always
     # worked on both machines, and it is here so the dynamic cases below cannot
@@ -147,6 +150,131 @@ CASES = [
      "        t += b[i]\n"
      "    sys.stdout.write(\"n=%d t=%d\" % (len(b), t))\n"
      "    return 0\n"),
+
+    # TWO DYNAMIC SPLATS IN ONE LITERAL. This is the case that separates "the
+    # loop keeps its own state" from "the loop keeps its own state ONCE": the
+    # second splice runs after the first has finished with its registers, so a
+    # base or an index left behind by the first is read by the second. arm64
+    # keeps them in X10-X12 and x86-64 on the stack, and the point of the case
+    # is that the choice is invisible from here — both have to answer the same
+    # list.
+    ("two_dynamic_splats_in_one_literal",
+     "def main():\n"
+     "    var a = [1, 2]\n"
+     "    var c = [8, 9, 10]\n"
+     "    var b = [*a, *c]\n"
+     "    printf(\"n=%d %d %d %d %d\", len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [1, 2]\n"
+     "    c = [8, 9, 10]\n"
+     "    b = [*a, *c]\n"
+     "    sys.stdout.write(\"n=%d %d %d %d %d\" % "
+     "(len(b), b[0], b[1], b[2], b[3]))\n"
+     "    return 0\n"),
+
+    # A COMPREHENSION over a spliced result, in the same function. The
+    # comprehension keeps its counter and its iterable pointer in named frame
+    # slots (`_ci0`/`_cb0`) and leaves its loop with the same setae/jne exit
+    # test the splice loop uses, so this is the case where two loops of that
+    # shape are emitted into one body and a backend that confuses their state
+    # reads a counter as a base address.
+    #
+    # The comprehension is over a NAME holding a spliced result, not over a
+    # spliced LITERAL: `[v for v in [*a]]` is a separate, pre-existing defect
+    # on BOTH backends (it exits 1 — the capacity guard, since the iterable's
+    # blob is reserved inside the comprehension's own reservation), and
+    # `bugs/FORMAL_a_comprehension_over_a_spliced_literal_exits_1.md` holds it.
+    # Putting it here would make this file red for a reason that has nothing to
+    # do with the lowering below.
+    ("a_comprehension_over_a_spliced_result",
+     "def main():\n"
+     "    var a = [3, 4]\n"
+     "    var c = [7, 8, 9]\n"
+     "    var b = [*a, *c]\n"
+     "    var d = [v * 2 for v in b]\n"
+     "    printf(\"n=%d %d %d\", len(b), b[0], len(d))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [3, 4]\n"
+     "    c = [7, 8, 9]\n"
+     "    b = [*a, *c]\n"
+     "    d = [v * 2 for v in b]\n"
+     "    sys.stdout.write(\"n=%d %d %d\" % (len(b), b[0], len(d)))\n"
+     "    return 0\n"),
+
+    # AN APPEND INTO THE SPLICED RESULT. The splice's reservation is sized for
+    # the source's length, which is not a compile-time number, so the blob is
+    # built by appending and its capacity comes from two places: the splat cap
+    # and `_scan_list_caps`'s count of append SITES. A backend that reserved
+    # only the splat cap answers the right list and then writes past the blob
+    # on the append — so the COUNT is checked here and not only the elements.
+    ("append_into_a_spliced_result",
+     "def main():\n"
+     "    var a = [1, 2]\n"
+     "    var b = [*a]\n"
+     "    b.append(3)\n"
+     "    b.append(4)\n"
+     "    printf(\"n=%d %d %d\", len(b), b[0], b[3])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a = [1, 2]\n"
+     "    b = [*a]\n"
+     "    b.append(3)\n"
+     "    b.append(4)\n"
+     "    sys.stdout.write(\"n=%d %d %d\" % (len(b), b[0], b[3]))\n"
+     "    return 0\n"),
+
+    # AN EMPTY SOURCE, and a source that is itself the result of a splice. Both
+    # are `count == 0` or a count read out of a blob the compiler never saw,
+    # and both are shapes where a loop whose exit test is inverted builds an
+    # empty result SILENTLY rather than failing — which is arm64's defect and
+    # the reason this file is differential rather than a build check. The
+    # middle operand is itself a splice result, so its count comes out of a
+    # blob the first one built.
+    ("an_empty_source_and_a_spliced_source",
+     "def main():\n"
+     "    var e = []\n"
+     "    var one = [4]\n"
+     "    var two = [*one]\n"
+     "    var b = [*e, *two, *e]\n"
+     "    printf(\"n=%d %d %d\", len(b), len(two), b[0])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    e = []\n"
+     "    one = [4]\n"
+     "    two = [*one]\n"
+     "    b = [*e, *two, *e]\n"
+     "    sys.stdout.write(\"n=%d %d %d\" % (len(b), len(two), b[0]))\n"
+     "    return 0\n"),
+
+    # A CONCATENATION with a spliced literal. `+` has to reserve its result
+    # BEFORE evaluating either operand (a nested container must not land inside
+    # the region being filled), so its size comes from a static ESTIMATE over
+    # the syntax — and the estimate used to be `len(elements)`, which counts a
+    # `*` operand as ONE element. `[1, 2] + [*c]` with `c = [7, 8, 9]`
+    # therefore estimated 3 elements for a 5-element result. arm64 copied past
+    # its own reservation without noticing and got the right answer by luck;
+    # x86-64, which CHECKS the run-time total against the estimate, stopped at
+    # the overflow guard. One under-estimate, two architectures, two different
+    # symptoms — which is why the estimate is now
+    # `model.list_literal_reserved_slots` in both.
+    ("concat_with_a_spliced_literal",
+     "def main():\n"
+     "    var c = [7, 8, 9]\n"
+     "    var b = [1, 2] + [*c]\n"
+     "    printf(\"n=%d %d %d %d\", len(b), b[0], b[2], b[4])\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    c = [7, 8, 9]\n"
+     "    b = [1, 2] + [*c]\n"
+     "    sys.stdout.write(\"n=%d %d %d %d\" % (len(b), b[0], b[2], b[4]))\n"
+     "    return 0\n"),
 ]
 
 
@@ -196,14 +324,6 @@ def run_case(case, tmpdir, verbose):
         out = os.path.join(tmpdir, f"{name}.{backend}")
         rc, text = build(src, out, backend)
         if rc != 0:
-            if backend == "x86_64" and X86_REFUSES in text:
-                # A refusal is the SAFE direction and this case does not demand
-                # more of it — see the module docstring. What must never happen
-                # is the other outcome, which is why the branch below is the
-                # only one that accepts a non-zero build.
-                if verbose:
-                    print(f"      x86_64: refused, as it does today")
-                continue
             return False, (f"--backend={backend} did not build: "
                            f"{text.strip()[-300:]}")
         if not os.path.isfile(out):

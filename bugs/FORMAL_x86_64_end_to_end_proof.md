@@ -59,6 +59,87 @@ the value theorem's 12 open. The one entry this pass does close is the
 admitted `hpop` is written down exactly, with its measurement, in
 `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
 
+## Status (2026-10-03 (b) — B28: the applicability check that was itself vacuous, and B29: a successor check that had never existed)
+
+Two more of the same kind, and the first is the worst instance of the class in
+this file, because it is the check that exists to catch a vacuous lemma.
+
+**B28. `formal/x86_64_model_coverage_test.py`'s step-lemma applicability check
+reported green no matter what Lean said.** `lemma_check_failures` compared the
+diagnostic's file against the bare string `"StepLemmas.lean"`, but `run_lean` is
+handed an ABSOLUTE scratch path and Lean prints the path it was given — so no
+diagnostic was ever attributed to a check. Measured, by planting both kinds of
+falsehood this file exists to catch:
+
+    x86_rex_w 0x40 = true (a false hypothesis)      ->  "every hypothesis
+                                                         satisfiable", exit 0
+    the movq successor with the ModRM halves swapped  ->  the same, exit 0
+
+It now matches on the basename, and reports by name:
+
+    movq xmm, R12  hypothesis 10 `(220 : UInt8).toNat >>> 6 = 3` does not hold
+                    at 66 49 0f 6e dc — the lemma is vacuous there
+
+So B1's failure mode — a lemma that proves its goal about nothing — was being
+checked for, by a check that could not fail. That is the doc's own sentence
+about a check being worse than no check, and it was true of the guard rather
+than of the thing the guard guards. The fix immediately found a real defect in
+the row B29 adds: its `h_mod` hypothesis was written `"%d.toNat >>> 6 = 3"`, and
+`_rex_mod3_hyps`'s docstring already explains that Lean reads a bare `192.toNat`
+as a malformed decimal and `(192).toNat` elaborates 192 as a `Nat` with no
+`toNat` field — so the row was an elaboration ERROR, i.e. a check that did not
+run.
+
+**B29. The applicability rows say nothing about a SUCCESSOR, and a successor is
+a second copy of the model.** `cqo`'s `_SUCCS` row named `x86_sign_extend32`
+while the model's arm computes `x86_cqo`, which left every hypothesis
+satisfiable — B1's green — and made every `cqo` step a proof of a different
+instruction. That is the argument B2 makes about a form NAME, one level down,
+and it had no check at all.
+
+`SUCCESSOR_FORMS` therefore reads the encoding off the ENCODER and the successor
+out of `_resolve`, and `native_decide` checks the two agree on `rip` and on the
+one field the instruction writes. Records go through a PROBE rather than being
+compared whole, because `Decidable` is not synthesizable for equality on two of
+them (`mem : Nat -> UInt8`) — an attempt that reports "failed to synthesize
+Decidable" is an error that says nothing about the successor, which is the same
+trap B23's fourth point is about. `RDI` is the `movq` source on purpose:
+`X86State.init 10` puts 10 in RDI and 0 elsewhere, so the value is non-zero and
+swapping the two halves of the ModRM shows up. Both mutants measured caught.
+
+**B28 and B29 are the same lesson as B1 and B21, from the guard's side rather
+than the lemma's: a check is a claim about the world, and a claim needs its own
+check.** The census that proves it can fail is B28's fix measured by planting a
+falsehood; the argument for B29 existing at all is B2's.
+
+**Also closed alongside, from the same pass, and each measured in its own
+commit:**
+
+* `movq xmm, r64` — the GPR-to-SSE move, the first instruction this project
+  emits into a formal x86-64 image that crosses register FILES, which neither
+  `formal/x86_64_decode.py` nor `lib/X86.lean` knew. `X86State` gains
+  `xmm0`..`xmm7`, one `UInt64` each; `x86_step_op66` is a new decoder because
+  `0x66` is not a REX byte; and the step lemma quotes the model's own
+  expressions, which is B3's rule reached from B10's direction.
+* `formal/x86_64_endtoend_test.py`'s verdict counted Lean's per-DECLARATION
+  `sorry` lines, so `wide_recv`'s five admitted holes read `proved, 1 sorry`.
+  They are now counted by name, in two classes, off the generated text.
+
+**What this pass does NOT do, and it is the same list as above:** the ten loop
+examples, `group3:idiv`, the value theorem's 12 open, and the `hpop` separation.
+The last has a number now — 5 admitted facts on `wide_recv`, 4 `hpop` and 1
+`hrip` — which the report prints and which is the number the separation work has
+to move. The stack/frame tracker the separation needs is specified in
+`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`; it is not
+landed.
+
+**NOT RE-MEASURED.** The 45-example sweep was not re-run — it is a heavy run and
+this pass is a light one — so every number in the 2026-10-02 and 2026-10-03
+tables stands as written. What *was* measured, one program at a time, is in the
+commits: `formal/x86_64_model_test.py` 48 agree / 0 WRONG / 0 NO-RUN, the
+coverage test at 151 samples over 57 forms with 23 lemmas at 50 encodings, and
+`wide_recv` at `proved, 5 admitted, 112 guarded`.
+
 ## Status (2026-10-02 — B24 closed; the last `terminates` sorry was a FALSE theorem, not missingness)
 
 | | 2026-09-26 | 2026-10-01 | 2026-10-02 |
@@ -669,11 +750,22 @@ the only name left, and it is not a wiring job. See its own entry.
 | `shift_imm8:shl/shr/sar` | shiftlr (+ subscript_var) | the count's clamp to 64 IS the semantics, so there is no `n < 64` to discharge; and `sar` is the `else` arm, not a third `if` |
 | `alu_ri32:add_reg`, `alu_ri32:and`, `alu_ri8:cmp` | ug8 (+ sum_range, subscript_var) | `81` and `83` differ in LENGTH as well as width; and `cmp` writes no register at all |
 | `mov_*_nodisp`, `mov_*_disp8` (base-register), `mov_*_disp32`, `lea …_disp32` | wide_recv, subscript_var | `_shapes` named only two of the three addressing modes, so `mov [rbp-0x410], rax` was reachable under the name of `mov [rbp+disp8], rax`. **Every mode now has its own name**, and an unmapped one is reported |
-| `cqo` | — (one half of udivmod's pair) | — |
+| `cqo` | — (one half of udivmod's pair) | the model changed under the lemma and the lemma did not: `da151f0c` made `x86_cqo` the 64-bit extension where it had been `cdq`, and `x86_step_cqo` still stated `x86_sign_extend32` — so the theorem contradicted the definition it was about and **the library stopped elaborating**. See `bugs/FORMAL_x86_64_cqo_step_lemma_contradicts_the_model.md`, deleted with its fix (`2eb418c5`, `60300077`) |
+| `movq_xmm_rm64` | — (only a floating `printf`, which the corpus has none of) | the first instruction crossing register FILES, so a successor with no register in it: `X86State` had no XMM file, and the alternative to adding eight `UInt64`s was a step that decoded the instruction and recorded no effect — a FALSE step, which is B2 at the level of a whole register file |
 
 Two of those six were found by the coverage getting better rather than by
 reading: `alu_ri32:add_other` was reported for `sum_range`, and `sum_range`'s
 only remaining blocker is its LOOP, which no lemma reaches.
+
+**The last two rows were added 2026-10-03, and the `cqo` one is here because
+this table was part of why the cqo incident took as long as it did.** A row
+reading "wired" under a column headed "the trap each one carried" looked like
+"wired and proved", and it was neither for a while: `x86_step_cqo` stated a
+DIFFERENT INSTRUCTION from the one `x86_step` decodes, so the library did not
+elaborate and every Lean-checking build failed — while this file, the coverage
+rows and the applicability rows were all green. The two rows now say what each
+form's trap actually was, because the trap is the part worth carrying forward and
+the row with a `—` in the trap column is a row that reads as done.
 
 **`group3:idiv` — the one form left, and why a lemma is not enough.**
 `x86_idiv128` returns `none` when the divisor is zero, so the model's arm is

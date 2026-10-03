@@ -98,6 +98,53 @@ check("movsx r10,r11b", X.encode_movsx_r64_r8(R.R10, R.R11), "movsx_r64_r8",
 check("movzx rax,dx", X.encode_movzx_r64_r16(R.RAX, R.RDX), "movzx_r64_r16")
 check("movsx rax,dx", X.encode_movsx_r64_r16(R.RAX, R.RDX), "movsx_r64_r16")
 
+# `movq xmm, r64` — the GPR-to-SSE move, and the first instruction this project
+# emits into a formal image that crosses from one register FILE into another.
+# SysV AMD64 hands a `double` to a variadic callee in XMM0..XMM7 and nowhere
+# else, so `printf("%f", w)` cannot be lowered without it.
+#
+# EVERY (xmm, gpr) pair, not one: the two index extensions are independent and
+# a single row cannot see either of them go wrong. The XMM number comes from the
+# ModRM `reg` field with NO REX.R (there is no XMM8 in this ABI, and
+# `encode_movq_xmm_rm64` asserts `0 <= xmm <= 7`), while the source GPR comes
+# from `rm` WITH REX.B. `xmm0`/`rax` is the pair where both are zero, so a
+# decoder that dropped REX.B and put REX.R on the XMM index would still pass
+# there. `xmm3`/`r12` is the row that separates them: a dropped REX.B names RSP
+# and a wrongly-applied REX.R names XMM11.
+for xmm in range(8):
+    for gpr in (R.RAX, R.R9, R.RDI, R.R12, R.R8):
+        check(f"movq xmm{xmm},{gpr.name}",
+              X.encode_movq_xmm_rm64(xmm, gpr), "movq_xmm_rm64",
+              mod=3, xmm=xmm, rm=gpr.value)
+# The XMM number is read off the RAW ModRM byte and not through the helper that
+# applies REX.R to `reg`, so `xmm` and `reg` are both the raw field. Asserting it
+# here is what says the two readers of an instruction agree about which half of
+# the ModRM is which; `x86_step_op66` reads `(modrm >>> 3) &&& 7` for the same
+# field, and the direction is the opposite of `89 /r`.
+check("movq xmm7,rsp", X.encode_movq_xmm_rm64(7, R.RSP), "movq_xmm_rm64",
+      mod=3, xmm=7, reg=7, rm=R.RSP.value)
+
+# THE THREE SHAPES THAT MUST STILL BE REFUSED, and each for a stated reason.
+# Without these the decoder could accept `0F 7E` (the REVERSE move, which
+# assembles and links and quietly loads whatever was already in XMM0 into RDI)
+# or `0F 6E` without REX.W (`MOVD`, which drops all but the low 32 bits and so
+# moves a different VALUE rather than a different placement of the same one),
+# and both would then be proved against an instruction this backend cannot emit.
+for label, raw, why in (
+        ("movq xmm,m64 (memory operand)", bytes([0x66, 0x48, 0x0F, 0x6E, 0x00]),
+         "mod=0 is a memory operand, which no emit path produces"),
+        ("0F 7E (the reverse move)", bytes([0x66, 0x48, 0x0F, 0x7E, 0xC0]),
+         "the reverse direction is not emitted and must not be inferred"),
+        ("MOVD, no REX.W", bytes([0x66, 0x0F, 0x6E, 0xC0]),
+         "without REX.W this is MOVD, a different value"),
+        ("0F 6E with no 0x66 prefix", bytes([0x48, 0x0F, 0x6E, 0xC0]),
+         "a four-byte instruction, and not one this backend emits")):
+    try:
+        got = D.decode_one(raw, 0)
+        FAILURES.append(f"{label}: decoded as {got.form!r} — {why}")
+    except D.DecodeError:
+        pass
+
 # ALU reg/reg
 for enc, name in ((X.encode_add_r64_r64, "add"), (X.encode_or_r64_r64, "or"),
                   (X.encode_and_r64_r64, "and"), (X.encode_sub_r64_r64, "sub"),

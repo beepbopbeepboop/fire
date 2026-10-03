@@ -6700,6 +6700,91 @@ def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
             f"functions so each gets its own budget.")
 
 
+# The number of slots a list literal containing `*xs` reserves for a DYNAMIC
+# operand. One number, in one place, because it is a frame-budget decision
+# that both backends make and a disagreement between them is a program that
+# builds on one machine and dies of the capacity guard on the other.
+DYNAMIC_SPLAT_SLOTS = 8
+
+
+def dynamic_splat_capacity(elements, literal_operand) -> int:
+    """Slots to reserve for a list literal whose `*` operands are spliced.
+
+    A literal operand contributes its own length, because it is known here; a
+    dynamic one has no compile-time length, so it contributes
+    `DYNAMIC_SPLAT_SLOTS`.
+
+    **That cap is a budget choice, not the semantics, and it is the reason a
+    long splat exits 1 rather than answering.** The append path's guard
+    (`list_append_overflow_message`'s subject) fires when the run-time count
+    reaches the reservation, and a source longer than `DYNAMIC_SPLAT_SLOTS`
+    reaches it: `a = [1..10]; b = [*a]` appends ten elements into eight slots
+    and stops. That is measured, on both backends, and it is the SAFE direction
+    — a named limit rather than a wrong answer — but it is a real ceiling and
+    it is shared with every comprehension, whose cap is likewise a number of
+    append sites rather than a length.
+
+    Both facts are here so that neither backend re-derives the number: it was
+    arm64's `static_n += 8` written inline in its emitter, and an x86-64 copy
+    that had to agree with it by reading the comment.
+    """
+    n = 0
+    for el in elements or []:
+        if _is_star_unpack(el):
+            if literal_operand(el.operand):
+                n += len(el.operand.elements)
+            else:
+                n += DYNAMIC_SPLAT_SLOTS
+        else:
+            n += 1
+    return max(1, n)
+
+
+def _is_star_unpack(el) -> bool:
+    """Whether `el` is a list element spelled `*operand`.
+
+    `F.UnaryOp` with `op == "*"` and nothing else: `*a` in a list literal is
+    the only place this spelling appears, and a `-a` or `not a` reaching the
+    same test must not be read as an unpack.
+    """
+    return (isinstance(el, F.UnaryOp) and el.op == "*"
+            and hasattr(el, "operand"))
+
+
+def literal_splat_operand_is_static(op) -> bool:
+    """Whether a `*` operand's length is known at compile time.
+
+    The one predicate both backends ask before deciding between "expand it
+    here" and "loop over it at run time", so the two cannot disagree about
+    which of the two a given `[*…]` is.
+    """
+    return isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr))
+
+
+def list_literal_reserved_slots(literal) -> int:
+    """How many element slots a list literal's own construction occupies.
+
+    `len(literal.elements)` for an ordinary literal, and
+    `dynamic_splat_capacity` for one with a `*` operand — because a splat
+    literal builds its blob by APPENDING, so what it occupies is the cap it
+    reserved, not the number of `*` operands written in it.
+
+    **This is what the append path's bound is made of, and getting it wrong
+    makes a legal program overflow.** `xs = [1, 2]; xs.append(3)` reserves
+    `len(elements) + append_sites` and is fine. `xs = [*a]; xs.append(3)` did
+    not: the bound counted the `*a` as ONE element, so a two-element `a` plus
+    one append hit a capacity of 2 and the guard stopped the program with
+    `list.append overflowed 'xs': its capacity is 2` — on both backends,
+    because both computed the bound the same wrong way. The blob itself holds
+    `dynamic_splat_capacity` slots, so the bound has to be stated in the same
+    units the reservation is.
+    """
+    if any(_is_star_unpack(el) for el in (literal.elements or [])):
+        return dynamic_splat_capacity(literal.elements,
+                                      literal_splat_operand_is_static)
+    return len(literal.elements or [])
+
+
 def set_union_refusal(left: str, right: str) -> str:
     """Why `{left} | {right}` is not lowered on the backend that asks.
 

@@ -3619,7 +3619,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             literals = _list_literals_bound_to(fn, name)
             if not literals:
                 continue
-            want = min(len(lit.elements) for lit in literals) + count
+            # `list_literal_reserved_slots`, not `len(lit.elements)`: a
+            # literal with a `*` operand builds its blob by appending and
+            # occupies the cap it reserved, so counting the `*` as ONE
+            # element made `xs = [*a]; xs.append(3)` overflow the guard
+            # with `a` of length 2. One rule, read by both backends.
+            want = min(M.list_literal_reserved_slots(lit)
+                       for lit in literals) + count
             for literal in literals:
                 prev = by_node.get(id(literal))
                 by_node[id(literal)] = want if prev is None else min(prev, want)
@@ -7712,18 +7718,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         """List literal containing `*iterable` splats — reserve, then append.
 
         Static list/tuple operands contribute their length; dynamic operands
-        are spliced at runtime with a frame-safe cap."""
-        static_n = 0
-        for el in expr.elements:
-            if isinstance(el, F.UnaryOp) and el.op == "*":
-                op = el.operand
-                if isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-                    static_n += len(op.elements)
-                else:
-                    static_n += 8
-            else:
-                static_n += 1
-        cap = max(1, static_n)
+        are spliced at runtime with a frame-safe cap. The cap is
+        `M.dynamic_splat_capacity`'s and not a number written here, so this
+        backend and the x86-64 one cannot reserve different amounts for one
+        source — which would be a program that builds on one machine and dies
+        of the append path's capacity guard on the other.
+        """
+        cap = M.dynamic_splat_capacity(expr.elements,
+                                       M.literal_splat_operand_is_static)
         offset = self._reserve_blob(8 + 8 * cap, "list unpack")
         self._emit_list_base(offset)
         self._emit_mov_imm("X10", 0)
@@ -7732,7 +7734,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         for el in expr.elements:
             if isinstance(el, F.UnaryOp) and el.op == "*":
                 op = el.operand
-                if isinstance(op, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+                if M.literal_splat_operand_is_static(op):
                     for sub in op.elements:
                         self._emit_expr(sub)
                         self._compr_append_elem(offset, cap)
@@ -8777,7 +8779,15 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _blob_est(self, e) -> int:
         """Static upper bound on element count for frame reservation."""
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return len(e.elements)
+            # `list_literal_reserved_slots`, NOT `len(e.elements)`: a literal
+            # with a `*` operand builds its blob by appending and so occupies
+            # the cap it reserved, while `len(elements)` counts the `*a` as ONE
+            # element. Measured: `[1, 2] + [*c]` with `c = [7, 8, 9]` estimated
+            # 3 elements for a 5-element result, and x86-64 — which checks the
+            # run-time total against this estimate rather than trusting it —
+            # stopped at the overflow guard. One rule with the two other places
+            # a splat literal's size is needed.
+            return M.list_literal_reserved_slots(e)
         if isinstance(e, F.Comprehension):
             return self._compr_cap(e)
         if isinstance(e, F.SliceExpr):

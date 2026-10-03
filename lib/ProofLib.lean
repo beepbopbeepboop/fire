@@ -10,7 +10,32 @@ functions.  It is compiled once (to .olean) and imported by all
 per-program proof files.
 -/
 
-/-- x86-64 machine state: 16 GPRs, flags, rip, and byte-addressable memory -/
+/-- x86-64 machine state: 16 GPRs, 8 XMM registers, flags, rip, and
+byte-addressable memory
+
+**Why the XMM file exists, and why it is eight `UInt64` and not a vector
+type.** SysV AMD64 hands a `double` to a variadic callee in `XMM0`..`XMM7` and
+nowhere else, so `printf("%f", w)` is a real crossing from the general-purpose
+file into the SSE one and `formal/x86_64.py::encode_movq_xmm_rm64` is the
+instruction that performs it. This file's stated rule is that it models every
+instruction form `formal/x86_64.py` can encode and nothing else, so the
+alternative was not "no XMM file" — it was a step that decoded the instruction
+and recorded no effect, which is a FALSE step: it says the machine left XMM0
+alone when it did not, and `FORMAL_x86_64_end_to_end_proof.md`'s B2 and B24 are
+about exactly how much worse that is than an absent instruction.
+
+Each XMM is one `UInt64` and not a `Vector`, and the reason is that this value
+model carries one word per value, which is unchanged: a `double` on this path
+IS a 64-bit word, it lives in a GPR until the `movq`, and the C library that
+reads it out of XMM0 is outside the image. So the XMM slot holds a word, the
+word is what the model already had, and nothing about `MojoExpr`'s "no
+aggregate node" argument changes — a slot with a word in it is the shape the
+model has always had. Only the count of slots grows.
+
+Eight, not sixteen, because `formal/x86_64.py` asserts `0 <= xmm <= 7` and the
+SysV variadic integer/float argument registers are `XMM0`..`XMM7`; modelling
+`XMM8`..`XMM15` would be modelling something this backend cannot emit, which
+the rule above forbids. -/
 structure X86State where
   rax : UInt64
   rbx : UInt64
@@ -28,6 +53,14 @@ structure X86State where
   r13 : UInt64
   r14 : UInt64
   r15 : UInt64
+  xmm0 : UInt64
+  xmm1 : UInt64
+  xmm2 : UInt64
+  xmm3 : UInt64
+  xmm4 : UInt64
+  xmm5 : UInt64
+  xmm6 : UInt64
+  xmm7 : UInt64
   rip : Nat
   zf : Bool
   sf : Bool
@@ -41,6 +74,8 @@ def X86State.init (input : UInt64) (entry : Nat) : X86State :=
     rsp := 0xfffffffffffffff0, rbp := 0, rsi := 0, rdi := input
     r8 := 0, r9 := 0, r10 := 0, r11 := 0
     r12 := 0, r13 := 0, r14 := 0, r15 := 0
+    xmm0 := 0, xmm1 := 0, xmm2 := 0, xmm3 := 0
+    xmm4 := 0, xmm5 := 0, xmm6 := 0, xmm7 := 0
     rip := entry, zf := false, sf := false, cf := false, of_ := false
     mem := fun _ => 0 }
 
