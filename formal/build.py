@@ -3403,6 +3403,29 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 fn, framed, [f.name for f in functions]).items():
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).extend(sts)
+        # A module global whose `__DATA` slot holds the ADDRESS of a struct
+        # FRAME built in the image (`model.prepare_module_frame_slots`), read in
+        # this function: the word the slot carries is a frame address, so
+        # `G.field` is a load at `G + 8k` and `G` hands its frame to a method of
+        # its own struct exactly as a local `Pair()` does.
+        #
+        # **This seeding is safe only because the frame is in `__DATA`, and that
+        # is the whole content of the change.** The same edit with the old
+        # storage — the module body storing its own block's address — would be
+        # right about the layout and wrong about the lifetime, so
+        # `_check_holder_agreements` would stop refusing
+        # `ModuleLoader_load_module(self, …)` beside
+        # `ModuleLoader_load_module(_module_loader, …)` and the image would
+        # SIGSEGV on the second one. That is why the fix is a new `init` kind in
+        # `build_data_image` rather than a rule in this analysis: the holder
+        # tables answer "is this word an address", and the answer is only safe if
+        # something guarantees the address outlives every reader.
+        for name, st in M.module_frame_slot_holders(
+                fn, structs_by_name).items():
+            if name in holders[_fn_key(fn)]:
+                continue
+            holders[_fn_key(fn)].add(name)
+            hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
                                 one_word)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
@@ -13641,10 +13664,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the reason that function takes them from the caller: two private copies of
     # "what does this annotation mean" is one architecture answering `len()` and
     # the other refusing it.
+    #
+    # …and the module-level STRUCT values the IMAGE holds, decided just above
+    # and handed over rather than derived here. It is a separate call and not
+    # an argument `collect_global_slots` computes because it EDITS the module
+    # body: `_module_loader = ModuleLoader()` must stop being a store of the
+    # body's own block address, and `collect_global_slots` reads
+    # `module_body_store_sites` a few lines into its own body, so the edit has
+    # to be finished before it runs.
+    frame_slots = M.prepare_module_frame_slots(stmts, functions,
+                                               structs_by_name)
     slots = M.collect_global_slots(stmts, functions,
                                    int_names=FT.TYPE_NAMES,
                                    string_names=FT.STRING_TYPE_NAMES,
-                                   dict_names=FT.DICT_TYPE_NAMES)
+                                   dict_names=FT.DICT_TYPE_NAMES,
+                                   frame_slots=frame_slots)
     M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever
