@@ -1,12 +1,12 @@
-# `test_gimple_runner.py` is RED on the merged bug-batch tree, on seven cases, and nobody has filed them
+# `test_gimple_runner.py` is RED on the merged bug-batch tree on seven cases, and `silentnoop` TIMES OUT, and nobody has filed either
 
-**Area:** CODEGEN. Found 2026-10-02 on `work/bugs4-2` while fixing four other
-docs, when a narrow `gimplerunner` run failed and the failures turned out to
-have nothing to do with the change under test. **NOT mine — this is a
+**Area:** CODEGEN / TESTS. Found 2026-10-02 on `work/bugs4-2` while fixing
+five other docs, when narrow runs of `gimplerunner` and `silentnoop` failed and
+the failures turned out to have nothing to do with the changes under test. **NOT mine — this is a
 measurement artefact of my own run, recorded so the next person does not spend
 an hour on it.** Every failure below is reproduced on a pristine
-`git archive HEAD~1` copy of the tree, so none of them is a regression from
-any commit on my branch.
+`git archive HEAD~1` copy of the tree (and `silentnoop` on `HEAD~2`), so none
+of them is a regression from any commit on my branch.
 
 ## What I ran and what it showed
 
@@ -80,6 +80,36 @@ defect from the same family, so it is not covered by that doc).
 `bugs4-9` holds `PERF_char_scan_leak_residual_21_bytes_per_char` and
 `PERF_char_scan_peak_rss_over_its_ceiling`; whether this case's 246.7 MB is the
 same measurement as that doc's ceiling question, I did not check.
+
+## And `silentnoop` TIMES OUT on the same tree, at 900 s against a 1125 s baseline
+
+`tools/suite.py` gives `silentnoop` a 900 s TIMEOUT, and
+`test_silent_noop_iter.py` takes **18m45s (1125 s)** on a pristine
+`git archive HEAD~2` copy of this tree, measured ALONE and with nothing else
+running. So the job is over its own timeout before any of my changes, and under
+a parallel suite load (12 jobs, `-j18`) it is worse.
+
+```
+$ cd .tmp/base            # git archive HEAD~2, i.e. the merged batch state
+$ time python3 test_silent_noop_iter.py
+23 passed, 0 failed
+real  18m45.547s
+```
+
+The content passes; only the clock fails, and per CLAUDE.md a hang "is a
+failure in its own class" — so this is a real red that the merged batch carries,
+in the same shape as the seven `gimplerunner` cases above. **I did not measure
+my own tree's time**, so I cannot say whether my changes made it worse; the
+integrator should, and the number to compare is 1125 s.
+
+The two next steps for it, both a decision rather than an implementation:
+either the TIMEOUT is wrong for a 19-minute job (and should be raised, with the
+measured number recorded at its registration — the same rule the memclass
+ledger follows), or the test is doing work it does not need. `23 passed` with
+`user 4m36s / sys 2m20s` in an 18m45s wall says it is almost entirely WAITING,
+not computing: 4.6 min of user CPU inside 18.8 min of wall is 24% of one core,
+so the time is in subprocesses (gcc, the compiled binaries) or in sleep, and
+which one is the question to answer before raising anything.
 
 ## The exact next step
 
