@@ -520,11 +520,20 @@ class TestSweepReach(unittest.TestCase):
 
 
 class TestSystemModuleCall(unittest.TestCase):
-    # `math` and not `json`: `json` used to be the host module named here, and
-    # `formal/hostmods/json.mojo` landed in 2026-09-30, so a `json` that is
-    # "not available here" is no longer a fact about anything. `math` has no
-    # Mojo source in this tree, so the message this rule reads is still true.
-    SRC = "import os\nimport math\n\ndef main():\n    pass\n"
+    # `os`, `json`, `math` and `socket`, and WHY each is here: a host module
+    # stops being a target fact the moment it has a Mojo source, and three of
+    # these four used to be named by this class when they had none.
+    # `json` got `formal/hostmods/json.mojo` on 2026-09-30, `math` got one after
+    # that, and `os` has had one for most of the tree's life — so all three are
+    # kept as the NEGATIVE cases below rather than as the positive one, because
+    # "a `math.floor()` refusal is a target fact" stopped being true the day
+    # `formal/hostmods/math.mojo` landed and the sweep is RIGHT not to believe
+    # it: a refusal about a module that EXISTS is a refusal about a construct in
+    # a module this build can compile, which is `codegen`, not "not fixable
+    # here". `socket` is the positive case now, and it is checked against
+    # `HOST_MODULES` rather than against a list of its own, so the day
+    # `socket.mojo` lands this row goes red and says why.
+    SRC = "import os\nimport socket\n\ndef main():\n    pass\n"
 
     def test_a_self_describing_message_is_a_target_fact(self):
         got = S._system_module_call(
@@ -534,9 +543,29 @@ class TestSystemModuleCall(unittest.TestCase):
 
     def test_a_message_naming_a_host_member_is_a_target_fact(self):
         got = S._system_module_call(
-            "build: math.floor() cannot be lowered: math is not available here",
-            self.SRC)
-        self.assertEqual(got, "math")
+            "build: socket.socket() cannot be lowered: socket is not "
+            "available here", self.SRC)
+        self.assertEqual(got, "socket")
+
+    def test_a_module_that_HAS_a_source_is_not_a_target_fact(self):
+        """The anti-rot for the row above, and the reason it changed hands.
+
+        `math` was this class's positive case while `formal/hostmods/math.mojo`
+        did not exist. It does now, so a refusal naming `math` is about a
+        construct in a module this backend compiles, and filing it as a target
+        fact would put real codegen findings in the bucket that is "not fixable
+        here" — which is the one class a coverage number must never grow.
+        """
+        from formal.imports import HOST_MODULES
+        self.assertNotIn("math", HOST_MODULES,
+                         "math.mojo exists, so math is no longer a host module "
+                         "this backend cannot compile; if it is back in the set, "
+                         "the negative row below is what to re-check")
+        self.assertEqual(
+            S._system_module_call(
+                "build: math.floor() cannot be lowered: math is not available "
+                "here", "import math\n\ndef main():\n    pass\n"),
+            "")
 
     def test_a_construct_refusal_is_not(self):
         """The negative that matters most, because the fallback is `codegen`.
@@ -560,10 +589,13 @@ class TestSystemModuleCall(unittest.TestCase):
 
         A diagnostic that happens to contain `socket.recv` does not make the
         file a system-module call; a file that never mentions `socket` cannot
-        be one.
+        be one. Its own source, and NOT this class's `SRC` — which imports
+        `socket`, deliberately, because the positive case above needs a file that
+        does.
         """
         self.assertEqual(
-            S._system_module_call("build: socket.recv cannot be lowered", self.SRC),
+            S._system_module_call("build: socket.recv cannot be lowered",
+                                  "import os\n\ndef main():\n    pass\n"),
             "")
 
     def test_classify_routes_it_out_of_codegen(self):
