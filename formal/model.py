@@ -2720,9 +2720,11 @@ def _build_cfg(body) -> tuple:
                 # the body LEAVES EARLY: `_flush_pending_finally` walks the
                 # pending frames and emits their statements at the `return` /
                 # `raise` / `break` / `continue` site, with `depth` 0 for a
-                # return. So the clause is entered from the arms' fall-through
-                # AND from every block of the body and the `else` that holds
-                # such a statement — which is what `_leaves_early` collects.
+                # return. So the clause's statements are reached from the arms'
+                # fall-through AND from every block of the body and the `else`
+                # that holds such a statement — which is what `_leaves_early`
+                # collects, and what the second half of the rule below turns
+                # into one `run` per copy.
                 #
                 # That is not a tidier restatement; it is a different graph,
                 # and the difference is a silent wrong answer. Measured, on the
@@ -2749,10 +2751,10 @@ def _build_cfg(body) -> tuple:
                 # register holds whatever the caller left in it — which is the
                 # worst outcome this path has, an answer that is BUILD-DEPENDENT
                 # and exits 0. `test_formal_read_before_store.py`'s
-                # `finally_clause_runs_at_every_point_the_body_leaves_early`
-                # pins the analysis and
-                # `test_formal_run.py`'s `finally_reads_a_later_store_*` pins
-                # the refusal against the binary, on both architectures.
+                # `finally_clause_runs_at_every_point_the_body_leaves_early_`
+                # refused` pins the analysis and `test_formal_run.py`'s
+                # `finally_runs_where_the_body_leaves_early_not_at_its_end`
+                # pins the refusal against the binary, on both architectures.
                 #
                 # The clause's OWN fall-through reaches the statement after the
                 # try, and it is emitted only where the body falls through —
