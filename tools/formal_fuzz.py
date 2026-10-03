@@ -40,7 +40,15 @@ WHAT IS AND IS NOT A FINDING
                        left to whoever holds the arm64 claim unless the x86-64
                        image agrees with it (which makes it a semantics gap in
                        both, not an x86-64 bug).
-  ARM64-DIVERGES       the two images disagree with each other.
+  ARM64-DIVERGES       the two images disagree with each other.  UNREACHABLE as
+                       `classify` is ordered today: both answers are compared
+                       against the same CPython output first, so "both agree with
+                       CPython and differ from each other" cannot happen, and the
+                       shape is reported as a `MISMATCH-*` naming the engine that
+                       is wrong about the program.  Kept because it is the
+                       verdict that shape deserves and because it becomes
+                       reachable the moment the ordering changes — but do not
+                       expect to see it in a tally.
   KNOWN:…              the image disagrees with CPython, and the disagreement
                        reduces to a construct `KNOWN_DIVERGENCES` names.
                        Counted apart from a finding so a sweep of two thousand

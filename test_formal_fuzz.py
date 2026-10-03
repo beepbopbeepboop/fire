@@ -177,6 +177,94 @@ def _check_features(mix, indexes, verbose):
     return 0
 
 
+# (name, results dict, want verdict).  `results` is what `check_one` hands
+# `classify`, built by hand because the classifier is the one piece of the
+# runner that decides EVERYTHING and that no case exercises on its own: every
+# other row here goes through a real build, so it can only reach the verdicts
+# the corpus happens to produce.
+#
+# `ok` is `{"verdict": "ok", "rc": <int>, "stdout": <str>}`; the oracle this
+# table compares against is `(0, "1\n")`, so an `ok` carrying that is a match
+# and anything else is a disagreement with it.
+CLASSIFIER_CASES = [
+    ("both_agree", {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
+                    "arm64": {"verdict": "ok", "rc": 0, "stdout": "1\n"}},
+     "match"),
+    ("one_disagrees", {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
+                       "arm64": {"verdict": "ok", "rc": 0, "stdout": "2\n"}},
+     "MISMATCH-ARM64"),
+    # Two different answers from two machines that both RAN. `ARM64-DIVERGES` is
+    # the verdict this shape is about, and it is UNREACHABLE while the two
+    # oracle comparisons come first: both answers are compared against the same
+    # CPython output, so "both agree with CPython and differ from each other"
+    # cannot happen. Measured by writing this case and getting `MISMATCH-X86` —
+    # which is the RIGHT answer (x86-64 printed `2` where the source says `1`),
+    # and which names the engine that is wrong about the program. The verdict is
+    # kept because the docstring documents it and because it becomes reachable
+    # the moment the ordering changes, but a reader must not expect to see it in
+    # a sweep's tally.
+    ("the_two_answers_differ", {"x86_64": {"verdict": "ok", "rc": 0,
+                                           "stdout": "2\n"},
+                                "arm64": {"verdict": "ok", "rc": 0,
+                                          "stdout": "3\n"}},
+     "MISMATCH-X86"),
+    # BOTH refusing is NOT a finding. A construct with no representation is
+    # correctly refused, and counting those as bugs would spend the whole
+    # budget on `bugs/FORMAL_known_limits.md`.
+    ("both_refuse", {"x86_64": {"verdict": "refusal", "diag": "no"},
+                     "arm64": {"verdict": "refusal", "diag": "no"}},
+     "refusal"),
+    # …and ONE refusing while the other ANSWERS is, because the construct is
+    # representable and this machine declines it. Measured on the tree this
+    # landed on: arm64 built and ran a program x86-64 refused with "main:
+    # '_cb0' has no home", and the sweep called it a plain `refusal`.
+    ("one_refuses_while_the_other_answers",
+     {"x86_64": {"verdict": "refusal", "diag": "no home"},
+      "arm64": {"verdict": "ok", "rc": 0, "stdout": "1\n"}},
+     "REFUSAL-DIVERGES-X86"),
+    ("one_refuses_the_other_way",
+     {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
+      "arm64": {"verdict": "refusal", "diag": "no home"}},
+     "REFUSAL-DIVERGES-ARM"),
+    # A refusal AND a wrong answer is the wrong answer, and it is reported as
+    # one: the finding names the engine that is wrong about the program's
+    # meaning, which is the engine that produced an answer.
+    ("one_refuses_and_the_other_is_wrong",
+     {"x86_64": {"verdict": "refusal", "diag": "no"},
+      "arm64": {"verdict": "ok", "rc": 0, "stdout": "9\n"}},
+     "MISMATCH-ARM64"),
+    # A crash outranks a refusal and a trap: both are about the IMAGE rather
+    # than about a difference between two of them.
+    ("a_crash_is_a_finding",
+     {"x86_64": {"verdict": "crash", "rc": 139},
+      "arm64": {"verdict": "refusal", "diag": "no"}}, "CODEGEN-CRASH"),
+    ("a_trap_is_not",
+     {"x86_64": {"verdict": "ok", "rc": 0, "stdout": "1\n"},
+      "arm64": {"verdict": "trapped", "rc": 2}}, "trapped"),
+]
+
+
+def check_classifier(verbose):
+    """Every verdict `classify` can return, on results built by hand.
+
+    No compiler and no corpus: this is the function that decides whether a
+    program that computed the wrong number is a finding, and it is reached only
+    through a real build everywhere else in this file — so a change to it that
+    turned a `MISMATCH-*` into a `refusal` would pass every other row here and
+    turn a sweep green.
+    """
+    args = argparse.Namespace(backends=["x86_64", "arm64"], min_kind="any")
+    failures = 0
+    for name, results, want in CLASSIFIER_CASES:
+        got = F.classify(results, 0, "1\n", args)
+        if got != want:
+            failures += _fail(f"classify_{name}", f"said {got!r}, "
+                              f"expected {want!r}", verbose)
+    print(f"formal fuzz: classify    {'PASS' if not failures else 'FAIL'} "
+          f"{len(CLASSIFIER_CASES)} verdicts (no compiler)")
+    return failures
+
+
 def check_run(arch, count, jobs, verbose):
     """`count` pinned indexes, end to end, and every verdict accounted for."""
     argv = [sys.executable, os.path.join(ROOT, "tools", "formal_fuzz.py"),
@@ -342,7 +430,7 @@ def main():
     print("FORMAL FUZZ — the generator's corpus and the runner's verdicts")
     print("=" * 68)
     mixes = [args.mix] if args.mix else sorted(F.MIXES)
-    failures = 0
+    failures = check_classifier(args.verbose)
     for mix in mixes:
         failures += check_generator(mix, args.gen_indexes, args.verbose)
     if not args.no_build_check:
