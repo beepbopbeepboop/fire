@@ -1,12 +1,51 @@
 # FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib: `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it
+**Status: unchanged and re-measured 2026-10-03 (`work/formal16-2`); the row is
+still "not worth it", and the honest stopping point has MOVED FURTHER AWAY rather
+than closer.** The refusal below is byte for byte what this doc recorded, the
+container-constant refusal §3 quotes is still the current one, and the MLIR row of
+§3 wall 2 is now *behind a second wall the doc does not mention*. Nothing here is
+fixed, and the one thing that would fix it is a feature another worker holds.
 
-**Status: unowned, 1 file in this slice and 1 in the corpus, and the number to
-take from it is that it is worth 1 file.** The refusal's own text ("There is
-nothing an importer could bind, and nothing this backend could add") is correct
-about a dylib's export trie and INCOMPLETE about the program, because the eight
-names `_unicode.mojo` imports are compile-time constants — read at a use site,
-never bound. This doc records the two walls behind it so nobody spends a
-monomorphizer on it.
+Re-measured on this tree:
+
+```console
+$ python3 fire.py build --formal --no-prove -o .tmp/uni.out \
+      ../new-modular/Mojo/stdlib/std/collections/string/_unicode.mojo
+build: _unicode.mojo imports 'std.collections.string._unicode_lookups', which
+cannot be built either: _unicode_lookups.mojo: formal dylib has no public
+functions: ... (identical to §1)
+
+# §3 wall 2, the MLIR row -- and what is in FRONT of it now:
+$ python3 fire.py build --formal --no-prove -o .tmp/gc.out .tmp/gc.mojo
+build: gc.mojo imports 'std.builtin.globals', which cannot be built either:
+builtin_slice.mojo: StridedSlice___init__ returns a frame address, so it cannot
+be compiled into a dylib ...
+$ python3 fire.py build --formal --no-prove -o .tmp/gc2.out .tmp/gc2.mojo
+build: pick: `pop.global_constant` is a dialect OPERATION whose value could be a
+word on this path, but it cannot be GUARDED here: ...
+```
+
+**The MLIR refusal itself is unchanged** — same operation, same "a deliberate
+deferral, not an impossibility" wording — so §3 wall 2 stands as written. What is
+new is that reaching it through the real spelling costs one more blocker:
+`std.builtin.globals` (which is where `global_constant` lives) imports
+`builtin_slice.mojo`, whose `__init__` returns a frame address, and a
+returned-frame function cannot go into a dylib at all. So the feature §4 step 1
+asks for would have to clear THREE walls to move this row by one file, not two.
+
+**Why nothing was done here**, and it is not only the "not worth it" the original
+Status gave:
+
+* the fix is one feature — inline a container-valued module constant at the use
+  site, and skip the dylib for a module nothing binds — and that feature is the
+  one `FORMAL_module_state_no_storage.md` §(2) needs, which is
+  `work/formal16-5`'s claim. Two workers implementing one feature is how the two
+  halves end up disagreeing about what a module constant IS;
+* even done, the row moves one file (`_unicode_lookups.mojo`, which nothing
+  imports for its own sake) and `_unicode.mojo` still refuses — on the MLIR row,
+  now behind the slice row;
+* and the working repair for the table is still an accessor, which is a source
+  change to an external stdlib that no repository worktree can make.
 
 Found by sweeping `std/collections` for `sweep14:std-collections`; see
 `FORMAL_sweep14_std_collections.md` §5.1.
