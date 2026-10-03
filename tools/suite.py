@@ -502,6 +502,14 @@ MEASURED_PEAK_GB = {
     # (2026-10-02): `test_formal_core_hostmods.py`, measured one at a time
     # under `tools/memslot.py --gb 8` before being named, like the two above.
     'formal-core-hostmods':  (0.1,  'measured'),   # 25 s, 6 groups
+    # …and `test_formal_monomorph.py`, which the estate check named on
+    # `work/formal15-generic-monomorph` (2026-10-03) and which is registered
+    # rather than excused for the reason the three above are: it is 9 s and
+    # 0.1 GB across the process tree, it is the only coverage of
+    # `doc/ABI.md` §Generics on this path at all, and the alternative would
+    # have been a permanent UNREGISTERED entry for a test that costs less than
+    # `formal-core-hostmods`'s 25 s.
+    'formal-monomorph':      (0.1,  'measured'),   # 9 s, 11 cases
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2475,6 +2483,20 @@ test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
      extra=['test_formal_receiver_spelling.py', 'formal/model.py',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a receiver spelled `this`, diffed against a `self` twin and CPython')
+# `doc/ABI.md` §Generics on the formal path: a module declaring only
+# `struct Pair[T]` has no boundary symbol, and each INSTANTIATION is one. The
+# estate check named this file on `work/formal15-generic-monomorph`, and it is
+# in `proofs` rather than `check` for the same reason as its neighbours
+# `formal-specialization` and `formal-receiver-spelling` — it BUILDS and EXECUTES
+# a multi-module program per case, on both backends, and the differential that
+# makes it worth anything is against CPython running the same text. 9 s and
+# 0.1 GB measured; `tiny` releases 4 GB of the machine's budget.
+test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_monomorph.py', 'formal/monomorph.py',
+            'formal/imports.py', 'formal/build.py', 'formal/model.py',
+            'monomorphize.py', 'elaborate.py', 'reflect.py'] + FORMAL_BUILD_INPUTS,
+     desc="a generic's instantiations are its boundary symbols, differentially")
 
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
@@ -2689,6 +2711,7 @@ BUCKETS = {
 'formal-external-call', 'formal-json', 'formal-pathlib',
                 'formal-method-param-field', 'formal-receiver-position',
                 'formal-small-hosts', 'formal-specialization',
+                'formal-monomorph',
                 'formal-target-queries', 'formal-value-model',
                 'formal-x86-dylib',
                 # …and the two the estate check named on 2026-10-02, for the

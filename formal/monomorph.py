@@ -220,8 +220,8 @@ def instantiate(src: str, name: str, args) -> tuple:
 # ── which instantiations a consumer asks for ───────────────────────────
 
 
-def type_arg_text(expr) -> str:
-    """The ABI spelling of a type ARGUMENT, or "" when it is not concrete.
+def type_arg_text(expr, values=()) -> str:
+    """The ABI spelling of a type ARGUMENT, or "" when it is not one.
 
     "" is the answer for everything that is not a type spelling, and it is a
     refusal rather than a fallback: a computed argument has no single name, and
@@ -236,25 +236,56 @@ def type_arg_text(expr) -> str:
                          mangler (`monomorphize.safe_suffix`) rather than a
                          second copy of that rule here
 
+    **A BARE IDENTIFIER must not be a name the reading scope BINDS AS A VALUE,
+    and this is the sharp edge of the whole module, so it is worth being exact
+    about what goes wrong without it.**  `Pair2[t]()` with `var t = Float64`
+    reads as `Pair2[t]` — an identifier, a spelling, a demand — and the
+    instantiation substituted `T` → `t`, so the library compiled
+    `struct Pair2_t: var first: t` with `t` undeclared in the module that owns
+    the file.  Nothing in that build objects: a field's declared type is not
+    read by `struct_is_framed` (which counts fields, not types), so `Pair2_t`
+    framed as two words and `first + second` compiled as the integer addition
+    the machine can do.  Measured, and it is the exact failure
+    `no_public_api_reason`'s docstring says must not happen — "a build-error
+    traded for a run-time wrong answer":
+
+        var t = Float64 ; a = Pair2[t]() ; a.first = 1.5 ; a.second = 2.5
+        print(a.scaled())      # CPython 4.0, this path 3
+
+    So `values` is the reading scope's own bindings —
+    `formal/build.py::_names_bound_in` for a function (parameters, assignments,
+    loop targets; the same union the register allocator is checked against) and
+    `formal/model.py::collect_module_symbols` for the module level — and a bare
+    identifier in that set is a VALUE, not a type.
+
+    **The check is deliberately the NEGATION and not a list of type names.**
+    `formal/model.py::is_type_name` is the existing "spells a TYPE on this
+    path" predicate and it is the wrong one to ask: its own docstring says it
+    must never be used to answer "can this name be read", and it is INCOMPLETE
+    for this purpose by construction — `Float64` and `Float32` are in none of
+    its four tables (`POINTEE_WIDTHS` has `Int` and no float), so asking it
+    would refuse `Pair2[Float64]()`, which is correct Mojo.  A name that nothing
+    binds is a type; a name something binds is a value unless a type is
+    declared with that spelling, and the second half of that sentence is the
+    documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type
+    declared in the CONSUMER's own file is refused rather than instantiated.
+
     `F.IntLiteral` and every expression form are refused, which is also what
     keeps `tile[2, 3](…)` — a comptime specialization whose bracket items are
     VALUES — from being read as a demand for `tile_2_3`.
     """
     if isinstance(expr, F.IdentExpr):
-        return expr.name or ""
+        return "" if expr.name in (values or ()) else (expr.name or "")
     if isinstance(expr, F.MemberExpr):
-        obj = type_arg_text(expr.obj)
+        obj = type_arg_text(expr.obj, values)
         return f"{obj}.{expr.member}" if obj and expr.member else ""
     if isinstance(expr, F.SubscriptExpr):
-        obj = type_arg_text(expr.obj)
-        inner = type_arg_text(expr.index)
+        obj = type_arg_text(expr.obj, values)
+        inner = type_arg_text(expr.index, values)
         if not obj or not inner:
             return ""
         import monomorphize                         # lazy — module docstring
         return f"{obj}_{monomorphize.safe_suffix(inner)}"
-    if isinstance(expr, (F.TupleExpr, F.ListExpr)):
-        parts = [type_arg_text(e) for e in (expr.elements or [])]
-        return "_".join(parts) if parts and all(parts) else ""
     return ""
 
 
@@ -268,15 +299,33 @@ def all_instantiation_calls(consumer_src: str) -> dict:
     package's re-exports (`formal/imports.py::instantiation_demands`), so
     filtering per module by re-parsing the consumer made the cost of a demand
     set a product where it only needed to be a sum.
+
+    The walk is per top-level statement rather than one flat walk, because
+    "is this identifier a value binding" is a question about the SCOPE the call
+    is written in and `iter_nodes` has no parent: `Pair[t]()` is a demand when
+    `t` is a type and not one when `t` is the local `var t = Float64` two lines
+    above it, and nothing below the callee can tell those apart. So each
+    function is walked with its own bindings
+    (`formal/build.py::_names_bound_in`) and each module-level statement with
+    the module's own table (`formal/model.py::collect_module_symbols`).
     """
+    from formal import model as M                  # lazy — cycle
+    from formal.build import _names_bound_in       # lazy — cycle
+    stmts = _consumer_statements(consumer_src)
+    module_level = set(M.collect_module_symbols(stmts) or {})
     found: dict = {}
-    for call in _consumer_calls(consumer_src):
-        base = _callee_base(call)
-        if base is None:
-            continue
-        args = _bracket_type_args(call.func)
-        if args:
-            found.setdefault(base, set()).add(tuple(args))
+    for st in stmts:
+        values = _names_bound_in(st) \
+            if isinstance(st, F.FunctionDef) else module_level
+        for node in M.iter_nodes(st):
+            if not isinstance(node, F.CallExpr):
+                continue
+            base = _callee_base(node)
+            if base is None:
+                continue
+            args = _bracket_type_args(node.func, values)
+            if args:
+                found.setdefault(base, set()).add(tuple(args))
     return {k: sorted(v) for k, v in found.items()}
 
 
@@ -337,7 +386,15 @@ def demands_key(wanted: dict) -> str:
     canon = ";".join(f"{name}[{','.join(args)}]"
                      for name in sorted(wanted or {})
                      for args in sorted(wanted[name]))
-    return cas.hash_parts(canon.encode())[:12]
+    # The EMPTY set digests to the empty string, and that is deliberate rather
+    # than a special case: the digest is part of a dylib's output NAME, so a
+    # real hash there would rename every module dylib in the tree — moving every
+    # cached library, invalidating every CAS entry that recorded one, and
+    # changing the path a dependency's load command names for a build that
+    # asked for no instantiations at all.  "" is the right answer for the empty
+    # demand set: the two libraries would be identical, so they should share a
+    # name.
+    return cas.hash_parts(canon.encode())[:12] if canon else ""
 
 
 # ── generated sources ───────────────────────────────────────────────────
@@ -420,28 +477,46 @@ def rewrite_instantiation_calls(stmts, demap: dict) -> int:
     docstring for why exempting by NAME rather than by position exempts every
     read of that name in the function.  What a bare type ANNOTATION binds to is
     not covered here; `bugs/FORMAL_generic_monomorph_scope.md` records it.
+
+    The position copied onto the replacement is the SUBSCRIPT'S BASE's, not the
+    subscript's: `fire_compiler.Parser` leaves `SubscriptExpr.line`/`col` at 0
+    (measured — the whole expression is positioned by its `obj`), so copying the
+    subscript's own position would report every rewritten call at line 0.
+
+    The bracket is read through the same scope-aware `_bracket_type_args` the
+    demand walk uses, for the same reason and with the same consequence: a call
+    site whose bracket names a VALUE (`Pair[t]()` with `var t = Float64`) has no
+    entry in `demap`, so it is left alone and keeps its brackets to be refused
+    with the sentence that is true of it.  Reading the bracket differently here
+    than in `all_instantiation_calls` would be the one way a rewrite could name a
+    definition the library was never asked for.
     """
     from formal import model as M                  # lazy — cycle
+    from formal.build import _names_bound_in       # lazy — cycle
+    module_level = set(M.collect_module_symbols(stmts) or {})
     n = 0
     for st in stmts:
+        values = _names_bound_in(st) \
+            if isinstance(st, F.FunctionDef) else module_level
         for node in M.iter_nodes(st):
             if not isinstance(node, F.CallExpr):
                 continue
             base = _callee_base(node)
             if base is None:
                 continue
-            args = tuple(_bracket_type_args(node.func))
+            args = tuple(_bracket_type_args(node.func, values))
             mangled = demap.get((base, args))
             if mangled is None:
                 continue
-            node.func = F.IdentExpr(name=mangled, line=node.func.line,
-                                    col=node.func.col)
+            node.func = F.IdentExpr(name=mangled,
+                                    line=getattr(node.func.obj, "line", 0),
+                                    col=getattr(node.func.obj, "col", 0))
             n += 1
     return n
 
 
-def _consumer_calls(consumer_src: str) -> list:
-    """Every `CallExpr` in `consumer_src`, from ONE parse.
+def _consumer_statements(consumer_src: str) -> list:
+    """`consumer_src`'s top-level statements, from ONE parse.
 
     The parse goes through `formal.build.parse_module`, the same front end both
     dylib and executable builds use, so the nodes here are the ones the rest of
@@ -452,11 +527,7 @@ def _consumer_calls(consumer_src: str) -> list:
     an empty demand set and then into "that module exports nothing".
     """
     from formal.build import parse_module          # lazy — cycle
-    from formal import model as M                  # lazy — cycle
-    calls = []
-    for st in parse_module(consumer_src):
-        calls.extend(n for n in M.iter_nodes(st) if isinstance(n, F.CallExpr))
-    return calls
+    return parse_module(consumer_src)
 
 
 def _callee_base(call):
@@ -474,8 +545,17 @@ def _callee_base(call):
     return comptime_eval.specialization_name(getattr(call, "func", None))
 
 
-def _bracket_type_args(sub) -> list:
+def _bracket_type_args(sub, values=()) -> list:
     """The bracket's items as concrete type-argument spellings, or [].
+
+    A COMMA LIST is several arguments and not one: `Pair[Int, Bool]` is `Pair`
+    declared with two parameters, and joining the items into `Int_Bool` would
+    hand the arity check in `instantiate` a single argument against a two-
+    parameter declaration and then report the arity as the problem when the
+    source got it exactly right.  So a `TupleExpr`/`ListExpr` index is expanded
+    here, where the bracket's meaning is known, and `type_arg_text` has no tuple
+    arm at all — a type argument is one item and the only way to write several is
+    the bracket.
 
     A KEYWORD bracket (`f[T = Int](…)`) carries its items in `attrs` and not in
     `index` (the parser's own split, `mojo/middle/comptime.keyword_bracket_args`
@@ -489,5 +569,5 @@ def _bracket_type_args(sub) -> list:
     index = sub.index
     items = list(index.elements) if isinstance(
         index, (F.TupleExpr, F.ListExpr)) else [index]
-    spelled = [type_arg_text(i) for i in items]
+    spelled = [type_arg_text(i, values) for i in items]
     return spelled if spelled and all(spelled) else []

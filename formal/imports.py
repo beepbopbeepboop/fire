@@ -2651,8 +2651,8 @@ def _instantiated_sources(source_path: str, wanted: dict, prefix: str) -> tuple:
     that is the design's whole error story rather than a shortcut: the two
     readers of a missing instantiation both have a better question to ask about
     it than this one does. `no_public_api_reason` can name the shape of the
-    module that asked for it ("it declares only the generic struct template(s)
-    Pair, and a parametric type has no single boundary layout either"), and
+    module that asked for it (and its generic branch now says what would make
+    the symbol appear — an importer spelling the type argument), and
     `formal/build.py`'s bracketed-callee check can name the call. Raising here
     would report a demand's failure in place of both, which is the "a message
     that is false about the file" defect `bugs/FORMAL_known_limits.md` opens

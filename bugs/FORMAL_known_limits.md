@@ -461,6 +461,48 @@ whose measured value on `binary_heap.mojo` is zero*, not as 21 files of
 near-term coverage. What was wrong was the *reporting*, and that is closed —
 see "What wave 5 closed".
 
+### §1.2, RE-MEASURED 2026-10-03: Stage 5 landed for the formal dylib path, and
+### the "0 files for `binary_heap.mojo`" measurement above still stands
+
+`work/formal15-generic-monomorph` implemented the monomorphization this section
+costed, and the implementation is `formal/monomorph.py` (discovery +
+instantiation) with `doc/ABI.md` §Generics amended from "forward-looking — Stage
+5" to the contract it now meets. What it does: a module dylib is compiled for
+the instantiations its importers ask for, each as a concrete declaration under
+`monomorphize.mangle`'s name, compiled into the DEFINING module's own library
+and exported with that module's qualifier.
+
+So the three clauses above change as follows, and it is worth being exact about
+which:
+
+* **(a), (b) and (c) are done** for the construct that needs them — a generic
+  struct template, a generic function template, a mangling, and a demand set
+  that is part of the artifact's identity. `widen[Int](5)` and `Pair[Int]()` now
+  build, run, and are pinned differentially against CPython on both
+  architectures by `test_formal_monomorph.py` (11 cases, 9 s).
+* **The COST line above is wrong in one direction and right in the other.** It
+  says "weeks, not an afternoon"; what landed is a day. It also says the largest
+  single member of the 21 is worth **0 files**, and THAT MEASUREMENT UNCHANGED
+  AND IS NOW THE INTERESTING ONE: `std/collections/binary_heap.mojo` still
+  refuses, at `BinaryHeap.pop()` — a PREP-time `mutating_receiver_return_refusal`
+  that pre-empts everything the monomorphizer would have reached. So the export
+  gate that stood behind it is gone and the 165-file row still does not move,
+  which is the `FORMAL_binary_heap_mojo_after_the_len_value.md` /
+  `FORMAL_sweep_work_map_2026-10-03_b8.md` §4.1 finding restated: two walls, and
+  the second one being removed is not the same as the first one being removed.
+* **"Monomorphizing nothing is still nothing" still holds** for the six
+  permanent rows above, and one of them is now measurably better for a different
+  reason: `std/stat/stat.mojo`'s seven generic `S_ISxxx` are instantiable now, so
+  a caller that writes `S_ISREG(st)` with the bracket a real caller has to write
+  reaches an instantiation, where the bare spelling remains refused — a bare call
+  names no instantiation, so no trie entry can mean it.
+
+The remainders — a type argument in an annotation position, a DOTTED
+application `mod.G[T]()`, a comptime specialization of an imported template, and
+the trait-bound check — are listed with the reason each is not a third line of
+the same commit in **`bugs/FORMAL_generic_monomorph_scope.md`**, which is the
+single home for them from here.
+
 ## 1.3 One of the 30 should not be in the family at all
 
 `std/gpu/host/nvidia/tma.mojo` is refused because it "imports `.`", and the

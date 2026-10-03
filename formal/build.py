@@ -13757,9 +13757,11 @@ def no_public_api_reason(source_paths: list) -> str:
         function and no type to cross, and there never will be;
       * every public function is a GENERIC template (`std/stat/stat.mojo`'s
         seven `S_ISxxx[intable: Intable]`): doc/ABI.md is explicit that a
-        generic is not a single boundary symbol, each INSTANTIATION is, and
-        the CAS keying that needs is Stage 5. Until monomorphization exists
-        on this path there is no name an importer could bind;
+        generic is not a single boundary symbol, each INSTANTIATION is. This
+        path DOES instantiate them now (`formal/monomorph.py`, 2026-10-03), on
+        demand, so reaching THIS branch means no importer asked for an
+        instantiation of any of them — which is the case for a module nothing
+        applies a template from, and the right answer for it is the refusal;
       * only struct TYPES, no free functions: the boundary symbol for a type
         is its layout in the reflection table (which this backend does not
         emit), so a type alone gives a dylib nothing to export;
@@ -13770,13 +13772,17 @@ def no_public_api_reason(source_paths: list) -> str:
         dylibs and so does not advertise.
 
     The generic case is the one worth being careful about in the OTHER
-    direction: exporting a template under its base name would be easy and
-    would make these files build, and it would be wrong. `S_ISREG` as one
-    symbol is one function; called at `Int` and at some other `Intable` it is
-    two, and only one address can be in the trie. Publishing a link line that
-    can silently bind the wrong body is the failure this whole mechanism
-    exists to prevent, so the honest answer is the refusal until the
-    instantiation keying lands.
+    direction, and the reason it is STILL a refusal after monomorphization
+    landed is the one half monomorphization does not do: exporting a template
+    under its base name would be easy and would make these files build, and it
+    would be wrong. `S_ISREG` as one symbol is one function; called at `Int` and
+    at some other `Intable` it is two, and only one address can be in the trie.
+    Publishing a link line that can silently bind the wrong body is the failure
+    this whole mechanism exists to prevent. What exists now is one symbol per
+    REQUESTED instantiation and no symbol for the template, so a module whose
+    instantiations nobody asked for still has no boundary symbol — and a BARE
+    `S_ISREG(st)` still has no instantiation to name, which is
+    `formal/model.py::imported_callee_refusal`'s case.
 
     **A branch may only claim what it checked.** Three of the branches below
     used to assert a fact that is not true of the file they fired on, which is
@@ -13880,19 +13886,31 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"public function in it is a GENERIC template ({listed}"
                 f"{' …' if len(set(gen_funcs)) > 6 else ''}), and doc/ABI.md "
                 f"is explicit that a generic is not a single boundary symbol "
-                f"— each INSTANTIATION is, keyed in the CAS by its type "
-                f"arguments. That monomorphization is Stage 5 and this path "
-                f"does not do it, so there is no name an importer could bind. "
-                f"Exporting the template under its base name instead would be "
-                f"wrong, not conservative: one trie entry cannot be two "
-                f"instantiations, so a call with different type arguments "
-                f"would silently bind the first one's body.")
+                f"— each INSTANTIATION is, under its own mangled name. This "
+                f"path instantiates them on demand (`formal/monomorph.py`), so "
+                f"reaching this message means nothing asked this module for an "
+                f"instantiation of any of them: call one with its type "
+                f"arguments spelled (`{sorted(set(gen_funcs))[0]}[Int](…)`) and "
+                f"the library you import will carry the instantiation this "
+                f"message says is missing. A BARE call still names no "
+                f"instantiation, and exporting the template under its base "
+                f"name instead would be wrong rather than conservative: one "
+                f"trie entry cannot be two instantiations, so a call with "
+                f"different type arguments would silently bind the first "
+                f"one's body.")
     if not concrete_funcs and not gen_funcs and not concrete_structs \
             and gen_structs:
         listed = ", ".join(sorted(set(gen_structs))[:6])
         return (f"{head} exports nothing under doc/ABI.md's rules: it "
-                f"declares only the generic struct template(s) {listed}, and a "
-                f"parametric type has no single boundary layout either.")
+                f"declares only the generic struct template(s) {listed}, and "
+                f"the template itself is not a boundary symbol. Its "
+                f"INSTANTIATIONS are — `formal/monomorph.py` compiles each one "
+                f"an importer asks for into this module's own library as a "
+                f"concrete `{sorted(set(gen_structs))[0]}_Int`, under this "
+                f"module's qualifier — so this message means nothing asked for "
+                f"one: construct the type with its argument spelled "
+                f"(`{sorted(set(gen_structs))[0]}[Int]()`) and the library will "
+                f"carry it.")
     if not concrete_funcs and concrete_structs:
         listed = ", ".join(sorted(set(concrete_structs))[:6])
         return (f"{head} exports nothing under doc/ABI.md's rules: it has no "
@@ -13926,8 +13944,10 @@ def _exclusion_why(reflect) -> dict:
             "entry cannot be two instantiations"),
         reflect.EXCL_GENERIC: (
             "a GENERIC template, and a generic is not a single boundary symbol "
-            "— each INSTANTIATION is, keyed in the CAS by its type arguments, "
-            "which is Stage 5 and this path does not do it"),
+            "— each INSTANTIATION is, under its own mangled name, compiled "
+            "into the defining module's library on demand "
+            "(`formal/monomorph.py`). The template under its own name is never "
+            "one symbol, so nothing imports it"),
     }
 
 
