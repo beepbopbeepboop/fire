@@ -1,4 +1,14 @@
-# Compiled mode stubs a module it never compiled, so every `mod.method()` consumer computed with a 0
+# RUNTIME: compiled mode stubs a module it never compiled; `argparse` (and `math`, and `signal`) are among them
+
+**The title this doc used to carry — "…so every `mod.method()` consumer
+computed with a 0" — stated the defect as if it were still open, and it is
+not.** The stub now raises `NotImplementedError` at the call instead of echoing
+the marker back, so the program names the absence, exits non-zero, and can
+still catch it. The bug that remains is the subsystem below: those modules are
+not compiled into the binary at all. Retitled 2026-10-02 (`work/bugs4-9-c`)
+because a doc whose title says "crashes" is read as "still crashes", and the
+next person to look at `argparse` here would re-do the diagnosis this Status
+already records.
 
 ## Status (2026-10-02 — the stub is LOUD; the subsystem is still not implemented)
 
