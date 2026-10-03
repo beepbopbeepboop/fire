@@ -8864,6 +8864,15 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 # one place to add to — a name added here changes a diagnostic, never a verdict:
 # the hand-off is unsound either way, because none of these has a compiled body
 # to hand an address to.
+#
+# **A name here is a name THIS IMAGE has no function of, not a spelling.** The
+# arm is inside `frame_undefined_callee_refusal`, and the refusal it is reached
+# from returns None for a callee that is one of this module's own functions
+# (`frame_receiver_escape_refusal`'s docstring, case by case). So a module that
+# defines its own `getattr` never arrives here and keeps being an ordinary
+# function that takes a frame receiver by reference — which is the one thing a
+# name-keyed table can get wrong silently, and which
+# `test_formal_run.py`'s `byref_a_local_getattr_is_not_the_builtin` pins.
 UNIMPLEMENTED_BUILTINS = {
     "type_of": (
         "its answer is a TYPE, and this path has no value that denotes a type: "

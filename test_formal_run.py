@@ -2661,6 +2661,31 @@ FD_CASES = [
 # because a frame belongs to the function that created it and a receiver that
 # outlives its creator would be dereferenced after its bytes were reused.
 BYREF_CASES = [
+    # A function whose NAME is a Python builtin, defined here. This is a GUARD,
+    # and the side it guards is the one `formal/model.py`'s
+    # `UNIMPLEMENTED_BUILTINS` table could plausibly take away: that table is
+    # consulted by `frame_undefined_callee_refusal`, whose whole subject is a
+    # callee this build compiles NOWHERE, so a locally defined `getattr` must
+    # keep being an ordinary function that takes a frame receiver by reference
+    # and returns 7. If a change made the table name-only, this case would start
+    # being refused with "getattr is a Python BUILTIN … no part of this path
+    # implements it" — false about this program, which implements it.
+    #
+    # Labelled a GUARD rather than a demonstration because it was already true
+    # before the table existed; it is here because the table is a name test and
+    # a name test is exactly the kind of change that can be wrong in this
+    # direction silently.
+    ("byref_a_local_getattr_is_not_the_builtin",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def getattr(o: P, name: Int) -> Int:\n"
+     "    return o.a + o.b\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return getattr(p, 0)\n", 7, None),
     # The cheapest width, and the whole design in one program: two fields, a
     # constructor, a write through the receiver, a read back through a
     # DIFFERENT method. 3 + 4 = 7.
