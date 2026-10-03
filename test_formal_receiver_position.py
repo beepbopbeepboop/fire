@@ -253,6 +253,51 @@ DIFF_CASES = [
      '    print("v=%d" % f(1, 3, 7), end="")\n'
      "    return 0\n\n"
      "main()\n"),
+
+    # **GUARD** — the advice the call-result-receiver refusal gives, and it is in
+    # this table because it is a positive case: `m.make().take(r)` is refused in
+    # `REFUSALS` below, and the sentence it is refused with tells the reader to
+    # bind the receiver to a local of a declared struct type. If that program did
+    # not build, the refusal would be a second defect wearing the first one's
+    # clothes, and nothing else in the tree would say so.
+    #
+    # `q.combine[2](3)` is the SPECIALIZED spelling deliberately — it is the one
+    # the other refusal case's twin uses, so the guard and the refusal describe
+    # the same call one rewrite apart. 5045 = 5000 + 40 + 3 + 2, and every digit
+    # is load bearing: `combine`'s receiver (5 and 4, swapped by `peer`), its
+    # `a` (5), the argument (3) and the specialization (2).
+    ("GUARD_a_call_result_receiver_bound_to_a_local_answers",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def peer(self) -> Pair:\n"
+     "        var q = Pair()\n"
+     "        q.a = self.b\n"
+     "        q.b = self.a\n"
+     "        return q\n"
+     "    def combine[T: Int](self, k: Int) -> Int:\n"
+     "        return self.a * 1000 + self.b * 10 + k + T\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Pair()\n"
+     "    p.a = 4\n"
+     "    p.b = 5\n"
+     "    var q = p.peer()\n"
+     '    printf("v=%d", q.combine[2](3))\n'
+     "    return 0\n",
+     "class Pair:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "    def peer(self):\n"
+     "        return Pair(self.b, self.a)\n"
+     "    def combine(self, T, k):\n"
+     "        return self.a * 1000 + self.b * 10 + k + T\n\n"
+     "def main():\n"
+     "    p = Pair(4, 5)\n"
+     "    q = p.peer()\n"
+     '    print("v=%d" % q.combine(2, 3), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 # ── the refusals ────────────────────────────────────────────────────────────
@@ -408,6 +453,84 @@ REFUSALS = [
      "    bs[0].k = 3\n"
      "    return bs[0].get()\n",
      "`bs[0].get(…)` cannot be lowered"),
+
+    # ── a CALL RESULT as the receiver, and the TWO SPELLINGS of that one call ──
+    #
+    # `m.make().take(r)` and `m.make().take[r](r)` are the same call — the
+    # brackets bind a specialization, which is not part of what the callee names
+    # — and before 2026-10-03 they got two different answers, neither of them a
+    # refusal at the construct:
+    #
+    #   m.make().take(r)     the LINK AUDIT: "the image would bind 1 symbol(s)
+    #                        that nothing provides: take"
+    #   m.make().take[r](r)  the EMITTER: "unsupported call target on the formal
+    #                        arm64 path (got SubscriptExpr)"
+    #
+    # The second names the compiler's node type for a call whose only problem is
+    # its receiver, and the first is the sentence
+    # `formal/model.py`'s `subscript_receiver_method_refusal` calls "worse than a
+    # wrong number because it is usually silent": a symbol spelled after the
+    # METHOD can also COLLIDE with a real one, and then the image binds that and
+    # computes a plausible wrong answer with nothing reporting a failure.
+    #
+    # One case per spelling, and that is the whole assertion: they must refuse
+    # with the SAME words. A reader who fixed only one of them would leave the
+    # other reporting a link line or a node class, and the suite would be green
+    # on both counts as long as each was checked alone.
+    #
+    # `m.make()` returns a two-field struct, so the receiver would be a FRAME
+    # ADDRESS if it were established at all — the shape the family is about
+    # rather than a one-word struct that would pass through unrepresentably.
+    ("refuse_a_method_call_on_a_call_result_receiver",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Maker:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def make(self) -> Maker:\n"
+     "        var q = Maker()\n"
+     "        q.a = self.b\n"
+     "        q.b = self.a\n"
+     "        return q\n"
+     "    def take(self, r: R) -> Int:\n"
+     "        return self.a + r.a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Maker()\n"
+     "    m.a = 1\n"
+     "    m.b = 2\n"
+     "    var r = R()\n"
+     "    r.a = 3\n"
+     "    r.b = 4\n"
+     "    return m.make().take(r)\n",
+     "`m.make().take(…)` cannot be lowered"),
+
+    # The same call, SPECIALIZED. The needle is the one above on purpose: a
+    # specialization that reported a different construct would be the defect
+    # again, one level down.
+    ("refuse_a_specialized_method_call_on_a_call_result_receiver_too",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Maker:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def make(self) -> Maker:\n"
+     "        var q = Maker()\n"
+     "        q.a = self.b\n"
+     "        q.b = self.a\n"
+     "        return q\n"
+     "    def take[T: Int](self, r: R) -> Int:\n"
+     "        return self.a + r.a + T\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Maker()\n"
+     "    m.a = 1\n"
+     "    m.b = 2\n"
+     "    var r = R()\n"
+     "    r.a = 3\n"
+     "    r.b = 4\n"
+     "    return m.make().take[7](r)\n",
+     "`m.make().take(…)` cannot be lowered"),
 ]
 
 # ── the comptime ABI, now on BOTH architectures ────────────────────────────

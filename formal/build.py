@@ -2596,8 +2596,10 @@ def _call_receivers(fn):
     generic's comptime parameters, so `b.run[3](4)` is a call in the same sense
     `b.run(4)` is, and both receivers are the same node: the `MemberExpr` under
     the `SubscriptExpr`. The walk therefore looks THROUGH a subscript on the
-    callee, which is what `formal/model.py`'s `call_callee_name` does for the
-    same reason — one recogniser per question, and both answers say `call`.
+    callee through `model.method_callee_base`, which is the one recogniser for
+    that question — `formal/model.py`'s `call_callee_name` looks through a
+    subscript for the same reason, the two spellings have to agree about it, and
+    both answers say `call`.
 
     `id()` of the node, because the walk yields nodes and a set of identities
     is the only way to say "this node, in this position" without a second walk
@@ -2606,11 +2608,9 @@ def _call_receivers(fn):
     for node in M.iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.CallExpr):
             continue
-        func = node.func
-        if isinstance(func, F.SubscriptExpr):
-            func = func.obj
-        if isinstance(func, F.MemberExpr):
-            out.add(id(func))
+        member = M.method_callee_base(node)
+        if isinstance(member, F.MemberExpr):
+            out.add(id(member))
     return out
 
 
@@ -6477,6 +6477,20 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             # rewriting did not lift has no callee name to report, and "a call
             # this path does not recognise" sends the reader looking for a
             # missing function rather than at the method the source names.
+            #
+            # NOT asked through `model.method_callee_base`, and the asymmetry is
+            # the point rather than an oversight: a specialization subscript does NOT
+            # make this a method call here, because `Box.run[1](0, r)` is a
+            # specialization of a DOTTED callee whose receiver is passed in
+            # ARGUMENT position 0 — reporting that as "a method call on a value
+            # receiver is dispatched by NAME" names a receiver and a dispatch
+            # the source does not contain, which is what
+            # `test_formal_receiver_position.py`'s
+            # `refuse_a_dotted_specialized_callee_names_it` exists to prevent.
+            # A receiver the LIFT did not happen for is refused earlier and
+            # better (`_receiver_shape_refusal`, asked from `_rewrite_method_calls`
+            # before this walk), so the only calls that reach here with a
+            # `MemberExpr` callee are the ones this sentence is for.
             method = (_member_chain(node.func)
                       if isinstance(node.func, F.MemberExpr) else None)
             # ONE loop over the arguments, and what each one is decided BY is
@@ -10847,10 +10861,13 @@ def _method_call_target(call, owners: dict):
     immediately after this one, on the same `one_word` table, and it can lift an
     ambiguous `m` where this cannot because it reads the field's DECLARED TYPE
     instead of the spelling.
+
+    The bracket is stripped by `model.method_callee_base`, the one recogniser for
+    "what does this callee name", so this lift and `_receiver_shape_refusal` —
+    which is asked immediately after it, of the same node — cannot disagree about
+    whether `recv.m[T](x)` names a method.
     """
-    func = call.func
-    if isinstance(func, F.SubscriptExpr):
-        func = func.obj
+    func = M.method_callee_base(call)
     if not (isinstance(func, F.MemberExpr) and isinstance(func.obj, F.IdentExpr)):
         return None
     owner = owners.get(func.member)
@@ -10969,11 +10986,13 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
     wider one refuses programs that work. Measured, each of them was tried
     first and cost something:
 
-      * the callee must be a `MemberExpr` whose base is NOT a bare name. A bare
-        name is `recv.m(...)`, which `_method_call_target` already lifts, and a
-        `SubscriptExpr` callee is `recv.m[T](...)` — the specialization, which
-        `specialization_call_refusal` and `imported_callee_refusal` both answer
-        with a better sentence and which this must not pre-empt;
+      * the callee must be a `MemberExpr`, and the RECOGNITION asks it through
+        `model.method_callee_base`, so a specialization subscript is stripped and
+        `recv.m[T](...)` is this function's question as much as `recv.m(...)` is
+        — one call, one answer. `specialization_call_refusal` and
+        `imported_callee_refusal` are asked elsewhere and still answer with a
+        better sentence for the callees they own; this one is asked only of a
+        receiver the lift did not happen for, and the lift is asked first;
       * `m` must be in `owners`, i.e. exactly one struct in this module declares
         it. Without that, `mod.f()` across a dylib boundary and every
         `external_call` template come through here, and both are correct;
@@ -10986,9 +11005,9 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
     into nested functions and a message naming the wrong one is a message that
     sends the reader to the wrong place.
 
-    The receiver must be a SUBSCRIPT, and that restriction is load-bearing
-    rather than cautious — measured, the two widenings each refused working
-    cases and pre-empted better sentences:
+    The receiver must be a SUBSCRIPT or a CALL RESULT, and that restriction is
+    load-bearing rather than cautious — measured, the one further widening refused
+    working cases:
 
       * "not a bare name" refused 24 working cases in `test_formal_run.py`. A
         `MemberExpr` receiver is a field or a nested frame
@@ -10996,20 +11015,57 @@ def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
         DECLARED type names the struct, so the case is answerable and is
         answered — by `_check_frame_escapes`, `frame_opaque_position_refusal`
         and the nested-frame refusals, several times over.
-      * "a subscript or a call result" still pre-empted
-        `frame_opaque_position_refusal`'s own sentence for `mk().take(r)`, which
-        is the SAME fact (a receiver whose type is not established) reached
-        through a path that already says so.
 
-    A subscript is the one shape with no answer anywhere: `bs[0]` is a value
-    the build has no name for at all, and it reaches the link audit as a call
-    against a symbol spelled after the METHOD.
+    **A call result is asked here for the first time (2026-10-03), and it is the
+    shape the two spellings of one call disagreed about.** `m.make().take(r)` and
+    `m.make().take[r](r)` are the same call, and before the callee was asked
+    through `model.method_callee_base` they got two different answers from two
+    different places — neither of them a refusal at the construct:
+
+    | | before |
+    |---|---|
+    | `m.make().take(r)` | the LINK AUDIT: "the image would bind 1 symbol(s) that nothing provides: take" — a diagnosis about where the symbol should have come from, for a defect in how the call was written |
+    | `m.make().take[r](r)` | the EMITTER: "unsupported call target on the formal arm64 path (got SubscriptExpr)" — a sentence about the compiler's node type, for a call whose only problem is its receiver |
+
+    The second is the same class of defect `bugs/FORMAL_frame_receiver_handoff.md`
+    §4 exists to police, and the first is the failure
+    `subscript_receiver_method_refusal`'s own docstring calls "worse than a wrong
+    number because it is usually silent": the symbol can also COLLIDE with a real
+    one and the image then computes a plausible wrong answer with nothing
+    reporting a failure. Both spellings now get the one sentence that names the
+    construct and the missing fact, and it is the same sentence the subscript
+    receiver has had since 2026-10-01.
+
+    **What it pre-empts, measured, and why the trade is the right way round.** For
+    a call result carrying a FRAME ARGUMENT, `frame_opaque_position_refusal`'s
+    method sentence answered both spellings before (and the bracketed one with the
+    wrong sentence of the two, which is the defect above). That sentence is about
+    the same fact — a receiver whose type is not established, so there is no
+    parameter list to read — but it says it in the voice of an ARGUMENT POSITION,
+    and it cannot quote the receiver: `member_chain_text` prints a call result as
+    `…`, so the reader was told about `….take`. Side by side, on the same source:
+
+        frame_opaque:  "a R receiver is passed to ….take in argument position 0,
+                        and a method call on a value receiver is dispatched by NAME …"
+        here:          "`m.make().take(…)` cannot be lowered: dispatch here is BY
+                        NAME, so a method call is lifted to `Maker_take(receiver, …)`
+                        from the name alone — and `m.make()` is not a bare name …"
+
+    Same fact, the source's own spelling of both halves, and a fix. The advice is
+    also true for this shape rather than merely plausible: `var q = m.make();
+    q.take(r)` builds and runs on BOTH architectures (measured — `q.take[2](3)`
+    answers 5045), because binding the receiver to a local of a declared struct
+    type is exactly what the lift needs a name for.
+
+    A subscript and a call result are the two shapes with no answer anywhere: both
+    are a value the build has no name for, and both reach the link audit as a
+    call against a symbol spelled after the METHOD.
     """
-    func = call.func
+    func = M.method_callee_base(call)
     if not isinstance(func, F.MemberExpr):
         return None
     recv = func.obj
-    if not isinstance(recv, F.SubscriptExpr):
+    if not isinstance(recv, (F.SubscriptExpr, F.CallExpr)):
         return None
     member = func.member
     if owners.get(member) is None:

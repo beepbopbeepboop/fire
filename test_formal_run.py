@@ -4086,6 +4086,24 @@ WAVE5_POSITION_CASES = [
     # with the same words. It is here because the split has to keep the narrow
     # case narrow, and a case that only ever fired on new shapes would not show
     # that.
+    #
+    # **The needle MOVED on 2026-10-03, and the case stayed, because the shape
+    # moved rather than the fact.** `mk()` is a CALL RESULT, and a call result
+    # as a receiver is now refused at the construct by `_receiver_shape_refusal`
+    # — `formal/model.py`'s `subscript_receiver_method_refusal` — which is the
+    # same message `bs[0].get()` has had since 2026-10-01 and says the same
+    # thing about the same missing fact. The sentence this case used to pin
+    # quoted the receiver as `….take`, because `member_chain_text` prints a call
+    # result as `…`, and its own tail then said what closes it: "the method's
+    # declaration reaching the analysis: a receiver whose type names the struct,
+    # so the call can be rewritten and the parameter list read". So the two
+    # sentences agree about the fix, and the one that leads with it wins.
+    #
+    # Measured, because a refusal whose advice does not work is a second defect
+    # wearing the first one's clothes: binding the receiver is enough, and the
+    # FRAME ARGUMENT that the old sentence was about is then fine —
+    # `var b = mk(); return b.take(r)` builds on arm64 (the lift gives the
+    # callee a name and its parameter list, so `r` is followed into it).
     ("byref_refuse_an_opaque_position_as_opaque",
      "struct R:\n"
      "    var a: Int\n"
@@ -4104,6 +4122,48 @@ WAVE5_POSITION_CASES = [
      "def main(n: Int) -> Int:\n"
      "    var r = R()\n"
      "    r.a = 7\n"
+     "    return mk().take(r)\n",
+     "refuse:`mk().take(…)` cannot be lowered", None),
+    # …and the branch the case above used to cover is still reachable, on the
+    # shape where the construct-level refusal CANNOT answer: an AMBIGUOUS method
+    # name. `take` is declared by two structs here, so `owners` has no entry for
+    # it and `subscript_receiver_method_refusal` — which needs the name to
+    # resolve to exactly one struct — declines, exactly as its own docstring says
+    # it must. What is left is the analysis's own sentence about an opaque
+    # position, and it is the right one here because the missing fact is DEEPER:
+    # even with the receiver named, `take` would still be two functions.
+    #
+    # So the two cases are the two halves of one question — "whose `take`?" — and
+    # dropping either would leave the other unmeasured. Both refuse on both
+    # architectures, from the shared build pass, before either emitter.
+    ("byref_refuse_an_opaque_position_when_the_method_name_is_ambiguous",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct A:\n"
+     "    var p: Int\n"
+     "    var q: Int\n"
+     "\n"
+     "    fn take(self, o: Int) -> Int:\n"
+     "        return self.p + o\n"
+     "\n"
+     "struct B:\n"
+     "    var p: Int\n"
+     "    var q: Int\n"
+     "\n"
+     "    fn take(self, o: Int) -> Int:\n"
+     "        return self.q + o\n"
+     "\n"
+     "def mk() -> A:\n"
+     "    var a = A()\n"
+     "    a.p = 1\n"
+     "    a.q = 2\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
      "    return mk().take(r)\n",
      "refuse:a METHOD call on a value receiver", None),
     # ONE PARAMETER, TWO KINDS OF VALUE — the wrong answer that was in the
