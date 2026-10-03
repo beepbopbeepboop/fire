@@ -1384,7 +1384,7 @@ class TestX86EndToEndEmitter(unittest.TestCase):
 # reads was written. Two scripts each wrote their generated source to a
 # hard-coded `os.path.join("/tmp", "<a fixed name>")` and handed it to `lean` BY
 # RELATIVE NAME with `cwd` set there
-# (`bugs/FORMAL_x86_model_scripts_write_to_a_shared_tmp_path.md`). Both are
+# (fixed 2026-10-03 in 01d77c3a). Both are
 # registered suite jobs, the corpus has several worktrees, and `tools/suite.py`
 # runs `-j 18` — so two concurrent runs wrote the SAME `Coverage.lean` and the
 # second writer's bytes were what the first run's `lean` read. The coverage file
@@ -1550,7 +1550,7 @@ class TestScratchDirEstate(unittest.TestCase):
 # three bound-clamp labels of `_emit_slice_parts`, which were named after the
 # REGISTER alone (`f_s4a`/`_z`/`_c`) — so a second slice in one function rebound
 # the first's `jge` and `xs[1:5][1:3]` summed the OUTER slice
-# (`bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`). The five behavioural
+# (fixed 2026-10-03 in 68671a62). The five behavioural
 # rows for it are `test_x86_64_containers.py`'s `slice-two-*` / `slice-of-slice`
 # cases; what is here is the mechanism, on both backends, because the defect is
 # in the assembler and arm64's is the same line of code.

@@ -1,9 +1,9 @@
 # `tools/tu_grind.py` puts its scratch directory in a shared `/tmp` path by default
 
 **Area:** TOOLS (`tools/tu_grind.py`). **Status: OPEN, one line, found 2026-10-03
-while fixing `bugs/FORMAL_x86_model_scripts_write_to_a_shared_tmp_path.md`.** Not
-fixed there: `tools/` is claimed by three other workers, so the line was named in
-that doc rather than edited.
+while fixing the shared-`/tmp` scratch path in the two x86-64 model scripts
+(fixed 2026-10-03 in 01d77c3a).** Not fixed there: `tools/` is claimed by three
+other workers, so the line was named in that pass rather than edited.
 
 ## What I saw
 

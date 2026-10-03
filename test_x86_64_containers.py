@@ -195,7 +195,7 @@ CASES = [
         "    return t"), 0),
     # A SECOND slice in one function. The five rows above are all ONE slice, and
     # that is why the bug they missed survived a file full of them
-    # (bugs/FORMAL_x86_64_a_second_slice_in_a_function.md): the three bound-clamp
+    # (fixed 2026-10-03 in 68671a62): the three bound-clamp
     # labels of `_emit_slice_parts` were named after the REGISTER alone
     # (`f_s4a`/`_z`/`_c`) while every other label in the emitter carries a
     # per-site counter, and `Assembler.label` keeps the LAST address for a name

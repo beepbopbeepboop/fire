@@ -5469,7 +5469,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # middle of another instruction sequence: the first slice's copy loop
         # then ran with the second's `r8`/`r9`, and `xs[1:3]` followed by
         # `xs[2:6]` either faulted or answered the wrong number silently
-        # (bugs/FORMAL_x86_64_a_second_slice_in_a_function.md).
+        # (fixed 2026-10-03 in 68671a62).
         self._if_counter += 1
         sid = self._if_counter
         if stop is None and ascending:

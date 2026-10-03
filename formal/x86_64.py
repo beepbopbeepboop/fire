@@ -820,7 +820,7 @@ class Assembler:
         alone — so a second slice in one function rebound the first slice's
         `jge` and `xs[1:3]` followed by `xs[2:6]` answered 14 for a sum of 23,
         or died
-        (`bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`). The
+        (fixed 2026-10-03 in 68671a62). The
         `_emit_range_list` labels collided the same way before that
         (`bugs/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
         a name is required to be unique per emission site, and this is where

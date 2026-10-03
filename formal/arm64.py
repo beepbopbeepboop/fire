@@ -680,7 +680,7 @@ class Assembler:
         number. Both backends share this because both have shipped it —
         `x86_64.Assembler.label` carries the same check and the longer account,
         and the x86-64 slice-clamp collision it describes
-        (`bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`) is the same defect
+        (fixed 2026-10-03 in 68671a62) is the same defect
         a label name without a per-site counter produces.
         """
         if name in self.labels:
