@@ -7680,7 +7680,7 @@ def _apply_receiver_writeback(node, writebacks: dict) -> None:
     M.rewrite_tree(node, visit)
 
 
-def _rewrite_self_fields(node, mapping: dict):
+def _rewrite_self_fields(fn, one_word: dict, structs_by_name: dict) -> None:
     """`x.f[.g…]` -> `x` when every field read is a sole field, replacing the
     node itself.
 
@@ -7709,6 +7709,34 @@ def _rewrite_self_fields(node, mapping: dict):
     struct — a frame — and belongs to the nested-frame path rather than to
     this one.
 
+    **A call's CALLEE is not a field read, and treating it as one is what
+    turned `c.f(5)` into a call of the receiver.** For a one-field struct the
+    sole field IS the object, so the rewrite above rewrites the callee `c.f`
+    to `c` and the call becomes `c(5)` — a call of a VALUE. The two backends
+    each refused it one stage later, with the only name they had:
+
+        build: `c` is a call through a VALUE rather than through a function of
+        this unit — `c` is a name main binds …
+
+    which is true of the node they held and useless to the reader, who wrote
+    `c.f`: `c` is not the problem, and finding that out costs a build
+    (`bugs/FORMAL_a_call_through_a_one_words_field_calls_the_receiver.md`).
+    Two things changed here and neither is optional on its own. The rewrite
+    no longer touches a node in callee position — `id()` of the callee,
+    because `rewrite_tree` hands the visitor a node and no parent, the same
+    position test `_call_receivers` exists for and the one
+    `refuse_member_reads_through_a_literal_base` reads — and a callee this
+    rewrite WOULD have collapsed is REFUSED instead of collapsed, by name and
+    at the spelling (`model.sole_field_call_refusal`). Refusing rather than
+    merely skipping is the other half: a skipped callee would reach an emitter
+    that flattens `c.f` to `c` anyway and refuses it there with the same
+    sentence, one pass later and with the spelling already lost. A callee the
+    rewrite would NOT collapse is left entirely alone, which is what keeps
+    `self._inner.get(5)` (a method call on the field, lifted by name before
+    this pass runs) and `c.mk(5).x` (a field of a call's answer, refused by
+    the emitters' own field-access rule with `Cb_mk(…)` in the message) exactly
+    as they were.
+
     `model.rewrite_tree`, and the walk it brings with it. `IfStmt.elifs` is a
     list of `(condition, body)` TUPLES, so the hand-rolled recursion descended
     every `if` body and every `else` and stopped dead at the first `elif`. The
@@ -7730,15 +7758,31 @@ def _rewrite_self_fields(node, mapping: dict):
     a bare name, and the node it was built from — the chain — is precisely what
     must not be offered to this rewrite a second time.
     """
-    def visit(n):
-        if isinstance(n, F.MemberExpr):
-            root, _, path = _member_chain(n).partition(".")
-            sole = mapping.get(root)
-            if sole and _is_sole_field_prefix(path, sole):
-                return F.IdentExpr(name=root)
-        return n
+    body = getattr(fn, "body", None)
+    # Built HERE rather than at the call site because this is the only consumer
+    # of the chain, and the refusal below needs the STRUCT that derives each
+    # chain in order to name it. `one_word` is `{name: the one-word struct the
+    # name holds}` — the value `_one_word_field_map` and `_rewrite_method_calls`
+    # read, so there is still one recognition of "this name is a one-word
+    # struct's word".
+    mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
+               for name, one in one_word.items()}
+    call_recv = _call_receivers(fn)
 
-    M.rewrite_tree(node, visit)
+    def visit(n):
+        if not isinstance(n, F.MemberExpr):
+            return n
+        root, _, path = _member_chain(n).partition(".")
+        sole = mapping.get(root)
+        if not (sole and _is_sole_field_prefix(path, sole)):
+            return n
+        if id(n) in call_recv:
+            raise CodegenError(M.sole_field_call_refusal(
+                _member_chain(n), one_word[root].name, ".".join(sole), root,
+                getattr(fn, "name", None)))
+        return F.IdentExpr(name=root)
+
+    M.rewrite_tree(body, visit)
 
 
 def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
@@ -11738,9 +11782,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                  _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
         # constructor holds that struct's sole field directly.  The table holds
-        # the STRUCT and the chain is derived from it in one line, because the
-        # rewrite below needs the struct and the rewrite after that needs the
-        # chain — one recognition of "this name is a one-word word", read twice.
+        # the STRUCT and the rewrite derives the chain from it, because the
+        # rewrite needs the struct too — to name it in the refusal a call
+        # through one of those fields gets — and the chain is one line away
+        # either way.  One recognition of "this name is a one-word word", read
+        # once.
         one_word = _one_word_field_map(fn, structs_by_name,
                                        method_owners.get(fn.name))
         st = method_owners.get(fn.name)
@@ -11766,9 +11812,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             fn.body, one_word, structs_by_name, receiverless,
             _bound_receiver_structs(fn, structs_by_name,
                                     [f.name for f in functions], st))
-        mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
-                   for name, one in one_word.items()}
-        _rewrite_self_fields(fn.body, mapping)
+        _rewrite_self_fields(fn, one_word, structs_by_name)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
         # this a struct of nothing but constants — which the width rule now

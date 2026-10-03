@@ -14862,6 +14862,167 @@ MUTATING_RECEIVER_REFUSALS = [
      "refuse:called here as a VALUE rather than as a statement", None),
 ]
 
+
+# ── a call THROUGH a one-field struct's own field ──────────────────────────
+#
+# `formal/build.py`'s `_rewrite_self_fields` is the identity that keeps
+# `self.f` and `self` one storage: a one-field struct's receiver IS its field.
+# It cannot tell a field READ from a CALL of that field, because both arrive as
+# the same node — and in callee position the rewrite used to collapse the
+# callee as well, so `c.f(5)` became `c(5)`, a call of the RECEIVER.  Both
+# backends refused that one stage later with the only name they had left:
+#
+#     `c` is a call through a VALUE rather than through a function of this unit
+#
+# which is true of the node they held and useless to the reader, who wrote
+# `c.f`.  `bugs/FORMAL_a_call_through_a_one_words_field_calls_the_receiver.md`
+# is the doc; the refusal now happens at the rewrite, by name, on both
+# architectures and in the same words (`formal/model.py`'s
+# `sole_field_call_refusal`).
+#
+# The pair is the assertion: a field READ and a METHOD CALL on the same struct
+# must both still build and compute, so a fix that refused every member access on
+# a one-field struct — the over-correction this shape invites — fails here.
+# Each refusal names the FIELD (`c.f`, `self.f`, `b._leaf.x`), because the
+# spelling is the whole point: a message naming `c` sends the reader to the
+# wrong line, and costs a second build to discover that `f` is the field.
+SOLE_FIELD_CALLEE_REFUSALS = [
+    # The reported shape: a field read in callee position on a LOCAL.
+    ("call_through_a_one_word_structs_own_field_is_refused_by_its_name",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    var v = c.f(5)\n"
+     "    printf(\"%d\", v)\n"
+     "    return 0\n",
+     "refuse:`c.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+    # THE SAME THING inside the struct's own method, where the receiver is
+    # spelled `self` — a different name in the message and therefore a
+    # different row.  Before the fix this one said `self`, which reads as "the
+    # method's own receiver is the problem".
+    ("call_through_a_one_word_receivers_own_field_is_refused_by_its_name",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        var v = self.f(5)\n"
+     "        return v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    printf(\"%d\", c.go())\n"
+     "    return 0\n",
+     "refuse:`self.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+    # The TRANSITIVE chain, which is the same rule reached through
+    # `_one_word_sole_field_chain` walking two structs: `Box`'s sole field is
+    # `Leaf`, `Leaf`'s is `x`, so `b._leaf.x` and `b` are one word.  This is the
+    # row that says the refusal covers the chain and not just the one-hop
+    # spelling, and the row a fix that compared the chain's LENGTH against the
+    # map's would fail.
+    ("call_through_a_transitive_sole_field_chain_is_refused_by_its_name",
+     "struct Leaf:\n"
+     "    var x: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(5))\n"
+     "    printf(\"%d\", b._leaf.x(1))\n"
+     "    return 0\n",
+     "refuse:`b._leaf.x` is a call of a VALUE rather than of a function of "
+     "this unit", None),
+    # A local whose name is ALSO a module-level function — and this is the
+    # case where the old collapse was not even a refusal.  `c.f(5)` became
+    # `c(5)`, which is a call of the function `c` this unit compiles, so it
+    # BUILT, ran, and printed 10 where CPython raises `TypeError: 'int' object
+    # is not callable`.  The row asserts the refusal, because "it computes
+    # something" is the worse outcome here and the only way to say so is to
+    # refuse.
+    ("a_call_through_a_field_is_not_the_function_the_receiver_is_named_after",
+     "struct Cb:\n"
+     "    var f: Int\n"
+     "\n"
+     "def c(n: Int) -> Int:\n"
+     "    return n * 2\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cb()\n"
+     "    printf(\"%d\", c.f(5))\n"
+     "    return 0\n",
+     "refuse:`c.f` is a call of a VALUE rather than of a function of this "
+     "unit", None),
+]
+
+# The two spellings that must keep BUILDING, as the CPython-pair shape, because
+# the assertion is about an answer rather than about a message: a field READ and
+# a METHOD CALL on a one-word struct, and a method call THROUGH such a field.
+# They are here rather than in the refusal group because "must not be refused"
+# is not a refusal expectation — `refuse_either:` asserts that the build FAILS.
+# `5` is the field's value, `5 5` is the read and the method on one struct.
+SOLE_FIELD_CALLEE_CASES = [
+    ("a_one_word_fields_read_and_method_both_answer",
+     "struct Cell:\n"
+     "    var _v: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self._v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c._v = 5\n"
+     "    printf(\"%d %d\", c._v, c.get())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self._v = 0\n"
+     "    def get(self):\n"
+     "        return self._v\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     "    c._v = 5\n"
+     "    sys.stdout.write(\"%d %d\" % (c._v, c.get()))\n"),
+    # A method call THROUGH the field, which is the shape a fix that refused
+    # every chain through a sole field would take with it.
+    # `_rewrite_one_word_field_method_calls` lifts it to `Leaf_get(b)` before
+    # `_rewrite_self_fields` runs, so the chain in the callee is `b._leaf.get`
+    # and it is not a prefix of the map's `_leaf.x`.  The declared-type twin of
+    # this row is `test_formal_receiver_spelling.py`'s
+    # `one_word_field_through_one_field_receiver`; this one has no declaration to
+    # read, so the lift is off the binding `b = Box(...)` alone.
+    ("a_method_through_a_transitive_sole_field_is_still_answered",
+     "struct Leaf:\n"
+     "    var x: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.x\n"
+     "\n"
+     "struct Box:\n"
+     "    var _leaf: Leaf\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(Leaf(5))\n"
+     "    printf(\"%d\", b._leaf.get())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Leaf:\n"
+     "    def __init__(self, x):\n"
+     "        self.x = x\n"
+     "    def get(self):\n"
+     "        return self.x\n"
+     "class Box:\n"
+     "    def __init__(self, leaf):\n"
+     "        self._leaf = leaf\n"
+     "def main():\n"
+     "    b = Box(Leaf(5))\n"
+     "    sys.stdout.write(\"%d\" % b._leaf.get())\n"),
+]
+
 ONE_FIELD_MUTATOR_CASES = [
     ("one_field_mutator_no_args",
      "struct Cell:\n"
@@ -16018,7 +16179,7 @@ def main():
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
-                  + MUTATING_RECEIVER_REFUSALS
+                  + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS
                   # STDERR_CASES is also a different shape (name, source, exit,
                   # needles) and is selected here so the `--cases` filter knows
                   # the name, then dispatched by `stderr_names` below. It is
@@ -16039,6 +16200,7 @@ def main():
                   | {c[0] for c in COMPTIME_ATTRIBUTE_CASES}
                   | {c[0] for c in OVERLOAD_LAYOUT_CASES}
                   | {c[0] for c in ONE_FIELD_MUTATOR_CASES}
+                  | {c[0] for c in SOLE_FIELD_CALLEE_CASES}
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
@@ -16049,6 +16211,7 @@ def main():
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
+                    + SOLE_FIELD_CALLEE_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
                      + SET_UNION_CASES + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])

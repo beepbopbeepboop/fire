@@ -4614,6 +4614,67 @@ def callee_value_refusal(name: str, fn, spelling: str = None) -> str:
     )
 
 
+def sole_field_call_refusal(spelling: str, struct: str, chain: str, root: str,
+                            fn_name: str = None) -> str:
+    """Why `c.f(5)` is a call of a VALUE: the callee is the struct's own field.
+
+    ARCH-FREE, and asked from the shared pass — `formal/build.py`'s
+    `_rewrite_self_fields`, at the rewrite that would have lost the spelling —
+    rather than from an emitter.  The emitter is the wrong place, and the reason
+    is that the rewrite that keeps `self.f` and `self` one storage used to
+    collapse the CALLEE as well: by the time a backend saw `c.f(5)` the node it
+    held was `IdentExpr('c')`, and the only name it could print was `c`.  A
+    refusal naming a name the reader did not write is
+    `bugs/FORMAL_known_limits.md`'s failure mode — it costs a second build to
+    discover that `f` is the field, and a reader who does not check concludes
+    that `c` is the problem.  `callee_value_refusal` above is what a backend
+    reaches for on the collapsed node and it is TRUE of it (`c` is a name the
+    function binds), which is exactly why it had to be answered before the
+    collapse rather than after it.
+
+    **The refusal belongs to the REWRITE, because every chain it would collapse
+    in callee position names FIELDS.**  `chain` is `_one_word_sole_field_chain`'s
+    answer, which stops where the identity stops: a two-field struct in the slot
+    is a FRAME, and `b.inner.v` is then a load at a frame base rather than a
+    spelling of `b`.  So a callee this rewrite matches is a chain of field reads
+    and nothing else — there is no spelling of it that names a method, because a
+    method name is not a field name.  That is why one arm covers both the
+    single-hop `c.f(5)` and the transitive `self._inner._k(5)`, and why nothing
+    here asks whether the last step is a field or a method: once a METHOD is
+    called through the field (`self._inner.get(5)`) the chain does not match,
+    and `_rewrite_one_word_field_method_calls` has lifted that call by name
+    before this pass runs.
+
+    **CPython agrees, which is what makes this a refusal and not a limitation.**
+    A field read is a value there too, so `c.f(5)` is
+    `TypeError: 'int' object is not callable` — the source does not compute
+    something else, it does not compute anything.  The two spellings this path
+    CAN answer are named in the message, because "call a function of this unit by
+    name" (the advice a call through a VALUE gets) sends the reader hunting for
+    a function named `f` that does not exist.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (
+        f"{who}`{spelling}` is a call of a VALUE rather than of a function of "
+        f"this unit: `{spelling}` is a read of `{chain}`, and a one-field "
+        f"struct's receiver IS its field — `{chain}` is `{struct}`'s whole "
+        f"value, so `{spelling}` and `{root}` are ONE 64-bit word here and the "
+        f"word holds a value, which is not something this path can call. There "
+        f"is no function value in it either: a code address is a word whose "
+        f"target this build cannot establish, and a closure needs an "
+        f"environment, which is a box this target has no allocator for. "
+        f"CPython says the same about the source — a field read is a value "
+        f"there as well, so `{spelling}` is a `TypeError: '… object is not "
+        f"callable'` — and the two spellings this path CAN answer are a METHOD "
+        f"call, `{root}.<method>(…)` with a method `{struct}` declares, and a "
+        f"field READ, `{spelling}` without the call. Refused at the rewrite "
+        f"that would have made it `{root}(…)`, a call of the RECEIVER: the "
+        f"rewrite cannot tell a field read from a call of one, and an emitter "
+        f"downstream could only see the name the rewrite had already "
+        f"invented."
+    )
+
+
 # The kind constants live HERE, above every table that names one, because the
 # string-method table below records what each method YIELDS and a table that
 # had to spell "str" as a literal to dodge a forward reference would be one
