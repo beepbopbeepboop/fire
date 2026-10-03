@@ -22,6 +22,79 @@ per-side `nm -g` evidence, both blockers, and the reusable findings are in
 item 1. `test_count.mojo` therefore REMAINS in `EXPECTED_FAILURES` and the
 sweep is unchanged at **591 / 19 / 0, exit 0**.
 
+### MEASURED 2026-10-03: where each of the remaining 17 actually refuses
+
+The table above names the GENERIC each file needs. This one names the exact
+refusal SITE — file, line, the receiver's C type as codegen computed it, and
+the source line — by instrumenting `emit_calls._lower_call` and re-raising, so
+every row is an observation rather than an inference. Re-measurable with the
+snippet in this section's last paragraph.
+
+| file | line | receiver C type | the source line that refuses |
+|---|---|---|---|
+| `std/collections/string/iterators.mojo` | 938 | `int64_t` | `return next(self._iter)` |
+| `std/itertools/itertools.mojo` | 140 | `int64_t` | `self._inner_a_elem = next(self._inner_a)` |
+| `test/collections/string/test_iterators.mojo` | 165 | `int64_t` | `_ = next(bytes)` |
+| `test/collections/test_set.mojo` | 231 | `MojoList *` | `var elem = next(it)` |
+| `test/collections/test_span.mojo` | 544 | `Span *` | `assert_equal(next(it), 1)` |
+| `test/iter/test_chain.mojo` | 24 | `int64_t` | `assert_equal(next(it), 1)` |
+| `test/iter/test_enumerate.mojo` | 20 | `MojoList *` | `var elem = next(it)` |
+| `test/iter/test_map.mojo` | 25 | `int64_t` | `assert_equal(next(m), 2)` |
+| `test/iter/test_peek.mojo` | 22 | `int64_t` | `_ = next(iter)` |
+| `test/iter/test_zip.mojo` | 27 | `void *` | `var elem = next(it)` |
+| `test/itertools/test_cycle.mojo` | 30 | `int64_t` | `assert_equal(next(it), 1)` |
+| `test/itertools/test_drop.mojo` | 27 | `int64_t` | `assert_equal(next(it), 3)` |
+| `test/itertools/test_drop_while.mojo` | 48 | `int64_t` | `assert_equal(next(it), 5)` |
+| `test/itertools/test_product.mojo` | 32 | `int64_t` | `var elem = next(it)` |
+| `test/itertools/test_take.mojo` | 27 | `int64_t` | `assert_equal(next(it), 1)` |
+| `test/itertools/test_take_while.mojo` | 47 | `int64_t` | `assert_equal(next(it), 1)` |
+| `test/python/test_python_object.mojo` | 296 | `MojoList *` | `var val = next(it)` |
+
+(`test/os/path/test_getsize.mojo` is the separate `stat` defect and
+`test/itertools/test_count.mojo` is item 1; neither appears here.)
+
+**Three shapes, not one, and only the first is the common case.**
+
+1. **`int64_t` (11 files) — the receiver is BOXED.** The local was bound from
+   a call that returned an un-elaborated generic, so codegen never learned a
+   struct type for it. This is items 2 and 3.
+2. **`MojoList *` / `Span *` / `void *` (6 files) — the receiver is a real
+   POINTER, to the wrong thing.** `var it = enumerate(list_obj.__iter__())`
+   types `it` as `MojoList *`: the erasure picked a container for an argument
+   it could not resolve, rather than the scalar `int64_t` of case 1. The
+   refusal is consequently a DIFFERENT one — `_lower_call`'s struct branch
+   computes `_struct_ptr_name(gen, 'MojoList *')`, finds no `MojoList___next__`
+   in `func_return_types`, and refuses — and it will NOT be fixed by whatever
+   fixes case 1. Worth separating before starting, because a fix aimed at case 1
+   that measures only "did the refusal count go down" will look like progress
+   here while changing nothing. `test_zip`'s `void *` is a third variant again:
+   `zip(l, l2)` erased to an untyped pointer rather than to any named struct.
+3. **`self._iter` (2 files) — the receiver is a FIELD of a struct in the same
+   module, typed by an IMPORTED GENERIC'S INSTANTIATION.** `iterators.mojo`'s
+   `BytesIter[origin: ImmOrigin]` declares
+   `var _iter: _SpanIter[Byte, Self.origin]` and its `__next__` does
+   `next(self._iter)`. Two distinct sub-problems, and this is the one item 3
+   is actually about: (a) `Self.origin` appears as a type ARGUMENT inside a
+   nested instantiation, not as a bare `Self.<TYPE PARAM>`, so commit
+   ae8f0493's substitution does not reach it; (b) even substituted, the result
+   `_SpanIter[Byte, <origin>]` is not a CONCRETE type name, so
+   `_materialize_generic_struct_mentions`' `_is_concrete_type_arg` check
+   declines it — an `Origin[...]` argument needs origin-aware elaboration, not
+   a name. `test_iterators.mojo`'s `_ = next(bytes)` is the same shape reached
+   through a method (`StringSlice.bytes()` returns `BytesIter[origin]`).
+
+   **This is the concrete next step, and it is narrower than items 2/3**: it
+   is two files, it is one field shape, and it does not need overload selection
+   at all. It needs (a) `Self.<comptime member>` read from the struct's own
+   `comptime`/`[...]` declaration in its DEFINING module and substituted
+   (explicitly NOT textual `Self.` stripping — see ae8f0493), and (b) an
+   origin-typed type argument accepted as concrete by the materializer.
+
+To reproduce the table, wrap `mojo/backend_gimple/emit_calls._lower_call`, log
+`getattr(node, 'line', 0)` and the receiver C type parsed out of the
+`receiver typed \`…\`` clause of the RuntimeError, re-raise, and call
+`build_stdlib_dylib.compile_module_to_c` once per file.
+
 ### Landed 2026-10-03: in-TU instantiation, and 3 of the 22 with it
 
 `mojo/backend_gimple/elab_intu.py` (new) + one call site in
