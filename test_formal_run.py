@@ -6036,6 +6036,76 @@ BOTH_ARCH_CASES = [
      "    b.inner.v = 41\n"
      "    b.inner.has = 1\n"
      "    return b.get()\n", 155, None),
+    # ── …AND THE ROW THAT DOES NOT WRITE THE FIELD FIRST ──────────────────────
+    #
+    # The two rows above are the SAME program with `b.inner = Opt()` in them, and
+    # that line is doing more work than it looks: `Box()` builds a one-field
+    # struct whose receiver IS its sole field's storage, and that storage is an
+    # ADDRESS (`model.one_word_sole_field_frame`). So `Box()` has to bring the
+    # `Opt` frame up, and it used not to: `model.struct_default_word` answered
+    # `("none", None)` — "no class-level initializer, so a fresh word of zeros is
+    # right" — which is true of every other field and false of this one, and the
+    # constructor emitted `mov X0, #0` / `mov eax, 0`. Every field read through
+    # it was then a load from address 0.
+    #
+    # **Measured on this tree before the fix, both architectures: SIGSEGV
+    # (exit 139) from a green build, with nothing on either stream.** The rows
+    # above cannot see it, which is why this is a separate row and not a variant
+    # of them: they never read through the null word.
+    #
+    # 0 is CPython's answer and it is a real assertion, not a weak one: the frame
+    # has to EXIST for the method's `self.inner.v` to read as 0, so a lowering
+    # that left the word null and a lowering that brought the frame up and
+    # initialized it to its defaults both have to agree on the reservation being
+    # there, and only one of them survives the fault.
+    ("one_word_holder_of_a_frame_read_before_it_is_written",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v * 10 + self.inner.has\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var b = Box()\n"
+     "    return b.get()\n", 0, None),
+    # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
+    # cannot reach: the frame is reserved in the PROLOGUE, one block per call
+    # site, laid out in walk order by `model.struct_constructor_sites`, and the
+    # second site's block has to start above the first one's. A reservation that
+    # handed both sites the same offset would answer 9 twice where CPython says
+    # 9 and then 3 — the first object's fields overwritten by the second
+    # construction, which is a wrong answer on both machines and not a fault.
+    #
+    # So the numbers are the assertion: `bx` and `by` are separate
+    # constructions, `bx.setboth(4, 5)` writes through the FIRST site's frame and
+    # `by.setboth(1, 2)` through the second's, and 9 / 3 is what survives only if
+    # the two blocks are disjoint. CPython prints the same two numbers.
+    ("two_one_word_constructions_get_two_different_frames",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def setboth(out self, a: Int, b: Int):\n"
+     "        self.inner.v = a\n"
+     "        self.inner.has = b\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.inner.v + self.inner.has * 10\n"
+     "\n"
+     "def main() -> int:\n"
+     "    var bx = Box()\n"
+     "    bx.setboth(4, 5)\n"
+     "    var by = Box()\n"
+     "    by.setboth(1, 2)\n"
+     "    printf(\"%d %d\", bx.get(), by.get())\n"
+     "    return 0\n", 0, "54 21"),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a

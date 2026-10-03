@@ -978,9 +978,13 @@ class X86_64Codegen:
         # has to start above the lot or a blob would land on one.  Reading the
         # block from the shared model rather than summing frame bytes here is
         # what keeps the two backends reserving the same bytes in the same
-        # order.
+        # order — and it is `struct_constructor_site_bytes`, not
+        # `struct_frame_block_bytes`, because a ONE-FIELD struct whose sole field
+        # holds a frame reserves the NESTED block alone (there is no object: the
+        # value is the nested frame's address).  arm64's twin, and the same
+        # shared reader, so the two cannot reserve different amounts.
         self._frame_recv_bytes = sum(
-            M.struct_frame_block_bytes(st, self._structs)
+            M.struct_constructor_site_bytes(st, self._structs)
             for st, _off, _nested in self._frame_sites.values())
         # Blocks for frames this function RECEIVES from a callee that returns
         # one.  The same region as the constructor frames and for the same
@@ -8272,7 +8276,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
-            self._emit_fresh_one_word(name, st)
+            self._emit_fresh_one_word(name, st, e)
             return
         self._emit_expr(value)
 
@@ -8524,7 +8528,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                                               Reg.RAX))
         self._emit_blob_base(base, Reg.RAX)
 
-    def _emit_fresh_one_word(self, name: str, st) -> None:
+    def _emit_fresh_one_word(self, name: str, st, e=None) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.
 
         The x86-64 twin of arm64's, and the shared half is the DECISION
@@ -8534,8 +8538,19 @@ ctor_field_value=self._ctor_field_value_for(name),
         program that read the field without writing it first got a value the
         source never said — and, before this, a struct constructor was not even
         recognised here and became a `call _S` against a symbol nothing
-        defines."""
-        kind, payload = M.struct_default_word(st)
+        defines.
+
+        **AND THE FRAME-VALUED SOLE FIELD IS NOT A WORD OF ZEROS.**  When the
+        sole field holds a nested FRAME the value is an ADDRESS, and a fresh
+        zero word was a load from address 0 on the first field read — measured,
+        both architectures, SIGSEGV from a green build
+        (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
+        word.md`). The frame comes up here exactly as it does for a struct of
+        two or more fields — its own nested subtree first, then its own slots at
+        their defaults — and its address is the result. `e` is the construction
+        node, and it is what finds the site, whose bytes
+        `model.struct_constructor_sites` reserved in the prologue."""
+        kind, payload = M.struct_default_word(st, self._structs)
         if kind == M.DEFAULT_OPAQUE:
             raise CodegenError(
                 f"constructing {name} cannot bring its field {payload!r} up at "
@@ -8545,6 +8560,30 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"program with a representation)")
         if kind == M.DEFAULT_STRING:
             self._emit_expr(F.StringLiteral(value=payload))
+            return
+        if kind == M.DEFAULT_NESTED_FRAME:
+            field_name, nested = payload
+            site = self._frame_sites.get(id(e)) if e is not None else None
+            if site is None:
+                raise CodegenError(
+                    f"constructing {name} needs the frame its field "
+                    f"{field_name!r} holds, and no prologue reservation was "
+                    f"made for one: the frame has to exist before the body runs, "
+                    f"so it cannot be handed out by a bump pointer the way a "
+                    f"list blob is. This is a disagreement between the "
+                    f"construction's layout table and the body rather than a "
+                    f"limit of the path — a compiler bug.")
+            # `base` is the same arithmetic `_emit_frame_constructor` uses for a
+            # struct with a frame of its own, and the nested subtree goes up
+            # through `_emit_frame_nested` ITSELF rather than a second walk of
+            # the same rows: that helper reads only the struct and the offset
+            # out of the tuple it is handed, so passing the nested pair is the
+            # one way to bring a subtree up at an offset the layout chose.
+            base = self._blob_base + site[1]
+            self._emit_frame_nested((nested, site[1], ()))
+            self._emit_frame_defaults(nested, base)
+            # The ADDRESS last: every store above left something else in RAX.
+            self._emit_blob_base(base, Reg.RAX)
             return
         self._emit_mov_imm(Reg.RAX, int(payload or 0))
 

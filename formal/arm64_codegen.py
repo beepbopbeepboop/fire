@@ -1051,9 +1051,13 @@ dylib_exports: list = None, globals_base: int = None,
         # has to start above the lot or a blob would land on one.  Reading the
         # block from the shared model rather than summing frame bytes here is
         # what keeps the two backends reserving the same bytes in the same
-        # order.
+        # order — and it is `struct_constructor_site_bytes`, not
+        # `struct_frame_block_bytes`, because a ONE-FIELD struct whose sole field
+        # holds a frame reserves the NESTED block alone (there is no object: the
+        # value is the nested frame's address). One reader of that size, so a
+        # site can never be reserved one amount and laid out another.
         self._frame_recv_bytes = sum(
-            M.struct_frame_block_bytes(st, self._structs)
+            M.struct_constructor_site_bytes(st, self._structs)
             for st, _off, _nested in self._frame_sites.values())
         # Blocks for frames this function RECEIVES from a callee that returns
         # one.  The same region as the constructor frames and the same reason:
@@ -6792,7 +6796,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         if refusal is not None:
             raise CodegenError(refusal)
         if value is None:
-            self._emit_fresh_one_word(name, st)
+            self._emit_fresh_one_word(name, st, e)
             return
         self._emit_expr(value)
 
@@ -7178,7 +7182,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             return
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_fresh_one_word(self, name: str, st) -> None:
+    def _emit_fresh_one_word(self, name: str, st, e=None) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.
 
         The one word a fresh struct holds is its sole field brought up at that
@@ -7191,8 +7195,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         A default that is not a literal is refused, naming the field. Substituting
         0 for it is the bug; evaluating it at the call site would mean resolving
         names in a scope the constructor does not have, and guessing there is
-        the same failure wearing a hat."""
-        kind, payload = M.struct_default_word(st)
+        the same failure wearing a hat.
+
+        **THE FRAME-VALUED SOLE FIELD IS THE THIRD CASE, and it is the one that
+        was a null pointer.** When the sole field holds a nested FRAME, this word
+        is an ADDRESS: a fresh word of zeros is a load from address 0 on the
+        first field read, from a green build, with no diagnostic
+        (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
+        word.md`). So the nested frame is brought up here, exactly as
+        `_emit_frame_constructor` brings up a struct of two or more fields'
+        nested frames — its defaults, then its own nested subtree, deepest
+        first — and its ADDRESS is the value. `e` is the construction node, and
+        it is what finds the site: the bytes were reserved in the prologue by
+        `model.struct_constructor_sites`, so the frame exists before the body
+        runs and this is only bringing it up, which is the whole difference
+        between a layout change and a new lowering."""
+        kind, payload = M.struct_default_word(st, self._structs)
         if kind == M.DEFAULT_OPAQUE:
             raise CodegenError(
                 f"constructing {name} cannot bring its field {payload!r} up at "
@@ -7202,6 +7220,32 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"program with a representation)")
         if kind == M.DEFAULT_STRING:
             self._emit_expr(F.StringLiteral(value=payload))
+            return
+        if kind == M.DEFAULT_NESTED_FRAME:
+            field_name, nested = payload
+            site = self._frame_sites.get(id(e)) if e is not None else None
+            if site is None:
+                raise CodegenError(
+                    f"constructing {name} needs the frame its field "
+                    f"{field_name!r} holds, and no prologue reservation was "
+                    f"made for one: the frame has to exist before the body runs, "
+                    f"so it cannot be handed out by a bump pointer the way a "
+                    f"list blob is. This is a disagreement between the "
+                    f"construction's layout table and the body rather than a "
+                    f"limit of the path — a compiler bug.")
+            # The nested struct's own subtree first, then its own slots: the
+            # same order `struct_block_direct_children` lays them out in, and
+            # through `_emit_frame_nested` ITSELF rather than a second walk of
+            # the same rows — that helper reads only the struct and the offset
+            # out of the tuple it is handed, so passing the nested pair brings a
+            # subtree up at the offset the layout chose.
+            self._emit_frame_nested((nested, site[1], ()))
+            self._emit_frame_defaults(nested, site[1])
+            # …and the ADDRESS last, because every store above left something
+            # else in X0. An address materialized once and then overwritten is a
+            # null pointer, which is the bug this case exists to close.
+            self._emit_frame_base(site[1])
+            self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         self._emit_mov_imm("X0", int(payload or 0))
 

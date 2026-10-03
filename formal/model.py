@@ -24343,6 +24343,49 @@ def struct_block_direct_children(struct_def, decls: dict, base: int = 0,
     return out
 
 
+def one_word_nested_frame_structs(decls: dict) -> dict:
+    """`{struct name: the struct whose FRAME its sole field holds}`.
+
+    The one-field structs of this module whose construction site has to reserve
+    somebody else's bytes, and the reader `struct_constructor_sites` walks with.
+    It is a table rather than a per-call question because the walk asks it once
+    per call SITE and the answer is a property of the struct: two calls per
+    question would be two chances for the two to disagree about which structs
+    hold a frame, and that disagreement is a SIGSEGV rather than a message.
+
+    Keyed by NAME, like `framed_struct_names`, because the constructor site is
+    recognised from the callee spelling (`Box1()`) and the struct table is what
+    the emitter holds.
+    """
+    out = {}
+    for name, st in (decls or {}).items():
+        nested = one_word_sole_field_frame(st, decls)
+        if nested is not None:
+            out[name] = nested
+    return out
+
+
+def struct_constructor_site_bytes(struct_def, decls: dict) -> int:
+    """Bytes ONE construction site of this struct reserves in the prologue.
+
+    The size of a site is `struct_frame_block_bytes` for a struct with a frame
+    of its own, and the NESTED block alone for a one-field struct whose sole
+    field holds one — that struct's own 8 bytes are not reserved, because there
+    is no object: the VALUE is the nested frame's address.
+
+    It exists so that the two places that need the number ask ONE question. The
+    emitters sum it to reserve the prologue's scratch, and `struct_constructor_
+    sites` advances its layout cursor by it; a site that reserved one amount and
+    was handed out another would put the second site's frame inside the first
+    one's, and the symptom would be one struct's fields reading another's values
+    — a wrong answer, on both architectures, with a green build.
+    """
+    nested = one_word_sole_field_frame(struct_def, decls or {})
+    if nested is not None:
+        return struct_frame_block_bytes(nested, decls)
+    return struct_frame_block_bytes(struct_def, decls)
+
+
 def struct_constructor_sites(fn, structs_by_name) -> dict:
     """`{id(call): (struct, offset, nested)}` — this function's receiver BLOCKS.
 
@@ -24361,12 +24404,24 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
 
     `nested` is `[(field_name, slot, struct, offset)]`: the frames of this
     struct's typed-nested fields (`struct_nested_frame_fields`), each with its
-    OWN absolute offset into the same scratch, immediately above the object's
+    own absolute offset into the same scratch, immediately above the object's
     own frame.  This is the tuple's third element and it is additive: a struct
     with no typed-nested field has an empty list, so every existing unpack of
     two elements is still a struct with no nested frames — but the emitters
     read three, because the whole point of the declared-type check is that the
     nested frame is PLACED here rather than hoped for at the use site.
+
+    **A ONE-FIELD STRUCT WHOSE SOLE FIELD HOLDS A FRAME IS IN THIS TABLE TOO,
+    and its `nested` row is the whole of what its construction needs.** There is
+    no object to lay out — the value IS the nested frame's address — so `offset`
+    is the NESTED frame's offset, its row's `slot` is `None` (there is no slot
+    array to store an address into; the word the caller receives is the address
+    itself), and the cursor advances by `struct_constructor_site_bytes`, which
+    is the nested block alone. Without this row the construction emitted
+    `mov X0, #0` / `mov eax, 0` and every field read through it was a load from
+    address 0 — a green build, a SIGSEGV on the first read, and no diagnostic
+    (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
+    word.md`).
 
     A FLAT list cannot carry the parent of each row, which is why the emitters
     read `struct_block_direct_children` for placement and recurse on it rather
@@ -24374,8 +24429,11 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
     the slot array of the block that DECLARES the field, and only a recursion
     knows which block that is.
     """
-    framed = framed_struct_names(list(structs_by_name.values()))
-    if not framed:
+    one_word = one_word_nested_frame_structs(structs_by_name)
+    framed = {name: st for name, st in framed_struct_names(
+        list(structs_by_name.values())).items()
+        if name not in one_word}
+    if not framed and not one_word:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
@@ -24389,18 +24447,27 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         # "the frame layout and the body disagree" refusal, on a program with
         # nothing wrong with it.
         if isinstance(node.func, F.IdentExpr):
-            st = framed.get(node.func.name)
+            name = node.func.name
         elif isinstance(node.func, F.MemberExpr) \
                 and isinstance(node.func.member, str):
-            st = framed.get(node.func.member)
+            name = node.func.member
         else:
             continue
-        if st is None:
+        st = framed.get(name)
+        if st is not None:
+            nested, block = struct_frame_block_layout(st, structs_by_name)
+            out[id(node)] = (st, offset, [(f, s, c, o + offset)
+                                         for f, s, c, o in nested])
+            offset += block
             continue
-        nested, block = struct_frame_block_layout(st, structs_by_name)
-        out[id(node)] = (st, offset, [(f, s, c, o + offset)
-                                     for f, s, c, o in nested])
-        offset += block
+        nested_st = one_word.get(name)
+        if nested_st is None:
+            continue
+        holder = structs_by_name[name]
+        field = struct_sole_field_name(holder)
+        out[id(node)] = (holder, offset,
+                         [(field, None, nested_st, offset)])
+        offset += struct_constructor_site_bytes(holder, structs_by_name)
     return out
 
 
@@ -25121,6 +25188,14 @@ DEFAULT_NONE = "none"          # no default to speak of: zero is correct
 DEFAULT_INT = "int"
 DEFAULT_STRING = "string"      # a formal string is a bare `char *`: one word
 DEFAULT_OPAQUE = "opaque"      # a real default this path cannot bring up
+# The sole field of a ONE-FIELD struct holds a NESTED FRAME of this module, so
+# the word `S()` must leave is that frame's ADDRESS and a word of zeros is a null
+# pointer wearing a value's clothes. `one_word_sole_field_frame` is the reader of
+# the question and `struct_default_word` is its only caller; `("nested_frame",
+# (field_name, nested_struct))` is the answer, and the reservation the address
+# names is `struct_constructor_sites`' job (see `struct_constructor_site_bytes`
+# for why that is one reader of the size as well).
+DEFAULT_NESTED_FRAME = "nested_frame"
 
 # ── `None`, and the word it is ──────────────────────────────────────────────
 #
@@ -25156,7 +25231,7 @@ def is_none_expr(node) -> bool:
     return isinstance(node, F.IdentExpr) and node.name == NONE_NAME
 
 
-def struct_default_word(struct_def) -> tuple:
+def struct_default_word(struct_def, decls: dict = None) -> tuple:
     """`(kind, payload)` — what `S()` must leave in the word for this struct.
 
     ("none", None) when there is no class-level initializer to honour, which
@@ -25172,6 +25247,27 @@ def struct_default_word(struct_def) -> tuple:
     substitute 0, because substituting 0 is precisely the wrong answer this
     function exists to prevent.
 
+    **("nested_frame", (field_name, nested_struct)) when the sole field holds a
+    FRAME**, which is the case ("none", None) used to answer and must not. A
+    one-field struct's receiver IS its field, so that word is an address;
+    "no initializer, so a fresh word of zeros is right" is true of every other
+    field and false of this one, and the two answers together are a null pointer.
+    Measured on both architectures: `struct Box1: var inner: Inner` with
+    `bx = Box1(); bx.inner.a = 1` built, ran, and died with SIGSEGV (exit 139)
+    on the first field read, with no diagnostic anywhere
+    (`bugs/FORMAL_one_word_struct_of_a_frame_field_is_constructed_as_a_null_
+    word.md`).
+
+    `decls` is what makes the question answerable at all — it is the module's
+    struct table, which is how the field's declared type is read — so it is a
+    parameter rather than a global, and a caller that has none keeps the old
+    answer. `one_word_sole_field_frame` is the ONE reader of "does this sole
+    field hold a frame", because two copies of that question would eventually
+    disagree about which structs are addresses and the disagreement is a
+    segfault rather than a message. Only a field with NO default reaches the new
+    kind: a non-literal default on a frame-valued field is still `opaque`, which
+    is the honest refusal, and a literal one is a different bug.
+
     Only meaningful for a struct of at most one field; a wider one brings each
     of its fields up separately, through `struct_frame_defaults`."""
     if struct_field_count(struct_def) != 1:
@@ -25183,6 +25279,10 @@ def struct_default_word(struct_def) -> tuple:
             default = getattr(field, "value", None)
             break
     kind, payload = literal_default_word(default)
+    if kind == DEFAULT_NONE and decls:
+        nested = one_word_sole_field_frame(struct_def, decls)
+        if nested is not None:
+            return (DEFAULT_NESTED_FRAME, (field_name, nested))
     return (kind, field_name if kind == DEFAULT_OPAQUE else payload)
 
 
