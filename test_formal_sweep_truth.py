@@ -875,12 +875,13 @@ class TestLeanLauncher(unittest.TestCase):
         be about — but a bound that dropped below what the work needs would fail
         every proof in the suite, so the direction is worth pinning.
         """
-        self.assertGreaterEqual(L.PROOF_WALL_S, 5 * 96,
+        self.assertGreaterEqual(L.PROOF_WALL_S, 5 * 298,
                                 "the proof bound must stay several times the "
-                                "slowest legitimate proof (~96 s)")
-        self.assertGreaterEqual(L.LIBRARY_WALL_S, 5 * 118,
+                                "slowest legitimate proof measured "
+                                "(formal/examples/udivmod.mojo, 297.8 s)")
+        self.assertGreaterEqual(L.LIBRARY_WALL_S, 5 * 112,
                                 "and the library bound above the slowest "
-                                "module build (~118 s)")
+                                "module build measured (ProofLib, 112.0 s)")
         self.assertLess(L.PROOF_WALL_S, 45 * 60,
                         "…and far below tools/control.py guard's 45 min net, "
                         "which is the net UNDER a launcher that lacks these")

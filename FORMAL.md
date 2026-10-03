@@ -1059,3 +1059,71 @@ test files in `tools/suite.py`, resolves any overlap that turns out to be real,
 updates this document with what actually landed, deletes the bug doc for any bug
 that is now **fixed** (a doc for a fixed bug is a doc that lies), and then
 **runs the gate once**.
+
+---
+
+## 12. Every Lean run is bounded — the launch policy
+
+`formal/lean.py::run_lean` is the **only** way this tree starts Lean 4, and
+every run it makes carries an upper bound on wall time, on total CPU across the
+whole process tree, and in Lean's own `maxHeartbeats`. The numbers and the
+measurements behind them are in that module's docstring; this section is the
+policy, and it is here rather than only there because a bound nobody can find is
+not a policy.
+
+**Why it exists.** On 2026-10-02 the user killed ten `lean` processes on this
+machine by hand, some of them hundreds of CPU-hours old. A valid inductive proof
+here checks in seconds to minutes, so those were non-terminating elaborations,
+and nothing would have stopped them: the launch sites that had a bound at all
+had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
+and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
+reduction, and `simp`'s congruence recursion — see
+`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`, where three
+separate budgets are measured failing to fire).
+
+| what | bound | why that size |
+|---|---|---|
+| one generated proof | `PROOF_WALL_S` / `PROOF_CPU_S` = 1500 s | 5x the slowest legitimate proof measured (`formal/examples/udivmod.mojo`, 297.8 s wall / 219.2 s CPU) |
+| one `lib/*.olean` build or census | `LIBRARY_WALL_S` / `LIBRARY_CPU_S` = 1800 s | ~16x the slowest module build (`ProofLib`, 112.0 s / 83.1 s) |
+| memory | `-M 6144` (proof), `-M 12288` (library) | 2x the measured peak of the largest of each: 3.00 GB and 7.82 GB. **Not** the project's 4 GB line: with `-M 4096` the `ProofLib` build fails outright ("(kernel) excessive memory consumption detected"), so that ceiling is a red suite, not a policy. The over-4 GB fact is `prooflib`'s `memwhy` |
+| threads | `-j 4` | one file is elaborated sequentially; the threads only decide how fast a runaway burns the machine |
+
+**The escape hatch is the library build and nothing else**
+(`FORMAL_LEAN_LIBRARY_WALL_S`, `FORMAL_LEAN_LIBRARY_CPU_S`). A proof bound the
+environment can lift is not a bound: the thing that needs lifting during a
+runaway is exactly the thing somebody would lift it for.
+
+**A breach is a verdict of its own.** `LeanRun.exceeded` says which bound was
+broken, `proof_census` refuses to publish it to the verdict cache (a bound is a
+fact about this machine at that moment, and a cached timeout is a permanent red),
+and the hole census for a killed elaboration is `None` — UNMEASURED — rather than
+`0`. Re-measure any of the numbers above with `FORMAL_LEAN_TRACE=1`, which makes
+the launcher print wall/CPU/peak for every run it makes.
+
+**What is still switched off, and how to switch it back on.** On master
+(`3b9bb56e`, after this branch was cut) the eight gate tests that typecheck
+generated Lean are `disabled=` in `tools/suite.py` against
+`bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`, which says plainly
+that `formal7-lean-bound` owns the fix and that the doc is the switch: deleting
+it re-enables the tests, and `tools/suite.py` refuses to load the registry while
+a disabled test's doc is gone. The bound now exists, so the remaining step is
+mechanical and is **not** done here — `tools/suite.py` is a shared file and the
+one marker that needs a decision rather than an edit is `formal-dylib`, whose
+`default path emits a checked proof` case is the dylib contract whose
+`bv_decide` does not terminate and will now report the breach rather than a
+pass. To close it: drop the `disabled=` marker from `formal`,
+`formal-call-proofgen`, `formal-dylib`, `formal-imports`, `formal-sweep`,
+`formal-x86`, `formal-x86-endtoend`, `formal-x86-model`, and `git rm` the doc
+**in the same commit**. Measured per-unit costs for sizing that decision, all on
+an idle box with `FORMAL_LEAN_TRACE=1`:
+
+* `prooflib` — 112 s wall, 7.82 GB peak on a cold CAS, and **0.3 s** on a warm
+  one (five CAS hits).
+* one generated proof — 8.6 s (`const2`) … 297.8 s (`udivmod`), 1.5–3.0 GB peak;
+  eleven of the 45 `formal/examples/*.mojo` measured, the largest by SIZE are not
+  the slowest (`wide_recv` is 703 KB and 93.4 s; `udivmod` is 437 KB and
+  297.8 s), so size is not a usable proxy.
+* `formal-x86-endtoend` and `formal-x86-model` — **not measured**; their Lean
+  runs are `formal/x86_64_endtoend_test.py`'s and
+  `formal/x86_64_model_coverage_test.py`'s, now bounded at
+  `PROOF_WALL_S`/3600 s respectively.

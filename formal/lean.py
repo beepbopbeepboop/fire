@@ -38,18 +38,38 @@ re-measuring is one env var and not a re-derivation):**
 | `lib/X86.olean` build — 6.6 MB | 6.0 s | 12.4 s | 1.36 GB |
 | `lib/work.olean`, `lib/Refine.olean`, `lib/Contracts.olean` | 1.2–1.4 s | 0.5–1.3 s | ~1.2 GB |
 | generated proof of `formal/examples/const2.mojo` — 139 KB | 8.6 s | 10.3 s | 1.54 GB |
+| generated proof of `formal/examples/bitops.mojo` — 436 KB | 21.5 s | 31.0 s | 2.19 GB |
+| generated proof of `formal/examples/augassign.mojo` — 421 KB | 20.9 s | 30.4 s | 2.15 GB |
+| generated proof of `formal/examples/elif3.mojo` — 514 KB | 69.7 s | 63.8 s | 2.89 GB |
 | generated proof of `formal/examples/count.mojo` — 384 KB | 79.7 s | 80.3 s | 2.71 GB |
-| generated proof of `formal/examples/wide_recv.mojo` — 703 KB | 93.4 s | 97.4 s | 3.00 GB |
+| generated proof of `formal/examples/pow2.mojo` — 420 KB | 84.4 s | 90.7 s | 2.98 GB |
+| generated proof of `formal/examples/sqsum.mojo` — 476 KB | 98.5 s | 102.2 s | 3.15 GB |
+| generated proof of `formal/examples/wide_recv.mojo` — 703 KB (the largest file) | 93.4 s | 97.4 s | 3.00 GB |
 | generated proof of `formal/examples/fib.mojo` (a known gap: rc=1) | 99.7 s | 100.2 s | 2.86 GB |
+| generated proof of `formal/examples/udivmod.mojo` — 437 KB (**the slowest**) | 297.8 s | 219.2 s | 2.30 GB |
 
-So `PROOF_WALL_S = 600` / `PROOF_CPU_S = 600` is **6x the slowest legitimate
-proof measured**, and `LIBRARY_WALL_S = 1800` / `LIBRARY_CPU_S = 1800` is **16x
-the slowest module build** — both far below `tools/control.py guard`'s 45 min
-wall / 90 min CPU net, which exists to catch a launcher that was never taught
-these bounds, not to be the bound. (6x rather than the 5-10x band on the low
-end because the measurements are one machine's: the largest of them, `count`,
-spent 80 s of CPU while `x86_64_endtoend_test.py`'s per-example checks run
-concurrently on a loaded box in the same suite.)
+**Size does not predict cost**, and that is in the table rather than in a
+warning: the largest generated proof here (`wide_recv`, 703 KB) checks in 93 s
+while a 437 KB one (`udivmod`) takes 298 s. A bound sized by "the biggest file I
+have seen" would have been set at 93 s and would have fired on a legitimate
+proof.
+
+So `PROOF_WALL_S = 1500` / `PROOF_CPU_S = 1500` is **5x the slowest legitimate
+proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 1800` /
+`LIBRARY_CPU_S = 1800` is **16x the slowest module build** — both far below
+`tools/control.py guard`'s 45 min wall / 90 min CPU net, which exists to catch a
+launcher that was never taught these bounds, not to be the bound.
+
+The multiplier is on the slowest measurement rather than on a typical one, and
+deliberately: `test_formal.py` runs up to 20 examples at once, each with its own
+`lean`, so a proof that takes 298 s alone can take several times that on a loaded
+box — and a bound that fires on a legitimate proof is worse than a bound that
+waits, because it is a false red in the gate and it looks like a regression. The
+cost of being generous is bounded and paid in the right currency: a runaway is
+stopped at 25 minutes of CPU, which is a quarter of the hour the guard net would
+otherwise have let it run, and `test_formal.py`'s own 900 s `BUILD_TIMEOUT`
+(unchanged, and it kills the process group) is the tighter bound in that one
+path.
 
 Two of those rows are the reason a wall-only bound was never enough, and they
 are in the measurements rather than in an argument: `X86` burned **12.4 s of
@@ -79,8 +99,12 @@ the hole census reports UNMEASURED for it.
 
 The one thing this does NOT fix is a proof that needs more than the bound: it
 converts an unbounded hang into a loud, reproducible, one-line failure that says
-which bound was broken. What spins is a separate question, tracked in
-`bugs/FORMAL_lean_elaboration_does_not_terminate.md`.
+which bound was broken. What spins is a separate question, and the one measured
+case is `bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`: `bv_decide`
+on a 14-fold composed `Arm64State` normalises its own goal with a `simp` that
+`maxHeartbeats`, `maxSteps` and `maxRecDepth` all fail to meter — three
+measurements in that doc, which is why the bound here is the instrument and not
+another budget.
 """
 import collections
 import hashlib
@@ -207,8 +231,8 @@ from tools import procrun  # noqa: E402 — the tree walk and the kill, shared
 # legitimate proof, and ~15x the slowest module build.  Both are far tighter
 # than `tools/control.py guard`'s 45 min / 90 min net, which is the net UNDER
 # every launcher that never got here.
-PROOF_WALL_S = 600.0
-PROOF_CPU_S = 600.0
+PROOF_WALL_S = 1500.0
+PROOF_CPU_S = 1500.0
 LIBRARY_WALL_S = 1800.0
 LIBRARY_CPU_S = 1800.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
