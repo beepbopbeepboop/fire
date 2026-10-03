@@ -129,7 +129,14 @@ HOST_UNREACHABLE = frozenset((
     # no interpreter here to ask, and on this path a value is one 64-bit word,
     # so there is nothing for `gc` to track and no bytecode for `dis` to
     # disassemble (the formal backends emit machine code, not bytecode).
-    "traceback", "gc", "atexit", "signal", "warnings", "dis",
+    # `builtins` is here for the same reason and it is measured rather than
+    # read off: the three files in this repository that want it
+    # (`tools/codeindex.py`, `tools/wave2c_explicit_imports.py`,
+    # `tools/wave2b_fix_deps.py`, ranked by `tools/formal_sweep_causes.py
+    # --host`) all spell `set(dir(builtins))` — they ask the INTERPRETER to
+    # enumerate its own namespace, which is the one question on this page with
+    # no answer at all here.
+    "traceback", "gc", "atexit", "signal", "warnings", "dis", "builtins",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
     # A terminal. `tempfile` WAS here too — under this heading, for the
@@ -145,8 +152,24 @@ HOST_UNREACHABLE = frozenset((
     # absent in that module with the reason at its own definition.
     "getpass", "webbrowser",
     # A library outside libSystem, so linking it would contradict the premise
-    # that a formal image links libSystem and nothing else.
+    # that a formal image links libSystem and nothing else. `zlib` and `gzip`
+    # also have an honest route that does NOT link anything — DEFLATE is
+    # arithmetic over bytes, so a `formal/hostmods/zlib.mojo` could compute it
+    # the way `re.mojo` computes a match — and 15 files in the sweep's host
+    # ranking are behind `zlib`. It is here rather than in HOST_MODELLED
+    # because the tier means "a Mojo-side implementation could in principle
+    # provide this, and has not yet", and for `zlib` the premise of this
+    # heading is the thing to argue with first: the cheapest correct module is
+    # one that implements inflate and deflate itself rather than one that links
+    # libz, and that is a project rather than a patch.
     "zlib", "gzip", "locale",
+    # An EMBEDDED CPython's installation, which is the reading of `sysconfig`
+    # that has no other: `get_paths()` answers "where is the interpreter that
+    # would run this program", and there is none. `fire.py` imports it and
+    # never uses it (measured — the module is reached on its first line and no
+    # `sysconfig.` appears anywhere in the file), so it is in this row for the
+    # diagnostic it gets rather than for anything fixing it would reach.
+    "sysconfig",
 ))
 
 # The reachable half: libSystem provides the facility, or the module is pure
@@ -412,7 +435,52 @@ HOST_MODELLED = frozenset((
     #     `unresolvable_import_error` say "not a stdlib or sibling module" —
     #     a false statement about the target, and the one diagnostic in this
     #     family that misidentifies what kind of thing the name is.
-    "shlex",
+    #
+    #     Four more names were in NEITHER tier on 2026-10-03 for the same
+    #     reason and are placed here by the RULE above rather than by reading:
+    #     none of the four needs a second process, a thread, a socket, a dynamic
+    #     loader, an embedded CPython, a terminal or a library outside
+    #     libSystem, so none of the four is a permanent fact about the target.
+    #     The ranking that found them is `tools/formal_sweep_causes.py --host`,
+    #     which is what turned "UNTIERED" from a label into a list of six
+    #     modules and ten files.
+    #   `html`  — `escape`/`unescape` are five character replacements over a
+    #     string: the `shlex` shape, and `os/_syscalls.mojo`'s `str_replace_all`
+    #     is the primitive. One file wants it (`tools/md2html.py`, `html.escape`
+    #     x1 measured), so the row is one file — which is the honest number and
+    #     not a reason to place it anywhere else.
+    #   `datetime`  — a CLOCK plus calendar arithmetic, and both halves are
+    #     reachable: `formal/hostmods/time.mojo` has every clock `datetime` can
+    #     read, and the arithmetic is integer work. What is NOT reachable is its
+    #     ANSWER: a `datetime` object is a record of six fields and
+    #     `strftime` is a formatted record, which is the same limit that keeps
+    #     `time.localtime` out of that module
+    #     (`bugs/FORMAL_time_struct_shaped_answers.md`). The two files that want
+    #     it (`run_stdlib_tests.py`, `scripts/bootstrap_full_test.py`) spell
+    #     `from datetime import datetime` and `datetime.now()` — the one call
+    #     whose answer is that object.
+    #   `resource`  — `getrusage(2)` is libSystem, so the CALL is reachable and
+    #     the two `RUSAGE_*` constants are arithmetic; the answer is
+    #     `struct rusage`, a fixed layout read one byte at a time, which is
+    #     `formal/hostmods/os/_syscalls.mojo`'s `fs_stat_fill` exercise rather
+    #     than a new capability. Both files that want it
+    #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
+    #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
+    #   `posixpath`  — **THE MODEL IS ALREADY WRITTEN AND THIS ENTRY IS A
+    #     SPELLING, not a capability.** `formal/hostmods/os/path/__init__.mojo`
+    #     IS CPython's `posixpath` (its own header says so) and answers
+    #     `abspath`, `basename`, `commonprefix`, `dirname`, `isabs`, `join`,
+    #     `normpath`, `realpath` and the rest, compared against CPython's own by
+    #     `test_formal_os.py`. What a file that writes `import posixpath` gets
+    #     instead is a module-RESOLUTION failure, because the resolver looks
+    #     for a source NAMED `posixpath`. One file wants it that way
+    #     (`test_formal_os.py`, measured — eight distinct `posixpath.` names), and
+    #     the fix is a `formal/hostmods/posixpath.mojo` that re-exports
+    #     `os.path`, which is what `os/__init__.mojo` already does for its own
+    #     five names. It is not written: `test_formal_os.py` spells `os.path`
+    #     everywhere else, so the one file is not evidence that CPython's
+    #     spelling is wanted.
+    "shlex", "html", "datetime", "resource", "posixpath",
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
     #     over a source larger than its own copy buffer, `copy`/`copy2`'s

@@ -1009,6 +1009,104 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
           f"does not exist: {text[-300:]}")
 
 
+def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
+    """The six names that were, and what each one is placed by.
+
+    `test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo` above pins the
+    property for `shlex`, one module. It was true for six more on 2026-10-03,
+    and they were found by a RANKING rather than by reading the tier list:
+    `tools/formal_sweep_causes.py --host` prints `UNTIERED` for a name in
+    neither tier with no model, which turned "some names are in neither tier"
+    from a sentence in a comment into six module names and ten swept files.
+
+    A name in neither tier is refused with "not a stdlib or sibling module, and
+    no such file exists", which is a false statement about a CPython
+    standard-library module — and it is also the sentence that says the reader
+    has a TYPO, which is the wrong thing to tell someone whose import is
+    correct. Ten files in the 2026-10-02 arm64 sweep were reading it.
+
+    The tier each one lands in is a judgement made BY THE RULE and stated in
+    `formal/imports.py`, so this test checks the placement and not just the
+    membership:
+
+      * `builtins` and `sysconfig` are UNREACHABLE, and each for a measured
+        reason rather than a read one — `builtins` because the three files that
+        want it all spell `set(dir(builtins))`, which asks the interpreter to
+        enumerate itself, and `sysconfig` because `fire.py` imports it and
+        never uses it, so what it wants is where an interpreter that is not here
+        would be installed.
+      * `html`, `datetime`, `resource` and `posixpath` are MODELLED, because
+        none of the four needs an object this target does not have: `html` is
+        five character replacements, `datetime` is a clock this tree already
+        reads plus calendar arithmetic, `resource` is `getrusage(2)` in
+        libSystem with a fixed struct, and `posixpath` IS
+        `formal/hostmods/os/path/__init__.mojo` under another spelling.
+
+    So: the premise (each is a real CPython stdlib module, read from
+    `sys.stdlib_module_names` and not trusted), the membership (each is in a
+    tier), the placement (each tier is the one its reason implies), and the
+    WORDING (each is refused as a host module and not as a typo).
+    """
+    import sys as _sys
+    import formal.imports as I
+    placed = {
+        # name: (tier, why that tier, in one line)
+        "builtins": ("unreachable",
+                     "`set(dir(builtins))`: the interpreter's own namespace"),
+        "sysconfig": ("unreachable",
+                      "where an embedded CPython would be installed"),
+        "html": ("modelled", "five character replacements over a string"),
+        "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
+        "resource": ("modelled", "`getrusage(2)` is libSystem"),
+        "posixpath": ("modelled",
+                      "`os/path/__init__.mojo` IS CPython's posixpath"),
+    }
+    for name, (tier, why) in sorted(placed.items()):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library module, "
+              f"so the diagnostic it used to get was not a false statement "
+              f"about one")
+        check(not I._host_tier_conflicts(),
+              "a name in two tiers is a partition bug: %s"
+              % I._host_tier_conflicts())
+        got = I.host_module_tier(name)
+        check(got == tier,
+              f"host_module_tier({name!r}) is {got!r}, not {tier!r} — {why}. "
+              f"The tier is what a coverage report counts a file against, so "
+              f"the wrong one moves a number rather than just a sentence")
+    root = os.path.join(tmpdir, "untiered")
+    os.makedirs(root, exist_ok=True)
+    for name in sorted(placed):
+        # A DIRECTORY PER NAME, and the reason is worth recording because the
+        # first version of this test put `builtins.mojo` NEXT TO the program
+        # that imports `builtins` and watched it build: the resolver's third
+        # pass finds a sibling source, so the program resolved its own import to
+        # itself and the test reported a false pass. The tier change is exactly
+        # what stops that — a name in a HOST tier outranks a sibling — which is
+        # `test_host_module_still_refused_despite_same_named_sibling`'s subject
+        # and is why this fixture does not rely on it.
+        one = os.path.join(root, name)
+        os.makedirs(one, exist_ok=True)
+        prog = os.path.join(one, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(f"import {name}\ndef main():\n  return 1\n")
+        fresh_cas()
+        result = run_fire(["build", "--formal", "--no-prove", "-o",
+                           os.path.join(one, "prog.aout"), prog], cwd=one)
+        check(result.returncode != 0,
+              f"import {name} built. A module with a Mojo source would "
+              f"resolve, which is a different (and better) finding — update "
+              f"this table and the census row together")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("host module" in text,
+              f"import {name} is not refused as a host module, so this name "
+              f"is being resolved some other way: {text[-300:]}")
+        check("not a stdlib or sibling module" not in text,
+              f"import {name} is still refused as a name that does not exist, "
+              f"which is a false statement about a CPython standard-library "
+              f"module: {text[-300:]}")
+
+
 def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     """The refusal's second half: what to write here instead, where the reader is.
 
@@ -2579,6 +2677,8 @@ TESTS = [
      test_host_module_still_refused_despite_same_named_sibling),
     ("a standard-library module in no tier is not reported as a typo",
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
+    ("no standard-library module is left in neither tier",
+     test_no_standard_library_module_is_left_in_neither_tier),
     ("a host-module refusal says what this target offers instead",
      test_a_host_module_refusal_says_what_this_target_offers),
     ("a package that only re-exports builds and runs",

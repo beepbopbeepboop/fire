@@ -918,8 +918,18 @@ def _uses_column_checks(failures):
 _HOST_REFUSAL_HOST = ("gimple_codegen.py imports 'zlib', which is a host "
                       "module (CPython standard library), which has no Mojo "
                       "source for this backend to compile")
-_HOST_REFUSAL_UNTIERED = ("fire.py imports 'datetime', which is not a stdlib "
-                          "or sibling module, and no such file exists")
+# A module in NEITHER tier with no model, which is the state this table has to
+# be able to REPORT. `bz2` is here rather than `datetime` because `datetime`
+# stopped being an example on 2026-10-03 (it was classified `modelled`, with
+# the reason, in `formal/imports.py`) — and a check whose subject gets fixed
+# has to move to the next one or it fails for a reason nobody reading it can
+# see. `bz2` is a library outside libSystem like `zlib` and is in the same
+# state, so it is the next example and the premise is asserted below rather
+# than trusted: if `bz2` is ever classified, this fails saying so.
+_HOST_UNTIERED_NAME = "bz2"
+_HOST_REFUSAL_UNTIERED = ("fire.py imports '%s', which is not a stdlib "
+                          "or sibling module, and no such file exists"
+                          % _HOST_UNTIERED_NAME)
 _HOST_CHAIN = ("build: analyze_benchmarks_types.py imports 'gimple_codegen', "
                "which cannot be built either: " + _HOST_REFUSAL_HOST)
 
@@ -968,15 +978,16 @@ def _host_rank_checks(failures):
         line(prose, _HOST_REFUSAL_HOST),
         line(write("chain.py", "import gimple_codegen\n"),
              _HOST_CHAIN),
-        line(write("untiered.py", "import datetime\n"),
+        line(write("untiered.py", "import %s\n" % _HOST_UNTIERED_NAME),
              _HOST_REFUSAL_UNTIERED),
     ])
     rows = {r["module"]: r for r in table}
-    check(set(rows) == {"zlib", "datetime"},
+    check(set(rows) == {"zlib", _HOST_UNTIERED_NAME},
           f"the table ranked {sorted(rows)} and the log names exactly 'zlib' "
-          f"(three files plus one behind a CHAIN) and 'datetime'. A row for a "
-          f"module the log never names, or a missing row for one it does, is "
-          f"the ranking measuring something else")
+          f"(three files plus one behind a CHAIN) and "
+          f"{_HOST_UNTIERED_NAME!r}. A row for a module the log never names, "
+          f"or a missing row for one it does, is the ranking measuring "
+          f"something else")
     z = rows.get("zlib")
     if z is not None:
         check(z["files"] == 4,
@@ -993,16 +1004,30 @@ def _host_rank_checks(failures):
               f"with no stdlib source, so the only honest answer is None — a "
               f"count computed from a list of names written here would be a "
               f"number nobody can check against anything")
-    d = rows.get("datetime")
+    d = rows.get(_HOST_UNTIERED_NAME)
     if d is not None:
+        try:
+            from formal import imports as _I
+            tier = _I.host_module_tier(_HOST_UNTIERED_NAME)
+            have_model = C._host_model_source(_HOST_UNTIERED_NAME) is not None
+        except Exception as exc:                         # noqa: BLE001
+            check(False, f"formal.imports is not importable here: {exc}")
+            tier, have_model = "?", False
+        check(tier == "" and not have_model,
+              f"precondition: {_HOST_UNTIERED_NAME} is in tier {tier!r} with "
+              f"a model at {have_model!r}. It has to be in NEITHER tier with "
+              f"no model for this fixture to be the thing it says it is; if it "
+              f"has been classified, move _HOST_UNTIERED_NAME to the next "
+              f"module in that state rather than deleting the check")
         check(d["untiered"] is True,
-              f"datetime is in NEITHER formal/imports.py tier and has no "
-              f"model, so its refusal reads 'not a stdlib or sibling module, "
-              f"and no such file exists' — false of a CPython standard-library "
-              f"module. The row has to SAY so (untiered={d['untiered']}) or a "
-              f"reader takes the count as a work item")
+              f"{_HOST_UNTIERED_NAME} is in NEITHER formal/imports.py tier "
+              f"and has no model, so its refusal reads 'not a stdlib or "
+              f"sibling module, and no such file exists' — false of a CPython "
+              f"standard-library module. The row has to SAY so "
+              f"(untiered={d['untiered']}) or a reader takes the count as a "
+              f"work item")
         check(d["model"] is None,
-              f"datetime reported a model at {d['model']!r}")
+              f"{_HOST_UNTIERED_NAME} reported a model at {d['model']!r}")
 
     # A module with a model is in no tier BY DESIGN (`HOST_MODELLED`'s rule is
     # "a name LEAVES here by being WRITTEN"), and calling that a defect would
