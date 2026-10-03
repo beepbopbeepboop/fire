@@ -357,6 +357,30 @@ class TestGeneratorSource(unittest.TestCase):
                                        f"a two-parameter model"):
                 getattr(gen, entry)(prog, b"", dict(info))
 
+    def test_the_step_table_and_the_model_are_the_same_set(self):
+        """`_STEP_CONDS` and `arm64_step`, checked two ways, because one is not
+        enough.
+
+        `check_step_conds` compares SETS and is called by
+        `generate_arm64_proof`, so every proved build enforces it; `audit_step_table`
+        also checks that the two ORDERS agree per overlapping pair, and it is the
+        one that reads `lib/ProofLib.lean` as TEXT. Both existed and the second was
+        reading a branch condition out of a COMMENT above the TBZ case, which put
+        `test_formal.py` in a state where it raised before generating a single
+        proof for every example it has — see
+        `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`.
+
+        The regression this pins is the one whose fix was to REMOVE a row:
+        `CSEL` is emitted by `arm64_codegen.py` at six sites and is in neither the
+        table nor the model, and a row in one without the other is a generator
+        describing an effect the function it is proving takes no step for."""
+        import formal.arm64_proof_gen as G
+        G.check_step_conds(os.path.join(HERE, "lib", "ProofLib.lean"))
+        notes = G.audit_step_table(os.path.join(HERE, "lib", "ProofLib.lean"))
+        self.assertIsInstance(notes, list)
+        for note in notes:
+            self.assertIn("shadows entry", note)
+
     def test_adrp_step_uses_simpa(self):
         """An ADRP's result reads the program counter, so the library lemma
         takes `pc` as a parameter while `_step_rhs` writes `s.pc`; `exact`

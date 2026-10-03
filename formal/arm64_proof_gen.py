@@ -2051,16 +2051,35 @@ _STEP_CONDS = [
     # getting that wrong would mean a branch to the wrong address, silently.
     (0xff000000, 0x36000000),
     (0xff000000, 0x37000000),
-    # CSEL is NOT here, and the row that was is removed rather than left:
-    # `arm64_step` has no CSEL branch either, and `check_step_conds` (called by
-    # `generate_arm64_proof`, so by EVERY proved arm64 build) requires the two to
-    # be the same set. An entry here with no branch in the model is not a gap in
-    # a check — it is a generator that would describe a CSEL's effect while the
-    # function being proved takes no step at all for that word, which is a proof
-    # about a different function. The check is right and the row was wrong.
+    # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
+    # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
+    # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
+    # this table cannot conclude from its absence that the instruction is unused.
+    #
+    # The row that was here is removed rather than left, and that is the correct
+    # direction: `arm64_step` has no CSEL branch either, and `check_step_conds`
+    # (called by `generate_arm64_proof`, so by EVERY proved arm64 build) requires
+    # the two to be the same set. An entry here with no branch in the model is not
+    # a gap in a check — it is a generator that would describe a CSEL's effect
+    # while the function being proved takes no step at all for that word, which
+    # is a proof about a different function. The check is right and the row was
+    # wrong. (`work/formal13-3`'s commit that added it violated its own stated
+    # premise in the very message that introduced it.)
+    #
+    # **WHAT IS STILL MISSING is the model branch, and what blocks it is not the
+    # three lines of Lean.** Measured 2026-10-03, both halves of the old reason
+    # re-measured rather than quoted: the three-line `arm64_step` branch BUILDS
+    # (the branch plus the `work_step_csel` the row needs), and with it a
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails —
+    # `_gen_run_cert`'s certificate exceeds `formal/lean.py`'s `PROOF_WALL_S` —
+    # and the control is that the same three branches spelled as ordinary
+    # comparisons fail identically. So the wall is the certificate's size and not
+    # the instruction, which changes the ORDER of the work: the certificate is
+    # the defect to fix first (`bugs/FORMAL_a_three_branch_certificate_exceeds_
+    # the_lean_bound.md` has the measurement and the next step), and the CSEL row
+    # is a three-line change once it is gone.
     # `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-    # has the measurement and the exact next step, which is the three-line
-    # `arm64_step` branch this row was written in anticipation of.
+    # carries the rest.
 ]
 
 
