@@ -247,6 +247,17 @@ kill undiagnosable. A partial run publishes a ledger under its own extension
 and marks itself partial, so the next run's history diff is against the last
 COMPLETE run and a missing file is never reported as a verdict that changed.
 
+And a run that is TOLD to stop must stop, which is a different property and was
+also false: every file is submitted up front, so the executor's queue is the
+whole run, and a plain `return` from the reporting loop let `__exit__`'s
+`shutdown(wait=True)` walk that queue to the end (measured: builds still
+starting ten minutes after the signal, and a second SIGTERM needed to die).
+SIGINT/SIGTERM now cancels what has not started, refuses to start a build once
+the flag is set, and then collects the `-j` builds that were in flight — which is
+the half that keeps the partial ledger and the CAS from disagreeing about how
+far the run got, since `run_one` publishes before it returns. See
+`_stream_results`.
+
 Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
 formal backend's own sources + the interpreter + the build flags + this tool's
 own bytes — see _criteria_id — + the IMPORT CLOSURE the build reads, see
@@ -2765,13 +2776,31 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
 
     A signal handler rather than only a `try`, because the two interruptions are
     not the same event. SIGINT/SIGTERM is a person or a watchdog asking the run
-    to stop, and the handler turns it into a clean drain: the pool is shut down
-    without waiting for the builds still in flight (they are the slow part, and
-    the caller has already decided they are not wanted), whatever had finished
-    is published, and the exit status says the run was cut short. A SIGKILL
-    cannot be caught at all — that is why the per-file ceiling above exists, to
-    make sure the only thing a SIGKILL can take is the tool's OWN process and
-    not a build that had already been classified and thrown away.
+    to stop, and the handler turns it into a clean drain: the files that had NOT
+    started building are cancelled, the `-j` builds already in flight are waited
+    for and their verdicts recorded and printed, and the exit status says the
+    run was cut short. A SIGKILL cannot be caught at all — that is why the
+    per-file ceiling above exists, to make sure the only thing a SIGKILL can
+    take is the tool's OWN process and not a build that had already been
+    classified and thrown away.
+
+    What the drain does is chosen, not incidental, and it is the opposite of what
+    this used to do. Every file is submitted up front, so the executor's queue is
+    the WHOLE run; a plain `return` left the `with` block, whose `__exit__` calls
+    `shutdown(wait=True)` with `cancel_futures=False`, so each worker kept
+    pulling the next queued file until it reached the sentinel `shutdown` appends
+    — a stopped sweep built every file it had been told to stop building, which
+    is what `ps` showed ten minutes after the signal (children younger than it,
+    each with almost no CPU). Cancelling the queue alone is not enough either,
+    because a worker that returns from one file picks up the next immediately
+    while the main thread is still waiting to hear that it should stop, so
+    `build` refuses to START a file once the flag is set. It is also why the
+    numbers had to be reconstructed from the CAS: `run_one` publishes before it
+    returns, so those builds wrote verdicts that `results` never heard about.
+    Hence the collection of what was in flight — that is what makes the log and
+    the cache agree again. What remains is the delay the builds in flight cost
+    (bounded by one `-t`), which is the honest price of not throwing away a build
+    that may be seconds from a verdict AND of not losing its published verdict.
     """
     stop = threading.Event()
 
@@ -2790,10 +2819,40 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
         signal.signal(sig, _on_signal)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futs = {ex.submit(run_one, p, timeout, flags, mem_gb): p
-                    for p in files}
-            for fut in concurrent.futures.as_completed(futs):
+            def build(path):
+                """One file's build, unless the run was told to stop first.
+
+                The check is HERE, at the one place a build is launched, and not
+                only in the reporting loop, because the loop's own cancellation
+                cannot be prompt enough on its own: a worker that returns from
+                one file picks up the next one immediately, and the main thread
+                only learns that it should stop when a verdict arrives. Without
+                this, a signal landing mid-build still buys one more file per
+                worker — measured as "thirteen children ten minutes after the
+                signal" on the b6 sweep. `None` means not reached, which the
+                caller records as nothing at all rather than as a verdict.
+                """
+                if stop.is_set():
+                    return None
+                return run_one(path, timeout, flags, mem_gb)
+
+            futs = {ex.submit(build, p): p for p in files}
+
+            def collect(fut):
+                """One build's verdict: recorded in `results` and printed.
+
+                One function for the streaming loop and for the drain below, so
+                a verdict that arrives during the drain is reported exactly like
+                one that arrived during the run — `run_one` published both to the
+                CAS, and a run whose log and cache disagree is the state this
+                whole function exists to prevent.
+                """
                 path = futs[fut]
+                if fut.cancelled():
+                    # Never built, so there is nothing to record. Reaching here
+                    # means the queue was drained after a stop, which is the
+                    # queue being thrown away rather than walked.
+                    return None
                 try:
                     v = fut.result()
                 except Exception as e:
@@ -2803,6 +2862,11 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                     v = Verdict(False, f"sweep worker raised: {e}"[:200],
                                 CAUSE_TOOL_ERROR, False, CLASS_TOOL,
                                 CAUSE_TOOL_ERROR)
+                if v is None:
+                    # The build declined to start because the run was stopped;
+                    # nothing is claimed about this file, which is what
+                    # _report_partial's "not reached" has to mean.
+                    return None
                 results[path] = v
                 if v.cls != CLASS_PASS:
                     # `v.detail or v.reason`, because a class whose diagnosis is
@@ -2813,12 +2877,48 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                     # in it for every admitted file.
                     print(f"{v.cls.upper()}: {rel(path)}  "
                           f"({v.detail or v.reason})", flush=True)
+                return v
+
+            for fut in concurrent.futures.as_completed(futs):
+                collect(fut)
                 if stop.is_set():
+                    # Stop BUILDING the rest of the scope, then keep what was
+                    # already running. Both halves are needed: the queue is the
+                    # whole run, so cancelling it is what makes a stopped sweep
+                    # stop, and collecting the in-flight builds is what keeps the
+                    # partial ledger and the CAS from disagreeing about how far
+                    # the run got.
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    _drain_in_flight(futs, collect)
                     return True
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, signal.SIG_DFL)
     return False
+
+
+def _drain_in_flight(futs, collect) -> None:
+    """Record the builds that were ALREADY RUNNING when the run was stopped.
+
+    Called after `shutdown(cancel_futures=True)`, so every future that had not
+    started is already cancelled and this only ever waits on the `-j` builds the
+    pool had taken. Each of those publishes its verdict to the CAS before
+    `run_one` returns, so a drain that ignored them would leave verdicts in the
+    cache that the run's own output never mentions — which is what forced
+    `bugs/FORMAL_sweep_work_map_2026-10-02_b6.md` §2.3 to reconstruct a run's
+    numbers from the cache instead of reading its log.
+
+    Waited for rather than killed, and the cost is bounded: each in-flight build
+    has its own `-t` already running, so the drain costs at most one more `-t`.
+    That is the price of not discarding a build that may be seconds from a
+    verdict, and of not losing the verdict it is about to publish.
+    """
+    running = [f for f in futs if not f.done() and not f.cancelled()]
+    if not running:
+        return
+    concurrent.futures.wait(running)
+    for fut in running:
+        collect(fut)
 
 
 def _report_partial(arch, files, results) -> None:

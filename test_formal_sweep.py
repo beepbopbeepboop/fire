@@ -18,8 +18,11 @@ cached result from a different set would be a different answer.
 import io
 import os
 import re
+import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -1676,6 +1679,150 @@ class TestResultsSurviveAnInterruptedRun(unittest.TestCase):
                          "a partial run must publish under its own extension")
         self.assertEqual(looked_up, [mod.LEDGER_EXT],
                          "load_ledger must only ever ask for a COMPLETE ledger")
+
+
+class TestAStoppedRunStopsBuilding(unittest.TestCase):
+    """A sweep told to stop stops BUILDING, and keeps what was in flight.
+
+    `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`. Every file is
+    submitted to the pool up front, so the executor's queue is the whole run;
+    returning from the reporting loop used to leave the `with` block, whose
+    `__exit__` calls `shutdown(wait=True)` with `cancel_futures=False`, and each
+    worker then pulled the next queued file until it reached the sentinel
+    `shutdown` appends. Measured on the b6 sweep: thirteen children ten minutes
+    after the signal, every one of them younger than it, and a second SIGTERM
+    needed to end the run.
+
+    The second half of the same bug is the numbers. `run_one` publishes to the
+    CAS before it returns, so a build that ran during that shutdown left a
+    verdict in the cache that the run's own ledger never mentioned — which is why
+    the b6 work map reconstructs a run's classes from the CAS instead of reading
+    its log. So the drain collects the `-j` builds that were already running.
+
+    These are the mechanics, driven through the real executor and a real signal,
+    because a test that patches the pool away cannot tell "cancelled the queue"
+    from "never queued it". The signal is a genuine SIGINT sent from inside a
+    build: that is what the handler is for, and it is the only way to exercise
+    the path between "a build finished" and "the loop notices it should stop".
+    """
+
+    def _stopped_run(self, names, jobs=1, signal_from=None, hold=None):
+        """Run `_stream_results` over `names`, SIGINTing it mid-run.
+
+        `signal_from` names the file whose build raises the stop signal, once
+        `hold` (the name of a second build) is running — so with `jobs=2` the
+        run really is interrupted while a second build is in flight, which is the
+        case the drain exists for. The signal is sent from a WORKER thread and
+        handled in the MAIN thread, exactly as a SIGTERM from outside is.
+
+        `hold`'s build blocks until the pool has been told to cancel its queue
+        (`drained`), which is the event under test and also the only thing that
+        can let that build finish: it stands in for a build that is a few
+        seconds from a verdict, so it must be waited for rather than killed. A
+        broken fix then fails the assertion instead of hanging the suite.
+
+        Returns `(results, out, started, shutdowns)` where `shutdowns` is what
+        the pool was asked to do, as `(wait, cancel_futures)` pairs.
+        """
+        import formal_sweep as mod
+        import concurrent.futures as cf
+
+        started, shutdowns = [], []
+        running, drained = threading.Event(), threading.Event()
+
+        class RecordingExecutor(cf.ThreadPoolExecutor):
+            def shutdown(self, wait=True, *, cancel_futures=False):
+                shutdowns.append((wait, cancel_futures))
+                if cancel_futures:
+                    drained.set()
+                return super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        def fake_run_one(path, timeout, flags, mem_gb=mod.MEMCAP_GB):
+            name = mod.rel(path)
+            started.append(name)
+            if name == hold:
+                running.set()
+                drained.wait(15)
+            elif name == signal_from:
+                if hold:
+                    running.wait(15)
+                os.kill(os.getpid(), signal.SIGINT)
+                # The handler runs in the MAIN thread, which is at that moment
+                # blocked waiting for a verdict, so give it the moment it needs
+                # to notice — a real build does not finish in the same instant
+                # the signal arrives, and this race is the one being pinned.
+                time.sleep(0.2)
+            return mod.Verdict(False, "build: refused", None, True,
+                               mod.CLASS_CODEGEN, "other refusal")
+
+        saved = mod.run_one
+        mod.run_one = fake_run_one
+        files = [os.path.join(mod.REPO, n) for n in names]
+        results, buf = {}, io.StringIO()
+        try:
+            with mock.patch.object(mod.concurrent.futures,
+                                   "ThreadPoolExecutor", RecordingExecutor):
+                with redirect_stdout(buf):
+                    interrupted = mod._stream_results(
+                        files, jobs, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertTrue(interrupted, "the run must report itself interrupted")
+        return results, buf.getvalue(), started, shutdowns
+
+    def test_the_files_that_never_started_are_not_built(self):
+        # Three files, one worker, the signal raised by the first build while it
+        # is still holding the worker. The old behaviour built all three: the
+        # single worker pulled b and c in turn while `__exit__` waited.
+        results, out, started, shutdowns = self._stopped_run(
+            ["a.py", "b.py", "c.py"], jobs=1, signal_from="a.py")
+        self.assertEqual(started, ["a.py"],
+                         "a stopped sweep must not build the rest of its scope")
+        self.assertEqual(sorted(results), [os.path.join(S.REPO, "a.py")])
+        self.assertIn("CODEGEN: a.py", out)
+        self.assertNotIn("b.py", out)
+        self.assertIn((False, True), shutdowns,
+                      "the queue must be cancelled, not walked")
+
+    def test_the_builds_already_in_flight_are_kept_and_reported(self):
+        # Two workers, so the signal arrives while a SECOND build is running.
+        # That build publishes its verdict to the CAS before it returns, so
+        # dropping it would leave the cache and the log disagreeing — the half of
+        # the bug that made a run's numbers have to be reconstructed.
+        results, out, started, shutdowns = self._stopped_run(
+            ["a.py", "b.py", "c.py"], jobs=2, signal_from="a.py", hold="b.py")
+        self.assertEqual(sorted(started), ["a.py", "b.py"],
+                         "the queued third file must be the one that is dropped")
+        self.assertEqual(sorted(os.path.basename(p) for p in results),
+                         ["a.py", "b.py"])
+        self.assertIn("CODEGEN: b.py", out,
+                      "a build that finished during the drain must still print")
+        self.assertIn((False, True), shutdowns)
+
+    def test_an_unsignalled_run_classifies_every_file_and_is_not_a_drain(self):
+        # The half that is NOT changed: nothing here is stopped, so no future is
+        # cancelled, every file is classified, and the pool is shut down only by
+        # its own `__exit__`.
+        import formal_sweep as mod
+        started = []
+        saved = mod.run_one
+        mod.run_one = lambda p, t, f, mem_gb=mod.MEMCAP_GB: (
+            started.append(mod.rel(p)) or
+            mod.Verdict(False, "build: refused", None, True,
+                        mod.CLASS_CODEGEN, "other refusal"))
+        files = [os.path.join(mod.REPO, n) for n in ("a.py", "b.py", "c.py")]
+        results, buf = {}, io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                interrupted = mod._stream_results(
+                    files, 2, 30, ("--formal",), 4.0, results)
+        finally:
+            mod.run_one = saved
+        self.assertFalse(interrupted)
+        self.assertEqual(sorted(started), ["a.py", "b.py", "c.py"])
+        self.assertEqual(len(results), 3)
+        for n in ("a.py", "b.py", "c.py"):
+            self.assertIn(f"CODEGEN: {n}", buf.getvalue())
 
 
 class TestSweepLock(unittest.TestCase):
