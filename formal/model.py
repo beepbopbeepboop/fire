@@ -20293,6 +20293,51 @@ def refuse_dropped_handler_arm(fn, found) -> str:
         f"end the arm with `raise` if the program is meant to fail there.")
 
 
+def call_result_frame_struct(call, functions: dict, decls: dict):
+    """The struct whose VALUE `call` evaluates to, when it is decidable, else None.
+
+    The one question a comparison rewrite asks about an operand that is a CALL
+    rather than a name, and it is asked the way `_rhs_pointee` asks the same
+    question about a pointer: from the CALLEE's own declaration, read out of this
+    image's function table. A call to something this image does not contain
+    answers None rather than guessing, which is the same conservative direction
+    every other type question on this path takes.
+
+    Three conditions, each load-bearing:
+
+      * the callee is a bare name in `functions` — a lifted method call
+        (`A_m`), a dotted call (`mod.f`) and an `external_call` all name
+        something whose return type is not stated here, and a receiver's own
+        declared type is a different question with a different answer;
+      * the declared return type's BASE name (`annotation_base_name`, which
+        reads `CStringSlice[ImmutOrigin[origin_of(self)]]` as `CStringSlice` and
+        an unannotated callee as nothing at all) names a struct of THIS image;
+      * that struct is one this path represents as a FRAME or as a single word
+        (`struct_is_framed` / `struct_is_one_word`), because the caller passes
+        the value straight to a method whose first parameter is a receiver and
+        the two representations are not interchangeable.
+
+    `None` is a refusal and never a zero: an unknown callee is a real function
+    whose return type this image does not state, and treating it as "not a
+    struct" would leave the caller with the address compare it is trying to
+    replace.
+    """
+    if not isinstance(call, F.CallExpr) or not isinstance(call.func,
+                                                        F.IdentExpr):
+        return None
+    callee = (functions or {}).get(call.func.name)
+    ann = getattr(callee, "return_type", None) if callee is not None else None
+    if not ann:
+        return None
+    base = annotation_base_name(ann)
+    st = (decls or {}).get(base) if base else None
+    if st is None:
+        return None
+    if struct_is_framed(st) or struct_fits_one_word(st):
+        return st
+    return None
+
+
 def module_body_refusal(stmt):
     """Why a top-level statement cannot be lowered as the module body, or None.
 

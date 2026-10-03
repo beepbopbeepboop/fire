@@ -10884,6 +10884,100 @@ EQ_DISPATCH_CASES = [
      "    var b = One(3)\n"
      "    printf(\"%d\\n\", 1 if a == b else 0)\n"
      "    return 0\n", 0, "1"),
+    # ── a CALL as one of the two operands ──────────────────────────────────
+    #
+    # The frame case's safety argument is about two words that are both frame
+    # ADDRESSES of one struct, and it was settled by asking the HOLDER TABLE,
+    # which is keyed by name — so an operand that is a call was never asked
+    # about, and the operator stayed a flag-setting compare of two addresses. For
+    # two names that is CPython's inherited `object.__eq__`; for a struct that
+    # DECLARES one it is a bypass, and a bypass of a field-wise `__eq__` on two
+    # DISTINCT objects with equal fields answers False where CPython answers
+    # True. Measured, both architectures, `eq=0` where CPython prints `eq=1` —
+    # and nothing refused it.
+    #
+    # The fix reads the CALL's struct off the callee's own DECLARED RETURN TYPE
+    # (`model.call_result_frame_struct`), which is an interprocedural fact
+    # rather than an inference, and leaves every operand it cannot resolve
+    # alone. `mk` is annotated, which is the point: an unannotated callee
+    # answers None and the address compare stands.
+    ("eq_operator_reaches_a_declared_eq_through_a_call_operand",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"eq=%d ne=%d diff=%d\", 1 if t == mk(1) else 0,\n"
+     "           1 if t != mk(1) else 0, 1 if t == mk(2) else 0)\n"
+     "    return 0\n", 0, "eq=1 ne=0 diff=0"),
+    # …and the CHAIN, whose ends may each be a call: `mk(1) == t == mk(1)` is
+    # two links and each `mk(1)` appears in ONE of them, so the call is evaluated
+    # where the source put it. This row exists because the first attempt at it
+    # produced a REFUSAL whose message was false about the file — the
+    # holder-agreement check counted a frame-returning call as "something that
+    # is not a frame address" — which is why that check now asks
+    # `_argument_is_frame_address` and reuses `_frame_valued_calls`, the table
+    # the emitters build their blocks from.
+    ("eq_chain_with_a_call_at_each_end",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"chain=%d\", 1 if mk(1) == t == mk(1) else 0)\n"
+     "    return 0\n", 0, "chain=1"),
+    # …and the call in a chain's MIDDLE, which stays an address compare, and is
+    # pinned as the ONE remaining shape rather than left to be discovered: the
+    # lowering reads each operand twice, so `t == mk(1) == u` would call `mk`
+    # three times where the source calls it twice. The remedy is a
+    # STATEMENT-level rewrite — bind the operand to a temporary in the enclosing
+    # statement, which needs its own round in the holder fixpoint — and it is
+    # written down in `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` rather
+    # than done here.
+    ("eq_chain_with_a_call_in_the_middle_stays_an_address_compare",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "    def __eq__(self, other: A) -> Bool:\n"
+     "        if other.y != self.y:\n"
+     "            return False\n"
+     "        return self.x == other.x\n"
+     "\n"
+     "def mk(v: Int) -> A:\n"
+     "    var a = A()\n"
+     "    a.x = v\n"
+     "    a.y = v\n"
+     "    return a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = mk(1)\n"
+     "    printf(\"chain=%d\", 1 if t == mk(1) == mk(1) else 0)\n"
+     "    return 0\n", 0, "chain=0"),
     # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
     # only `B` declares a dunder, so which call the comparison lowers to depends
     # on the path and this analysis has no path sensitivity.  Pre-change this

@@ -2111,6 +2111,30 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
     """
     declared = declared or {}
     name_defs = name_defs if name_defs is not None else {}
+    # `{id(site function): {id(call): ([struct], why)}}`, LAZILY.  It is the
+    # shared recogniser the emitters build their blocks from — a frame address
+    # reaches a callee through a construction (`f(Pair(3, 4))`) or through a
+    # call to a function that returns one (`f(make())`) as much as through a
+    # name — and the bucket test below used to count both of those as "not a
+    # frame", so two call sites that agreed handed this check one of each and
+    # it refused a program whose image is right.  Measured, both architectures:
+    # `mk(1) == t == mk(1)` lowered to two `A___eq__` calls, one with `t` at
+    # argument 0 and one with `mk(1)`, and the refusal said "something that is
+    # not a frame address at mk(1)" — false about the call, which returns a
+    # frame.
+    #
+    # Lazy because it walks a function body and the bucket test is only reached
+    # for a parameter the two sides disagree about, so the common case pays
+    # nothing for it.
+    frame_calls: dict = {}
+
+    def frames_of(site_fn):
+        got = frame_calls.get(id(site_fn))
+        if got is None:
+            got = frame_calls[id(site_fn)] = _frame_valued_calls(
+                site_fn, structs_by_name or {}, returns_frame, functions)
+        return got
+
     for fn in functions:
         hs = holders.get(_fn_key(fn)) or ()
         by_name = hstruct.get(_fn_key(fn)) or {}
@@ -2152,12 +2176,33 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
                     continue
                 _check_one_callee(functions, fn, callee, def_fn, params, node,
                                   hs, holders, hstruct, declared,
-                                  structs_by_name or {}, returns_frame)
+                                  structs_by_name or {}, returns_frame,
+                                  frames_of)
+
+
+def _argument_is_frame_address(arg, hs, frame_calls) -> bool:
+    """Whether `arg` is a frame address at this call site, by either spelling.
+
+    A NAME the holder analysis holds a frame for, or a CALL whose value is one —
+    a construction (`Pair(3, 4)`) or a call to a function that returns a frame
+    (`make()`), which is what `frame_calls` is
+    (`_frame_valued_calls`, the table both emitters reserve their blocks from).
+
+    One predicate because the bucket test it serves is a comparison of two KINDS
+    of value, and a test that recognises only the name spelling calls a frame
+    something else: `_check_holder_agreements` refused `mk(1) == t == mk(1)`,
+    whose two `A___eq__` call sites hand argument 0 a holder and a
+    frame-returning call, with the message asserting the call was "something
+    that is not a frame address" — a sentence about a call that returns one.
+    """
+    if isinstance(arg, F.IdentExpr):
+        return arg.name in hs
+    return id(arg) in frame_calls
 
 
 def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
                       holders, hstruct, declared, structs_by_name,
-                      returns_frame=None) -> None:
+                      returns_frame=None, frames_of=None) -> None:
     """One definition's worth of the holder-agreement check, for one call site.
 
     The body of `_check_holder_agreements`'s per-callee loop, split out so it
@@ -2170,7 +2215,8 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
         pname = params[position] if position < len(params) else None
         if not pname:
             continue
-        here = isinstance(arg, F.IdentExpr) and arg.name in hs
+        here = _argument_is_frame_address(arg, hs,
+                                         frames_of(fn) if frames_of else {})
         there = pname in (holders.get(_fn_key(def_fn)) or ())
         if pname in by_decl:
             _check_declared_parameter(
@@ -2198,17 +2244,31 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
                 for i, a, _k in _frame_argument_slots(site, params):
                     if i != position:
                         continue
-                    site_holder = isinstance(a, F.IdentExpr) \
-                        and a.name in holders.get(_fn_key(site_fn), ())
+                    site_holder = _argument_is_frame_address(
+                        a, holders.get(_fn_key(site_fn), ()),
+                        frames_of(site_fn) if frames_of else {})
                     spelling = _call_spelling(site, a, position, pname)
                     bucket = (holder_spellings if site_holder
                               else plain_spellings)
                     if spelling not in bucket:
                         bucket.append(spelling)
-                    for st in (hstruct.get(_fn_key(site_fn), {})
-                               .get(a.name) or ()) if site_holder else ():
-                        if st.name not in structs:
-                            structs.append(st.name)
+                    if site_holder:
+                        # The struct NAMES a frame site hands over, from the
+                        # same two tables either spelling is read out of: the
+                        # holder table for a name, and `_frame_valued_calls`'s
+                        # own entry for a construction or a frame-returning
+                        # call. The message names them, so it must not say
+                        # "A" for a site that passed something else.
+                        if isinstance(a, F.IdentExpr):
+                            names = [st.name for st in
+                                     (hstruct.get(_fn_key(site_fn), {})
+                                      .get(a.name) or ())]
+                        else:
+                            names = list((frames_of(site_fn)
+                                          .get(id(a)) or ((), ""))[0])
+                        for st_name in names:
+                            if st_name not in structs:
+                                structs.append(st_name)
         if not holder_spellings or not plain_spellings:
             continue
         raise CodegenError(M.frame_holder_disagreement_refusal(
@@ -2802,7 +2862,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
                                     holders, one_word)
-        _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word)
+        _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
+                                       one_word, structs_by_name)
         for fn in functions:
             fn._frame_holders = set()
             fn._frame_candidates = {}
@@ -3195,7 +3256,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         moved = (_rewrite_len_on_frame_receivers(functions, holders,
                                           hstruct)
                  + _rewrite_eq_on_frame_receivers(functions, holders,
-                                                 hstruct, one_word))
+                                                 hstruct, one_word,
+                                                 structs_by_name))
         if not (grew or moved):
             break
     else:
@@ -4766,7 +4828,7 @@ def _replace_nodes(root, replacements: dict) -> None:
 
 
 def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
-                      hs, one_word=None) -> object:
+                      hs, one_word=None, call_frame=None) -> object:
     """The call that answers `left op right`, or None to leave the operator be.
 
     The decision is `model.struct_dunder_dispatch_candidates` and nothing here
@@ -4776,16 +4838,29 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     not touch, and each is a shape where the pre-existing lowering is either
     CORRECT or already refused by something closer to the mistake:
 
-      * an operand that is not a BARE NAME — `f(h) == h`, `h.x == h`.  The
-        holder table is keyed by name, and a name is the only thing here that can
-        say what a word holds; guessing past it is the bug this file exists to
-        stop;
+      * an operand that is not a BARE NAME and not a CALL of this image — `f(h)
+        == h`, `h.x == h`.  The holder table is keyed by name, and a name is the
+        only thing here that can say what a word holds; guessing past it is the
+        bug this file exists to stop;
       * a name with no candidates, which is a plain word, so its `==` is the
         word compare that has always run;
       * no candidate declaring the dunder, which is CPython's INHERITED
         identity `__eq__` — and a frame's address compare already IS that, so
         leaving it alone is the right answer and not a gap.
+
+    `call_frame` is `{id(call): struct}` for the CALL operands this rewrite may
+    dispatch, settled by the caller from `model.call_result_frame_struct` — the
+    callee's own DECLARED return type, which is a real interprocedural answer
+    read out of this image's function table and not an inference.  It is passed
+    in rather than computed here because the caller already walks the operands
+    and a chain's double-evaluation rule needs the same walk to say which of
+    them may be a call at all.
     """
+    if call_frame is None:
+        call_frame = {}
+    if isinstance(left, F.CallExpr) or isinstance(right, F.CallExpr):
+        return _eq_dispatch_on_call_operand(node, op, left, right, by_name, hs,
+                                            one_word, call_frame)
     if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
         return None
     if left.name in hs and right.name in hs:
@@ -4815,13 +4890,74 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
             one_word.get(right.name) or ())
         cands_l = one_word.get(left.name) or ()
         cands_r = one_word.get(right.name) or ()
+    return _eq_dispatch_decide(node, op, left, right, cands, cands_l, cands_r)
+
+
+def _eq_dispatch_on_call_operand(node, op: str, left, right, by_name, hs,
+                                 one_word, call_frame):
+    """`left op right` where at least one operand is a CALL, or None.
+
+    The frame case with a call in it, and it is here rather than a widening of
+    the name-only path because the safety argument is the SAME one and rests on a
+    DIFFERENT fact: `a == mk(1)` compares a name the holder table holds a frame
+    for against the result of a call whose declared return type names the same
+    struct, and both words are frame addresses of that one struct — which is
+    every clause `_rewrite_eq_on_frame_receivers`' docstring gives for two
+    names. Before this, the operator stayed an address compare, so it answered
+    "are these the same object" where the language asks the method:
+
+        struct A:  var x: Int
+                   var y: Int
+                   def __eq__(self, other: A) -> Bool: …
+        def mk(v: Int) -> A: …
+
+        var t = mk(1)
+        if t == mk(1):  …     # CPython: True (equal fields)
+                            # this path, both architectures: False
+
+    Each operand is resolved to a candidate list by the SAME two tables the
+    name-only path reads, and a CALL contributes only what
+    `call_result_frame_struct` decided about its callee's declaration. An
+    operand that resolves to nothing, or to a different struct from the other
+    one, is `None` — the address compare, which is what this path always did for
+    a comparison it cannot dispatch.
+    """
+    sides = []
+    for expr in (left, right):
+        if isinstance(expr, F.CallExpr):
+            st = call_frame.get(id(expr))
+            sides.append([] if st is None else [st])
+        elif isinstance(expr, F.IdentExpr) and expr.name in hs:
+            sides.append(list(by_name.get(expr.name) or ()))
+        elif isinstance(expr, F.IdentExpr) and one_word is not None \
+                and expr.name in one_word and expr.name not in hs:
+            sides.append(list(one_word.get(expr.name) or ()))
+        else:
+            return None
+    cands_l, cands_r = sides
+    if not cands_l or not cands_r:
+        return None
+    return _eq_dispatch_decide(node, op, left, right,
+                               cands_l + cands_r, cands_l, cands_r)
+
+
+def _eq_dispatch_decide(node, op: str, left, right, cands, cands_l, cands_r):
+    """Candidates → the dispatch call, or None. Shared by both operand shapes.
+
+    Split out so the disagreement refusal, the "no dunder" answer and the
+    `!=`-negation are ONE implementation: the two operand shapes differ only in
+    how each side's candidate list is settled, and a copy of this tail per shape
+    is a second place for the two to disagree about which struct a comparison
+    belongs to.
+    """
     if not cands:
         return None
     owner, dunder, negate, (disagree, rows) = \
         M.struct_dunder_dispatch_candidates(cands_l, cands_r, op)
     if disagree:
         raise CodegenError(M.eq_dispatch_candidates_disagree(
-            f"{left.name} {op} {right.name}",
+            f"{getattr(left, 'name', left)} {op} "
+            f"{getattr(right, 'name', right)}",
             sorted({st.name for st in cands}), rows))
     if owner is None:
         return None
@@ -4833,9 +4969,9 @@ def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
     return F.UnaryOp(op="not", operand=call)
 
 
-def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
-                                   one_word=None) -> int:
-    """`a == b` → `Struct___eq__(a, b)`, for two names that hold the same frame.
+def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
+                                   structs_by_name=None) -> int:
+    """`a == b` → `Struct___eq__(a, b)`, for two operands holding the same frame.
 
     The COMPARISON half of what `_rewrite_len_on_frame_receivers` does for
     `len`, and it is here for exactly the reason that function's call site gives:
@@ -4876,11 +5012,17 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
 
     The chain spelling (`a == b == c`) is one `F.CompareChain` and lowers here
     as the `and` of its pairwise comparisons, which is what the language says a
-    chain is.  Only when EVERY operand is a bare name: the rewrite re-reads the
-    middle operands, and a name read twice is the same load twice, while an
-    operand with a call in it would be called twice where the language calls it
-    once.  A chain with a call in it is left alone — see the remainder named in
-    `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`.
+    chain is.  A call may stand at either END of the chain — `mk(1) == b` and
+    `b == mk(1)` are one link each, so the call is evaluated exactly where the
+    source put it — and NOT in the middle: `a == mk(1) == b` lowers to
+    `and(A___eq__(a, mk(1)), A___eq__(mk(1), b))`, which calls `mk` twice where
+    the language calls it once.  That middle case is the one shape left alone,
+    and the remedy for it is a STATEMENT-level rewrite — bind the operand to a
+    temporary in the enclosing statement first, which is what
+    `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md` asks for and what this
+    deliberately does not do, because it needs its own round in the fixpoint
+    below and this change's argument is that a dispatch decision must not
+    introduce a store.
 
     Returns how many operators it rewrote, which is what lets the caller run
     this and the holder fixpoint as ONE fixpoint: a round that neither grew a
@@ -4888,6 +5030,8 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
     move one may have introduced a call the next round's fixpoint has to follow.
     """
     moved = 0
+    functions_by_name = {fn.name: fn for fn in functions
+                         if getattr(fn, "name", None)}
     for fn in functions:
         hs = holders.get(_fn_key(fn)) or ()
         by_name = hstruct.get(_fn_key(fn)) or {}
@@ -4901,14 +5045,16 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
             continue
         pending = []
         for node in M.iter_nodes(getattr(fn, "body", None)):
-            if isinstance(node, F.BinaryOp) and node.op in ("==", "!=") \
-                    and isinstance(node.left, F.IdentExpr) \
-                    and isinstance(node.right, F.IdentExpr):
+            if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
                 call = _eq_dispatch_call(
                     node, node.op, node.left, node.right,
-                    by_name.get(node.left.name) or (),
-                    by_name.get(node.right.name) or (), by_name, hs,
-                    fn_one_word)
+                    by_name.get(node.left.name)
+                    if isinstance(node.left, F.IdentExpr) else None or (),
+                    by_name.get(node.right.name)
+                    if isinstance(node.right, F.IdentExpr) else None or (),
+                    by_name, hs, fn_one_word,
+                    _call_frame_structs(node, functions_by_name,
+                                        structs_by_name))
                 if call is not None:
                     pending.append((id(node), call))
                 continue
@@ -4916,14 +5062,24 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
                 continue
             if any(op not in ("==", "!=") for op in node.ops):
                 continue
-            if not all(isinstance(o, F.IdentExpr) for o in node.operands):
-                continue
+            call_frame = _call_frame_structs(node, functions_by_name,
+                                             structs_by_name)
             links, lowered = [], True
             for i, op in enumerate(node.ops):
                 left, right = node.operands[i], node.operands[i + 1]
+                if isinstance(left, F.CallExpr) and i > 0:
+                    lowered = False            # evaluated twice — see above
+                    break
+                if isinstance(right, F.CallExpr) and i + 1 < len(node.ops):
+                    lowered = False
+                    break
                 call = _eq_dispatch_call(
-                    node, op, left, right, by_name.get(left.name) or (),
-                    by_name.get(right.name) or (), by_name, hs, fn_one_word)
+                    node, op, left, right,
+                    by_name.get(left.name) if isinstance(left, F.IdentExpr)
+                    else None or (),
+                    by_name.get(right.name) if isinstance(right, F.IdentExpr)
+                    else None or (),
+                    by_name, hs, fn_one_word, call_frame)
                 if call is None:
                     lowered = False
                     break
@@ -4941,6 +5097,30 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct,
             _replace_nodes(fn.body, {node_id: call})
         moved += len(pending)
     return moved
+
+
+def _call_frame_structs(node, functions_by_name: dict, structs_by_name: dict):
+    """`{id(call): struct}` for the CALL operands `node` may dispatch.
+
+    Keyed by identity because the answer is about a NODE — the operand as
+    written, which appears once in a single comparison and twice in a chain's
+    middle — and because the walk that asks has already decided which of them may
+    be a call at all. `model.call_result_frame_struct` does the deciding, from
+    the callee's declared return type, and answers None for a call this image
+    does not contain: an entry with no struct is simply absent, which the
+    dispatch reads as "leave this operand alone".
+    """
+    out = {}
+    operands = ([node.left, node.right] if isinstance(node, F.BinaryOp)
+                else list(getattr(node, "operands", None) or ()))
+    for operand in operands:
+        if not isinstance(operand, F.CallExpr):
+            continue
+        st = M.call_result_frame_struct(operand, functions_by_name,
+                                        structs_by_name)
+        if st is not None:
+            out[id(operand)] = st
+    return out
 
 
 def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
