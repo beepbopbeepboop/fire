@@ -365,8 +365,14 @@ def cmd_guard(a):
     `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
     OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process
     outside our trees."""
-    roots = [os.path.realpath(p) for p in
-             [t["worktree"] for t in load().values()] + [os.path.join(PARENT, "work-integ")]]
+    def tree_roots():
+        # Recomputed every pass: workers are spawned all day, and a list taken once at start-up
+        # stopped covering every worktree created after the guard did (2026-10-03: two orphaned
+        # `lean` processes at 154 and 286 CPU-minutes ran for an hour inside work-337, a worktree
+        # born after the guard, and the lean time bound never matched their cwd).
+        return [os.path.realpath(p) for p in
+                [t["worktree"] for t in load().values()] + [os.path.join(PARENT, "work-integ")]]
+    roots = tree_roots()
     limit_kb = int(a.limit_gb * 1048576)
     total_kb = int(a.total_gb * 1048576)
 
@@ -382,6 +388,7 @@ def cmd_guard(a):
         except OSError: pass
 
     while True:
+        roots = tree_roots()
         out = subprocess.run(["ps", "-axo", "pid=,rss=,args="], capture_output=True, text=True).stdout
         big = []                                     # processes over 1 GB that live in our trees
         for line in out.splitlines():
