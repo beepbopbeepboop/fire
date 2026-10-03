@@ -515,6 +515,63 @@ def _foreign_cpp_module_global_value():
         globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
 
 
+def _cpp_coroutine_builtin_module_constant():
+    # A constant read off a module MARKER that is NEVER INLINED — `os` and
+    # `signal` bind to an opaque marker with no compiled body in this TU, so
+    # there is no `_module_globals['os']` field to read and no emitted struct
+    # to name. Real: scriptutil.py's `iter_marks` (`div = os.linesep` beside
+    # `end = f'{mark}{os.linesep}'`), bugs/COMPILE_FAIL_Tools_c-analyzer_c_
+    # common_scriptutil.md.
+    #
+    # Those few constants are known BY VALUE instead (fixed by the OS ABI
+    # and by os.py's own literals). The table is SHARED with the ordinary
+    # GIMPLE path, which already read them correctly — and that sharing is
+    # the point of the test's shape: the generator body and the ORDINARY
+    # function in the same program read the same constant, so the two
+    # backends cannot answer differently without one of the two lines going
+    # wrong. When the coroutine emitter had its own stub-to-0, the ordinary
+    # line still printed '/' while the generator line printed ''.
+    #
+    # Asserted against CPython run on a reference twin AT TEST TIME, because
+    # the failure mode is a silent wrong value on both halves.
+    _mojo = (
+        "import os\n"
+        "import signal\n"
+        "\n"
+        "def strings(*, start=[]):\n"
+        "    div = os.linesep\n"
+        "    end = f'x{os.linesep}'\n"
+        "    yield end\n"
+        "    yield div\n"
+        "\n"
+        "def numbers(*, start=[]):\n"
+        "    yield signal.SIGTERM + 0\n"
+        "    yield signal.SIGKILL * 2\n"
+        "    yield 1 if signal.SIGPIPE else 0\n"
+        "    yield 1 if os.sep else 0\n"
+        "    yield 1 if os.pathsep else 0\n"
+        "\n"
+        "def ordinary():\n"
+        "    print(repr(os.linesep))\n"
+        "    print(os.pathsep)\n"
+        "    print(signal.SIGTERM)\n"
+        "\n"
+        "def main():\n"
+        "    for s in strings():\n"
+        "        print(repr(s))\n"
+        "    for n in numbers():\n"
+        "        print(n)\n"
+        "    ordinary()\n"
+        "\n"
+        "main()\n")
+    # The reference twin drops only the A3-gate triggers (`*, start=[]`);
+    # everything the compiled program computes is identical source.
+    _cpy = (_mojo.replace("def strings(*, start=[]):", "def strings():")
+                .replace("def numbers(*, start=[]):", "def numbers():"))
+    test_generator_matches_cpython(
+        "cpp_coroutine_body_reads_marker_module_constant", _mojo, _cpy)
+
+
 def _cpp_coroutine_exc_ctor_value():
     # `e = ValueError('boom')` then `raise e` — real: scriptutil.py's
     # `_iter_filenames` (`onempty = Exception('no filenames provided')` /
@@ -4078,6 +4135,7 @@ def main():
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
+    _cpp_coroutine_builtin_module_constant()
     _cpp_coroutine_exc_ctor_value()
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY

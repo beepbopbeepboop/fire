@@ -40,6 +40,7 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
+from mojo.middle.module_shared import builtin_module_constant
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -1427,8 +1428,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
 
         # os.sep / os.pathsep / os.curdir / os.pardir / os.linesep —
         # this platform is always POSIX ('/'), so all five are genuine
-        # compile-time constants straight out of os.py's own module body
-        # (sep='/'; pathsep=':'; curdir='.'; pardir='..'; linesep='\n').
+        # A compile-time constant a module MARKER exports (`os.linesep`,
+        # `signal.SIGTERM`). `os` and `signal` are never inlined, so there is
+        # no `_module_globals['os']` field to read — the lookup above
+        # legitimately has nothing to say about them and these values are
+        # fixed by os.py's own literals and the OS ABI.
+        #
         # `sep`/`pathsep` were always handled here; the other three fell
         # through to the generic unresolved-module-attribute paths below
         # — a silent `(int)0` stub where one was reachable, else a fatal
@@ -1436,38 +1441,22 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # from the generic dynamic-dispatch fallback (real:
         # Lib/mailbox.py:32's `linesep = os.linesep.encode('ascii')`,
         # whose global then also mis-typed against the mismatched RHS).
-        if _canon == 'os' and node.member in ('sep', 'pathsep',
-                                                   'curdir', 'pardir',
-                                                   'linesep'):
-            val = {'sep': '/', 'pathsep': ':', 'curdir': '.',
-                   'pardir': '..', 'linesep': '\n'}[node.member]
+        #
+        # The table itself is SHARED with the coroutine C++20 emitter's
+        # module-constant read (`builtin_module_constant`), which used to
+        # stub every one of these to 0 — see that table's own comment for
+        # why two copies of one answer were a silent wrong answer rather
+        # than a visible failure.
+        _bm_const = builtin_module_constant(_canon, node.member)
+        if _bm_const is not None:
+            _bm_ctype, _bm_val = _bm_const
             # _intern_string wants an already-C-escaped literal body —
             # linesep's raw newline must go through _c_escape (the same
             # shared helper every other string-emission site uses) or it
             # splices a literal line break into the .ci string pool.
-            t = gen._new_val('char *',
-                             gen._intern_string(gimple_ctypes._c_escape(val)))
-            return 'char *', t
-
-        # signal.SIG* — the portable POSIX signal numbers, genuine
-        # compile-time constants fixed by the OS ABI (identical on every
-        # POSIX system this runtime targets). `signal` binds to a bare
-        # module marker, so these fell through to the dynamic-getattr
-        # fallback — obj=NULL, fatal `AttributeError: SIGTERM` at runtime
-        # (real: Apple/__main__.py's main(): `signal.signal(signal.SIGTERM,
-        # signal_handler)`). Only the eleven numbers that are identical
-        # across all POSIX platforms are listed; BSD/Linux-only members
-        # (SIGUSR1/SIGCHLD/...) deliberately keep the honest AttributeError
-        # rather than risk emitting a wrong number.
-        if _canon == 'signal' and node.member in (
-                'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGABRT',
-                'SIGFPE', 'SIGKILL', 'SIGSEGV', 'SIGPIPE', 'SIGALRM',
-                'SIGTERM'):
-            val = {'SIGHUP': 1, 'SIGINT': 2, 'SIGQUIT': 3, 'SIGILL': 4,
-                   'SIGABRT': 6, 'SIGFPE': 8, 'SIGKILL': 9, 'SIGSEGV': 11,
-                   'SIGPIPE': 13, 'SIGALRM': 14, 'SIGTERM': 15}[node.member]
-            t = gen._new_val('int64_t', str(val))
-            return 'int64_t', t
+            _bm_text = (gen._intern_string(gimple_ctypes._c_escape(_bm_val))
+                        if _bm_ctype == 'char *' else str(_bm_val))
+            return _bm_ctype, gen._new_val(_bm_ctype, _bm_text)
 
         # Class attribute access: ClassName.ATTR
         # Check if module_name is a known struct/class (not an instance variable)

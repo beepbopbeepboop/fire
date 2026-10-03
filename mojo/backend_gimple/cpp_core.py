@@ -41,7 +41,8 @@ import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_exprs as gex
-from mojo.middle.module_shared import module_qualifier
+from mojo.middle.module_shared import (
+    module_qualifier, builtin_module_constant, builtin_module_constant_names)
 
 # Sentinel for "this dict has no such key", so a caller can tell a key
 # that is ABSENT from one whose value happens to be falsy. Used by
@@ -1089,6 +1090,18 @@ def _cpp_module_global_field(gen, marker, name):
     bound = (gen.imported_symbols.get(marker) or {}).get('module')
     if not bound:
         return None
+    # A constant this compiler knows BY VALUE rather than by compiled module
+    # body: `os` and `signal` are never inlined into this TU, so the
+    # per-module field lookup below has nothing for them — see
+    # `builtin_module_constant`'s own table comment. The SAME table the
+    # ordinary GIMPLE path reads `os.linesep` through, so one program cannot
+    # see `'\n'` in one function and `''` in another.
+    _bm_const = builtin_module_constant(str(bound), name)
+    if _bm_const is not None:
+        _bm_ctype, _bm_val = _bm_const
+        if _bm_ctype == 'char *':
+            return _bm_ctype, _cpp_string_literal_expr(gen, _bm_val)
+        return _bm_ctype, f'({_bm_ctype}){_bm_val}'
     found = gen._module_global_field_type(bound, name)
     key = bound
     if found is None:
@@ -1148,6 +1161,14 @@ def _cpp_module_global_ctypes(gen):
         bound = (gen.imported_symbols.get(_marker) or {}).get('module')
         if not bound:
             continue
+        # The by-VALUE constants first, for the same reason
+        # `_cpp_module_global_field` asks for them first: a marker that is
+        # never inlined has no field row, so without this half `os.linesep`
+        # would be typed by neither table and fall to the `int64_t` default.
+        for _cname in builtin_module_constant_names(str(bound)):
+            _bc = builtin_module_constant(str(bound), _cname)
+            if _bc is not None:
+                out[f'{_marker}.{_cname}'] = _bc[0]
         for _key in (bound, gimple_ctypes._c_field_name(str(bound))):
             for _entry in (gen._module_globals.get(_key) or ()):
                 _gtype = gimple_exprtypes._as_str(_entry[2])

@@ -315,6 +315,82 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
     return _out
 
+# Constants a MODULE MARKER exports that this compiler knows BY VALUE rather
+# than by compiled module body. `os` and `signal` are markers, never inlined
+# into the translation unit (their bodies are not part of any program's
+# closure the way a `from . import sibling` sibling's is), so there is no
+# `_module_globals['os']` field to read and no emitted struct to name — the
+# per-module field lookup that every other `mod.CONST` read answers through
+# (see `GimpleGen._module_global_field_type`) legitimately has nothing to say
+# about these two. These values are fixed by the OS ABI and by os.py's own
+# literals, so emitting them directly is not a guess.
+#
+# One table, because two backends read the same `os.linesep`: the ordinary
+# GIMPLE path's `_lower_MemberExpr` and the coroutine C++20 emitter's
+# module-constant read. Kept as two near-identical literal dicts, the
+# disagreement was invisible until the second reader existed and then produced
+# a SILENT wrong answer rather than an error — the coroutine emitter stubbed
+# `os.linesep` to `0` (an empty string) while the ordinary path in the same
+# program read `'\n'`, and the only thing that kept the coroutine body off
+# the compiled path was the mixed-yield refusal that difference caused
+# (bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
+#
+# The POSIX-only half of `signal` is deliberate: only the numbers identical
+# across every POSIX platform this runtime targets are listed, so a
+# BSD/Linux-only member (`SIGUSR1`, `SIGCHLD`, ...) keeps the honest
+# unresolved-attribute answer rather than risking a wrong number.
+_BUILTIN_MODULE_CONSTANTS = {
+    'os': {
+        'sep': ('char *', '/'),
+        'pathsep': ('char *', ':'),
+        'curdir': ('char *', '.'),
+        'pardir': ('char *', '..'),
+        'linesep': ('char *', '\n'),
+    },
+    'signal': {
+        'SIGHUP': ('int64_t', 1),
+        'SIGINT': ('int64_t', 2),
+        'SIGQUIT': ('int64_t', 3),
+        'SIGILL': ('int64_t', 4),
+        'SIGABRT': ('int64_t', 6),
+        'SIGFPE': ('int64_t', 8),
+        'SIGKILL': ('int64_t', 9),
+        'SIGSEGV': ('int64_t', 11),
+        'SIGPIPE': ('int64_t', 13),
+        'SIGALRM': ('int64_t', 14),
+        'SIGTERM': ('int64_t', 15),
+    },
+}
+
+
+def builtin_module_constant(module: str, name: str) -> tuple[str, object] | None:
+    """`(ctype, value)` for a constant `module` exports that this compiler
+    knows by value — `os.linesep` is `('char *', '\\n')`, `signal.SIGTERM` is
+    `('int64_t', 15)` — or None when it knows of no such constant.
+
+    `module` is the CANONICAL (import-resolved) module name, so an
+    `import os as _os` alias resolves the same as a bare `os`.
+
+    Both readers are in this file's `bugs/` and neither can be a second
+    implementation: see `_BUILTIN_MODULE_CONSTANTS`'s own comment for the
+    silent-wrong-answer failure the duplication produced. The VALUE is
+    returned unconverted so each backend can put it through its own literal
+    spelling (`_intern_string`/`_c_escape` for the GIMPLE path's string pool,
+    a C++ literal for the coroutine path's text) and neither has to reach
+    through the other.
+    """
+    return _BUILTIN_MODULE_CONSTANTS.get(module, {}).get(name)
+
+
+def builtin_module_constant_names(module: str) -> tuple:
+    """The `name`s `builtin_module_constant` knows for `module` — for the
+    callers that need the whole set rather than one lookup (the coroutine
+    emitter builds its per-unit `"<marker>.<name>" -> ctype` map by walking
+    markers, so it must be able to ask which names exist without holding a
+    second copy of the keys)."""
+    return tuple(_BUILTIN_MODULE_CONSTANTS.get(module, {}).keys())
+
+
 def module_qualifier(q) -> str:
     """The ONE module-string -> C-qualifier sanitization every cross-module
     registry key and symbol prefix in this codegen must agree on.
