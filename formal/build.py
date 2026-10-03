@@ -5615,7 +5615,8 @@ def check_construction_shapes(functions, structs_by_name,
     declared = {fn.name for fn in functions or ()}
     sources = {lib.get("source") for lib in (link_line or [])
                if lib.get("source")}
-    rets = M.function_return_types(functions)
+    rets = M.CalleeReturnTable(functions, int_names=FT.TYPE_NAMES,
+                               string_names=FT.STRING_TYPE_NAMES)
     for fn in functions or ():
         cands = getattr(fn, "_frame_candidates", None) or {}
         for node in M.iter_nodes(getattr(fn, "body", None)):

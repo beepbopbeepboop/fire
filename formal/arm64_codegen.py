@@ -1003,9 +1003,13 @@ dylib_exports: list = None, globals_base: int = None,
         # argument needs to be told apart from a container returned by a
         # callee.  Read once per function from the same function table the
         # emitter already has, so the answer cannot differ from the one the
-        # build pass reached.
-        self._return_types = M.function_return_types(
-            self._functions.values())
+        # build pass reached.  `CalleeReturnTable` rather than the bare mapping
+        # because the construction pass also asks the SECOND question — what a
+        # callee that declares no return type returns — and a second table
+        # threaded through three callers is a second thing to keep in step.
+        self._return_types = M.CalleeReturnTable(
+            self._functions.values(), int_names=TYPE_NAMES,
+            string_names=STRING_TYPE_NAMES)
 
         self._call_types = {
             g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)

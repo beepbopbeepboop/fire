@@ -16937,7 +16937,8 @@ def _member_chain_text(node) -> str:
     return ".".join(reversed(parts))
 
 
-def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
+def construction_dead_blob_refusal(name: str, field: str, arg,
+                                   evidence: str = "declared") -> str:
     """A construction argument that is a blob belonging to a CALLEE.
 
     The one per-argument hazard the confinement above does not cover, and the
@@ -16953,24 +16954,59 @@ def construction_dead_blob_refusal(name: str, field: str, arg) -> str:
     premises` looks at what a METHOD BODY writes, and this is a constructor
     argument.
 
+    `evidence` is WHICH of the two sources said so, and it is a parameter
+    because the message has to name the one that fired: a reader who is told
+    "is declared to return a container" about a callee that declares nothing
+    goes looking for a declaration that does not exist, and comes back
+    concluding the compiler cannot see what is in front of it.  `"declared"` is
+    `BLOB_TYPE_NAMES` on the return annotation; `"inferred"` is
+    `callees_returning_containers` on the callee's return statements, which is
+    what says it when the callee declares no return type at all.
+
     The exception is a call to a struct this path PLACES: that is a frame
     address, one word, with a lifetime the frame layout governs, and
     `_callee_is_placed_frame` is the one predicate that knows.
     """
     callee = (arg.func.name
              if isinstance(arg.func, F.IdentExpr) else "?")
+    because = (
+        f"{callee}() declares no return type and every `return` in it yields a "
+        f"container"
+        if evidence == "inferred" else
+        f"{callee}() is declared to return a container")
     return (f"constructing {name} with {_construction_arg_spelling(arg)} as "
-            f"field {field!r} is refused on this path: {callee}() is declared "
-            f"to return a container, and a container on this path is a "
-            f"bump-allocated region of the CALLEE's own reserved scratch, so by "
-            f"the time the constructor stores it the bytes are reclaimed — and "
-            f"a method reaching through the slot afterwards appends into "
-            f"reclaimed stack. A container LITERAL, or a name bound here or in "
-            f"a caller, is fine for exactly the opposite reason: it is built in "
-            f"a function that is still running, and so is any call whose "
-            f"declared return type is not a container. Build the container and "
-            f"assign the field after `S()`, which is the same program with a "
-            f"lifetime this analysis can see")
+            f"field {field!r} is refused on this path: {because}, and a "
+            f"container on this path is a bump-allocated region of the CALLEE's "
+            f"own reserved scratch, so by the time the constructor stores it the "
+            f"bytes are reclaimed — and a method reaching through the slot "
+            f"afterwards appends into reclaimed stack. A container LITERAL, or a "
+            f"name bound here or in a caller, is fine for exactly the opposite "
+            f"reason: it is built in a function that is still running, and so is "
+            f"any call whose declared return type is not a container — and a call "
+            f"that declares nothing at all and does not return a container "
+            f"consistently either. Build the container and assign the field "
+            f"after `S()`, which is the same program with a lifetime this "
+            f"analysis can see")
+
+
+def construction_arg_dead_blob_refusal(name: str, field: str, arg,
+                                       rets=None):
+    """The refusal for `arg` if it is a callee's container, else None.
+
+    ONE function rather than a predicate plus three `if refused:` sites at the
+    three callers, because the two halves are not separable: the DECISION is
+    which source of evidence fired and the MESSAGE names that source, so a
+    predicate that returned a bool would force each caller to re-derive it and
+    the three could drift.
+
+    `rets` is `CalleeReturnTable` — the declared annotations plus the inferred
+    reading — and a plain dict is accepted so that anything holding only the
+    declared table keeps working with the declared-only answer.
+    """
+    evidence = _callee_container_evidence(arg, rets)
+    if evidence is None:
+        return None
+    return construction_dead_blob_refusal(name, field, arg, evidence)
 
 
 def construction_frame_in_value_refusal(name: str, field: str, arg,
@@ -17157,6 +17193,12 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     because a reader who has been told "this constructor is not lowered" needs
     to know WHICH LINE of it is responsible, and the two questions have
     different fixes.
+
+    `rets` is the construction pass's `CalleeReturnTable`, and it is asked here
+    for the same fact it is asked about a positional argument: a right-hand side
+    that is a CALL to a function returning a container is a blob in the CALLEE's
+    reclaimed scratch, and an inlined constructor body runs at a construction
+    site in the CALLING function, so nothing about the lifetime differs.
     """
     method, params, _positional, _required, _optional = shape
     got = len(list(getattr(call, "args", None) or []))
@@ -17570,9 +17612,10 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
     free = _init_free_names(struct_def, value)
     if free is not None:
         return (None, free)
-    if _construction_arg_is_dead_blob(value, rets):
-        return (None, construction_dead_blob_refusal(
-            struct_def.name, "of this `__init__`", value))
+    refusal = construction_arg_dead_blob_refusal(
+        struct_def.name, "of this `__init__`", value, rets)
+    if refusal is not None:
+        return (None, refusal)
     return (value, None)
 
 
@@ -17926,9 +17969,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
     `formal/build.py`'s `{holder name: [StructDef, …]}` for the function the
     call is in — the recognition a copy construction needs, and the only thing
     in the compiler that can say a word is a frame address, and `rets` is
-    `function_return_types`' `{name: declared return annotation}` — the
-    evidence for the one argument kind that is refused, a container returned by
-    a callee (`_construction_arg_is_dead_blob`).
+    `CalleeReturnTable`'s `{name: declared return annotation}` plus its reading
+    of a callee that declares none — the evidence for the one argument kind that
+    is refused, a container returned by a callee (`_callee_container_evidence`).
 
     A `plan` is `(kind, …)`:
 
@@ -18106,8 +18149,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         arg = bound[only]
         if arg is None:
             return ((CONSTRUCTION_DEFAULT,), None)
-        if _construction_arg_is_dead_blob(arg, rets):
-            return (None, construction_dead_blob_refusal(name, only, arg))
+        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets)
+        if refusal is not None:
+            return (None, refusal)
         src = _frame_source_structs(arg, candidates)
         if src:
             return (None, construction_frame_in_value_refusal(
@@ -18121,8 +18165,9 @@ def struct_construction_plan(struct_def, call, decls: dict,
         if field in placed:
             return (None, construction_nested_slot_refusal(
                 name, field, arg, placed[field]))
-        if _construction_arg_is_dead_blob(arg, rets):
-            return (None, construction_dead_blob_refusal(name, field, arg))
+        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+        if refusal is not None:
+            return (None, refusal)
         if arg is not None:
             continue
         # A field filled from its own default and holding a nested FRAME: the
@@ -18229,57 +18274,58 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
     return ({f: bound.get(f) for f in slots}, None)
 
 
-def _construction_arg_is_dead_blob(arg, rets=None) -> bool:
-    """Whether a construction argument is a container belonging to a CALLEE.
+def _callee_container_evidence(arg, rets=None):
+    """`"declared"`, `"inferred"` or None — WHICH evidence says `arg` is a blob.
 
-    One predicate, because it is one fact and the two call sites were two
-    copies of a three-line test.  It is a CALL, and among calls only the ones
-    whose DECLARED RETURN TYPE is a bump-allocated region: a function that says
-    it returns `Int` puts an integer in the slot, whatever it did internally,
-    and a function that says it returns a `List` puts a region of ITS OWN
-    reserved scratch in the slot, and that scratch is reclaimed the moment it
-    returns.
+    The decision half of `construction_arg_dead_blob_refusal`, split out because
+    three call sites need it and one of them (`_init_store_value`) asks it about
+    an `__init__` body's right-hand side rather than about a construction
+    argument.  It replaced `_construction_arg_is_dead_blob`, which returned a
+    bool and so could not say WHICH source of evidence fired — which is the fact
+    the message names.  The two sources and why the second exists:
 
-    The declared return type is the whole of the evidence, and the cases are
-    the three this path can tell apart:
+    A container LITERAL and a name are not here at all: a literal is built by
+    the function whose block is being filled and a name was bound in that
+    function or an ancestor, so in both cases the region outlives every read of
+    the slot.  `construction_dead_blob_refusal` is where that argument is spelled
+    out for the reader.
 
-      * a container type — refused, by name;
-      * any other type, INCLUDING no type at all — allowed.  A function that
-        declares nothing returns whatever its body returns, and a
-        `-> Int`-shaped declaration is the ordinary case (`scale(2)` in
-        `constr_positional_expression_arguments`), so refusing every call would
-        refuse essentially every positional construction in a real program.  An
-        absent answer has to be the PERMISSIVE one here, and that is the
-        opposite tie-break from the copy construction's on purpose: a wrong
-        word in a slot is a value the source did not write, while a missed blob
-        is only reachable if some method later appends through the slot — and
-        that path is refused on its own terms today (`list.append()` needs the
-        capacity to be known where the list is built, and a slot is not a list
-        literal).  So the residual is real and it is stated rather than
-        guessed at in either direction: it is the same gap premise (B1) has
-        about a bare name, and what closes it is the VALUE KIND of a call's
-        result, which is `ValueKinds`' question and not a re-derivation to be
-        smuggled in here;
-      * a call to a struct this path PLACES — a frame address, one word, with a
-        lifetime the frame layout governs.  Not a container and not refused.
+      * `"declared"` — the callee's return annotation names a bump-allocated
+        region (`BLOB_TYPE_NAMES` through `return_type_is_blob`);
+      * `"inferred"` — the callee declares NO return type and every one of its
+        definitions returns a container (`CalleeReturnTable.returns_container`),
+        which is a spelling real Mojo uses constantly and which used to be
+        allowed here on the strength of an absence;
+      * None — anything else.  A callee this unit does not define, a
+        `-> Int` declaration, a callee whose returns disagree with one another,
+        an argument that is not a call to a bare name, and a call to a struct
+        this path PLACES (a frame address, one word, with a lifetime the frame
+        layout governs — `_callee_is_placed_frame` is the one predicate that
+        knows).  An absent answer is the PERMISSIVE one, and the argument for
+        that is the one this predicate replaced, restated here because a
+        permission needs its reason in the place it is granted:
+        this function's caller: a wrong word in a slot is a value the source did
+        not write, while a missed blob is only reachable if some method later
+        mutates the container through the slot — and that is refused on its own
+        terms today (`list.append()` needs the capacity to be known where the
+        list is built, and a slot is not a list literal).
 
-    A container LITERAL and a name are not in this function at all: a literal
-    is built by the function whose block is being filled and a name was bound
-    in that function or an ancestor, so in both cases the region outlives every
-    read of the slot.  `construction_dead_blob_refusal` is where that argument
-    is spelled out for the reader.
-    """
+    `arg.func` is a bare name or it is not a call this table can say anything
+    about: `List[Self.T]()`, `Self.T[…]()`, `a.b()` and `f()[0]()` all land in
+    the None arm, and a subscript callee is not a name in `rets` — it is a type
+    or an expression whose result this path does not follow."""
     if not isinstance(arg, F.CallExpr) \
             or not isinstance(arg.func, F.IdentExpr):
-        # `arg.func` is a bare name or it is not a call this table can say
-        # anything about: `List[Self.T]()`, `Self.T[…]()`, `a.b()` and
-        # `f()[0]()` all land here, and a subscript callee is not a name in
-        # `rets` — it is a type or an expression whose result this path does
-        # not follow.  Not a blob, because nothing here knows that it is one.
-        return False
-    if _callee_is_placed_frame(arg.func.name):
-        return False
-    return return_type_is_blob((rets or {}).get(arg.func.name))
+        return None
+    name = arg.func.name
+    if _callee_is_placed_frame(name):
+        return None
+    if return_type_is_blob((rets or {}).get(name)):
+        return "declared"
+    if getattr(rets, "returns_container", None) is not None \
+            and rets.returns_container(name):
+        return "inferred"
+    return None
 
 
 # The annotations that name a BUMP-ALLOCATED REGION on this path — the types
@@ -18305,9 +18351,9 @@ def return_type_is_blob(annotation) -> bool:
     is, and the arguments decide nothing this value model has a slot for.
 
     False for an absent or unreadable annotation.  That is the permissive
-    direction and `_construction_arg_is_dead_blob` says why, at length, because
-    a reader who finds this predicate alone would reasonably guess the other
-    way round.
+    direction and `_callee_container_evidence` says why, at length, because a
+    reader who finds this predicate alone would reasonably guess the other way
+    round.
     """
     base = annotation_base_name(annotation)
     return base is not None and base in BLOB_TYPE_NAMES
@@ -18327,6 +18373,98 @@ def function_return_types(functions) -> dict:
         if name:
             out[name] = getattr(fn, "return_type", None)
     return out
+
+
+def callees_returning_containers(functions, int_names=None,
+                                 string_names=None) -> dict:
+    """`{name: element kind or None}` for every callee whose RETURNS are containers.
+
+    The SECOND source of the dead-blob evidence, beside the declared return
+    annotation, and it exists because the declaration is absent about half the
+    time in real Mojo: `def make(): return [1, 2]` is an ordinary spelling and
+    `Bag2(make(), 5)` stores exactly the same dead region a `-> List[Int]`
+    declaration would have warned about.  Read with NO `func_kind` hook, which is
+    the safety argument rather than a shortcut — the same one
+    `_callee_blob_elem_kind` gives: a hook resolves a call in a return position
+    by recursing into the callee, and an undecidable answer has to be the
+    permissive one.
+
+    The rule is UNANIMITY over every definition of the name, for the reason
+    `_callee_blob_elem_kind` states: Mojo overloads are ordinary (`std/builtin/
+    reversed` is defined eight times over) and a name that means several bodies
+    answers no single question.  One definition returning a list and another
+    returning an integer therefore claims nothing, which is the direction that
+    keeps a refusal from being a guess.
+
+    The VALUE is the element kind where the returns pin one and `None` where
+    they agree only that it is a container — `is_list_kind` is the question the
+    callers ask, and an element it does not need is not guessed at."""
+    by_name: dict = {}
+    for fn in functions or ():
+        name = getattr(fn, "name", None)
+        if name:
+            by_name.setdefault(name, []).append(fn)
+    out: dict = {}
+    for name, defs in by_name.items():
+        elems = set()
+        for fn in defs:
+            kind = ValueKinds(
+                fn, int_names=int_names or INT_TYPE_CTORS,
+                string_names=string_names or STRING_TYPE_CTORS).return_kind
+            if not is_list_kind(kind):
+                break
+            elems.add(list_elem_kind(kind))
+        else:
+            out[name] = elems.pop() if len(elems) == 1 else None
+    return out
+
+
+class CalleeReturnTable(dict):
+    """`function_return_types`' table, able to answer the INFERRED case too.
+
+    A dict SUBCLASS rather than a second table, and the reason is that the
+    construction pass is handed ONE evidence argument by three callers
+    (`formal/build.py` and the two emitters): a separate table would be a second
+    thing to thread through all three and a second thing to keep in step with the
+    first.  As a subclass, every existing reader of the declared table keeps
+    reading a mapping and the extra evidence is a question asked of the same
+    object.
+
+    `returns_container(name)` is the dead-blob question, and the ORDER in it is
+    the whole decision:
+
+      * a callee that DECLARES a return type is answered by that declaration
+        alone, both ways.  A `-> List[Int]` is refused as a dead blob, and a
+        `-> Int` is allowed even if its body returns a list — the declaration is
+        the contract, and a body that contradicts it is a bug in the program
+        rather than a fact about this path's representation;
+      * a callee that declares NOTHING is then read from its RETURN STATEMENTS
+        (`callees_returning_containers`), which is the case this class exists
+        for;
+      * anything else — a name this unit does not define, a definition whose
+        returns disagree, a `ValueKinds` that could not classify them — claims
+        nothing, and claiming nothing is allowed here for the reason
+        `_callee_container_evidence` argues at length: a wrong word in a slot
+        is a value the source did not write, while a missed blob is only
+        reachable through a method that mutates the container through the slot.
+
+    The inference is computed AT MOST ONCE and only when it is asked, so a unit
+    with no positional construction that passes a call pays nothing for it."""
+    def __init__(self, functions, int_names=None, string_names=None):
+        super().__init__(function_return_types(functions))
+        self._functions = list(functions or ())
+        self._int_names = int_names
+        self._string_names = string_names
+        self._inferred = None
+
+    def returns_container(self, name: str) -> bool:
+        declared = self.get(name)
+        if declared:
+            return return_type_is_blob(declared)
+        if self._inferred is None:
+            self._inferred = callees_returning_containers(
+                self._functions, self._int_names, self._string_names)
+        return name in self._inferred
 
 
 def _frame_source_structs(arg, candidates: dict):

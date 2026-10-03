@@ -948,10 +948,13 @@ class X86_64Codegen:
             getattr(f, "_one_word_candidates", None) or {})
         # The x86-64 twin of arm64's, from the same function table: a
         # construction argument has to be told apart from a container returned
-        # by a callee, and the declared return type is the only evidence there
-        # is.
-        self._return_types = M.function_return_types(
-            self._functions.values())
+        # by a callee, and the declared return type is only the first of the two
+        # sources — a callee that declares NO return type is read from its
+        # return statements, in the same `CalleeReturnTable` both backends
+        # build, so the two cannot disagree about a program.
+        self._return_types = M.CalleeReturnTable(
+            self._functions.values(), int_names=TYPE_NAMES,
+            string_names=STRING_TYPE_NAMES)
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES

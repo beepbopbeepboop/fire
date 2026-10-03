@@ -7470,8 +7470,10 @@ CONSTRUCTION_CASES = [
 
     # ── a DECLARED `__init__`: `S(a, b)` is a CALL, and the call is INLINED ──
     #
-    # This whole block is `bugs/FORMAL_struct_construction_shapes.md`'s one
-    # remaining refusal, closed.  `Slice` — the case that found it — declares
+    # This whole block is the construction family's last remaining refusal,
+    # closed — the family was `bugs/FORMAL_struct_construction_shapes.md` and
+    # that doc is deleted now that every shape lowers, so the cases here are what
+    # stands in its place.  `Slice` — the case that found it — declares
     # TWO `__init__` overloads against three fields and the corpus writes all
     # three counts, so `Slice(a, b)` is a call to the two-parameter constructor
     # and NOT a two-field construction of a three-field struct.  What used to
@@ -8275,6 +8277,63 @@ CONSTRUCTION_REFUSALS = [
      "refuse:is declared to return a container, and a container on this path is a "
      "bump-allocated region of the CALLEE's own reserved scratch",
      None),
+    # ── the SAME hazard with NO declaration to read ──
+    #
+    # `def mklist(): return [1, 2, 3]` is an ordinary Mojo spelling and stores
+    # exactly the same dead region the case above refuses, so the DECLARATION
+    # was never the fact — it was one reader of it.  The needle names the second
+    # reader (the callee's return statements) rather than repeating the first,
+    # because a message that said "is declared to return a container" about a
+    # callee that declares nothing would send the reader looking for a
+    # declaration that does not exist.
+    ("constr_refuse_container_inferred_from_a_callee",
+     "struct Bag4:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mklist():\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return xs\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag4(mklist(), 5)\n"
+     "    return b.n\n",
+     "refuse:declares no return type and every `return` in it yields a container",
+     None),
+    # The other direction, and it is a build rather than a refusal because the
+    # permissive tie-break has to stay permissive for the cases it is right
+    # about: an unannotated callee that returns a STRING (static storage, so no
+    # lifetime problem at all), one whose returns DISAGREE with one another (no
+    # single question, so no claim), and one declared `-> Int` whose body returns
+    # a list (the declaration is the contract). Each field has its own return
+    # code, so a regression says which of the three started being refused.
+    ("constr_allow_a_callee_that_is_not_a_container",
+     "struct Bag5:\n"
+     "    var items: Int\n"
+     "    var n: Int\n"
+     "\n"
+     "def mkstr():\n"
+     "    return \"abc\"\n"
+     "\n"
+     "def mixed(c: Int):\n"
+     "    if c > 0:\n"
+     "        return [1]\n"
+     "    return 7\n"
+     "\n"
+     "def lying() -> Int:\n"
+     "    return [9]\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Bag5(mkstr(), 1)\n"
+     "    if a.n != 1:\n"
+     "        return 10 + a.n\n"
+     "    var b = Bag5(mixed(n), 2)\n"
+     "    if b.n != 2:\n"
+     "        return 20 + b.n\n"
+     "    var c = Bag5(lying(), 3)\n"
+     "    if c.n != 3:\n"
+     "        return 30 + c.n\n"
+     "    return 7\n", 7, None),
     # The REACHABLE CONSEQUENCE of the hazard the case above refuses, checked
     # separately and for a different reason. `append` through a frame slot is
     # refused on its own terms — the room an append needs has to be known where
