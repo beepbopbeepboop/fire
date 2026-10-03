@@ -411,8 +411,8 @@ chains and numbers in `FORMAL_dylib_export_gate_ceiling.md`):
   prediction held exactly.** The `len(self._data)` value IS representable now —
   it took three defects, none of them the refusal's own text, and the file no
   longer refuses on it anywhere (§`bugs/FORMAL_binary_heap_mojo_after_the_len_value.md`
-  §1 names them). Ten of the 165 files behind it were re-swept on x86-64 and
-  **0 of 10 moved**, with the terminal cause advanced from the export gate to
+  §1 names them). Ten of the 165 files behind it were re-swept on BOTH
+  architectures (which agree exactly) and **0 of 10 moved**, with the terminal cause advanced from the export gate to
   `binary_heap.mojo`'s own next construct, which is what "the refusal advances
   one level" meant. Then the decisive one: **with every codegen refusal in that
   file bypassed, the module-dylib build fails at the export gate with the very

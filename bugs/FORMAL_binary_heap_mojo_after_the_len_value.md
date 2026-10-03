@@ -41,14 +41,22 @@ defects, none of them the refusal's own text:
 
 ## 2. The row does not move, and the export gate is the wall behind it
 
-Ten of the 165 files, re-measured on x86-64 with
-`python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 <10 files>`:
+Ten of the 165 files, re-measured on **both** architectures with
+`python3 tools/formal_sweep.py -j 2 -t 120 <10 files>` (and `--arch x86_64`),
+which agree exactly:
 
 ```
+[arm64]  10 files: PASS=0 not-pass=10
+  codegen/dependency by family: binary_heap.mojo: one-field mutator has no return convention x10
+codegen coverage: 0/10 = 0.0%
 [x86_64] 10 files: PASS=0 not-pass=10
   codegen/dependency by family: binary_heap.mojo: one-field mutator has no return convention x10
 codegen coverage: 0/10 = 0.0%
 ```
+
+(the arm64 sweep lock is machine-wide and shared with every other worker, so
+one arch can refuse to start while another is sweeping — that is the runner's
+`--allow-concurrent` flag, not a finding.)
 
 **0 of 10 move**, which is the same answer `bugs/FORMAL_known_limits.md` §1.2
 recorded on 2026-09-30 for a smaller sample ("Giving `binary_heap.mojo` a
@@ -145,8 +153,8 @@ for a in arm64 x86_64; do
     ../new-modular/Mojo/stdlib/std/collections/binary_heap.mojo
 done
 
-# the row: ten of the 165, x86-64 (the arm64 lock is shared machine-wide, so
-# one of the two arches may refuse to start while another worker sweeps)
+# the row: ten of the 165, both arches (they agree exactly)
+python3 tools/formal_sweep.py -j 2 -t 120            <10 files>
 python3 tools/formal_sweep.py -j 2 -t 120 --arch x86_64 <10 files>
 python3 tools/formal_sweep_causes.py --min 3 bugs/sweeps/sweep-arm-7.txt
 
