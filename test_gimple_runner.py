@@ -6420,7 +6420,15 @@ print({'ok': True, 'count': 3})
     # `b.n` (an `int` field) and `%d` of the bool are in the test
     # deliberately: they are RIGHT, and a fix that made them print True/False
     # or 1 would pass every other assertion in this file.
-    test_gimple_stdout("gimple_bool_annotated_struct_field", """\
+    #
+    # The reads are at MODULE SCOPE, which is the point of this spelling and
+    # not an incidental choice of fixture: `b` is then a module-level GLOBAL,
+    # so the receiver's type lives in `_global_var_types` and there is no
+    # `var_types` entry for it at all. `_receiver_ctypes` is the helper that
+    # knows this, and `_is_python_bool_field` asking `_quick_type` instead is
+    # what printed every line below as 1/0 while the same field read inside a
+    # function printed True/False.
+    test_gimple_stdout("gimple_bool_annotated_struct_field_at_module_scope", """\
 class Box:
     def __init__(self, flag: bool, n: int):
         self.flag = flag
@@ -6463,6 +6471,13 @@ if b.flag:
     # pins every spelling rather than the one that was easiest to look at.
     # The `int` field in the same struct and `b.flag + 0` are the controls
     # that a fix did not turn a bool field into something else.
+    #
+    # The reads are inside a function, where `b` is a LOCAL and so has a
+    # `var_types` entry — the spelling
+    # `gimple_bool_annotated_struct_field_at_module_scope` above covers is the
+    # same field through a module-level GLOBAL, and the two are separate
+    # regressions that separate as readily as separate cases: they resolve the
+    # receiver's struct through different tables.
     test_gimple_stdout("gimple_bool_annotated_struct_field", """\
 class Box:
     def __init__(self, flag: bool, n: int):

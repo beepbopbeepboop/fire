@@ -1765,41 +1765,92 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
             else:
-                # A genuine SCALAR where a `char *` is expected. Python's
-                # answer is `str(value)`, and that is also the only answer
-                # that is not a wild pointer: the `else` branch this
-                # replaces reinterpreted the integer's BITS as an address,
-                # so `class D: __init__(self, w: str)` called as `D(5)`
-                # stored address 5 in a `char *` field and the first
-                # `mojo_print` of it walked to it and SIGSEGV'd — while
-                # `D(2.5)` did not even compile ("cannot convert to a
-                # pointer type"). The comment above this branch already
-                # makes exactly this argument for a `char`; an `int` is the
-                # same case with a wider byte value.
+                # A value of UNKNOWN provenance where a `char *` is expected.
+                # Two situations reach here and they need opposite answers,
+                # and they are NOT statically separable in general:
                 #
-                # The two situations that are NOT statically separable —
-                # an unannotated/polymorphic int64_t slot legitimately
-                # holding a string HANDLE, and a genuine integer — are both
-                # answered here, because `_stringify_value` consults
-                # `_actual_types` and hands back a cast for the first rather
-                # than its decimal address. That is why this is the
-                # stringify and not a runtime refusal: a refusal would
-                # DIVERGE from CPython, which prints `5`, and it would have
-                # to be wrong for every one of the `f(d.get(k))` guards in
-                # the tree. `# the comment above this branch already makes
-                # exactly this argument for a `char`'s own case.
+                #   * a genuine SCALAR. Python's answer is `str(value)`, and
+                #     that is also the only answer that is not a wild pointer:
+                #     the raw `(char *)bits` cast this branch replaces
+                #     reinterpreted the integer as an address, so
+                #     `class D: __init__(self, w: str)` called as `D(5)`
+                #     stored address 5 in a `char *` field and the first
+                #     `mojo_print` of it walked to it and SIGSEGV'd — while
+                #     `D(2.5)` did not even compile ("cannot convert to a
+                #     pointer type"). The comment above this branch already
+                #     makes exactly this argument for a `char`; an `int` is
+                #     the same case with a wider byte value.
+                #   * an int64_t slot legitimately holding a string HANDLE —
+                #     a lambda parameter, an erased dict value, a getattr
+                #     result, a boxed tuple-loop var. All of them arrive here
+                #     with their pointer bits and nothing recorded, and that
+                #     by-value handle pass-through is load-bearing for the
+                #     self-host's own compilation.
+                #
+                # The discriminator is "can this value BE a pointer at all?",
+                # which has three independent answers and all three are
+                # needed: `_int_word_vals` holds the values whose PROVENANCE
+                # is known to be non-pointer (an integer LITERAL, at any
+                # magnitude — `_lower_IntLiteral` is the only thing that adds
+                # to it); a `double`/`_Bool` argument cannot be one whatever
+                # its provenance, since its bits are an IEEE-754 double or a
+                # 0/1 flag; and `is_python_bool_expr` is the ONE shared
+                # predicate for "this expression is a Python bool", which a
+                # pointer never is. Without them the answer was taken from
+                # `_actual_types`, which records only what THIS function saw
+                # type-erased: `sorted(["ccc", "a", "bb"], key=lambda s:
+                # k3(s))` has no such record for the lambda's `s`, so the
+                # key became `mojo_str_from_int(s)` — the DECIMAL of the
+                # string's own address — `mojo_sorted_by_keys` compared those
+                # correctly as strings, and the sort came out in heap order,
+                # exit 0. With the gate, only a value that cannot be a
+                # pointer is stringified. (This is strictly wider than the
+                # `_int_word_vals`-only gate, which is what let `Dialog(2.5)`
+                # print `2` and `Dialog(True)` print `1`.)
+                #
+                # The ambiguous case goes to `mojo_cstr_or_int_str`, the
+                # model's OWN answer to this question — it is what
+                # `_char_to_cstr` already routes every other
+                # int64_t-used-where-a-string-is-needed through — and it is
+                # safe in BOTH directions rather than right in only one: a
+                # real boxed `char *` comes back as the very same address
+                # (the cast's own result), and a genuine integer comes back
+                # as its decimal, which is what CPython prints. So it is also
+                # the right answer for the unprovable integer, which is why
+                # the gate is about SOUNDNESS of the two arms rather than
+                # about picking a winner.
+                #
+                # Deliberately NOT registered with `_cstr_key_src`, so the
+                # `mojo_cstr_or_int_release` protocol does not reclaim it:
+                # the callee may STORE the pointer (`self.widgetName =
+                # widgetName`), and releasing a string the value kept is a
+                # use-after-free. The provable arm goes through
+                # `_stringify_value`, whose integer half keeps its one block
+                # — this runtime's documented no-free model for a kept string
+                # (`mojo_str_from_int`'s own comment).
                 #
                 # `_stringify_value` is the chokepoint for "stringify this
-                # typed value" and is what `str()`, f-strings and `%s` all
-                # go through, so this reuses it rather than adding a fourth
-                # spelling. It is also what makes the boxed case safe: an
-                # `int64_t` that really holds a `char *` pointer is answered
-                # by its `_actual_types` entry as a cast, not as a decimal.
+                # typed value" and is what `str()`, f-strings and `%s` all go
+                # through, so the provable arm reuses it rather than adding a
+                # fourth spelling. It is what makes `Dialog(5)` print `5`
+                # rather than segfault, and a refusal would have diverged
+                # from CPython besides.
                 _anode = None
                 if arg_nodes is not None and i < len(arg_nodes):
                     _anode = arg_nodes[i]
-                coerced_args.append(
-                    gen._stringify_value(actual_atype, aval, _anode))
+                _provable = (
+                    actual_atype in ('double', 'float', '_Bool')
+                    or aval in getattr(gen, '_int_word_vals', ())
+                    or (_anode is not None
+                        and gimple_exprtypes.is_python_bool_expr(gen, _anode)))
+                if _provable:
+                    coerced_args.append(
+                        gen._stringify_value(actual_atype, aval, _anode))
+                else:
+                    _iv = (aval if atype == 'int64_t'
+                           else gen._new_val('int64_t', f'(int64_t){aval}'))
+                    coerced_args.append(gen._call_expr(
+                        'char *', 'mojo_cstr_or_int_str', [('int64_t', _iv)]))
 
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain

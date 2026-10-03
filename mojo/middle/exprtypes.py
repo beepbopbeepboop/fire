@@ -547,10 +547,17 @@ def _is_python_bool_field(gen, node) -> bool:
 
     Resolving the RECEIVER's struct is the whole job, and there are two
     spellings: `self.f` inside the struct's own method, where the current
-    struct is the answer, and `b.f` at a call site, where the receiver is
-    an ordinary expression whose type has to be asked for. A receiver this
-    cannot type (a call result, a subscript) answers False, which is the
-    pre-existing behaviour of every caller of the shared predicate.
+    struct is the answer, and `b.f` everywhere else, where the receiver is an
+    ordinary expression whose type has to be ASKED FOR -- through
+    `_receiver_ctypes`, which is the one place that knows a name's type can
+    live in four tables that genuinely disagree in coverage. Calling
+    `gen._quick_type` here instead answered `int64_t` for a module-scope
+    `b = Box(True, 5)`, because `_quick_type` reads `var_types`, which has no
+    entry for a module-level GLOBAL: every spelling of `b.flag` printed
+    `1`/`0` at module scope while the same field inside a function printed
+    `True`/`False`. A receiver this cannot type at all (a call result, a
+    subscript) answers False, which is the pre-existing behaviour of every
+    caller of the shared predicate.
     """
     _member = getattr(node, 'member', None)
     if not _member:
@@ -563,14 +570,12 @@ def _is_python_bool_field(gen, node) -> bool:
         _sn = getattr(gen, '_current_struct_name', None)
         if _sn and _member in (_bf.get(_sn) or ()):
             return True
-    try:
-        _rt = gen._quick_type(_recv)
-    except Exception:
-        return False
-    if not _rt or not _rt.endswith(' *'):
-        return False
-    _rsn = _struct_name_of(_rt)
-    return _member in (_bf.get(_rsn) or ())
+    for _rt in _receiver_ctypes(gen, _recv):
+        if not _rt or not _rt.endswith(' *'):
+            continue
+        if _member in (_bf.get(_struct_name_of(_rt)) or ()):
+            return True
+    return False
 
 
 def _is_python_bool_method(gen, node) -> bool:
