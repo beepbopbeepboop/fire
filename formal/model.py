@@ -10098,13 +10098,80 @@ def builtin_value_method(method: str):
 # `...`). Getting the second from a table rather than assuming "the first one"
 # is what keeps a two-named-argument function like `fprintf(stream, fmt, ...)`
 # from having its stream pointer written into the unnamed area.
+#
+# ── IT IS A TABLE, SO THE TABLE HAS TO BE RIGHT, AND BEING WRONG IS THE WORST
+# ── OUTCOME ON THIS PATH: a callee that reads its third argument out of the
+# ── unnamed area and is called without one reads `[sp]` — whatever the caller
+# ── had there — and answers from it. No crash, no refusal, a plausible number.
+#
+# Every entry below was measured against clang's own codegen for this target
+# rather than read off a prototype, because a prototype says how many arguments
+# are NAMED and clang says where the third one GOES, and those are the two
+# facts that have to agree. The probe is one line of C per symbol, compiled with
+# `clang -O1 -S`, and the measurement is the same shape every time:
+#
+#     $ cat > /tmp/va3.c <<'EOF'
+#     #include <fcntl.h>
+#     int f(int a, int b) { return fcntl(a, b, 3); }
+#     EOF
+#     $ clang -O1 -S -o - /tmp/va3.c | sed -n '/_f:/,/ret/p'
+#             mov w8, #3
+#             str x8, [sp]            ← the third argument is in the AREA
+#             mov w0, #1
+#             mov w1, #2
+#             bl _fcntl
+#
+# Three entries were wrong or missing before this was checked, and each was a
+# live wrong answer rather than a missing feature:
+#
+#   * `fcntl` was ABSENT, so `fcntl(fd, cmd, flags)` was called with the flags
+#     in X2 and nothing in the area. The syscall then applied whatever was at
+#     `[sp]` — measured, `fcntl(fd, F_SETFD, 1)` returned 0 (success) and
+#     changed nothing, and `fcntl(fd, F_SETFL, O_NONBLOCK)` left `F_GETFL`
+#     reporting a number CPython does not report. That is
+#     `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`, whose title
+#     says "drops" and whose measurement is really "puts it in the wrong
+#     place": the third argument was emitted, positionally, into X2.
+#   * `ioctl` was ABSENT for the same reason, and it is a name this path
+#     already reaches (`FRAME_C_VALUE_CALLS` lists it beside `fcntl`), so the
+#     same silence applied to `ioctl(fd, request, arg)`.
+#   * `asprintf` said 1 named argument and has 2 (`char **strp, const char
+#     *format, ...`), which made the emitter write the FORMAT POINTER into
+#     `[sp+0]` — the slot the first variadic value is read from — while the
+#     value itself sat in X2 and was ignored. An entry that is present and
+#     wrong is worse than one that is absent, because an absent one at least
+#     fails the same way.
+#
+# C gives a variadic function at least one named parameter (`...` may not be the
+# only one in the list), so 1 is the floor and no entry below it can exist.
+#
+# **The `v*` family is DELIBERATELY ABSENT** — `vprintf`, `vfprintf`, `vsprintf`,
+# `vsnprintf`, `vdprintf` were here, and they are not `...`-variadic at all: each
+# one takes a `va_list` as its LAST NAMED parameter
+# (`int vprintf(const char *, va_list)` in this SDK's `stdio.h`, read out of
+# clang's own preprocessed output rather than from memory). There is no unnamed
+# argument, so an entry claiming one reserved an area and copied the `va_list`
+# pointer into a slot nothing reads. Harmless today — this path cannot BUILD a
+# `va_list`, so no program here calls one — and false, which is the state this
+# table must not be in: it is consulted to decide a calling convention, and an
+# entry that misstates one is how `asprintf: 1` came to copy a FORMAT POINTER
+# into the slot the first variadic value is read from. They stay in
+# `FRAME_C_VALUE_CALLS`, which answers a different question (is this name a C
+# library entry point).
 VARIADIC_LIBC = {
-    "printf": 1, "vprintf": 1,
-    "fprintf": 2, "vfprintf": 2,
-    "sprintf": 2, "vsprintf": 2,
-    "snprintf": 3, "vsnprintf": 3,
-    "asprintf": 1, "dprintf": 2, "vdprintf": 2,
-    "syslog": 2, "err": 1, "errx": 1, "warn": 1, "warnx": 1,
+    "printf": 1,
+    "fprintf": 2,
+    "sprintf": 2,
+    "snprintf": 3,
+    "asprintf": 2, "dprintf": 2,
+    # `err(status, format, ...)` and `errx(status, format, ...)` have TWO named
+    # arguments — the status and the format — and were recorded with one, which
+    # is the `asprintf` bug again: the emitter would have written the FORMAT
+    # POINTER into `[sp+0]` and left the value in X2. Found by the direction of
+    # `test_formal_external_call.py`'s `variadic_table_*` cases that reads this
+    # table back out of clang's own preprocessed headers, which is the point of
+    # that check being in the suite rather than in this comment.
+    "syslog": 2, "err": 2, "errx": 2, "warn": 1, "warnx": 1,
     # open(2) is declared `open(const char *, int, ...)`, and Apple's build of
     # it reads the permission word from the variadic area like any other
     # variadic callee — measured, not assumed: with the word in X2 the file
@@ -10112,6 +10179,12 @@ VARIADIC_LIBC = {
     # register, and with it in the area the mode was 0666 & ~umask as it
     # should be.
     "open": 2,
+    # `int fcntl(int, int, ...)` and `int ioctl(int, unsigned long, ...)` — the
+    # two the descriptor-control commands go through, and both TWO named
+    # arguments, so the third (`flags` / `arg`) is the first unnamed one and is
+    # the first thing in the area. `sys/fcntl.h:624` and `sys/ioctl.h:97` in this
+    # SDK; the placement is clang's, as above.
+    "fcntl": 2, "ioctl": 2,
 }
 
 # Slots the caller reserves for the unnamed arguments. The area is 8-byte
@@ -19048,22 +19121,38 @@ def literal_default_word(value) -> tuple:
     constructor) and `class_constant_word` (a class-level constant, materialized
     at each read of it) because they are the same question asked of the same
     node, and two copies of this decision would eventually disagree about which
-    defaults are representable."""
+    defaults are representable.
+
+    **The fold is `fold_literal_expr`'s, not a second one.**  This used to
+    spell out its own arms for `None` / `IntLiteral` / `BoolLiteral` /
+    `StringLiteral`, so it was the same classifier as `fold_literal_expr` with
+    the unary and binary arms missing — and a class-level constant is exactly
+    where a signed literal appears. `class C: A = -3` parses to
+    `UnaryOp('-', IntLiteral(3))`, the one token wider than `3` and exactly
+    representable in the word `3` already is, and it was REFUSED with a message
+    claiming the value "is not a value this build can materialize" — false, and
+    actively misleading, because there is nothing non-literal in the reader's own
+    source to go and look at. Measured:
+
+        $ python3 fire.py build --formal --no-prove t.py    # class C: A = -3
+        build: C.A reads a class-level constant of C, whose value is `-3` — and a
+        formal value is one 64-bit word with nowhere to keep a non-literal one…
+
+    `enum` is where it was first reached, because an enum member's `.value` IS
+    the class constant (`enum_member_accessor`), and a negative member is
+    ordinary. Every fold that folder can do is therefore exact here too, and
+    `None` keeps its own answer by being distinguished BEFORE the fold: no
+    default at all is (DEFAULT_NONE, None) and a default that does not fold is
+    (DEFAULT_OPAQUE, None), which are two different facts about the slot."""
     if value is None:
         return (DEFAULT_NONE, None)
-    if is_none_expr(value):
-        # `None` is the word 0 on this target (see NONE_WORD). Folded here, not
-        # refused: `x: T = None` is the default for an optional field and is the
-        # single most common class-level default in this repository's own
-        # dataclasses, and both backends materialize an int word exactly.
-        return (DEFAULT_INT, NONE_WORD)
-    if isinstance(value, F.IntLiteral):
-        return (DEFAULT_INT, int(value.value))
-    if isinstance(value, F.BoolLiteral):
-        return (DEFAULT_INT, 1 if value.value else 0)
-    if isinstance(value, F.StringLiteral) \
-            and isinstance(value.value, str) and not value.is_bytes:
-        return (DEFAULT_STRING, value.value)
+    folded = fold_literal_expr(value)
+    if isinstance(folded, bool):
+        return (DEFAULT_INT, int(folded))
+    if isinstance(folded, int):
+        return (DEFAULT_INT, folded)
+    if isinstance(folded, str):
+        return (DEFAULT_STRING, folded)
     return (DEFAULT_OPAQUE, None)
 
 
@@ -19589,14 +19678,23 @@ def module_constant_literal(name: str):
 
 # The literal-only expression folder. Deliberately tiny and deliberately
 # literal-only: its whole job is to decide "can the build KNOW this value", and
-# every operator added here is one more way for a fold to be wrong. `-` and `+`
-# on integers and `+ - * //` between integers is the closure that covers the
+# every operator added here is one more way for a fold to be wrong. `-`, `+` and
+# `~` on integers and `+ - * //` between integers is the closure that covers the
 # module-level constants in this repository (`_PASS = 0`, `_CMP_OPS = 6`,
 # `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`, and `std/utils/_serialize.mojo`'s
-# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`); `~` is F3's operator
-# surface and is deliberately NOT here, so a module constant folded with it
-# lands in the "cannot fold" refusal rather than in a second, disagreeing
-# implementation.
+# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`).
+#
+# `~` was the one operator here that every RUNTIME already lowered and no
+# compile-time folder folded, which is the same hole `//` was and with the same
+# repair: `comptime c = ~3` was refused by `mojo/middle/comptime.py:eval_const`
+# while both formal backends emit MVN/NOT for it (`arm64_codegen`'s `~` arm and
+# `x86_64_codegen`'s, each with the comment saying which of the two was missing),
+# so the compiled value and the emitted code disagreed about whether the program
+# was knowable at all. It is in all three folders now — `eval_const`,
+# `eval_const_int` and this one — because a folder that declines an operator
+# another folder in the same build folds is answering a different question from
+# the one it is asked, and `~n` is exact for every integer (CPython agrees:
+# `~3` is `-4`, and the word it is computed in is the word it is stored in).
 #
 # `//` is the same operator `mojo/middle/comptime.py:fold_arith` gained, and
 # for the same reason, and the two must not drift: that folder decides what a
@@ -19614,6 +19712,14 @@ _FOLD_BINOPS = {"+": lambda a, b: a + b,
                 "-": lambda a, b: a - b,
                 "*": lambda a, b: a * b,
                 "//": lambda a, b: a // b}
+
+# The unary sign operators this folder folds, and what each one DOES to the
+# folded word. Kept as a table rather than an `if` chain so the third folder
+# (`mojo/middle/comptime.py:eval_const`) spells the same rule and the two can be
+# compared by reading, which is the whole of the "must not drift" note above.
+_FOLD_UNARY = {"-": lambda v: -v,
+               "+": lambda v: v,
+               "~": lambda v: ~v}
 
 
 def fold_literal_expr(node, names=None):
@@ -19654,10 +19760,10 @@ def fold_literal_expr(node, names=None):
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
             and isinstance(node.value, str):
         return node.value
-    if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
+    if isinstance(node, F.UnaryOp) and node.op in _FOLD_UNARY:
         v = fold_literal_expr(node.operand, names)
         if isinstance(v, int) and not isinstance(v, bool):
-            return -v if node.op == "-" else v
+            return _FOLD_UNARY[node.op](v)
         return None
     if isinstance(node, F.BinaryOp) and node.op in _FOLD_BINOPS:
         a = fold_literal_expr(node.left, names)

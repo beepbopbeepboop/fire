@@ -570,6 +570,137 @@ def run_refusal(name, source, needle, tmpdir, verbose):
     return True, ""
 
 
+# ── the VARIADIC calling convention, checked against the platform ────────────
+#
+# On Apple arm64 a variadic argument is NOT passed in an argument register: the
+# caller reserves an area and the i-th unnamed argument goes at offset 8*(i-1)
+# from SP as it stands at the call. `formal/model.py`'s `VARIADIC_LIBC` is where
+# a callee is recorded as variadic and how many of its arguments are named, and
+# `arm64_codegen`'s `_emit_variadic_area` lays the area out from it.
+#
+# **A table is only as good as its last audit, and being wrong here is the worst
+# outcome on this path**: a callee that reads its third argument out of the area
+# and is called without one reads `[sp]` — whatever the caller had there — and
+# answers from it. No crash, no refusal, a plausible number. Measured, with
+# `fcntl` missing from the table: `fcntl(fd, F_SETFD, FD_CLOEXEC)` returned 0
+# (success) and changed nothing, and `fcntl(fd, F_GETFL)` reported 192 where
+# CPython reports 4. With `asprintf` recorded as having ONE named argument when
+# it has two, the emitter wrote the format POINTER into `[sp+0]` — the slot the
+# first variadic value is read from — and left the value itself in X2.
+#
+# So both directions are checked against the platform's own headers, read out of
+# clang's preprocessed output rather than out of a second copy of the answer:
+#
+#   * every symbol this path can reach that the headers declare `...`-variadic is
+#     in the table, with the header's named count — the direction that was
+#     broken (`fcntl`, `ioctl` absent; `asprintf` wrong);
+#   * every entry in the table IS `...`-variadic in those headers, with that
+#     count — the direction that catches an entry asserting a convention the
+#     callee does not have, which is how the `v*` family came to claim an
+#     unnamed area for a function whose last parameter is a `va_list`.
+#
+# The vocabulary is derived, not written down: `model.FRAME_C_VALUE_CALLS` is
+# the model's own list of C entry points this path reaches by bare name, and the
+# `external_call["sym", …]` literals are harvested from this repository's Mojo
+# and test sources. A new extern call to a variadic callee therefore fails here
+# rather than answering from `[sp]`.
+HEADERS = """
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/utsname.h>
+#include <sys/select.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/resource.h>
+#include <dirent.h>
+#include <signal.h>
+#include <syslog.h>
+#include <err.h>
+"""
+
+
+def _header_variadic_map():
+    """`({symbol: named counts}, {every declared symbol})`, or None.
+
+    Read out of `clang -E`, so both answers are the platform's and not a second
+    copy of the table's own. The second set is what makes the "is this entry
+    even variadic" direction checkable at all: the first map holds only the
+    symbols with a `...`, so absence from it is ambiguous between "not variadic"
+    and "not in these headers", and only the full set tells the two apart.
+
+    Returns None when clang is not available, which the caller turns into a
+    FAILURE naming the reason rather than a silent pass: a skipped check of the
+    one table whose wrong entries are silent wrong answers is the failure mode
+    this file exists to prevent.
+    """
+    import re
+    import shutil
+    import tempfile
+    clang = shutil.which("clang")
+    if clang is None:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "hdr.c")
+        with open(src, "w") as f:
+            f.write(HEADERS)
+        r = subprocess.run([clang, "-E", "-P", src], capture_output=True,
+                           text=True, timeout=120)
+        if r.returncode != 0:
+            return None
+        text = r.stdout
+    # A declaration wraps over lines, so the whitespace is collapsed before the
+    # declarator is matched; a parameter list containing `...` is the fact.
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"\s+", " ", text)
+    variadic, declared = {}, set()
+    for m in re.finditer(r"([A-Za-z_][A-Za-z_0-9]*)\s*\(([^(){}]*)\)", text):
+        name, params = m.group(1), m.group(2)
+        declared.add(name)
+        if "..." not in params:
+            continue
+        named = [x.strip() for x in params.split("...")[0].split(",")
+                 if x.strip() and x.strip() != "void"]
+        if named:
+            variadic.setdefault(name, set()).add(len(named))
+    return variadic, declared
+
+
+def _reachable_c_symbols():
+    """Every C symbol this repository can call, harvested rather than listed.
+
+    Two sources and no third: `model.FRAME_C_VALUE_CALLS`, which is the model's
+    own answer to "is this name a C library entry point this path reaches", and
+    the `external_call["sym", …]` literals in this repository's own sources,
+    which is where a new C call is written. Both are read, not maintained here,
+    so this cannot fall behind the code it is checking.
+    """
+    import glob
+    import re
+    import formal.model as M
+    names = set(M.FRAME_C_VALUE_CALLS) | set(M.VARIADIC_LIBC)
+    literal = re.compile(r'external_call\["([A-Za-z_][A-Za-z_0-9]*)"')
+    paths = glob.glob(os.path.join(HERE, "formal", "**", "*.mojo"),
+                      recursive=True)
+    paths += glob.glob(os.path.join(HERE, "test_formal_*.py"))
+    paths += glob.glob(os.path.join(HERE, "formal", "**", "*.py"),
+                       recursive=True)
+    for p in paths:
+        try:
+            with open(p, errors="replace") as f:
+                names.update(literal.findall(f.read()))
+        except OSError:
+            continue
+    return names
+
+
 # ── the model reader, without a build ──────────────────────────────────────
 #
 # `external_call_spec` is a decision three call sites and two architectures
@@ -727,6 +858,48 @@ def model_cases():
                             'Pointer[UInt8]](s)\n'
                             '    return p.value()\n'),
                 "load"))
+    # The variadic calling convention, in BOTH directions, against the platform's
+    # own headers. See the section comment above for why this is here and what
+    # each direction is protecting against; the short version is that a missing
+    # entry and a wrong entry are both a plausible wrong ANSWER, never a
+    # refusal, because the callee reads `[sp]`.
+    variadic, declared = _header_variadic_map() or (None, None)
+    if variadic is None:
+        no_clang = ("no clang on PATH: the variadic table cannot be checked "
+                    "against the platform's headers, and an unchecked table is "
+                    "the exact failure this case exists for")
+        out.append(("variadic_table_matches_the_platform_headers",
+                    no_clang, no_clang))
+        out.append(("variadic_table_covers_every_reachable_callee",
+                    no_clang, no_clang))
+    else:
+        # Direction 1: every entry IS a `...`-variadic callee, and says the
+        # right number of named arguments. `asprintf` was the wrong count (1 for
+        # 2) and the five `v*` entries were not variadic at all — both are in
+        # this direction, and both were silent wrong answers at a call site.
+        wrong = sorted(
+            f"{name}: the table says {M.VARIADIC_LIBC[name]} named, the "
+            f"headers say {sorted(variadic[name])}"
+            for name in sorted(set(M.VARIADIC_LIBC) & set(variadic))
+            if variadic[name] != {M.VARIADIC_LIBC[name]})
+        wrong += sorted(
+            f"{name}: the table claims a variadic tail and the headers "
+            f"declare no `...` for it"
+            for name in sorted(set(M.VARIADIC_LIBC) - set(variadic))
+            if name in declared)
+        out.append(("variadic_table_matches_the_platform_headers",
+                    wrong, []))
+        # Direction 2: every C symbol this path can reach that the platform
+        # declares variadic is IN the table. `fcntl` and `ioctl` were both
+        # missing, and both are names `FRAME_C_VALUE_CALLS` already listed as
+        # reachable — so the vocabulary was not the hard part and the table was
+        # the only thing that was out of date.
+        uncovered = sorted(
+            f"{name} ({sorted(variadic[name])} named, per the headers)"
+            for name in sorted(_reachable_c_symbols())
+            if name in variadic and name not in M.VARIADIC_LIBC)
+        out.append(("variadic_table_covers_every_reachable_callee",
+                    uncovered, []))
     return out
 
 

@@ -37,12 +37,14 @@ WHAT IS HERE
     numbers and a mirror with a hole in a command table is not a mirror; the
     `lockf` CALL that uses them is absent, and the reason is spelled out where
     `lockf` would have been.
-  * `FD_CLOEXEC` — the constant. **The `getfd`/`setfd`/`getfl`/`setfl` that
-    would use it are NOT here**, because the third argument of `fcntl(2)` does not arrive and a
-    `setfd` that reports success and changes nothing is a silent wrong answer
-    about a descriptor. The measurement is in the comment where they would have
-    been, and the filing is
-    `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`.
+  * `FD_CLOEXEC` — the constant, and `getfd` / `setfd` / `getfl` / `setfl` —
+    the four descriptor-flag calls that use it. They were absent for a while
+    because the third argument of `fcntl(2)` is VARIADIC and this path did not
+    know `fcntl` was one of the C entry points that takes its variadic
+    arguments in a stack area rather than in registers, so the flag word was
+    emitted into X2 and the syscall applied whatever was at `[sp]`: a `setfd`
+    that reported success and changed nothing. The measurement is in the
+    comment where the four are defined.
   * every `F_*` COMMAND NUMBER as a function, including the ones with no
     function here (`F_SETOWN`, `F_GETOWN`, `F_FULLFSYNC`, `F_GETPATH`,
     `F_SETNOSIGPIPE`, `F_RDAHEAD`, `F_NOCACHE`, `F_GETLEASE`, `F_SETLEASE`,
@@ -52,11 +54,15 @@ WHAT IS HERE
 
 WHAT IS NOT HERE, AND WHY
 ------------------------
-  * `getfd`, `setfd`, `getfl`, `setfl` — see the measurement below the
-    constants. This is the only absence in the module that is NOT a fact about
-    the target: everything else here is a struct layout or a host object, and
-    this one is a SPELLING, which is why it is filed rather than described as
-    out of reach.
+  * `lockf`, and `F_SETLK`'s pointer argument. `lockf`'s C call is
+    `fcntl(fd, F_SETLK, &lock)` and the third argument is a POINTER through the
+    same variadic tail. The tail now works (see above), so what is left is the
+    pointer: this path cannot spell a variadic argument that is a pointer, and
+    `formal/hostmods/os/_syscalls.mojo`'s `fs_fcntl` takes three INTEGER
+    arguments for that reason. The struct itself is not the obstacle — it is
+    five fields at offsets 0, 2, 8, 16 and 24 — so this is one extension of the
+    argument-passing convention away, not a capability; it is written down in
+    `bugs/FORMAL_a_pointer_through_a_variadic_argument.md`.
 
   * `ioctl(fd, request, arg)`. `ioctl` is not a lock and not a flag: it is a
     DEVICE's private protocol, and the request number means whatever the driver
@@ -93,11 +99,13 @@ THE TWO THINGS A LOCK MODULE GETS WRONG, AND BOTH ARE HERE
     same-process test and be wrong against every other process, because
     `F_SETLK` with `l_pid == 0` means the CALLING process and POSIX record locks
     are per-process.
-  * **`flock` and `F_SETLK` DO NOT INTERACT** on macOS or Linux — they are two
-    independent lock spaces on the same file. `test_formal_fcntl.py` asserts it
-    too, because a module that quietly routed everything through one of them
-    would pass every single-process test and be wrong against every other
-    process on the machine.
+  * **`flock` and `F_SETLK` DO NOT INTERACT — ON LINUX. ON macOS THEY DO**, and
+    that is measured rather than assumed: macOS implements `flock` over `fcntl`
+    record locks with a different `l_type`, so a `flock` on a second descriptor
+    is refused while a POSIX `F_WRLCK` is held on the first.
+    `test_formal_fcntl.py`'s `independence` group asserts the platform's own
+    answer rather than Linux's, precisely so that a reader who has the other
+    platform in their head is caught.
 
 NO EXCEPTIONS AND NO ERROR CODES
 --------------------------------
@@ -173,14 +181,8 @@ def flock(fd, operation) -> int:
 def FD_CLOEXEC() -> int:
     """`FD_CLOEXEC`: 1 — close this descriptor when the process execs.
 
-    **THE CONSTANT WITHOUT THE TWO FUNCTIONS THAT USE IT**, and that is the
-    whole of what is here for the descriptor flags. `getfd` and `setfd` are
-    absent because the third argument of `fcntl(2)` does not arrive — the
-    measurement is in the comment below — and a `setfd` that reports success and
-    changes nothing is a silent wrong answer about a descriptor, which is worse
-    than a refusal. A caller that wants close-on-exec on this path has to
-    `open` the descriptor with a flag that carries it, and this path's
-    `open(p, "r")` has no spelling for that either.
+    The number, and the two calls that set and read it (`setfd` / `getfd`) are
+    below with the rest of the descriptor-flag calls.
 
     The number is here because it IS CPython's number and a mirror with a hole
     in a command table is not a mirror.
@@ -188,37 +190,53 @@ def FD_CLOEXEC() -> int:
     return 1
 
 
-# `F_GETFD`, `F_SETFD`, `F_GETFL` and `F_SETFL` are all reachable in principle —
+# `F_GETFD`, `F_SETFD`, `F_GETFL` and `F_SETFL` were all reachable in principle —
 # the command numbers are here and `fs_fcntl` is the call — and **the third
-# argument of `fcntl(2)` does not arrive.**
+# argument of `fcntl(2)` did not arrive.**  That sentence is in the past tense
+# because it is fixed, and what it was is the single most useful thing this file
+# has to say about the target, so the measurement is kept rather than deleted.
 #
-# MEASURED, on both architectures, on a descriptor this path opened itself:
+# `fcntl(2)` is `int fcntl(int fd, int cmd, ...)`. On Apple arm64 the unnamed
+# arguments do NOT go in argument registers: the caller reserves an area and the
+# i-th unnamed argument goes at offset 8*(i-1) from SP as it stands at the call.
+# `formal/model.py`'s `VARIADIC_LIBC` is where a callee is recorded as variadic
+# and how many of its arguments are named, and `fcntl` was not in it — so the
+# third argument was emitted into X2, which is the generic convention and not
+# this target's, and nothing was written into the area at all.
 #
-#   getfd(fd)                       -> 0        (CPython: 1, because CPython's
-#                                              `os.open` sets CLOEXEC and
-#                                              this path's `open(p, "r")` does
-#                                              not — that half is a difference
-#                                              in the OPEN, not in the read)
-#   setfd(fd, FD_CLOEXEC())         -> 0        (success)
-#   getfd(fd)                       -> 0        (UNCHANGED: the flag did not
-#                                              take, so `setfd` reported
-#                                              success and did nothing)
-#   getfl(fd)                       -> 0
-#   fs_fcntl(fd, F_SETFL, 4)        -> 0
-#   getfl(fd)                       -> 192      (CPython: 4)
+# MEASURED, on arm64, on a descriptor this path opened itself, BEFORE:
 #
-# So `setfd` would be a function whose documented answer is "0 on success" and
-# whose actual effect is nothing, and `getfl` would report a number that does not
-# match CPython's for the same descriptor. **Both are worse than absent**, and
-# the difference is the one this directory cares about: a `setfd` that returns 0
-# and changes nothing is a silent wrong answer about a descriptor, and a caller
-# that checks the return value — which is the only thing it can check on this
-# path, because `errno` cannot be bound — believes it has set close-on-exec.
+#   fcntl(fd, F_GETFD, 0)              -> 0       (CPython: 1, but see below)
+#   fcntl(fd, F_SETFD, FD_CLOEXEC)     -> 0       (success)
+#   fcntl(fd, F_GETFD, 0)              -> 0       (UNCHANGED: the flag did not
+#                                                take, so `setfd` reported
+#                                                success and did nothing)
+#   fcntl(fd, F_GETFL, 0)              -> 0
+#   fcntl(fd, F_SETFL, 4)              -> 0
+#   fcntl(fd, F_GETFL, 0)              -> 192     (CPython: 4)
 #
-# `printf` is NOT evidence against this: its arguments demonstrably arrive, and
-# `printf` is built by a path that knows it is variadic. `bugs/
-# FORMAL_a_variadic_call_drops_its_third_argument.md` is where the measurement,
-# the two data points and the next step are written down.
+# AFTER (both architectures, and the entry is `"fcntl": 2` in `VARIADIC_LIBC`):
+#
+#   fcntl(fd, F_SETFD, FD_CLOEXEC)     -> 0       (success)
+#   fcntl(fd, F_GETFD, 0)              -> 1       (the flag took)
+#   fcntl(fd, F_SETFL, 4)              -> 0
+#   fcntl(fd, F_GETFL, 0)              -> 4       (CPython: 4)
+#
+# **x86-64 never had this.** SysV x86-64 passes variadic arguments in the same
+# registers as fixed ones, so the positional emission above is the whole
+# convention there and only the arm64 table entry was missing. A test that ran
+# one architecture would have called this fixed before and after.
+#
+# `getfd` reading 0 where CPython reads 1 on a FRESH descriptor is NOT this
+# bug and is still true: CPython's `os.open` sets `FD_CLOEXEC` by default and
+# this path's `open(p, "r")` does not, and cannot until `open` grows a flag for
+# it. It is a difference in the OPEN, not in the read, and
+# `test_formal_fcntl.py`'s `fdflags` group says so in the one place where the
+# two are compared.
+#
+# `printf` was never evidence against this: its arguments demonstrably arrive,
+# because `printf` IS in the table. That is the whole asymmetry — a variadic
+# callee that is in the table works, and one that is not does not, silently.
 
 
 def F_RDLCK() -> int:
@@ -305,6 +323,81 @@ def F_GETPATH() -> int:
 # that is written down, and it is the same gap that keeps
 # `platform.architecture()` (a `read` into a buffer the caller fills) and
 # `struct tm` out of `formal/hostmods/time.mojo`.
+
+# ── the descriptor flags: THE CALLS ──────────────────────────────────────────
+#
+# These four are here NOW, and the reason they were not is the most useful thing
+# in this file, so it is written down rather than deleted:
+#
+# `fcntl(2)` is `int fcntl(int fd, int cmd, ...)`. The third parameter is
+# VARIADIC, and on Apple arm64 a variadic argument is NOT passed in an argument
+# register: the caller reserves an area and the i-th unnamed argument goes at
+# offset 8*(i-1) from SP as it stands at the call. `formal/model.py`'s
+# `VARIADIC_LIBC` says which C entry points are variadic and how many of their
+# arguments are named, `arm64_codegen`'s `_emit_variadic_area` lays the area out
+# from that table, and **`fcntl` was not in the table**. So `fcntl(fd, cmd, arg)`
+# was emitted with `arg` in X2 — positionally, correctly, into the register the
+# generic convention uses — and nothing at all in the area, and the callee read
+# whatever the caller had at `[sp]`. Measured, before the table entry existed:
+#
+#   fcntl(fd, F_SETFD, FD_CLOEXEC)  -> 0   (success) … and nothing changed
+#   fcntl(fd, F_GETFD)              -> 0   (before AND after the set)
+#   fcntl(fd, F_SETFL, O_NONBLOCK)  -> 0
+#   fcntl(fd, F_GETFL)              -> 192 (CPython: 4)
+#
+# A `setfd` built on that would report success and change nothing, which is the
+# silent wrong answer about a descriptor this file refused to ship rather than
+# ship. `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md` recorded the
+# measurement; the entry `"fcntl": 2` in `VARIADIC_LIBC` is the fix, and
+# `test_formal_fcntl.py`'s `fdflags` group is what says it took.
+#
+# x86-64 was never affected and that is not luck: SysV x86-64 passes variadic
+# arguments in the same registers as fixed ones, so the positional emission above
+# is the whole convention there. The bug was ARM64-only, and a test that ran one
+# architecture would have called it fixed.
+
+def getfd(fd: int) -> int:
+    """`fcntl(fd, F_GETFD)`: the descriptor's flag word, or -1.
+
+    On this target the function's own return value IS the answer, because
+    `fcntl(2)` returns the old value of the word for a GET and -1 for a
+    failure — which is why this is not `0` on a descriptor that was never
+    opened, and why -1 cannot be told from a legitimate word here (see the
+    module header on `errno`).
+    """
+    return fs_fcntl(fd, F_GETFD(), 0)
+
+def setfd(fd: int, flags: int) -> int:
+    """`fcntl(fd, F_SETFD, flags)`: 0 on success, -1 on failure.
+
+    `flags` is a WORD (`FD_CLOEXEC` or 0), not a set of bits to OR in here:
+    `F_SETFD` replaces the word, and a caller that wants close-on-exec ORs the
+    constant into what `getfd` returned, which is the whole of why `getfd` is
+    here rather than only the setter.
+    """
+    return fs_fcntl(fd, F_SETFD(), flags)
+
+def getfl(fd: int) -> int:
+    """`fcntl(fd, F_GETFL)`: the descriptor's STATUS flags (`O_*`), or -1.
+
+    CPython's `os.O_*` constants are not mirrored here and do not need to be:
+    they are the C library's, not this module's, and a caller that wants
+    `O_NONBLOCK` spells it or compares against a number it got from elsewhere.
+    What this mirrors is the fcntl answer, and `test_formal_fcntl.py` compares
+    it against CPython's own `fcntl.fcntl(fd, fcntl.F_GETFL)` on the same file.
+    """
+    return fs_fcntl(fd, F_GETFL(), 0)
+
+def setfl(fd: int, flags: int) -> int:
+    """`fcntl(fd, F_SETFL, flags)`: 0 on success, -1 on failure.
+
+    `F_SETFL` SETS the listed status flags and is not required to clear the
+    others on every platform, so the portable way to turn one off is to read the
+    word with `getfl`, clear the bit, and set the result back. macOS replaces
+    the word; this docstring states the weaker promise rather than the stronger
+    one, because the weaker one is the one a caller can rely on.
+    """
+    return fs_fcntl(fd, F_SETFL(), flags)
 
 # ── the command numbers with no function here ───────────────────────────────
 #

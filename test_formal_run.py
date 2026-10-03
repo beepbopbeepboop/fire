@@ -4936,6 +4936,108 @@ BOTH_ARCH_CASES = [
      "    comptime b = a // 7\n"
      "    comptime c = (b // 2) * 6 + 1\n"
      "    return c\n", 43, None),
+
+    # ── a class-level constant and a field default are LITERAL expressions ──
+    #
+    # `formal/model.py::literal_default_word` is the one classifier behind both
+    # of these (`class_constant_word` and `struct_default_word` are the same
+    # question of the same node), and it used to have arms for `IntLiteral` /
+    # `BoolLiteral` / `StringLiteral` and nothing else. So `-3` — which parses to
+    # `UnaryOp('-', IntLiteral(3))`, one token wider than `3` and exactly
+    # representable in the word `3` already is — was REFUSED with a message
+    # claiming the value "is not a value this build can materialize". That
+    # message is false, and it is worse than wrong: it sends a reader looking
+    # for something non-literal in their own source, and there is nothing there.
+    #
+    # The fix is not a new arm but the DELETION of the second classifier:
+    # `literal_default_word` now folds with `fold_literal_expr`, the folder the
+    # module-level constants already used, so one rule answers "can the build
+    # know this value" for every binding a class body or a module body declares.
+    # `1 + 2` and `~0` come with it for the same reason, and they are in the
+    # same program so a fix that added only the unary-minus arm is visible.
+    #
+    # Both spellings of a read are here — bare `Regs.A` and `self.A` through a
+    # method — because `_rewrite_class_constants` substitutes both from the same
+    # census and the receiver spelling has a separate arm (`struct_receivers`).
+    ("both_arch_negative_and_folded_class_constant",
+     "class Regs:\n"
+     "    A = -3\n"
+     "    B = 7\n"
+     "    C = 1 + 2\n"
+     "    D = ~0\n"
+     "\n"
+     "    def both(self):\n"
+     "        printf(\"A=%d B=%d\", self.A, self.B)\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> int:\n"
+     "    r = Regs()\n"
+     "    r.both()\n"
+     "    printf(\" C=%d D=%d\", Regs.C, Regs.D)\n"
+     "    return 0\n", 0, "A=-3 B=7 C=3 D=-1"),
+
+    # THE SAME FOLD, on the other side of the same classifier: a FIELD's
+    # default, which the constructor materializes rather than the read.
+    # `-3` and `100000` are one row each because they failed differently and
+    # only one of them was a build crash:
+    #
+    #   * `100000` does not fit MOVZ's 16-bit unsigned field, and the arm64
+    #     emitter reached for `encode_movz_xn_imm` directly instead of this
+    #     backend's own `_emit_mov_imm`, so it died on `assert 0 <= imm16 <=
+    #     0xffff`. x86-64 was fine — its three twins all call `_emit_mov_imm`.
+    #     A wide default has been buildable on one architecture and not the
+    #     other, which is why this is a both-arch case and not an arm64 one.
+    #   * `-3` is the row above's value in the other position, and it is here
+    #     because the two paths are two call sites of one classifier and a fix
+    #     that reached only the read would leave the constructor emitting a
+    #     truncated word for the very same default.
+    #
+    # `m` has no default and must read 0 — the boundary between "a default this
+    # path materializes" and "no default", which is the refusal/zero distinction
+    # `struct_default_word` exists to keep.
+    ("both_arch_negative_and_wide_struct_field_default",
+     "struct R:\n"
+     "    var n: Int = -3\n"
+     "    var m: Int\n"
+     "    var w: Int = 100000\n"
+     "\n"
+     "    def show(self) -> Int:\n"
+     "        printf(\"n=%d m=%d w=%d\", self.n, self.m, self.w)\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> int:\n"
+     "    r = R()\n"
+     "    r.show()\n"
+     "    return 0\n", 0, "n=-3 m=0 w=100000"),
+
+    # The MODULE-level spelling of the same fold, which is the one that was
+    # never broken and is here as the control: `G = -5` was already answered
+    # (by `fold_module_value`), so if this row ever fails while the two above
+    # pass, the classifier and the module folder have drifted apart again —
+    # which is the whole failure mode of having two folders.
+    ("both_arch_negative_and_folded_module_constant",
+     "G = -5\n"
+     "H = ~0\n"
+     "I = 6 * 7\n"
+     "\n"
+     "def main() -> int:\n"
+     "    printf(\"G=%d H=%d I=%d\", G, H, I)\n"
+     "    return 0\n", 0, "G=-5 H=-1 I=42"),
+
+    # `comptime c = ~3` is the third folder, and it is a row of its own because
+    # `mojo/middle/comptime.py:eval_const` is a DIFFERENT function from
+    # `fold_literal_expr` that answers the same question about the same operator:
+    # both formal backends already LOWERED `~` at run time (one MVN, one NOT) and
+    # the reference interpreter evaluates it, while every compile-time folder
+    # refused it. So the program printed -4 under `python3 fire.py run`, ran at
+    # run time as -4 when the same `~` sat outside the `comptime`, and was
+    # REFUSED when it was inside one. `~` is now in all three folders, which is
+    # the only way that stays true when a fourth is written.
+    ("both_arch_comptime_bitwise_not_folds",
+     "def main(n: Int) -> Int:\n"
+     "    comptime c = ~3\n"
+     "    comptime d = -2\n"
+     "    return c + d + 11\n", 5, None),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
