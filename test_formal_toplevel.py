@@ -64,11 +64,15 @@ What is asserted, in the order the fixes were made:
      `yield`, an `await`. Each of those is a different construct once the body
      is wrapped in a function, and each would otherwise build, run, and
      compute something other than what the file says.
-  8. **A module body on the DYLIB path is refused.** A library has no entry
-     point for any of it, and a module whose API is its top level used to
-     compile to a library that computes nothing at load time and is then
-     refused by `no_public_api_reason` for the wrong reason — "no public
-     functions", sent at a file that has exactly what it meant to write.
+  8. **A module body in a DYLIB RUNS, at load time.** A library has no `main`,
+     so a body compiled into one used to be a function nothing called — the
+     file built, linked, and did nothing, which is the silent no-op one level
+     down from the executable case and cost 16 files of this repository. Both
+     object writers now emit a load-time initializer pointing at the body, and
+     a body whose MEANING is file-level (`return`, `global`, `yield`,
+     `await`) is still refused — by the same code and the same words as the
+     executable path, so an imported module and a run one cannot answer
+     differently about one source file.
   9. **A module docstring, a file-level `pass`, and a module-level constant
      the folder can substitute are NOT body.** They are classified out in
      `model.module_body`; this pins the classification against the tree's
@@ -565,49 +569,133 @@ def test_file_level_await_is_refused(tmpdir, verbose):
         verbose)
 
 
-# ── 7. the dylib path: a library has no entry point for any of it ──────────
+# ── 7. the dylib path: a library's entry point is its load-time initializer ──
 #
-# A module whose API is its top-level statements used to compile to a
-# dylib that exported nothing, had no code to run the store, and was then
-# refused by `no_public_api_reason` for the wrong reason — "no public
-# functions", sent at a file that has exactly what it meant to write. The
-# refusal is now about the top-level statement, by name.
+# A module body used to be REFUSED on this path, for a reason that was true and
+# whose remedy was wrong: a library has no `main`, so a module whose top level
+# had statements in it compiled to a function nothing called — built, linked,
+# and silent. 16 files in this repository were refused for it, 15 of them for
+# having IMPORTED the offending module and for using nothing it declares
+# (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`).
+#
+# The remedy was an entry point, not a refusal: both object writers now emit
+# one — `__TEXT,__init_offsets` in a Mach-O library, `.init_array` in an ELF one
+# — pointing at the body wrapper, and dyld calls it after the library's
+# dependencies are loaded and before `main`, which is where CPython runs a
+# module body at import. The first case below is that claim, end to end, on both
+# architectures; the second is the refusal that SURVIVED, because a body the
+# path cannot lower is still refused, now by the same code and the same words the
+# executable path uses.
 
 DYLIB_PROGRAM = "from pkg import join\n\nexit(0)\n"
+# The body's EFFECT has to be observable from the program's own stdout, because
+# "the library has an initializer section" is a claim about the file and this is
+# a claim about the run. `printf` in the body's first position is what puts the
+# body's output BEFORE the program's: a load-time initializer that ran after
+# `main` would print the same bytes in the other order.
 DYLIB_MODULE_WITH_BODY = """\
 def _parts():
     return ["a", "b"]
 
 ALL = _parts()
+printf("body@")
+
 
 def join(a, b):
     return a + b
 """
 
+DYLIB_PROGRAM_WITH_BODY = """\
+from pkg import join
 
-def test_dylib_path_refuses_a_module_body(tmpdir, verbose):
-    """A module whose API is its top-level statements is refused BY NAME.
+def main(k):
+    printf("main=%d@@", join(1, 2))
+    return 0
+"""
 
-    End to end through the import mechanism, because the point is what a
-    caller linking the library sees: the chain carries the module's own
-    refusal, so the reader is sent to the file that has the statement rather
-    than to a `def` the file never meant to have."""
-    root = os.path.join(tmpdir, "dylibbody")
+
+def case_dylib_body_runs_at_load(name, module, program, expect_stdout,
+                                 tmpdir, verbose=False):
+    """Build an IMPORTING program on BOTH backends and check what it printed.
+
+    End to end through the import mechanism, because the point is what a caller
+    LINKING the library sees: the chain builds the module's own dylib, and the
+    program's stdout is the only place a load-time effect can show up.
+
+    Both backends build; only the native one is RUN, because an x86-64 image
+    needs Rosetta and this file's runner has no story about it (that is
+    `test_formal_x86_64_dylib.py`'s job, and it builds and inspects both
+    containers there)."""
+    ok = True
+    for backend in BACKENDS:
+        root = os.path.join(tmpdir, f"{name}.{backend}")
+        os.makedirs(os.path.join(root, "pkg"), exist_ok=True)
+        with open(os.path.join(root, "pkg", "__init__.mojo"), "w") as f:
+            f.write(module)
+        prog = os.path.join(root, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(program)
+        out = os.path.join(root, f"{name}.{backend}.aout")
+        r = build(prog, out, backend, cwd=root)
+        if r.returncode != 0:
+            ok &= check(False, f"{name} [{backend}] built",
+                        (r.stderr or r.stdout).strip()[-400:])
+            continue
+        if backend != NATIVE:
+            continue
+        code, text = run_binary(out)
+        ok &= check(text == expect_stdout, f"{name} [{backend}] stdout",
+                    f"got {text!r}, expected {expect_stdout!r}")
+        ok &= check(code == 0, f"{name} [{backend}] exit status",
+                    f"got {code}, expected 0")
+        if verbose:
+            print(f"      [{backend}] exit={code} stdout={text!r}")
+    return ok
+
+
+def test_a_dylib_runs_its_module_body_at_load_time(tmpdir, verbose):
+    """A module body in a LIBRARY runs when the library loads.
+
+    The statement this replaces asserted the opposite, and the reason is the
+    whole of the fix: a library has no `main` and no caller for a body, so
+    before the load-time initializer the body compiled to a function nothing
+    ran and the importing program printed only its own output."""
+    return case_dylib_body_runs_at_load(
+        "dylibbody", DYLIB_MODULE_WITH_BODY, DYLIB_PROGRAM_WITH_BODY,
+        "body@main=3@@", tmpdir, verbose)
+
+
+def test_dylib_path_still_refuses_a_body_that_cannot_run(tmpdir, verbose):
+    """A body whose MEANING is file-level is still refused, as a LIBRARY too.
+
+    `return` at file level returns from nothing: this path runs the top level as
+    the body of a synthetic function, so a `return` there returns from THAT
+    function rather than from a function the source wrote. The refusal is asked
+    for both paths from the same code (`_refuse_unlowerable_module_body`), so a
+    reader whose module is imported gets the same sentence as one that is run —
+    which is the property that replaced the old whole-body refusal, and the one
+    a per-path copy of this check would lose."""
+    root = os.path.join(tmpdir, "dylibreturn")
     os.makedirs(os.path.join(root, "pkg"), exist_ok=True)
     with open(os.path.join(root, "pkg", "__init__.mojo"), "w") as f:
-        f.write(DYLIB_MODULE_WITH_BODY)
+        f.write("printf(\"early@\")\nreturn 3\n\n\n"
+                "def join(a, b):\n    return a + b\n")
     with open(os.path.join(root, "prog.mojo"), "w") as f:
         f.write(DYLIB_PROGRAM)
-    r = build(os.path.join(root, "prog.mojo"),
-              os.path.join(tmpdir, "dylibbody.aout"), "arm64", cwd=root)
-    ok = check(r.returncode != 0, "a module body is refused on the dylib path",
-               "it BUILT: the library would compute nothing at load time")
-    text = r.stderr or r.stdout
-    ok &= check("a library has no entry point to run them" in text,
-                "the refusal names the construct",
-                f"{text.strip()[-300:]}")
-    if verbose and text:
-        print(f"      refused: {text.strip()[:200]}")
+    ok = True
+    for backend in BACKENDS:
+        out = os.path.join(root, f"prog.{backend}.aout")
+        r = build(os.path.join(root, "prog.mojo"), out, backend, cwd=root)
+        ok &= check(r.returncode != 0,
+                    f"a file-level `return` in an imported module's body is "
+                    f"refused [{backend}]",
+                    "it BUILT: the body would return from the initializer")
+        text = r.stderr or r.stdout
+        ok &= check("a `return` at file level returns from nothing" in text,
+                    f"the refusal names the construct [{backend}]",
+                    text.strip()[-300:])
+        if verbose and text:
+            print(f"      [{backend}] refused: {text.strip()[:200]}")
     return ok
 
 
@@ -968,6 +1056,29 @@ def test_module_body_classification(tmpdir, verbose):
         ("X = 5\n", []),                       # folds: substituted at reads
         ('X = "s"\n', []),                      # folds
         ("X = 5 + 2 * 3\n", []),                # folds: the folder's closure
+        # A FLOAT constant, which is the one literal that did not fold until the
+        # module-level folder grew an arm for it (`model.fold_module_value`).
+        # It is body-only-by-omission: both emitters lower a `FloatLiteral` with
+        # `int(expr.value)` ("formal is int-only; truncate toward zero") and
+        # `formal/types.py` types it `DEFAULT_INT_TYPE`, so the build KNEW the
+        # value and the folder declined to say so — `collect_module_symbols`
+        # recorded the name `rebound`, `module_body` declined the store, and a
+        # dylib was refused for having a body at all. Measured on this
+        # repository's own `tools/memslot.py`: four of its six body statements
+        # are float constants. So this row is the doc's item 3.
+        ("X = 96.0\n", []),
+        ("X = 0.5\n", []),                      # …including a fractional one:
+                                               # the word is 0, which is what a
+                                               # read of the literal itself is
+        # …but a float inside an EXPRESSION is NOT a folded constant, and
+        # folding it would be a wrong answer rather than a widening. The
+        # emitters compute `2.5 * 3` as `int(2.5) * 3` = 0, and a folder that
+        # said 7 would have the substitution put 7 at a read site where the
+        # same expression written there yields 0 — so the module-level folder
+        # truncates a LITERAL and nothing wider, exactly the node the emitters
+        # have a rule for. This row is what stops the next reader from adding
+        # the binary arm.
+        ("X = 2.5 * 3\n", ["AssignStmt"]),
         ("comptime X = 5\n", []),               # a compile-time binding
         ("exit(0)\n", ["ExprStmt"]),
         # A CONTAINER literal does not fold, so it is module STATE — and since
@@ -1108,7 +1219,8 @@ def main():
         test_file_level_global_is_refused,
         test_file_level_yield_is_refused,
         test_file_level_await_is_refused,
-        test_dylib_path_refuses_a_module_body,
+        test_a_dylib_runs_its_module_body_at_load_time,
+        test_dylib_path_still_refuses_a_body_that_cannot_run,
         test_t1_is_a_named_finding_not_a_pass,
         test_a_module_body_reaches_its_next_real_finding,
         test_a_module_body_subscript_and_dict_run,

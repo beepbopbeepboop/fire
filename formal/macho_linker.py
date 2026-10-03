@@ -42,6 +42,55 @@ CPU_TYPE_X86_64 = 0x01000007
 CPU_SUBTYPE_X86_64_ALL = 0x00000003
 MH_EXECUTE = 2
 
+# The section TYPE dyld reads a load-time initializer list from, and it is NOT
+# the pointer-array type (`S_MOD_INIT_FUNC_POINTERS`, 0x9) that the name
+# `__mod_init_func` suggests. Measured on this platform (macOS 26.6.2, dyld as
+# shipped): a `__DATA,__mod_init_func` section carrying a correct 8-byte pointer
+# to a module body is parsed, loads, links and is NEVER CALLED — the importing
+# program ran and printed only its own output — while `clang -dynamiclib`'s own
+# initializer, in a `__TEXT,__init_offsets` section of type 0x16, runs. So this
+# writer emits the form the toolchain emits and the loader honours:
+#
+#   * `S_INIT_FUNC_OFFSETS` (0x16) as the section TYPE. `clang` uses it for every
+#     `__attribute__((constructor))`, which is what makes it present in every
+#     image the platform's own build system produces.
+#   * 32-bit values, and they are OFFSETS FROM THE START OF THE IMAGE (its
+#     mach_header), not addresses and not offsets from the section. Measured both
+#     ways: `clang -dynamiclib` at `__TEXT` `0x0` stores the initializer's
+#     address verbatim, and the same file linked at `__TEXT 0x100000000` stores
+#     `address - 0x100000000`. A 32-bit field cannot hold an address in an image
+#     whose `__TEXT` is at `TEXT_BASE`, so this is also the only form that works
+#     for an image linked where this one is.
+#
+# The name is a convention; the type is the mechanism, and `_write_text_segment`
+# is told the type.
+S_INIT_FUNC_OFFSETS = 0x16
+_INIT_OFFSET_WIDTH = 4
+
+
+def _init_offsets_blob(addrs) -> bytes:
+    """The `__init_offsets` payload: one 32-bit image-relative offset per address.
+
+    `TEXT_BASE` is subtracted because it is this file's mach_header address for
+    every image it writes (`__TEXT` is the lowest segment of both an executable
+    and a dylib, and the mach_header lives at its start), and because that is
+    what the offset is measured from — see `S_INIT_FUNC_OFFSETS`.
+
+    Refused rather than truncated, for a value that will not fit: `struct.pack`
+    raises on an address 4 GB or more past `TEXT_BASE`, and a silently dropped
+    initializer is the exact failure this mechanism exists to prevent.
+    """
+    out = bytearray()
+    for addr in (addrs or []):
+        try:
+            out += struct.pack("<I", int(addr) - TEXT_BASE)
+        except (struct.error, TypeError, ValueError) as e:
+            raise ValueError(
+                f"a load-time initializer at {addr!r} is not an address in an "
+                f"image whose mach_header is at {TEXT_BASE:#x}: the offset form "
+                f"this platform's dyld reads is 32 bits wide ({e})") from None
+    return bytes(out)
+
 # Per-architecture Mach-O identity and stub geometry.
 ARCHES = {
     "arm64": {
@@ -519,6 +568,10 @@ def _write_data_segment(file: bytearray, o: int, data_vm: int, data_file: int,
     and string bytes the address-valued slots point at. `initprot` is rw- (3)
     because a `global NAME` store WRITES here — a read-only data segment would
     fault on the first write, which is the one operation the segment exists for.
+
+    The load-time initializer is NOT here: it is a `__TEXT,__init_offsets`
+    section, beside the code it points at and in the form this platform's
+    `clang` emits (`_init_offsets_blob` and `build_macho_dylib`).
 
     Returns the offset just past the command."""
     def patch(off, fmt, *vals):
@@ -1115,7 +1168,8 @@ def _export_trie(exports: list) -> bytes:
 
 
 def dylib_load_commands(install_name: str, has_externs: bool,
-                        deps: list = None, has_globals: bool = False) -> tuple:
+                        deps: list = None, has_globals: bool = False,
+                        has_mod_init: bool = False) -> tuple:
     """(sizeofcmds, ncmds) of a dylib's load-command list.
 
     One function, because the code offset is DERIVED from this and the two
@@ -1131,15 +1185,23 @@ def dylib_load_commands(install_name: str, has_externs: bool,
     ordinal space (1 = libSystem when present, then deps), so it is passed in
     rather than sorted here: reordering it would silently rebind every symbol.
 
-    `has_globals` adds the module-global `__DATA` segment, which pushes the code
-    down by the same amount — so both effects have to be visible here, where
-    the code offset is decided, rather than discovered later by the builder."""
+    `has_globals` adds the module-global `__DATA` segment, and `has_mod_init`
+    a THIRD SECTION in `__TEXT` (the `__init_offsets` list a library with a
+    module body runs at load, beside the code it points at — `S_INIT_FUNC_OFFSETS`
+    for the form). Either is 80 more bytes of load command and so pushes the
+    code down by as much as the segment or section it describes. Both effects
+    have to be visible here, where the code offset is decided, rather than
+    discovered later by the builder — and the builder's own check that the base
+    it was handed matches this layout is what turns a caller that forgot to pass
+    the flag into a refusal instead of a mis-mapped image."""
     deps = list(deps or [])
     name = install_name.encode("utf-8") + b"\0"
     id_cmdsize = (24 + len(name) + 7) & ~7
-    # __TEXT carries __text, plus __stubs when the library calls out, so its
-    # command is 72 + 80 per section.
-    text_cmdsize = 72 + 80 * (2 if has_externs else 1)
+    # __TEXT carries __text, plus __stubs when the library calls out, plus
+    # __init_offsets when it has a module body, so its command is 72 + 80 per
+    # section.
+    text_sections = (2 if has_externs else 1) + (1 if has_mod_init else 0)
+    text_cmdsize = 72 + 80 * text_sections
     dep_cmds = sum(dylib_command_size(d) for d in deps)
     sizeofcmds = (text_cmdsize + 72 + id_cmdsize + 24 + 24 + 48 + 16 + dep_cmds
                   + (dylib_command_size(LIBSYSTEM_PATH.decode()) + 152
@@ -1150,15 +1212,16 @@ def dylib_load_commands(install_name: str, has_externs: bool,
 
 
 def dylib_code_offset(install_name: str, has_externs: bool = False,
-                      deps: list = None, has_globals: bool = False) -> int:
+                      deps: list = None, has_globals: bool = False,
+                      has_mod_init: bool = False) -> int:
     """File offset of a dylib's code.
 
-    `has_externs`, `deps` and `has_globals` must match what the library is
-    actually built with — the caller needs them BEFORE compiling, because they
-    decide the base address the code is emitted for.
+    `has_externs`, `deps`, `has_globals` and `has_mod_init` must match what the
+    library is actually built with — the caller needs them BEFORE compiling,
+    because they decide the base address the code is emitted for.
     """
     sizeofcmds, _n = dylib_load_commands(install_name, has_externs, deps,
-                                         has_globals)
+                                         has_globals, has_mod_init)
     return ((32 + sizeofcmds + 31) & ~15)
 
 
@@ -1180,7 +1243,8 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
                       install_name: str, arch: str = "arm64",
                       external_syms: list = None,
                       entryoff: int = None, deps: list = None,
-                      dep_syms: dict = None, globals_image=None) -> bytes:
+                      dep_syms: dict = None, globals_image=None,
+                      mod_init_addrs: list = None) -> bytes:
     """MH_DYLIB with an export trie, and — when `external_syms` is given —
     the same extern machinery an executable has: __TEXT,__stubs, a
     __DATA_CONST,__got, an LC_LOAD_DYLIB for libSystem, and a bind stream.
@@ -1212,7 +1276,28 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     why a cross-module global is a separate capability and not this one: an
     exporting module's slot would need the importing module's GOT to carry a
     POINTER-TO-DATA symbol, and this backend's export/bind machinery is
-    function-shaped."""
+    function-shaped.
+
+    `mod_init_addrs` are the ADDRESSES of the functions the LOADER must run when
+    it loads this image — the module body's wrapper, one per source file that
+    had one, in that order — and they become the `__TEXT,__init_offsets` list
+    dyld calls (`_init_offsets_blob` for the form, which is offsets rather than
+    pointers and is the reason the section is in `__TEXT`). Addresses in,
+    because `Assembler.label` already records `org + len(text)`: a label is the
+    address the image maps.
+
+    This is the library's entry point, and the reason a module with top-level
+    statements can be a library at all
+    (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`). An
+    initializer runs after the image's dependencies are loaded and before the
+    program's `main`, which is the position CPython gives a module body's
+    statements at import. A library with a body and no initializer compiles the
+    body to a function nothing runs, which is the silent no-op the list removes.
+
+    Empty — the ordinary case, every module whose top level is declarations and
+    constants — writes no section and does not move the code, so every image the
+    tree built before this argument existed is byte-for-byte the image it builds
+    now."""
     spec = arch_spec(arch)
     trie = _export_trie(exports)
     name = install_name.encode("utf-8") + b"\0"
@@ -1226,16 +1311,31 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     deps = list(deps or [])
     gblob = _globals_blob(globals_image)
     has_globals = bool(gblob)
+    # One entry per load-time initializer, in the order the addresses were
+    # given, as the 32-bit IMAGE-RELATIVE OFFSETS this platform's dyld reads —
+    # `_init_offsets_blob` for why that is the form and not a pointer array.
+    init_blob = _init_offsets_blob(mod_init_addrs)
+    has_mod_init = bool(init_blob)
     sizeofcmds, ncmds = dylib_load_commands(install_name, bool(n), deps,
-                                             has_globals)
-    code_file = dylib_code_offset(install_name, bool(n), deps, has_globals)
+                                             has_globals, has_mod_init)
+    code_file = dylib_code_offset(install_name, bool(n), deps, has_globals,
+                                  has_mod_init)
     if base_addr != TEXT_BASE + code_file:
         raise ValueError("dylib base address does not match Mach-O layout")
     # Stubs follow the code exactly as in the executable, so a call site's
     # patched target and the stub the image emits cannot drift apart.
     stub_file = (code_file + len(code) + 3) & ~3 if n else 0
     stub_base_vm = base_addr + (stub_file - code_file)
-    text_size = _text_filesize((stub_file + ssize * n) if n else code_file + len(code))
+    # The initializer list follows the stubs (or the code, in a library that
+    # calls nothing out) and is INSIDE __TEXT, at a 4-byte-aligned file offset
+    # because its entries are 4 bytes. Beside the code rather than in `__DATA`
+    # for the reason the offsets are relative: the values are offsets from the
+    # mach_header, and `__TEXT` is the segment the mach_header lives in.
+    init_file = _align_up((stub_file + ssize * n) if n else code_file + len(code), 4) \
+        if has_mod_init else 0
+    text_size = _text_filesize(init_file + len(init_blob) if has_mod_init
+                               else (stub_file + ssize * n) if n
+                               else code_file + len(code))
     data_file = text_size if n else 0
     data_size = _align_up(8 * n, PAGE_SIZE) if n else 0
     got_base_vm = TEXT_BASE + data_file if n else 0
@@ -1282,12 +1382,20 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     patch(24, "<I", 0x800005)
     o = 32
 
+    text_sections = [(b"__text", base_addr, len(code), code_file, 0x80000400, 0)]
     if n:
-        o = _write_text_segment(file, o, text_size, [
-            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
-            (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize),
-        ])
-
+        text_sections.append(
+            (b"__stubs", stub_base_vm, ssize * n, stub_file, 0x80000408, ssize))
+    if has_mod_init:
+        # `S_INIT_FUNC_OFFSETS`, and `__TEXT` — the two things `_init_offsets_blob`
+        # says dyld reads and where. An initializer this image declares but dyld
+        # does not call is the module body compiled and never run: the file
+        # builds, links, and does nothing at load time.
+        text_sections.append(
+            (b"__init_offsets", TEXT_BASE + init_file, len(init_blob),
+             init_file, S_INIT_FUNC_OFFSETS, 0))
+    o = _write_text_segment(file, o, text_size, text_sections)
+    if n:
         # __DATA_CONST,__got — rw- because dyld writes the resolved pointer.
         patch(o, "<I", SEGMENT_64_CMD)
         patch(o + 4, "<I", 152)
@@ -1313,10 +1421,6 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         patch(s2 + 68, "<I", 0)
         patch(s2 + 72, "<I", 0)
         o += 152
-    else:
-        o = _write_text_segment(file, o, text_size, [
-            (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
-        ])
 
     if has_globals:
         o = _write_data_segment(file, o, g_vm, g_file, g_size, gblob)
@@ -1390,6 +1494,8 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
                                                arch)
     if has_globals:
         file[g_file : g_file + len(gblob)] = gblob
+    if init_blob:
+        file[init_file : init_file + len(init_blob)] = init_blob
     file[linkedit_file : linkedit_file + len(trie)] = trie
     file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
     _assert_no_unclaimed_bytes(

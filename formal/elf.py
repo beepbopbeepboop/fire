@@ -57,6 +57,8 @@ DT_RELA = 7
 DT_RELASZ = 8
 DT_STRSZ = 10
 DT_SONAME = 14
+DT_INIT_ARRAY = 25
+DT_INIT_ARRAYSZ = 27
 STB_GLOBAL = 1
 STB_WEAK = 2
 STT_NOTYPE = 0
@@ -122,6 +124,12 @@ _STN_UNDEF = 0
 # `nm` reports as `A` rather than `T`, so a reader can see the difference
 # between "defined here" and "defined at an address" from the file alone.
 _SHNDX_ABS = 0xFFF1
+# One function pointer in `.init_array`. The array is a list of them and nothing
+# else, so its size is a count times this — and a constant rather than a
+# literal `8` at each site, because `_layout` sizes the array from it and
+# `_dynamic_for` reports it as `DT_INIT_ARRAYSZ` and those two have to be the
+# same number for a loader to call the right number of initializers.
+_PTRSZ = 8
 
 
 def _ident() -> bytes:
@@ -250,14 +258,19 @@ def _build_rela_dyn(got_slots: list[tuple[str, int]],
 
 def _layout(code_size: int, external_syms: list[str], needed: list[str],
             soname: str = None, exports: list = None,
-            globals_size: int = 0) -> dict:
+            globals_size: int = 0, init_array_size: int = 0) -> dict:
     """Every size and virtual address the image needs, in one place.
 
     `compute_got_addrs` runs BEFORE the image exists (it back-patches the call
     sites) while `build_elf` runs after, so the two must not each compute the
     .got address: they share this. The same is true of a shared object's
     `.dynsym` indices — `r_info` names them — so this is also the authority for
-    "symbol `i` is at `.dynsym` index `i + 1`".
+    "symbol `i` is at `.dynsym` index `i + 1`", and of the `.init_array`, whose
+    presence changes the `.dynamic` array's SIZE and therefore everything laid
+    out after it. A caller that passed `init_array_size` to `build_elf_dylib` and
+    not to `compute_got_addrs` would get an image whose `.dynamic` describes one
+    more entry than it wrote and whose call sites branch through GOT slots a
+    different distance away.
 
     `soname` is what makes it a shared object and its absence is what makes it
     an executable: an `ET_DYN` is defined by a `DT_SONAME` and an export table
@@ -299,7 +312,8 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
     dynstr_size = sum(len(n) + 1 for n in names)
     n_exported = len(exports) if dylib else 0
     dynsym_size = (1 + len(external_syms) + n_exported) * _SYMSZ
-    dynamic_size = (len(_dynamic_tags(needed, soname)) + 1) * 16 if dynamic else 0
+    dynamic_size = ((len(_dynamic_tags(needed, soname, bool(init_array_size)))
+                     + 1) * 16 if dynamic else 0)
     # nbucket + nchain words, the bucket heads, then one chain link per SYMBOL —
     # the exact shape `_build_hash` writes, and `_assemble` checks the emitted
     # length against this number before it places the table.  Counted over the
@@ -327,6 +341,18 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
     off += dynamic_size
     got_off = off
     off += got_size
+    # `.init_array` is the loader's list of functions to call while it brings
+    # this object up, and it is placed BEFORE the globals because that is the
+    # only place in this layout that is inside the code segment's own PT_LOAD
+    # without being claimed twice: a loader reads the array, it does not write
+    # it, and this image's second PT_LOAD starts at the globals.
+    #
+    # An ABSOLUTE pointer, like the `st_value` of an export and for the same
+    # reason: this is an `ET_DYN` whose `p_vaddr` is `base_addr` and whose
+    # relocations cover the `.got` only, so the array holds `base_addr + offset`
+    # and nothing relocates it.
+    init_array_off = off
+    off += init_array_size
     # The .globals CONTENT sits at the end of the image but is MAPPED at
     # GLOBALS_VM, so `globals_off` (a file offset) and `GLOBALS_VM` (an address)
     # are deliberately different numbers — see GLOBALS_VM's note.
@@ -352,6 +378,8 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
         "hash_off": hash_off, "hash_size": hash_size,
         "dynamic_off": dynamic_off, "dynamic_size": dynamic_size,
         "got_off": got_off, "got_size": got_size,
+        "init_array_off": init_array_off,
+        "init_array_size": init_array_size,
         "globals_off": globals_off, "globals_size": globals_size,
         "rela_off": rela_off, "rela_size": rela_size,
         "body_size": off,
@@ -363,7 +391,8 @@ def compute_got_addrs(code_size: int, external_syms: list[str],
                       vaddr: int = DEFAULT_BASE,
                       lib_name: str = DEFAULT_LIBC,
                       soname: str = None, exports: list = None,
-                      needed: list = None) -> dict[str, int]:
+                      needed: list = None,
+                      has_init_array: bool = False) -> dict[str, int]:
     """Absolute virtual address of each symbol's .got slot.
 
     Must agree with `build_elf`'s and `build_elf_dylib`'s layout — all three go
@@ -378,13 +407,15 @@ def compute_got_addrs(code_size: int, external_syms: list[str],
         # through it; a shared object names its own soname and dependencies, and
         # `libc.so.6` is one of those dependencies rather than an implied one.
         needed = [lib_name]
-    lay = _layout(code_size, external_syms, needed, soname, exports)
+    lay = _layout(code_size, external_syms, needed, soname, exports,
+                  init_array_size=_PTRSZ * (1 if has_init_array else 0))
     base = vaddr + lay["got_off"]
     return {sym: base + i * _GOTSLOT
             for i, sym in enumerate(external_syms)}
 
 
-def _dynamic_tags(needed: list[str], soname: str = None) -> list:
+def _dynamic_tags(needed: list[str], soname: str = None,
+                  has_init_array: bool = False) -> list:
     """The `.dynamic` TAGS, in the order they are written.
 
     `_layout` sizes the array from this list and `_dynamic_for` fills the
@@ -401,12 +432,21 @@ def _dynamic_tags(needed: list[str], soname: str = None) -> list:
 
     The hash table comes FIRST among a shared object's own tags, before
     `DT_SONAME`, because that is the order `ld` writes and a loader is entitled
-    to stop reading the array at the first tag it does not recognise.
+    to stop reading the array at the first tag it does not recognise. The
+    initializer pair goes LAST, after the tables and the soname and where `ld`
+    puts arrays: `DT_INIT_ARRAY` is the address of the `.init_array` this object
+    wants called at load and `DT_INIT_ARRAYSZ` its size, and the pair is what
+    makes a library's module body run — `elf/dl-init.c` walks every object's
+    `DT_INIT_ARRAY` in dependency order, after its relocations are applied and
+    before the program's own initializers, which is the position CPython gives a
+    module body at import.
     """
     tags = [DT_NEEDED] * len(needed)
     tags += [DT_SYMTAB, DT_STRTAB, DT_STRSZ, DT_RELA, DT_RELASZ]
     if soname:
         tags += [DT_HASH, DT_SONAME]
+    if has_init_array:
+        tags += [DT_INIT_ARRAY, DT_INIT_ARRAYSZ]
     return tags
 
 
@@ -424,8 +464,10 @@ def _dynamic_for(lay: dict, str_offsets: dict, vaddr: int, needed: list[str],
               DT_RELA: vaddr + lay["rela_off"],
               DT_RELASZ: lay["rela_size"],
               DT_HASH: vaddr + lay["hash_off"],
-              DT_SONAME: str_offsets[soname] if soname else 0}
-    tags = _dynamic_tags(needed, soname)
+              DT_SONAME: str_offsets[soname] if soname else 0,
+              DT_INIT_ARRAY: vaddr + lay["init_array_off"],
+              DT_INIT_ARRAYSZ: lay["init_array_size"]}
+    tags = _dynamic_tags(needed, soname, bool(lay["init_array_size"]))
     if tags.count(DT_NEEDED) != len(needed):
         raise ValueError("the DT_NEEDED count and the dependency list "
                          "disagree, so one of them would be written twice")
@@ -488,7 +530,8 @@ def build_elf(code: bytes, entry: int = DEFAULT_BASE,
 
 def _assemble(lay: dict, code: bytes, dynstr_data: bytes, dynsym_data: bytes,
               dynamic_data: bytes, rela_data: bytes, gblob: bytes,
-              e_type: int, entry: int, hash_data: bytes = b"") -> bytes:
+              e_type: int, entry: int, hash_data: bytes = b"",
+              init_array: bytes = b"") -> bytes:
     """Headers and body for either container, from one `_layout`.
 
     A shared object and an executable differ in `e_type`, in the extra sections
@@ -497,6 +540,11 @@ def _assemble(lay: dict, code: bytes, dynstr_data: bytes, dynsym_data: bytes,
     per-symbol work an ELF dylib shares with this executable is the whole of the
     extern machinery, and a second assembly loop would be the place for the two
     to disagree about which program header owns which byte.
+
+    `init_array` is the bytes `DT_INIT_ARRAY` points at, and it is written
+    between the `.got` and the `.globals` because that is where `_layout` put
+    the offset the dynamic entry names; an array somewhere else would be an image
+    whose `.dynamic` points at the `.got`.
     """
     phnum = lay["phnum"]
     text_file_offset = lay["text_file_offset"]
@@ -581,6 +629,12 @@ def _assemble(lay: dict, code: bytes, dynstr_data: bytes, dynsym_data: bytes,
     buf.extend(hash_data)                  # .hash
     buf.extend(dynamic_data)               # .dynamic
     buf.extend(b"\x00" * lay["got_size"])  # .got, filled by the loader
+    if len(init_array) != lay["init_array_size"]:
+        raise ValueError(f"the .init_array is {len(init_array)} bytes and the "
+                         f"layout reserved {lay['init_array_size']}, so the "
+                         f"DT_INIT_ARRAYSZ in .dynamic would name the wrong "
+                         f"number of initializers")
+    buf.extend(init_array)                 # .init_array, called at load
     buf.extend(gblob)                      # .globals, the module-global slots
     buf.extend(rela_data)                  # .rela.dyn
 
@@ -788,7 +842,8 @@ def elf_needed(deps: list, has_externs: bool) -> list:
 def build_elf_dylib(code: bytes, base_addr: int = DYLIB_BASE,
                     exports: list = None, soname: str = None,
                     external_syms: list = None, deps: list = None,
-                    globals_image=None, namespace: bool = False) -> bytes:
+                    globals_image=None, namespace: bool = False,
+                    mod_init_addrs: list = None) -> bytes:
     """An x86-64 `ET_DYN` shared object around `code`.
 
     **The ELF counterpart of `formal/macho_linker.py::build_macho_dylib`, and
@@ -831,6 +886,18 @@ def build_elf_dylib(code: bytes, base_addr: int = DYLIB_BASE,
     line. The default refuses an empty table because that is nearly always a
     build that lost its API, and a `.so` with no exports is an image that loads
     and provides nothing, which is the one outcome worse than refusing.
+
+    `mod_init_addrs` are the ADDRESSES of the functions the LOADER must run when
+    it loads this object — the module body's wrapper, one per source file that
+    had one, in that order — and they become the `.init_array` the
+    `DT_INIT_ARRAY`/`DT_INIT_ARRAYSZ` pair points at. This is the ELF counterpart
+    of the `__TEXT,__init_offsets` array
+    `formal/macho_linker.py::build_macho_dylib` writes, and it exists for the
+    same reason: a library with a module body needs an entry point that runs at
+    load, and without one the body compiles to a function nothing calls
+    (`bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md`). Empty —
+    the ordinary case — writes no array and no dynamic tags, so an image without
+    a module body is byte-for-byte what it was before this argument existed.
     """
     exports = list(exports or [])
     if not exports and not namespace:
@@ -845,8 +912,15 @@ def build_elf_dylib(code: bytes, base_addr: int = DYLIB_BASE,
     external_syms = sorted(external_syms or [])
     needed = elf_needed(deps, bool(external_syms))
     gblob = b"" if globals_image is None else bytes(globals_image.blob)
+    # One pointer per entry, in the order given, verbatim: the emitters report
+    # ADDRESSES (`Assembler.label` records `org + len(text)`), and this image's
+    # relocations cover the `.got` and nothing else, so an address written here
+    # is one the loader will not touch.
+    init_array = b"".join(struct.pack("<Q", int(addr))
+                          for addr in (mod_init_addrs or []))
 
-    lay = _layout(len(code), external_syms, needed, soname, exports, len(gblob))
+    lay = _layout(len(code), external_syms, needed, soname, exports, len(gblob),
+                  len(init_array))
     dynstr_data, str_offsets = _sym_name_offsets(lay["names"])
     syms = [(sym, 0, STT_NOTYPE, _STN_UNDEF) for sym in external_syms]
     # The export's `entry` is an address in the code emitter's own space, which
@@ -867,4 +941,5 @@ def build_elf_dylib(code: bytes, base_addr: int = DYLIB_BASE,
     dynamic_data = _dynamic_for(lay, str_offsets, base_addr, needed, soname)
     lay["vaddr"] = base_addr
     return _assemble(lay, code, dynstr_data, dynsym_data, dynamic_data,
-                     rela_data, gblob, ET_DYN, base_addr, hash_data)
+                     rela_data, gblob, ET_DYN, base_addr, hash_data,
+                     init_array)
