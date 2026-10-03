@@ -5277,21 +5277,16 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             vv = vv_tmp
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # A bool stored as a dict value is indistinguishable from a genuine
-        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
-        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
-        # return a C int on purpose), so the dict is MARKED and
-        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
-        # mark used to require a literal RHS, which missed every other bool
-        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
-        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
-        # already right. `is_python_bool_expr` is the one predicate, shared
-        # with the print dispatch.
-        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
-        gen._note_dict_callable_ret(t, vv, vt)
-        vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
+        # The ONE shared non-str dict store: `emit_dict_int_value_store`
+        # picks the setter from the key's domain (`bytes_` or not) and from
+        # `is_python_bool_expr` — the one bool predicate every consumer uses —
+        # so a bool VALUE lands in a slot of its own (`mojo_dict_set_bool`,
+        # `kind == 3`) and this dict's OTHER values are untouched. This arm
+        # used to emit the whole-dict marker `mojo_mark_dict_bool_values`
+        # instead, which the runtime deleted with that per-slot replacement,
+        # so `{'k': True}` compiled to a call to a function that does not
+        # exist — a hard build failure on an ordinary literal.
+        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

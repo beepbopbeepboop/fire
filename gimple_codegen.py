@@ -4742,6 +4742,10 @@ class GimpleGen:
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]],
                     arg_nodes: list = None) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs, arg_nodes)
+    def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str, key_val: str,
+                                   val_ctype: str, val: str, val_node) -> None:
+        return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
+                                              val_ctype, val, val_node)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:

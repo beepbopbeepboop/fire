@@ -6443,6 +6443,56 @@ print({'ok': True, 'count': 3})
 """, "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n"
        "{'a': True, 'n': 5}\n{'ok': True, 'count': 3}\n")
 
+    # ...and EVERY dict store shape has to reach that same shared store.
+    # `emit_dict_int_value_store` is the one implementation of it, but the six
+    # lowering sites that used to spell the store out between them had drifted
+    # in two directions: five still called the whole-dict marker
+    # `mojo_mark_dict_bool_values`, which the runtime DELETED when the per-slot
+    # `kind` replaced it (so `{'k': True}` and `d['a'] = True` emitted a call
+    # to a function that does not exist — "implicit declaration" in the
+    # generated C, a hard build failure, not a wrong value), and the sixth, a
+    # bytes key with a non-str value, called `gen._emit_dict_int_value_store`,
+    # a `gen.` name that was never a delegate, so it raised AttributeError and
+    # took four registered cases with it.
+    #
+    # One program per shape, all against CPython: the dict literal, the
+    # subscript store (a local and a module-level dict), a CHAINED assignment
+    # (`d['a'] = e = False`, the MultiAssignStmt path), the dict comprehension,
+    # `dict(k=v)`'s kwarg pairs (the literal's other caller) and the bytes-key
+    # domain. Each asserts `True`/`False` for a bool slot AND leaves a plain
+    # int in the same dict, so a store that tags the whole dict instead of the
+    # one slot cannot pass.
+    test_gimple_matches_cpython("gimple_dict_store_shapes_share_one_bool_slot", """\
+def literal_store():
+    d = {}
+    d['a'] = True
+    d['n'] = 5
+    return d
+
+def chained():
+    g = {}
+    e = 0
+    g['a'] = e = False
+    return g
+
+def bytes_keyed():
+    b = {}
+    b[b'k'] = 5
+    b[b'j'] = 9
+    print(b[b'k'], b[b'j'], len(b))
+
+print(literal_store())
+print(chained())
+print({k: True for k in ['x', 'y']})
+print(dict(ok=True, n=3))
+d = {}
+d['p'] = 1 == 1
+d['r'] = 1 == 2
+d['s'] = 7
+print(d)
+bytes_keyed()
+""")
+
     # A `bool`-ANNOTATED struct field. `_TYPE_MAP` maps `'bool'` to `'int'`
     # on purpose (see struct_bool_fields' docstring), so the field's lowered
     # C type is an ordinary integer and its LAYOUT carries no trace of the

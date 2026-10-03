@@ -3165,13 +3165,11 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
-            # See the dict-literal case's identical comment: vt alone
-            # can't distinguish a real bool literal from a genuine int.
-            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
-                gen._emit(f"  mojo_mark_dict_bool_values ({res});")
-            gen._note_dict_callable_ret(res, vv, vt)
-            vv64 = gen._to_int64(vt, vv)
-            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
+            # The ONE shared non-str dict store (see
+            # `_emit_dict_pair_store`'s call): `vt` alone can't tell a real
+            # bool from a genuine 0/1 int, so `is_python_bool_expr` decides
+            # and the value gets its own slot kind.
+            gen._emit_dict_int_value_store(res, kt, kv, vt, vv, node.key)
 
 
 
