@@ -230,6 +230,84 @@ self-host shape that forced it). Shapes 1 and 3 are untouched by (b) and still
 need dependent return types plus overload selection — and shape 3 additionally
 needs the `_SpanIter` head question above answered.
 
+### MEASURED 2026-10-03 (merged tree): the `Span *` receiver is GONE, and the
+### in-TU pass's wall is `_concrete_args`, NOT `_protocol_only_overloads`
+
+Re-measured after the 2026-10-03 merge of the parallel tree. Two results, one
+of which corrects where this doc's own "what is still open" table points the
+next session.
+
+**1. One file out of the family, and it needed no inference at all.** 19 → 18.
+`test/collections/test_span.mojo` was the only member whose receiver was a REAL
+pointer rather than a boxed integer (`Span *`, per the table below), so nothing
+about the callee's type had to be inferred. Three defects stood between the
+iterator cursor and that receiver, all now fixed and none of them about type
+inference:
+
+* `_try_bind_list_iter` (now `_try_bind_iter_cursor`) gated the cursor on
+  `MojoList *`, so a `Span *` got no cursor at all and `next(it)` had no
+  receiver to dispatch on. The gate is now `emit_calls._struct_data_field` +
+  a `_len` field — the same predicate `_lower_subscript` uses to read `span[i]`
+  — so the two agree by construction. All six cursor readers now go through
+  `mojo/middle/itcursor.py`; before that they were four half-implementations
+  across three back-end files.
+* `len(<cursor>)` answered the CONTAINER's total length, unchanged by every
+  `next()` that had already run. Wrong on the list cursor too — this was not a
+  Span-only defect.
+* `Span(<list>)` stored the list POINTER in `_data` and left `_len` unset, and
+  `span[i]`'s tracked-element branch required a known STRUCT element, so every
+  numeric span read one byte where the element is eight.
+
+Artifact evidence, because `compile_stdlib.py` is `gcc -fsyntax-only` and
+cannot see any of this: the module's own object defines `_mojo_at_int64_t` and
+uses it for every cursor read, and `tools/linkcheck.py
+test/collections/test_span.mojo` leaves 17 undefined symbols against
+runtime + the dylib, of which 8 are libc and 3 are `std.testing`'s
+`assert_equal`/`assert_raises`/`assert_true` — the same baseline as
+`test/iter/test_empty.mojo`, which was accepted green in the round above (11).
+The remaining 6 are `_Span_apply`, `_Span_binary_search_by`, `_std_math_
+___init___iota`, `_std_memory___init___forget_deinit_9f63a2` and
+`_check_write_to`: methods and functions this file CALLS and that live in
+other stdlib modules the single-module link does not build. **No cursor, `next`
+or iterator symbol is undefined** — which is the thing `linkcheck.py`'s own
+docstring says the instrument exists to catch.
+
+**2. The in-TU pass's wall is `_concrete_args`, not `_protocol_only_overloads`,
+and widening the latter changes nothing.** The table below, and the "honest
+boundary" section under "Landed 2026-10-03", both leave the impression that a
+struct whose duplicated method names reach outside the iteration protocol is
+what stops the `std/itertools` family (`_TakeIterator` duplicates `__init__`).
+Measured: adding `'__init__'` to `elab_intu._ITERATION_PROTOCOL` and
+recompiling `test/itertools/test_take.mojo` produces **zero** in-TU
+instantiations and the identical `next(...)` refusal on the identical receiver
+type. The refusal happens EARLIER, in `_concrete_args`, which accepts only two
+readable sources of a type argument — explicit bracket arguments, or an argument
+list that is ALL literals — and `take(nums, 3)` is neither (`nums` is a local,
+so nothing has a type yet: the pass runs before any lowering). So the order is:
+
+1. `_concrete_args` needs the callee's bracket arguments, which needs argument
+   TYPES, which needs a static pass over the module's own statements — nothing
+   has a C type at this point in `gen_module`.
+2. Only then does `_protocol_only_overloads` matter, and only because
+   `_TakeIterator` duplicates `__init__`.
+
+**And step 1 alone would not be enough.** `take`'s return annotation is
+`_TakeIterator[IterableType.IteratorType[origin]]`, so binding `IterableType`
+from the argument still leaves a return type that is not a CONCRETE struct name:
+`IterableType.IteratorType[origin]` is an ASSOCIATED TYPE of the argument's
+type, read from `comptime IteratorType[...] : Iterator = <expr>` in the
+struct's own declaration and substituted over its type parameters. Both halves
+are needed, in that order, and both are shared infrastructure the `formal`
+target-query inference wants too — which is why this doc has said for several
+rounds that the associated-type resolution is the part worth building once.
+
+**3. Receiver types, re-measured on the merged tree** (the "refusal SITE"
+table further down is unchanged in substance; this is the count after the Span
+removal): `int64_t` 13, `MojoList *` 3 (`test_set`, `test_enumerate`,
+`test_python_object` — all `enumerate(x)` in value position), `void *` 1
+(`test_zip`, `_lower_builtin_zip_n`'s deliberate choice), and one file that is
+not this bug at all (`test/os/path/test_getsize.mojo`, the `stat` out-param).
+
 ### MEASURED 2026-10-03: where each of the remaining 17 actually refuses
 
 The table above names the GENERIC each file needs. This one names the exact
