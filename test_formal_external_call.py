@@ -127,7 +127,49 @@ CASES = [
      "    return 1\n",
      0, "null"),
 
+    # A NULLABLE POINTER return, which is what `std/os/env.mojo`'s `getenv` and
+    # `std/pwd/*.mojo`'s `getpwuid` declare: `OptionalPointer[…]` and
+    # `OpaquePointer[…]` are `std/memory/pointer.mojo`'s names for
+    # `Optional[Pointer[…]]`, so at a C BOUNDARY the register holds one address
+    # and the C ABI says a null pointer IS the absent answer. Both were refused
+    # — "this path has no value of that kind to put in the return register" —
+    # which is a claim about the WIDTH of a pointer, and false.
+    #
+    # It is one table of its own (`model.NULLABLE_POINTER_ALIASES`) and NOT three
+    # more entries in `POINTER_TYPE_CTORS`, because the two questions are
+    # different and only one of them has an answer here. As a value a MOJO
+    # function built, an `Optional`'s tag lives a second frame away from its
+    # one-word payload, so `if not ptr:` is not answerable from the word and
+    # `Some(null)` is not `None` — `bugs/FORMAL_stdlib_optional_needs_a_
+    # representation.md`, and the reason reading through one stays refused.
+    # `external_call_return_kind` asks the C ABI's question, so it is the one
+    # reader that may answer, and it is the only one that does.
+    #
+    # **The spelling here is deliberately argument-free, and that is a
+    # limitation rather than a style choice.** Every spelling a real source
+    # writes for these two aliases carries two or more type arguments
+    # (`OptionalPointer[UInt8, ImmUntrackedOrigin]`, `OpaquePointer[mut=False]`),
+    # and a multi-parameter generic application is currently refused EARLIER, as
+    # a subscript whose index is a tuple — which is
+    # `bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, owned
+    # by another lane, and the same wall `env_round_trip` below is sitting on. So
+    # this row pins the classification the moment that wall comes down, and until
+    # then it is the only spelling of a nullable pointer this path can be asked
+    # about at all. It is a real build-and-run row, not a unit test of the model:
+    # a misclassification would leave the register holding whatever was in it,
+    # which is a plausible non-zero answer rather than a failure.
+    ("opaque_pointer_return_is_one_word",
+     "def main() -> Int32:\n"
+     "    var p = external_call[\"getenv\", OpaquePointer](\"" + ABSENT + "\")\n"
+     "    if not p:\n"
+     "        print(\"null\")\n"
+     "        return 0\n"
+     "    print(\"not null\")\n"
+     "    return 1\n",
+     0, "null"),
+
     # ── 2. the C symbol is the C symbol, even when the image says otherwise ──
+
     # `env.mojo` declares Mojo functions called `getenv`, `setenv` and
     # `unsetenv` and calls the C symbols of the same names inside them. Before
     # the extern path was forced, the bare name was found in the image's own

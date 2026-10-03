@@ -1534,6 +1534,31 @@ def external_call_return_kind(text):
       * `NoneType` is `void`: the C prototype has no return, so there is
         nothing in the register to extend (`KGEN_CompilerRT_GetArgV` and the
         rest of the runtime's void entry points).
+      * a NULLABLE pointer is still an address, so `"word"` — see
+        `NULLABLE_POINTER_ALIASES` below, which is why `getenv` is answerable.
+
+    **What "at a C boundary" is doing in that list, and why it is not a claim
+    about `Optional`.** `bugs/FORMAL_stdlib_optional_needs_a_representation.md`
+    measures `Optional[Pointer[T]]` as one word whose payload is the address and
+    whose TAG lives a second frame away, so `if not ptr:` cannot be answered from
+    the word: `Some(null)` and `None` are two Mojo values of one word. That is a
+    fact about an `Optional` a MOJO function built, and it is why `Optional` is
+    not in the table below and must not be added to it.
+
+    A C function has no such thing. `char *getenv(const char *)` returns one
+    word, and by the C ABI a null pointer IS the "absent" answer — there is no
+    second register and no tag, so a caller cannot distinguish them and neither
+    can this. So for a declared return type that is one of the two NULLABLE
+    POINTER ALIASES, the register holds that word and nothing else, and refusing
+    it says "this path cannot tell how wide a pointer is", which is false.
+
+    Measured: `std/os/env.mojo`'s `getenv` declares
+    `external_call["getenv", OptionalPointer[UInt8, ImmUntrackedOrigin]]` and was
+    refused here — "`this path has no value of that kind to put in the return
+    register`" — which took `std/os/env.mojo` and the three `std/random` files
+    behind it (`__init__`, `_rng`, `random`) out of the build. Whether `ptr` can
+    then be READ (`if not ptr:`, `ptr.value()`) is a separate question with its
+    own answer, and it is the one that document is about.
     """
     if not text:
         return None
@@ -1542,7 +1567,8 @@ def external_call_return_kind(text):
         return None
     if base == "NoneType":
         return EXTERN_RETURN_VOID
-    if base in POINTER_TYPE_CTORS or base in STRING_TYPE_CTORS:
+    if (base in POINTER_TYPE_CTORS or base in STRING_TYPE_CTORS
+            or base in NULLABLE_POINTER_ALIASES):
         return EXTERN_RETURN_WORD
     # A name this path does not know is refused, NOT passed through as a word:
     # a `SIMD[dtype, 4]` or a `Scalar[dtype]` return is n words, and dropping
@@ -2912,6 +2938,15 @@ def _build_cfg(body) -> tuple:
     # `test_formal_read_before_store.py`: there a store in one arm really is not
     # dominating and the refusal is correct; it was refused here because the
     # ENTRY was also counted as a predecessor.)
+    #
+    # …the same edge seen from the builder.  Every edge into the body is
+    # already recorded by the `open_block` inside `take`: the first straight-line
+    # statement's block is opened from `pending`, which starts as
+    # `[entry.index]`, so `entry -> first block` exists before `run` returns.
+    # What `run` returns is the set of blocks from which control leaves the RUN
+    # — `[]` for a body ending in a `return`, and the last statement's block for
+    # a body that ends on a loop or a branch — so adding it made
+    # `entry -> LAST block`, a path no source takes.
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:
@@ -6141,6 +6176,35 @@ POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
                       "DTypePointer", "Reference",
                       "OptionalPointer", "MutPointer", "ImmPointer",
                       "OpaquePointer", "MutOpaquePointer", "ImmOpaquePointer")
+
+# The two NULLABLE-POINTER aliases `std/memory/pointer.mojo` declares, and the
+# reason they are a table of their own rather than three more entries in
+# `POINTER_TYPE_CTORS`.
+#
+#     comptime OptionalPointer[mut, T, origin, address_space=…]
+#         = Optional[Pointer[T, origin, …]]
+#     comptime OpaquePointer[mut, origin, address_space=…]
+#         = Optional[Pointer[None, origin, …]]      (and the pointee-less form)
+#
+# Two facts make them different from `Pointer`, and both are load-bearing:
+#
+#   * AT A C BOUNDARY they are one word holding an address, because the C
+#     function returned a nullable pointer and the C ABI says a null pointer is
+#     the absent answer. That is `external_call_return_kind`, and it is the only
+#     thing this table is read by.
+#   * AS A MOJO VALUE they are `Optional`s, and an `Optional`'s tag lives a
+#     second frame away from its one word, so `if not ptr:` is not answerable
+#     from the word and `Some(null)` is not `None`. That is
+#     `bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and it is why
+#     these two names are NOT in `POINTER_TYPE_CTORS` — adding them there would
+#     let the pointer value model read through one and compare it as an address,
+#     which is a wrong answer rather than a refusal.
+#
+# So the split is by WHERE the value comes from, and it is recorded here so that
+# a future reader adding a nullable pointer does not put the name in the wrong
+# table: the extern-return question is about the C ABI, and the pointer question
+# is about a value a Mojo function built.
+NULLABLE_POINTER_ALIASES = ("OptionalPointer", "OpaquePointer")
 
 # A pointee base name -> `(width in bytes, signed)`.  One table, read by both
 # backends through `dereference_lowering`, so the two architectures cannot
@@ -14773,6 +14837,81 @@ def frame_field_type_candidates(structs, name, decls: dict):
     if st is None or not struct_is_framed(st):
         return (None, (False, rows))
     return (st, (False, rows))
+
+
+def one_word_field_struct(struct_def, name, decls: dict):
+    """`(StructDef, evidence)` for the struct `struct_def.<name>` holds as a word.
+
+    THE READER FOR THE ONE-WORD IDENTITY, and its own name because it is
+    deliberately not `struct_field_type`.  Those two disagree on one shape, and
+    the difference is what this function exists for:
+
+      * `struct_field_type` answers for a FRAME SLOT — "is there a nested frame
+        here, and if so which one" — so it must be unanimous across every
+        store and every declaration and it treats a store it cannot classify as
+        no evidence at all.  That is right there and wrong here.
+      * the identity `x.<f>.<g>` is ONE word (`_one_word_field_map`,
+        `_one_word_sole_field_chain`), and the question is whether the chain
+        keeps being a chain, which a single declaration settles.
+
+    The shape they disagree on is the commonest one in this repository's own
+    source: a field assigned from `__init__`'s own ANNOTATED PARAMETER.
+
+        class Outer:
+            def __init__(self, inner: Inner):
+                self._inner = inner        # stores a name, not a constructor
+
+    `assigned_value_base_name` classifies `Inner()` and not `inner`, so
+    `struct_field_type` reports "assigned values this path cannot reduce to a
+    type" — and the type is right there in the signature of the method three
+    lines above the store.  Reading it is not inference: `inner: Inner` is a
+    declaration about the word the caller passes, and the store is a store this
+    path performs, which is exactly the pair of premises `struct_field_type`'s
+    own docstring rests on.
+
+    It is a SEPARATE function rather than a fourth source inside
+    `struct_field_type` because of what that would change: adding the parameter
+    row there would make every such field TYPED for
+    `frame_field_type_candidates` as well, so a field holding a FRAMED struct
+    would start placing a nested frame where it is answered "not typed" today.
+    That is a frame-layout decision for every caller of the slot decision, and
+    it is not this function's question to change; here the only thing at stake
+    is whether a chain continues.
+
+    `(None, None)` for a field whose assigned values are not unanimously ONE
+    parameter of `__init__`, or whose parameter declares no struct of this
+    module — the same unanimous-or-nothing rule `struct_init_field_types`
+    applies, and for the same reason.
+    """
+    base, _spelling, evidence, _why = struct_field_type(struct_def, name, decls)
+    st = (decls or {}).get(base) if base and evidence else None
+    if st is not None:
+        return st, evidence
+    values = _init_field_assignments(struct_def).get(name) or []
+    if not values:
+        return None, None
+    params = None
+    named = set()
+    for v in values:
+        if not (isinstance(v, F.IdentExpr) and v.name != "None"):
+            return None, None
+        if params is None:
+            params = _init_declared_parameters(struct_def, decls)
+        st = params.get(v.name)
+        if st is None:
+            return None, None
+        named.add(st.name)
+    if len(named) != 1:
+        return None, None
+    return structs_declared(named.pop(), decls), "assigned"
+
+
+def _init_declared_parameters(struct_def, decls: dict) -> dict:
+    """`{parameter name: StructDef}` for `__init__`'s annotated parameters."""
+    for m in struct_methods(struct_def):
+        if m.name == "__init__":
+            return parameter_declared_structs(m, decls or {}, owner=struct_def)
+    return {}
 
 
 def field_type_one_word_struct(structs, name, decls: dict):

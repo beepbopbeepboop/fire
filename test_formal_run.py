@@ -6428,6 +6428,38 @@ ONE_WORD_FIELD_METHOD_REFUSALS = [
      "    b.n = 3\n"
      "    return b.go()\n",
      "refuse:is a method call on a value", None),
+    # The same boundary one step along, and it is the boundary of
+    # `model.one_word_field_struct`'s PARAMETER row rather than of the
+    # declared-type row above: the field has no class-body declaration at all,
+    # only `__init__`'s annotated parameter, and the annotation names a type
+    # that is not a struct of this image — so there is no word to continue the
+    # chain with and the call stays refused.  A parameter row that ignored
+    # whether the annotation names a struct of this module would read `Int` as
+    # a chain step and lift `self._inner.total()` onto `self`, which is the
+    # wrong receiver for a total.
+    ("one_word_field_assigned_from_a_parameter_of_an_unknown_type_is_still_refused",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "\n"
+     "    def total(self) -> Int:\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "struct Box:\n"
+     "    def __init__(out self, inner: Int):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def go(self) -> Int:\n"
+     "        return self._inner.total()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Box(3)\n"
+     "    return b.go()\n",
+     "refuse:is a method call on a value", None),
 ]
 
 # ── a CONDITIONAL ARM: `elif` and `comptime if`, and a walk that stops at them ──

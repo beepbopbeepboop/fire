@@ -6401,8 +6401,16 @@ def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
         seen.add(st.name)
         field = _sole_field_name(st)
         chain.append(field)
-        base = M.struct_field_type(st, field, structs_by_name)[0]
-        st = structs_by_name.get(base) if base else None
+        # `model.one_word_field_struct`, NOT `model.struct_field_type`: this walk
+        # asks whether the chain CONTINUES, and the two readers differ on
+        # exactly the shape this repository's own source is full of — a field
+        # assigned from `__init__`'s annotated parameter, which the frame-slot
+        # reader classifies as "cannot reduce to a type" and which the chain can
+        # read.  Both readers are called from both places that walk a chain, so
+        # the identity (`_rewrite_self_fields`) and the method lift
+        # (`_lift_one_word_field_method`) cannot disagree about where it stops.
+        nxt, _evidence = M.one_word_field_struct(st, field, structs_by_name)
+        st = nxt
     return tuple(chain)
 
 
@@ -6759,9 +6767,46 @@ def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
     one node and they read as one question ("does this callee name a method of
     the struct its receiver's DECLARED type names?"), which is not the same
     shape as "visit every node".
+
+    TWO SHAPES reach here and both are refusals without it.  The first is the
+    field chain below (`recv.f.m(x)`), whose receiver this pass exists for.  The
+    second is a BARE receiver whose method name two structs of this image
+    declare, which is what is left over after `_rewrite_method_calls`: it lifts
+    `recv.m(x)` by NAME and declines a name two structs declare, so
+    `b.size()` for a `b` holding `Box` — with `size` on `Box`, `Leaf` and
+    `ContiguousSlice` — arrives here unlifted and is refused as "a method call
+    on a value", naming `b.size` as though the program had written something
+    else.  `b` is a `Box` (that is what `one_word` recorded), `Box` declares
+    `size`, and Python agrees; the evidence is the same declaration
+    `_rewrite_method_calls` uses, one step further along.
+
+    That second arm CANNOT redirect a call the name-only path resolved, and it is
+    worth being precise about why rather than only about the fact: it runs after
+    `_rewrite_method_calls`, so any call that path could lift has already been
+    lifted and its callee is an `IdentExpr`, not a `MemberExpr` — reaching this
+    function at all means the name-only path declined it.  And a member this
+    arm lifts is one the receiver's own struct DECLARES, which is the test the
+    name-only path cannot make.
+
+    The census behind the pair, over `stdlib/std`: 61 call sites in 14 files,
+    of which 16 are the ambiguous bare-receiver shape and 45 the field chain —
+    6 of the field-chain sites are in `std/pathlib/path.mojo`, 7 in
+    `std/random/_rng.mojo` and 1 in `std/io/file_descriptor.mojo`, and
+    `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the instance whose
+    three refusals are written out above.
     """
     func = call.func
     obj = func.obj
+    if isinstance(obj, F.IdentExpr):
+        st = one_word.get(obj.name)
+        if st is None or not any(m.name == func.member
+                                 for m in M.struct_methods(st)):
+            return False
+        call.func = F.IdentExpr(name=M.method_function_name(st.name,
+                                                            func.member))
+        if func.member not in (receiverless or ()):
+            call.args = [obj] + list(call.args)
+        return True
     if not isinstance(obj, F.MemberExpr):
         return False
     # `_root_ident` and not `obj.obj` being an `IdentExpr`, because the chain can
@@ -6803,8 +6848,10 @@ def _chain_declared_struct(st, fields, structs_by_name: dict):
     """
     cur = st
     for field in fields:
-        base = M.struct_field_type(cur, field, structs_by_name)[0]
-        cur = structs_by_name.get(base) if base else None
+        # The same reader `_one_word_sole_field_chain` uses, for the reason its
+        # comment gives: two walks of one chain that can stop in different places
+        # is how a collapse and a lift disagree about the same expression.
+        cur, _evidence = M.one_word_field_struct(cur, field, structs_by_name)
         if cur is None:
             return None
     return cur
@@ -9827,7 +9874,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _refuse_unlowerable_module_body(body)
     functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
                                    body=body)
-    owners = _method_owners(stmts, extra_structs)
+    # NAMED for what it holds, because the two tables in this function have the
+    # same SUBJECTS and incompatible SHAPES and were interchanged once already
+    # (`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`):
+    #
+    #   `dispatch_owners` — `{`size`: "Pair"}`  bare method name → struct NAME.
+    #                       What `recv.m(x)` dispatches on, so a name TWO
+    #                       structs declare is absent: that absence is what
+    #                       makes an ambiguous call decline to be rewritten.
+    #   `method_owners`  — `{`Pair_size`: <Pair StructDef>}`  LIFTED function
+    #                       name → the struct, every method present however many
+    #                       structs declare it.  What "which struct is this
+    #                       FUNCTION a method of" is answered from.
+    #
+    # Reading either as the other is a crash or a refusal, not a degradation.
+    dispatch_owners = _method_owners(stmts, extra_structs)
     # This file's own declarations win over an imported one of the same name:
     # a local definition shadows the import, and the local is what this file's
     # code means.
@@ -9918,7 +9979,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # required — a class name is not a value and has no register, so the call
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
-    receiverless = _receiverless_methods(owners, structs_by_name)
+    receiverless = _receiverless_methods(dispatch_owners, structs_by_name)
     # The class values a function may read through its OWN receiver, per
     # function, and read here rather than at the substitution because both of
     # the consumers below need the same answer and neither has the other's
@@ -9957,7 +10018,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     for fn in functions:
         if fn.name in writebacks:
             _return_the_receiver(fn, writebacks[fn.name])
-        _rewrite_method_calls(fn.body, owners, wide, receiverless, fn.name,
+        _rewrite_method_calls(fn.body, dispatch_owners, wide, receiverless,
+                              fn.name,
                               _this_unit_modules)
         # A class-level CONSTANT read through a RECEIVER is the same read, and
         # goes before `_rewrite_self_fields` for the reason the comment above
@@ -10076,7 +10138,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
     # …and nothing else. `_frame_receivers` used to take a sixth parameter, the
-    # method census, and this site filled it from `owners` (line 9821) —
+    # method census, and this site filled it from `dispatch_owners` — i.e.
     # `_method_owners`' `{bare method name: struct NAME}`, the DISPATCH table
     # `_rewrite_method_calls` uses to resolve `recv.m(...)` by name.  Every
     # consumer inside the pass wanted the OTHER table, the one keyed by the
@@ -10091,7 +10153,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     #
     #   AttributeError: 'str' object has no attribute 'name'
     #     formal/build.py:6465 in _overridden_comptime_names
-    #       st.name          <- `owners`' value is a struct NAME
+    #       st.name          <- `dispatch_owners`' value is a struct NAME
     #     formal/build.py:6255 in publish
     #       _overridden_comptime_names(structs_by_name, st)
     #     formal/build.py:6232 <- owner = method_owners.get(fn.name)
@@ -10099,8 +10161,9 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # so the sweep classified the file `backend-crash` ("the backend RAISED
     # rather than refusing"), which is the one class that is never cached and
     # that means a bug in the compiler's own plumbing rather than a finding
-    # about the source.  The lookup only ever HIT because `owners` is keyed by
-    # a BARE method name and a lifted one-field method keeps its bare name, so
+    # about the source.  The lookup only ever HIT because `dispatch_owners` is
+    # keyed by a BARE method name and a lifted one-field method keeps its bare
+    # name, so
     # every other module missed and silently got an empty census — the quieter
     # half of the same bug, and why `_check_method_receiver_types` was dead.
     _frame_receivers(functions, structs_by_name, dc_equality,
@@ -10200,7 +10263,11 @@ def _method_call_target(call, owners: dict):
 
     `None` for every other callee, which is the answer `owners` itself gives for
     a name two structs declare — dispatch here is by NAME, so an ambiguous one
-    has no owner to lift to.
+    has no owner to lift to.  A receiver that is not a bare NAME is `None` for
+    the same reason there is nothing here to dispatch it by, and the lift for
+    the one-word-field case (`recv.f.m(x)`, where `recv.f` and `recv` are the
+    same word) is `_lift_one_word_field_method`, which asks the field's DECLARED
+    type instead of the name and so can lift an ambiguous `m` as well.
     """
     func = call.func
     if isinstance(func, F.SubscriptExpr):
@@ -10245,11 +10312,11 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     becomes its first argument and every existing rule about arguments,
     registers and tail calls applies unchanged.
 
-    Which is also why the by-reference receiver needed NO change here. The
+    Which is also why the by-reference receiver needed NO change here.  The
     receiver this already passes is the word the local holds, and for a
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
-    has is still enough. The whole ABI question
+    has is still enough.  The whole ABI question
     `bugs/FORMAL_wide_receiver_by_reference.md` asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
