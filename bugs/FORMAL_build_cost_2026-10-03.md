@@ -4,8 +4,9 @@
 `formal/model.py`'s `struct_derived_names`, and the code paths each feeds —
 **shared, so every number here moved both backends at once.**
 
-**Status: two of the three costs below are FIXED and verified (byte-identical
-artifacts); the third is left with its exact next step in §6.** Nothing in
+**Status: the two costs below are FIXED and verified (byte-identical artifacts
+on both architectures); what is left is four residues, each MEASURED and each
+with its exact next step and its precondition in §6.** Nothing in
 `formal/build.py` or `formal/model.py` here is a cache: the fix removes two
 derivations of a MODULE-level table that a per-FUNCTION loop was making for
 itself, which is the same shape as the `wide` / `dispatch_owners` /
@@ -53,8 +54,8 @@ Per-file, the ones that moved (full table in `.tmp/cost-arm64-{base,fix1}.csv`):
 | every `formal/examples/*.mojo` | 0.6-0.7 | 0.6-0.7 | — |
 
 **Nothing here is a memory problem and that is the first result.** The largest
-peak over the whole spread is **98.9 MB**, on `gimple_codegen.py`, and 45 of the
-43 rows sit between 45 and 99 MB. `bugs/PERF_memory_over_4gb_is_a_bug.md` sets
+peak over the whole spread is **98.9 MB**, on `gimple_codegen.py`, and every one
+of the 43 rows sits between 45 and 99 MB. `bugs/PERF_memory_over_4gb_is_a_bug.md` sets
 3-4 GB as the standard and nothing in the formal build is within two orders of
 magnitude of it, so this doc is entirely about TIME. (It also means the formal
 suite's memory classes are honest: `formal-*` jobs measured at 0.1-0.2 GB.)
