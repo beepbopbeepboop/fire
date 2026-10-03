@@ -309,7 +309,11 @@ def unsetenv(name) -> int:
 #     os.environ.items()       environ_items(e)           the view itself
 #     os.environ[k] = v        e2 = environ_set(e, k, v)  see that function
 #     del os.environ[k]        environ_del(e, k)          0, or -1 when unset
-#     os.environ.pop(k, None)  environ_get(e, k) then environ_del(e, k)
+#     os.environ.pop(k, d)     environ_pop(e, k, d)
+#     os.environ.copy()        environ_copy(e)
+#     dict(os.environ)         environ_copy(e)
+#     os.environ.clear()       environ_clear(e)
+#     os.environ.update(o)     two calls: environ_set per pair (see below)
 #     os.environ.setdefault(k, v)
 #                              environ_get_or(e, k, v) then environ_set if 0
 #     os.getenv(k[, d])        getenv(k) / getenv_or(k, d)  — the C library's
@@ -629,6 +633,110 @@ def environ_keys(e: Pointer[Int64], i) -> str:
     remove.
     """
     return environ_key(e, i)
+
+
+def environ_copy(e: Pointer[Int64]) -> Pointer[Int64]:
+    """`os.environ.copy()` / `dict(os.environ)`: an INDEPENDENT snapshot, or 0.
+
+    CPython's `copy()` is a DICT COPY: a new mapping holding the same pairs, and
+    writing to one does not write to the other.  A view here IS its pairs, so a
+    copy is a fresh blob with every key and every value DUPLICATED — one
+    `str_dup` per buffer — and deliberately not a second name for the same
+    words: an aliasing copy would make `environ_free` on either blob free
+    buffers the other still hands out, which is the double free this module's
+    `environ_keys` docstring records being measured the hard way (SIGABRT after
+    a whole correct run of everything else in the program).
+
+    So a copy costs `1 + 2n` allocations, exactly what `environ()` costs, and
+    the CALLER owns it: `environ_free` the copy and the original, separately.
+    That is what `dict(os.environ)` costs in CPython too, and it is why this is
+    a function that RETURNS the copy rather than one that fills a caller's blob:
+    the size is a property of the view, so the module allocates it.
+
+    0 for a 0 view, and 0 when the allocation fails — the same two answers
+    `environ()` gives, for the same reason (there is no exception to raise).
+    A copy of a copy is a copy of the pairs, so nothing here depends on where
+    the original came from.
+    """
+    if e == 0:
+        return 0
+    n = e[0]
+    var b: Pointer[Int64] = malloc(8 * (1 + 2 * n))
+    if b == 0:
+        return 0
+    memset(b, 0, 8 * (1 + 2 * n))
+    var i = 0
+    while i < n:
+        b[1 + 2 * i] = str_dup(e[1 + 2 * i])
+        b[2 + 2 * i] = str_dup(e[2 + 2 * i])
+        i = i + 1
+    b[0] = n
+    return b
+
+
+def environ_pop(e: Pointer[Int64], k, default) -> str:
+    """`os.environ.pop(k, default)`: the value, and the pair goes. `default` if unset.
+
+    **THE VALUE IS DUPLICATED BEFORE THE PAIR IS RELEASED, and that is why this
+    is one function rather than `environ_get` followed by `environ_del`.**
+    `environ_del` frees both buffers of the pair it removes, so the alias
+    `environ_get` handed back a moment earlier would be freed memory by the time
+    the caller printed it — a use-after-free that reads as a plausible string
+    until the allocator reuses the block.  One `str_dup` is the whole cost of
+    getting that right, and CPython's answer is a value that outlives the
+    removal, so this is the honest spelling of it.
+
+    `default` is a REQUIRED parameter, for the reason every default is on this
+    path (`getenv_or` above): a default argument is not applied to a call from
+    another image, and `pop`'s answer for a key that is not there IS the default.
+    CPython raises `KeyError` when the caller passes none, and there is no
+    unwinder to raise into, so a caller here passes what it would have caught.
+
+    The pair goes through `environ_del`, so `unsetenv` is called first and the
+    last pair is moved into the hole — which means a `pop` REORDERS the view
+    (`environ_del`'s own docstring is the measurement).  CPython's dict does not
+    reorder on a removal, and that is a recorded divergence rather than an
+    omission: the order of an environment is not a thing a caller can rely on in
+    either, and the alternative — leaving a hole — is what `environ_keys`'s
+    docstring says a dense numbering is for.
+    """
+    if e == 0:
+        return default
+    var i = environ_find(e, k)
+    if i < 0:
+        return default
+    var v = str_dup(environ_value(e, i))
+    environ_del(e, k)
+    return v
+
+
+def environ_clear(e: Pointer[Int64]) -> int:
+    """`os.environ.clear()`: every pair goes and every variable is unset. 0.
+
+    **IN PLACE, so this answers a STATUS where `environ_set` answers a blob.**
+    That asymmetry is the layout talking and not an inconsistency: adding a pair
+    can move the allocation and removing pairs cannot, so a clear has nothing to
+    hand back.  It is the same reason `environ_del` returns 0.
+
+    CPython's `__clear__` in its order — `unsetenv` for every key first, so a C
+    library callee sees each variable go, then the mapping empty — and both
+    buffers of every pair are released rather than leaked, which is what lets
+    `environ_free` afterwards be the same call it always was: it releases the
+    first `e[0]` pairs, and the count is 0.
+
+    0 for a 0, like every other function in this section.
+    """
+    if e == 0:
+        return 0
+    var n = e[0]
+    var i = 0
+    while i < n:
+        fs_unsetenv(e[1 + 2 * i])
+        free(e[1 + 2 * i])
+        free(e[2 + 2 * i])
+        i = i + 1
+    e[0] = 0
+    return 0
 
 
 def environ_free(e: Pointer[Int64]) -> int:
