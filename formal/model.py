@@ -14644,7 +14644,26 @@ TYPE_VALUE_NAMES = frozenset(
      # program written in the shared subset (`f(bool)`) has to have an answer
      # here as well as in the interpreter — which binds `bool` to Python's own
      # `bool`, so both agree that `f(bool)` is handed the same object.
-     "bool"))
+     "bool",
+    # The NARROW float formats and the 128-bit unsigned integer, which are in
+    # no table here for the same reason `BFloat16` is: those tables answer a
+    # question about BITS (how wide a pointee load is, which formats this path
+    # can represent) and a tag asks only whether a type can be NAMED. They are
+    # a CLOSED list and not a shape rule, which is the whole of the condition:
+    # `type_value_name_space()` stays finite, so `type_value_tags_are_distinct`
+    # stays a proof over every pair rather than a hope, and a member outside
+    # this list is still refused with its own name. Measured over this
+    # repository and the stdlib checkout, these are every float-format and
+    # 128-bit member either of them writes — `DType.float8_e4m3fn` 26,
+    # `float8_e5m2fnuz` 21, `float8_e4m3fnuz` 20, `float8_e5m2` 19,
+    # `float8_e8m0fnu` 14, `float6_e3m2fn` 11, `float6_e2m3fn` 11,
+    # `float4_e2m1fn` 10, `uint128` 8, `float8_e3m4` 7 — so the list is the
+    # corpus rather than a guess at the language's shape. A tag for a format
+    # this path cannot hold is not a lie: it is a word two programs comparing
+    # dtypes agree on, which is all a dtype VALUE is on this path.
+    "Float8_e4m3fn", "Float8_e5m2", "Float8_e4m3fnuz", "Float8_e5m2fnuz",
+    "Float8_e8m0fnu", "Float8_e3m4", "Float6_e3m2fn", "Float6_e2m3fn",
+    "Float4_e2m1fn", "UInt128"))
 
 
 # A `DType` member whose name is not its type's name. `DType.int` is the 64-bit
@@ -14696,13 +14715,15 @@ def _dtype_member_type(member: str) -> str | None:
     answer is admitted only if it is a name this path knows, which is what
     keeps the name space a tag is asked about FINITE and therefore checkable.
 
-    KNOWN AND DELIBERATELY NOT ADMITTED: the float8/float4 family
-    (`DType.float8_e4m3fn` and its six siblings, 191 spellings in the corpus)
-    and `DType.uint128` (11). Their type names — `Float8_e4m3fn`,
-    `UInt128` — are in no table here, and admitting them by SHAPE would make
-    the name space a tag is asked about unbounded, which is exactly what
-    `type_value_tags_are_distinct` needs it not to be. They are refused with the
-    member named, and the fix is the type names in `TYPE_VALUE_NAMES`.
+    THE FAMILY IS CLOSED, and that is the condition rather than a detail: the
+    spellings the corpus writes are admitted by NAME in `TYPE_VALUE_NAMES` (the
+    float8/float6/float4 formats and `UInt128`, with their measured counts
+    there), and a member outside that list is still refused with its own name.
+    A rule that admitted any `float<width>_<format>` would make the name space a
+    tag is asked about unbounded, which is exactly what
+    `type_value_tags_are_distinct` needs it not to be — so the boundary is drawn
+    once, explicitly, and every member outside it keeps a refusal that says what
+    the admitted ones are.
     """
     over = _DTYPE_MEMBERS.get(member)
     if over is not None:
@@ -14862,10 +14883,16 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
     A different diagnostic from `dtype_object_refusal` because it is a
     different fact: the bare `DType` is a type object and there is none, while
     this is a member that names a real Mojo type whose NAME is in no table on
-    this path — the float8/float4 formats and `uint128`, 202 spellings in the
-    corpus. Saying "a field access through 'DType'" instead (which is what the
-    emitter's own fallback says, and did say, for all of them) sends the reader
-    to look for a struct field where there is a missing table entry.
+    this path — a float format or a width outside the closed list in
+    `TYPE_VALUE_NAMES`. Saying "a field access through 'DType'" instead (which
+    is what the emitter's own fallback says, and did say, for all of them)
+    sends the reader to look for a struct field where there is a missing table
+    entry.
+
+    The corpus's own spellings are no longer in that state: the float8/float6/
+    float4 formats and `UInt128` are named in `TYPE_VALUE_NAMES`, so this
+    refusal is now only reachable for a member no file in this repository or its
+    stdlib checkout writes, and it says which names do work.
     """
     return (f"DType.{member} names a type, and this path has no value for it: "
             f"a type is a word here — its tag — and the tag is computed from "
@@ -14873,7 +14900,8 @@ def dtype_member_refusal(spelled: str, member: str) -> str:
             f"formal/model.py lists, so there is nothing to compute it from. "
             f"The members that do work are the ones whose type name this path "
             f"knows: DType.int8 … DType.int64, DType.uint8 … DType.uint64, "
-            f"DType.float16/float32/float64/bfloat16 and DType.bool, each of "
+            f"DType.float16/float32/float64/bfloat16, the DType.float8_*/"
+            f"float6_*/float4_* formats, DType.uint128 and DType.bool, each of "
             f"which is the same word the bare type name is. Naming the type "
             f"instead of the member (Int8 rather than DType.int8) is the same "
             f"value and always works")

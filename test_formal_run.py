@@ -15256,6 +15256,12 @@ TYPE_VALUE_CASES = [
      5, None),
 ]
 
+# The model itself, imported rather than a table of its answers: a tag is a hash
+# of a canonical name, and a literal written here would be a second
+# implementation of that hash in a test.
+_TYPE_VALUE_MODEL = __import__("formal.model", fromlist=["model"])
+
+
 TYPE_VALUE_DTYPE_CASES = [
     # `DType.<member>` is the SAME WORD as the bare name — the case that says
     # so, and the reason the tag is computed from the type's name and not from
@@ -15288,6 +15294,44 @@ TYPE_VALUE_DTYPE_CASES = [
     # Through a STRUCT FIELD, which is the shape the corpus uses: both files
     # declare `dtype: DType` and store into it. The field is one word, so this
     # is only interesting because the VALUE is a type.
+    # The NARROW float formats and `UInt128`, which were 202 corpus spellings
+    # refused as "a name no table in formal/model.py lists". The expected values
+    # are `model.type_tag` read from the model rather than written down here,
+    # and that is the right oracle for THIS row specifically: a tag IS a hash of
+    # the canonical name, so a constant typed by hand would be a second
+    # implementation of the same hash in a test. What the row asserts is the
+    # thing the list exists for — every one of the ten corpus spellings is a
+    # word, the member and the bare type name are the SAME word, and two
+    # different formats are DIFFERENT words (which is the injectivity property
+    # the closed set buys, checked here where a reader can see it).
+    ("type_value_narrow_float_formats_and_uint128_are_tags",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 0\n"
+     "    if DType.float8_e4m3fn == Float8_e4m3fn:\n        a = a + 1\n"
+     "    if DType.float8_e5m2 == Float8_e5m2:\n        a = a + 2\n"
+     "    if DType.uint128 == UInt128:\n        a = a + 4\n"
+     "    if DType.float4_e2m1fn != Float4_e2m1fn:\n        a = a + 8\n"
+     "    printf(\"h=%d@@\", a)\n"
+     "    printf(\"i=%d@@\", DType.float6_e3m2fn != DType.float8_e3m4)\n"
+     "    printf(\"j=%d@@\", DType.float8_e4m3fnuz != DType.float8_e5m2fnuz)\n"
+     "    printf(\"k=%d@@\", DType.float8_e8m0fnu != UInt128)\n"
+     "    return 0\n",
+     0, "h=7@@i=1@@j=1@@k=1@@"),
+    # …and the WORDS themselves, because "it built" is not "it is the right
+    # word": a member that resolved to some OTHER type's tag would satisfy
+    # every comparison above and answer a program wrongly. `print()` and not
+    # `printf("%d")`, which is the reason the expected values are the full
+    # 64-bit tags: `%d` is a 32-bit conversion in C and every one of the 67
+    # admitted tags is above 2**31 — `bool`'s included, which is why
+    # `TYPE_VALUE_NUMBER_CASES` below uses `print` for the same reason.
+    ("type_value_dtype_narrow_format_tags_are_the_model_words",
+     "def main(n: Int) -> Int:\n"
+     "    a = DType.float8_e4m3fn\n    print(a)\n"
+     "    b = DType.uint128\n    print(b)\n"
+     "    c = DType.float8_e3m4\n    print(c)\n"
+     "    return 0\n",
+     0, "\n".join(str(_TYPE_VALUE_MODEL.type_tag(n)) for n in
+                   ("Float8_e4m3fn", "UInt128", "Float8_e3m4"))),
     ("type_value_through_a_struct_field",
      "struct Bag:\n"
      "    var tag: Int64\n"
@@ -15315,15 +15359,19 @@ TYPE_VALUE_REFUSALS = [
      "    var t = DType\n"
      "    return 0\n",
      "refuse:is the type OF a type", None),
-    # A `DType` member naming a real Mojo type whose NAME is in no table here
-    # (the float8/float4 formats and `uint128`, 202 spellings in the corpus).
-    # Refused with the member named, because the emitter's own fallback said
-    # "is a field access through 'DType'" — a struct field where there is a
-    # missing table entry, which sends the reader to the wrong file.
+    # A `DType` member naming a real Mojo type whose NAME is in no table here.
+    # **This used to be the corpus's own spellings** — the float8/float6/float4
+    # formats and `uint128`, 202 of them — and it is now a member outside the
+    # closed list in `TYPE_VALUE_NAMES`, which is the boundary that keeps
+    # `type_value_tags_are_distinct` a proof over a finite set rather than a
+    # hope over a shape rule. A format Mojo has and this list does not is
+    # refused, and still with the member named, because the emitter's own
+    # fallback says "is a field access through 'DType'" — a struct field where
+    # there is a missing table entry, which sends the reader to the wrong file.
     ("an_unknown_dtype_member_is_refused_by_name",
      "def main(n: Int) -> Int:\n"
-     "    return Int(DType.float8_e4m3fn)\n",
-     "refuse:DType.float8_e4m3fn names a type", None),
+     "    return Int(DType.float8_e7m0fnu)\n",
+     "refuse:DType.float8_e7m0fnu names a type", None),
     # `len()` of a type.  This was a GUARD against making a type a VALUE turning
     # `len()` of one into a count, and the guard held; what it also pinned was the
     # imprecision: "the source does not say what this operand holds … Annotate it
@@ -15409,9 +15457,9 @@ TYPE_VALUE_REFUSALS = [
 # pre-existing limit of the statement walk and not this case's problem to fix;
 # 26 comparisons per function is well inside it and the case builds in under
 # four seconds.
-_TYPE_VALUE_MODEL = __import__("formal.model", fromlist=["model"])
 _TYPE_VALUE_TAG_NAMES = sorted(_TYPE_VALUE_MODEL.type_value_name_space()
                                - {"DType"})   # no tag: dtype_object_refusal
+
 
 # The same claim asked of the model directly, so a collision is loud at import
 # and not only in the image: two questions, two places. This one is a fact about
