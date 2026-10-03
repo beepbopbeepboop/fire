@@ -929,19 +929,18 @@ def fs_mkdtemp(tmpl) -> str:
     The six random characters are THE C LIBRARY'S, so what comes back is a real
     answer about a real directory rather than a value this tree chose.
 
-    **NOT YET THE BODY OF ANY CALLER, and the exact next step is written down
-    rather than left as a reader's exercise.**
-    `formal/hostmods/tempfile.mojo`'s `mkdtemp(prefix)` is the one function that
-    wants this and it still draws its own eight characters and retries `mkdir`,
-    so its loop cannot tell a collision from a failure
+    **AND IT IS NOW SOMEBODY'S BODY**: `formal/hostmods/tempfile.mojo`'s
+    `mkdtemp(prefix)` is one call to this, over a template of `prefix` +
+    `XXXXXX` in the directory `gettempdir` names. It replaced a hand-written
+    loop there that drew eight characters and retried `mkdir`, and the loop
+    could not be right: this path cannot read `errno` (`__error`'s leading
+    underscore, this module's own header), so every failure was a "collision"
+    and a directory that could not be made cost the whole budget
     (`bugs/FORMAL_mkdtemp_retries_a_mkdir_it_cannot_read_the_reason_for.md`).
-    It was not switched here because that module's `mkdtemp` is pinned against
-    CPython by `test_formal_tempfile.py` for four things `mkdtemp(3)` would
-    change — the mode, the eight-character name over CPython's own alphabet,
-    `TMP_MAX` as the retry budget and `gettempprefix` — and rewriting a merged,
-    measured module and its test is not a merge's business. So this is a
-    correct binding of a real libSystem call with no caller yet, which is a
-    smaller thing than a module that guesses.
+    Two consequences recorded where they are paid rather than here: the name is
+    `prefix` + six characters of `[A-Za-z0-9]` where it was `prefix` + eight of
+    CPython's alphabet, and the mode is the platform's `0o700` rather than a
+    literal this tree passes — `test_formal_tempfile.py` reads both back.
     """
     b = str_dup(tmpl)
     if mkdtemp(b) == 0:
