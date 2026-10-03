@@ -45,23 +45,22 @@ landing in the process's CWD — which for a sweep started at the repository roo
 is the repository root. `--out` relocates the sweep's own writes; nothing
 relocates a build's generated C++.
 
-Two candidate repairs, and which one is right depends on a question this doc
-does not answer:
+The real fix is not the sweep's: `fire.py`'s `build_executable` writes every
+intermediate into the process's CWD and only `test_module_cache.py` and
+`jit/arm64.py` pass `work_dir` — `fire.py`'s own `build` command does not. That
+is filed, with the collision hazard it creates, as
+`bugs/CODEGEN_fire_py_writes_build_intermediates_into_the_cwd.md`, and it is a
+compiled-path change, so it owes a full `make gate`.
 
-* **Have the sweep build somewhere else.** `py314_harness._build_uncached`
-  already gives every build its own `-o` path from `tempfile.mkstemp`, and then
-  runs it with `cwd=HERE` — `HERE` being the repository root, which is what
-  puts the `.cpp` there. Dropping the `cwd=` (or pointing it at the temp
-  directory) puts the build's own output beside its `-o`, and the question is
-  closed for every caller of the harness. Narrow, and it does not touch the
-  compiler.
-* **Stop `fire.py build` emitting into the CWD at all.** That is the better
-  property — a build that writes outside its `-o` is surprising whatever the
-  CWD is, and the same surprise will reach the gate eventually — but it is a
-  compiler change and needs its own pass.
+What landed here is the cheap half: `*_gen.cpp` is in `.gitignore`, beside the
+`*.ci` and `*.o` entries that already covered the other three intermediates,
+so this file can no longer be the one that turns a build into a commit. Two
+such files had already been committed — `update_file_gen.cpp` and
+`generate_sre_constants_gen.cpp`, both by `e98ea1f8` — and both are removed.
 
-The first is the honest next step; the second is the one that removes the
-class. Do not take the first and then record §4.1 as closed.
+Dropping `cwd=HERE` in `py314_harness._build_uncached` is still worth doing on
+its own: it is one keyword and it makes the harness leave nothing behind. But
+do not record §4.1 as closed on the strength of it.
 
 ## How to confirm the fix
 

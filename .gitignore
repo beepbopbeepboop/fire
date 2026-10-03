@@ -23,6 +23,14 @@ stage2/
 *.pyi
 *.o
 *.aout
+# `fire.py build`'s C++20-coroutine companion unit, beside the `*.ci` and
+# `*.o` above: `fire.py` writes `<stem>_gen.cpp` into the CURRENT WORKING
+# DIRECTORY, so a build run from the repository root leaves one here and
+# nothing reads it. Two of them were committed by e98ea1f8 before this line
+# existed. `bugs/TEST_py314_sweep_still_leaves_a_generated_cpp_at_the_repo_root.md`
+# has the measurement; the ignore is the cheap half of the fix and the CWD
+# itself is the other.
+*_gen.cpp
 mojoc
 bfib
 bnbody
