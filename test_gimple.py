@@ -9451,6 +9451,95 @@ print(M(1.5, 2).b)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_module_level_struct_global_keeps_its_type_in_a_container():
+        """A module-level `p = P("a")` read as a bare name is a global, and
+        `_quick_type` used to answer `int64_t` for it because `var_types`
+        holds only locals and parameters.
+
+        A global holding a STRUCT is the one value class that cannot recover
+        from the box: its C field is an `int64_t` holding the pointer, and a
+        struct-allocated value has no runtime type tag for the container
+        walkers to dispatch on — so the list literal recorded no element repr
+        and `repr([p])` printed the pointer decimal where CPython prints the
+        object. `repr(p)` alone was already RIGHT, which is what makes this a
+        type-inference gap rather than a repr bug, so both spellings are
+        asserted: the one that was broken and the one that must stay right.
+
+        The same text inside a function is the control that pins the fix to
+        the module-level spelling rather than to struct-in-a-container, which
+        was already working.
+        """
+        global _PASS, _FAIL
+        name = "module_level_struct_global_keeps_its_type_in_a_container"
+        src = '''\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+p = P("a")
+print(repr([p]))
+print(repr(p))
+
+def inside():
+    q = P("b")
+    print(repr([q]))
+inside()
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'modlevel.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'ml_{mode}.c')
+                exe = os.path.join(td, f'ml_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dict_union_right_operand_is_converted_at_runtime():
         """`dict | x` with `x`'s type unresolved must convert, not cast.
 
@@ -9830,6 +9919,7 @@ print(run('x/y.txt'))
     test_scalar_arity_min_max_params_are_not_containers()
     test_list_sort_in_a_method_body_is_gimple_legal()
     test_dict_union_right_operand_is_converted_at_runtime()
+    test_module_level_struct_global_keeps_its_type_in_a_container()
     test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
     test_next_over_a_filter_result_still_refuses_without_iter()
     test_unannotated_init_param_evidence_reaches_the_signature()

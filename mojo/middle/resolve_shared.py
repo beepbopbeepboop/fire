@@ -135,6 +135,37 @@ def _quick_type(gen, node) -> str:
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
             return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+        # A MODULE-LEVEL global, read by bare name. `var_types` holds only
+        # locals and parameters, so a name that is not one fell to the
+        # int64_t default even though the global's own SEMANTIC type is
+        # recorded — and a global holding a STRUCT is the one value class
+        # that cannot recover: the C field is a boxed `int64_t` holding the
+        # pointer, and there is no runtime type tag on a struct-allocated
+        # value for the container walkers to dispatch on. Measured:
+        #
+        #     class P: ... def __repr__(self): return "R<" + self.x + ">"
+        #     p = P("a")
+        #     print(repr([p]))      # CPython [R<a>] / compiled [4345469360]
+        #
+        # `repr(p)` alone was already right, which is what makes this a
+        # `_quick_type` gap rather than a repr bug: the list literal's
+        # element type comes from `_infer_list_elem_type`, which asks
+        # `_quick_type` per element.
+        #
+        # `_own_global_var_types` and NOT the shared `_global_var_types`, and
+        # the distinction is measured rather than stylistic. The shared table
+        # is a whole-transitive-tree superset (it has to be, for cross-module
+        # `mod.attr`), so answering from it makes `_quick_type` describe a
+        # SIBLING's global — and two errors appear on the self-host closure
+        # that are absent with the own overlay: `assignment to 'char *' from
+        # 'int64_t'` in `resolve_shared.py` and `invalid conversion in gimple
+        # call` in `gimple_codegen.py`, because the answer is a semantic
+        # pointer type while the value on the C level is a boxed `int64_t`.
+        # The own overlay is the same "is this bare name MINE" answer
+        # `_lower_IdentExpr` asks before it picks a field to load, so the two
+        # agree by construction.
+        if node.name in getattr(gen, '_own_global_var_types', {}):
+            return _as_str(gen._own_global_var_types[node.name])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and isinstance(node.obj, gimple_ctypes.IdentExpr)):
