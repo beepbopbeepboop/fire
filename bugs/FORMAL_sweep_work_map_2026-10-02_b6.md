@@ -1,11 +1,25 @@
 # FORMAL_sweep_work_map_2026-10-02_b6: a fresh sweep of this repository and the stdlib, both architectures
 
-**Status: swept (interrupted), both arms, and two defects in the instrument
-found by reading its own output.** Read §1 for the runs and §2.3 for exactly how
-much of the scope the numbers are over — nothing here claims a verdict about a
-file no run reached. **Claim** `sweep:6` on `work/formal6-sweep-r2`, continuing
-`formal6-sweep`, whose branch is this branch's parent and whose logs are
-therefore measurements of this tree (§1.1).
+**Status: both arms swept, both stopped short, three defects in the instrument
+found by reading its own output, and the most consequential of them fixed on this
+branch.** Read §1 for the runs and §2.3 for exactly how much of the scope the
+numbers are over — nothing here claims a verdict about a file no run reached.
+
+* **§5.1 — a machine fact filed as a backend gap, and published to the CAS.**
+  Fixed here (`6febd26e`); filed as
+  `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+* **§5.2 — what `-t` and `-j` are worth on a loaded box**, measured, because the
+  `-5` baseline's 361 `tool` rows and this run's 20 are the same fact.
+* **§2.3 — the SIGTERM drain does not drain**: a signalled sweep keeps building
+  the whole rest of its scope and reports only what it had classified when the
+  signal arrived. Filed as
+  `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`, **not fixed here** — it
+  changes the interruption contract, and this branch already changes a
+  classification rule.
+
+**Claim** `sweep:6` on `work/formal6-sweep-r2`, continuing `formal6-sweep`,
+whose branch is this branch's parent and whose logs are therefore measurements of
+this tree (§1.1).
 
 ## 1. The run
 
@@ -161,87 +175,136 @@ useless for the coverage rate.
 ### 2.3 This run
 
 The `-j 8 -t 600` run is the one whose logs are at
-`bugs/sweeps/sweep-{arm,x86}-6.txt`. **Its summary block — the per-class counts,
-the coverage rate and the CAS accounting — is the number to read for this
-sweep**: it is the only run of the four that was given enough `-t` to answer the
-large stdlib modules at all, and the other three cannot produce a coverage rate
-(SIGKILLed, so no summary and no ledger; §2.2).
+`bugs/sweeps/sweep-{arm,x86}-6.txt`. Both arms were stopped with `SIGTERM` after
+1 h 38 m, having classified **154 files each** and reached `std/os/` — stdlib
+file ~175 of 252. **Neither arm printed its summary**, and the reason is a defect
+in the tool, filed as
+`bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`: every file is submitted
+to the pool up front, so `ThreadPoolExecutor.shutdown(wait=True)` on the way out
+of the signal handler does not cancel — it drains the queue. The run stopped
+*printing* at once and went on *building* (13 children, every one of them
+younger than the signal), and it needed a second `SIGTERM` to die. So the
+classified lines are in the log and the summary is not.
 
-What is already established from it, and does not depend on how far it got:
+**What the two logs hold** (every line is a NON-pass file; the tool prints
+nothing for a pass):
 
-* the two arms agree file-for-file apart from one file
-  (`std/builtin/swap.mojo`, §3) — measured on the predecessor's pair, and the
-  same shape holds in this run's logs so far. It is the shape the x86-a map
-  measured for the repository scope (15 of 16 in-file findings shared);
-* `tool` is again the largest class, and it is again **all timeouts** on the
-  same biggest stdlib modules (§4);
-* the `memcap:`-as-`codegen` rows of §5.1 are in the predecessor's logs, not in
-  this one's — this run has produced none, which is consistent with §5.1's
-  finding that they are a property of a run's machine conditions rather than of
-  the files.
+| class | arm64 | x86_64 |
+|---|---|---|
+| codegen (a refusal IN this file) | 10 | 11 |
+| codegen/dependency | 124 | 124 |
+| tool — no verdict (all `-t 600` timeouts) | 20 | 19 |
+| **classified non-pass, total** | **154** | **154** |
+| pass | **<= 33** (see below) | **<= 33** |
+| **files never reached** | **498** | **498** |
+
+**The pass count is not recoverable from this run, and the bound is the honest
+way to say it.** The tool prints a line per NON-pass file and nothing else, so
+the only place a run's passes exist is the summary and the ledger — and this run
+lost both to the drain defect above (the summary is printed by the handler that
+the defect makes unreachable, and the partial ledger is published by the same
+one). What *is* known: the sweep reached the first ~187 files of the sorted
+scope and printed 154 non-pass verdicts, so **at most 33 of the 187 passed**. For
+scale, the `-5` baseline's answered files passed at 116/283 = 41 %, which would
+put the real number near 16; that is an extrapolation from a different run on a
+different tree and is not offered as this run's figure.
+
+**The two arms are the same sweep with one file different.** Comparing the two
+logs path-for-path, three lines differ in the whole 154:
+
+| file | arm64 | x86_64 |
+|---|---|---|
+| `std/builtin/swap.mojo` | lowers it | **`codegen`**: an operator the x86-64 codegen does not lower |
+| `std/collections/string/_utf8.mojo` | **`tool`** (timeout) | `codegen/dependency` |
+| `std/os/_linux_x86.mojo` | `codegen/dependency` | **not reached** |
+
+151 lines are identical. This is the shape the x86-a map measured for the
+repository scope (15 of 16 in-file findings shared, the 16th an x86-64-only ABI
+fact), so **the x86-64 machine subset is not where the remaining coverage is**:
+one file in this slice, and it is owned (`FORMAL_x86_64_formal_backend_gaps`).
+
+### 2.4 What moved against the `-5` baseline, file by file
+
+**Not computed, and why that is a real gap rather than an omission.** A
+per-file `-5` → `-6` comparison needs the `-6` side's classes for files that
+PASSED, which is exactly what this run did not record (§2.3), and it needs the
+`-5` side's per-file classes, which its log does not contain either — that run
+published no ledger (it was the first for its arch+scope, so `report_history`
+printed "nothing to compare against") and its scope is 644 files against a tree
+that has since gained 8, so even the ledger key cannot be reconstructed. The
+class-count comparison in §2.1/§2.3 and the cause ranking in §3 are therefore the
+whole of the delta this sweep can support, and a run that completes (§1.4) would
+give the rest: the tool's own ledger exists for exactly that.
 
 ## 3. Ranked causes
 
-`python3 tools/formal_sweep_causes.py .tmp/predecessor-partial-arm.txt` — the
-`-j 10 -t 600` run on this tree, which is the largest classified population
-available for either arch. **FILES BLOCKED IS AN UPPER BOUND**: a file's
-terminal cause is the first refusal its build walk reaches, so fixing one moves
-it to the next with the count unchanged.
+`python3 tools/formal_sweep_causes.py --min 1 bugs/sweeps/sweep-arm-6.txt` —
+**this run's own log**, over the 134 `codegen` + `codegen/dependency` lines it
+classified. **FILES BLOCKED IS AN UPPER BOUND**: a file's terminal cause is the
+first refusal its build walk reaches, so fixing one moves it to the next with the
+count unchanged.
 
 | files blocked | in-file | cause | refused in | example |
 |---|---|---|---|---|
-| **80** | 0 | module exports no public functions | `binary_heap.mojo x79`, `_unicode_lookups.mojo x1` | `std/_gpu/_utils.mojo` |
-| **28** | 7 | other refusal | `builtin_slice.mojo x21`, (this file) x7 | `std/bit/__init__.mojo` |
-| 7 | 2 | MLIR dialect construct (`__mlir_op`) | `_assembly.mojo x4`, `_select.mojo x1`, (this file) x2 | `std/_gpu/globals.mojo` |
-| 6 | 1 | a bracketed specialization of a callee this unit does not compile | `tile.mojo x4`, `format_int.mojo x1`, (this file) x1 | `std/algorithm/backend/tile.mojo` |
-| 1 each | 1 | a one-field struct's mutator has no convention to write its answer back | (this file) | `std/builtin/float_literal.mojo` |
+| **89** | 0 | module exports no public functions | `binary_heap.mojo x88`, `_unicode_lookups.mojo x1` | `std/_gpu/host/_builtin_targets.mojo` |
+| **23** | 1 | other refusal | `builtin_slice.mojo x22`, (this file) x1 | `std/benchmark/__init__.mojo` |
+| 9 | 2 | MLIR dialect construct (`__mlir_op`) | `_assembly.mojo x6`, (this file) x2, `_select.mojo x1` | `std/_gpu/globals.mojo` |
+| 7 | 1 | a bracketed specialization of a callee this unit does not compile | `tile.mojo x4`, `format_int.mojo x2`, (this file) x1 | `std/algorithm/backend/tile.mojo` |
+| 1 | 1 | a one-field struct's mutator has no convention to write its answer back | (this file) | `std/builtin/float_literal.mojo` |
 | 1 | 1 | a `...` body: no instructions to emit | (this file) | `std/builtin/len.mojo` |
 | 1 | 1 | a method on a multi-field struct where a descriptor is meant | (this file) | `std/builtin/none.mojo` |
 | 1 | 1 | a slot's declared type is not a value this path can supply | (this file) | `std/collections/binary_heap.mojo` |
-| 1 | 1 | method call on a value receiver is not one of the lowered methods | (this file) | `std/format/repr.mojo` |
+| 1 | 1 | method call on a value receiver is not one of the lowered methods (`write_repr_to`) | (this file) | `std/format/repr.mojo` |
 | 1 | 1 | comptime does not fold to a constant | (this file) | `std/math/polynomial.mojo` |
 
-x86_64 differs from arm64 in exactly one row of this table: `std/builtin/
-swap.mojo` ("an operator the x86-64 codegen does not lower"), which arm64
-lowers. Everything else is byte-identical between the two arms, which is the
-same shape the x86-a map measured for the repository scope (15 of 16 in-file
-findings shared).
+The x86-64 arm is the same table — **88 / 23 / 10 / 7** on the first four rows,
+the +1 on MLIR being `std/builtin/swap.mojo` (§2.3) — and the same six one-file
+rows. **128 of the arm64 run's 134 lines are four modules' refusals.**
 
-**The `uses:` lines are the ones that size the work** and they are in the tool's
+The predecessor's interrupted run (§2.2) ranked the same four causes at
+80 / 28 / 7 / 6 over a smaller classified population; nothing moved between the
+two runs except the counts, which grow with coverage.
+
+**The `uses:` lines are the ones that size the work**, and they are in the tool's
 own output:
 
-* `binary_heap.mojo`: **1 of the 79 blocked files names anything `binary_heap`
-  declares** (`BinaryHeap`). The other 78 are pure import closure.
-* `_assembly.mojo`: **0 of 4** name anything it declares (`inlined_assembly`).
+* `binary_heap.mojo`: **1 of the 88 blocked files names anything `binary_heap`
+  declares** (`BinaryHeap`). The other 87 are pure import closure — they import
+  `std.collections`, which re-exports it.
+* `builtin_slice.mojo`: **1 of 22** (the module declares only `slice`).
+* `_assembly.mojo`: **0 of 6** name anything it declares (`inlined_assembly`).
   `_select.mojo`: **1 of 1** — that row is work.
-* `builtin_slice.mojo`: **0 of 21** (the module declares only `slice`).
-* `tile.mojo`: **4 of 4** (`tile`) — that row is work.
+* `tile.mojo`: **4 of 4** (`tile`) — work. `format_int.mojo`: 1 of 2.
 
-So of the 121 `codegen/dependency` lines in the arm64 run, **four modules'
-refusals are the whole story**, and one of those four (`tile.mojo`) is the only
-one whose blocked files actually use what it declares.
+So of the 89 files the biggest row blocks, **88 do not use the thing that blocks
+them**, and the one that does is `binary_heap.mojo` itself, which is refused for
+a different reason entirely (§6). That is why the row's measured value is 0 in
+`FORMAL_dylib_export_gate_ceiling.md`, and why re-deriving it here with a bigger
+denominator gives the same answer.
 
 ## 4. Files with no verdict, and why
 
-The `tool` class is 21 files on arm64 and 20 on x86_64 in the interrupted run,
-and **every one of them is a `-t 600` timeout**:
+**The `tool` class is 20 files on arm64 and 19 on x86_64, and every one of them
+is a `-t 600` timeout.** The x86-64 list is the arm64 list minus
+`collections/string/_utf8.mojo`, which that arm answered (§2.3):
 
 ```
-benchmark/benchmark.mojo        builtin/builtin_slice.mojo   collections/counter.mojo
-benchmark/quick_bench.mojo      builtin/int_literal.mojo     collections/deque.mojo
-builtin/bool.mojo               builtin/string_literal.mojo  collections/dict.mojo
-                                builtin/tuple.mojo            collections/interval.mojo
-collections/_swisstable.mojo    collections/list.mojo        collections/set.mojo
-collections/string/_utf8.mojo   collections/string/codepoint.mojo
-collections/string/iterators.mojo  collections/string/string.mojo
-collections/string/string_span.mojo  format/_utils.mojo      itertools/itertools.mojo
+benchmark/benchmark.mojo        builtin/bool.mojo             collections/list.mojo
+benchmark/quick_bench.mojo      builtin/int_literal.mojo      collections/set.mojo
+bit/bit.mojo                    builtin/string_literal.mojo   collections/string/_utf8.mojo
+collections/_swisstable.mojo    builtin/tuple.mojo            collections/string/iterators.mojo
+collections/counter.mojo        collections/deque.mojo        collections/string/string.mojo
+collections/dict.mojo           collections/interval.mojo     format/_utils.mojo
+                                itertools/itertools.mojo      memory/memory.mojo
 ```
 
-They are the largest modules in the stdlib, and they were the same files the
-`-5` sweep timed out at `-t 30`: **every `tool` row this run has produced so far
-is in the `-5` log's `tool` rows too** (10 of 10 at the time of writing, by
-`comm` over the two logs' path lists). This is a **timeout artefact, not a
-finding**, and it is the one number a reader must not quote.
+They are the largest modules in the stdlib, and they are the same files the `-5`
+sweep timed out at `-t 30`: **every `tool` row this run produced is in the `-5`
+log's `tool` rows too** (`comm` over the two logs' path lists), so the timeout
+set is a property of those files and of this machine, not of a run. The
+predecessor's `-t 600` run timed out on 21 of the same files (§2.2). This is a
+**timeout artefact, not a finding**, and it is the one number a reader must not
+quote.
 
 **What one of them actually costs, and what it turns out to be**, measured here
 on the same file with a private `GMOJO_HOME` (so nothing of the sweep's is
@@ -272,7 +335,7 @@ Three things in one measurement:
   these first, or state the rate over the files that were answered and stop
   there.
 
-## 5. Two defects in the instrument, found by reading its own output
+## 5. Defects in the instrument, found by reading its own output
 
 ### 5.1 A build that hit the per-file memory ceiling is filed as `codegen`
 
@@ -339,25 +402,55 @@ stderr: build: mask.mojo imports 'std.sys.info', which cannot be built either: _
 §3). So the 4 GB was a property of that run's machine conditions, not of the
 file — and the file's true verdict was sitting in that run's output, unread.
 
-**Next step (small, and it is a fix rather than a measurement).** Give
-`procrun.memcap_verdict` a third state. It already distinguishes "memcap printed
-`BREACH`" from "no memcap lines at all"; the missing case is **"memcap printed
-its banner and nothing else"**, which means the wrapper died before it could
-report. That is not `memory-killed` (no breach was measured) and it is not a
-`codegen` finding either — it belongs in `tool` with its own cause name, next to
-the file it applies to. Two lines in `memcap_verdict`, one branch in
-`run_one`, and a case in `test_formal_sweep_truth.py`.
+**The fix, landed on this branch** (`6febd26e`). `procrun.memcap_wrapper_died()`
+is the third state `memcap_verdict` did not have — banner present, no outcome
+line — sharing one definition of "memcap reported something" with the breach
+reader rather than adding a second parser. `run_one` files it as
+`tool`/`wrapper-died`: its own cause name, because the two machine causes are
+told apart by *evidence* (a breach is memcap saying the ceiling fired; this is
+memcap saying nothing) and a reader told "killed at the 4 GB ceiling" about a
+build that was never measured against it goes looking for a memory bug that is
+not there. Not cached, for the reason a timeout is not. The same branch stops a
+silent death's `detail` from being memcap's `done … child exit -9` line, which
+`BuildRun`'s docstring already promised nothing downstream could do. Five cases
+in `test_formal_sweep.py::TestWrapperDied`.
 
-**Filed as** `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md`.
+**What it costs, said out loud:** `tools/formal_sweep.py`'s own bytes are in
+every cache key (`_criteria_id`), so this invalidates the CAS for every sweep on
+the machine and the next sweep rebuilds. That is the tool working as designed —
+a rule change must take effect — and it is the price of the fix.
 
-### 5.2 `-j` buys much less than it looks like it does
+**Filed as** `bugs/FORMAL_sweep_memcap_death_is_filed_as_codegen.md` (the doc is
+kept, not deleted: the fix landed, and the six rows it misfiled are still in the
+CAS under the pre-fix key, which the invalidation retires).
 
-`bit/mask.mojo` above: **3 m 37 s of wall for 56 s of user CPU** on a box at
-load 90 with 18 cores. Every build in the sweep is in the same position, so
-per-file wall time is ~5x its CPU time and a `-t` is really a CPU budget divided
-by five. This is the whole explanation of the `-5` sweep's 361 `tool` rows at
-`-t 30` and of this run's 21 at `-t 600`, and it is why the task note's `-j 2`
-would have taken ten hours. Recorded here so the next person sizing a sweep does
+### 5.2 The SIGTERM drain does not drain, and the summary never arrives
+
+**Filed as** `bugs/FORMAL_sweep_sigterm_drains_the_whole_scope.md`, **not fixed
+here.** In one paragraph, because §2.3 lives with the consequence: every file is
+submitted to the pool before the first is classified, and
+`ThreadPoolExecutor.shutdown(wait=True)` — which is what leaving the `with` block
+runs — does not cancel, so a signalled sweep keeps building every remaining file
+in its scope while printing nothing, and the summary and the partial ledger are
+printed only when that finishes. Measured here: signalled, it went on spawning
+builds for another ten minutes, needed a second `SIGTERM`, and produced no
+summary at all. The doc carries the code, the `ps` evidence and the one-line fix
+(`shutdown(wait=False, cancel_futures=True)` before the early return).
+
+### 5.3 `-j` buys much less than it looks like it does
+
+Two measurements, both on this box at load 90 with 18 cores:
+
+| build | wall | CPU | ratio |
+|---|---|---|---|
+| `std/bit/mask.mojo` (§5.1) | 3 m 37 s | 56 s | **3.9x** |
+| `std/collections/dict.mojo` (§4) | 31 m 54 s | 7 m 35 s | **4.2x** |
+
+Every build in the sweep is in the same position, so per-file wall time is ~4x
+its CPU time and a `-t` is really a CPU budget divided by four. This is the whole
+explanation of the `-5` sweep's 361 `tool` rows at `-t 30` and of this run's 20
+at `-t 600`, and it is why the task note's `-j 2 -t 120` would have taken ten
+hours: at that `-t` a build gets ~30 s of CPU, and half the corpus needs more. Recorded here so the next person sizing a sweep does
 not have to rediscover it from three restarts.
 
 ## 6. Next step per cause
@@ -368,10 +461,10 @@ the finding of this sweep, not an omission in it.
 
 | cause | files | owner / next step |
 |---|---|---|
-| module exports no public functions (`binary_heap.mojo`) | 80 | measured at **ceiling 0** in `FORMAL_dylib_export_gate_ceiling.md` §3/§5/§6: every export-table fix was measured at 0 files, because 78 of the 79 name nothing `binary_heap` declares. §8 of that doc names the real blocker, and it is not the export table: `binary_heap.mojo` itself cannot lower, on `len(self._data)`. `FORMAL_dylib_export_gate_ceiling` is claimed (`formal3-3-r2`) |
-| other refusal (`builtin_slice.mojo` + 7 in-file) | 28 | the closure half is `formal2-re-and-slice` (`construct:re-merge-and-builtin-slice`), and its ceiling is already measured at **0** (lifting it moves all 21 onto `lowers only append, close, write`). The 7 in-file rows are 7 different constructs; §6 of the std-a map already prices each one |
-| MLIR dialect construct | 7 | `formal-mlir-gpu` + `formal2-mlir-comptime`; `FORMAL_known_limits.md` §2. The 4 behind `_assembly.mojo` are closure (0 of 4 use it); the `_select.mojo` one is 1 file and is work |
-| bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 6 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` — fully specified, **4 of 4 blocked files do use `tile`** (so the row is work, not closure), and held: `construct:mlir-and-gpu-globals` (`formal-mlir-gpu`). Its doc's "Whose" section says why it is not `formal/`'s to fix either: the callee is a *function-valued field*, so there is no declaration in hand even in principle |
+| module exports no public functions (`binary_heap.mojo`) | 89 | measured at **ceiling 0** in `FORMAL_dylib_export_gate_ceiling.md` §3/§5/§6: every export-table fix was measured at 0 files, because 87 of the 88 name nothing `binary_heap` declares. §8 of that doc names the real blocker, and it is not the export table: `binary_heap.mojo` itself cannot lower, on `len(self._data)`. `FORMAL_dylib_export_gate_ceiling` is claimed (`formal3-3-r2`) |
+| other refusal (`builtin_slice.mojo` + 1 in-file) | 23 | the closure half is `formal2-re-and-slice` (`construct:re-merge-and-builtin-slice`), and its ceiling is already measured at **0** (lifting it moves all 22 onto `lowers only append, close, write`). The in-file row is `std/benchmark/__init__.mojo`; the other six in-file rows this sweep found are in the six one-file causes below, and §6 of the std-a map prices each one |
+| MLIR dialect construct | 9 | `formal-mlir-gpu` + `formal2-mlir-comptime`; `FORMAL_known_limits.md` §2. The 6 behind `_assembly.mojo` are closure (**0 of 6** use it); the `_select.mojo` one is 1 file and is work; the 2 in-file rows are `builtin/type_aliases.mojo` (`Never`) and `origin/__init__.mojo` (`AnyOrigin`) |
+| bracketed specialization of a callee this unit does not compile (`tile.mojo`) | 7 | `FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md` — fully specified, **4 of 4 blocked files do use `tile`** (so the row is work, not closure), and held: `construct:mlir-and-gpu-globals` (`formal-mlir-gpu`). Its doc's "Whose" section says why it is not `formal/`'s to fix either: the callee is a *function-valued field*, so there is no declaration in hand even in principle |
 | one-field struct's mutator (`float_literal.mojo`) | 1 | refused by name and already pinned (`model.receiver_writeback_name`, `test_formal_run.py`'s `one_field_mutator_with_a_return_value_is_refused`); a value-model decision |
 | a `...` body (`len.mojo`) | 1 | **a stdlib source edit** — `write the function, or declare it as a trait method`. Not actionable from a repository worktree at all (§7) |
 | a method on a multi-field struct where a descriptor is meant (`none.mojo`) | 1 | the receiver-position family, `FORMAL_frame_receiver_handoff.md` §6-§13. **Not** the 24-file "receiver at argument position 0" row, which `formal-receiver-novalue` holds |
@@ -386,9 +479,10 @@ ceiling 0; the seven in-file rows are seven one-file constructs, each of which
 is claimed, is a stdlib edit no repository worktree can make (§7), or — the only
 one with neither a doc nor a claim, `repr.mojo` — needs a `repr` model before it
 can be lowered at all. **The next unit of unowned work in this area is therefore
-not a cause from this table; it is the instrument defect in §5**, which costs
-every sweep that runs rather than one file in one sweep, and which is fixed by
-this branch (the fix and its cost are in §5.1's commit).
+not a cause from this table; it is the instrument defects in §5**, which cost
+every sweep that runs rather than one file in one sweep. §5.1's is fixed on this
+branch (commit and cost in §5.1); §5.2's is filed with its one-line fix and left
+alone here, because it changes the interruption contract.
 
 ## 7. A note on what a worker can and cannot fix here
 
@@ -414,9 +508,23 @@ python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-arm-6.txt    # §3
 python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-x86-6.txt
 ```
 
+**Size it before starting** (§1.4): the full 652-file scope is ~4-6 h per arm
+with both arms at once on a loaded box. Nine slices with claims
+(`sweep:repo-a/b/c`, `sweep:std-a/b/c`, `sweep:x86-a/b`) is the shape that fits a
+session, and the CAS is what makes slicing free of duplication.
+
+**Stopping one is not a matter of sending it a signal** (§5.2): the pool drains
+the whole queue, so a `SIGTERM` needs a second one, and the run publishes neither
+its summary nor its ledger. Budget for that before you plan to read the output.
+
 The CAS is content-addressed and shared machine-wide, so a re-run with nothing
 changed reads a file per file instead of recompiling: **re-running this sweep
-after reading this map costs only the files no run has answered.** The scope is
-printed before the first build, the classified lines are flushed as they land,
-and an interrupted run publishes its classified set as a `*.ledger.partial`, so
-a reader never has to guess which files a number is over.
+after reading this map costs only the files no run has answered** — and after
+this branch's `tools/formal_sweep.py` change (§5.1) it costs all of them, because
+that file's own bytes are in every key. That is the price of the fix, stated once
+here so nobody has to infer it from a cache that stopped hitting.
+
+The scope is printed before the first build and the classified lines are flushed
+as they land, so a reader never has to guess which files a number is over; the
+one thing a stopped run does not leave behind is the summary, which is why §2.3
+is built from the log.
