@@ -1891,8 +1891,6 @@ def external_call_return_kind(text):
       * `NoneType` is `void`: the C prototype has no return, so there is
         nothing in the register to extend (`KGEN_CompilerRT_GetArgV` and the
         rest of the runtime's void entry points).
-      * a NULLABLE pointer is still an address, so `"word"` — see
-        `NULLABLE_POINTER_ALIASES` below, which is why `getenv` is answerable.
 
     **What "at a C boundary" is doing in that list, and why it is not a claim
     about `Optional`.** `bugs/FORMAL_stdlib_optional_needs_a_representation.md`
@@ -1900,14 +1898,18 @@ def external_call_return_kind(text):
     whose TAG lives a second frame away, so `if not ptr:` cannot be answered from
     the word: `Some(null)` and `None` are two Mojo values of one word. That is a
     fact about an `Optional` a MOJO function built, and it is why `Optional` is
-    not in the table below and must not be added to it.
+    not in `POINTER_TYPE_CTORS` and must not be added to it.
 
     A C function has no such thing. `char *getenv(const char *)` returns one
     word, and by the C ABI a null pointer IS the "absent" answer — there is no
     second register and no tag, so a caller cannot distinguish them and neither
-    can this. So for a declared return type that is one of the two NULLABLE
-    POINTER ALIASES, the register holds that word and nothing else, and refusing
-    it says "this path cannot tell how wide a pointer is", which is false.
+    can this. So for a declared return type that is one of the NULLABLE POINTER
+    ALIASES (`OptionalPointer`, `OpaquePointer` — both already in
+    `POINTER_TYPE_CTORS`, which is what answers them), the register holds that
+    word and nothing else, and refusing it says "this path cannot tell how wide a
+    pointer is", which is false. The OTHER question about those two names — that
+    a `.value()` on one is an unwrap and not a load — is asked by
+    `NULLABLE_POINTER_UNWRAP_ALIASES` and by nothing here.
 
     Measured: `std/os/env.mojo`'s `getenv` declares
     `external_call["getenv", OptionalPointer[UInt8, ImmUntrackedOrigin]]` and was
@@ -1924,8 +1926,7 @@ def external_call_return_kind(text):
         return None
     if base == "NoneType":
         return EXTERN_RETURN_VOID
-    if (base in POINTER_TYPE_CTORS or base in STRING_TYPE_CTORS
-            or base in NULLABLE_POINTER_ALIASES):
+    if base in POINTER_TYPE_CTORS or base in STRING_TYPE_CTORS:
         return EXTERN_RETURN_WORD
     # A name this path does not know is refused, NOT passed through as a word:
     # a `SIMD[dtype, 4]` or a `Scalar[dtype]` return is n words, and dropping
@@ -8307,39 +8308,39 @@ VALUE_METHOD_RECEIVERS = {
 # `opaque.value()` is refused by the width table rather than loaded at a width
 # nothing established.  They are here for `external_call_return_kind`, where the
 # question is only "is the whole register the answer", and an opaque pointer is.
-POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
-                      "DTypePointer", "Reference",
-                      "OptionalPointer", "MutPointer", "ImmPointer",
-                      "OpaquePointer", "MutOpaquePointer", "ImmOpaquePointer")
-
-# The two NULLABLE-POINTER aliases `std/memory/pointer.mojo` declares, and the
-# reason they are a table of their own rather than three more entries in
-# `POINTER_TYPE_CTORS`.
+#
+# The spellings that MEAN a pointer here — `Pointer`, the `Mut`/`Imm` variants,
+# and the two NULLABLE-POINTER aliases `std/memory/pointer.mojo` declares:
 #
 #     comptime OptionalPointer[mut, T, origin, address_space=…]
 #         = Optional[Pointer[T, origin, …]]
 #     comptime OpaquePointer[mut, origin, address_space=…]
 #         = Optional[Pointer[None, origin, …]]      (and the pointee-less form)
 #
-# Two facts make them different from `Pointer`, and both are load-bearing:
+# A name is in this table for ONE reason: its word IS the register it is passed
+# in or returned in. That is the C ABI question (`external_call_return_kind`), and
+# for a nullable pointer it is settled by the ABI itself — `char *getenv(...)`
+# returns one word, and by C a null pointer IS the absent answer, because there
+# is no second register and no tag for a caller to tell from. It is ALSO the
+# pointer value model's question, and the two answers are not the same: at a C
+# boundary a nullable pointer is one word, while as a value a MOJO function
+# built it is an `Optional` whose tag lives a second frame away, so `if not
+# ptr:` is not answerable from the word and `Some(null)` is not `None`
+# (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`).
 #
-#   * AT A C BOUNDARY they are one word holding an address, because the C
-#     function returned a nullable pointer and the C ABI says a null pointer is
-#     the absent answer. That is `external_call_return_kind`, and it is the only
-#     thing this table is read by.
-#   * AS A MOJO VALUE they are `Optional`s, and an `Optional`'s tag lives a
-#     second frame away from its one word, so `if not ptr:` is not answerable
-#     from the word and `Some(null)` is not `None`. That is
-#     `bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and it is why
-#     these two names are NOT in `POINTER_TYPE_CTORS` — adding them there would
-#     let the pointer value model read through one and compare it as an address,
-#     which is a wrong answer rather than a refusal.
-#
-# So the split is by WHERE the value comes from, and it is recorded here so that
-# a future reader adding a nullable pointer does not put the name in the wrong
-# table: the extern-return question is about the C ABI, and the pointer question
-# is about a value a Mojo function built.
-NULLABLE_POINTER_ALIASES = ("OptionalPointer", "OpaquePointer")
+# **So the other half of a nullable pointer is its own table, named for the
+# question it answers**, and this is the note that says so at the point where a
+# future reader adds one: `NULLABLE_POINTER_UNWRAP_ALIASES` below is what makes
+# `value()` the UNWRAP rather than a LOAD, and adding a name to THIS table does
+# not make its `value()` an unwrap. One name per question, and the name says
+# which question it answers — which is what `bugs/FORMAL_nullable_pointer_
+# aliases_is_defined_twice.md` is about, and what
+# `test_formal_external_call.py`'s `no_module_level_name_is_bound_twice` keeps
+# true from then on.
+POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
+                      "DTypePointer", "Reference",
+                      "OptionalPointer", "MutPointer", "ImmPointer",
+                      "OpaquePointer", "MutOpaquePointer", "ImmOpaquePointer")
 
 # A pointee base name -> `(width in bytes, signed)`.  One table, read by both
 # backends through `dereference_lowering`, so the two architectures cannot
@@ -9049,19 +9050,27 @@ def _offset_scale(fn, expr, width, seen=()):
     return (True, None)
 
 
-# The spellings that are `Optional[Pointer[…]]` — a NULLABLE pointer — and the
-# reader that recognises one.  Both halves are here rather than at the call site
-# because `dereference_lowering` is not the only reader: `subscript_base_lowering`
-# asks the same question about `p[i]`, and a second place that spelled the
-# nullable-pointer test would be a second place for the two to disagree about
-# what `OptionalPointer` is.
+# The spellings that are `Optional[Pointer[…]]` — a NULLABLE pointer — whose
+# `value()` is the UNWRAP rather than a LOAD, and the reader that recognises one.
+# Both halves are here rather than at the call site because `dereference_lowering`
+# is not the only reader: `subscript_base_lowering` asks the same question about
+# `p[i]`, and a second place that spelled the nullable-pointer test would be a
+# second place for the two to disagree about what `OptionalPointer` is.
+#
+# The name says which question it answers, and that is the whole point of it:
+# this is NOT the table that makes a nullable pointer one word at a C boundary
+# (that is `POINTER_TYPE_CTORS`, and every name here is in it), it is the table
+# that makes the `.value()` of one an unwrap rather than a load of its first
+# byte. A reader adding a nullable pointer needs BOTH, and putting the name in
+# one of them and expecting the other question to follow is the mistake the two
+# names are here to make impossible.
 #
 # `_CPointer` is the stdlib's PREVIOUS name for the same type — measured
 # 2026-10-02, `new-modular`'s `std/` no longer spells it anywhere, so the name is
 # here because the corpus this path was measured on used it and because removing
 # it would change the answer for a spelling that is still in the table's own
 # docstrings, not because anything reads it today.
-NULLABLE_POINTER_ALIASES = ("OptionalPointer", "_CPointer")
+NULLABLE_POINTER_UNWRAP_ALIASES = ("OptionalPointer", "_CPointer")
 
 
 def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
@@ -9120,7 +9129,7 @@ def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
     if not text:
         return (False, None)
     base = annotation_base_name(text)
-    if base in NULLABLE_POINTER_ALIASES:
+    if base in NULLABLE_POINTER_UNWRAP_ALIASES:
         return (True, f"{text} is `Optional[Pointer[...]]` — the stdlib's own "
                       f"definition of {base} — so `value()` is "
                       f"`Optional.value()`, the UNWRAP, and a nullable "
@@ -24081,51 +24090,6 @@ def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
             f"image can bind")
 
 
-def function_value_refusal(name: str, fn_name: str = "") -> str:
-    """The diagnostic for reading a FUNCTION of this unit as a VALUE.
-
-    The same shape as `external_call_value_refusal` one level out, and for the
-    same reason: the name resolves, and it resolves to something that is not a
-    value.  What it used to be reported as is the reason this function exists —
-    `'plain' has no home: the register allocator collected no home for it, so the
-    emitter and the allocation walk disagree about this function's locals` — which
-    is a TRUE statement about this pass and a useless one, because it sends the
-    reader to look for a register-allocation bug in a program whose real problem
-    is that it asked for a construct this path does not have.  Measured on
-    `call_it(plain, 5)` on both architectures: the allocator sentence, naming an
-    internal table, for a program that is ordinary Mojo.
-
-    **A function is not a word on this path, and the refusal is about the
-    CONSTRUCT rather than about a missing representation of it.**  Every callee
-    on this path is a NAME: the emitters resolve `_functions`, a struct's
-    declaration, a dylib export table or a type constructor, and each of those is
-    reached by name at the call.  There is no indirect-call form, so a function
-    that arrives as a word has nothing to call — and the two things that could
-    give it one (a function pointer, and a callee that is a subscript of a
-    parameter) are both refused elsewhere with their own sentences, which is why
-    this one says what to do instead.
-
-    The shape it blocks is `workgroup_function[tile_size](offset)` in
-    `std/algorithm/backend/tile.mojo`: the callee is a PARAMETER whose declared
-    type is `Some[Static1DTileUnitFunc]`, and the brackets are a specialization
-    of a function TYPE.  `specialization_call_refusal` already refuses that call,
-    and it is right to — but it is refused as a question about BRACKETS, and the
-    wall behind it is that the callee is a value at all.  Measured, both
-    architectures: passing a function as an argument is this refusal, before any
-    bracket is reached.
-    """
-    who = f"{fn_name}: " if fn_name else ""
-    return (f"{who}{name!r} is a function of this module read as a VALUE, and "
-            f"there is no value of a function on this path: a formal value is "
-            f"one 64-bit word, and every callee this backend reaches is a NAME "
-            f"— a function of this module, a struct's constructor, a type "
-            f"conversion, or an export on the link line. Nothing here can call "
-            f"through a word, so the call that would use it has no form. Call "
-            f"`{name}(...)` where the name is written out; if the callee has to "
-            f"be chosen at run time, write the choice as a branch over the calls, "
-            f"which is the same program with a callee this path can name")
-
-
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
                              fn_name: str, published) -> str:
     """The diagnostic for reading `module.leaf` as a VALUE.
@@ -25780,6 +25744,22 @@ def function_value_refusal(name: str, fn_name: str) -> str:
     So the message says what the construct is, which is the same repair
     `UNIMPLEMENTED_BUILTINS` and `FRAME_IDENTITY_CALLS` are: name the thing
     instead of the machinery that failed to hold it.
+
+    **This function was defined TWICE in this module** — an earlier copy of it
+    sat ~1700 lines up with its own wording ("is a function of this module read
+    as a VALUE"), and Python's rebinding made that one dead, so two sentences
+    for this refusal existed and only the second was ever spoken.  The dead copy
+    is deleted and the one measurement only it recorded is kept here: the shape
+    `workgroup_function[tile_size](offset)` in
+    `std/algorithm/backend/tile.mojo`, where the callee is a PARAMETER of
+    declared type `Some[Static1DTileUnitFunc]` and the brackets are a
+    specialization of a function TYPE.  `specialization_call_refusal` refuses
+    that call too, and is right to, but it answers a question about BRACKETS
+    while the wall behind it is that the callee is a value at all — measured,
+    both architectures: passing a function as an argument lands here, before any
+    bracket is reached.  `test_formal_external_call.py`'s
+    `no_module_level_name_is_bound_twice` is what keeps this file to one
+    definition per name.
     """
     who = f"{fn_name}: " if fn_name else ""
     return (f"{who}{name!r} is a FUNCTION, and a function is not a value on "

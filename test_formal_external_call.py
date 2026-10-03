@@ -135,15 +135,18 @@ CASES = [
     # — "this path has no value of that kind to put in the return register" —
     # which is a claim about the WIDTH of a pointer, and false.
     #
-    # It is one table of its own (`model.NULLABLE_POINTER_ALIASES`) and NOT three
-    # more entries in `POINTER_TYPE_CTORS`, because the two questions are
-    # different and only one of them has an answer here. As a value a MOJO
-    # function built, an `Optional`'s tag lives a second frame away from its
-    # one-word payload, so `if not ptr:` is not answerable from the word and
-    # `Some(null)` is not `None` — `bugs/FORMAL_stdlib_optional_needs_a_
-    # representation.md`, and the reason reading through one stays refused.
-    # `external_call_return_kind` asks the C ABI's question, so it is the one
-    # reader that may answer, and it is the only one that does.
+    # It is answered by `model.POINTER_TYPE_CTORS`, where all three of these
+    # names are now in, and NOT by a table of their own: at a C BOUNDARY the
+    # question is only "is the whole register the answer", and every spelling of
+    # a pointer says yes. As a value a MOJO function built, an `Optional`'s tag
+    # lives a second frame away from its one-word payload, so `if not ptr:` is
+    # not answerable from the word and `Some(null)` is not `None` —
+    # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and the reason
+    # reading through one stays refused. That OTHER question has its own table,
+    # `model.NULLABLE_POINTER_UNWRAP_ALIASES`, named for it; the two were one
+    # name until `bugs/FORMAL_nullable_pointer_aliases_is_defined_twice.md` was
+    # fixed, and the model's `no_module_level_name_is_bound_twice` case below is
+    # what keeps them from becoming one name again.
     #
     # **The spelling here is deliberately argument-free, and that is a
     # limitation rather than a style choice.** Every spelling a real source
@@ -707,6 +710,35 @@ def _reachable_c_symbols():
 # read, so its cases are worth holding without paying a build each. These parse
 # a source string the same way the backends do, so a change in the parser that
 # reshapes the bracket shows up here rather than as a mysterious None.
+def _module_level_names_bound_twice(path):
+    """`["NAME (lines 1, 2)", …]` — every module-level name `path` binds twice.
+
+    An `ast` walk of the module's own top level, counting assignments, `def`s
+    and `class`es. It reads the SOURCE rather than the imported module on
+    purpose: the whole failure is that the SECOND binding is what every reader
+    gets, so asking the imported module "what is this name" cannot see it —
+    `getattr` returns one value however many times it was assigned.
+    """
+    import ast
+    import collections
+    lines = collections.defaultdict(list)
+    with open(path) as f:
+        tree = ast.parse(f.read(), path)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            lines[node.name].append(node.lineno)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    lines[t.id].append(node.lineno)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
+                                                           ast.Name):
+            lines[node.target.id].append(node.lineno)
+    return [f"{name} (lines {', '.join(str(n) for n in sorted(where))})"
+            for name, where in sorted(lines.items()) if len(where) > 1]
+
+
 def model_cases():
     """`[(name, actual, expected)]` for the shared reader.
 
@@ -858,6 +890,44 @@ def model_cases():
                             'Pointer[UInt8]](s)\n'
                             '    return p.value()\n'),
                 "load"))
+    # The two questions the nullable aliases answer, asserted SEPARATELY, which
+    # is what the fix that split them was: the return register is one word for
+    # every spelling of a nullable pointer (the C ABI's own answer — a null
+    # pointer IS the absent answer, there is no tag in a second register), and
+    # `.value()` on one of them is the UNWRAP rather than a load of its first
+    # byte. One name answered both before
+    # (`bugs/FORMAL_nullable_pointer_aliases_is_defined_twice.md`), so the two
+    # tables had to be read together and the dead first one won.
+    out.append(("nullable_alias_is_one_word_at_a_c_boundary",
+                [M.external_call_return_kind(spelling)
+                 for spelling in ("OptionalPointer[UInt8, ImmUntrackedOrigin]",
+                                  "OpaquePointer[MutUntrackedOrigin]",
+                                  "_CPointer[UInt8, ImmUntrackedOrigin]")],
+                [M.EXTERN_RETURN_WORD] * 3))
+    out.append(("every_nullable_unwrap_alias_is_a_pointer_spelling",
+                sorted(n for n in M.NULLABLE_POINTER_UNWRAP_ALIASES
+                       if n not in M.POINTER_TYPE_CTORS),
+                []))
+    out.append(("the_two_nullable_tables_are_named_for_their_question",
+                (hasattr(M, "NULLABLE_POINTER_ALIASES"),
+                 M.NULLABLE_POINTER_UNWRAP_ALIASES),
+                (False, ("OptionalPointer", "_CPointer"))))
+    # The general form of the same defect, over `formal/model.py` itself. A
+    # module-level name bound twice is a SILENT shadowing: the first definition
+    # is unreachable, the second answers, and a reader who edits the first gets
+    # a green run and no behaviour change. Two instances were here when this
+    # case was written — `NULLABLE_POINTER_ALIASES` (the one this file's
+    # `external_call_return_kind` cases above are about) and
+    # `function_value_refusal`, which had two different sentences for one
+    # refusal and spoke the second. Both are gone.
+    #
+    # `formal/build.py` and `formal/imports.py` each have one of their own; they
+    # are other lanes' files and are recorded in
+    # `bugs/FORMAL_a_module_level_name_bound_twice.md` rather than edited here,
+    # so this case deliberately reads ONE file and says so.
+    out.append(("no_module_level_name_is_bound_twice",
+                _module_level_names_bound_twice(
+                    os.path.join(HERE, "formal", "model.py")), []))
     # The variadic calling convention, in BOTH directions, against the platform's
     # own headers. See the section comment above for why this is here and what
     # each direction is protecting against; the short version is that a missing
