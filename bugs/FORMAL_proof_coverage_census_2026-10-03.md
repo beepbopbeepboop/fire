@@ -261,14 +261,29 @@ helpers (`_bind_one`, `_entry_env`). Before/after, programs generating a proof:
 | before | 26 of 60 | 51 of 60 |
 | after | **60 of 60** | **60 of 60** |
 
-A second finding is a REFUSAL that was a crash: a program with two calls out of
-the image raised `ValueError: unsupported: recursion argument bound (not a dec1
-pattern)` — about recursion, for a program with none — because the walk halts at
-ONE address and a second call has paths of its own. It now refuses by name, and
-`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` carries the x86-64
-side of the campaign: 7 of 40 proofs rejected because `eval_eq_mojo`'s goal over
-a free `n` is not closed by `simp`, and neither `simp (maxSteps …)` nor
-`bv_decide` recovers it.
+Two more findings, and both are coverage:
+
+* **`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`** — the 7 of 40
+  x86-64 rejections. `eval_eq_mojo`'s goal over a free `n` is not closed by
+  `simp`, and neither `simp (maxSteps …)` nor `bv_decide` recovers it, so it is
+  not a fuel limit.
+* **A refusal that was a crash.** A program with two calls out of the image
+  raised `ValueError: unsupported: recursion argument bound (not a dec1
+  pattern)` — about recursion, for a program with none — because the walk halts
+  at ONE address and a second call has paths of its own. It now refuses by name.
+* **The x86-64 fallback model was written at arity 1**, so the promise its own
+  comment makes ("rather than failing the build") held only for an entry of one
+  argument, which is every program in `formal/examples`. Over the `ternary` mix
+  it was 9 of 60 there and 0 of 60 after; arm64 is unmoved because it propagates
+  the shared generator's refusal rather than degrading.
+
+**And the largest thing still in the way** is a construct, not a bug in a
+generator: a conditional expression has no value in the arm64 semantic model, and
+the CODE GENERATOR already lowers it (`_emit_csel_ternary`). Over the same
+corpus it is 37 of 60 programs, against 0 of 60 for the default `plain` mix —
+`bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+carries the measurement and why closing it is three layers deep rather than a
+ten-line arm.
 
 ## 1. The workload, and why it is 60 functions and not 60 files
 
