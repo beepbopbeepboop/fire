@@ -330,6 +330,10 @@ comparison, not one big image, is the primary evidence.
         test_formal_run.py                            # PASS=803 FAIL=0
     python3 tools/memslot.py --gb 8 --label tfimp -- python3 \
         test_formal_imports.py                        # PASS=61  FAIL=0
+    python3 tools/memslot.py --gb 8 --label tvm -- python3 \
+        test_formal_value_model.py                    # PASS=46  FAIL=0
+    python3 tools/memslot.py --gb 8 --label tmpf -- python3 \
+        test_formal_method_param_field.py             # PASS=26  FAIL=0
 
 `test_formal_run.py` is the one that matters most for this change: it is the
 corpus of class-constant reads, enum accessor sites and frame layouts, which is
