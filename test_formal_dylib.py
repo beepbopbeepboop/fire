@@ -569,29 +569,51 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         text = f.read()
     check("DylibImage" in text and "dylib_export_0_triple" in text,
           "generated dylib proof does not mention the exported function")
-    # The generated file no longer admits NOTHING, and that is the point.
+    # The generated file admits nothing, and that is the point.
     # [3]'s IR-3-to-2-dylib-stubs.md replaced three `sorry`s-over-false-claims
     # with two NAMED obligations -- `_semantics_total` (the run terminates for
     # every argument) and `_spec` (the export matches its specification) -- so
     # that the caller's theorem is proved and sorry-free.  Grepping for "no
     # sorry anywhere" would therefore be red for the right reason, and silencing
-    # it would be wrong.  So the obligation SET is pinned instead: a THIRD
-    # obligation appearing is a regression, and one closing stays green.  Same
-    # asymmetry the library check below already had, applied to the half that
-    # moved out of lib/ and into this file.
+    # it would be wrong.
+    #
+    # What changed on 2026-10-03 is that an export whose spec `_dylib_spec_lean`
+    # CAN derive no longer emits a `_spec` obligation at all: its contract is
+    # emitted PROVED (`hreg`, `agrees_of_body`) and `bv_decide` checks the
+    # machine against the source.  So the set is pinned per export as
+    # "terminates, and EITHER a proved contract OR a named `_spec`
+    # obligation" -- never equality against a fixed set, which cannot tell
+    # "no obligation because it is PROVED" from "no obligation because the
+    # emitter forgot", and treats those two as the same observation.  That
+    # distinction is `FORMAL_OPUS_dylib_termination_handoff.md` §`OPUS-2`, and
+    # the asymmetry is now checked in the direction that matters.
     import re as _re
-    # The WHOLE theorem name is captured, suffix included: capturing the ident
-    # and comparing against ident+suffix is off by the suffix, which is how the
-    # first version of this check reported an obligation set that looked right
-    # and matched nothing.
-    obligations = set(_re.findall(r"theorem (\w+_semantics_total)\b", text))
-    obligations |= set(_re.findall(r"theorem (\w+_spec)\b", text))
-    # one `_semantics_total` and one `_spec` per export, named by its ident
     idents = set(_re.findall(r"^def (dylib_export_\w+) : DylibExport :=", text, _re.M))
-    expected = {f"{i}_semantics_total" for i in idents} | {f"{i}_spec" for i in idents}
-    check(obligations == expected,
-          f"generated dylib proof has obligation set {sorted(obligations)}, "
-          f"expected exactly {sorted(expected)}")
+    check(idents, "the generated proof names no export at all")
+    for ident in sorted(idents):
+        check(_re.search(rf"theorem {ident}_semantics_total\b", text),
+              f"{ident} has no `_semantics_total` theorem: every export gets "
+              f"one, proved or named")
+        proved = (f"Contracts.agrees_of_body dylib_image {ident} bodyI" in text)
+        named = bool(_re.search(rf"theorem {ident}_spec\b", text))
+        check(proved != named,
+              f"{ident} has "
+              + ("both a proved contract and a named `_spec` obligation"
+                 if proved and named else
+                 "neither a proved contract nor a named `_spec` obligation -- "
+                 "the emitter dropped the export's claim about its own result"))
+    # ... and the proved contract must be sorry-free, in its own namespace.
+    # A `sorry` anywhere in the contract namespace is exactly the shape
+    # `formal/admitted.py` counts, and a per-export grep is the only thing that
+    # can see it: the census below reports a FILE total, which cannot say which
+    # export admitted one.
+    for ident in sorted(idents):
+        ns = _re.search(rf"namespace {ident}_contract\n(.*?)\nend {ident}_contract",
+                        text, _re.S)
+        check(ns is not None,
+              f"{ident}'s contract namespace is missing from the generated file")
+        check("sorry" not in ns.group(1),
+              f"{ident}'s proved contract contains a `sorry`")
     # `triple` is acyclic and call-free, so its termination is PROVED by the
     # CFG walk rather than left as the obligation above.  Pinned so a
     # regression to the `sorry` fallback is a failure, not a quiet extra hole.
@@ -600,7 +622,14 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
           "triple's termination is no longer proved by the CFG walk")
     # The caller's theorem must stay PROVED and sorry-free: it is the whole
     # reason the obligations are named rather than the contract being admitted.
-    check(":=\n  Refine.dylib_export_contract_of_spec" in text,
+    # The caller's theorem must be DERIVED from the export's spec obligation
+    # and be sorry-free: that is the whole reason the obligation is named
+    # rather than the contract admitted.  Two routes, and both are named
+    # here because which one fires depends on whether the emitter could derive
+    # a spec from the source -- `caller_uses_contract` off the PROVED
+    # contract, `dylib_export_contract_of_spec` off the named `_spec`.
+    check("Contracts.caller_uses_contract dylib_image " in text
+          or ":=\n  Refine.dylib_export_contract_of_spec" in text,
           "the caller's contract is no longer derived from the spec")
     check("dylib_export_contract_stub" not in text,
           "the deleted identity-claim stub is still emitted")
@@ -654,6 +683,68 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     check(ok, f"lean rejected the generated dylib proof: {detail[-400:]}")
     check(call_exported_by_name(out, "triple", 14) == 42,
           "triple(14) did not return 42")
+
+
+def test_a_wrong_spec_is_rejected_not_believed(tmpdir, shared):
+    """The contract has teeth: the wrong spec is a PROOF FAILURE.
+
+    A generated proof that merely elaborates says nothing, and the shape this
+    guards against is specific and has already happened in this very file: a
+    `sorry` over a FALSE claim, and a contract whose composed effect ran the
+    machine's steps more than once (`n * 243` where the machine computes
+    `n * 3` — `formal/arm64_proof_gen.py`, 2026-10-03).  Both elaborate.  Only
+    a wrong spec RUN THROUGH LEAN tells the two apart, so this is the
+    `OPUS-9` check ("state the predicate at a concrete instance and see
+    whether it survives") applied to the one obligation the emitter used to
+    admit: the export's agreement with its spec.
+
+    Three Lean runs, and the first is a control — the same bytes with the
+    RIGHT spec must check, so a red on the other two is the spec and not the
+    proof.  Reuses the dylib the case above already built (`--no-prove`, so no
+    code generation happens twice), so the cost is three Lean runs and nothing
+    else.
+    """
+    from formal.lean import find_lean
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (proof part of the dylib path)")
+        return
+    src = os.path.join(tmpdir, "teeth.mojo")
+    with open(src, "w") as f:
+        f.write("def triple(n):\n  return n * 3\n")
+    out = os.path.join(tmpdir, "teeth.dylib")
+    # `prove=False` for the dylib and `--no-prove` on the line, because the
+    # proof is written by hand below from the same code.
+    build_dylib(tmpdir, [src], "teeth.dylib")
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    from formal.lean import check_proof
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "triple", 14) == 42,
+          "the control dylib does not compute 42, so this test says nothing")
+
+    def with_spec(spec: str) -> str:
+        path = os.path.join(tmpdir, f"teeth_{abs(hash(spec)) % 10 ** 8}.lean")
+        with open(path, "w") as f:
+            f.write(generate_dylib_proof(built["code"], built["info"],
+                                         built["exports"], {"triple": spec}))
+        return path
+
+    ok, detail = check_proof(with_spec("(fun n => (n * (3 : UInt64)))"),
+                             repo_root=root)
+    check(ok, f"the CONTROL proof (the right spec) was rejected, so the two "
+              f"rejections below would prove nothing: {detail[-300:]}")
+    for label, spec in [("a wrong multiplier", "(fun n => (n * (5 : UInt64)))"),
+                        ("the identity", "(fun n => n)"),
+                        ("the negation", "(fun n => (0 : UInt64) - n)")]:
+        ok, detail = check_proof(with_spec(spec), repo_root=root)
+        check(not ok,
+              f"lean ACCEPTED a contract claiming triple computes {label} — the "
+              f"per-export contract is not being checked against the machine, "
+              f"so it is an admitted claim wearing a proof's clothes")
+        check("counterexample" in detail or "unsolved goals" in detail,
+              f"the {label} spec was rejected for the wrong reason, so this "
+              f"test is not measuring what it claims: {detail[-300:]}")
 
 
 def test_overloads_do_not_collide(tmpdir, shared):
@@ -997,6 +1088,8 @@ TESTS = [
      test_a_symbol_that_prefixes_another_is_still_exported),
     ("--no-prove skips proof generation", test_no_prove_skips_proof),
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
+    ("a wrong spec is rejected, not believed",
+     test_a_wrong_spec_is_rejected_not_believed),
     ("overloads build and export once", test_overloads_do_not_collide),
     ("same name in two modules", test_same_name_in_two_modules),
     ("module with no public functions rejected", test_private_only_module_rejected),
