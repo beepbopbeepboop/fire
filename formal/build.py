@@ -2608,21 +2608,30 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     are flattened and lambdas lifted, because a lifted lambda is a function
     with its own locals and its own receivers.
 
-    The method census is BUILT here rather than passed, because the two tables
-    in this file are both called "owners" and only one of them is this: there
-    used to be a sixth parameter documented as `{function name: struct}` which
-    the one call site filled with `{bare method name: struct NAME}` — a `str` —
-    so every consumer below read a string as a `StructDef` and did `st.name` on
-    it. That is an `AttributeError` out of the compiler on any unit where a
-    module-level function shares a bare name with a method of a struct the unit
-    imports, and it had also left `_check_method_receiver_types` matching
-    nothing at all, since a lifted name is never a key in the bare-name table.
-    The census is a pure function of `structs_by_name`, which is already a
-    parameter, so there is nothing to pass and nothing that can be passed wrong:
-    `method_owners` below is the one table. It is needed BEFORE the
-    class-constant rewrites as well as after them, because a `comptime` binding
-    read through a receiver is the same read whichever order the two passes run
-    in and `refuse_none_comparisons` runs first.
+    WHICH STRUCT A FUNCTION IS A METHOD OF is answered by the local
+    `method_owners` (`M.method_owner_names(structs)`, i.e.
+    `{<Struct>_<method> function name: StructDef}`) and by nothing else, and
+    that is a load-bearing choice rather than a tidiness one. It is needed HERE
+    as well as at the class-constant rewrites, because a `comptime` binding read
+    through a receiver is the same read whichever order the two passes run in,
+    and `refuse_none_comparisons` runs BEFORE the rewrite that would materialize
+    it — so asking it a census that does not know which functions are methods is
+    asking a different question than the substitution asks. The table is BUILT
+    here rather than passed in, because the two tables a module has are easy to
+    confuse and confusing them is a crash rather than a wrong answer:
+    `_method_owners` is `{BARE method name: struct NAME}` — the dispatch table,
+    for a `MemberExpr`'s `.member` — and this one is `{LIFTED <Struct>_<method>
+    name: StructDef}`. A sixth parameter documented as the second was filled
+    from the first, so the owner lookup answered with a `str` for any function
+    whose name happened to be a struct's method name, which a module-level `def`
+    colliding with one is; the string reached `_overridden_comptime_names` and
+    was asked for `.name`, and `_check_method_receiver_types` matched nothing at
+    all because a lifted name is never a key in the bare-name table. Deleting
+    the parameter beats handing it the right one: the census is a pure function
+    of `structs_by_name`, which is already a parameter, so there is nothing left
+    here that can be passed wrong. The reproducer and the measurement are
+    `test_formal_run.py`'s
+    `class_constant_census_survives_a_function_named_like_a_method`.
 
     The fixpoint is over one edge only: a call `f(c, …)` in some function where
     `c` is a holder makes `f`'s FIRST parameter a holder. That is the whole of
@@ -10066,16 +10075,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # `stmts` — the pass does not have them.
     from formal.imports import (imported_bound_names,
                                 star_imported_modules)
-    # …and nothing else: `_frame_receivers` used to take a sixth parameter, the
-    # method census, and this site filled it from `owners` (line 9821), which is
-    # `{bare method name: struct NAME}` for `_rewrite_method_calls` to dispatch
-    # `recv.m(...)` by name.  Every consumer inside the pass wanted the OTHER
-    # table — the one keyed by the LIFTED `<Struct>_<method>` a rewritten call
-    # spells, carrying a `StructDef` — which is `method_owners` below, so a
-    # `str` was read as a struct and `st.name` raised.  The census is a pure
-    # function of `structs_by_name`, which the pass already takes, so the
-    # parameter is gone rather than fixed: there is nothing left here that can
-    # be handed the wrong table.
+    # …and nothing else. `_frame_receivers` used to take a sixth parameter, the
+    # method census, and this site filled it from `owners` (line 9821) —
+    # `_method_owners`' `{bare method name: struct NAME}`, the DISPATCH table
+    # `_rewrite_method_calls` uses to resolve `recv.m(...)` by name.  Every
+    # consumer inside the pass wanted the OTHER table, the one keyed by the
+    # LIFTED `<Struct>_<method>` a rewritten call spells and carrying a
+    # `StructDef`, so a `str` was read as a struct and `st.name` raised.  The
+    # pass builds the owner table from `structs_by_name`, which is this
+    # function's own list of the same nodes, so there is nothing to thread
+    # through and no way to hand it the other one again: the parameter is gone
+    # rather than corrected.
     #
     # Measured on `std/builtin/reversed.mojo`, arm64:
     #

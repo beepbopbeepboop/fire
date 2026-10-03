@@ -2863,6 +2863,32 @@ def _build_cfg(body) -> tuple:
     # of it, and its trailing-loop section for this one — because a rule stated
     # in its coarse form and measured only in that form is how the next person
     # re-derives it.
+    #
+    # The intersection, written out, because it is the whole mechanism and the
+    # ASCII is from the same instance the sweep reported:
+    #
+    #     def f(a):            header.IN = entry.OUT & preheader.OUT
+    #         x = a + 1                  = {params} & {…, x}     = {params}
+    #         while 1:            body.IN  = header.OUT & latch.OUT
+    #             if x > 3:               — `x` is in neither
+    #                 return x
+    #         x = x + 1
+    #
+    # The refusal it produced asserted that CPython raises `UnboundLocalError`
+    # for the program. It does not — `formal/hostmods/re.mojo`'s `_p_alt` has
+    # `pend = entry` at line 1397 and the read at 1401, and CPython is silent —
+    # and that one refusal is what `sweep:repo-b` measured as
+    # `codegen/dependency` on two repo files that import `re`.
+    #
+    # DROP THE EDGE IS STRICTLY MORE ACCURATE, not merely more permissive, and
+    # the safety property is measured rather than asserted: over every function
+    # of the 14 modules under `formal/hostmods/` plus `re.mojo` — 5 888 CFG
+    # blocks — the orphan count (a non-entry block with no predecessor at all)
+    # is **0 before and 0 after**. A block that genuinely has no predecessor is
+    # unreachable, which `_definitely_stored`'s top-initialisation already
+    # answers correctly (it keeps the universe and so reports no read), so this
+    # change SUBTRACTS a false edge and never creates an unreachable region —
+    # the only direction in which removing an intersection could lose a refusal.
     entry = new([])
     run(body, [], [entry.index])
     for b in blocks:

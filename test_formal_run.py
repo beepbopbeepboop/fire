@@ -1083,6 +1083,78 @@ CASES = [
       "refuse:o.LIMIT reads a class-level constant of S through 'o', and 'o' is "
       "built from more than one constructor in this function (S(1), T())", None),
 
+    # ── a FUNCTION is not a METHOD just because they share a name ──────────
+    #
+    # The class-constant census asks two questions and used to be handed the
+    # answer to the wrong one. "Which struct is this function a method of?" is
+    # keyed by the LIFTED name a rewritten call spells (`Parser_parse_module`)
+    # and its value is a StructDef; "who owns this method name?" is keyed by the
+    # BARE name a `MemberExpr`'s `.member` is and its value is the struct's
+    # NAME. Both are called "owners", they look alike, and
+    # `_prepare_functions` passed the second where `_frame_receivers` documents
+    # the first — so a module-level `def parse_module` was answered with the
+    # string `"Parser"` and the value reached `_overridden_comptime_names`,
+    # which asked it for `.name`. A traceback out of the compiler, on a program
+    # with nothing exotic in it.
+    #
+    # The `None` default is LOAD-BEARING and is here for a measured reason, not
+    # for coverage: `refuse_none_comparisons` opens with
+    # `if not none_names and not none_consts: return`, so without a class-level
+    # `None` somewhere in the unit the census never runs and this case would
+    # pass with the defect still in it. Two of the struct's fields make it
+    # framed, which is the other half — `_frame_receivers` returns before its
+    # own census when no struct in the unit holds a frame. Both halves are the
+    # reason the shape is `Parser` and not a one-field helper.
+    #
+    # The corpus case in `test_dataclasses_formal.py` found the same crash on
+    # `formal/build.py`, which has a module-level `parse_module` colliding with
+    # `fire_compiler.Parser.parse_module` and nothing else unusual about it.
+    # That is a `formal/build.py` test wearing a generic name; this is the
+    # construct, so a regression here does not need the repository's own source
+    # to keep its shape.
+    ("class_constant_census_survives_a_function_named_like_a_method",
+     "struct Parser:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    var MISSING: Int = None\n"
+     "\n"
+     "    def parse_module(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def parse_module(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Parser()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    return parse_module(1) + p.parse_module()\n",
+     5, None),
+    # The `None` read is still a `None` read through this same receiver, so the
+    # census that the case above has to survive still REFUSES where the language
+    # says it must. Without it, "the crash is gone" and "the check was dropped"
+    # would be the same green: this is the row that separates them.
+    ("class_constant_none_through_a_receiver_is_still_refused_when_a_function_shares_its_name",
+     "struct Parser:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    var MISSING: Int = None\n"
+     "\n"
+     "    def parse_module(self) -> Int:\n"
+     "        return 1\n"
+     "\n"
+     "def parse_module(x: Int) -> Int:\n"
+     "    return x + 1\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Parser()\n"
+     "    if p.MISSING == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+
     # ── methods on a string ──────────────────────────────────────────────
     #
     # A string here is a bare `char *`: no header, no length, just bytes to a
