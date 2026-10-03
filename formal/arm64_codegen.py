@@ -286,7 +286,16 @@ def _collect_var_names(f: F.FunctionDef) -> list:
                 acc[0] = True
                 acc[1] = max(acc[1], depth + n - 1)
             for g in gens:
-                walk_compr_temps(g.iterable, depth, acc)
+                # `depth + n` for the ITERABLE too, and the reason is the
+                # emitter's convention rather than Python's: `_emit_comprehension`
+                # raises `_compr_depth` to `d0 + len(gens)` for the WHOLE walk
+                # — the iterable included, because `_emit_compr_gen` emits
+                # `gen.iterable` after that assignment — so a nested
+                # comprehension reached from an iterable is emitted at
+                # `depth + n`. Reserving it at `depth` asked for `_ci{d}` where
+                # the emitter wanted `_ci{d+n}`, and the emitter has no home for
+                # a name the allocator never reserved: "… has no home".
+                walk_compr_temps(g.iterable, depth + n, acc)
                 for c in g.conditions or []:
                     walk_compr_temps(c, depth + n, acc)
             walk_compr_temps(node.element, depth + n, acc)
@@ -7776,9 +7785,22 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         d0 = self._compr_depth
         self._compr_depth = d0 + len(gens)
+        # `_container_ctx` is AMBIENT — it is read by `_emit_binop` at whatever
+        # depth it finds itself — so a comprehension reached from a container
+        # position (a for-iterable, a membership RHS, a parent generator's
+        # iterable) inherited that position and lowered its OWN body with it:
+        # `[x + 1 for x in [10, 20]]` inside `for y in …` took the concat path,
+        # copied an integer as a blob and faulted on both architectures. A
+        # comprehension's body is not a container position — inside one, `+` is
+        # arithmetic, and the operands decide on their own (`_is_container_expr`
+        # on a list literal, a name in `_blob_vars`). So the body is emitted
+        # outside it and each generator's ITERABLE re-establishes it below.
+        saved_ctx = self._container_ctx
+        self._container_ctx = 0
         try:
             self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
         finally:
+            self._container_ctx = saved_ctx
             self._compr_depth = d0
 
         self._emit_list_base(offset)
@@ -7838,7 +7860,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         # its own first bytes (measured: SIGBUS walking past the string).
         self._refuse_string_iteration("a comprehension iterable",
                                       gen.iterable)
-        self._emit_expr(gen.iterable)
+        # Container ctx for the ITERABLE alone, so a BinaryOp `+` there means
+        # list concat: `[x for x in a + b]` is a walk of the concatenation, and
+        # without this it took the ALU path and looped forever. The elevation is
+        # bounded to this expression because it is ambient — a nested
+        # comprehension's body is not a container position (see
+        # `_emit_comprehension`). The x86-64 backend's twin.
+        self._container_ctx += 1
+        try:
+            self._emit_expr(gen.iterable)
+        finally:
+            self._container_ctx -= 1
         self._store_var(cb_name, 0)
         self.asm.emit(encode_movz_xd_imm(0, 0))
         self._store_var(ci_name, 0)

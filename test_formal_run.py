@@ -6911,6 +6911,76 @@ BOTH_ARCH_CASES = [
      "    printf(\"%d\", c._value)\n"
      "    return 0\n",
      0, "9"),
+
+    # ── a comprehension INSIDE a generator's ITERABLE ──
+    #
+    # Refused on both architectures before the fix, with a message that names an
+    # internal table rather than the construct: "`_cb1` has no home: the
+    # register allocator collected no home for it, so the emitter and the
+    # allocation walk disagree about this function's locals". The disagreement
+    # was exactly one: `_emit_comprehension` raises `_compr_depth` to
+    # `d0 + len(gens)` for the WHOLE walk (the iterable included), while
+    # `_collect_var_names`' comprehension walk reserved a nested
+    # comprehension's `_ci{d}`/`_cb{d}` at the OUTER depth — so the emitter
+    # asked for `_ci1` and the collector had reserved `_ci0` only.
+    # `bugs/FORMAL_nested_comprehension_generator_temps_are_not_collected.md`.
+    #
+    # In this group rather than `CASES` because the two conventions are the two
+    # backends' own (`_collect_var_names` is spelled twice, once per backend),
+    # and a row checked on the host alone would not have caught the x86-64 half.
+    #
+    # The four shapes in one program, because each reaches a different part of
+    # the walk: the nest in the FIRST generator's iterable (`2 11`), the nest in
+    # the SECOND generator's iterable of a two-generator comprehension (`4`),
+    # a three-deep nest where the middle generator's ELEMENT holds the inner
+    # one, and a DICT comprehension whose values are comprehensions. The `+` in
+    # an inner element is the second half of the fix, and without it this row
+    # is a fault rather than a wrong number: `_container_ctx` is ambient, so a
+    # comprehension reached from a container position lowered its own `+` as a
+    # list CONCAT and copied an integer as a blob base (SIGSEGV on x86-64,
+    # `movq (%rsi), %r8` with rsi = 10). The row below is that half on its own.
+    ("nested_comprehension_in_a_generator_iterable",
+     "def main() -> Int:\n"
+     "    var a = [y for y in [x + 1 for x in [10, 20]]]\n"
+     "    var b = [q for p in [1, 2] for q in [r * 2 for r in [5, 6]]]\n"
+     "    var c = [z for z in [y for y in [x for x in [7, 8]]]]\n"
+     "    var d = {k: [v for v in [1, 2, 3]] for k in [1, 2]}\n"
+     "    printf(\"%d %d %d %d\", len(a), a[0], len(b), b[3])\n"
+     "    printf(\" %d %d %d %d\", len(c), len(d), c[0],\n"
+     "           len([v for v in [1, 2, 3]]))\n"
+     "    return 0\n",
+     0, "2 11 4 12 2 2 7 3"),
+
+    # ── a comprehension's BODY is not a container position ──
+    #
+    # `_container_ctx` is read by `_emit_binop` at whatever depth it finds
+    # itself, so a comprehension reached from a for-iterable or a membership
+    # RHS inherited that position and concatenated its own arithmetic:
+    # `for y in [x + 1 for x in [10, 20]]` copied the integer 10 as a blob base
+    # and died with SIGSEGV on BOTH architectures. Inside a comprehension `+` is
+    # arithmetic, and the operands decide on their own (`_is_container_expr`).
+    #
+    # The last two lines are the other side of the same fix and are what keep it
+    # from over-correcting: a generator's ITERABLE *is* a container position, so
+    # `[x for x in a + b]` concatenates — which it must, and which on both
+    # architectures used to loop FOREVER on arm64 (no elevation there at all, so
+    # `a + b` took the ALU path and the generated walk never advanced) and on
+    # x86-64 only by way of the same ambient flag this row removes.
+    ("comprehension_body_is_not_a_container_position",
+     "def main() -> Int:\n"
+     "    var a = [1, 2]\n"
+     "    var b = [3, 4]\n"
+     "    var s = 0\n"
+     "    for y in [x + 1 for x in [10, 20]]:\n"
+     "        s = s + y\n"
+     "    if 32 in [x + 1 for x in [10, 20, 21]]:\n"
+     "        s = s + 100\n"
+     "    var r = [x for x in a + b]\n"
+     "    if 1 in [x for x in a + b]:\n"
+     "        s = s + 1000\n"
+     "    printf(\"%d %d %d %d\", s, len(r), r[3], len([x for x in [1, 2]]))\n"
+     "    return 0\n",
+     0, "1032 4 4 2"),
 ]
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here

@@ -274,7 +274,14 @@ def _collect_var_names(f: F.FunctionDef) -> list:
             if n:
                 acc[0] = max(acc[0], depth + n - 1)
             for g in node.generators or []:
-                walk_compr(g.iterable, depth, acc)
+                # `depth + n`, for the emitter's reason and not Python's: this
+                # backend's `_emit_comprehension` raises `_compr_depth` to
+                # `d0 + len(gens)` for the whole walk, the iterable included,
+                # so a comprehension reached from a generator's iterable is
+                # EMITTED at `depth + n`. Reserving it at `depth` gave the
+                # allocator `_ci{d}` and left the emitter asking for
+                # `_ci{d+n}`, which it reports as "has no home".
+                walk_compr(g.iterable, depth + n, acc)
                 for c in g.conditions or []:
                     walk_compr(c, depth + n, acc)
             walk_compr(node.element, depth + n, acc)
@@ -6717,9 +6724,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         d0 = self._compr_depth
         self._compr_depth = d0 + len(gens)
+        # `_container_ctx` is AMBIENT — `_emit_binop` reads it at whatever depth
+        # it finds itself — so a comprehension reached from a container position
+        # (here, a parent generator's iterable; also a for-iterable and a
+        # membership RHS) lowered its OWN body under that position: `[x + i for
+        # x in [10, 20]]` inside a parent generator's iterable took the concat
+        # path, copied the integer 10 as a blob base and faulted (SIGSEGV,
+        # `movq (%rsi), %r8` with rsi = 10). Inside a comprehension `+` is
+        # arithmetic and the operands decide on their own
+        # (`_is_container_expr`), so the body is emitted outside the context and
+        # each generator's iterable re-establishes it below. arm64's twin.
+        saved_ctx = self._container_ctx
+        self._container_ctx = 0
         try:
             self._emit_compr_gen(expr, 0, offset, is_dict, cap, d0)
         finally:
+            self._container_ctx = saved_ctx
             self._compr_depth = d0
         self._emit_blob_base(offset, Reg.RAX)
 
@@ -6765,7 +6785,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # 1 from the capacity guard instead of walking the text.
         self._refuse_string_iteration("a comprehension iterable",
                                       gen.iterable)
-        # Under container context so a BinaryOp `+` iterable means concat.
+        # Under container context so a BinaryOp `+` iterable means concat —
+        # `[x for x in a + b]` walks the concatenation. Bounded to this
+        # expression because the context is ambient and a nested comprehension's
+        # body is not a container position (`_emit_comprehension`).
         self._container_ctx += 1
         try:
             self._emit_expr(gen.iterable)
