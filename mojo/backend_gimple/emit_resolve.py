@@ -512,6 +512,16 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # symmetric, and a name interned only by the failed subtree is
             # simply never declared because nothing references it.
             strpool_declared_before = set(gen._str_pool_declared)
+            # `_c_helpers_needed` is the same shape of mark as the string pool:
+            # a helper is emitted INLINE at the point that needs it, and
+            # `_emitted_c_helpers` is what keeps a second module from emitting
+            # a duplicate `static` definition. A failed subtree's text is
+            # discarded, so its helpers' definitions went with it -- but the
+            # marks said they were already emitted, and every surviving
+            # reference became an implicit declaration. Measured: 100+
+            # "implicit declaration of function '_mojo_sizeof_<Struct>'", one
+            # per AST node class in fire_compiler.py.
+            emitted_c_helpers_before = set(gen._emitted_c_helpers)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -1002,6 +1012,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._emitted_funcptr_builtins.discard(_e)
                 for _sp in list(gen._str_pool_declared - strpool_declared_before):
                     gen._str_pool_declared.discard(_sp)
+                for _ch in list(gen._emitted_c_helpers - emitted_c_helpers_before):
+                    gen._emitted_c_helpers.discard(_ch)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
