@@ -14837,6 +14837,13 @@ def dylib_module_variables(dylib_exports: list) -> dict:
     for a list, an object or a stream" for one that is not, and those are
     different facts with different repairs.
 
+    **A name with a `__DATA` slot is NOT automatically in here**, which is the
+    correction this table needed: the slot exists for a container literal that
+    nobody writes, and that name is a constant whose blob the linker places. The
+    membership rule is `GlobalSlot.mutable`, set by `collect_global_slots` from
+    the unit's statements AND its bodies; `dylib_module_containers` is the other
+    half of the split.
+
     Keyed by the same ABI identity the export and constant tables use, and it
     takes the FIRST library on the link line for a module identity appearing
     twice — the precedence `dylib_module_constants` already applies, so the two
@@ -14865,6 +14872,52 @@ def dylib_module_variable_names(dylib_exports: list, qualifier: str) -> set:
     ABI spellings, `os.path` and `os_path` — rather than matching a bare string
     and answering differently from its two neighbours."""
     table = dylib_export_module(dylib_module_variables(dylib_exports), qualifier)
+    return set(table or ())
+
+
+def dylib_module_containers(dylib_exports: list) -> dict:
+    """`{module identity: [name, …]}` for the module-level CONSTANTS each library
+    lays out in `__DATA` and does not publish as a value.
+
+    The third shape, and the one that was missing: `collect_global_slots` gives a
+    `__DATA` slot to a name whose value is a container literal for a reason that
+    has nothing to do with a writer — the blob is static data the linker places —
+    so such a name is a CONSTANT with a home, and publishing it in `dylib_module_variables`
+    made a consumer refuse it as a variable with a `global` write the defining
+    module does not contain (measured on both architectures; the split is
+    `GlobalSlot.mutable`).
+
+    It is a separate table rather than a boolean beside the variable one because
+    the two produce DIFFERENT sentences, and each has to be true: "the module's
+    own functions write it through `global`" is false of a constant, and "a
+    dylib publishes functions and folded words, so this blob's address does not
+    cross" is false of a variable. Keyed by the same ABI identity and taking the
+    FIRST library on the line for a module appearing twice, so the three tables
+    cannot answer differently about one module.
+    """
+    out: dict = {}
+    for lib in (dylib_exports or []):
+        module = lib.get("module") or ""
+        if not module:
+            continue
+        names = lib.get("containers") or []
+        if not names:
+            continue
+        out.setdefault(module, [])
+        for name in names:
+            if name not in out[module]:
+                out[module].append(name)
+    return out
+
+
+def dylib_module_container_names(dylib_exports: list, qualifier: str) -> set:
+    """The container-constant names the module `qualifier` publishes, for one
+    reader. The `dylib_module_variable_names` shape, asked about the third table
+    for the same reason: one qualifier, resolved the same way, by the same
+    function — so `pkg.TABLE` and `x.TABLE` cannot get two different
+    classifications out of one link line."""
+    table = dylib_export_module(dylib_module_containers(dylib_exports),
+                                qualifier)
     return set(table or ())
 
 
@@ -25376,7 +25429,8 @@ def function_value_refusal(name: str, fn_name: str = "") -> str:
 
 
 def module_attribute_refusal(spelling: str, module: str, leaf: str,
-                             fn_name: str, published, variables=()) -> str:
+                             fn_name: str, published, variables=(),
+                             containers=()) -> str:
     """The diagnostic for reading `module.leaf` as a VALUE.
 
     A DIFFERENT fact from `module_global_refusal`'s "imported" arm, and the
@@ -25415,6 +25469,19 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     false about the name it names sends the reader after a capability the name
     does not need, which is the defect this function was written to remove.
 
+    **`containers` is the second half of the same repair, and it exists because
+    the variable arm was reached with a name it is false about.** A module-level
+    `TABLE = [10,20,30]` that nothing writes has a `__DATA` slot — the blob is
+    static data — and used to be published in the same list as `G`, so
+    `mylib.TABLE` was refused for "that module's own functions write it through
+    `global`" in a module that writes nothing at all (measured, both
+    architectures). It is a CONSTANT: the build knows its value, and what does
+    not cross is the ADDRESS, because `doc/ABI.md`'s export rule publishes
+    functions and folded words and a blob is neither. So it gets its own
+    sentence too, and the repair is an accessor that hands back an element —
+    the same spelling that works for a variable, and for the same reason: the
+    accessor is code, and code is what a dylib exports.
+
     `published` is the list of what the module DOES publish, so a reader can see
     in one line whether the name they wrote is one of the module's own or a
     capability it does not have. That is `dylib_extern_symbol`'s own device,
@@ -25431,17 +25498,37 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
         return (f"{who}{spelling} reads {leaf!r}, which is a module-level name "
                 f"of `{module}` that `{module}`'s OWN functions write through "
                 f"`global`, so its value is not known when the library was built "
-                f"and cannot be recorded the way a literal constant is. It is a "
-                f"VARIABLE and not a constant even though `{module}` also "
-                f"declares it at module level with a value the build could fold: "
-                f"a folded name's value crosses the boundary only because it has "
-                f"exactly one writer, and this one has a second. What `{module}` "
-                f"publishes: {shown} — give the module an accessor "
-                f"(`def get_{leaf}(): global {leaf}; return {leaf}`) and call "
-                f"that, which reads the same slot and lowers today. "
-                f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what it "
-                f"would take to publish the slot itself rather than a function "
-                f"that reads it")
+                f"and cannot be recorded the way a value the build knows is. It "
+                f"is a VARIABLE and not a constant even though `{module}` also "
+                f"declares it at module level: a name whose one value the build "
+                f"knows crosses the boundary by substitution, because there is "
+                f"exactly one of it in a whole program, and this one has a second "
+                f"writer — so the importer would materialize the value `{module}` "
+                f"STARTED at. What `{module}` publishes: {shown} — give the "
+                f"module an accessor (`def get_{leaf}(): global {leaf}; return "
+                f"{leaf}`) and call that, which reads the same slot and lowers "
+                f"today. `bugs/FORMAL_module_state_no_storage.md` §(2) records "
+                f"what it would take to publish the slot itself rather than a "
+                f"function that reads it")
+    if leaf in set(containers or ()):
+        return (f"{who}{spelling} reads {leaf!r}, which is a module-level "
+                f"CONSTANT of `{module}` — its only writer is its own "
+                f"module-level statement, so there is exactly one value of it in "
+                f"a whole program — whose value is laid out in `{module}`'s own "
+                f"`__DATA` as a run of words. What does not cross is the "
+                f"ADDRESS: a dylib publishes its functions (as symbols, so "
+                f"`{module}.fn(...)` lowers) and its module-level names the "
+                f"build FOLDED TO A LITERAL (as values, so `{module}.K = 1` "
+                f"lowers), and a container is neither — it is a block of static "
+                f"data at an address chosen when the library was linked, which "
+                f"this image cannot have known. So this is a missing "
+                f"capability and not a missing value, and the spelling that "
+                f"works today is an accessor that hands back what you need out "
+                f"of it: `def {leaf}_at(i: Int) -> Int: return "
+                f"{leaf}[i]` in `{module}`, called as `{module}.{leaf}_at(0)`. "
+                f"What `{module}` publishes: {shown}. "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what "
+                f"publishing the blob itself would take")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
             f"`{module}`, and a module is not a value this path can place: "
             f"there is no register, frame slot or `__DATA` word for it because "
@@ -25460,7 +25547,8 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
             f"what would have to be true to close it, and §(2) is this shape")
 
 
-def module_global_refusal(name: str, sym, fn_name: str) -> str:
+def module_global_refusal(name: str, sym, fn_name: str, variables=None,
+                          containers=None) -> str:
     """The one-line diagnostic for a module-level name this path cannot read.
 
     Says which of the four kinds it is and what would have to be true, because
@@ -25502,6 +25590,45 @@ def module_global_refusal(name: str, sym, fn_name: str) -> str:
         # therefore not one of those: it is a real variable, a list, an object,
         # or a function used as a value. Saying so is what makes the remaining
         # sentence a repair rather than a deflection.
+        #
+        # `variables` and `containers` are what keep that last sentence from
+        # being false about a name it names, and the arm had neither before:
+        # `from lookups import TABLE`, where `lookups` declares
+        # `TABLE = [10,20,30]` and writes nothing, was refused as "this name's
+        # value is a real global with nowhere to live" (measured, both
+        # architectures). It has a home — the defining library lays the blob out
+        # in its `__DATA` — and it is a CONSTANT, so the two facts worth saying
+        # are "nothing writes it" and "the ADDRESS is what does not cross". The
+        # dotted spelling of the same read has said both since
+        # `module_attribute_refusal` grew its arms, and a refusal must not be
+        # true for `mod.TABLE` and false for `from mod import TABLE`.
+        if name in set(variables or ()):
+            return (f"{who}{name!r} is imported from `{mod}`, and it is a name "
+                    f"`{mod}`'s OWN functions write through `global`, so its "
+                    f"value is not the same in both modules and cannot be "
+                    f"recorded the way a value the build knows is. It is a "
+                    f"VARIABLE and not a constant even though `{mod}` also "
+                    f"declares it at module level: a name whose one value the "
+                    f"build knows crosses the boundary by substitution, because "
+                    f"there is exactly one of it in a whole program, and this "
+                    f"one has a second writer — so the importer would "
+                    f"materialize the value `{mod}` STARTED at. Give `{mod}` an "
+                    f"accessor (`def get_{name}(): global {name}; return {name}`) "
+                    f"and call that, which reads the same slot and lowers today")
+        if name in set(containers or ()):
+            return (f"{who}{name!r} is imported from `{mod}`, where it is a "
+                    f"module-level CONSTANT whose only writer is its own "
+                    f"module-level statement — its value is laid out in "
+                    f"`{mod}`'s `__DATA` as a run of words, and there is exactly "
+                    f"one of it in a whole program. What does not cross is the "
+                    f"ADDRESS: a dylib publishes functions and folded literals, "
+                    f"and a block of static data is neither, because its address "
+                    f"is chosen when the library is linked and this image cannot "
+                    f"have known it. So this is a missing capability and not a "
+                    f"missing value: give `{mod}` an accessor that hands back "
+                    f"what you need out of it (`def {name}_at(i: Int) -> Int: "
+                    f"return {name}[i]`) and call that, which is code, and code "
+                    f"is what a dylib exports")
         return (f"{who}{name!r} is imported from `{mod}`, and it is a "
                 f"module-level name of another module. This path compiles an "
                 f"import into a dylib, and a dylib publishes FUNCTIONS and "
@@ -25624,6 +25751,27 @@ class GlobalSlot:
     `module_slot_readable_in` then refuses rather than assumes, because the
     conservative answer there is the one that cannot be a wrong number.
 
+    `mutable` is the question a manifest asks and a slot otherwise could not
+    answer: **is there a writer besides the module-level binding?** True for a name
+    a function writes through `global` and for a name the MODULE BODY stores, false
+    for a name whose only writer is its own module-level statement. It is carried
+    here for the reason the other fields are — `collect_global_slots` is the only
+    function with the unit's statements AND its bodies in hand, so it is the only
+    place the two can be compared, and every later reader (`write_dylib_manifest`'s
+    `variables`/`containers` split, and through them the refusal that names the
+    shape) has neither.
+
+    **A `__DATA` slot is NOT the same fact as `mutable`, and reading it as one is
+    what produced a false refusal.** `NUMS = [10,20,30]` gets a slot because its
+    value is a container blob the linker places — nothing writes it, so it is a
+    CONSTANT with a home — and the manifest published it in the same list as `G`
+    in `G = 5` plus `def bump(): global G`. Both have a slot; only one has a second
+    writer, and the sentence about the second ("that module's own functions write
+    it through `global`") is then false of the first. Measured on both
+    architectures before the split: `from lookups import TABLE` where `lookups`
+    declares `TABLE = [10,20,30]` and writes nothing was refused as "a module-level
+    name … that `lookups`'s OWN functions write through `global`".
+
     `kind` is the `ValueKinds` kind the slot's value has, and `is_dict` is the
     one distinction that kind cannot carry, for the slots whose initializer does
     not state them: a slot the MODULE BODY fills is `("unknown", …)`, so the
@@ -25640,11 +25788,11 @@ class GlobalSlot:
     """
 
     __slots__ = ("name", "index", "init", "site", "filled_by_body", "body_site",
-                 "kind", "is_dict")
+                 "kind", "is_dict", "mutable")
 
     def __init__(self, name: str, index: int, init, site=None,
                  filled_by_body=False, body_site=None, kind=None,
-                 is_dict=False):
+                 is_dict=False, mutable=False):
         self.name = name
         self.index = index
         self.init = init
@@ -25653,6 +25801,7 @@ class GlobalSlot:
         self.body_site = body_site
         self.kind = kind
         self.is_dict = is_dict
+        self.mutable = mutable
 
     @property
     def is_address(self) -> bool:
@@ -26341,6 +26490,14 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
     string whose value is a literal, with nothing writing it. A name in NEITHER
     set is not in the table, and `module_global_refusal` is what says why.
 
+    **All three buckets are in the table, so the table alone does not say which
+    is which**, and the second of them is the one that is easy to get wrong: the
+    container-literal bucket has a slot for a reason that has nothing to do with a
+    writer (the blob is static data the linker places), so reading "has a slot" as
+    "is a variable" makes a constant a variable. `GlobalSlot.mutable` is the
+    distinction, set here because this is the only function holding both the
+    statements and the bodies.
+
     Reads the module's own statement list for the INITIALIZER and the function
     bodies for the WRITES, because the two live in different places: the value is
     stated once, at module level, and the writes are stated inside the bodies.
@@ -26399,7 +26556,9 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
                                  site=stmt,
                                  filled_by_body=name in body_written,
                                  body_site=body_sites.get(name),
-                                 kind=kind, is_dict=is_dict)
+                                 kind=kind, is_dict=is_dict,
+                                 mutable=(name in written
+                                          or name in body_written))
     return slots
 
 

@@ -594,12 +594,25 @@ def test_a_store_to_a_module_constant_is_refused(tmpdir, _shared, verbose):
 def test_a_module_level_list_is_still_refused(tmpdir, _shared, verbose):
     """`mod.LIST` where the value is a LIST — the case the fold must not take.
 
-    A list is a blob carved out of the frame of the function that built it, so
-    it is not a literal, has no compile-time value, and cannot be materialized
-    in another image. The refusal has to be this one and not the constant's: a
-    reader who is told "the module does not export this name" when the truth is
-    "the value is not a value this path can copy" goes looking for a missing
-    definition that is not missing."""
+    Still refused, and the reason is worth stating precisely because this
+    docstring used to state it wrongly: it said a list "is a blob carved out of
+    the frame of the function that built it, so it is not a literal, has no
+    compile-time value". None of that is true of a MODULE-LEVEL list, and
+    measuring it is what found the false sentence this row now also checks.
+    `ITEMS = [1,2,3]` is static data: one value for the whole program, laid out
+    in the library's own `__DATA`, and read correctly by that library's own
+    functions (measured, both architectures). What does not cross the boundary
+    is its ADDRESS — a dylib publishes functions and folded words, and a block of
+    static data at a link-time address is neither — so the refusal is about the
+    boundary and not about the value having no compile-time meaning.
+
+    The reader-facing requirement is unchanged and is what this asserts: the
+    refusal must be THIS one and not the constant's, because a reader told "the
+    module does not export this name" when the truth is "the value's address
+    does not cross" goes looking for a missing definition that is not missing.
+    `test_a_read_only_container_constant_is_not_reported_as_a_variable` is the
+    row that pins which of the two sentences it is.
+    """
     lib = "ITEMS = [1, 2, 3]\n\n\ndef addup(a, b):\n  return a + b\n"
     prog = ("import mylib\n\n"
             "def main():\n"
@@ -1229,6 +1242,200 @@ def test_the_manifest_records_a_variable_separately_from_a_constant(
           f"constants={m.get('constants')!r}")
 
 
+# ── the THIRD shape: a container constant nothing writes ──────────────────
+#
+# `G = 5` plus a `global G` write and `TABLE = [10,20,30]` plus nothing both end
+# up with a `__DATA` slot, and only the first is a variable. The manifest used to
+# publish both in `variables`, so a consumer told `TABLE` was "a module-level
+# name that `mylib`'s OWN functions write through `global`" — in a module that
+# writes nothing at all. A refusal whose stated reason is false about the name it
+# names sends the reader after a `global` that is not in their file, which is the
+# defect class this file exists to keep out of the boundary.
+
+# A module-level container, read inside its OWN module, works — measured, both
+# architectures: the blob is static data and the linker places it. So the value
+# has a home and the only thing that does not cross is its ADDRESS.
+TABLE_LIB = ("TABLE = [10, 20, 30]\n\n\n"
+             "def addup(a, b):\n  return a + b\n")
+
+# The same library with a function that writes `TABLE` through `global`. This is
+# the CONTROL for the split: a container literal is not what makes a name a
+# variable, a second writer is, and a fix that classified by the value's shape
+# would get this one wrong in the other direction.
+TABLE_WRITTEN_LIB = ("TABLE = [10, 20, 30]\n\n\n"
+                     "def addup(a, b):\n  return a + b\n\n\n"
+                     "def bump():\n  global TABLE\n  TABLE[0] = 99\n")
+
+
+def test_a_read_only_container_constant_is_not_reported_as_a_variable(
+        tmpdir, _shared, verbose):
+    """`mylib.TABLE` / `from mylib import TABLE`, where nothing writes TABLE.
+
+    Both spellings, because they are two different functions
+    (`model.module_attribute_refusal` and `model.module_global_refusal`'s
+    "imported" arm) and a refusal must not be true for one and false for the
+    other — which is exactly what happened: only the dotted one had a `variables`
+    arm, and it was reached with a name it was false about.
+
+    Asserted negatively as well as positively. "It says CONSTANT" is the weak
+    half; "it must NOT name a `global` write" is the half that fails if the
+    manifest's `variables` list grows the container back, and a positive-only
+    assertion would still pass on a message that said both.
+    """
+    for label, prog in (
+            ("dotted", "import mylib\n\n"
+                       "def main():\n"
+                       "  printf(\"%d\", mylib.TABLE[1])\n"
+                       "  return 0\n"),
+            ("bare", "from mylib import TABLE\n\n"
+                     "def main():\n"
+                     "  printf(\"%d\", TABLE[1])\n"
+                     "  return 0\n")):
+        root = os.path.join(tmpdir, "container_constant_" + label)
+        os.makedirs(root)
+        write_tree(root, {"mylib.mojo": TABLE_LIB, "prog.mojo": prog})
+        fresh_cas()
+        for arch in ARCHES:
+            text = build_expecting_refusal(root, "prog", arch)
+            check("write through `global`" not in text,
+                  f"{arch}/{label}: `mylib` writes nothing, so a refusal that "
+                  f"names a `global` write is describing a module the reader "
+                  f"does not have: {text.strip()[-500:]}")
+            check("VARIABLE" not in text,
+                  f"{arch}/{label}: `TABLE`'s only writer is its own "
+                  f"module-level statement, so it is a CONSTANT and calling it a "
+                  f"variable sends the reader after a second writer that does "
+                  f"not exist: {text.strip()[-500:]}")
+            check("CONSTANT" in text and "`__DATA`" in text,
+                  f"{arch}/{label}: it must name the shape it actually is — a "
+                  f"constant whose value the defining library lays out in its "
+                  f"own `__DATA`: {text.strip()[-500:]}")
+            check("ADDRESS" in text,
+                  f"{arch}/{label}: and it must say the ADDRESS is what does "
+                  f"not cross, because that is the missing capability and not a "
+                  f"missing value: {text.strip()[-500:]}")
+            check("TABLE_at" in text,
+                  f"{arch}/{label}: and it must offer the accessor, which is the "
+                  f"spelling that works — see the row below, which runs it: "
+                  f"{text.strip()[-500:]}")
+
+
+def test_the_accessor_is_the_spelling_that_reads_another_modules_container(
+        tmpdir, _shared, verbose):
+    """The repair the row above names, RUN: `mylib.TABLE_at(0)` is `TABLE[0]`.
+
+    Not decoration. This file's rule is that a refusal which names a repair
+    nobody has measured is a dead end wearing a repair, and it is the same rule
+    `test_the_accessor_is_the_spelling_that_reads_the_slot` states for the
+    variable half. Both architectures, and compared with CPython on the same
+    text: 10 and 30 are what CPython prints, and the refusal is only worth
+    having if the alternative is reachable.
+    """
+    lib = ("TABLE = [10, 20, 30]\n\n\n"
+           "def TABLE_at(i: Int) -> Int:\n  return TABLE[i]\n")
+    prog = ("from mylib import TABLE_at\n\n"
+            "def main():\n"
+            "  printf(\"%d %d\", TABLE_at(0), TABLE_at(2))\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "container_accessor")
+    os.makedirs(root)
+    files = {"mylib.mojo": lib, "prog.mojo": prog}
+    write_tree(root, files)
+    agrees_with_cpython(root, "prog", files, prog, verbose)
+
+
+def test_a_global_write_still_makes_a_container_a_VARIABLE(
+        tmpdir, _shared, verbose):
+    """The CONTROL for the two rows above: same container, one `global` write.
+
+    `collect_global_slots` gives a name a `__DATA` slot for three reasons and
+    only two of them make it a variable, so a fix that split on "has a slot" or
+    on "is a container" would classify this one as a constant and tell the reader
+    its value is fixed when a function rebinds it. The refusal must be the
+    VARIABLE one, and it must not claim the module-level value was foldable — a
+    list literal is not — which is the clause that was wrong about this name.
+    """
+    for label, prog in (
+            ("dotted", "import mylib\n\n"
+                       "def main():\n"
+                       "  mylib.bump()\n"
+                       "  printf(\"%d\", mylib.TABLE[0])\n"
+                       "  return 0\n"),
+            ("bare", "from mylib import TABLE, bump\n\n"
+                     "def main():\n"
+                     "  bump()\n"
+                     "  printf(\"%d\", TABLE[0])\n"
+                     "  return 0\n")):
+        root = os.path.join(tmpdir, "container_written_" + label)
+        os.makedirs(root)
+        write_tree(root, {"mylib.mojo": TABLE_WRITTEN_LIB, "prog.mojo": prog})
+        fresh_cas()
+        for arch in ARCHES:
+            text = build_expecting_refusal(root, "prog", arch)
+            check("write through `global`" in text,
+                  f"{arch}/{label}: `bump()` writes `TABLE` through `global`, so "
+                  f"it has a second writer and the refusal must say so — that is "
+                  f"the reason, and it is not the name's type: "
+                  f"{text.strip()[-500:]}")
+            check("fold" not in text,
+                  f"{arch}/{label}: and it must not claim the module-level value "
+                  f"was foldable: `[10,20,30]` is not a literal, and the clause "
+                  f"is what sends a reader looking for a second value that does "
+                  f"not exist: {text.strip()[-500:]}")
+
+
+def test_the_manifest_separates_a_variable_from_a_container_constant(
+        tmpdir, _shared, verbose):
+    """`variables` and `containers` are DISJOINT, and each name is in one.
+
+    Read from the FILE, for the reason
+    `test_the_manifest_records_a_variable_separately_from_a_constant` gives: a
+    consumer reads the manifest, and a test asserting the writer's own dict
+    would pass when the writer and the file disagree.
+
+    Two libraries and both directions, because the defect was in BOTH: a
+    read-only container published as a variable produced a false sentence about a
+    module that writes nothing, and the split that fixed it could have introduced
+    the mirror — a written container published as a constant, which is the
+    silently-wrong-answer direction `formal8-7-r2` exists to prevent.
+    """
+    root = os.path.join(tmpdir, "manifest_container")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": TABLE_LIB, "other.mojo": TABLE_WRITTEN_LIB})
+    fresh_cas()
+    user = os.path.join(root, "user.mojo")
+    with open(user, "w") as f:
+        f.write("import mylib\nimport other\n\n\ndef main():\n  return 0\n")
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "user.aout"), user], cwd=root)
+    check(result.returncode == 0,
+          f"building a user of the two libraries failed: "
+          f"{(result.stderr or result.stdout).strip()[-300:]}")
+    read_only = manifest(module_dylib("mylib"))
+    written = manifest(module_dylib("other"))
+    check("TABLE" in list(read_only.get("containers") or []),
+          f"a module-level container nothing writes is a CONSTANT with a home "
+          f"in that library's `__DATA`, and the manifest has to say so or every "
+          f"consumer calls it a variable: "
+          f"containers={read_only.get('containers')!r}")
+    check("TABLE" not in list(read_only.get("variables") or []),
+          f"and it must NOT also be a variable: that is the false statement "
+          f"this row exists to remove — a `global` write the module does not "
+          f"contain. variables={read_only.get('variables')!r}")
+    check("TABLE" not in (read_only.get("constants") or {}),
+          f"nor a folded constant: `[10,20,30]` does not fold to one word. "
+          f"constants={read_only.get('constants')!r}")
+    check("TABLE" in list(written.get("variables") or []),
+          f"a container a function WRITES through `global` is a variable, and "
+          f"the split must not lose that: "
+          f"variables={written.get('variables')!r} "
+          f"containers={written.get('containers')!r}")
+    check("TABLE" not in list(written.get("containers") or []),
+          f"and the two lists are disjoint, because a name in both would let a "
+          f"consumer materialize the value the module started at: "
+          f"containers={written.get('containers')!r}")
+
+
 TESTS = [
     ("`mod.fn(x)` builds, runs, and agrees with CPython",
      test_a_module_qualified_call_runs),
@@ -1276,6 +1483,14 @@ TESTS = [
      test_the_accessor_is_the_spelling_that_reads_the_slot),
     ("the manifest records a variable apart from a constant",
      test_the_manifest_records_a_variable_separately_from_a_constant),
+    ("a read-only container constant is NOT reported as a variable",
+     test_a_read_only_container_constant_is_not_reported_as_a_variable),
+    ("the accessor is the spelling that reads another module's container",
+     test_the_accessor_is_the_spelling_that_reads_another_modules_container),
+    ("a `global` write still makes a container a VARIABLE",
+     test_a_global_write_still_makes_a_container_a_VARIABLE),
+    ("the manifest separates a variable from a container constant",
+     test_the_manifest_separates_a_variable_from_a_container_constant),
     ("the manifest names its module, its constants and its forwarding",
      test_the_manifest_names_its_module_and_its_constants),
 ]
