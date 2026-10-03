@@ -3,7 +3,12 @@
 **Area:** FORMAL (the value model; shared by both backends and the Lean proof).
 Found 2026-10-01 on `work/formal2-re-and-slice`. **NOT FIXED — it is a
 value-model decision, and it is the last thing between the `builtin_slice` row
-and 13 files.**
+and 13 files.** Its own dependency chain has since moved TWICE and is now
+blocked one layer EARLIER than either revision of it below says: see
+"Re-measured 2026-10-03" at the end, whose first arrow is a frame-identity
+question in somebody else's area (`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md`).
+Read that section first if you are picking this up; the two below it are
+history and both name an arrow that is no longer the first one.
 
 This doc exists to say what `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`
 left open, with the measurement that settles the question of which wall it is.
@@ -244,3 +249,54 @@ from its author and I did not repeat it.
   option 2 is picked up, and it is checkable on one file.
 * **Re-measured on arm64 only** by the 2026-10-01 session above, which did not
   repeat the x86-64 half.
+## Re-measured 2026-10-03 (`work/formal10-5`): the chain has a NEW first arrow, and it is not a value-model question
+
+Both revisions above end with a chain whose first arrow is a value-model or MLIR
+question. **That is no longer where the chain starts.** Measured, both
+architectures, byte-identical text:
+
+```
+$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label bsl -- \
+      python3 fire.py build --formal --no-prove -o .tmp/esc/bsl \
+      ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: builtin_slice.mojo imports 'std.format._utils', which cannot be built
+either: builtin_slice.mojo: StridedSlice___init__ returns a frame address, so it
+cannot be compiled into a dylib: the returned-frame convention needs the CALLER
+to reserve the block the object is built in, and an importer of this library is a
+compilation this build does not perform …
+```
+
+and the same text, on the same two architectures, for `std/utils/variant.mojo`
+— the file whose `__mlir_op` refusal was this doc's original first arrow.
+
+So the chain now reads:
+
+    a one-word struct whose only field is a nested frame: its `__init__` is
+    classified as returning a frame, so the module cannot be a dylib
+      ->  `std/builtin/builtin_slice.mojo` builds as a library
+        ->  the 2026-10-01 arrow (`comptime` class attribute of a computed value)
+          ->  `Variant.get_discriminant`'s `__mlir_op` (option 2's second half)
+            ->  `Optional.or_else`
+              ->  the 13 files reach their own next refusal
+
+**What that means for picking this up, and it is the useful part.** Option 2
+below is still the right answer to the representation question, and neither of
+its two halves can be started until the arrow above them is closed — so a
+session that reads only "the next step" section below will implement a
+`Variant` tag reader and discover the wall on the way. The 2026-10-01 session
+said the same thing about its own predecessor, and it was right; this is the
+third revision of that chain and the second time the first arrow has been a
+frame or boundary question rather than a value-model one. **Measure the first
+refusal before starting any of it**, which is what this section exists for.
+
+The new arrow is filed, with a 15-line reproducer and the four-step chain, as
+`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md`. It is a
+frame-identity question (a receiver writeback that hands back the address it was
+given) in the frame/export boundary, and it is worth more than this row: it is
+the first blocking fact of 20+ files in `bugs/sweeps/sweep-x86-6.txt`, every one
+of which is an importer of `builtin_slice` or `rebind`.
+
+**Not measured here:** whether closing the new arrow actually moves
+`builtin_slice.mojo` past its own next refusal, or how many of the 13 files gain
+a PASS when it does. Both need the integrator's sweep, and both are the kind of
+number this document has twice recorded wrongly by estimating it.
