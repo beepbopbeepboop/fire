@@ -1451,8 +1451,10 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     two answers in this file that were false about the second kind are what
     cost it: the escape check's container branch in `formal/build.py`, and
     `multi_index_kind` below, which answered "a subscript whose index is a
-    tuple" about a type application. Both are measured before and after in
-    `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+    tuple" about a type application. Both were false diagnoses counted in map
+    rows 7 and 8 of the sweep work map; `formal/build.py`'s container branch
+    and this `multi_index_kind` were two readers of the same wrong question,
+    which is why they are one function now.
 
     THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
     reader of the multi-index question: two functions deciding "is this bracket
@@ -10358,16 +10360,14 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 # PYTHON BUILTINS THIS PATH DOES NOT IMPLEMENT, and why each one has no answer
 # here. The values are the second half of the sentence they appear in.
 #
-# This is the table `bugs/FORMAL_frame_receiver_handoff.md` names as the thing
-# the `getattr`/`setattr` finding was waiting for — "a program that reaches one
+# This is the table the `getattr`/`setattr` finding was waiting for — "a program that reaches one
 # of them is a program with a Python builtin this backend does not implement,
 # which is a fact about the backend's surface rather than about the image, and
-# naming it needs a table of what the backend DOES implement" — and it is also
-# the one remaining wrong diagnosis in
-# `bugs/FORMAL_frame_by_value_ceiling_zero.md`'s landing table, where
-# `std/memory/unsafe_pointer.mojo` is refused with "a Pointer receiver is
-# passed to type_of()" and the doc's own note says what that sentence is worth:
-# "`type_of` is a missing builtin, on any receiver".
+# naming it needs a table of what the backend DOES implement" — which is the
+# table immediately below. `std/memory/unsafe_pointer.mojo` is the file that
+# asked for it: it is refused with "a Pointer receiver is passed to type_of()",
+# and the honest reading of that sentence is "`type_of` is a missing builtin, on
+# any receiver".
 #
 # **Why the existing sentence is wrong for these and only these.** The last arm
 # of `frame_undefined_callee_refusal` says "this module defines no FUNCTION of
@@ -10522,9 +10522,9 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"to give: {UNIMPLEMENTED_BUILTINS[callee]}. That is a fact about "
             f"what this backend does, not about the receiver — so nothing about "
             f"{who}'s layout is at fault, and no declaration of {callee} in "
-            f"this file would change it. `bugs/"
-            f"FORMAL_frame_by_value_ceiling_zero.md` has the measurement that "
-            f"put this name on the list")
+            f"this file would change it. `UNIMPLEMENTED_BUILTINS` is the one "
+            f"table of what this path does not implement, and adding a name to "
+            f"it is all it takes to name the next one")
     if comptime_param_of:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -15348,6 +15348,91 @@ def method_receiver_name(method) -> object:
     return None
 
 
+def method_declares_receiver(method) -> bool:
+    """Whether this method's DECLARATION spells a receiver as its first parameter.
+
+    The question `method_receiver_name` above answers "which name", and this one
+    answers "is it a receiver at all" — which is a different question and the
+    source of an argument-binding defect.
+
+    `method_receiver_name` returns the first parameter's name whatever it is
+    called, which is what makes `def __init__(this)` and `@classmethod def
+    is_float(cls, …)` work: `this` and `cls` are receiver SPELLINGS, and the
+    name is not how the language recognises a receiver, the first parameter's
+    position is. But a first parameter called `x` is not a receiver in any
+    spelling this language has, and treating it as one is not a harmless
+    generality:
+
+    * `formal/build.py`'s `_rewrite_method_calls` prepends the receiver to the
+      call's argument list for every method this returns True for, and
+      `function_param_shape` / `incoming_args` read `fn.params` verbatim. For a
+      method that DECLARED its receiver those agree — `params[0]` is the
+      receiver's slot and the prepended word lands in it. For a method that did
+      not, they do not: the prepended receiver lands on the first DECLARED
+      parameter and every argument after it is off by one, with one argument
+      too many.
+    * The safe direction held only by luck. Measured on this tree,
+      `struct Box: def run(x: Int, r: R)` called `bx.run(0, r)` is refused —
+      first by `check_holder_agreements` ("`r` … every call site hands it
+      something else: passes the literal 0", which is false: it passes `r`),
+      and, for the specialized spelling, by `bind_call_arguments` ("too many
+      positional arguments (3 for 2 parameter(s))"), which is also false. Both
+      are refusals for reasons that are not operating, on a program whose only
+      real problem is spelled in its own source.
+
+    **What the corpus says about the cost of refusing**, measured by walking
+    every `.mojo` file in the tree and asking this of every method that HAS
+    parameters: 118 files, 6 such methods, and all 6 spell the receiver `self`
+    (`bootstrap_test_classes.mojo`, `class_jit.mojo`,
+    `formal/examples/wide_recv.mojo`). A `@staticmethod` is excluded by its
+    decorator rather than by its first parameter, which is the shape
+    `std/python/python.mojo`'s `import_module` is (`FORMAL_staticmethod_is_compiled_
+    as_an_instance_method.md`'s other half). So refusing costs 0 files here.
+
+    The answer is deliberately about the SPELLING rather than about the count,
+    because a count cannot distinguish `def m(self, x)` from `def m(x, y)` and
+    the count is the thing that is already believed twice.
+    """
+    if "staticmethod" in _decorator_names(method):
+        return False
+    params = list(getattr(method, "params", None) or [])
+    if not params or not isinstance(params[0], (tuple, list)) or not params[0]:
+        return False
+    return params[0][0] in RECEIVER_PARAMETER_SPELLINGS
+
+
+def method_without_a_receiver_parameter_refusal(struct_name: str,
+                                                member: str) -> str:
+    """Why a method with parameters and no receiver parameter is not lowered.
+
+    The refusal for the shape `method_declares_receiver` rules out, and it
+    exists because both of the answers this path had for it were wrong in the
+    same direction: bind the receiver as if the method took one and every
+    argument after the first is off by one, or bind it as if the method took
+    none and the caller's receiver is silently dropped. Neither is a question
+    about the program, and a reader sent to either is sent to fix an argument
+    list that is correct.
+
+    The advice is the one that makes the program work, and it is spelled as the
+    source change rather than as a rule: put the receiver back.
+    """
+    return (f"{struct_name}.{member}() is declared with parameters and no "
+            f"receiver: its first parameter is an ordinary argument, so this "
+            f"path cannot tell whether a call passes the receiver before it "
+            f"or not — bind the receiver as an ordinary word would shift every "
+            f"argument after it by one, and ignore it would drop it. A method "
+            f"here takes its receiver as its FIRST parameter, named "
+            f"{'/'.join(sorted(RECEIVER_PARAMETER_SPELLINGS))}, which is the "
+            f"same program with an argument list this path can read")
+
+
+# The spellings a receiver parameter is written with. `struct_receivers`
+# derives the field-reading set from them and `method_declares_receiver` below
+# requires one, so the two cannot come apart; a method that writes it some
+# other name is refused by name rather than half-supported.
+RECEIVER_PARAMETER_SPELLINGS = frozenset({"self", "this", "cls"})
+
+
 def struct_declared_names(struct_def) -> list:
     """The class body's own names, in declaration order, `__slots__` expanded.
 
@@ -16764,7 +16849,8 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         there would be false in its first clause — the operand IS the bare name
         `h` — and it is reachable, measured: `return len(b, b)` on a `Bag`
         frame hits it.  A refusal whose stated reason is entirely false is the
-    worst outcome on this path (`bugs/FORMAL_frame_receiver_handoff.md` §4), so
+    worst outcome on this path (`test_refusal_taxonomy.py` is the standing
+    # check for it), so
     the arm is not there to be right about a case that should have a different
         message.
     """
@@ -21658,7 +21744,8 @@ def dylib_frame_return_refusal(module, names) -> str:
     measured one: `formal/build.py`'s `_method_exports` used to filter wide
     receivers out of the export set, the importer's call had nothing to bind
     to, and the symptom was reported as a layout problem (see
-    `bugs/FORMAL_frame_receiver_handoff.md` §1).  Silently changing a module's
+    `byref_cross_module_wide_receiver_reads` in `test_formal_run.py`).
+    # Silently changing a module's
     public API is the same defect with a different spelling."""
     return (f"module {module} exports {' and '.join(names)}, which "
             f"{'return' if len(names) == 1 else 'return'} a frame address, and "
@@ -22049,7 +22136,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
     """`recv.m[T](x)` where two structs in this image declare `m`.
 
     A refusal whose stated reason was **entirely false**, which is the defect
-    class §4 of `bugs/FORMAL_frame_receiver_handoff.md` is three examples of.
+    class `test_refusal_taxonomy.py` exists to hold this path to.
     It was refused as `b.run names 'run', which is a METHOD of Box … a
     value-position method reference is a bound method`, which is a claim about a
     program that has no such reference in it: `b.run[3](4)` is a CALL, the
@@ -22067,7 +22154,7 @@ def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
         that may be the other — a wrong answer with exit 0.
 
     So the reader's next step is in their own source, and this says which of the
-    two things they can do about it.  `bugs/FORMAL_frame_receiver_handoff.md`
+    two things they can do about it.  `formal/model.py`'s own
     §18 measured the shape across the corpus: it is what still refuses
     `std/runtime/_asyncrt.mojo` and `std/utils/index.mojo` of the eight files the
     sweep reported as value-position method references.
@@ -22150,7 +22237,8 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
     at this function and be reported by the second bullet above, which is false
     about it in every clause: it is a call and not a value-position reference,
     and `run` is a method of the receiver's OWN struct, which is the hand-off
-    `bugs/FORMAL_frame_receiver_handoff.md` §1 measures to be sound.  It has its
+    cross-module hand-off measures to be sound (`test_formal_run.py`'s
+    # `byref_cross_module_wide_receiver_writes`).  It has its
     own message, `ambiguous_method_specialization_refusal`, reached from
     `formal/build.py`'s `check_module_symbols` instead — which is where the
     BRACKET is examined, and therefore the only place the ambiguity is knowable
@@ -23909,6 +23997,171 @@ class GlobalDataImage:
 # BUDGET that underestimates costs depth, which is a refusal and never a crash.
 STACK_FLOOR_BUDGET_BYTES = 7 * 1024 * 1024 + 512 * 1024
 
+# THE STATUS A STACK OVERFLOW LEAVES, beside the one a shift leaves. The
+# argument for a second number and against reusing `SHIFT_TRAP_STATUS` is the
+# argument every status on this path makes: "this program could not be answered"
+# is one answer, and a caller that has to tell a stack overflow from a negative
+# shift amount is being handed a distinction nobody downstream wanted. But they
+# are not the same event, and the diagnostic value of naming which one happened
+# is real: an overflow is a statement about the program RECURING and an operand
+# being a negative amount is a statement about one line. 1 is taken by the
+# divide-by-zero arm of each backend's shift/div emitter (`SHIFT_TRAP_STATUS`),
+# so this is 2, and both backends read the constant rather than the literal —
+# the same reason that one is a constant.
+STACK_TRAP_STATUS = 2
+
+
+def stack_floor_address(base: int, table: dict = None) -> int:
+    """Where this unit's stack-floor WORD is, as an absolute address.
+
+    The one computation of it, for both backends and for every prologue in the
+    image, because the failure this guards against has a second copy of this
+    answer in it: `GlobalDataImage.stack_floor_offset` already refuses to be a
+    second field kept equal to `init_flag_offset + GLOBAL_SLOT_BYTES`, and a
+    backend that added `init_flag_offset + 16` here would be the third answer
+    to one question about an image's layout. The offset is read out of the image
+    the linker is writing, not recomputed from the table, so the code cannot
+    address a word the bytes do not contain.
+
+    `table` defaults to the published slot table; both callers pass
+    `module_slots()` explicitly today, and the default exists so a caller that
+    has not published yet gets the empty-table image (two reserved words) rather
+    than a `None`.
+    """
+    return base + build_data_image(
+        module_slots() if table is None else table, base).stack_floor_offset
+
+
+def recursive_function_names(functions, structs: dict = None) -> set:
+    """The functions of one image a call chain can RE-ENTER, by name.
+
+    This is the set the stack-floor guard is emitted for, and the rule is
+    "on a call-graph cycle" rather than "in the image" for a reason that is
+    about what the guard is FOR. Unbounded call depth is a cycle: a chain of
+    distinct functions has a finite depth, and it is the return to a function
+    already on the stack that makes the depth a function of the PROGRAM rather
+    than of its shape. So a cycle's members are where a runaway recursion is
+    stopped, and a program that recurses cannot get past one.
+
+    **And the narrower set costs nothing anywhere else, which is what makes it
+    the rule rather than a compromise.** The per-export contract proof
+    (`arm64_proof_gen._dylib_contract_proof`) declines to emit a contract for an
+    export whose body contains ANY conditional branch — `Refine.Block.step` is one
+    function of one state — and every RECURSIVE function contains a branch (a
+    branch-free body that calls itself does not return, so it is not a program
+    this backend can be asked about). So guarding the cycles adds no branch to
+    any export that still had a proved contract, and removes none: the export
+    contracts that exist today are exactly the straight-line, non-recursive
+    ones, and they are byte-identical with this in place. Widening the rule to
+    "every function" would therefore trade proved contracts for nothing.
+
+    What it does leave open, and what is stated rather than hidden: a chain of
+    DISTINCT functions deep enough to exhaust the stack is still unguarded. Its
+    depth is finite and knowable, and the budget this guards against
+    (`STACK_FLOOR_BUDGET_BYTES`) would fire on it only if the guard were in a
+    function the chain passes through, which by construction it is not.
+
+    The edges are a SUPERSET of the calls the emitter makes, deliberately, since
+    a missed edge here means a missed cycle and an unguarded recursion:
+    `call_callee_name` answers the two spellings that name a function of this
+    image by a bare name, and a `recv.m(x)` callee contributes `Struct_m` for
+    EVERY struct in the image that declares an `m` — which is the symbol the
+    method-call rewriting emits, and over-approximating the owner is the safe
+    direction because it can only add an edge. A call out of the image
+    (a dylib symbol, an extern) is not an edge: nothing in this image calls back
+    into it, so it cannot close a cycle here.
+    """
+    names = {f.name for f in functions}
+    method_owners: dict = {}
+    for st in (structs or {}).values():
+        for m in struct_methods(st):
+            method_owners.setdefault(m.name, []).append(st.name)
+    edges: dict = {f.name: set() for f in functions}
+    for f in functions:
+        body = getattr(f, "body", None)
+        if body is None:
+            # A StructDef, or anything else that is not a function. Both
+            # backends pass their `_functions` table, which is FunctionDefs
+            # only, so this is the guard against a caller that hands over the
+            # module's whole statement list — and skipping is the right answer
+            # rather than an error, because a struct has no calls of its own.
+            continue
+        for node in iter_nodes(body):
+            if not isinstance(node, F.CallExpr):
+                continue
+            callee = call_callee_name(node.func)
+            if callee is not None:
+                edges[f.name].add(callee)
+                continue
+            func = node.func
+            if isinstance(func, F.SubscriptExpr):
+                func = func.obj
+            if not isinstance(func, F.MemberExpr):
+                continue
+            for owner in method_owners.get(func.member, ()):
+                edges[f.name].add(f"{owner}_{func.member}")
+
+    def reaches_self(start: str) -> bool:
+        seen, stack = set(), [start]
+        while stack:
+            cur = stack.pop()
+            for nxt in edges.get(cur, ()):
+                if nxt == start:
+                    return True
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    return {name for name in names if reaches_self(name)}
+
+
+# THE GUARD'S SHAPE, decided once so that neither backend can spell it twice.
+#
+# **Which prologues get it** is `recursive_function_names` above, and that is
+# the only decision here that is not the sequence: the sequence is the same in
+# every prologue it appears in, and a prologue it does not appear in is
+# unchanged code.
+#
+# Both prologues subtract a fixed frame and then do this, and the order is
+# load-bearing on both machines:
+#
+#     <floor> = the word at `stack_floor_address(...)`
+#     if <floor> == 0:  <floor> = SP - BUDGET ; store it back
+#     compare SP against <floor> and EXIT(STACK_TRAP_STATUS) if SP is below it
+#
+# Four decisions, each of which had more than one available answer:
+#
+# * **The floor is stored LAZILY, in every prologue, and not from the
+#   executable's entry stub.** A stub would do it once per process for an
+#   executable, and a dylib has no entry stub (`emit_startup=False`), so that
+#   answer is one mechanism for one container kind and a hole in the other —
+#   the shape `initialization_is_lazy` below already refuses for the same
+#   reason. The store is a `cbnz`/`jne` over four instructions and runs once
+#   per process; the alternative saves those four instructions per call and
+#   costs a second code path that a library image cannot take.
+# * **Zero means "not stored yet", and that is SAFE, not a hole.** The compare
+#   is an UNSIGNED lower test, and a stack pointer is never below zero, so an
+#   unset floor cannot fire — the guard is silent rather than wrong, which is
+#   exactly today's behaviour and the state the word starts in. This is why the
+#   floor needs no initialization ORDER relative to the first prologue: the
+#   store and the compare are in the same prologue, store first.
+# * **The budget is subtracted from the SP the frame subtraction LEFT**, not
+#   from the caller's SP. The difference is this function's own frame, which is
+#   charged against the budget rather than added to it, and that is the
+#   conservative direction.
+# * **The compare reads SP into a scratch register first on arm64** rather than
+#   using `CMP SP, Xm`. Both spell the same instruction to the hardware, but
+#   `lib/ProofLib.lean`'s `arm64_reg` answers 0 for index 31, so the
+#   shifted-register `SUBS` that `CMP SP, Xm` decodes to would be proved about
+#   `0 - Xm` — a proof of a different instruction
+#   (`bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`). `ADD Xd, SP, #0`
+#   is one of the forms the model already reads as `s.sp`, and the `CMP` that
+#   follows then names two ordinary registers. The bug doc for the guard
+#   concluded that the arm64 model gap BLOCKED it; this is the way round that,
+#   and it is why the sequence is written down here rather than left to two
+#   emitters.
+
 
 # WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
 #
@@ -24789,7 +25042,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     at the address the slot holds.
 
     **The image is never empty, and that is a change of policy rather than an
-    oversight** (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    oversight** (`model.STACK_FLOOR_BUDGET_BYTES`, whose guard reads the word
+    below).
     The two reserved words are the backend's own bookkeeping rather than any
     program's storage, so they exist whether or not the module declares a
     global — which means `has_globals` is true of every image and `__DATA` is
@@ -24857,7 +25111,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     # finds it clear must treat the floor as UNKNOWN rather than as zero —
     # which is the safe direction for the guard this word exists for, because a
     # zero floor compares as "nothing is below the stack pointer" and so never
-    # fires (`bugs/FORMAL_formal_frame_size_bounds_recursion_depth.md`).
+    # fires (`model.STACK_FLOOR_BUDGET_BYTES`).
     return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
                            string_cells)
 
@@ -25003,6 +25257,41 @@ def unresolved_name_refusal(name: str, fn_name: str, why: str) -> str:
             f"out of whatever register the allocator left behind, which is "
             f"how one program returned 10 on arm64 and 0 on x86-64 where the "
             f"source says 5")
+
+
+def function_value_refusal(name: str, fn_name: str) -> str:
+    """Why a FUNCTION NAME cannot be read as a value, in its own words.
+
+    `def dbl(x): …` followed by `call2(dbl, 5)` — or by `var g = dbl` — reaches
+    the name as an ordinary read, and the read finds no home for it because a
+    function is not a local, a receiver field, or a folded module constant. The
+    refusal that stood there was `unresolved_name_refusal`'s, whose `why` clause
+    is *"the register allocator collected no home for it, so the emitter and the
+    allocation walk disagree about this function's locals"*.
+
+    **Every clause of that is false, and it is false in the direction that costs
+    a reader the most.** The emitter and the allocation walk agree perfectly:
+    both of them know `dbl` is not a local, which is why neither gave it one.
+    What is true is that a first-class function has no representation on this
+    path at all \u2014 one word is a value and a function is a code address, so there
+    is nothing for the word to hold (`pointer_value_model` is what says what a
+    word can and cannot denote). Measured on this tree, both spellings above
+    were refused with the allocator sentence.
+
+    So the message says what the construct is, which is the same repair
+    `UNIMPLEMENTED_BUILTINS` and `FRAME_IDENTITY_CALLS` are: name the thing
+    instead of the machinery that failed to hold it.
+    """
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a FUNCTION, and a function is not a value on "
+            f"this path: it has no representation here \u2014 a value is one 64-bit "
+            f"word and a function is a code address, so there is nothing for "
+            f"that word to hold, and passing one as an argument, storing one in "
+            f"a container, or returning one is refused rather than answered "
+            f"with a number that means nothing. `formal/hostmods/` has no "
+            f"module that hands back a callable for the same reason "
+            f"(`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"it directly, or move the work into a `def` and pass its results")
 
 
 def member_chain_text(expr) -> str:

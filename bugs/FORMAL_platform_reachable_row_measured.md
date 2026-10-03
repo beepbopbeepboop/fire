@@ -118,9 +118,8 @@ rate.
 
 ## 3. `glob` re-measured: still 9 files, and the reason has moved
 
-`.tmp/sweep-x86-4.txt` lists `glob x9`, and the older record
-(`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` §`glob`) said the
-blocker was `os.listdir` and that "glob landed earlier" meant
+`.tmp/sweep-x86-4.txt` lists `glob x9`, and the older record said the blocker
+was `os.listdir` and that "glob landed earlier" meant
 `formal/hostmods/pathlib.mojo`'s `pathlib.match`. **Both halves of that are now
 stale, and the useful question is what a `glob` would be worth TODAY.**
 

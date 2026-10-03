@@ -72,7 +72,7 @@ Mach-O images (`test_formal_os.py`, `test_struct_formal.py`,
 tally, and to the coverage number, and nothing in the tree says that is a
 decision.
 
-That is the failure mode `bugs/FORMAL_frame_receiver_handoff.md` §7 records from
+That is the failure mode `formal/build.py`'s check ORDER records from
 the other direction: `coro` sat in the gate naming `mojo_*` runtime files after
 they were renamed to `fire_*`, all twenty of its cases had been failing to
 compile, and the suite had been reporting 0/20 the whole time. Here nothing fails
