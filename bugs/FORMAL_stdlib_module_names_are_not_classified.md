@@ -2,13 +2,72 @@
 
 **Area:** FORMAL (module classification — `formal/imports.py`'s
 `HOST_MODELLED` / `HOST_UNREACHABLE` / `HOST_ADMITTED`, and the wording of
-`unresolvable_import_error`). **Status: OPEN, measured, not fixed.** One name
-of the 223 was fixed while writing this
-(`bugs/FORMAL_shlex_is_not_classified_as_a_host_module.md`); the other 222 are
-here because one line is not a census and the census is not one session's
-judgement call.
+`unresolvable_import_error`). **Status: the FALSE SENTENCE is fixed for all 223
+and the 222 judgements are still to do — with the coverage question answered, and
+the answer is ZERO.**
 
 Found while fixing that one name, 2026-10-02, on `work/formal8-10`.
+
+## 0. What landed, 2026-10-03 (`work/formal10-4`)
+
+**The wording, which is the half that was a lie.** `shlex` was fixed by adding
+ONE tier entry, while the question its diagnostic was really asking — "is this
+name in the standard library?" — has an oracle: CPython's own
+`sys.stdlib_module_names`. Answering it from the hand-kept tiers made the build
+say, of a module CPython ships:
+
+```console
+$ python3 fire.py build --formal --no-prove -o .tmp/a a.mojo     # `import binascii`
+build: a.mojo imports 'binascii', which is not a stdlib or sibling module,
+and no such file exists
+```
+
+`formal/imports.py::is_cpython_stdlib` now asks the oracle in the place that
+decides the WORDING, and `unresolvable_import_error` has three arms:
+
+| the name | what the build says |
+|---|---|
+| in a tier | "a host module (CPython standard library), which has no Mojo source for this backend to compile" — unchanged, and it carries `host_module_advice` |
+| CPython ships it, no tier names it | "a CPython standard-library module, which has no Mojo source in this tree and no tier … saying whether implementing it would need an object this target does not have — so nothing here can say whether it is reachable" |
+| CPython does not ship it | "not a stdlib or sibling module, and no such file exists" — the only sentence that may say it |
+
+**And `tools/formal_sweep.py`'s `_is_cpython_stdlib` is deleted as a copy.** It
+existed precisely because the build's message was wrong, and read
+`sys.stdlib_module_names` to correct a verdict the build had already printed — a
+report disagreeing with the message it reports on. Its own docstring records the
+cost: "36 of them would otherwise be filed as unresolved imports". It is now a
+delegation, so the build and the report cannot come apart.
+
+`_is_host_module` is deliberately NOT the place: it answers "is this one of the
+names we have CLASSIFIED", which includes every module with a `formal/hostmods/`
+source — `math`, `stat`, `shutil`, `fcntl`, `platform` all answer False there
+and are pinned False by their own suites. One oracle, two questions, and both are
+asked where they are used.
+
+## 0.1 The coverage question, answered: ZERO
+
+§"The next step" says "which of the 120 a swept file actually imports is the
+number that decides how much of this is worth doing, and it is cheap … Until that
+is counted, 120 is an upper bound". Counted, on this tree, with
+`formal/imports.py`'s own `imported_modules` over every `.mojo` file in this
+repository and the stdlib:
+
+```
+223 names in no tier (120 public, 103 private)
+370 .mojo files scanned
+0 of the 223 are imported by ANY of them
+```
+
+**So the classification is worth nothing for coverage, and that is the finding
+that decides what to do with the 222.** It is not an emergency and it is not
+invisible either: the tier sets are the CLAIM about the target, and a claim is
+made by the rule and by nothing else, so filling 222 entries by category from a
+distance is the failure the comment at `:101` warns about — and with nothing
+importing them there is no measurement to tell a right entry from a plausible
+one. The honest shape is what landed: the diagnostic is true, the unclassified
+names are named as unclassified (so a coverage report counts them as "no verdict"
+rather than as either tier), and the queue for the 222 is a bounded piece of
+per-name work with the readings §"The next step" already lists.
 
 ## What I ran
 
@@ -108,11 +167,13 @@ lists already exist (`formal/imports.py`'s `imported_modules`, and the
 that is counted, 120 is an upper bound and the honest statement is that
 **`shlex` was the one a real file in this repository imports.**
 
-## Why this is filed and not fixed here
+## Why the 222 are filed and not fixed here
 
 * It is 222 judgement calls in `formal/imports.py`, which three other workers
   were editing in this same round — a bulk change to the two tier sets is a
   merge conflict on every hunk and a reach-accounting change nobody can review.
+  §0.1 adds the reason that survives the round ending: ZERO corpus exposure, so
+  there is no measurement to tell a right entry from a plausible one.
 * The tiers are a CLAIM about the target, and CLAUDE.md's rule is that a claim
   is made by the rule and by nothing else. Filling them in by category from a
   distance is exactly the failure mode the comment at `:101` warns about

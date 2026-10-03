@@ -677,7 +677,53 @@ def _host_tier_conflicts() -> list:
 
 
 def _is_host_module(name: str) -> bool:
+    """Whether this name is a HOST MODULE this path refuses for want of source.
+
+    NOT "is this a name in CPython's standard library" — that is
+    `is_cpython_stdlib`, and the two are different questions with different
+    consumers. This one is `resolve_module_path`'s pass 2 and the tier tables'
+    own membership test, so it answers "is this one of the names we have
+    CLASSIFIED", and a classified name includes every module with a
+    `formal/hostmods/` source, which is why `math`, `stat`, `shutil`, `fcntl`
+    and `platform` all answer False here and are pinned False by their own
+    suites: they are built here, so nothing refuses them.
+    """
     return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+
+
+def is_cpython_stdlib(name: str) -> bool:
+    """Whether `name` names a module of the HOST's standard library.
+
+    **CPython's own list is the authority**, `sys.stdlib_module_names` (3.10+),
+    with the hand-maintained tiers as a second opinion rather than the first.
+    The tiers are a CLAIM about the target — "does implementing this need an
+    object a freestanding image that links libSystem and nothing else does not
+    have" — and a claim is the wrong thing to answer "is `binascii` part of the
+    standard library". That question has an oracle, and using a hand-kept list
+    for it made this build say, of a module CPython ships:
+
+        build: a.mojo imports 'binascii', which is not a stdlib or sibling
+        module, and no such file exists
+
+    which is false about the target in a message nobody wrote a rule for, and
+    which sent 36 sweep rows to be filed as unresolved imports rather than as
+    the host-import rows they are (measured, and recorded in
+    `tools/formal_sweep.py`'s own `_is_cpython_stdlib`, which grew a second
+    authority to compensate — two readers of one fact, which is how they come to
+    disagree; this function is the one, and that copy now calls it).
+
+    Matched on the TOP component, like `_is_host_module` and `host_module_tier`,
+    so `os.path` and `os` answer alike. The interpreter's table is read through
+    `getattr` and a missing one answers False, which is the direction that keeps
+    a Python older than 3.10 behaving as it did rather than raising.
+    """
+    if not name:
+        return False
+    top = name.split(".")[0]
+    if name in HOST_MODULES or top in HOST_MODULES:
+        return True
+    names = getattr(sys, "stdlib_module_names", None)
+    return bool(names) and top in names
 
 
 # Modules whose import is a DECLARATION to the reader rather than a
@@ -1552,6 +1598,28 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
+    elif is_cpython_stdlib(module_name):
+        # The one sentence that used to be FALSE about the target.  CPython
+        # ships `binascii`, `cmath`, `getopt`, `html`, `tomllib` and 217 other
+        # names this table does not classify, and each of them was reported as
+        # "not a stdlib or sibling module, and no such file exists" — a
+        # statement about the TARGET that the interpreter's own
+        # `sys.stdlib_module_names` denies.
+        #
+        # It is worded apart from the classified case on purpose, because the
+        # two differ in something a reader acts on: a name in a tier has an
+        # owner and a next step (`host_module_advice` below, and
+        # `host_module_tier` for a coverage report), and a name in NO tier has
+        # neither — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is
+        # the queue for the 222, and it records that ZERO of them is imported by
+        # any file in this repository or the stdlib, which is what makes the
+        # classification a bounded piece of work rather than a coverage
+        # emergency. So this says what is true (it is the host's library, there
+        # is no source here) and claims nothing about which tier it belongs to.
+        kind = ("a CPython standard-library module, which has no Mojo source "
+                "in this tree and no tier in `formal/imports.py` saying whether "
+                "implementing it would need an object this target does not "
+                "have — so nothing here can say whether it is reachable")
     else:
         kind = "not a stdlib or sibling module, and no such file exists"
     advice = host_module_advice(module_name) if _is_host_module(module_name) \

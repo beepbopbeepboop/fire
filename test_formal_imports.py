@@ -928,6 +928,88 @@ def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
           f"does not exist: {text[-300:]}")
 
 
+def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
+    """222 names: CPython ships them, this table classifies none of them.
+
+    The same defect as the row above, one tier wider, and it was 222 names wide
+    rather than one because `shlex` was fixed by adding ONE tier entry while the
+    question it was really asking — "is this name in the standard library?" —
+    has an oracle: CPython's own `sys.stdlib_module_names`. Answering it from the
+    hand-kept tiers made the build say, of a module CPython ships:
+
+        build: a.mojo imports 'binascii', which is not a stdlib or sibling
+        module, and no such file exists
+
+    which is false about the target, and 36 sweep rows were filed as unresolved
+    imports rather than as the host-import rows they are. The wording now has
+    three arms and this is the middle one: a name in a tier says it is a host
+    module, a name CPython ships and no tier names says it is a standard-library
+    module with no tier and therefore no verdict, and a name CPython does not
+    ship is the only one that may be called unresolvable.
+
+    Both boundaries are checked, because a rule that answered "yes" for
+    everything would make the typo sentence unreachable and this suite's other
+    rows (`test_an_unresolvable_import_says_no_such_file_exists` and its
+    neighbours) would stop testing anything.
+    """
+    import sys as _sys
+    import formal.imports as I
+    unclassified = [n for n in sorted(_sys.stdlib_module_names)
+                    if not I.host_module_tier(n)]
+    check(len(unclassified) > 100,
+          "precondition: this test is about the names in NO tier, and there are "
+          f"only {len(unclassified)} of them now — if they have been "
+          "classified, this row is about nothing and should go")
+    for name in ("binascii", "cmath", "getopt", "html", "tomllib"):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is a CPython standard-library module, "
+              "which is the fact the diagnostic used to deny")
+        check(I.is_cpython_stdlib(name),
+              f"is_cpython_stdlib({name!r}) is False: it is the host's own "
+              "library, and CPython's own table says so")
+        check(not I.host_module_tier(name),
+              f"{name} is expected to be in no tier — this row is about the "
+              "wording of an UNCLASSIFIED name, and if it has been classified "
+              "the row above is the one that applies")
+    check(I.is_cpython_stdlib("os.path"),
+          "a dotted name is matched on its TOP component, like "
+          "`_is_host_module` and `host_module_tier`")
+    check(not I.is_cpython_stdlib("not_a_module_anywhere"),
+          "a name CPython does not ship must not be called a standard-library "
+          "module, or the typo sentence becomes unreachable")
+    check(not I.is_cpython_stdlib(""),
+          "the empty name is not a module")
+    # A classified name that this tree BUILDS is still not a host module for
+    # `_is_host_module`'s purposes, which is the distinction the two predicates
+    # exist to keep: `math` is in CPython's table and has a `formal/hostmods/`
+    # source, so the build must not refuse it.
+    check(not I._is_host_module("math"),
+          "_is_host_module('math') became True: that predicate answers 'is this "
+          "one of the names we have classified as unbuildable', and `math` has "
+          "a source in formal/hostmods/ and is pinned False by "
+          "test_formal_math.py")
+    root = os.path.join(tmpdir, "unclassified")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": "import binascii\ndef main():\n  return 1\n"})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    check(result.returncode != 0,
+          "an unclassified standard-library import is still refused — this "
+          "test is about the WORDING")
+    text = (result.stderr or "") + (result.stdout or "")
+    check("not a stdlib or sibling module" not in text,
+          "the refusal still calls a standard-library module something that "
+          f"does not exist: {text[-300:]}")
+    check("standard-library module" in text,
+          f"the refusal must say what the name IS: {text[-300:]}")
+    check("no tier" in text,
+          "and it must say that nothing here can say whether the module is "
+          f"reachable, which is the whole difference from a tiered name: "
+          f"{text[-300:]}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -2439,6 +2521,8 @@ TESTS = [
      test_host_module_still_refused_despite_same_named_sibling),
     ("a standard-library module in no tier is not reported as a typo",
      test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
+    ("an unclassified CPython stdlib name is not called a typo",
+     test_an_unclassified_stdlib_name_is_not_called_a_typo),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
