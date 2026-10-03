@@ -4627,23 +4627,55 @@ def _call_boundary(code: bytes, base: int, func_entry: int,
     came from: a call to a two-argument function was reported as a recursion
     problem.
     """
+    out = _unfollowable_calls(code, base, func_entry, func_end)
+    return out[0] if out else None
+
+
+def _unfollowable_calls(code: bytes, base: int, func_entry: int,
+                        func_end: int) -> list:
+    """Every `BL` in `[func_entry, func_end)` the CFG walk cannot follow, in
+    address order — the LIST `_call_boundary` takes its first element from.
+
+    The list exists because one is not always enough.  The walk discharges a
+    call out of the image by HALTING at it (`exit_at`), and it halts only on the
+    path whose last instruction sits immediately before that one address.  A
+    program with TWO such calls has a path that reaches the second without ever
+    passing the first, and the walk walks it and executes the `BL` as if it were
+    a self-call — which ended at
+
+        ValueError: unsupported: recursion argument bound (not a dec1 pattern)
+
+    an error about recursion for a program with no recursion, raised past every
+    refusal this module classifies as one (the generator's refusal type is
+    `NotImplementedError`).  `formal_proof_fuzz.py` found it on
+
+        def main(n) -> Int:
+            if n > 100:
+                print(1)
+            print(2)
+            return 0
+
+    where the `else` path reaches `print(2)` without touching `print(1)`.
+    Turning that into a named refusal is `generate_arm64_proof`'s job (it knows
+    whether the caller can say anything better); this function's job is only to
+    be able to tell it there are two.
+    """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
     rets = [pc for pc, w in words.items() if w == 0xd65f03c0 and pc >= func_entry]
     end = max(rets) + 4 if rets else base + len(code)
     if func_end is not None:
         end = func_end
+    out = []
     for pc in sorted(p for p in words if func_entry <= p < end - 4):
         if _step_branch_index(words[pc]) != 15:       # 15 = BL
             continue
         tgt = _branch_target(words, pc)
         if tgt is None or tgt == func_entry:
             continue                                   # self-call: contracted
-        if not (func_entry <= tgt < end):
-            return {"kind": "opaque", "pc": pc, "target": tgt, "func_end": end}
-        return {"kind": "intralocal", "pc": pc, "target": tgt,
-                "func_end": end}
-    return None
+        kind = ("opaque" if not (func_entry <= tgt < end) else "intralocal")
+        out.append({"kind": kind, "pc": pc, "target": tgt, "func_end": end})
+    return out
 
 
 def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
@@ -8195,7 +8227,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     # function up to the call", not "and returns the model".  `_opaque_call_
     # boundary` finds the first such call; when there is one, the halt address
     # is that call and the terminal proposition is the reachability of it.
-    _opaque = _call_boundary(code, base_addr, func_entry_addr, None)
+    _calls = _unfollowable_calls(code, base_addr, func_entry_addr, None)
+    _opaque = _calls[0] if _calls else None
     if _opaque is not None and _opaque["kind"] == "intralocal":
         raise NotImplementedError(
             f"universal theorem: the call at {_opaque['pc']:#x} targets "
@@ -8209,6 +8242,29 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"not a missing case here.  The semantic model for the call is "
             f"correct and emitted (see the `_go` definitions above); what is "
             f"missing is the machine half.")
+    if len(_calls) > 1:
+        # The halt address is ONE address and the walk reaches it only on the
+        # paths that pass it, so a second unfollowable call has a path of its own
+        # and the walk executes it as if it were a self-call — landing in the
+        # recursion arm of `_gen_universal_e2e_cfg` and raising
+        # `ValueError: unsupported: recursion argument bound (not a dec1
+        # pattern)` for a program with no recursion.  That is a crash where a
+        # refusal is what the generator owes the reader: `NotImplementedError` is
+        # the type every other limit in this file raises, and it is the one
+        # `tools/formal_proof_breadth.py` classifies as `proof-refused` rather
+        # than as a defect in the generator.
+        where = ", ".join(f"{c['pc']:#x} -> {c['target']:#x} ({c['kind']})"
+                          for c in _calls)
+        raise NotImplementedError(
+            f"universal theorem: {len(_calls)} calls this walk cannot follow "
+            f"({where}), and ONE halt address cannot discharge them.  The run "
+            f"reaches {_opaque['pc']:#x} only on the paths that pass it, so a "
+            f"second call has paths of its own -- the honest statement would be "
+            f"a disjunction over the call addresses, which is one exit address "
+            f"more than this framework has.  The semantic model is emitted and "
+            f"correct for all of them; what is missing is the machine half.  "
+            f"Raised here rather than left to the walk, which reported this as "
+            f"a recursion problem.")
     # The AST bridge's own limit, asked AFTER the machine half's so that the
     # refusal a two-function program gets names the bigger of the two gaps: the
     # CFG walk cannot follow the call at all, where the bridge could be fixed

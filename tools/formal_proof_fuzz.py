@@ -196,6 +196,18 @@ PROOF_CLASSES = ("pass", "admitted", "lean-rejected", "bound-exceeded",
                  "proof-refused", "codegen-refused", "refused-import",
                  "proof-crash", "build-crash", "no-proof", "not-checked")
 
+#: The number of `sorry`s EVERY proof a generator emits carries, by
+#: architecture — its DESIGNED trust boundaries, not a defect in any one proof.
+#: x86-64's two are `<fn>_compile_correct` (the AST-to-bytes link, stated with a
+#: hypothesis attached) and the step certificates; arm64's is 0. This is the
+#: default for `--holes-below`, and it is a default rather than a constant
+#: because a reader of an x86-64 campaign should not have to know that its
+#: architecture can never emit a hole-free proof before a `SOUNDNESS` verdict is
+#: possible at all: what that verdict asserts at the floor is still the whole of
+#: the model, since the two holes are both in the machine half and the AST-to-
+#: `mojo` half is fully proved.
+HOLES_FLOOR = {"x86_64": 2, "arm64": 0}
+
 # The verdict a mismatch is reported under when Lean accepted the proof.
 SOUNDNESS = "SOUNDNESS-MISMATCH"
 ADMITTED_BUG = "admitted-MISMATCH"
@@ -775,10 +787,12 @@ def main():
                     help="per-proof WALL bound in seconds, passed to "
                          "check_proof_cached (Lean's own CPU bound is its "
                          "default, and it is the half a wall clock misses)")
-    ap.add_argument("--holes-below", type=int, default=0,
+    ap.add_argument("--holes-below", type=int, default=None,
                     help="the largest hole count an `admitted` verdict may carry "
-                         "and still be reported as a model bug (default 0, i.e. "
-                         "only a hole-free `pass`)")
+                         "and still be reported as a model bug (default: this "
+                         "architecture's DESIGNED floor — 2 on x86-64, whose "
+                         "declared trust boundaries are the AST-to-bytes link "
+                         "and the step certificates, 0 on arm64)")
     ap.add_argument("--no-lean", action="store_true",
                     help="phase A and the images, but no Lean run: the "
                          "behaviour half alone, which is `tools/formal_fuzz.py`'s "
@@ -803,6 +817,8 @@ def main():
     args.backends = (["arm64", "x86_64"] if args.arch == "both"
                      else [args.arch])
     args.extra_inputs = EXTRA_INPUTS
+    if args.holes_below is None:
+        args.holes_below = max(HOLES_FLOOR[b] for b in args.backends)
     args.check = not args.no_check
     args.check_lean = args.check and not args.no_lean
     if args.print_program is not None:
@@ -824,36 +840,52 @@ def main():
     counts = collections.Counter()
     proof_counts = collections.Counter()
     findings = []
+    recs = []
+    # The ledger is APPENDED as each program finishes, not written at the end.
+    # A campaign is minutes to hours (arm64 is ~2 min a proof and x86-64 ~30 s,
+    # and both are content-addressed so a re-run is free), and a tool that only
+    # publishes at the end publishes NOTHING when the run is interrupted — which
+    # is exactly the run whose results you want. One JSON line per program is
+    # also the shape `bugs/sweeps/*.jsonl` already uses for the same reason.
+    ledger_path = os.path.join(args.work, "records.jsonl")
+    open(ledger_path, "w").close()
     tmpdir = tempfile.mkdtemp(prefix="proofuzz.", dir=args.work)
     try:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            recs = list(pool.map(lambda i: check_one(i, args, tmpdir),
-                                 range(args.count)))
-        for rec in recs:
-            counts[rec.get("verdict")] += 1
-            for arch, proof in rec["proof"].items():
-                proof_counts[(arch, proof["cls"])] += 1
-            if rec.get("verdict") in (SOUNDNESS, ADMITTED_BUG, PLAIN):
-                findings.append(rec)
-            if args.verbose or rec.get("verdict") not in QUIET_VERDICTS:
-                for line in report(rec):
-                    print(line, flush=True)
+        with open(ledger_path, "a") as ledger:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                for rec in pool.map(lambda i: check_one(i, args, tmpdir),
+                                     range(args.count)):
+                    recs.append(rec)
+                    counts[rec.get("verdict")] += 1
+                    for arch, proof in rec["proof"].items():
+                        proof_counts[(arch, proof["cls"])] += 1
+                    if rec.get("verdict") in (SOUNDNESS, ADMITTED_BUG, PLAIN):
+                        findings.append(rec)
+                    ledger.write(json.dumps(rec, sort_keys=True) + "\n")
+                    ledger.flush()
+                    if args.verbose or rec.get("verdict") not in QUIET_VERDICTS:
+                        for line in report(rec):
+                            print(line, flush=True)
     finally:
         subprocess.run(["rm", "-rf", tmpdir])
 
-    # EVERY record goes in the ledger, not only the findings: a census run is
-    # re-derivable as a `Counter` over a file in the tree, and the rows that are
-    # NOT findings — the refusals, the rejections, the bounds — are most of what
-    # such a counter is read for.
-    ledger = os.path.join(args.work, "findings.json")
-    with open(ledger, "w") as f:
+    # The summary, next to the per-program ledger written as the run went: every
+    # record goes in one of them or the other, so a census run is re-derivable as
+    # a `Counter` over a file — and the rows that are NOT findings (the
+    # refusals, the rejections, the bounds) are most of what such a counter is
+    # read for.
+    # `summary.json` and NOT the ledger: the ledger is opened "w" here, which
+    # would truncate the per-program lines the run just wrote.
+    summary = os.path.join(args.work, "summary.json")
+    with open(summary, "w") as f:
         json.dump({"args": vars(args), "counts": dict(counts),
                    "proof": {f"{a}:{c}": n
                              for (a, c), n in sorted(proof_counts.items())},
                    "findings": findings, "records": recs}, f, indent=1)
     elapsed = time.time() - started
     print(f"\nformal_proof_fuzz seed={args.seed} arch={args.arch} "
-          f"programs={args.count} in {elapsed:.1f}s (jobs={args.jobs})")
+          f"programs={args.count} in {elapsed:.1f}s (jobs={args.jobs}, "
+          f"holes-below={args.holes_below})")
     print("  the proof half, per architecture (every class, zero included):")
     for arch in args.backends:
         print(f"    {arch:<7} " + "  ".join(
@@ -861,7 +893,8 @@ def main():
     print("  the behaviour half, and the cell the two meet in:")
     for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         print(f"    {v:<20} {n}")
-    print(f"ledger: {ledger}")
+    print(f"ledger: {ledger_path} (one JSON line per program), "
+          f"summary: {summary}")
     return 1 if any(r.get("verdict") == SOUNDNESS for r in findings) else 0
 
 

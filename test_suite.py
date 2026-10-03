@@ -3154,6 +3154,23 @@ UNREGISTERED = {
         'for a job no gate can afford is to declare it. '
         'bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md records '
         'the same gap for the eleven suites above.',
+    # The same shape as `test_formal_fuzz.py` above, and for the same reason: it
+    # is a differential FUZZER's own regression suite, and what it protects is
+    # the measurement. It is cheaper than that one (its Lean half is declared
+    # rather than run — see its own docstring), it adds the one assertion that
+    # file has no place for, which is that the corpus still REACHES the proof
+    # layer: a generator change that made every program a refusal would leave
+    # `test_formal_fuzz.py` green and this campaign measuring nothing.
+    'test_formal_proof_fuzz.py':
+        'The proof-layer differential fuzzer\'s own regression suite: the '
+        'generator\'s corpus (60 indexes, no compiler), the classifier\'s '
+        'cross of Lean\'s verdict with the image\'s, and — through the real '
+        '`compile_formal`, with `check=False` so no Lean — that two programs '
+        'which the 2026-10-03 fix widened to the proof layer still do, and that '
+        'a two-call program is still refused by name rather than crashing. '
+        'Measured 2026-10-03: ~25 s wall, 0.3 GB peak. Declared rather than '
+        'registered for the reason `test_formal_fuzz.py` is: a fuzzer\'s '
+        'heavier settings are a sweep, not a check.',
     'test_formal_math.py': _FORMAL_SUITE_REASON,
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     # The same shape, and here for the same reason. `posixpath` is a SPELLING
