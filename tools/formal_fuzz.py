@@ -72,6 +72,20 @@ Every repro — blamed or not — is written under `--repro-dir` (default
 `build/formal-fuzz/<arch>/`), so the classification is checkable rather than
 trusted.
 
+**What the blame cannot do, stated rather than hidden.** Neutralisation is a
+TEXTUAL substitution, and a substituted program can stop being a runnable
+program: swapping `%` for `+` can make an argument large enough that CPython
+hits its own recursion limit, and a substitution that leaves a `print` of an
+unclassifiable expression is refused by the backend. A candidate that does not
+run counts as no evidence in either direction, so a divergence whose only
+explanation needs such a substitution is reported as unexplained even when it is
+a known construct's. That is the direction to err in — one extra report rather
+than one hidden bug — and it is rare: over the first 1350 seeds it accounted for
+one seed. Each feature is also tried on its OWN after the whole set fails,
+because two truncating divisions in one program means neither alone is the whole
+cause and reporting that as unexplained would be a false positive on the tool
+rather than on the backend.
+
 EXIT STATUS
 -----------
 0 when nothing is unexplained: no `DIVERGED`, or every `DIVERGED` reduced to a
@@ -131,10 +145,6 @@ KNOWN_DIVERGENCES = {
     "truediv": (
         "`/` between two ints is an integer division; the model is int-only and "
         "floats truncate toward zero on emit (FORMAL.md §6, Phase 7)"),
-    "print_bool": (
-        "a `bool` prints as 1/0 rather than True/False: a formal value is one "
-        "word and the tag is not carried (`formal/arm64_codegen.py`'s "
-        "`_print_call`)"),
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
         "FORMAL_string_value_model.md)"),
@@ -147,7 +157,6 @@ FEATURE_PATTERNS = {
     "floordiv": (r"//",),
     "modulo": (r"%",),
     "truediv": (r"(?<![/*])/(?![/*=])",),
-    "print_bool": (r"\bprint\(\s*[^\n()]*\s(?:==|!=|<|>|<=|>=)\s",),
     # Decided by `features_of`, not by a pattern: a subscript is correct on a
     # list and wrong on a string, and only the binding says which. An empty
     # pattern tuple is how this table says "handled specially", and keeping the
@@ -498,8 +507,16 @@ class Gen:
         # the default width so it does not change which proof model is used.
         if rng.random() < 0.45:
             recursed = ", ".join([f"{first} - 1"] + params.split(", ")[1:])
+            # The base case bounds the DEPTH as well as the bottom, and it has to:
+            # the call sites pass arguments built from literals up to 1000, and a
+            # recursive helper called with 598 recurses 597 deep, which is past
+            # CPython's own recursion limit — so the oracle became a traceback
+            # and the seed reported nothing about the backend. Capping the depth
+            # in the HELPER rather than at the call site makes the bound a
+            # property of the program, so no argument any call site can build
+            # reaches it.
             lines = [f"def {name}({params}) -> Int:",
-                     f"    if {first} <= 1:",
+                     f"    if {first} <= 1 or {first} > 12:",
                      f"        return {rng.randint(0, 3)}",
                      f"    return {name}({recursed}) + {rng.randint(1, 3)}"]
         else:
@@ -853,7 +870,6 @@ def features_of(source):
 NEUTRALISERS = {
     "floordiv": [(r"//", "-")],
     "modulo": [(r"(?<![\w)])%(?![a-zA-Z_(])", "+")],
-    "print_bool": [(r"print\(([^\n]*?)\)", r"print(1 if (\1) else 0)")],
     "str_subscript": [(r"print\((\w+)\[\d+\]\)", r"print(1)")],
 }
 
@@ -893,19 +909,30 @@ def blame(program, arch, workdir, memo):
     present = sorted(features_of(program.source()))
     if not present:
         return None
-    everything = _neutralise_all(program, present)
-    if everything is None or not _has_body(everything):
-        return None            # present by pattern, unreachable by the swap
-    if check_program(everything, arch, workdir, memo).status != "AGREE":
+    def _agrees(features):
+        cand = _neutralise_all(program, features)
+        if cand is None or not _has_body(cand):
+            return False
+        return check_program(cand, arch, workdir, memo).status == "AGREE"
+
+    # A neutralised candidate that REFUSES or will not run is not evidence in
+    # either direction, and both happen: swapping `%` for `+` can make a
+    # program's argument large enough that CPython hits its own recursion limit,
+    # and wrapping a comparison can make `print` unclassifiable. So a candidate
+    # counts only when it runs and AGREES.
+    if not _agrees(present):
+        # Neutralising them ALL together can also be what breaks it while any
+        # ONE of them is the whole cause — two divisions in a program, one of
+        # which is the only thing wrong. So each is tried on its own before the
+        # program is called unexplained.
+        for name in present:
+            if _agrees([name]):
+                return (name,)
         return None
     kept = present
     for name in list(kept):
         smaller = [f for f in kept if f != name]
-        if not smaller:
-            continue
-        cand = _neutralise_all(program, smaller)
-        if cand is not None and _has_body(cand) and \
-                check_program(cand, arch, workdir, memo).status == "AGREE":
+        if smaller and _agrees(smaller):
             kept = smaller
     return tuple(kept)
 
@@ -1045,7 +1072,7 @@ def main(argv=None):
     if errors:
         print("  ERRORS (about the generator or the build, not a verdict on a bug):")
         for v in errors[:20]:
-            print(f"    {v.detail[:220]}")
+            print(f"    seed {v.seed}: {v.detail[:200]}")
     if findings:
         print()
         print(f"  {len(findings)} UNEXPLAINED DIVERGENCE(S). Each one builds, runs and")
