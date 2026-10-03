@@ -30,9 +30,9 @@ heapprof_report.py      → imports 'subprocess'        (HOST_UNREACHABLE)
 
 **Every one of the five lands on a permanent tier.** So a `collections` module
 converts **zero** files to a build and moves five diagnostics from one host module
-to a different one. That agrees with the 2026-10-01 re-measurement in
-`FORMAL_glob_copy_collections_io_not_attempted.md` §`collections` and it is
-reproduced here, so the number is stable rather than a one-day artefact.
+to a different one. That agrees with the 2026-10-01 re-measurement (five files, one stubbed
+`collections`, every one moving to a different host import) and it is reproduced
+here, so the number is stable rather than a one-day artefact.
 
 ## The blob route: half-open, and the half that is open is not `Counter`
 

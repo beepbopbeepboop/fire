@@ -1,11 +1,12 @@
 # FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time: `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table
 
 **Status: OPEN, not started, and deliberately filed as ONE capability rather than
-two modules.** Split out of `FORMAL_glob_copy_collections_io_not_attempted.md`,
-whose own text says this document "does not exist yet and should" — that a
-reader who finds one of these two should be told about the other, because they
-are the same missing thing. That parent is a measurement record whose remaining
-actions are withdrawn or filed elsewhere; this is the part of it that is work.
+two modules.** It was split out of a measurement record of `glob`, `copy`,
+`collections` and `io` (now deleted, its remaining actions withdrawn or filed
+elsewhere) whose own text said this document "does not exist yet and should" —
+that a reader who finds one of `copy` and `collections` should be told about the
+other, because they are the same missing thing. This is the part of it that is
+work.
 
 **This is not a defect in anything that exists.** `formal/hostmods/` has no
 `collections.mojo` and no `copy.mojo`, and the absence is correct: neither can

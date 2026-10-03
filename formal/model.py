@@ -1451,8 +1451,10 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     two answers in this file that were false about the second kind are what
     cost it: the escape check's container branch in `formal/build.py`, and
     `multi_index_kind` below, which answered "a subscript whose index is a
-    tuple" about a type application. Both are measured before and after in
-    `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+    tuple" about a type application. Both were false diagnoses counted in map
+    rows 7 and 8 of the sweep work map; `formal/build.py`'s container branch
+    and this `multi_index_kind` were two readers of the same wrong question,
+    which is why they are one function now.
 
     THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
     reader of the multi-index question: two functions deciding "is this bracket
@@ -9467,12 +9469,11 @@ COMPTIME_REFLECTION_INTRINSICS = frozenset((
 # the `getattr`/`setattr` finding was waiting for — "a program that reaches one
 # of them is a program with a Python builtin this backend does not implement,
 # which is a fact about the backend's surface rather than about the image, and
-# naming it needs a table of what the backend DOES implement" — and it is also
-# the one remaining wrong diagnosis in
-# `bugs/FORMAL_frame_by_value_ceiling_zero.md`'s landing table, where
-# `std/memory/unsafe_pointer.mojo` is refused with "a Pointer receiver is
-# passed to type_of()" and the doc's own note says what that sentence is worth:
-# "`type_of` is a missing builtin, on any receiver".
+# naming it needs a table of what the backend DOES implement" — which is the
+# table immediately below. `std/memory/unsafe_pointer.mojo` is the file that
+# asked for it: it is refused with "a Pointer receiver is passed to type_of()",
+# and the honest reading of that sentence is "`type_of` is a missing builtin, on
+# any receiver".
 #
 # **Why the existing sentence is wrong for these and only these.** The last arm
 # of `frame_undefined_callee_refusal` says "this module defines no FUNCTION of
@@ -9627,9 +9628,9 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"to give: {UNIMPLEMENTED_BUILTINS[callee]}. That is a fact about "
             f"what this backend does, not about the receiver — so nothing about "
             f"{who}'s layout is at fault, and no declaration of {callee} in "
-            f"this file would change it. `bugs/"
-            f"FORMAL_frame_by_value_ceiling_zero.md` has the measurement that "
-            f"put this name on the list")
+            f"this file would change it. `UNIMPLEMENTED_BUILTINS` is the one "
+            f"table of what this path does not implement, and adding a name to "
+            f"it is all it takes to name the next one")
     if comptime_param_of:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "

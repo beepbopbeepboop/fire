@@ -51,8 +51,8 @@ the Python side, so the capability exists as a COMPILER-side reader; what a Mojo
 module needs is a way to read a header field out of a file it opened, and
 `formal/hostmods/os/_syscalls.mojo` has `fs_open_ro`/`fs_lseek`/`fs_close` and
 **no read** (which is also why `libc_ver()`, `architecture()` and
-`freedesktop_os_release()` are all absent — see the stream argument in
-`bugs/FORMAL_glob_copy_collections_io_not_attempted.md`). So: one `read` in
+`freedesktop_os_release()` are all absent — each is absent for the same
+reason, and `io`'s streams are absent for it too. So: one `read` in
 `_syscalls.mojo` plus a `filetype` reader is what `architecture()`, and then
 `platform()`, need. That is a capability, not a module, and it is the same
 `read` that `io`'s streams need.
@@ -91,9 +91,8 @@ rate.
 
 ## 3. `glob` re-measured: still 9 files, and the reason has moved
 
-`.tmp/sweep-x86-4.txt` lists `glob x9`, and the older record
-(`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` §`glob`) said the
-blocker was `os.listdir` and that "glob landed earlier" meant
+`.tmp/sweep-x86-4.txt` lists `glob x9`, and the older record said the blocker
+was `os.listdir` and that "glob landed earlier" meant
 `formal/hostmods/pathlib.mojo`'s `pathlib.match`. **Both halves of that are now
 stale, and the useful question is what a `glob` would be worth TODAY.**
 

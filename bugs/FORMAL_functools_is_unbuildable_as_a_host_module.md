@@ -103,11 +103,11 @@ is not the one the source says. `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`
 filed a decision of exactly this shape rather than shipping one, and the same
 argument applies here.
 
-This is also the shape `bugs/FORMAL_glob_copy_collections_io_not_attempted.md`
-warned about for `glob` and then withdrew its own advice about: a module that
-does not export the name a caller wants converts "out of reach, with an owner"
-into an export-map refusal, which dresses a fact about the target as a gap in
-the backend.
+This is also the shape the (now deleted) `glob`/`copy`/`collections`/`io`
+measurement record warned about for `glob` and then withdrew its own advice
+about: a module that does not export the name a caller wants converts "out of
+reach, with an owner" into an export-map refusal, which dresses a fact about
+the target as a gap in the backend.
 
 ## The exact next step
 

@@ -3341,12 +3341,11 @@ BYREF_REFUSALS = [
     # `from … import …` in it binds the name either", and for a builtin both of
     # those are impossible — the name comes from the LANGUAGE — so the sentence
     # sent the reader to look for a missing `def` that cannot exist. `type_of`
-    # is on the list on the measurement in
-    # `bugs/FORMAL_frame_by_value_ceiling_zero.md` (`std/memory/unsafe_pointer`
-    # is refused with this very message and the doc's note is "`type_of` is a
-    # missing builtin, on any receiver"); the two cases below are the two
-    # families the table carries, and the needle is the clause that names what
-    # the callee is rather than what this file lacks.
+    # is on the list because `std/memory/unsafe_pointer.mojo` is refused with
+    # this very message and the honest reading of that sentence is "`type_of` is
+    # a missing builtin, on any receiver"; the two cases below are the two
+    # families `model.UNIMPLEMENTED_BUILTINS` carries, and the needle is the
+    # clause that names what the callee is rather than what this file lacks.
     #
     # The prefix "which is a name with no definition in hand" is asserted by
     # neither needle and is load-bearing anyway: two taxonomies key on that
@@ -12009,8 +12008,11 @@ SHIFT_CASES = [
 ]
 
 
-# `origin_of(x)` — the COMPILE-TIME IDENTITY, and the seven stdlib files it
-# un-blocks are measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+# `origin_of(x)` — the COMPILE-TIME IDENTITY. It was one of three false
+# diagnoses counted in map rows 7 and 8 of the sweep work map, all three now
+# fixed (`origin_of` here, a subscript's argument list in
+# `model.subscript_index_is_a_comptime_parameter_list`, and `type_of` in
+# `model.UNIMPLEMENTED_BUILTINS`).
 #
 # `origin_of` is in the corpus almost entirely as a TYPE argument —
 # `Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` —
@@ -12188,8 +12190,7 @@ ORIGIN_OF_REFUSALS = [
 # a frame address" — a sentence about a lifetime the program does not have,
 # which is the false diagnosis that cost the most because it sends the reader
 # to look for an escape that is not there. Four stdlib files drew it
-# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`;
-# measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`).
+# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`).
 #
 # Every row here is a REFUSAL, and that is not a gap in the fix: a type
 # application is a compile-time construct this backend still cannot lower, and

@@ -7,10 +7,10 @@ precedes it makes the boundary visible: `model.subscript_index_is_a_comptime_par
 says yes for a BARE NAME it can classify and no for everything else, and
 everything else includes the two shapes the corpus writes most.
 
-No stdlib file is measured against this today — the four files
-`FORMAL_frame_by_value_ceiling_zero.md` tracks all reach a bare-name base
-(`Pointer`, `UnsafePointer`, `_DequeIter`). So this costs 0 files and is here
-for the reader who writes the next one, not as a queue item.
+No stdlib file is measured against this today — the four files map rows 7 and
+8 of the sweep work map tracked all reach a bare-name base (`Pointer`,
+`UnsafePointer`, `_DequeIter`). So this costs 0 files and is here for the reader
+who writes the next one, not as a queue item.
 
 ## What is still wrong
 
@@ -124,6 +124,6 @@ Two consequences worth stating because they are easy to get wrong:
   remedy is Stage 5 monomorphization rather than a better sentence.
 
 Nothing here is a file on the sweep: the four files
-`FORMAL_frame_by_value_ceiling_zero.md` tracks all reach a bare-name base, so
+the four files map rows 7 and 8 tracked all reach a bare-name base, so
 this is written down for the reader who writes the next `Foo[A, B]` and finds
 the backend cannot classify `Foo`.
