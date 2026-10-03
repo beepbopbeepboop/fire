@@ -7587,10 +7587,12 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_ldr_xt_xn_imm(0, 5, 0))
         self._compr_append_elem(offset, src_cap)
         # X6 survives the append (it clobbers X0-X4 and X9); step does not, so
-        # it is re-read. X4's reload is the leftover of an earlier version that
-        # kept `start` live for a bound this loop no longer reads.
+        # it is re-read from the stack.  The reload of `start` that used to sit
+        # here is gone: `_compr_append_elem` overwrites X4 with the element
+        # address and nothing in the loop reads it afterwards — both bounds are
+        # re-read from their own words because that is the only copy the append
+        # cannot take.
         self.asm.emit(encode_ldr_xt_xn_imm(8, 31, SLOT_STEP))
-        self.asm.emit(encode_ldr_xt_xn_imm(4, 31, SLOT_START))
         self.asm.emit(encode_add_xd_xn_xm(6, 6, 8))      # i += step
         self._emit_b_to(loop)
 
