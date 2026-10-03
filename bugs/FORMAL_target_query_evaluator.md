@@ -29,6 +29,50 @@ the language lets a query be written, not in a coverage number. The residue is
 unchanged and is still the residue: Blocker 1's two permanent refusals and the
 `-mcpu=` feature of item 4.**
 
+**Updated 2026-10-03: this document's own rows are no longer reachable, and its
+item 1 is closed by a message rather than by a new site kind.** Both measured on
+this tree (`python3 tools/formal_sweep.py -j 3 -t 120 <the three files>`, arm64):
+
+| file | what this document measured in 2026-09-30 | what it says now |
+|---|---|---|
+| `std/sys/info.mojo` | the `!kgen.target` binding, then `_current_target` as a value | `codegen/dependency` — `info.mojo` imports `std.collections.string.string_span`, which imports `binary_heap.mojo`, and a module that declares only a GENERIC struct template exports nothing an importer can bind |
+| `std/builtin/coroutine.mojo` | `_suspend_async: __mlir_op is an MLIR dialect construct` | `codegen/dependency`, same import chain |
+| `std/builtin/variadics.mojo` | `Self.reduce[…]` is a subscript whose index is a tuple | `codegen/dependency`, same import chain |
+
+The gate is the **dylib export rule** and it fires before any body is looked at,
+so none of the three rows can be reached without it moving — which is row 2 of
+the gate table in `bugs/FORMAL_sweep_work_map_2026-09-30.md` and not this
+document's subject. A reader planning against any of the three rows should
+measure that gate first; the refusals this document quotes are still the ones
+those files carry when they are built as images, and they are still true.
+
+**Item 1 is closed as a diagnostic, and the site-vocabulary change it sketched
+is moot.** A module-level `comptime` binding initialised from an MLIR *type*
+template is refused with a message that now names the consequence and not only
+the template:
+
+```
+build: the module-level comptime binding '_T' is initialized from an MLIR type
+template: __mlir_type.`!kgen.target` names an MLIR TYPE, not a value: the
+template's elements are backtick-quoted type fragments and the whole thing
+denotes a type, and a type is not something a register can hold on a path where
+the only value is a 64-bit word. Refused rather than read out of a register,
+which would give a program a number no source wrote.
+```
+
+That is what "a deliberate change to the `declared`/`comptime` site vocabulary,
+with a new message for 'bound to a type', not as a one-line skip" asked for, and
+it was made as wording rather than as a new site kind — which is the better
+version of it here, because the binding is REFUSED before any read exists: there
+is no `var _TargetType` in any surviving program to give a name-with-no-value to.
+The two files this document measured moving (and `variadics.mojo` moving for the
+worse) are behind the import gate above and cannot be re-measured.
+
+What is left here is unchanged and is still not a bug: `target_has_feature` is a
+refusal by design (a CPU feature is a property of a CPU, and this build names
+the architecture it emits and never a CPU), `info.mojo` reads the target itself
+as a value, and closing either is the per-CPU feature item 4 below.
+
 The one-line answer: the target-query evaluator is not the next blocker. Two
 other constructs are, in this order, and each is outside the claim that landed
 the evaluator.
