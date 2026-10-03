@@ -3,7 +3,7 @@
 **Both arms ran to completion over the whole 668-file scope, so every number below
 is over the whole scope — not over the part of it a run happened to reach, which is
 the caveat that dominates every earlier map in this series** (`…_b6.md` §2.3,
-`…_b3.md`, `…_repo-a.md` §1). The three findings a reader should take away:
+`…_b3.md`, `…_repo-a.md` §1). Three findings a reader should take away:
 
 * **Zero `tool` rows.** Every one of the 668 files got a verdict from a build, on
   both architectures, at `-t 120` — including the **20 files the `-6` runs could
@@ -14,6 +14,10 @@ the caveat that dominates every earlier map in this series** (`…_b6.md` §2.3,
   file the arm64 arm does not (`formal/hostmods/os/_syscalls.mojo`, and it is an
   ABI fact about the host, not a gap) (§2.5). **The x86-64 machine subset is not
   where the remaining coverage is.**
+* **The four `backend-crash` rows are FIXED on this branch** — one heterogeneous
+  dict's two value shapes, one caller that knew about one of them (§3.2). A crash
+  is the one class a sweep cannot leave behind: it is never cached, so it costs
+  four builds per arm per sweep until it is gone. It is gone.
 * **The largest unowned codegen row in the corpus is 16 files, and it is a
   refusal that is CORRECT** — a dylib has no entry point for a module's top-level
   code — so its next step is a load-time initializer in two object writers, gated
@@ -296,7 +300,8 @@ frame-holder slot rebound (`regex_compile.py`), struct construction arity
 (`mojo/backend_gimple/device_glue.py`), and `print()` that cannot classify its
 argument on the x86-64 path (`test_llm/dumb_gemm.mojo`).
 
-**Four `backend-crash` rows, all one crash, and no doc owns it:**
+**Four `backend-crash` rows, all one crash — FIXED on this branch, so a re-run will
+not reproduce them:**
 
 ```
 BACKEND-CRASH: detect_real_type_errors.py   (the backend raised: ValueError: too many values to unpack (expected 2, got 3))
@@ -305,13 +310,20 @@ BACKEND-CRASH: run_type_system_tests.py     (same)
 BACKEND-CRASH: test_type_system.py          (same)
 ```
 
-A crash is not a coverage finding — it is a bug in the compiler, in no rate, never
-cached, so it re-runs every sweep until it is gone. All four are
-type-system-shaped and identical, which is the signature the summary warns about
-("if a sweep suddenly reports many of these, another agent is mid-edit in
-`formal/`"), and `construct:type-name-as-value-2` is a live claim in exactly that
-area. **It is not attributed here**, because attributing it needs a re-run after
-that work lands; it is filed as `bugs/FORMAL_backend_raises_on_a_three_element_unpack.md`.
+One direct build located it — `formal/build.py:10307`, in `refuse_none_comparisons`:
+`{path: kind for path, (st, kind) in _constant_read_sites(...)}` destructured a
+table whose entries are **3-tuples for an enum member** (`struct, kind, accessor`,
+added by `5731ca02`) and 2-tuples for every other spelling. `_apply_constant_sites`
+knew about both; this caller knew about one, so any file that read an enum member
+AND had a `None`-valued constant raised instead of refusing. The fix is one shape
+for every producer (`_constant_site`), which is why the two `…_with_two_fields`
+guards above it now pass. All four files answer properly on the fixed tree:
+`test_type_system.py` → `not-answerable/unresolved-import` (`pytest`),
+`detect_real_type_errors.py` and `run_type_system_tests.py` →
+`codegen/dependency` behind `type_system.py`'s `Type.origin` default,
+`formal/x86_64_codegen.py` → `not-answerable/host-import` (`importlib`). **The
+counts in §2.1 are the run's, and they are what the log holds; the class itself is
+empty on a re-run.**
 
 ---
 

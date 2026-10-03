@@ -1155,7 +1155,56 @@ CASES = [
      "    return 0\n",
      "refuse:is class-level constant holding `None`", None),
 
-    # ── methods on a string ──────────────────────────────────────────────
+    # THE SAME REFUSAL, IN A FILE THAT ALSO READS AN ENUM MEMBER — which used to
+    # RAISE instead of refuse. `_constant_read_sites` publishes one entry per
+    # read of a class-level constant, and the entry is a 3-tuple for an enum
+    # member (`struct, kind, accessor`) and a 2-tuple for every other spelling.
+    # `_apply_constant_sites` destructured both; `refuse_none_comparisons`
+    # destructured one, so this program raised
+    # `ValueError: too many values to unpack (expected 2, got 3)` out of the
+    # middle of `_prepare_functions` — the backend falling over on a construct it
+    # owes a refusal for, and doing it on four of this repository's own files
+    # (`type_system.py` and three that import it; see
+    # `bugs/FORMAL_backend_raises_on_a_three_element_unpack.md`).
+    #
+    # It is here, in this table, because the row above it is the one that says
+    # "this check still refuses where the language says it must": together they
+    # separate "the crash is gone" from "the check was dropped".
+    ("refuse_none_in_a_file_that_also_reads_an_enum_member",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    R15 = 15\n"
+     "\n"
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 0:\n"
+     "        return 7\n"
+     "    if Reg.R15.value == 15:\n"
+     "        return 8\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    # And the enum member read ALONE still answers, which is the other direction
+    # an over-correction would break: a uniform table shape must not cost the
+    # spelling that carries a third element. The two `if`s are in the wrong order
+    # on purpose — the answer here is 8, and it is 8 only because the comparison
+    # that must be REFUSED comes first.
+    ("enum_member_read_answers_without_a_none_constant",
+     "from enum import Enum\n"
+     "\n"
+     "class Reg(Enum):\n"
+     "    RAX = 0\n"
+     "    R15 = 15\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if Reg.R15.value != 15:\n"
+     "        return 7\n"
+     "    return 8\n",
+     8, None),
     #
     # A string here is a bare `char *`: no header, no length, just bytes to a
     # NUL. That splits the string methods in two (formal/model.py,
