@@ -95,6 +95,13 @@ ADMITTED_COUNTS = {
                                    # getstatusoutput/Popen + popen_{wait,poll,
                                    # kill,terminate,communicate}
     "sys": 0,
+    # `tempfile` is 0 and that is the BEST outcome for it: `gettempdir` is
+    # CPython's own candidate walk and `mkdtemp` is the real `mkdtemp(3)`, so
+    # nothing in it is a fact this tree cannot derive. It is the largest
+    # host-import row in the corpus (111 files) and it left
+    # `HOST_UNREACHABLE` on 2026-10-03 for that reason — the placement was under
+    # "a terminal", which is about `TMPDIR`, and `TMPDIR` is a variable.
+    "tempfile": 0,
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
     "time": 0,
     "typing": 0,

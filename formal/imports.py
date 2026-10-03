@@ -132,13 +132,25 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal. `tempfile` is here for the `TMPDIR`-derived half of that
-    # sentence rather than the terminal half, and `shutil` WAS here too — under
-    # "a writable filesystem this target does not get", which was FALSE and is
-    # now `formal/hostmods/shutil.mojo`; `get_terminal_size` is the half that
-    # survived the removal and is absent in that module with the reason at its
-    # own definition.
-    "getpass", "webbrowser", "tempfile",
+    # A terminal. `getpass` and `webbrowser` are here for that reason and
+    # `get_terminal_size` is absent from `formal/hostmods/shutil.mojo` with the
+    # reason at its own definition.
+    #
+    # `tempfile` WAS here — under "a terminal", for the `TMPDIR`-derived half of
+    # that sentence rather than the terminal half — and left on 2026-10-03,
+    # because the measurement behind that placement was about `TMPDIR` and
+    # `TMPDIR` is an ordinary variable: `formal/hostmods/tempfile.mojo` is
+    # `gettempdir` as CPython's own candidate walk over `os.getenv` and
+    # `access(2)`, and `mkdtemp` as the real `mkdtemp(3)`, checked against
+    # CPython by `test_formal_tempfile.py`. It is the largest host-import row in
+    # the corpus — 111 files in the b7 sweep, 2.4x the next one — and 43 of the
+    # 127 that import it use nothing else. What of `tempfile` is still missing
+    # is the OBJECT half (`TemporaryDirectory`, `NamedTemporaryFile`,
+    # `TemporaryFile`): a context manager, a class and a stream, none of which is
+    # a value on this path. That is a fact about a different capability and it
+    # is written down at the top of the module rather than here, so a reader
+    # asking "why is 84 of this row still refused" has one place to look.
+    "getpass", "webbrowser",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else.
     "zlib", "gzip", "locale",

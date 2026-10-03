@@ -122,7 +122,7 @@ module:` line, and re-measured here over the sweep's own scope:
 
 | module | files in the row | what this tree actually calls | reachable half |
 |---|---|---|---|
-| **`tempfile`** | **111** | `TemporaryDirectory` 142, `mkdtemp` 91, `NamedTemporaryFile` 64, `mkstemp` 3, `TemporaryFile` 3, `gettempdir` 1 | **`mkdtemp`, `mkstemp`, `gettempdir` — three libc calls (`mkdtemp(3)`, `mkstemp(3)`, `confstr(_CS_DARWIN_USER_TEMP_DIR)`) and nothing admitted** |
+| **`tempfile`** | **111** | `TemporaryDirectory` 142, `mkdtemp` 96, `NamedTemporaryFile` 64, `TemporaryFile` 3, `mkstemp` 3, `gettempdir` 3 | **`mkdtemp` and `gettempdir` — `mkdtemp(3)` plus CPython's own candidate walk over `os.getenv` and `access(2)`, and NOTHING admitted.** `mkstemp` is reachable and is not written; see §7 |
 | `importlib` | 48 | — | **0.** An embedded CPython; `HOST_UNREACHABLE` is right and there is nothing to write. |
 | `glob` | 18 | — | the listing half is in the tree; `**` matching is not. Claimed by `formal10-3` (`FORMAL_glob_copy_collections_io_not_attempted`). |
 | `zlib` | 15 | — | **0.** A library outside libSystem; the premise forbids linking it. |
@@ -131,21 +131,25 @@ module:` line, and re-measured here over the sweep's own scope:
 | `types` | 6 | — | a type factory; `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`. |
 | `copy` | 5 | — | **0.** One file imports it and never uses it; `copy.copy` is the identity, which is the shape of a wrong `time.time()`. |
 
-**`tempfile` is the next row by a factor of 2.4, it is unclaimed, and it is worth
-43 files.** Measured: of the 127 files in the sweep's scope that import it, **43
-use ONLY `mkdtemp`/`mkstemp`/`gettempdir`** and no unreachable name, so writing
-the reachable half moves 43 files off `not-answerable/host-import` into the
+**`tempfile` is the next row by a factor of 2.4, and it is worth 44 files.**
+Measured over the 128 files in this repository that import it, **44 use ONLY
+`mkdtemp`/`mkstemp`/`gettempdir`** and no unreachable name, so writing the
+reachable half moves 44 files off `not-answerable/host-import` into the
 answerable denominator, where they are counted as `codegen` findings rather than
 as target facts. That is the `platform` row's arithmetic
 (`bugs/FORMAL_platform_reachable_row_measured.md` §2) and the ceiling for a
-`host-import` row to **PASS** is 0 either way: none of those 43 is a small
+`host-import` row to **PASS** is 0 either way: none of those 44 is a small
 program.
 
 `TemporaryDirectory` (142 uses) and `NamedTemporaryFile` (64) are 206 of the
-305 attribute uses and are NOT reachable — a context manager and a file object
+311 attribute uses and are NOT reachable — a context manager and a file object
 respectively, and `formal/hostmods/io.mojo` says at length why a stream is not a
-value here. 84 of the 127 files use one or both, so the reachable half leaves
+value here. 84 of the 128 files use one or both, so the reachable half leaves
 them exactly where they are.
+
+`tempfile` is **no longer a recommendation**: `formal/hostmods/tempfile.mojo`
+and `test_formal_tempfile.py` landed with it, `tempfile` left `HOST_UNREACHABLE`,
+and `mkstemp` is absent with a measured reason. §7.
 
 ## 6. Reproducing this
 
@@ -171,6 +175,37 @@ python3 tools/memslot.py --gb 8 --label spslice -- \
 python3 tools/formal_sweep_causes.py bugs/sweeps/sweep-arm-7.txt
 grep 'not-answerable/host-import by module' bugs/sweeps/sweep-arm-7.txt
 ```
+
+## 7. `tempfile`, landed
+
+`formal/hostmods/tempfile.mojo`, `test_formal_tempfile.py`,
+`formal/hostmods/os/_syscalls.mojo::fs_mkdtemp`, and `tempfile` out of
+`HOST_UNREACHABLE`. `gettempdir` is CPython's own candidate walk and is checked
+against CPython's own answer on both backends, including with `$TMPDIR` pointed
+at a directory of the test's own — which is the row that separates "first
+candidate" from "first ENVIRONMENT candidate", and the reason this host would
+not have caught a `/tmp`-first walk. `mkdtemp` is the real `mkdtemp(3)` and is
+checked against CPython's own six invariants rather than a table, because six
+random characters cannot be compared between two processes.
+
+**Zero admitted contracts**, which is why `tempfile` is in no tier at all rather
+than in `HOST_ADMITTED`: it is `fcntl`'s situation, not `subprocess`'s.
+
+Two things this row cost that are worth knowing before the next one:
+
+  * **`mkstemp` is reachable and is NOT written**, because its only failure
+    check cannot be trusted on this tree today.
+    `bugs/FORMAL_a_bare_c_call_returning_a_32_bit_int_is_compared_as_a_zero_extended_word.md`
+    has the measurement: a bare C call whose C return type is `int` arrives with
+    the high 32 bits of the register unspecified, and this backend models every
+    bare call's return as a full word, so `mkstemps(...) < 0` is FALSE for the
+    `-1` the host returned. `mkdtemp(3)` returns `char *` and is unaffected,
+    which is why one of the two shipped.
+  * **`mkdtemp(suffix=…)` is correct only for an EMPTY suffix**, and that is
+    pinned by a test rather than left for a caller to discover: `mkdtemp(3)`
+    substitutes the last six bytes, so `.txt` after them is part of the name.
+    The entry point that takes a suffix is `mkstemps(3)`, which is the callee
+    the bug above is about.
 
 **-j 4 -t 60, not -j 6 -t 120**: this is 143 files of the 673-file scope and
 every one of them is a REFUSAL, which is cheap — `~2.2 s of wall per build`

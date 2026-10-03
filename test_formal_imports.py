@@ -58,6 +58,12 @@ sys.path.insert(0, HERE)
 from test_formal_dylib import (TestFailure, check, parse_macho, read_uleb,
                                run_fire)
 
+# The resolver's own tier table, read rather than a list of names copied here:
+# `test_several_unresolvable_imports_are_all_named` picks its two blocker
+# modules out of it, and a copied list would keep naming a module that has since
+# been answered — which is exactly how that test stopped testing two blockers.
+from formal import imports as I
+
 FIRE = os.path.join(HERE, "fire.py")
 # Module dylibs are written per ARCHITECTURE (formal/build.py's
 # `_resolve_imports`): a dylib is a target-specific image, so an arm64 library
@@ -553,9 +559,24 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
     """
     root = os.path.join(tmpdir, "many")
     os.makedirs(root)
+    # The two blocker names are CHOSEN, not fixed, and they were `tempfile` and
+    # `glob` until 2026-10-03, when `formal/hostmods/tempfile.mojo` landed and
+    # `tempfile` stopped being a blocker.  A test that kept it would still have
+    # passed — `glob` is still named — while quietly testing ONE blocker instead
+    # of two, which is the property the two orderings exist to check.  So the
+    # pair is taken from what is still unreachable, which is the only list that
+    # cannot go stale the same way.
+    blockers = sorted(I.HOST_UNREACHABLE - {"asyncio", "socket"})[:2]
+    check(len(blockers) == 2 and "sys" not in blockers,
+          f"this test needs two names that are still unresolvable host modules "
+          f"and got {blockers!r} out of HOST_UNREACHABLE. Either fewer than two "
+          f"are unreachable any more — in which case this property has nothing "
+          f"left to test and the test should go with them — or the pair has to "
+          f"be chosen by hand and the choice written down here.")
+    one, two = blockers
     orderings = {
-        "alpha": "import glob\nimport tempfile\nimport sys\n",
-        "omega": "import tempfile\nimport glob\n",
+        "alpha": f"import {one}\nimport {two}\nimport sys\n",
+        "omega": f"import {two}\nimport {one}\n",
     }
     for tag, imports in orderings.items():
         write_tree(root, {f"{tag}.mojo":
@@ -572,7 +593,7 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
         check("Traceback" not in text,
               f"{tag}: an unresolved import should be a clean error:\n"
               f"{text[-400:]}")
-        for mod in ("glob", "tempfile"):
+        for mod in blockers:
             check(mod in text,
                   f"{tag}: the diagnostic names {mod!r} nowhere, so fixing it "
                   f"only reveals the next one:\n{text[-400:]}")
@@ -582,7 +603,9 @@ def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
               f"\"every import\":\n{text[-400:]}")
         texts[tag] = text
     # The two files differ only in the order of two import lines, so the
-    # sentences have to be identical once the file's own name is set aside.
+    # sentences have to be identical once the file's own name is set aside —
+    # and once the NAMES are set aside too, since `omega` says the two in the
+    # other order and the sentence has to be the same text either way.
     same = texts["alpha"].replace("alpha", "F")
     other = texts["omega"].replace("omega", "F")
     check(same == other,
