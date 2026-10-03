@@ -1161,6 +1161,25 @@ def _cpp_module_global_ctypes(gen):
     return out
 
 
+def _cpp_exc_ctor_value(gen, node) -> bool:
+    """True iff `node` is an exception class CONSTRUCTOR call used as a value
+    — `Exception('...')`, `ValueError(...)`, `TypeError()` — i.e. the shape
+    `_cpp_expr`'s CallExpr case lowers to that exception's message. One
+    predicate shared by the emitter and the local-typing site so the value's
+    emitted type and its declared local type cannot disagree.
+
+    Bounded to `_KNOWN_EXCEPTION_NAMES` rather than
+    `_is_exc_class_name`, which also accepts a user STRUCT name: a foreign
+    struct constructor reaching this far is a genuine unresolved-callee
+    refusal (`Pair(...)` from another module — see that refusal's own
+    comment), and must stay one.
+    """
+    return (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name in gen._KNOWN_EXCEPTION_NAMES
+            and len(node.args) <= 1 and not (node.kwargs or []))
+
+
 def _cpp_resolve_generator_call_api(gen, func):
     """Resolve a CallExpr's callee to a compiled generator's api dict
     ({'base', 'value_ctype', 'params', ...}) — or None when the callee is
@@ -3789,6 +3808,29 @@ def _cpp_expr(gen, e) -> str:
                 if _lsr is not None:
                     _lsr.add(fname)
                 return f"{fname}({', '.join(args)})"
+            # An exception CONSTRUCTOR used as a VALUE — `onempty =
+            # Exception('no filenames provided')` in scriptutil.py's
+            # `_iter_filenames`, then `raise onempty`. As the OPERAND of a
+            # `raise` this is handled with a real tagged `_MojoCppExc`
+            # (`_cpp_raise_stmt`); as a plain value there is nothing to call
+            # and no such tag to attach, because this model's one exception
+            # representation IS the message (see `_cpp_raise_stmt`'s own
+            # `raise <IdentExpr>` case, which throws exactly that), so the
+            # value IS its message. That is also what the ordinary
+            # (non-coroutine) GIMPLE path already does for the same shape —
+            # `_lower_opaque_ctor` returns a lone string argument unchanged,
+            # so `e` there is a `char *` holding the message text — which is
+            # why there is no second representation to invent here.
+            #
+            # `raise onempty` then takes the EXISTING untagged(0) lenient
+            # match, the same one a handler-bound `except ... as e; raise e`
+            # already takes in both backends. Not a new looseness: a
+            # constructed-but-not-raised exception has had its type tag
+            # discarded by the time it is raised, on either path.
+            if _cpp_exc_ctor_value(gen, e):
+                if not e.args:
+                    return 'const_cast<char *>("")'
+                return gen._cpp_expr(e.args[0])
             # Everything else reaching this point would be emitted as a
             # bare, undeclared C++ identifier call — which g++ always
             # rejects ("'X' was not declared in this scope") or, worse,
@@ -4946,6 +4988,26 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # would mismatch the real `std::function<...>`-
                 # convertible value `_cpp_expr` actually emits for it.
                 ctype = gimple_ctypes._CPP_CALLABLE_CTYPE
+            elif _cpp_exc_ctor_value(gen, s.value):
+                # `e = ValueError('boom')` — `_cpp_expr` lowers the RHS to
+                # the exception's MESSAGE (see its exception-constructor
+                # case), so the local must be that message's own type rather
+                # than the int64_t default, which would make the later
+                # `raise e` throw an integer where CPython throws a
+                # message. With no argument the emitted expression is a `char
+                # *` empty literal by construction; with one, the type is
+                # deliberately the ARGUMENT's own inference, so a message
+                # this model cannot spell as a `char *` still lands on the
+                # honest default instead of claiming a type the emitted
+                # expression does not have.
+                ctype = 'char *' if not s.value.args else \
+                    gimple_exprtypes._infer_simple_expr_ctype(
+                        s.value.args[0], declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api,
+                        fn_return_types=_cpp_trusted_fn_return_types(gen),
+                        module_global_types=getattr(
+                            gen, '_cpp_module_global_ctypes', None))
             else:
                 ctype = gimple_exprtypes._infer_simple_expr_ctype(
                     s.value, declared, getattr(gen, '_cpp_gen_self_fields', None),

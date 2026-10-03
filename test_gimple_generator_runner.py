@@ -515,6 +515,59 @@ def _foreign_cpp_module_global_value():
         globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
 
 
+def _cpp_coroutine_exc_ctor_value():
+    # `e = ValueError('boom')` then `raise e` — real: scriptutil.py's
+    # `_iter_filenames` (`onempty = Exception('no filenames provided')` /
+    # `raise onempty`), which refused the whole generator with "a call to
+    # unresolved callee 'Exception(...)' is not supported in a compiled
+    # generator/coroutine body".
+    #
+    # What the local HOLDS is unchanged by this: this model's one exception
+    # representation is the message, which is what `_cpp_raise_stmt`'s own
+    # `raise <handler variable>` case already throws and what the ordinary
+    # (non-coroutine) GIMPLE path already produces for the same source
+    # (`_lower_opaque_ctor` returns the lone string argument, so `e` there
+    # is a `char *`). So the fix is an emission site plus the matching local
+    # type, not a second representation. The type tag is consequently the
+    # existing untagged(0) lenient match — the same one a
+    # constructed-then-raised exception gets on the ordinary path, where the
+    # tag set at construction is not carried onto the variable at all.
+    #
+    # Asserted against the BINARY's output, not just "it compiles": the
+    # failure this shape had was a compile refusal, but a `int64_t`-typed
+    # local would have compiled and thrown an integer as the message.
+    test_generator_stdout("cpp_coroutine_exception_ctor_as_value", """\
+def probe(*, start=[]):
+    e = ValueError('boom')
+    raise e
+    yield 'never'
+
+def main():
+    try:
+        for s in probe():
+            print(s)
+    except ValueError as err:
+        print('caught', err)
+""", "caught boom\n")
+    # The no-argument form: `TypeError()` is legal Python and the message is
+    # the empty string, which is what the emitted `char *` empty literal
+    # carries. Kept because it is the shape whose typing needs no argument to
+    # infer from — the one place a "just use args[0]" shortcut is wrong.
+    test_generator_stdout("cpp_coroutine_exception_ctor_as_value_no_arg", """\
+def probe(*, start=[]):
+    e = TypeError()
+    raise e
+    yield 'never'
+
+def main():
+    try:
+        for s in probe():
+            print(s)
+    except TypeError as err:
+        print('caught', repr(str(err)))
+""", "caught ''\n")
+
+
 def run_next_method_tests():
     test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
 def counter():
@@ -4025,6 +4078,7 @@ def main():
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
+    _cpp_coroutine_exc_ctor_value()
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY
     # function. An async generator is consumed by `async for`, and the
