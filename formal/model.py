@@ -17851,9 +17851,18 @@ def struct_derived_names(struct_defs, name: str) -> set:
     same reason — the fixed point is the set, and one pass over the direct bases
     is a prefix of it.
 
-    Returns struct NAMES, so a caller with a list of StructDefs can index it."""
+    Returns struct NAMES, so a caller with a list of StructDefs can index it.
+
+    **The final filter this used to end with is gone because it could not
+    remove anything.** It read `{n for n in derived if n in set(names)}`, and
+    `set(names)` was rebuilt — a fresh set of every struct's name — once per
+    element of `derived`, so the tail cost `#derived × #structs` set insertions
+    to return a set that was already exactly `derived`: `derived` only ever
+    receives `own = getattr(st, "name", None)` from a struct in `struct_defs`
+    that passed `own is None`, and `names` is the same collection's names, so
+    every member of `derived` is in `names` by construction. `names` is
+    therefore dead too, and with it one list build per call."""
     derived, grew = set(), True
-    names = [getattr(st, "name", None) for st in struct_defs or []]
     while grew:
         grew = False
         for st in struct_defs or []:
@@ -17864,7 +17873,7 @@ def struct_derived_names(struct_defs, name: str) -> set:
                    for b in (getattr(st, "bases", None) or [])):
                 derived.add(own)
                 grew = True
-    return {n for n in derived if n in set(names)}
+    return derived
 
 
 def struct_is_derived_from(struct_defs, name: str) -> bool:

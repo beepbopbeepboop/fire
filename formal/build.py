@@ -2024,9 +2024,20 @@ def _struct_methods(stmts: list) -> list:
     for st in stmts:
         if not isinstance(st, F.StructDef):
             continue
-        for m in M.struct_methods(st):
-            if not M.struct_fits_one_word(st) \
-                    and not M.struct_is_framed(st):
+        # The REPRESENTATION question is per STRUCT, asked once above the
+        # method loop rather than once per method inside it. It is not cheap:
+        # `struct_fits_one_word` and `struct_is_framed` both count the fields,
+        # and the count walks every method body of this very struct
+        # (`formal/model.py`'s `_split_declaration`) — so asking it per method
+        # made a struct with M methods cost M whole-struct walks to answer one
+        # question about it. Nothing in this loop mutates the struct, so there
+        # is nothing for a later iteration to see that an earlier one did not.
+        methods = M.struct_methods(st)
+        if not methods:
+            continue
+        lowerable = M.struct_fits_one_word(st) or M.struct_is_framed(st)
+        for m in methods:
+            if not lowerable:
                 # Not compiled, and not exported — but NOT an error here. The
                 # body would read `self.<field>` as a field of an integer, so
                 # it cannot be lowered; refusing at DECLARATION though broke
@@ -3008,7 +3019,8 @@ def _holder_state(holders: dict, hstruct: dict, returns_frame: dict) -> tuple:
 
 def _frame_receivers(functions: list, structs_by_name: dict,
                      dc_classes: dict = None, imported: dict = None,
-                     star_imports: tuple = ()) -> None:
+                     star_imports: tuple = (),
+                     enum_structs=None) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -3624,13 +3636,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                             structs_by_name)
 
     refuse_none_comparisons(functions, structs_by_name, _holder_bases,
-                            method_owners)
+                            method_owners, enum_structs)
     for fn in functions:
         if not hstruct.get(_fn_key(fn)):
             continue
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
-                                 _holder_bases(fn))
+                                 _holder_bases(fn), enum_structs)
 
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
@@ -8570,7 +8582,7 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
-def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> dict:
+def _bound_receiver_structs(fn, framed, functions=(), owner=None) -> dict:
     """`{name: struct}` for a local whose construction bindings all AGREE.
 
     **The same evidence `_one_word_field_map` reads, without the one-word
@@ -8585,13 +8597,26 @@ def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> di
     wrong answer chosen by ordering.
 
     `_constructor_bindings` is the implementation rather than a second walk of
-    the same bindings, and it is called with a `framed` map derived from
-    `structs_by_name` so the list it returns is over exactly the constructions
-    it was written for. The `type_constructor_kind` guard and the
-    `call_lowers_as_framed_construction` guard are therefore both this table's,
-    not re-derived — a call the emitters route to a type CONVERSION produces a
-    plain word that is not an `S`, and naming it one would lift `x.m()` to a
-    method of a struct `x` does not hold.
+    the same bindings, and it is called with the module's `framed` table so the
+    list it returns is over exactly the constructions it was written for. The
+    `type_constructor_kind` guard and the `call_lowers_as_framed_construction`
+    guard are therefore both this table's, not re-derived — a call the emitters
+    route to a type CONVERSION produces a plain word that is not an `S`, and
+    naming it one would lift `x.m()` to a method of a struct `x` does not hold.
+
+    **`framed` is a PARAMETER, `{struct name: struct}` for the module's framed
+    structs, and it was derived here instead — once per FUNCTION, over every
+    struct the module declares.** That is the whole of what it cost:
+    `M.struct_is_framed` counts the struct's fields, and the count is derived by
+    walking every method body of the struct (`formal/model.py`'s
+    `_split_declaration`), so each ask was a whole-struct walk; on
+    `myinterpreter.py` this line made 43 508 of them for 275 structs and 1 031
+    functions, which was 33.6 s of `struct_receiver_stores` inside a 97 s build
+    (`bugs/FORMAL_build_cost_2026-10-03.md` has the measurement). `_prepare_functions`
+    derives it once and threads it, like `wide` and `dispatch_owners`. Passing
+    the table rather than a predicate keeps this function free of the question
+    entirely: it cannot answer a different one by accident, because it no longer
+    answers it at all.
 
     `owner` adds the method's own receiver, under whatever SPELLING that struct
     uses (`M.struct_receivers`, because the receiver set is not the literal
@@ -8611,13 +8636,23 @@ def _bound_receiver_structs(fn, structs_by_name, functions=(), owner=None) -> di
     together would make the older table's verdict depend on this one's
     conservatism.
     """
-    framed = {name: st for name, st in (structs_by_name or {}).items()
-              if M.struct_is_framed(st)}
     out = {name: cands[0]
            for name, cands in _constructor_bindings(
                fn, framed, functions).items()
            if len(cands) == 1}
-    if owner is not None and M.struct_is_framed(owner):
+    # The owner's OWN entry in the same table, not a fresh `struct_is_framed`
+    # ask: `owner` comes from `method_owners`, which is built from the `structs`
+    # list `framed` is keyed over, so a hit on the very same object IS the
+    # predicate's answer. Asking it was 274 more whole-struct walks on
+    # `myinterpreter.py` — one per function that is a method — in the one
+    # function here whose stated reason for existing is that it no longer
+    # derives a module-level table. A table that does not cover this owner falls
+    # back to the predicate, because this function cannot know what a partial
+    # table was meant to say.
+    covered = framed.get(owner.name) if owner is not None else None
+    owner_framed = (covered is owner if covered is not None
+                    else owner is not None and M.struct_is_framed(owner))
+    if owner_framed:
         for recv in M.struct_receivers(owner):
             out.setdefault(recv, owner)
     return out
@@ -8932,7 +8967,8 @@ def _constant_site(st, kind: str, member: str = None) -> tuple:
 
 
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
-                         receiver_structs: dict = None) -> dict:
+                         receiver_structs: dict = None,
+                         enum_structs=None) -> dict:
     """{access path: (struct, kind, member)} for every read of a class-level
     constant.
 
@@ -9020,7 +9056,7 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
                 st, "comptime" if name in M.struct_comptime_aliases(st)
                 else "constant")
     for path, (st, kind, member) in _enum_member_sites(
-            structs_by_name, bound).items():
+            structs_by_name, bound, enum_structs).items():
         sites[path] = _constant_site(st, kind, member)
     def publish(holder, st, comptime_only):
         """Every read of `st`'s class-level values through `holder`.
@@ -9613,7 +9649,8 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
 
 
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
-                             receiver_structs: dict = None):
+                             receiver_structs: dict = None,
+                             enum_structs=None):
     """`S.NAME` / `self.NAME` -> the literal `NAME` holds, in place, over `fn`.
 
     A class-level constant — a class-level assignment OR a `comptime` binding —
@@ -9652,7 +9689,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
         return
     _apply_constant_sites(
         fn.body,
-        _constant_read_sites(fn, structs_by_name, owner, receiver_structs),
+        _constant_read_sites(fn, structs_by_name, owner, receiver_structs,
+                             enum_structs),
         _class_read_disagreement(fn, structs_by_name),
         structs_by_name)
 
@@ -12493,7 +12531,8 @@ def _first_unanswerable_mlir(value):
 
 
 
-def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
+def _enum_member_sites(structs_by_name: dict, bound: set,
+                       enum_structs=None) -> dict:
     """`{access path: (struct, kind, 'value'|'name')}` for every ENUM accessor read.
 
     The `.value` / `.name` half of the census, and it exists because of a measured
@@ -12529,12 +12568,31 @@ def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
     `kind` is the constant's own kind, carried through so the refusal arm can say
     whether the value it cannot materialize is a `comptime` binding or an
     assignment — the same distinction the bare `S.NAME` read makes.
+
+    **`enum_structs` is the module's `{name: struct}` table of ENUM classes and
+    it is a parameter, because the question behind it is a property of the
+    MODULE and every asker here asks it per FUNCTION.** `model.struct_is_enum`
+    is not a predicate over a class: it asks whether the class derives from one
+    of `model.ENUM_BASES`, which is `model.struct_derived_names`' fixed point
+    over every struct in the module — so one call is a whole-module graph walk,
+    and this loop asks one per struct per function. Measured on `myinterpreter.py`
+    (275 structs, 1 031 functions): 876 575 whole-module fixed points, 24.5 s of
+    a 31 s build, all of it re-deriving a set of enums that is EMPTY for that
+    file. `bound` is the only per-function input left, which is why it is the
+    only thing this function still asks. `_prepare_functions` derives the table
+    once, beside the framed one, and threads it here for the same reason and by
+    the same mechanism (`bugs/FORMAL_build_cost_2026-10-03.md`).
+
+    Deriving it here instead is kept as the `None` default so that a caller with
+    no module context — a test, a tool reading one function's census — still gets
+    the right answer, and it costs one walk rather than none.
     """
     sites = {}
-    for st in structs_by_name.values():
+    if enum_structs is None:
+        enum_structs = {name: st for name, st in structs_by_name.items()
+                        if M.struct_is_enum(structs_by_name, name)}
+    for st in enum_structs.values():
         if st.name in bound:
-            continue
-        if not M.struct_is_enum(structs_by_name, st.name):
             continue
         for name, _default in M.struct_class_constants(st):
             kind = ("comptime" if name in M.struct_comptime_aliases(st)
@@ -12747,7 +12805,8 @@ def _constant_read_spelling(node) -> str:
 
 def refuse_none_comparisons(functions: list, structs_by_name: dict,
                              receiver_bases=None,
-                             method_owners: dict = None) -> None:
+                             method_owners: dict = None,
+                             enum_structs=None) -> None:
     """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
 
     Asked BEFORE either substitution, and that ordering is the whole reason this
@@ -12794,7 +12853,7 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict,
         # function that wrote that `p` and not in any other.
         sites = _constant_read_sites(
             fn, structs_by_name, (method_owners or {}).get(fn.name),
-            receiver_bases(fn) if receiver_bases else None)
+            receiver_bases(fn) if receiver_bases else None, enum_structs)
         none_paths = {path: kind for path, (st, kind, _member) in sites.items()
                       if (st.name, path.partition(".")[2]) in none_consts}
         if not none_names and not none_paths:
@@ -13163,13 +13222,57 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                    else dc_classes)
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
+    # THE REPRESENTATION TABLE, derived ONCE for the module.
+    #
+    # `struct_is_framed` is not a cheap predicate: it counts the struct's
+    # fields, and `struct_field_names` derives that set by walking EVERY method
+    # body of the struct (`_split_declaration` → `struct_receiver_stores` +
+    # `struct_method_receiver_reads`). So each ask is a whole-struct walk, and
+    # the question is a property of the MODULE — one answer per declared struct
+    # — while every asker in this file below asks it from inside the per-FUNCTION
+    # loop. That is `#functions × #structs` whole-struct walks of bodies nobody
+    # has touched since the previous one, and it is where a big file's time
+    # goes: `myinterpreter.py` (5 572 lines, 275 structs, 1 031 functions) made
+    # 43 508 asks of `M.struct_is_framed` from `_bound_receiver_structs` alone,
+    # out of 46 512 asks of the field set in the whole build, and
+    # `formal/model.py`'s `struct_receiver_stores` was 33.6 s of a 97 s build
+    # inside them. See `bugs/FORMAL_build_cost_2026-10-03.md`.
+    #
+    # So the answer is computed here, once, and THREADED — the same way
+    # `dispatch_owners`, `method_owners` and `wide` are, and for the same
+    # reason: a module-level table read by a per-function pass. No cache and no
+    # invalidation, because nothing is being remembered across a mutation: the
+    # loop below used to re-derive the same partition and could read the two
+    # HALVES of it at two different points, which is the inconsistency this
+    # removes rather than one it introduces. Measured: over 14 files (this
+    # repository's own largest sources and the stdlib's biggest) 146 779 asks of
+    # the four predicates covered 7 788 (question, struct) pairs, and NOT ONE of
+    # them changed its answer between two asks inside one `_prepare_functions`
+    # call — so the table this replaces is the table every one of those asks
+    # returned.
+    framed = {name: st for name, st in structs_by_name.items()
+              if M.struct_is_framed(st)}
     # A struct of more than one field is not refused here when its receiver is
     # by reference (formal.model.struct_is_framed): the receiver word is a
     # frame address, which is one word, so the method needs no special casing
     # and the call needs no change. What is still refused is a struct that
-    # fits neither representation.
-    wide = {st.name: st for st in structs
-            if not M.struct_fits_one_word(st) and not M.struct_is_framed(st)}
+    # fits neither representation. The other half of the partition `framed`
+    # holds, read from it rather than re-asked, so the two cannot disagree —
+    # `wide` is a filter over the same `structs_by_name`, in the same order, and
+    # `structs` and `structs_by_name` are one-to-one by construction
+    # (`seen_struct` above keeps the first declaration of each name).
+    wide = {name: st for name, st in structs_by_name.items()
+            if name not in framed and not M.struct_fits_one_word(st)}
+    # …and the module's ENUM classes, derived once for the same reason and by
+    # the same mechanism. `model.struct_is_enum` is not a predicate over a class
+    # but a fixed point over every struct in the module (`struct_derived_names`),
+    # so a per-function asker pays a whole-module graph walk per struct per
+    # function: 876 575 of them on `myinterpreter.py`, 24.5 s of a 31 s build,
+    # every one re-deriving a set of enums that file has none of. The census that
+    # reads it (`_enum_member_sites`) is per function — `bound` is — so this is
+    # the table it takes instead.
+    enum_structs = {name: st for name, st in structs_by_name.items()
+                    if M.struct_is_enum(structs_by_name, name)}
     # Re-attach the census to the structs THIS FILE declares, so that a
     # consumer of the same file's declarations cannot narrow one of them behind
     # this build's back: the two would then measure the same class differently
@@ -13189,11 +13292,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # every struct reached as a typed-nested field of one of them.  Published
     # rather than threaded because the one consumer — the blob-in-a-field
     # premise check — is a node walk with no unit in hand, the same reason
-    # `attach_field_evidence` puts the evidence on the struct.
+    # `attach_field_evidence` puts the evidence on the struct. The framed HALF
+    # is `framed`'s key set read off the table above, which is what it was: a
+    # third derivation of the same predicate over the same structs.
     M.attach_placed_frame_callees(
         [st for st in structs if id(st) in own],
-        {st.name for st in structs_by_name.values()
-         if M.struct_is_framed(st)}
+        set(framed)
         | {child.name for st in structs_by_name.values()
            for _f, _s, child in M.struct_nested_frame_fields(
                st, structs_by_name)})
@@ -13239,7 +13343,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # zero was a `None`. See `refuse_none_comparisons` for why the fold stands
     # and only the comparison is refused.
     refuse_none_comparisons(functions, structs_by_name,
-                            _method_receiver_bases, method_owners)
+                            _method_receiver_bases, method_owners,
+                            enum_structs)
     # …and the OTHER lossy fold on this path, asked at the same point for the
     # same reason: a member and its value are one word, so two members with equal
     # values are one word and `Reg.A == Reg.B` answers True where CPython says
@@ -13262,6 +13367,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # rooted at a MODULE", which is a fact about the source spelling.
     from formal.imports import imported_modules as _imported_modules
     _this_unit_modules = tuple(_imported_modules(stmts) or ())
+    # The image's compiled function names, for `_constructor_bindings`' one
+    # name-that-is-both-a-function-and-a-struct guard. Hoisted out of the loop
+    # because `functions` is not rebound or extended anywhere inside it — the
+    # `_flatten_closures` / `_lift_lambdas` calls that DO change the list are
+    # after it — so the comprehension was loop-invariant and rebuilt a
+    # `#functions`-long list once per function: 1 031 × 1 031 name reads on
+    # `myinterpreter.py`, i.e. a million attribute loads to compute one list.
+    _image_function_names = [f.name for f in functions]
     for fn in functions:
         # A `with` is CPython's context-manager PROTOCOL, and this path used to
         # lower its first line and drop the two calls that ARE it — the emitters
@@ -13301,6 +13414,13 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # (`model.list_element_structs`). One walk of the bindings each, neither
         # recomputed by a consumer.
         st = method_owners.get(fn.name)
+        # A method's `self` IS the field; a local initialised from a one-word
+        # constructor holds that struct's sole field directly.  The table holds
+        # the STRUCT and the rewrite derives the chain from it, because the
+        # rewrite needs the struct too — to name it in the refusal a call
+        # through one of those fields gets — and the chain is one line away
+        # either way.  One recognition of "this name is a one-word word", read
+        # once.
         one_word = _one_word_field_map(fn, structs_by_name, st)
         if st is not None and M.struct_is_one_field(st):
             one_word["self"] = st
@@ -13318,15 +13438,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # gives. Everything else about it is `_rewrite_class_constants`.
         _rewrite_class_constants(fn, structs_by_name,
                                  method_owners.get(fn.name),
-                                 _method_receiver_bases(fn))
-# A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's sole field directly.  The table holds
-        # the STRUCT and the rewrite derives the chain from it, because the
-        # rewrite needs the struct too — to name it in the refusal a call
-        # through one of those fields gets — and the chain is one line away
-        # either way.  One recognition of "this name is a one-word word", read
-        # once.  (Built with `one_word` at the top of this loop rather than
-        # here, beside `elems`, for the reason the comment there gives.)
+                                 _method_receiver_bases(fn), enum_structs)
         # A method call THROUGH a one-word field, lifted while the field's
         # DECLARED type can still be read — the identity below is about the same
         # storage but it keeps the method name and loses the struct, and a
@@ -13345,9 +13457,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # the owner of `o.get()` as plainly as the source spells it.
         _rewrite_one_word_field_method_calls(
             fn.body, one_word, structs_by_name, receiverless,
-            _bound_receiver_structs(fn, structs_by_name,
-                                    [f.name for f in functions], st))
-# `mapping` is derived inside `_rewrite_self_fields` now, because the
+            _bound_receiver_structs(fn, framed, _image_function_names, st))
+        # `mapping` is derived inside `_rewrite_self_fields` now, because the
         # rewrite is handed the table it derives the chain from — it needs the
         # struct as well as the chain, for the refusal a call through one of
         # those fields gets. So neither the chain nor the table is built twice.
@@ -13368,7 +13479,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # pass sees what is left, which is the class name and a local built
         # from a constructor.
         _rewrite_class_constants(fn, structs_by_name,
-                                 method_owners.get(fn.name))
+                                 method_owners.get(fn.name),
+                                 None, enum_structs)
         # …and the CALLER half of the one-field mutator write-back, after
         # `_rewrite_self_fields` so the receiver it stores through is the same
         # word the callee was handed (`c._value` is `c` by now, and it is `c`
@@ -13507,7 +13619,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # half of the same bug, and why `_check_method_receiver_types` was dead.
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
-                     star_imported_modules(stmts))
+                     star_imported_modules(stmts), enum_structs)
     # The slot table is RETURNED as well as published, for the reason
     # `symbols` is: building an import compiles the imported module through this
     # same function, and that nested call publishes ITS globals over ours, so
