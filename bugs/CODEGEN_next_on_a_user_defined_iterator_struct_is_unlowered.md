@@ -297,6 +297,75 @@ is not a guess.
    `Elaborator.elaborate_overload_call` matches on `c_to_mojo`'s scalar reverse
    table, which cannot answer a conformance question; `check_conformance` and
    `Some[...]` already exist and the table is what has to learn to ask them.
+
+   ### MEASURED 2026-10-03: the elaborator does NOT first-pick here, and the
+   ### silent first-pick was in the INTERPRETER — fixed; the elaborator's real
+   ### limitation is stated precisely below.
+
+   The previous plan said `elaborate_overload_call` "matches on a scalar
+   reverse table, which cannot answer a conformance question", and implied that
+   it then picked something. Checked rather than assumed, and the two halves
+   come apart:
+
+   - **It matches on the RAW annotation, not the erased one, so it cannot tie.**
+     `elaborate_overload_call` compares `ptypes == arg_mojo` where `ptypes` is
+     each overload's declared annotation VERBATIM (`extract_overloads` reads
+     them off the parse tree) and `arg_mojo` is `c_to_mojo(arg_ctypes[i])`,
+     whose every value is a scalar name (`Int64`, `Int`, `String`, `Float64`,
+     …). So a match requires the annotation to literally BE one of those names;
+     `Some[Iterable]` never equals `Int`. Measured over every non-generic
+     overload group in the stdlib (98 of them; `extract_overloads`' pattern
+     requires `(` right after the name, so bracketed templates are excluded and
+     must not be counted here): **14 groups have at least one matchable
+     overload, and 0 have a DUPLICATED matchable annotation.** There is no tie
+     to refuse, because the matcher is comparing two different kinds of thing
+     and the answer is reliably "no".
+
+   - **So `peekable` is declined, not mis-picked — and the decline
+     MISDESCRIBES ITSELF.** Both candidates are visible and distinguishable
+     (`('Some[Iterable]',)` vs `('Some[IterableOwned]',)`), yet the decline
+     reads as "no overload matches these argument types", which is false. The
+     real reason is that the resolver holds a scalar C type where answering
+     needs the argument's Mojo type.
+
+   - **Mojo's real rule, and whether it is derivable from the stdlib source:
+     NO, and it is worth stating why rather than leaving it open.** The
+     discriminator between `std/iter/__init__.mojo`'s two `peekable` overloads
+     is the argument's *parameter convention* (`ref iterable: Some[Iterable]`
+     vs `var iterable: Some[IterableOwned]`) plus conformance of the argument's
+     type to `Iterable` vs `IterableOwned`. Both facts live in the ARGUMENT, and
+     the argument reaches this code as an erased C type: `c_to_mojo` is a scalar
+     reverse table, so `MojoList *` and a `String *` and an `int64_t` all arrive
+     as scalars and an owned `MojoList` satisfies BOTH traits — a real tie that
+     no amount of reading the trait declarations resolves. Recovering it needs
+     the argument's Mojo type at the call site, which is item 3's machinery
+     (`_refine_generic_return_type` does not receive argument types either).
+     **So: do not guess these, and do not build a conformance checker against
+     an erased type — it would be answering a question it cannot see.**
+
+   - **The actual "silently picks the first" antipattern was
+     `myinterpreter.MojoOverloadSet`, and it is FIXED (landed 2026-10-03).**
+     `__call__` returned the first candidate `_matches` accepted, and
+     `_matches` looks only at argument count and keyword names — so the
+     stdlib's own `peekable` pair (same arity, no keywords, differing only in a
+     trait bound and a convention) dispatched to whichever the file declared
+     first. Its class docstring claimed "no match is a hard error rather than a
+     silent first-pick", which was true of the no-match branch and **false of
+     the ambiguous one**. It now collects all matching candidates, raises
+     `_NoOverloadMatch` naming the tie when more than one survives, and still
+     dispatches when exactly one does. Pinned by
+     `test_module_cache.py::test_ambiguous_overload_is_refused_not_first_picked`
+     (4 checks: the tie raises, the message names the candidates, a RANKABLE
+     set still dispatches so the refusal cannot over-reach, and the pre-existing
+     no-match error is unchanged). Measured blast radius: none —
+     `test_runtime_diff.py` 42/0, `test_interp_oracle.py` 6/0,
+     `test_generators.py` 29/0, `test_module_cache.py` 146/0,
+     `test_gimple.py` 354/0, `compile_stdlib.py` 591/19/0.
+     (`test_myinterpreter_simple.py`, `test_myinterpreter_validation.py` and
+     `test_dispatch_phase_c.py` fail on this tree for PRE-EXISTING reasons —
+     the first two on the dead `mojo/ast_nodes.mojo`, the third on
+     `DispatchSolver should have been instantiated` — verified by stashing the
+     change and re-running.)
 3. **Dependent return types**, for the ones that then survive selection:
    `peekable(list)` → `_PeekableIterator[type_of(iterable).IteratorOwnedType]`,
    with `List.IteratorOwnedType = _ListIterOwned[Self.T]`

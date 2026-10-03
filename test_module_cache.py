@@ -1820,6 +1820,92 @@ def test_in_tu_instantiation(wd):
               f'= {m}___next__ (' in code and ' _next (' not in code)
 
 
+def test_ambiguous_overload_is_refused_not_first_picked(wd):
+    """An overload set this resolver cannot rank must RAISE, not return the
+    first candidate.
+
+    `myinterpreter.MojoOverloadSet` dispatches on argument count and keyword
+    names only — the interpreter is untyped, so parameter types are not
+    available to it. Two candidates that agree on both are therefore genuinely
+    unrankable, and returning the first in source order is a silent wrong
+    answer whenever they differ in parameter type, parameter convention
+    (`ref`/`var`/`mut`) or return type.
+
+    The stdlib's own shape is `peekable` (`std/iter/__init__.mojo`):
+    `def peekable(ref iterable: Some[Iterable]) -> _PeekableIterator[...]`
+    versus `def peekable(var iterable: Some[IterableOwned]) -> ...`. Same
+    arity, no keywords, differing only in a trait bound and a convention.
+
+    Pinned per property, because each is a distinct way this could rot back
+    into a first-pick:
+      - an unrankable tie RAISES, and the message names the tie;
+      - the candidates are still enumerated in the message, so the caller can
+        see WHICH overloads collided;
+      - a tie that IS rankable (differing arity) still DISPATCHES — refusing
+        every overload set would be a different regression, and this is what
+        keeps the refusal from over-reaching;
+      - the pre-existing no-match error still fires, unchanged, with its own
+        message.
+    """
+    import myinterpreter as MI
+
+    class _FakeFn:
+        def __init__(self, tag):
+            self.tag = tag
+
+        def __call__(self, interpreter, *a, **k):
+            return ('called', self.tag)
+
+    class _I:
+        pass
+
+    def _set(name, specs):
+        s = MI.MojoOverloadSet(name)
+        for fn, req, opt, kwo in specs:
+            s.add(fn, req, opt, kwo, False)
+        return s
+
+    # The stdlib `peekable` shape: same arity, same parameter name, no
+    # keywords, differing only in what `_matches` cannot see.
+    tie = _set('peekable', [
+        (_FakeFn('ref-Some[Iterable]'), ['iterable'], [], []),
+        (_FakeFn('var-Some[IterableOwned]'), ['iterable'], [], []),
+    ])
+    try:
+        got = tie(_I(), [1, 2, 3])
+        check("ovl#1: an unrankable tie RAISES rather than returning the first "
+              "candidate", False, f'returned {got!r}')
+    except MI._NoOverloadMatch as e:
+        msg = str(e)
+        check("ovl#1: an unrankable tie RAISES rather than returning the first "
+              "candidate", 'AMBIGUOUS' in msg, msg[:120])
+        check("ovl#2: the refusal names the tie — 'peekable', the candidate "
+              "count, and the call shape",
+              'peekable' in msg and '2 of 2' in msg and '1 positional' in msg,
+              msg[:120])
+
+    # Rankable: arity differs, so this MUST still dispatch. A refusal here
+    # would be over-reaching, and `test_runtime_diff.py` (42 cases) is the
+    # backstop for that; this pins it at the unit.
+    ranked = _set('f', [
+        (_FakeFn('one'), ['a'], [], []),
+        (_FakeFn('two'), ['a', 'b'], [], []),
+    ])
+    check("ovl#3: a RANKABLE overload set (differing arity) still dispatches",
+          ranked(_I(), 1) == ('called', 'one')
+          and ranked(_I(), 1, 2) == ('called', 'two'))
+
+    # The pre-existing no-match error, unchanged.
+    try:
+        ranked(_I(), 1, 2, 3)
+        check("ovl#4: no-match still raises the original error", False,
+              'returned instead of raising')
+    except MI._NoOverloadMatch as e:
+        check("ovl#4: no-match still raises the original error",
+              'AMBIGUOUS' not in str(e) and 'no overload' in str(e),
+              str(e)[:120])
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -1854,6 +1940,7 @@ def main():
         test_module_attr_class_alias_constructs_that_class(wd)
         test_root_module_circular_import_symbol(wd)
         test_underscore_prefixed_sibling_import_symbol(wd)
+        test_ambiguous_overload_is_refused_not_first_picked(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

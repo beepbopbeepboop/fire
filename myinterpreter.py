@@ -1013,10 +1013,32 @@ class MojoOverloadSet:
     not redefinitions of the same function — real Mojo picks the candidate
     whose signature matches the call site. We can only realistically dispatch
     on argument count and keyword names (the interpreter is untyped, so
-    parameter *types* can't disambiguate); no match is a hard error rather
-    than a silent first-pick, matching this project's own compiled-path
-    overload-resolution philosophy (see gimple_codegen's "no-match overload
-    returns None" test)."""
+    parameter *types* can't disambiguate).
+
+    **Both failure directions are hard errors, and the second one was missing
+    until 2026-10-03.** The no-match case always raised. The AMBIGUOUS case —
+    two or more candidates that `_matches` cannot tell apart — returned the
+    FIRST one, in source order, which is a silent wrong answer whenever the
+    candidates differ in anything `_matches` does not look at: parameter types,
+    parameter conventions (`ref`/`var`/`mut`), or the return type. `peekable`'s
+    two stdlib overloads are exactly that shape
+    (`std/iter/__init__.mojo`: `def peekable(ref iterable: Some[Iterable])` vs
+    `def peekable(var iterable: Some[IterableOwned])`) — same arity, no
+    keywords, differing only in a trait bound and a convention, so
+    `peekable(a_list)` dispatched to whichever the file happened to declare
+    first. The class docstring claimed "no match is a hard error rather than a
+    silent first-pick", which was true of the no-match case and false of this
+    one.
+
+    Refusing is the correct outcome, not a limitation being papered over: a
+    first-pick here is indistinguishable, to the caller, from a correct
+    dispatch, which is strictly worse than an error that names the tie. The
+    same rule the compiled path already follows is `elaborate`'s — an overload
+    the resolver cannot decide is declined, never guessed. What is genuinely
+    unavailable here (and is why this is a refusal rather than a dispatch) is
+    parameter-type information: the interpreter is untyped, and recovering it
+    would mean modelling Mojo's ownership conventions, not adding a comparison.
+    """
     def __init__(self, name):
         self.name = name
         self.candidates = []  # list of (MojoFunction, required, optional, kwonly, has_var_kwargs)
@@ -1042,13 +1064,34 @@ class MojoOverloadSet:
         return True
 
     def __call__(self, interpreter, *args, **kwargs):
-        for spec in self.candidates:
-            if self._matches(spec, args, kwargs):
-                func = spec[0]
-                return func(interpreter, *args, **kwargs)
+        matching = [spec for spec in self.candidates
+                    if self._matches(spec, args, kwargs)]
+        if len(matching) == 1:
+            return matching[0][0](interpreter, *args, **kwargs)
+        if not matching:
+            raise _NoOverloadMatch(
+                f"no overload of '{self.name}' matches {len(args)} positional "
+                f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
+            )
+        # More than one candidate survived, so the choice is between
+        # signatures this resolver cannot rank — they differ in parameter
+        # types, parameter conventions, or return type, and dispatching on
+        # argument count and keyword names alone cannot separate them. Naming
+        # the candidates is the point: the caller can see WHICH tie it hit and
+        # add the information, where a first-pick would have hidden it.
+        _shapes = ', '.join(
+            f"({', '.join(spec[1] + spec[2])})"
+            f"{' + ' + str(spec[3]) if spec[3] else ''}"
+            for spec in matching)
         raise _NoOverloadMatch(
-            f"no overload of '{self.name}' matches {len(args)} positional "
-            f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
+            f"AMBIGUOUS call to '{self.name}': {len(matching)} of "
+            f"{len(self.candidates)} overloads match {len(args)} positional "
+            f"arg(s) and keyword(s) {sorted(kwargs.keys())} equally well "
+            f"[{_shapes}]. This interpreter dispatches on argument count and "
+            f"keyword names only, so it cannot choose between them; picking "
+            f"the first would be a silent wrong answer. Disambiguate at the "
+            f"call site (or pass the arguments by keyword where the "
+            f"signatures differ in arity)."
         )
 
 
