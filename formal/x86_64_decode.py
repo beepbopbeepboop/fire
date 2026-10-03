@@ -21,7 +21,7 @@ by round-tripping every encoder through this decoder.
 """
 
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # REX bits, as in formal/x86_64.py's `_rex`.
 REX = 0x40
@@ -38,6 +38,20 @@ _ALU_RR = {0x01: "add", 0x09: "or", 0x21: "and", 0x29: "sub", 0x31: "xor",
 
 class DecodeError(Exception):
     """The byte stream does not decode as a known instruction at `offset`."""
+
+    #: `BaseException.args`, declared so the message has a SLOT.  CPython fills
+    #: `args` from the caller's arguments and `str(e)` reads it, so
+    #: `raise DecodeError(msg)` already carries the text there; an annotation
+    #: with no initializer creates no attribute and runs nothing, so this is
+    #: invisible to the language and to every reader of this module.
+    #:
+    #: It is here because `raise DecodeError(msg)` is a CONSTRUCTION with one
+    #: argument and this backend fills a struct's fields in DECLARATION ORDER
+    #: from positional arguments: a struct that declares no field of its own has
+    #: no slot to put the message in, so the call was refused.  Declaring the
+    #: field the base class already has is the same program with a
+    #: representation.
+    args: tuple
 
 
 @dataclass
@@ -65,7 +79,6 @@ class Insn:
     mem_base: int | None = None
     mem_disp: int = 0
     rip_rel: int = 0
-    extra: dict = field(default_factory=dict)
 
     @property
     def next_offset(self) -> int:

@@ -2788,6 +2788,18 @@ dylib_exports: list = None, globals_base: int = None,
         why = M.ellipsis_refusal(expr)
         if why is not None:
             raise CodegenError(why)
+        # The RECEIVER of an inlined `__init__`, and the FIELD of one.  Neither
+        # is in the source: they are what `model.init_receiver_rewrite` turned
+        # `self` into once the body's stores were decided to run at the
+        # construction site, because the block that object is being built in is
+        # THIS call site's and its address is what `self` meant.  Asked here,
+        # at the top of the walk, because both are ARGUMENTS to a lifted
+        # `Class_m(<receiver>, …)` call and everything downstream — the argument
+        # binder, the spill-and-pop sequence, the callee's frame-holder
+        # contract — is then the code a method call has always run.
+        if isinstance(expr, (M.CtorReceiver, M.CtorField)):
+            self._emit_ctor_receiver(expr)
+            return
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm("X0", expr.value)
             return
@@ -6720,6 +6732,34 @@ ctor_field_value=self._ctor_field_value_for(name),
         makes "a frame is a blob that the cursor skips" true by construction
         instead of by two address computations agreeing."""
         self._emit_list_base(offset)
+
+    def _emit_ctor_receiver(self, node) -> None:
+        """X0 = the block the inlined `__init__` is constructing, or its slot.
+
+        The two nodes `model.init_receiver_rewrite` produces, and the arithmetic
+        is the same two instructions in the same order the store loop above
+        uses: `_emit_frame_base` puts the block's address in X9 and a field read
+        is a load at `X9 + 8·slot`.  The address is X9-RELATIVE, so this is
+        correct at any point in the body whatever SP is doing — which matters
+        because the value is an ARGUMENT of a lifted method call and the
+        arguments after it are evaluated (and spill) in between.
+
+        X9 → X0 because a bare expression leaves its value in X0 and this is
+        reached through `_emit_expr`, the same door every other value comes
+        through.
+        """
+        site = self._frame_sites.get(id(node.call))
+        if site is None:
+            raise CodegenError(
+                f"a read of the receiver of a constructor at a site this "
+                f"function did not reserve a receiver frame for — the frame "
+                f"layout and the body disagree, which is a compiler bug, not a "
+                f"program error")
+        self._emit_frame_base(site[1])
+        if isinstance(node, M.CtorField):
+            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * node.slot))
+            return
+        self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_fresh_one_word(self, name: str, st) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.

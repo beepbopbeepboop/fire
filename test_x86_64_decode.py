@@ -9,6 +9,13 @@ strength of it. This test pins the claim to the encoders it is the inverse of:
 for each `encode_*` in formal/x86_64.py, decode the bytes it produces and
 check the form and operands come back.
 
+It also builds THIS MODULE through the formal backend at the end, because the
+decoder is swept like any other source file and its first two refusals were
+about what it DECLARES rather than about what it computes — `Insn.extra`'s
+`field(default_factory=dict)`, which nothing reads, and `DecodeError(msg)`,
+which is a construction with one argument and a struct that declared no slot to
+put it in. Neither is visible to a round-trip.
+
 Run: python3 test_x86_64_decode.py
 """
 
@@ -185,6 +192,72 @@ try:
     FAILURES.append("data bytes decoded as instructions (they must not)")
 except D.DecodeError:
     pass
+
+# ── the two DECLARATIONS the formal backend builds this module through ──────
+#
+# `formal/x86_64_decode.py` is itself swept by `tools/formal_sweep.py`, and its
+# first two refusals were about what it DECLARES rather than about what it
+# computes, so a round-trip above cannot see them: every case here builds or
+# decodes fine in CPython either way.
+#
+#   * `Insn.extra` was `field(default_factory=dict)` and is read and written
+#     NOWHERE in the repository — the `extra` names in this module are a local
+#     counting trailing bytes. So there is no per-instance value for a factory
+#     to produce, and the declaration described nothing the program does.
+#   * `DecodeError(msg)` is a construction with one argument, and a struct that
+#     declares no field of its own has no slot to put it in: the fields are
+#     filled in DECLARATION ORDER from positional arguments. It declares
+#     `args` now, which is the field CPython's `BaseException` already fills
+#     from those arguments and `str(e)` already reads.
+#
+# The build below is the assertion that matters: the file's FIRST refusal must
+# not be either construct. It is a build and not a source inspection because
+# the two are only related by the backend's reading of the declarations — the
+# whole content of both fixes is what that reading sees.
+import os
+import subprocess
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FIRE = os.path.join(HERE, "fire.py")
+
+
+def _formal_first_refusal(rel):
+    """The first refusal `fire.py build --formal` prints for `rel`, or ''.
+
+    Both architectures, and both answers are needed: a refusal that only one of
+    them reaches is one this test would otherwise call green. '' means the file
+    BUILDS, which is strictly better than either needle and says so.
+    """
+    out = []
+    for backend in ("arm64", "x86_64"):
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             f"--backend={backend}", "-o",
+             os.path.join(HERE, "build", f"decode_sweep_{backend}"),
+             os.path.join(HERE, rel)],
+            capture_output=True, text=True, timeout=600, cwd=HERE)
+        out.append("" if r.returncode == 0
+                   else (r.stderr or r.stdout).strip())
+    return out
+
+
+for _msg in _formal_first_refusal("formal/x86_64_decode.py"):
+    if "default_factory" in _msg:
+        FAILURES.append("formal/x86_64_decode.py is refused on "
+                        "`field(default_factory=…)` again: " + _msg[-300:])
+    if "constructing DecodeError" in _msg:
+        FAILURES.append("formal/x86_64_decode.py is refused on constructing "
+                        "DecodeError again — it declares `args`, so the message "
+                        "has a slot: " + _msg[-300:])
+# And the declarations themselves, so a fix that deleted the message instead of
+# the cause would still be caught: `str()` reads `args` on both paths.
+try:
+    if str(D.DecodeError("truncated instruction at 4")) != \
+            "truncated instruction at 4":
+        FAILURES.append("DecodeError lost its message: `str(e)` does not read "
+                        "the argument the raise passed")
+except Exception as _e:                                    # noqa: BLE001
+    FAILURES.append(f"DecodeError could not be raised with a message: {_e}")
 
 if FAILURES:
     print(f"FAIL ({len(FAILURES)})")

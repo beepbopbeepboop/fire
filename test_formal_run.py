@@ -8749,26 +8749,139 @@ CONSTRUCTION_REFUSALS = [
      "    return x.a\n",
      "refuse:whose body this path does not inline: a local assignment (`t = …`)",
      None),
-    # (5) A READ OF THE RECEIVER, which is the case a bare-parameter check
-    # misses and the one that would be a wrong ANSWER rather than a refusal:
-    # `self.a = a` is fine because `a` is the caller's own expression, and
-    # `self.a = 1 + a` is not, because the arithmetic names a word the calling
-    # function does not have.  The needle is the READ, and the parameter row
-    # below is its twin from the other side.
-    ("constr_refuse_an_init_body_that_reads_the_receiver",
-     "struct A5:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "\n"
-     "    def __init__(out self, a: Int, b: Int):\n"
-     "        self.a = a\n"
-     "        self.b = self.a + b\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var x = A5(1, 2)\n"
-     "    return x.b\n",
-     "refuse:whose body this path does not inline: a read of 'self' in the right-hand side",
-     None),
+     # (5) A READ OF THE RECEIVER.  It used to be one refusal with the needle
+     # "a read of 'self' in the right-hand side", because the block's address
+     # could not be threaded through as a receiver — and it is now TWO lowerings
+     # and a smaller refusal.  A method call is lifted to a real call with the
+     # block's address as its receiver and a one-level field read is a load at
+     # `block + 8·slot`, both of which the emitters answer from the block
+     # `struct_constructor_sites` already reserved for this call
+     # (`CTOR_RECEIVER_CASES` builds and runs the two shapes against CPython).
+     #
+     # What is left is a receiver read with no address to compute from, and the
+     # three cases below are the three ways that happens.  This first one is a
+     # read THROUGH a field: the slot holds a frame ADDRESS and the offset after
+     # it is a different struct's layout, which is the one thing this struct's
+     # own field table cannot answer.
+     ("constr_refuse_an_init_body_that_reads_through_a_nested_field",
+      "struct In5:\n"
+      "    var q: Int\n"
+      "    var r: Int\n"
+      "\n"
+      "struct A5:\n"
+      "    var a: Int\n"
+      "    var inner: In5\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.inner.q\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.inner.q`, "
+      "a read THROUGH a field of A5",
+      None),
+     # (5a) The same family from the other side: a field handed to a CALL.
+     # A slot holds one word and that word is an ADDRESS when the field holds a
+     # nested frame, so whether a callee may be handed one is a question about
+     # the CALLEE's parameter convention — and this is the one place in the
+     # compiler that cannot ask, because the frame-holder analysis reads
+     # function bodies and a call lifted out of an inlined constructor body is in
+     # none of them.
+     ("constr_refuse_an_init_body_that_hands_a_field_to_a_call",
+      "def twice5(v: Int) -> Int:\n"
+      "    return v * 2\n"
+      "\n"
+      "struct A5b:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = twice5(self.a)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5b(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: `self.a` handed "
+      "to `twice5(…)` as an argument",
+      None),
+     # (5b) The receiver read with nothing behind it at all: the object itself,
+     # rather than one of its fields.  A bare `self` has no word to load and no
+     # call to lift, so there is nothing for the block to say.
+     ("constr_refuse_an_init_body_that_reads_the_receiver_barely",
+      "def sink5(v: Int) -> Int:\n"
+      "    return 1\n"
+      "\n"
+      "struct A5c:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int):\n"
+      "        self.a = a\n"
+      "        self.b = sink5(self)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5c(1)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a bare read of "
+      "`self`, which is the object under construction and neither one of its "
+      "fields nor a method call on it",
+      None),
+     # (5c) A receiver read on a struct that HAS no block to read.  A struct of
+     # one field is a plain word and its receiver IS that word, so the two
+     # lowerings above — both of which compute something out of an address —
+     # have no address; and the word this construction evaluates to is the LAST
+     # store of the body, so an earlier read has no value to read.  The method
+     # is a `@staticmethod` because an ordinary method of a one-field struct that
+     # returns a value is refused earlier and more specifically, by
+     # `receiver_writeback_name` — which is a real answer about a different
+     # question and not this one.
+     ("constr_refuse_an_init_body_that_reads_a_one_field_receiver",
+      "struct One5:\n"
+      "    var n: Int\n"
+      "\n"
+      "    def __init__(out self, v: Int):\n"
+      "        self.n = self.plus()\n"
+      "\n"
+      "    @staticmethod\n"
+      "    def plus() -> Int:\n"
+      "        return 7\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = One5(1)\n"
+      "    return x.n\n",
+      "refuse:whose body this path does not inline: a read of the receiver this "
+      "path cannot resolve against the block being constructed: a read of the "
+      "receiver of One5, which is a struct of 1 field(s) and so its receiver IS "
+      "its own word",
+      None),
+     # (5d) The name `self.a + b` used to be refused as a receiver read.  The
+     # receiver half of it lowers now and the refusal is about the OTHER name:
+     # `b` is a parameter read inside an expression, which this path does not
+     # substitute (see `_init_store_value`'s bare-parameter rule, and why the
+     # rule is "alone" and not "anywhere").
+     ("constr_refuse_an_init_body_that_reads_a_parameter_under_a_field_read",
+      "struct A5d:\n"
+      "    var a: Int\n"
+      "    var b: Int\n"
+      "\n"
+      "    def __init__(out self, a: Int, b: Int):\n"
+      "        self.a = a\n"
+      "        self.b = self.a + b\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var x = A5d(1, 2)\n"
+      "    return x.b\n",
+      "refuse:whose body this path does not inline: a read of 'b' in the "
+      "right-hand side",
+      None),
+
     # (6) The same refusal for a PARAMETER, which is the one that is easy to
     # get wrong in the accepting direction: a program that inlined this would
     # read a word out of whatever register the CALLING function left in it, and
@@ -11213,6 +11326,179 @@ CONCAT_CASES = [
      "    for v in ys:\n"
      "        s += v\n"
      "    print(\"sum=%d\" % s)\n"),
+]
+
+
+# ── an inlined `__init__`'s OWN RECEIVER ─────────────────────────────────────
+#
+# `model.init_receiver_rewrite` resolves a read of the object under construction
+# against the block `struct_constructor_sites` reserved for that construction,
+# in two ways: a METHOD CALL is lifted to the call it is with the block's address
+# as its receiver, and a one-LEVEL FIELD READ is a load at `block + 8·slot`.  It
+# used to be one refusal ("whose body this path does not inline: a read of 'self'
+# in the right-hand side"), and the two files it blocked were this repository's
+# own — `module_spec_gen.py`'s `self.spec_content = self._read_spec()`.  The
+# refusals that remain are in `CONSTRUCTION_REFUSALS` (5), (5a), (5b), (5c).
+#
+# A CPython-pair group rather than four-column constants, because the whole
+# content of the change is an ORDER: the stores run in the body's own order, each
+# receiver read sees what the stores BEFORE it wrote, and the block belongs to the
+# construction SITE.  A hand-written constant would not notice a receiver reading
+# a slot before the store that fills it, and CPython does.
+CTOR_RECEIVER_CASES = [
+    # (1) A METHOD CALL with no arguments, and a field read of what it returned.
+    # The last store is the whole value of the answer, so a receiver that read
+    # the wrong block would return the caller's block's garbage rather than 15.
+    ("ctor_recv_a_method_call_and_a_field_read",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S(5)\n"
+     "    printf(\"%d\\n\", s.c)\n"
+     "    return 0\n",
+     "class S:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "        self.c = self.a + self.b\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    s = S(5)\n"
+     "    print(s.c)\n"),
+    # (2) A method that reads TWO fields, one of them at its CLASS-LEVEL default
+    # and one the body has already stored — so the receiver the method reads
+    # through is the block under construction and the store order is load-bearing.
+    ("ctor_recv_a_method_reads_a_class_default",
+     "struct Box:\n"
+     "    var w: Int = 40\n"
+     "    var h: Int\n"
+     "    var area: Int\n"
+     "    var tag: Int\n"
+     "\n"
+     "    def __init__(out self, h: Int):\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(out self) -> Int:\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(out self, k: Int) -> Int:\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box(2)\n"
+     "    printf(\"%d\\n\", b.area + b.tag)\n"
+     "    return 0\n",
+     "class Box:\n"
+     "    def __init__(self, h):\n"
+     "        self.w = 40\n"
+     "        self.h = h\n"
+     "        self.area = self.scaled()\n"
+     "        self.tag = self.pick(3)\n"
+     "\n"
+     "    def scaled(self):\n"
+     "        return self.w * self.h\n"
+     "\n"
+     "    def pick(self, k):\n"
+     "        if k == 3:\n"
+     "            return 7\n"
+     "        return 0\n"
+     "\n"
+     "def main():\n"
+     "    b = Box(2)\n"
+     "    print(b.area + b.tag)\n"),
+    # (3) TWO constructions of one struct in one function, which is the case the
+    # receiver has to name its own SITE for: the block is per call site, so a
+     # receiver that resolved to the first construction would read 5 where the
+     # source says 7.
+    ("ctor_recv_two_sites_get_two_blocks",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(out self) -> Int:\n"
+     "        return 10\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var p = P(5)\n"
+     "    var q = P(7)\n"
+     "    printf(\"%d\\n\", p.b * 100 + q.b + p.a)\n"
+     "    return 0\n",
+     "class P:\n"
+     "    def __init__(self, n):\n"
+     "        self.a = n\n"
+     "        self.b = self.ten()\n"
+     "\n"
+     "    def ten(self):\n"
+     "        return 10\n"
+     "\n"
+     "def main():\n"
+     "    p = P(5)\n"
+     "    q = P(7)\n"
+     "    print(p.b * 100 + q.b + p.a)\n"),
+    # (4) The shape `module_spec_gen.py` is written in: a constructor whose stores
+    # are the constructor's own ARGUMENT and two calls on the object being built,
+    # with the methods reading fields the earlier stores wrote.  Written out here
+    # with a file-shaped body instead of `open()`/`f.read()` so the case measures
+    # the receiver and nothing else.
+    ("ctor_recv_module_spec_generator_shape",
+     "struct ModuleSpecGenerator:\n"
+     "    var spec_file: String = \"\"\n"
+     "    var spec_len: Int\n"
+     "    var type_count: Int\n"
+     "\n"
+     "    def __init__(out self, spec_file: String):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(out self) -> Int:\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(out self) -> Int:\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var g = ModuleSpecGenerator(\"abcd\")\n"
+     "    printf(\"%d\\n\", g.spec_len * 100 + g.type_count)\n"
+     "    return 0\n",
+     "class ModuleSpecGenerator:\n"
+     "    spec_file = \"\"\n"
+     "    def __init__(self, spec_file):\n"
+     "        self.spec_file = spec_file\n"
+     "        self.spec_len = self.measure()\n"
+     "        self.type_count = self.count_types()\n"
+     "\n"
+     "    def measure(self):\n"
+     "        return len(self.spec_file)\n"
+     "\n"
+     "    def count_types(self):\n"
+     "        return self.spec_len + 2\n"
+     "\n"
+     "def main():\n"
+     "    g = ModuleSpecGenerator(\"abcd\")\n"
+     "    print(g.spec_len * 100 + g.type_count)\n"),
 ]
 
 
@@ -15755,14 +16041,15 @@ def main():
                   | {c[0] for c in SLICE_CASES}
                   | {c[0] for c in SLICE_BOUND_CASES}
                   | {c[0] for c in CONCAT_CASES}
-                  | {c[0] for c in SET_UNION_CASES})
+                  | {c[0] for c in SET_UNION_CASES}
+                  | {c[0] for c in CTOR_RECEIVER_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      + COMPTIME_ATTRIBUTE_CASES
                      + ONE_FIELD_MUTATOR_CASES
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
-                     + SET_UNION_CASES
+                     + SET_UNION_CASES + CTOR_RECEIVER_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and

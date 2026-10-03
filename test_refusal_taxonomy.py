@@ -522,9 +522,10 @@ CAUSE_SAMPLES = [
      "CallExpr.args: `field(default_factory=F)` calls F once per instance, "
      "and this path has nowhere to keep the result"),
     ("a constructor body that reads `self` is not inlined",
-     "constructing ModuleSpecGenerator with arguments is a call to a "
-     "user-defined `__init__` whose body this path does not inline: a read of "
-     "'self' in the right-hand side"),
+     "constructing A5b with arguments is a call to a user-defined `__init__` "
+     "whose body this path does not inline: a read of the receiver this path "
+     "cannot resolve against the block being constructed: `self.a` handed to "
+     "`twice5(…)` as an argument"),
     ("a local read before its first assignment",
      "load: 'f' is read at line 22 before anything in this function stores "
      "it, and CPython raises UnboundLocalError for that program"),
