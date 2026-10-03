@@ -122,8 +122,13 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal, or a writable filesystem this target does not get.
-    "getpass", "webbrowser", "tempfile", "shutil",
+    # A terminal. `tempfile` is here for the `TMPDIR`-derived half of that
+    # sentence rather than the terminal half, and `shutil` WAS here too — under
+    # "a writable filesystem this target does not get", which was FALSE and is
+    # now `formal/hostmods/shutil.mojo`; `get_terminal_size` is the half that
+    # survived the removal and is absent in that module with the reason at its
+    # own definition.
+    "getpass", "webbrowser", "tempfile",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else.
     "zlib", "gzip", "locale",
@@ -182,7 +187,25 @@ HOST_MODELLED = frozenset((
     #     answer is written at the top of the file: `platform()` itself is one
     #     call away and blocked on `architecture()`, which needs `file(1)`, and
     #     `processor()`/`libc_ver()` are subprocesses and a readable file.
-    "errno", "stat", "select",
+    #   `stat`  — `formal/hostmods/stat.mojo`, the MODE VOCABULARY and nothing
+    #     else: every `S_I*` / `S_IF*` / `ST_*` constant, `S_IFMT`, `S_IMODE`,
+    #     the seven `S_IS*` predicates this platform compiles, and `filemode`,
+    #     each checked name by name against CPython's own `stat` by
+    #     `test_formal_stat.py` over an EXHAUSTIVE mode corpus — every one of
+    #     the 4096 permission combinations and every type CPython's `filemode`
+    #     table has a row for. It is the only host module with no dependency on
+    #     the C library and none on `os`, because CPython's `stat` is the
+    #     VOCABULARY for reading `os.stat`'s answer and holds no syscall of its
+    #     own; the syscall and its byte-wise field reader are
+    #     `formal/hostmods/os/_syscalls.mojo`'s (`fs_stat_field64`,
+    #     `fs_stat_mode`) and are deliberately NOT re-exported here, so there is
+    #     one reader of `struct stat` in this tree. What it cannot answer is at
+    #     the top of that file: `S_ISDOOR` / `S_ISPORT` / `S_ISWHT` are
+    #     compiled out of CPython on this platform and answering "no" would be a
+    #     plausible wrong answer about a whiteout, and Darwin's
+    #     `ST_BIRTHTIME` / `ST_BLOCKS` / `ST_BLKSIZE` have no CPython name to
+    #     be checked against.
+    "errno", "select",
     #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
     #     checked read for read against CPython's own `PurePosixPath` by
     #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
@@ -311,13 +334,52 @@ HOST_MODELLED = frozenset((
     #     `contextmanager` is a decorator (silently DROPPED, so it would build
     #     and do nothing) and `closing` would bind correctly and then silently
     #     never close anything — the one shape a mirror of CPython must not ship.
+    #   `math`  — `formal/hostmods/math.mojo`, the SEVEN functions in CPython's
+    #     `math` that answer an INTEGER (`gcd` / `lcm` / `isqrt` / `factorial`
+    #     / `comb` / `perm` / `prod`), plus the IEEE-754 bit patterns of the
+    #     five float constants, checked name by name against CPython's own
+    #     `math` by `test_formal_math.py`. Everything else in CPython's `math`
+    #     takes and answers a `float`, and that is not a missing libc call:
+    #     libSystem has every one of them, and a `double` does not travel in an
+    #     integer register on either ABI (arm64 `d0`, SysV x86-64 `XMM0`), so
+    #     calling `sqrt(x)` here would hand the C library a garbage bit pattern
+    #     and return a plausible wrong answer. `floor`/`ceil`/`trunc`/`round`/
+    #     `fabs` are absent for that reason and not because their integer case
+    #     is hard: for an integral argument each of them answers the argument,
+    #     and a `floor` that returns its argument is `copy.copy`. What the
+    #     module cannot answer is at the top of that file: a binomial
+    #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
+    #     number, which is a status because there are no exceptions here
+    #     (FORMAL.md phase 7).
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "math", "random", "decimal", "fractions",
+    "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
+    #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
+    #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
+    #     over a source larger than its own copy buffer, `copy`/`copy2`'s
+    #     one observable difference (the mode and not the time, and both),
+    #     `copymode`, `copystat`, `move`, `rmtree`, `copytree` and `which` over
+    #     a `PATH` corpus chosen for its branches. It was in `HOST_UNREACHABLE`,
+    #     not here, so its removal is a REVERSAL of a permanent-fact claim and
+    #     the reason is worth stating: that claim said "a writable filesystem
+    #     this target does not get", and `formal/hostmods/os/__init__.mojo` has
+    #     had `mkdir`, `makedirs`, `remove`, `rmdir`, `rename`, `replace` and
+    #     `chmod` for a while — `test_formal_os.py` runs 75 filesystem
+    #     operations against the real filesystem — so the filesystem half was
+    #     false and only the TERMINAL half is not. What it adds to make the copy
+    #     possible is `fopen`/`fwrite`/`fread`/`fclose` and `utimes` in
+    #     `formal/hostmods/os/_syscalls.mojo`, because this path lowers `open`
+    #     itself and refuses the C library's three-argument spelling of it.
+    #     What it cannot answer is at the top of that file: `disk_usage` is a
+    #     three-tuple (`bugs/FORMAL_time_struct_shaped_answers.md`),
+    #     `get_terminal_size` is the terminal that IS unavailable, `move` has no
+    #     cross-device fallback because `errno` cannot be bound
+    #     (`__error` has a leading underscore), and the archives are a library
+    #     with a struct layout nobody in the sweep asks for.
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
@@ -351,6 +413,28 @@ HOST_MODELLED = frozenset((
 # files they imported "not a stdlib or sibling module", which is a statement
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
+# `fcntl` WAS IN NEITHER TIER, which is why its note is here and not in one of
+# them: the sweep classified `import fcntl` as `not-answerable/host-import`
+# because no `fcntl.mojo` existed for the resolver to find, not because a set
+# said so — and `_is_host_module` returns False for it, so the refusal a caller
+# got was "not a stdlib or sibling module, and no such file exists", the same
+# message any unresolvable import gets. `formal/hostmods/fcntl.mojo` is
+# `flock(2)` and the whole of CPython's integer surface — 30 constants, each
+# read out of CPython's own `fcntl` by `test_formal_fcntl.py`, and the lock
+# itself over a take/retake/release sequence including the case a POSIX
+# record-lock implementation gets wrong (a SECOND descriptor of the same file
+# is refused, because a `flock` is per open file description). Worth saying
+# plainly: **it moves ZERO files to PASS**, since all three files that want
+# `fcntl` also want `subprocess` and move to that instead — the same accounting
+# `bugs/FORMAL_platform_reachable_row_measured.md` §2 records for `platform`.
+# What is absent is at the top of that file, and one absence is a SPELLING
+# rather than a fact about the target: the third argument of `fcntl(2)` does not
+# arrive, so `getfd`/`setfd`/`getfl`/`setfl` would be a `setfd` that reports
+# success and changes nothing —
+# `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`. A second measured
+# fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
+# opposite of Linux, so a reader who assumes Linux gets this backwards.
+
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
 
 
