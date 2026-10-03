@@ -105,3 +105,57 @@ would be the same non-move `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_a
 warns about for `collections`: the name resolves, the callers still cannot write
 the line, and the failure moves from a link message to a build refusal that
 sounds like a fact about the program.
+## Status, 2026-10-03 (`formal13-3`): the refusal is landed by NAME; the width decision is not
+
+The second half of the "why the message is the wrong one to stop at" section —
+"a bare `bytearray()`/`bytes()` can be refused BY NAME with the reason" — is
+done, and it is the whole of what could be done without deciding the element
+width. All four spellings, both backends, measured:
+
+    $ for a in arm64 x86_64; do python3 fire.py build --formal --no-prove \
+        --backend=$a -o .tmp/ba/t.bin .tmp/ba/t.mojo; done
+    build: constructing bytearray is refused on this path, and the reason is a
+    fact about the TYPE rather than about a symbol: a bytearray is a counted
+    region, and every counted region here is laid out as `[count:i64][element
+    0]…` in EIGHT-BYTE slots — the same blob `[]` is, and the one `len` reads
+    its answer from. A byte is one byte, so the element width is the undecided
+    part: … Nothing here guesses between those. What this path CAN already do is
+    the part that needs no width: a bytes LITERAL is a blob of this layout and
+    `len` of it answers 3, so `b"abc"` is not what is missing — the
+    CONSTRUCTOR is. …
+
+against the previous answer, which was `the image would bind 1 symbol(s) that
+nothing provides …: bytearray` — a statement about the LINK LINE, produced four
+stages after the one that could have named the type.
+
+**What changed, and why the message is not the generic one.** `bytearray` and
+`bytes` are in `model.UNREPRESENTABLE_TYPE_CTORS`, which is what
+`type_constructor_kind` answers `("unsupported", None)` for — so both backends
+route them to the one place that already refuses a type with no representation
+and neither backend needed an edit to the routing. The TEXT is now
+`model.unrepresentable_type_ctor_refusal`, and it has two arms, because the
+generic sentence is **false** of these two: it says "a formal value is one
+64-bit word … there is no field list to bring up", and a byte blob is neither a
+word nor short of a field list — the blob layout is one this path already lays
+out (`[]` is it, and `LEN_FROM_BLOB_FIELD` reads it), and the bytes LITERAL
+already builds one. Only the element width is undecided, so that is what the
+message says, with both candidate answers named. Moving the wording into
+`formal/model.py` also removed the two byte-identical copies of it that
+`formal/arm64_codegen.py` and `formal/x86_64_codegen.py` each carried.
+
+**Not decided, deliberately:** the width. Neither option is adopted, and the
+section above is why — option 1 makes `len(b)` right and `b[i]` wrong by a
+factor of eight, and two disagreeing answers are worse than either. So this
+document stays open, and what is left is exactly the decision it already named.
+
+**Nothing in the corpus moves.** Measured: the 17 `bytes`/`bytearray` spellings
+in the new-modular stdlib are all `.bytes()` / `.alignment.bytes()` METHODS, so
+no swept file changes class. The tree's own `formal/arm64.py:660` use is
+CPython-side, and `formal/hostmods/struct.mojo`'s only mention is in a comment.
+
+Pinned by three cases: `test_formal_run.py`'s `constr_refuse_bytearray_by_name`
+(the undecided-width clause, by its words) and
+`constr_refuse_bytes_with_an_argument_by_name` (an argument does not make the
+width any more decided), and `test_formal_x86_64_parity.py`'s
+`bytearray_constructor_refused_identically`, which is the only one of the three
+that can see the other backend.

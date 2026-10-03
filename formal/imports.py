@@ -22,6 +22,7 @@ once per (source, compiler, dependency-closure) and shared by every program
 that imports it.
 """
 
+import contextlib
 import os
 import sys
 
@@ -2336,7 +2337,6 @@ def _dylib_lock(out: str):
     description, so it is released when the process dies — a crashed build
     cannot wedge the tree.
     """
-    import contextlib
     import fcntl
 
     @contextlib.contextmanager
@@ -2348,6 +2348,111 @@ def _dylib_lock(out: str):
         finally:
             os.close(fd)
     return _locked()
+
+
+@contextlib.contextmanager
+def _staged_dylib(out: str):
+    """Yield a path to build `out` at, so `out` only ever holds signed bytes.
+
+    `compile_formal_dylib` writes the library, then runs `codesign -s -` as a
+    SEPARATE PROCESS which rewrites the same file in place to append
+    `LC_CODE_SIGNATURE`. Between the write and the end of that subprocess the
+    published path holds a complete but UNSIGNED Mach-O, and the two versions
+    are very different sizes — 49 304 bytes as the linker writes it, 67 680
+    after `codesign` on the same library. `_dylib_lock` closes that window
+    between WRITERS, and it has to: the manifest's read-modify-write is only
+    single-writer with it. But this path is also a long-lived SHARED artifact
+    that already-linked images load at RUN time, and a reader takes no lock at
+    all. So one worktree republishing a module dylib while another's program
+    was loading it produced, in the wild:
+
+        dyld[2165]: Library not loaded: …/struct.6cd3c815d2e8.arm64.dylib
+          Referenced from: … cs3.bin
+          Reason: tried: '…' (missing code signature in …)
+        child exit -6
+
+    — a program that built, linked and was correct, refused by the loader with
+    a message that names a library and says nothing about a concurrent build.
+    `os.replace`-style atomicity is the fix, and it cannot be had at this path
+    by any of the alternatives: a staging file BESIDE the target with a marked
+    name (`out + ".tmp.<pid>"`) publishes a valid, correctly signed dylib with
+    the WRONG IDENTITY, because `compile_formal_dylib` derives
+    `install_name = "@rpath/" + os.path.basename(output)` and bakes it into
+    `LC_ID_DYLIB` and into the load command of everything that links it.
+    Verified: `otool -l` on the published file then reads
+    `name @rpath/struct.6cd3c815d2e8.arm64.dylib.tmp.999`.
+
+    **A subdirectory keeps the basename**, which is the whole of the identity
+    that matters: same tree (so `os.replace` is atomic — it is the same
+    filesystem), same file name, different directory. The lock still moves
+    NOTHING: `out + ".lock"` stays a sibling of `out`, because it is the lock
+    and two processes with two staging directories would race the `os.replace`.
+
+    The context manager removes the staging directory on the way out, including
+    on a refusal, and a crashed build leaves at most one empty directory that
+    the next `mkdtemp` does not collide with.
+    """
+    import shutil
+    import tempfile
+    stage = tempfile.mkdtemp(prefix=".staging.", dir=os.path.dirname(out))
+    # The basename is the identity (`@rpath/<basename>`), so it is copied
+    # exactly; the manifest's name is DERIVED from it, which is why the caller
+    # moves that too.
+    staged = os.path.join(stage, os.path.basename(out))
+    try:
+        yield staged
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _publish_staged(staged: str, out: str) -> None:
+    """Move a staged dylib and its manifest onto `out`, dylib FIRST.
+
+    The order is the point. Publishing the manifest first would leave a window
+    in which the manifest describes a library that is not there yet, and this
+    manifest is a file other processes read with no lock: a consumer that found
+    it would resolve its call sites against exports of a library that had not
+    appeared, and report a dangling symbol. The reverse window — new bytes, the
+    previous manifest — is the state every reader already handles, because the
+    library is content-addressed by its own source digest: two builds of one
+    source agree byte for byte, so an old manifest beside new bytes describes
+    the same library.
+
+    **The manifest's own two path fields are retargeted before either file
+    moves**, and that is not cosmetic: `write_dylib_manifest` records `dylib`
+    and `load_path` as `os.path.abspath(dylib_path)`, and `load_path` is what
+    the executable puts in its own `LC_LOAD_DYLIB`. A manifest published
+    verbatim from the staging directory therefore names a directory this
+    function deletes thirty lines later, and the program that reads it links
+    against a path that does not exist:
+
+        dyld: Library not loaded: …/.staging.8psh_5kn/math.e537a6d4d53b.arm64.dylib
+          Referenced from: … prog.aout
+          Reason: tried: '…/.staging.8psh_5kn/math.…dylib' (no such file)
+
+    — measured, on `test_formal_imports.py`'s own suite, which is the only
+    reason this function is not a two-line `os.replace` pair. Rewriting it here
+    rather than after the move is deliberate: the staged manifest is inside a
+    private directory nobody else can name, so this write cannot be observed,
+    whereas correcting the published manifest afterwards would leave a window in
+    which the bytes are new and the manifest still points into the staging
+    directory — the same failure, one step later.
+
+    `_record_depends` runs after both, outside here, and rewrites the published
+    manifest in place through `update_dylib_manifest`'s atomic write — so the
+    `depends_on` it adds is the last writer of that file, as it was before.
+    """
+    from formal.build import update_dylib_manifest
+
+    published = os.path.abspath(out)
+
+    def _retarget(payload):
+        payload["dylib"] = published
+        payload["load_path"] = published
+
+    update_dylib_manifest(_manifest_path(staged), _retarget)
+    os.replace(staged, out)
+    os.replace(_manifest_path(staged), _manifest_path(out))
 
 
 def build_module_dylib(module_name: str, source_path: str, out_dir: str,
@@ -2507,23 +2612,31 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # sharing is fine; writing it in place is not, because a reader can
     # observe the file part written.
     #
-    # A lock, not a staging path with a rename. Renaming looked like the tidier
-    # fix and is wrong here: a dylib's install name is derived from its output
-    # path, and it is baked into the load command of everything that links it,
-    # so a file built as `.../staging/foo.dylib` and moved afterwards no longer
-    # matches the path its dependents were told to load. The lock leaves the
-    # path — and therefore the identity — exactly as it was.
+    # A lock AND a staging directory, and the two are not alternatives — the
+    # first version of this comment said the staging rename was wrong here, and
+    # that was true of a staging FILE beside the target, whose basename (and so
+    # whose `@rpath/` install name) is part of the artifact's identity. It is
+    # false of a staging SUBDIRECTORY holding the same basename, which is what
+    # `_staged_dylib` hands to `compile_formal_dylib`: the lock keeps the
+    # manifest's read-modify-write single-writer, and the staging directory is
+    # what stops this path — a shared, long-lived artifact that RUNNING images
+    # load — from ever holding the unsigned half-written library that
+    # `codesign` exists to replace. `_publish_staged`'s docstring has the
+    # measurement and the two orders that matter.
     with _dylib_lock(out):
         try:
-            result = compile_formal_dylib(
-                [source_path], output=out, prove=False, check=False,
-                module_prefixes={source_path: prefix},
-                link_dylibs=dep_dylibs, arch=arch,
-                fmt=default_format(arch),
-                reexports=_qualified_reexports(
-                    reexported_names(
-                        stmts, {m: declared_kinds(p) for m, p in depends}),
-                    module_identity))
+            with _staged_dylib(out) as staged:
+                result = compile_formal_dylib(
+                    [source_path], output=staged, prove=False, check=False,
+                    module_prefixes={source_path: prefix},
+                    link_dylibs=dep_dylibs, arch=arch,
+                    fmt=default_format(arch),
+                    reexports=_qualified_reexports(
+                        reexported_names(
+                            stmts,
+                            {m: declared_kinds(p) for m, p in depends}),
+                        module_identity))
+                _publish_staged(staged, out)
         except (FormalBuildError, CodegenError) as e:
             raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
         # Record the dependencies in the manifest so a program can link them

@@ -1183,6 +1183,23 @@ REFUSALS = [
      "    printf(\"%d\", o.x)\n"
      "    return 0\n",
      "past the 4 levels this path lays out"),
+    # `bytearray()` and `bytes()` are the one refusal here that is a fact about
+    # a TYPE, and it used to reach the bind audit as a dangling extern named
+    # `bytearray` — so both machines "built" it and the build failed about a
+    # SYMBOL. The needle is the clause that says what is actually undecided
+    # (the ELEMENT WIDTH) rather than the name, because the name is what both
+    # messages would say whatever they meant, and a byte blob's layout is not a
+    # fact about one architecture.
+    #
+    # `test_formal_run.py`'s `constr_refuse_bytearray_by_name` pins the same
+    # refusal's WORDS on the host backend; this row is what says the two
+    # backends say them, which is the property a one-sided assertion cannot see.
+    ("bytearray_constructor_refused_identically",
+     "def main():\n"
+     "    var b = bytearray()\n"
+     "    printf(\"%d\", 1)\n"
+     "    return 0\n",
+     "the element width is the undecided part"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

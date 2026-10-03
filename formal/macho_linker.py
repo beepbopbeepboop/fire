@@ -105,6 +105,40 @@ ARCHES = {
 }
 
 
+def macho_export_name(c_name: str) -> str:
+    """The Mach-O EXPORT NAME dyld forms from the C identifier `c_name`.
+
+    **Exactly one leading underscore, always, and dyld's.** This is the whole
+    relationship between the two spellings, and it is what the assembler does
+    to every C identifier it is given — including one that already begins with an
+    underscore, which becomes two. It is here, as a function, because three
+    places in this tree once stated it independently and two of them stated it
+    CONDITIONALLY, so a name that already began with `_` was written out and read
+    back one character apart from each other:
+
+      * `_export_trie` wrote the name unchanged when the ABI symbol already began
+        with `_`, and
+      * `_bind_info` wrote the bind-stream name with one leading `_` removed.
+
+    Those are the same error from opposite ends, and the shape that shows it is a
+    module whose own NAME begins with an underscore: `abi_module_name` flattens
+    dots to `_` (`a.b` → `a_b`) and nothing else, so a module `__pkg` exports
+    `__pkg__helper_twice_9f63a2`. Its trie then held `__pkg__helper_twice_…`
+    while a consumer's bind stream said `pkg__helper_twice_…`, so dyld asked for
+    `_pkg__helper_twice_9f63a2`, found nothing, and died at load — and the
+    library's own audit, which re-derived the export name with the SAME
+    unconditional prepend `tools/formal_sweep.py::_macho_symbol` uses, refused
+    the build first, with a message blaming a name the image did not lack.
+
+    It is exported because the reader side is a question too, not just the
+    writer: `formal/build.py::_advertised_but_absent` verifies a library against
+    the trie with it, so the audit asks the writer's rule instead of a third
+    spelling of it. The inverse direction — a Mach-O name back to the C
+    identifier dyld's underscore was on — is `formal/build.py::_c_export_name`.
+    """
+    return "_" + c_name
+
+
 def arch_spec(arch: str) -> dict:
     """Mach-O identity and stub geometry for `arch`, or a clear error."""
     spec = ARCHES.get(arch)
@@ -507,13 +541,24 @@ def _bind_info(external_syms: list[str], dylib_of: dict = None,
         # what made dyld (and `codesign`, which runs the same validator) reject
         # the image outright.
         out += bytes((BIND_SYMBOL_FLAGS_FUNCTION,))
-        # The stream carries the bare C name; dyld prepends the Mach-O
-        # underscore when it forms the symbol it looks up. Both spellings were
-        # measured against a real dyld: "printf" binds and calls through, while
-        # "_printf" gets "Symbol not found: __printf" — the underscore in the
-        # message is dyld's own, on top of ours. The codegen hands us the name
-        # as the source spelled it, so normalise to the C spelling here.
-        out += (sym[1:] if sym.startswith("_") else sym).encode()
+        # The stream carries the bare C name, and dyld prepends the Mach-O
+        # underscore when it forms the symbol it looks up — `macho_export_name`
+        # is that relationship. Both spellings were measured against a real
+        # dyld: "printf" binds and calls through, while "_printf" gets "Symbol
+        # not found: __printf" — the underscore in the message is dyld's own, on
+        # top of ours.
+        #
+        # The name is written AS GIVEN. It used to have one leading underscore
+        # removed, which is right for the two spellings of a C function and
+        # wrong for every other one: an ABI export symbol may legitimately begin
+        # with `_` (`abi_module_name` on a module called `__pkg` gives
+        # `__pkg__helper_twice_9f63a2`), and eating that character made the
+        # bind ask dyld for a name the library never exported. Which of the two
+        # conventions a name is spelled in is not decidable from the name, so
+        # the answer cannot be a guess made here: the caller hands over C names,
+        # and `macho_export_name`/`_c_export_name` are the two ends of the one
+        # rule they are all read against.
+        out += sym.encode()
         out += b"\0"
         out += bytes((BIND_SET_TYPE_IMM | BIND_TYPE_POINTER,))
         out += bytes((BIND_SET_SEGMENT_AND_OFFSET_ULEB | got_segment,))
@@ -1127,12 +1172,12 @@ def _export_trie(exports: list) -> bytes:
     for export in sorted(exports, key=lambda e: e["symbol"]):
         # The export table holds Mach-O names; `symbol` is the C identifier
         # the ABI spells (what an importer's bind stream carries, and what
-        # dyld prepends its underscore to). Prepending it here keeps the two
+        # dyld prepends its underscore to). `macho_export_name` is that
+        # relationship, and asking it rather than spelling it keeps the two
         # conventions from drifting: a trie written with the bare C name
         # exports a symbol nothing can bind, and the program dies in dyld with
         # "Symbol not found" for a function that is right there.
-        raw = (export["symbol"] if export["symbol"].startswith("_")
-               else "_" + export["symbol"]).encode("utf-8")
+        raw = macho_export_name(export["symbol"]).encode("utf-8")
         addr = bytearray()
         _uleb(addr, export["entry"] - TEXT_BASE)
         flags = bytearray()

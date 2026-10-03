@@ -952,11 +952,13 @@ def test_an_export_that_binds_a_local_still_gets_a_proved_contract(tmpdir, share
         clean with no hole (`bv_decide` against the machine, so a derivation
         that was subtly wrong would be a build failure rather than a claim);
       * `rebound` -- `var m = n * 3` then `m = m + 1` -- gets NO spec and no
-        contract claim of any kind.  The `ifexp`/`and` shapes beside it in the
-        measurement also get nothing, for a different reason (their code
-        contains an `and` the machine model does not step), and this case does
-        not pretend otherwise: what it pins is that widening the derivation did
-        not widen it past a reassignment.
+        contract claim of any kind.  The `ifexp`/`and` shapes do get a spec now
+        (`a conditional expression derives a spec`, which is where their exact
+        renderings are pinned) and still get no PROVED contract, for a reason
+        that is not this function's: their code contains a `CSEL`, and
+        `arm64_step` does not step one, so the walk declines above this layer.
+        This case does not pretend otherwise: what it pins is that widening the
+        derivation did not widen it past a reassignment.
     """
     import re as _re
     from formal.lean import find_lean
@@ -1614,10 +1616,196 @@ def test_the_library_admits_no_hole(tmpdir, shared):
           "warns about nothing):\n      " + "\n      ".join(found))
 
 
+def test_an_export_symbol_that_already_begins_with_an_underscore(tmpdir, shared):
+    """A module whose own NAME begins with `_`, end to end, on both halves.
+
+    Every other symbol in the tree begins with a letter, because
+    `reflect.export_exclusions` denies a private `def _foo` and `doc/ABI.md` has
+    no other way to mint one. The exception is a MODULE name: `abi_module_name`
+    flattens dots to `_` (`a.b` -> `a_b`) and nothing else, so a module called
+    `__pkg` qualifies its imports as `__pkg__helper` and exports
+    `__pkg__helper_twice_9f63a2` — a legal C identifier that starts with an
+    underscore, and the only shape on this path that does.
+
+    Three places used to spell "the Mach-O name of this C identifier" and two of
+    them spelled it CONDITIONALLY, from opposite ends: `_export_trie` wrote a
+    name that already began with `_` unchanged, and `_bind_info` removed one
+    leading `_` from the bind-stream name. So the trie held
+    `__pkg__helper_twice_9f63a2` while a consumer's bind stream asked dyld for
+    `_pkg__helper_twice_9f63a2`, and dyld died at load for a function that was
+    right there. The library's own audit did not see it, because it re-derived
+    the export name with the unconditional prepend — so it refused the BUILD
+    first, naming a symbol the image did not lack, and the shape never got far
+    enough to be observed as a load failure.
+
+    All three now ask `macho_linker.macho_export_name`, which is one function and
+    has no case in it. What is asserted, in the order the failure appeared:
+
+      1. the writer puts the export where `macho_export_name` says, read back by
+         THIS FILE's trie reader rather than by the writer;
+      2. the audit ACCEPTS the library it just wrote — the build-time half;
+      3. the bind stream carries the C name AS GIVEN, and the name dyld forms
+         from it is the export the library has — the run-time half, and the one
+         that turns a correct refusal into a silent load failure if it regresses
+         alone;
+      4. and the audit still REFUSES a name the image really lacks, including the
+         one-character-short spelling, so the check was corrected rather than
+         removed. Without this the fix could equally well have been "delete the
+         check", and every assertion above would still pass.
+    """
+    from formal import build as B
+    from formal import macho_linker as ML
+    # `formal_sweep` is the committed reader for a bind stream (`tools/`, imported
+    # the way test_formal_sweep.py imports it) rather than a fourth reader here:
+    # this file's own trie reader covers the export half, and the bind opcodes
+    # have exactly one reader in the tree.
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    import formal_sweep                       # tools/: the bind-stream reader
+    symbols = ["__pkg__helper_twice_9f63a2", "helper_add_2dbb98"]
+    out = os.path.join(tmpdir, "lead.dylib")
+    data = ML.build_macho_dylib(
+        b"", ML.TEXT_BASE + ML.dylib_code_offset(out, False, [], False),
+        [{"symbol": s, "entry": ML.TEXT_BASE + 16 * (i + 1)}
+         for i, s in enumerate(symbols)],
+        out, arch="arm64")
+    with open(out, "wb") as f:
+        f.write(data)
+    trie = parse_macho(data)["exports"] or {}
+    for s in symbols:
+        check(ML.macho_export_name(s) in trie,
+              f"the trie carries {sorted(trie)}, so it does not carry "
+              f"{ML.macho_export_name(s)!r} for the ABI symbol {s!r}: "
+              f"macho_export_name is not what _export_trie writes")
+
+    # The audit, on the library it just wrote, and on one name short of it.
+    absent = B._advertised_but_absent(out, [{"symbol": s} for s in symbols])
+    check(absent == [],
+          f"the audit refuses a library that advertises exactly what its own "
+          f"trie carries, reporting {absent!r}; a symbol already beginning "
+          f"with an underscore is a C identifier like any other and the Mach-O "
+          f"name is that with ONE underscore in front (formal/macho_linker.py's "
+          f"macho_export_name)")
+    fabricated = {"symbol": "__pkg__helper_absent_9f63a2", "name": "absent",
+                  "module": "__pkg__helper", "arity": 1, "kind": None,
+                  "signature": "absent", "frame_params": []}
+    short = {"symbol": symbols[0][1:], "name": "short", "module": "x",
+             "arity": 1, "kind": None, "signature": "short", "frame_params": []}
+    missing = B._advertised_but_absent(
+        out, [{"symbol": s} for s in symbols] + [fabricated, short])
+    check(missing == ["__pkg__helper_absent_9f63a2", "_pkg__helper_twice_9f63a2"],
+          f"the audit reported {missing!r} for two advertised names the image "
+          f"does not define; it must name both, and in particular the "
+          f"one-character-short spelling of a name it DOES define is a "
+          f"different name")
+
+    # The run-time half: what dyld is asked for is what the library exports.
+    # Built here rather than by a real program because the property is about the
+    # bind stream alone, and the sweep's end-to-end case
+    # (`test_formal_sweep.py`'s `test_a_bind_name_that_itself_begins_with_an_underscore_resolves`)
+    # runs the image on both architectures for exactly this shape.
+    image = ML.build_macho_executable_extern(
+        ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4), symbols, "arm64",
+        dylibs=[{"install_name": out, "symbols": set(symbols)}])
+    binds = [name for _ordinal, name in formal_sweep._binds(image)]
+    check(binds == symbols,
+          f"the image binds {binds!r} for the C names {symbols!r}; the bind "
+          f"stream carries the C identifier as given and dyld prepends the "
+          f"underscore, so a name that already begins with one must not lose "
+          f"it (formal/macho_linker.py's _bind_info)")
+    for name in binds:
+        check(ML.macho_export_name(name) in trie,
+              f"the image binds {name!r}, so dyld looks for "
+              f"{ML.macho_export_name(name)!r}, which the library does not "
+              f"export: {sorted(trie)}")
+
+
+def test_a_conditional_expression_derives_a_spec(tmpdir, shared):
+    """`a if c else b`, `and`, `or` and a comparison as a CONDITION.
+
+    `_dylib_spec_lean` required the body to be EXACTLY one `return` of
+    arithmetic over the parameter, so a conditional expression got no spec — and
+    the ceiling was this function rather than the proof layer behind it, which
+    is the same mistake `an export that binds a local still gets a proved
+    contract` records for the binding case.
+
+    The three node kinds are asserted with their EXACT renderings, because each
+    one is a decision rather than a transcription:
+
+      * `a if c else b` tests `c` for TRUTHINESS (`!= 0`), not for equality with
+        zero, which is what Python's ternary does and what
+        `arm64_codegen.py`'s `_emit_csel_ternary` says in so many words;
+      * `and`/`or` select an OPERAND rather than producing a boolean, so
+        `(n * 3) and (n + 1)` is `(n + 1)` when `n * 3` is non-zero and `n * 3`
+        otherwise — `_emit_truthy_word`'s rule, and a 0/1 rendering would be a
+        different function;
+      * a comparison is rendered SIGNED, as `(a ^^^ SIGN) > (b ^^^ SIGN)`, which
+        is the statement `arm64_flag_gt_s` makes. Signed is both what CPython
+        means for an `Int` and what the code computes: measured,
+        `(n if n > 3 else 0) * 3` answers 0 at `n = 2^63`.
+
+    And two shapes are still REFUSED, because a spec that over-reaches is worse
+    than none — it is a claim about the source that nothing checks:
+
+      * a comparison in VALUE position (`return n > 3`). This path's only
+        word-shaped encoding of a comparison's answer is 0/1 by convention
+        rather than by a rule anything states, so there is nothing here to
+        derive it from;
+      * a compound condition (`if n and n > 1`), which would need the
+        short-circuit that two separately-inlined operands do not carry.
+
+    Both refusals are asserted as `None` rather than left implicit, because a
+    derivation that quietly starts accepting them is the failure this whole
+    family of checks is for.
+    """
+    from formal.build import parse_module
+    from formal.arm64_proof_gen import _dylib_spec_lean
+    src = (
+        "def ifexp(n):\n  return (n * 3) if n else 0\n\n\n"
+        "def andop(n):\n  return (n * 3) and (n + 1)\n\n\n"
+        "def orop(n):\n  return (n * 3) or (n + 1)\n\n\n"
+        "def cmpcond(n):\n  return (n if n > 3 else 0) * 3\n\n\n"
+        "def cmp_in_value(n):\n  return n > 3\n\n\n"
+        "def compound_cond(n):\n  return (n * 3) if (n and n > 1) else 0\n\n\n"
+        "def rebounded(n):\n  var m = (n * 3) if n else 0\n"
+        "  m = m + 1\n  return m\n")
+    specs = {fn.name: _dylib_spec_lean(fn)
+             for fn in parse_module(src)}
+    want = {
+        "ifexp": "(fun n => (if (n) != 0 then (n * (3 : UInt64)) "
+                 "else (0 : UInt64)))",
+        "andop": "(fun n => (if ((n * (3 : UInt64))) != 0 then "
+                 "(n + (1 : UInt64)) else (n * (3 : UInt64))))",
+        "orop": "(fun n => (if ((n * (3 : UInt64))) != 0 then "
+                "(n * (3 : UInt64)) else (n + (1 : UInt64))))",
+        "cmpcond": "(fun n => ((if ((n) ^^^ 0x8000000000000000) > "
+                   "(((3 : UInt64)) ^^^ 0x8000000000000000) then n "
+                   "else (0 : UInt64)) * (3 : UInt64)))",
+    }
+    for name, spec in want.items():
+        check(specs.get(name) == spec,
+              f"{name}'s derived spec is {specs.get(name)!r}, expected {spec!r}")
+    for name, why in (
+            ("cmp_in_value",
+             "a comparison in value position is a 0/1 encoding this path does "
+             "not state, so deriving a spec for it would be guessing"),
+            ("compound_cond",
+             "a compound condition needs the short-circuit that two "
+             "separately-inlined operands do not carry"),
+            ("rebounded",
+             "the inlining assumes a fresh binding, and a name bound twice "
+             "breaks exactly that")):
+        check(specs.get(name) is None,
+              f"{name} got the spec {specs.get(name)!r}, but {why}: a spec is "
+              f"a claim about the source and nothing downstream checks it "
+              f"against anything except the machine")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("the manifest offers nothing the image does not define",
      test_the_manifest_offers_nothing_the_image_does_not_define),
+    ("an export symbol that already begins with an underscore",
+     test_an_export_symbol_that_already_begins_with_an_underscore),
     ("exported functions execute", test_exported_functions_execute),
     ("a symbol that prefixes another is still exported",
      test_a_symbol_that_prefixes_another_is_still_exported),
@@ -1629,6 +1817,8 @@ TESTS = [
      test_several_exports_and_no_derivable_spec),
     ("an export that binds a local still gets a proved contract",
      test_an_export_that_binds_a_local_still_gets_a_proved_contract),
+    ("a conditional expression derives a spec",
+     test_a_conditional_expression_derives_a_spec),
     ("a wrong spec on a multi-export image is rejected",
      test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),

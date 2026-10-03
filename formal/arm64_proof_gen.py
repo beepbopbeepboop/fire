@@ -1877,6 +1877,16 @@ _STEP_CONDS = [
     # makes the comparison against a zero-cond base unmatchable, so the
     # instruction is never recognised and the model silently skips it.
     (0xff000000, 0x54000000),
+    # 52 CSEL. Appended for the same reason, and the mask carries bits 11-10
+    # (`o2`) because that is what separates the four siblings on this base --
+    # `csinc` 0x9a800400, `csneg` 0x9a800c00, `csinv` 0xda800000 -- so this row
+    # matches CSEL and only CSEL. Measured against `as -arch arm64`:
+    # `csel x0, x0, x1, eq` is 0x9a810000 and `csel x3, x4, x5, gt` is
+    # 0x9a85c083, both of which this entry claims and no other one does.
+    # ProofLib's row sits beside its own CSET case rather than at the end of the
+    # chain; `audit_step_table` allows that because the two entries do not
+    # overlap, which is the only case where the order is load-bearing.
+    (0xffe00c00, 0x9a800000),
 ]
 
 
@@ -2023,6 +2033,10 @@ def _step_rhs(w: int, idx: int):
         cond = (field + 1) if (field & 1) == 0 else (field - 1)
         return (f"some (arm64_set_reg {rd} s "
                 f"(if arm64_matches_condition {cond} s.nzcv then 1 else 0))")
+    if idx == 52:  # CSEL Xd, Xn, Xm, cond — one word, one effect, no pc change
+        cond = (w >> 12) & 0xf
+        return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
+                f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
     if idx == 18:  # LDR Xt, [Xn, #imm] (unsigned-offset LOAD; mirrors arm64_step)
         rt = w & 0x1f
         rn = (w >> 5) & 0x1f
@@ -2972,7 +2986,7 @@ def _regs_written(w: int, idx: int):
         return set()
     if idx == 15:
         return {30}
-    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33):
+    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 52):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
@@ -8637,6 +8651,24 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
 _DYLIB_SPEC_BINOPS = {"+": "+", "-": "-", "*": "*",
                       "/": "UInt64.div", "%": "UInt64.mod"}
 
+# The COMPARISONS a derived spec's CONDITION may use, and nothing else. They are
+# the six the machine has a condition code for; `in` is the only one that is not,
+# and `is`/`is not` are the identity tests, which a word cannot answer here.
+#
+# They are rendered SIGNED, as `(a ^^^ SIGN) ⋈ (b ^^^ SIGN)`, which is the same
+# statement `arm64_flag_gt_s` and its siblings make — a signed order on the
+# two's-complement values is an unsigned order on the sign-flipped ones. Signed
+# is what the CODE computes and what CPython means for an `Int`: measured on
+# `(n if n > 3 else 0) * 3`, `n = 2^63` answers 0, which is the signed reading
+# and not the unsigned one (`2^63 > 3`).
+#
+# The sign mask is a LITERAL and not a library function, deliberately:
+# `bv_decide` works on literals and cannot unfold a function, so swapping it
+# for one would buy a no-drift property that every tactic then has to be
+# re-supplied the bounds for.
+_DYLIB_SPEC_COMPARISONS = ("==", "!=", "<", "<=", ">", ">=")
+_DYLIB_SPEC_SIGN_FLIP = "0x8000000000000000"
+
 # How much Lean source a derived spec may be before the derivation gives up.
 # Substitution is let-elimination, so a chain of bindings COPIES each bound
 # expression into every use: a 30-binding body that binds one word from the
@@ -8684,6 +8716,28 @@ def _dylib_spec_lean(fn) -> str:
     handled, and an unrecognised node yields None rather than a partial
     translation. A spec is a claim about the source, so anything short of a
     faithful rendering of it is worse than no spec at all.
+
+    **A CONDITIONAL EXPRESSION is a value here, not control flow**, and the
+    three node kinds that make one are what this function used to refuse:
+    `TernaryExpr` (`a if c else b`), `and`/`or`, and a comparison read as a
+    condition. A body's `CSEL` was already a legal instruction — the encoder is
+    byte-exact against `as -arch arm64` and `arm64_codegen.py` emits it at six
+    sites — so what refused these was this function, and refusing it made the
+    export carry a NAMED obligation for a body the emitter renders as four
+    instructions of straight-line code.
+
+    `and`/`or` are rendered the way Python defines them, as an OPERAND selected
+    by the left one's TRUTHINESS rather than as a boolean: `a and b` is `b` when
+    `a` is non-zero and `a` otherwise, `a or b` is the other way round. That is
+    `_emit_truthy_word`'s own rule, and a rendering that produced 0/1 would be a
+    different function.
+
+    **A comparison in VALUE position is still refused**, while a comparison as a
+    CONDITION is rendered. `return n > 3` is a bool in CPython and this path's
+    only word-shaped encoding of a comparison's answer is 0/1 by convention
+    rather than by a rule anything states, so deriving a spec for it would be
+    guessing at an encoding. A condition needs no such answer: it selects, and
+    `if` is what the source says.
     """
     params = list(getattr(fn, "params", None) or [])
     if len(params) != 1:
@@ -8733,7 +8787,16 @@ def _dylib_spec_lean(fn) -> str:
             sym = {"-": "-", "+": "", "~": "~~~"}[op]
             return f"({sym}{inner})"
         if kind == "BinaryOp":
-            sym = _DYLIB_SPEC_BINOPS.get(getattr(node, "op", None))
+            op = getattr(node, "op", None)
+            if op in ("and", "or"):
+                a_val = go(getattr(node, "left", None))
+                a_test = go_cond(getattr(node, "left", None))
+                b_val = go(getattr(node, "right", None))
+                if a_val is None or a_test is None or b_val is None:
+                    return None
+                return (f"(if {a_test} then {b_val} else {a_val})" if op == "and"
+                        else f"(if {a_test} then {a_val} else {b_val})")
+            sym = _DYLIB_SPEC_BINOPS.get(op)
             if sym is None:
                 return None
             a = go(getattr(node, "left", None))
@@ -8741,7 +8804,40 @@ def _dylib_spec_lean(fn) -> str:
             if a is None or b is None:
                 return None
             return f"({a} {sym} {b})"
+        if kind == "TernaryExpr":
+            test = go_cond(getattr(node, "condition", None))
+            then = go(getattr(node, "then_val", None))
+            other = go(getattr(node, "else_val", None))
+            if test is None or then is None or other is None:
+                return None
+            return f"(if {test} then {then} else {other})"
         return None
+
+    def go_cond(node):
+        """A Lean PROPOSITION that is true exactly when `node` is TRUTHY.
+
+        The separate reader is what keeps a word-valued condition from being
+        rendered as a word-valued ANSWER: `if n then` is a test, and `n` is a
+        value, so it needs `n != 0` around it — while a comparison is already a
+        proposition and must NOT be given one, because `n > 3 != 0` would be a
+        claim about a value this path never forms.
+        """
+        kind = type(node).__name__
+        if kind == "BinaryOp" and getattr(node, "op", None) in _DYLIB_SPEC_COMPARISONS:
+            a = go(getattr(node, "left", None))
+            b = go(getattr(node, "right", None))
+            if a is None or b is None:
+                return None
+            op = "=" if getattr(node, "op") == "==" else getattr(node, "op")
+            flip = _DYLIB_SPEC_SIGN_FLIP
+            return (f"(({a}) ^^^ {flip}) {op} (({b}) ^^^ {flip})")
+        if kind == "BinaryOp" and getattr(node, "op", None) in ("and", "or"):
+            # A compound condition would need the short-circuit the two
+            # operands' own renderings do not carry; `if (a and b) then` is
+            # refused rather than flattened into `a != 0 && b != 0`.
+            return None
+        val = go(node)
+        return None if val is None else f"({val}) != 0"
 
     for stmt in body[:-1]:
         kind = type(stmt).__name__
