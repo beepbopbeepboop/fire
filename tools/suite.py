@@ -2294,6 +2294,27 @@ test('formal-external-call', [PY, 'test_formal_external_call.py'],
      extra=['test_formal_external_call.py', 'formal/build.py',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')
+# The ELEVENTH of the section above, and the first one to arrive with a merge
+# rather than with a batch: `work/formal8-4` added `test_formal_typed_flag.py`
+# and neither registered it nor excused it, so `suite-self-test`'s estate check
+# ("every test file is run by something, or says why not") was red on the merge
+# of that branch. Registered rather than excused, for the reason the section
+# above gives — it is a real test and it passes, and an `UNREGISTERED` entry for
+# it would be the estate check's own failure mode repeated on purpose.
+#
+# It is also the CHEAPEST test in this section by an order of magnitude, which
+# is why it is here rather than in `check`: it reads `formal/model.py`'s
+# `uses_typed_model` flag over `formal/examples/` and prints the table — no
+# build, no image, no Lean. Measured 2026-10-03 on this tree under
+# `tools/memslot.py --gb 8`, peak read by polling `procrun.tree_usage` every
+# 20 ms: **0.033 GB, 0.64 s wall**. `mem='tiny'` from that peak and not from
+# the shape. `proofs` rather than `check` to stay with its neighbours; it is
+# cheap enough that either is defensible and it is not worth the second argument.
+test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_typed_flag.py', 'formal/model.py', 'formal/types.py',
+            'formal/build.py'],
+     desc="the `typed` model flag: one definition, and not vacuous")
 # `json`: RFC 8259 on the formal backend, every case computed twice — once
 # through `fire.py build --formal` and executed, once through this process's own
 # `json` — because a table of digests is a table that is wrong the moment
@@ -2671,7 +2692,16 @@ BUCKETS = {
                 # formal image per group and its subject is a host module's
                 # answers rather than a static shape; 25 s and 0.1 GB measured,
                 # which is the cost class of `formal-json` above.
-                'formal-core-hostmods'],
+                'formal-core-hostmods',
+                # …and the one the estate check named on the merge of
+                # `work/formal8-4` (2026-10-03): `test_formal_typed_flag.py`
+                # came with that branch and was named by no bucket and by no
+                # `UNREGISTERED` excuse. `proofs` rather than `check` to stay
+                # with its neighbours; it is the cheapest formal test in the
+                # tree (0.64 s, 0.033 GB, no build and no Lean) so `check`
+                # would be defensible too, and the choice is not worth a
+                # second argument.
+                'formal-typed-flag'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,
