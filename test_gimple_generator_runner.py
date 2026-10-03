@@ -426,6 +426,95 @@ def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
         _FAIL += 1
 
 
+def _foreign_cpp_module_global_value():
+    # A MODULE-LEVEL CONSTANT of one module, read as a VALUE in a cpp-path
+    # coroutine body of another (`div = foreign.SEP`, `foreign.SEP.endswith`)
+    # — real: scriptutil.py's `iter_marks` doing `div = os.linesep` beside
+    # `end = f'{mark}{os.linesep}'`, and `track_progress_compact`'s
+    # `last.endswith(os.linesep)`.
+    #
+    # Two independent failures hid behind this one shape, and the second is
+    # why the test asserts the compiled BINARY's output rather than "it
+    # compiles":
+    #
+    #   1. `_cpp_expr`'s member-read case stubbed any `<module marker>.<name>`
+    #      read to a diagnosed `0` — a WRONG ANSWER, not an error, so
+    #      `div` became `''` where CPython has `'|'`. Anywhere that did not
+    #      also trip a type check, the generator compiled, ran, exited 0 and
+    #      printed the wrong text.
+    #   2. With the real value read, the module's OWN field triple types it
+    #      `char *`, so `div` binds a `char *` local and the generator's
+    #      yields now agree — before, `div` took the `int64_t` default that a
+    #      `self`-less MemberExpr used to fall through to, disagreed with its
+    #      sibling `end`, and the whole generator was refused outright with
+    #      "every `yield` must ... agree on one scalar type". That refusal is
+    #      what kept this shape off the compiled path entirely until now.
+    #
+    # The `*, start=[]` default is the A3 gate's rejection trigger (see
+    # `_foreign_a3_generator_handle_next`), so the body really is compiled by
+    # the cpp C++20-coroutine emitter rather than the A3 stack-switch pass.
+    T_FOREIGN_CPP_PKG_FILES = {
+        '__init__.py': '',
+        # A STRING constant and an INT one, plus an EMPTY string, so the
+        # comparison/`not`/length cases below can tell a real read from a
+        # stubbed 0: `0 == '|'` is False, `len(0)` is not 1.
+        'foreign.py': ("SEP = '|'\n"
+                       "EMPTY = ''\n"
+                       "WIDTH = 4\n"),
+    }
+    _saved_pkg_files = _FOREIGN_PKG_FILES
+    try:
+        globals()['_FOREIGN_PKG_FILES'] = T_FOREIGN_CPP_PKG_FILES
+        # A local bound to the read, yielded beside a string sibling: the
+        # mixed-kind refusal fires without the fix, and with only the value
+        # read fixed it would print `''`.
+        _test_foreign_a3_generator_handle(
+            "cpp_coroutine_body_reads_foreign_module_constant",
+            "from . import foreign\n"
+            "\n"
+            "def lines(prefix, *, start=[]):\n"
+            "    div = foreign.SEP\n"
+            "    end = f'{prefix}{foreign.SEP}'\n"
+            "    yield end\n"
+            "    yield div\n"
+            "\n"
+            "def main():\n"
+            "    for s in lines('a'):\n"
+            "        print(repr(s))\n"
+            "\n"
+            "main()\n",
+            "'a|'\n'|'\n")
+        # The truthiness/comparison/length/arithmetic half. Every yield is
+        # wrapped in a one-or-zero ternary because this model gives a
+        # generator ONE value-slot type: yielding the `==` result directly
+        # would widen to `char *` and the four yields would disagree — a
+        # genuine mixed-kind generator, not this test's subject.
+        #
+        # `_cpp_expr_static_ctype` answers the same question the value read
+        # does, so `foreign.SEP` in a CONDITION must be decided on the
+        # string's emptiness rather than on a null pointer. That is what
+        # makes the first case discriminating: the stub's `0` is ALSO
+        # falsy, but as a NULL it says `''` where the real `'|'` says true.
+        _test_foreign_a3_generator_handle(
+            "cpp_coroutine_body_compares_foreign_module_constant",
+            "from . import foreign\n"
+            "\n"
+            "def probe(*, start=[]):\n"
+            "    yield 1 if foreign.SEP else 0\n"
+            "    yield 1 if foreign.SEP == '|' else 0\n"
+            "    yield len(foreign.SEP)\n"
+            "    yield foreign.WIDTH * 2\n"
+            "\n"
+            "def main():\n"
+            "    for s in probe():\n"
+            "        print(s)\n"
+            "\n"
+            "main()\n",
+            "1\n1\n1\n8\n")
+    finally:
+        globals()['_FOREIGN_PKG_FILES'] = _saved_pkg_files
+
+
 def run_next_method_tests():
     test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
 def counter():
@@ -3935,6 +4024,7 @@ def main():
 
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
+    _foreign_cpp_module_global_value()
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY
     # function. An async generator is consumed by `async for`, and the
