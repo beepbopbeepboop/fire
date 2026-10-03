@@ -1517,6 +1517,75 @@ def test_frame_params_are_published_not_empty(tmpdir, shared):
           f"contract must name P as a frame holder; published {contract!r}")
 
 
+def test_a_receiver_writeback_is_not_a_returned_frame(tmpdir, shared):
+    """A one-word mutator's appended `return <receiver>` is not a frame return.
+
+    `_return_the_receiver` appends `return <receiver>` to every exit of a
+    one-field mutator, because a one-word struct's receiver IS its field and a
+    store to the callee's copy of that word has to reach the caller. When the
+    receiver is an ADDRESS of a block the caller owns, that text is a NO-OP —
+    the same address goes back — and reading it as a frame return refused a
+    module whose only frame belongs to the caller. Both halves are here because
+    the two constructors differ in exactly one thing and only one of them is a
+    real escape:
+
+      * WRITING THROUGH (`self.inner.a = a`, below) writes the caller's block in
+        place. It used to be refused on both counts — "Box1___init__ returns a
+        frame address, so it cannot be compiled into a dylib", and, once that
+        was out of the way, "a Inner receiver is returned from a method of Box1,
+        which did not create the frame". The second sentence was the check
+        refusing its own convention: the frame it names is the CALLER's and is
+        still there.
+      * ASSIGNING A FRAME (`self.inner = Inner(a, b)`, which the one-word elision
+        makes a rebinding of the receiver) really does hand back a block the
+        CALLEE built, so the escape is real and the refusal is right.
+
+    The refusal is asserted with its own sentence rather than as "something was
+    refused": a reader who hits it needs to know which of the two shapes they
+    wrote.
+    """
+    write_through = (
+        "struct Inner:\n"
+        "    var a: Int\n"
+        "    var b: Int\n"
+        "\n"
+        "struct Box1:\n"
+        "    var inner: Inner\n"
+        "\n"
+        "    def __init__(out self, a: Int, b: Int):\n"
+        "        self.inner.a = a\n"
+        "        self.inner.b = b\n"
+        "\n"
+        "def mk(x: Int) -> Int:\n"
+        "    return x + 1\n")
+    src = os.path.join(tmpdir, "writethrough.mojo")
+    with open(src, "w") as f:
+        f.write(write_through)
+    out, _ = build_dylib(tmpdir, [src], "writethrough.dylib")
+    exports = manifest_exports(out)
+    check("mk" in exports,
+          f"the module built but exported {sorted(exports)}, expected mk; a "
+          f"library whose write-back constructor is classified as a returned "
+          f"frame is refused, not exported")
+
+    rebinds = write_through.replace(
+        "        self.inner.a = a\n        self.inner.b = b\n",
+        "        self.inner = Inner(a, b)\n")
+    src2 = os.path.join(tmpdir, "rebinds.mojo")
+    with open(src2, "w") as f:
+        f.write(rebinds)
+    out2 = os.path.join(tmpdir, "rebinds.dylib")
+    result = run_fire(["dylib", "--formal", "--no-prove", "-o", out2, src2])
+    text = (result.stderr + result.stdout).strip()
+    check(result.returncode != 0,
+          "a constructor that ASSIGNS a frame to its own one word was built as "
+          "a dylib: the frame it hands back is one the CALLEE built, and an "
+          "importer has no way to learn the width of the block it must reserve")
+    check("returns a frame address" in text,
+          f"the assigning constructor was refused without naming the returned "
+          f"frame it really is: {text}")
+
+
 def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
     """The check on the direction that used to be unchecked, both ways.
 
@@ -1592,6 +1661,8 @@ TESTS = [
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
     ("a frame parameter's contract is published, not empty",
      test_frame_params_are_published_not_empty),
+    ("a receiver write-back is not a returned frame",
+     test_a_receiver_writeback_is_not_a_returned_frame),
 ]
 
 

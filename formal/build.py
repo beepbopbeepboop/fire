@@ -6404,6 +6404,49 @@ _RETURN_WORD = "word"
 _RETURN_UNSOUND = "unsound"
 
 
+def _writeback_rebound_receivers(fn) -> set:
+    """The receivers `_return_the_receiver` appended a write-back for that this
+    body REBINDS.
+
+    Asked after `_rewrite_self_fields`, and that ordering is the whole of it: the
+    rewrite collapses `self.<field> = v` onto `self`, so in the body this reads
+    a store THROUGH the receiver and a REBINDING of it are the same assignment.
+    A store through the receiver leaves the name alone — the caller's block is
+    written in place — and a rebinding replaces it with a frame this function
+    built, which is the one case where handing the word back really does make
+    this a frame return. Only the tagged returns' own names are considered, so
+    a local the function happens to rebind cannot put a receiver in this set.
+    """
+    tagged = {getattr(n, "_receiver_writeback", None)
+              for n in M.iter_nodes(getattr(fn, "body", None))
+              if isinstance(n, F.ReturnStmt)}
+    tagged.discard(None)
+    if not tagged:
+        return set()
+    out = set()
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        target = getattr(node, "target", None)
+        if isinstance(target, F.IdentExpr) and target.name in tagged:
+            out.add(target.name)
+    return out
+
+
+def _writeback_noop_names(fn) -> set:
+    """The receivers a write-back hands back UNCHANGED, and so cannot escape.
+
+    The complement of `_writeback_rebound_receivers`: a tagged write-back return
+    whose receiver this body does not rebind. Both readers of the tag ask it the
+    same way and for the same reason — `_frame_return_status` (a write-back of
+    an unrebound receiver is not a frame RETURN) and the escape check here (it is
+    not a frame ESCAPE either, because the caller already held the block).
+    """
+    tagged = {getattr(n, "_receiver_writeback", None)
+              for n in M.iter_nodes(getattr(fn, "body", None))
+              if isinstance(n, F.ReturnStmt)}
+    tagged.discard(None)
+    return tagged - _writeback_rebound_receivers(fn)
+
+
 def _frame_return_status(fn, holders, by_name, returns_by_name):
     """`(status, struct_or_None, holder_or_None)` — what `fn` gives back.
 
@@ -6429,12 +6472,48 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
         resolve, and a refusal raised from inside it is reported in place of
         the import diagnosis.
 
-    A value is frame-valued in exactly two ways, and they are the two the
-    holder analysis can recognise: a bare name that holds a frame address, and
-    a call to a function already known to return one.  Anything else is a
+A value is frame-valued in exactly two ways, and they are the two the holder
+    analysis can recognise: a bare name that holds a frame address, and a
+    call to a function already known to return one.  Anything else is a
     word — including a field read (`self.x` is a VALUE read out of the frame,
     not the frame) and a copy construction, which is a frame in THIS function's
     own scratch and is copied out by the same convention when it is returned.
+
+    **…and a third way that is not one of them: a RECEIVER WRITE-BACK.**
+    `_return_the_receiver` appends `return <receiver>` to every exit of a
+    one-field mutator, because a one-word struct's receiver IS its field and a
+    store to the callee's copy of that word has to come back.  That text is
+    indistinguishable from `return p` for a local that holds a frame — and when
+    the receiver is a frame ADDRESS and the body did not rebind it, it is not a
+    frame return at all: the function was handed the block and hands the same
+    block back, so there is nothing for a caller to reserve.  The
+    returned-frame convention is about a callee that BUILDS a block in a block
+    the CALLER reserved, and by construction a write-back does not.
+
+    So the write-back returns carry a tag (`_return_the_receiver` puts it there,
+    because it is the only place that knows which returns it made), and a tagged
+    return is counted only when the receiver was REBOUND in this body.  The test
+    for that is made here, after `_rewrite_self_fields` has collapsed
+    `self.<field> = v` onto `self` — which is what makes it the honest question
+    to ask, and the reason it cannot be asked in `_return_the_receiver` itself:
+    at that point a store THROUGH the receiver and a REBINDING of it are
+    different text and the same fact.
+
+    Measured, on the refusal this removes: `struct Inner: var a: Int; var b:
+    Int` / `struct Box1: var inner: Inner` with
+
+        def __init__(out self, a: Int, b: Int):
+            self.inner.a = a
+            self.inner.b = b
+
+    builds as a program on both architectures and was REFUSED as a dylib with
+    "`Box1___init__` returns a frame address, so it cannot be compiled into a
+    dylib" — on a function whose only frame is the caller's own object.  The
+    constructor that ASSIGNS a frame to its own one word
+    (`self.inner = Inner(a, b)`, which the rewrite makes a rebinding) is a real
+    frame return and is still refused; that is the other half of
+    `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` and it is
+    right there.
 
     `returns_by_name` is the JOIN (`_returns_frame_by_name`), not the
     per-function table: the second case asks about a CALLEE, and a callee is
@@ -6444,11 +6523,16 @@ def _frame_return_status(fn, holders, by_name, returns_by_name):
     the definitions do not return would size the caller's scratch for a copy
     that does not happen.
     """
+    rebound = _writeback_rebound_receivers(fn)
     frames, words = [], []
     for node in M.iter_nodes(getattr(fn, "body", None)):
         if not isinstance(node, F.ReturnStmt) or node.value is None:
             continue
         value = node.value
+        if isinstance(value, F.IdentExpr) \
+                and getattr(node, "_receiver_writeback", None) == value.name \
+                and value.name not in rebound:
+            continue                      # a write-back of an unrebound receiver
         if isinstance(value, F.IdentExpr) and value.name in holders:
             cands = by_name.get(value.name) or []
             if cands:
@@ -7087,6 +7171,21 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
 
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
+            # A RECEIVER WRITE-BACK that did not rebind the receiver is not an
+            # escape, and it is the same fact
+            # `_frame_return_status` reads for the same text: `_return_the_receiver`
+            # appends `return <receiver>` to a one-field mutator so a store to the
+            # callee's copy of that word reaches the caller, and when the receiver
+            # is an ADDRESS of a block the caller owns, handing it back moves
+            # nothing. Without this the check refused its own convention: the
+            # write-through constructor of a one-word struct whose field is a
+            # nested frame (`def __init__(out self, a: Int, b: Int): self.inner.a =
+            # a`) was refused in a dylib build with "a Inner receiver is returned
+            # from a method of Box1, which did not create the frame" — a frame the
+            # CALLER created and still owns.
+            if isinstance(node.value, F.IdentExpr) \
+                    and node.value.name in _writeback_noop_names(fn):
+                continue
             # `return <frame>` used to be refused here, and the refusal was
             # CORRECT: the block belongs to the function that reserved it and
             # that function's scratch dies with it, so the address the caller
@@ -7738,6 +7837,34 @@ def _return_the_receiver(fn, wb=None) -> None:
     Runs BEFORE `_rewrite_self_fields`, which is what makes the appended
     `return self` mean the new value: the rewrite turns `self._value` into
     `self`, so a `return` placed after it reads the word the body just stored.
+
+    **Every return it touches is TAGGED, and the tag is what
+    `_frame_return_status` reads to tell a write-back from a frame return.**
+    The two are the same text — `return self` — and they are different facts: a
+    write-back hands the caller back the word it already had, while a frame
+    return hands back a block the callee built and the caller must have
+    reserved. One-word mutators are the only functions that get an appended
+    `return` at all, so "is this return a write-back" is not derivable from the
+    function; it is a property of the STATEMENT, and the statement is the only
+    place that knows. Measured on the false refusal this closes: a struct of one
+    field whose field is a nested frame, with a constructor that writes THROUGH
+    the block the caller owns
+
+        struct Inner:  var a: Int;  var b: Int
+        struct Box1:   var inner: Inner
+                        def __init__(out self, a: Int, b: Int):
+                            self.inner.a = a
+                            self.inner.b = b
+        def mk(x: Int) -> Int:  return x + 1
+
+    builds as a program and is REFUSED as a dylib with "Box1___init__ returns a
+    frame address, so it cannot be compiled into a dylib" — on a function whose
+    only frame is the caller's own object and whose write-back is a no-op.
+    `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` is the doc;
+    §"Why step 3 is the wrong answer" is the part of it this implements, and §
+    "The related question" is the part it does NOT: a constructor that ASSIGNS a
+    frame to its own one word (`self.inner = Inner(a, b)`) really does hand back
+    a frame the callee built, and it stays refused.
     """
     if (getattr(fn, "return_type", None) is not None
             or any(isinstance(n, F.ReturnStmt) and n.value is not None
@@ -7755,9 +7882,11 @@ def _return_the_receiver(fn, wb=None) -> None:
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is None:
             node.value = F.IdentExpr(name=recv)
+            node._receiver_writeback = recv
     if not M.returns_on_every_path(fn.body):
-        fn.body = list(fn.body) + [
-            F.ReturnStmt(value=F.IdentExpr(name=recv), line=fn.line)]
+        tail = F.ReturnStmt(value=F.IdentExpr(name=recv), line=fn.line)
+        tail._receiver_writeback = recv
+        fn.body = list(fn.body) + [tail]
 
 
 def _writeback_spelling(node) -> str:
