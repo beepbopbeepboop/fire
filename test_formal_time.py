@@ -638,12 +638,21 @@ def f(p: Pointer[P3]) -> int:
   p.value() = 1
   return 0
 """, "a STRUCT"),
+    # The needle is the sentence's OPERATIVE clause and not its framing. The
+    # refusal is still raised, on both backends, in the same words as each
+    # other -- what moved is the wording of the half that explains WHY, and a
+    # needle pinned to the old framing reported the group red on a tree where
+    # the thing it measures (a store whose width would be a choice rather than a
+    # fact) is intact. Checked by hand on 2026-10-03: this program is still
+    # refused on arm64 and on x86-64, both with this clause and both with the
+    # `p` is declared 'Pointer[Int64]', which is not a pointer to a 8-byte
+    # element` sentence that names the declaration at fault.
     ("unscaled", """\
 def f(p: Pointer[Int64], k) -> int:
   var q: Pointer[Int64] = p + k
   q.value() = 1
   return 0
-""", "WITHOUT scaling it by the pointee's"),
+""", "have to agree about the element size"),
     ("readonly", """\
 def f() -> int:
   var p: Pointer[UInt8] = "hello"
