@@ -63,10 +63,30 @@ empty:
     8 metavar    empty to derive it (`{choices}`, else dest.upper())
     9 help       the help text
 
-`R` is `nargs=REMAINDER`. A `;` or `|` in help text or in a choice is not
-expressible; a VALUE containing `;` is refused rather than written, because a
-value that quietly split a field would be a wrong answer with nothing left to
-detect it. `add(spec, record)` appends one record and returns a new spec, which
+`R` is `nargs=REMAINDER`. A `;` or `|` in help text or in a choice IS
+expressible: a field ESCAPES them (`\;`, `\|`), and a backslash in the text is
+itself written `\\`. Only the ESCAPED bytes are separators, so every reader that
+walks a record or a field skips a backslash and the byte after it. `_esc_end`
+below is the ONE scan that does this and every one of those readers goes
+through it — `_fend` and `_rend` for the two separator sets, and the two
+`choices` readers with `,` added. `_ftext` is the only place the backslashes are
+removed, because it is one of only two readers that produce TEXT out of a field
+(the other is `_quote_choices`, and both go through `_unesc_upto`); the rest
+measure or compare raw bytes, which is right for them because no field but
+`help` can contain a separator (an option string, a type name, a nargs letter, a
+comma-joined choice list, a flag, a default, a dest and a metavar have none) and
+because a spec written before this rule existed contains no backslash at all and
+so reads identically.
+
+This is a rule on the WRITER, not a hidden convention: `add(spec, record)`
+appends a record the caller has already written, and it cannot tell a `|` that
+separates two fields from one that is help text, so the caller escapes. A VALUE
+containing `;` is still refused rather than written, because a value that
+quietly split a field would be a wrong answer with nothing left to detect it —
+and a value is written by this module into the NAMESPACE buffer, not by a caller
+into a spec, so the escape rule does not reach it.
+
+`add(spec, record)` appends one record and returns a new spec, which
 is the alternative to one long literal — string `+` is refused on this path
 (`bugs/FORMAL_string_value_model.md`), so a spec cannot be concatenated in the
 source.
@@ -359,28 +379,116 @@ NONE_TEXT = "~"
 # copying, because the hot path — matching one option string against every
 # declared one — asks the same questions thousands of times.
 
+def _esc_end(p, stops) -> int:
+    """Offset from `p` to the first byte of `stops` that is not ESCAPED.
+
+    A backslash escapes the byte after it, so a `;` or a `|` inside a field can
+    be written `\;` / `\|` and is not a separator. That is the whole rule, and
+    what it costs is this function: `strcspn` alone cannot express it, so the
+    scan is a loop that jumps to the next byte worth looking at and then steps
+    over an escape.
+
+    `stops` is the separator SET as a NUL-terminated string, because `strcspn`
+    takes one; the backslash is part of the scan rather than of `stops` so that
+    every caller gets the escape rule and cannot forget it.
+
+    THE COST ON THE COMMON PATH, measured rather than assumed, because this is
+    the number the doc this fixes asks for: `_fld` is asked for every field of
+    every record on every parse, and it used to be one `strcspn` plus one
+    `strspn` per field. It is STILL one `strcspn` plus two `strspn`, and every
+    one of the three is O(1) — `strcspn` stops at the first byte in `stops` or
+    at the NUL, and `strspn` stops at the first byte out of it. The scan cannot
+    ask "is the byte at `j` the NUL" with `str_len`, which is the obvious way to
+    write it and which is O(the rest of the spec): a field is three bytes long
+    and the spec is five hundred, so that strlen would have made `_fld`
+    quadratic in the number of fields for no gain. `strspn(p + j, stops) == 0`
+    says the same thing in one byte read, because `strcspn` above cannot have
+    stopped anywhere else.
+
+    A lone backslash at the very end of a field escapes nothing: the field ends
+    AT it, and the byte after it is not read. Reading it would be the one way
+    this loop could walk off the end of the buffer, and a spec is caller memory.
+    That test IS a `str_len`, and it runs only on the escape path — which is the
+    other half of why the two are not symmetric.
+    """
+    i = 0
+    while True:
+        j = i + strcspn(p + i, stops)      # at a stop byte, or at the NUL
+        if strspn(p + j, stops) == 0:
+            return j                        # the NUL ends the run
+        if strspn(p + j, "\\") == 0:
+            return j                        # a real separator
+        if str_len(p + j + 1) == 0:
+            return j                        # a dangling escape: nothing follows
+        i = j + 2                           # step over `\` and the byte it escapes
+
+
+def _fend(p) -> int:
+    """Offset from `p` to the end of the field, honouring escapes."""
+    return _esc_end(p, "\\|;")
+
+
+def _rend(p) -> int:
+    """Offset from `p` to the end of the RECORD, honouring escapes.
+
+    A record's separators are only `;`, so the field scan's `|` must not stop it
+    — hence a second name over the same function rather than a second scan.
+    """
+    return _esc_end(p, "\\;")
+
+
+def _esc_at(p) -> int:
+    """1 if the byte at `p` is a backslash."""
+    return strspn(p, "\\")
+
+
+def _unesc_upto(dst, u, p, n) -> int:
+    """`n` bytes of `p` at `dst[u:]`, ESCAPES REMOVED, NUL-terminated. New `u`.
+
+    **The one copy-with-unescape in this module**, and it is one because there
+    are exactly two readers that turn a field's RAW bytes into TEXT — `_ftext`
+    for a help string, `_quote_choices` for a choice inside an error message —
+    and a `str_put` of the raw range at either of them would print the very
+    backslash the writer put there to keep the byte out of the separator set.
+
+    Copied a RUN at a time rather than a byte, because a help string is sixty
+    characters and `_cp` is a `memmove` plus a `memset`; the loop only runs per
+    ESCAPE, so the common field is one `_cp`.
+    """
+    i = 0
+    start = 0
+    while i < n:
+        if _esc_at(p + i) == 1:
+            u = _cp(dst, u, p + start, i - start)
+            i = i + 1
+            start = i
+        i = i + 1
+    return _cp(dst, u, p + start, n - start)
+
+
 def _rec(spec, i):
     """Pointer to record `i` of `spec`, or 0 if there is no such record."""
     p = spec
     k = 0
     while k < i:
-        q = strchr(p, SEP_FIELD)
-        if q == 0:
+        d = _rend(p)
+        if strspn(p + d, ";") == 0:
             return 0
-        p = q + 1
+        p = p + d + 1
         k = k + 1
     return p
 
 
-def _nrec(spec):
+def _nrec(spec) -> int:
     """How many records `spec` holds. An empty spec is one (empty) record."""
     n = 1
-    i = 0
-    while i < str_len(spec):
-        if strspn(spec + i, ";") > 0:
-            n = n + 1
-        i = i + 1
-    return n
+    p = spec
+    while True:
+        d = _rend(p)
+        if strspn(p + d, ";") == 0:
+            return n                    # NUL: no more records
+        n = n + 1
+        p = p + d + 1
 
 
 def _fld(rec, f):
@@ -389,12 +497,14 @@ def _fld(rec, f):
     The delimiter has to be FOUND before it can be recognised: `strspn` asks
     whether a byte at a pointer is one of a set, and the first byte of a field
     is almost never a `|`. So each step measures the run up to the next
-    delimiter and then asks whether the byte there is the field separator.
+    delimiter with `_fend` and then asks whether the byte there is the field
+    separator — which is what makes an ESCAPED `|` inside an earlier field not
+    end that field.
     """
     p = rec
     k = 0
     while k < f:
-        d = strcspn(p, "|;")
+        d = _fend(p)
         if strspn(p + d, "|") == 0:
             return 0                    # ';' or NUL: no such field
         k = k + 1
@@ -402,12 +512,17 @@ def _fld(rec, f):
     return p
 
 
-def _flen(rec, f):
-    """Length of field `f`, or 0 when there is no such field."""
+def _flen(rec, f) -> int:
+    """Length of field `f`, or 0 when there is no such field.
+
+    The RAW length, backslashes included: `_feq` compares the bytes the spec
+    holds, and the only reader that turns a field into text is `_ftext`. A
+    length that counted escape bytes as two would be right for neither.
+    """
     p = _fld(rec, f)
     if p == 0:
         return 0
-    return strcspn(p, "|;")
+    return _fend(p)
 
 
 def _feq(rec, f, s):
@@ -415,18 +530,35 @@ def _feq(rec, f, s):
     p = _fld(rec, f)
     if p == 0:
         return 0
-    n = strcspn(p, "|;")
+    n = _fend(p)
     if n != str_len(s):
         return 0
     return str_eq_n(p, s, n)
 
 
 def _ftext(rec, f):
-    """Field `f` as a NUL-terminated buffer the caller owns; "" if absent."""
+    """Field `f` as a NUL-terminated buffer the caller owns; "" if absent.
+
+    **THE ONE PLACE BACKSLASHES ARE REMOVED**, and that is not an accident of
+    where this function sits: a field's escapes are load-bearing all the way
+    through the readers above — `_fend` has to skip them to find the field's end
+    at all, and a `strcspn` that ignored them would truncate the help text at
+    exactly the separator the writer escaped. So the escapes survive to here and
+    are dropped in the copy, which is the only step that produces TEXT.
+
+    The fast path is the old one-instruction `str_prefix`, taken whenever the
+    field holds no backslash — which is every field of every spec written before
+    the rule existed, and every field but `help` of every spec since.
+    """
     p = _fld(rec, f)
     if p == 0:
         return ""
-    return str_prefix(p, strcspn(p, "|;"))
+    n = _fend(p)
+    if strcspn(p, "\\") >= n:
+        return str_prefix(p, n)
+    d = str_alloc(n + 1)
+    _unesc_upto(d, 0, p, n)
+    return d
 
 
 def _haschar(s, chars):
@@ -534,7 +666,7 @@ def _nname(rec):
     p = _fld(rec, F_NAMES)
     if p == 0:
         return 0
-    end = strcspn(p, "|;")
+    end = _fend(p)
     if end == 0:
         return 0
     n = 0
@@ -551,7 +683,7 @@ def _name_ptr(rec, k):
     p = _fld(rec, F_NAMES)
     if p == 0:
         return 0
-    end = strcspn(p, "|;")
+    end = _fend(p)
     i = 0
     c = 0
     while i < end:
@@ -585,7 +717,7 @@ def _name_len(rec, k) -> int:
     if p == 0:
         return 0
     start = _fld(rec, F_NAMES)
-    lim = strcspn(start, "|;") - (p - start)
+    lim = _fend(start) - (p - start)
     n = 0
     while n < lim and strspn(p + n, " ") == 0:
         n = n + 1
@@ -801,14 +933,50 @@ def _in_choices(rec, v):
     if _flen(rec, F_CHOICES) == 0:
         return 1
     p = _fld(rec, F_CHOICES)
-    end = strcspn(p, "|;")
+    end = _fend(p)
     i = 0
     while i < end:
-        j = strcspn(p + i, ",|;")
-        if j == str_len(v) and str_eq_n(p + i, v, j) == 1:
+        j = _esc_end(p + i, "\\,|;")
+        if _ceq(p + i, j, v) == 1:
             return 1
         i = i + j + 1
     return 0
+
+
+def _ceq(p, n, v) -> int:
+    """1 if the `n` RAW bytes at `p` are `v` once ESCAPES are removed.
+
+    The CHOICES comparison, and it is a LOCKSTEP walk rather than an unescape
+    into a buffer for two reasons that point the same way. It cannot unescape
+    first because `_has_choice` is the hot path — every value of every
+    `choices` action is compared against every declared choice, so a scratch
+    buffer per comparison is an allocation in the middle of a parse. And it
+    cannot compare raw bytes because the choice is stored ESCAPED (`alpha\|beta`)
+    while the value on the command line is not (`alpha|beta`): `str_eq_n` over
+    the raw range would find no such choice and refuse a value CPython accepts.
+
+    The length test is the walk's own, and it is what makes the two lengths
+    comparable at all — `n` counts raw bytes and `str_len(v)` counts unescaped
+    ones, so they are equal only for a choice with no escape in it, which is
+    every choice a spec written before this rule existed holds.
+    """
+    m = str_len(v)
+    i = 0
+    j = 0
+    while i < n and j < m:
+        if _esc_at(p + i) == 1:
+            i = i + 1
+            if i >= n:
+                break
+        if str_eq_n(p + i, v + j, 1) == 0:
+            return 0
+        i = i + 1
+        j = j + 1
+    if i < n:
+        return 0
+    if j < m:
+        return 0
+    return 1
 
 
 # ── Finding an action by one of its option strings ──────────────────────────
@@ -3027,15 +3195,15 @@ def _quote_choices(rec, buf, u):
     not the message and `(choose from 'a', 'b')` is.
     """
     p = _fld(rec, F_CHOICES)
-    end = strcspn(p, "|;")
+    end = _fend(p)
     first = 1
     i = 0
     while i < end:
-        j = strcspn(p + i, ",|;")
+        j = _esc_end(p + i, "\\,|;")
         if first == 0:
             u = _putlit(buf, u, ", ")
         u = _putlit(buf, u, "'")
-        u = str_put(buf, u, p + i, j)
+        u = _unesc_upto(buf, u, p + i, j)
         u = _putlit(buf, u, "'")
         first = 0
         i = i + j + 1
