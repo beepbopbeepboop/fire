@@ -330,6 +330,85 @@ def main(n):
     {"a": "100", "b": "97"},
 ))
 
+# ── 2b. `listdir` as a PYTHON-LEVEL list ───────────────────────────────────
+#
+# The three shapes above read a blob through the module's own accessors,
+# because that is what it published: `listdir` was declared `-> int` and a
+# caller could do nothing else with the word. That was the half of
+# `bugs/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
+# KIND and not a representation — the value has been one word pointing at
+# `[count][element]…` since the blob landed. With `-> List[String]` on the
+# declaration the annotation says so across the dylib boundary, and the three
+# spellings a Python caller writes all lower:
+#
+#     len(names)        the count word at offset 0
+#     names[i]          the element, as the element KIND the annotation gives
+#     for x in names    a loop whose target is that element kind
+#
+# `n`, `chars` and `first` are the aggregate answers and `len`-through-the-
+# accessor is the CONTROL: the same count read both ways, in one image, so a
+# difference between them is a difference in how the kind was used rather than
+# in what the filesystem said. The oracle is CPython's `os.listdir` of the same
+# fixture, and its ORDER is the filesystem's `readdir` order, which is what
+# both sides walk.
+CASES.append(Case(
+    "listdir_is_a_python_level_list",
+    '''\
+from os import listdir, listdir_len, listdir_free
+
+def show(tag, p):
+    names = listdir(p)
+    printf("%s_n=%d@@", tag, len(names))
+    printf("%s_acc=%d@@", tag, listdir_len(names))
+    chars = 0
+    for x in names:
+        chars = chars + len(x)
+    printf("%s_chars=%d@@", tag, chars)
+    printf("%s_first=[%s]@@", tag, names[0])
+    printf("%s_last=[%s]@@", tag, names[len(names) - 1])
+    listdir_free(names)
+    return 0
+
+
+def main(n):
+    show("root", "@@ROOT@@")
+    show("dir", "@@ROOT@@/dir")
+    return 0
+''',
+    None,
+    oracle=lambda: _listdir_as_list_oracle(),
+))
+
+
+def _listdir_as_list_oracle():
+    """CPython's answers for `listdir_is_a_python_level_list`.
+
+    Computed against the SAME fixture the image walked, which is what makes the
+    three aggregate answers comparable rather than merely equal: `chars` is the
+    sum of `len(x)` over the same names, so a wrong element KIND shows up as a
+    wrong sum rather than as a crash.
+
+    **Only directories that EXIST**, and the reason is in the module rather than
+    here: a missing path makes `listdir` answer the WORD 0 rather than a blob,
+    and `len(0)` is a load at address 0 — a question about a null pointer, not
+    about a directory listing. The 0-for-missing answer is `listdir_and_walk`'s
+    row, through the accessors, which is where it belongs.
+    """
+    root = _FIXTURE[0]
+    out = {}
+    for tag, path in (("root", root), ("dir", os.path.join(root, "dir"))):
+        names = os.listdir(path)
+        out[f"{tag}_n"] = str(len(names))
+        out[f"{tag}_acc"] = str(len(names))
+        out[f"{tag}_chars"] = str(sum(len(x) for x in names))
+        # The brackets are part of the RECORD, not of the value: the program
+        # prints `[%s]` so an empty listing is visible as `[]` rather than as a
+        # missing field, and the oracle strips them back off for the comparison.
+        out[f"{tag}_first"] = f"[{names[0]}]"
+        out[f"{tag}_last"] = f"[{names[-1]}]"
+    return out
+
+
 # ── 3. The refusals ───────────────────────────────────────────────────────
 #
 # A wrong answer is worse than a diagnostic, so each of these has to be a BUILD
@@ -816,11 +895,25 @@ def run_listdir_case(arch, tmpdir, fixture, verbose):
     return True, ""
 
 
-def run_case(case, arch, tmpdir, verbose):
-    """(ok, detail) for one case on one architecture."""
+# The fixture root, for the oracle of a case whose program names `@@ROOT@@`.
+# A one-element list because the oracle is a zero-argument callable (the `Case`
+# contract) and the fixture only exists inside `main`'s `TemporaryDirectory`.
+_FIXTURE = [""]
+
+
+def run_case(case, arch, tmpdir, verbose, fixture=None):
+    """(ok, detail) for one case on one architecture.
+
+    `@@ROOT@@` is the fixture directory every case's source may name, so a case
+    can ask a question about a directory whose contents it did not write. The
+    convention is `LISTDIR_PROGRAM`'s own, generalised from it: a case that does
+    not mention the marker is unaffected, and one that does gets the same
+    `run_listdir_case` does.
+    """
     src = os.path.join(tmpdir, case.name + ".mojo")
     with open(src, "w") as f:
-        f.write(case.source)
+        f.write(case.source.replace("@@ROOT@@", fixture)
+                if fixture else case.source)
     out = os.path.join(tmpdir, case.name + "." + arch)
     rc, text = build(src, out, arch)
     if case.refusal:
@@ -886,6 +979,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         fixture = os.path.realpath(os.path.join(tmpdir, "fx"))
         os.makedirs(fixture)
+        _FIXTURE[0] = fixture
         paths = make_shapes(fixture)
         cases = list(CASES)
         for shape, p in sorted(paths.items()):
@@ -922,7 +1016,8 @@ def main():
                     print(f"SKIP {n} [{arch}]  ({case.archs_reason})")
                     continue
                 total += 1
-                ok, detail = run_case(case, arch, tmpdir, args.verbose)
+                ok, detail = run_case(case, arch, tmpdir, args.verbose,
+                                      fixture)
                 print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
                       (("  " + detail) if detail else ""))
                 if not ok:

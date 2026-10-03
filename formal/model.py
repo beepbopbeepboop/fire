@@ -11021,13 +11021,33 @@ class ValueKinds:
         `_iterable_kind` answers INT_KIND for it because there is nothing else
         to answer.  That answer is a word, not an integer, so anything reading
         it as evidence that the source says "integer" refuses a correct
-        program; see `own_shape_kind`, which is what reads this."""
+        program; see `own_shape_kind`, which is what reads this.
+
+        **A NAME whose kind carries an ELEMENT is the fourth shape**, and it is
+        the one a returned blob needs: `for x in names: len(x)` over
+        `names = listdir(p)` — `-> List[String]`, so the name's kind is
+        `list:str` — refused with "an integer has no length" about a `char *`,
+        because nothing read the element off the one place that states it. The
+        answer is the element kind, and it is evidence for the same reason the
+        three above are: the annotation said what the loop yields.
+
+        It stays None for a name whose kind is the BARE list prefix, which is
+        every container this path cannot give an element type to (a parameter
+        annotated `List`, a nested container, a blob whose initializer claimed
+        nothing). That is the conservative direction and it is the measured one:
+        `for row in rows: row[0]` over an unannotated parameter must keep
+        working, and it does, because nothing claims an element.
+        """
         if isinstance(iterable, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(iterable.elements))
         if isinstance(iterable, F.Comprehension):
             return list_kind(_kind_of_simple(iterable.element))
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
+        if isinstance(iterable, F.IdentExpr):
+            kind = self.name_kind(iterable.name)
+            if is_list_kind(kind or ""):
+                return list_elem_kind(kind)
         return None
 
     def _return_kind(self, fn) -> str | None:
@@ -11411,11 +11431,70 @@ def dylib_export_return_kind(entry) -> str | None:
     for it. Only a `char *` is a kind this model can be sure of from the
     signature, because only a `char *` is the one pointer whose pointee the
     emitters already know how to walk.
+
+    **A container return is NOT readable from the signature, and that is the
+    half `imported_callee_kind` adds.** `-> List[Int]` and `-> Int` are both
+    `int64_t` in the manifest, so the one-word signature cannot say which is
+    which — which is exactly why `len(t)` for `t = other_module.triple()`
+    refused with "an integer has no length" about a blob (`[3, 14, 0]`) the
+    callee built and the caller already reads by subscript.
     """
     if not entry:
         return None
     ret = signature_return_type(entry.get("signature") or "")
     return STR_KIND if ret.replace("const", "").strip() == "char *" else None
+
+
+def imported_callee_kind(entry, declaration, int_names=(), string_names=(),
+                         decls=None) -> str | None:
+    """What a call ACROSS a dylib boundary produces, or None for "not known".
+
+    The declaration first, then the signature — in that order and with the
+    reason written down, because the two answer different questions and only one
+    of them can be right about a container.
+
+    A library's C signature is one word, so it can say `char *` (which is why
+    `dylib_export_return_kind` exists and why `print(mod.name())` stopped
+    formatting a string as a decimal) and it cannot say anything else:
+    `-> List[Int]`, `-> Int` and `-> Bool` are all `int64_t`. The callee's own
+    `-> T` can, and `declared_type_kind` is the one reader of a declared type in
+    this file, so the two backends cannot disagree about what `List[Box]` means.
+
+    **The container answer carries its ELEMENT kind**, because the two consumers
+    a returned blob has are a subscript and a `for`, and both ask what the blob
+    HOLDS rather than only that it is one: `for x in names: len(x)` refused with
+    "an integer has no length" about a `char *` when the annotation said
+    `List[String]` and the bare prefix `list` was all that was carried.
+    `annotation_type_arg_base` reads the element out of the brackets and
+    `declared_type_kind` classifies it — `List[String]` → `list:str`,
+    `List[Int]` → `list:int`, `List[Box]` → `list` (a struct of ANOTHER image
+    is not a kind this model has, and the bare prefix is the honest answer).
+
+    **Only a container answer is taken from the declaration.** An `-> Int` is
+    deliberately NOT claimed, even though the declaration states it, because
+    this path cannot tell an integer from a frame address and the unclassified
+    answer is the one that refuses rather than guessing; widening this to the
+    scalars is a decision with its own blast radius, and the measured gap this
+    closes is the container one (`bugs/FORMAL_listdir_no_run_time_sequence.md`'s
+    item 1: `len()` of a value the callee's declaration says is a list).
+
+    `declaration` may be None — a library shipped without its sources, or one
+    whose manifest predates the contract — and then this is exactly
+    `dylib_export_return_kind`, which is the whole of what it could answer
+    before.
+    """
+    ann = getattr(declaration, "return_type", None) if declaration else None
+    if isinstance(ann, str):
+        kind = declared_type_kind(ann, int_names, string_names, decls)
+        if is_list_kind(kind or ""):
+            elem = declared_type_kind(
+                annotation_type_arg_base(ann, self_type=None),
+                int_names, string_names, decls)
+            # A scalar element is the answer a subscript and a loop target both
+            # ask for; a container element (`List[List[Int]]`) is not one this
+            # path can carry, and the bare prefix is the honest thing to leave.
+            return list_kind(elem) if elem and not is_list_kind(elem) else kind
+    return dylib_export_return_kind(entry)
 
 
 def abi_module_name(dotted: str) -> str:
