@@ -1,0 +1,1088 @@
+#!/usr/bin/env python3
+"""DIFFERENTIAL FUZZING for the formal backend: CPython vs a built image.
+
+`test_formal_x86_64_parity.py` asserts that a program which WAS THOUGHT OF gets
+the same answer on both architectures as it does on CPython.  Every case in it is
+a construct somebody already knew to be interesting, which makes it a good place
+to pin a fix and a bad place to find the next one: the class of silent
+miscompiles that survives such a file is exactly the class nobody wrote a case
+for.  This tool closes that gap the only way that scales — generate programs
+nobody designed, run each one three ways, and require the answers to be equal.
+
+    python3 tools/formal_fuzz.py --count 200 --backends x86_64,arm64 --jobs 6
+
+Three answers per program:
+
+  * CPython — the SOURCE's meaning, computed here, now, by running the same
+    text.  Not a constant anyone wrote down: a reference that cannot run
+    asserts nothing, and a golden value recorded against a lowering is an
+    assertion about the lowering made against itself.
+  * the built image, under `arch -x86_64` on this host (the x86-64 backend's
+    whole subject is an image that RUNS, so "built" and "ran" are separate
+    properties and only the second one is compared);
+  * the same program built for arm64, when `--backends` names it — the
+    arm64-vs-x86-64 disagreement, which is a miscompile the CPython
+    comparison alone can miss whenever both machines are wrong the same way.
+
+A program is generated ONCE and both engines run the SAME TEXT.  The only
+difference between the two files is a prelude of type-name aliases
+(`Int64 = Int32 = int`, `String = str`) that CPython needs because it
+evaluates a `def`'s annotations, and a `main()` call — so a divergence is a
+divergence of ANSWERS, never of dialects.  `var`, and any other spelling Mojo
+accepts and Python does not, is deliberately absent from the generator.
+
+WHAT IS AND IS NOT A FINDING
+----------------------------
+  match                both images agree with CPython.  The common case.
+  MISMATCH-X86         the x86-64 image disagrees with CPython: a silent
+                       miscompile.  Minimised and reported.
+  MISMATCH-ARM64       the arm64 image disagrees with CPython.  Reported, and
+                       left to whoever holds the arm64 claim unless the x86-64
+                       image agrees with it (which makes it a semantics gap in
+                       both, not an x86-64 bug).
+  ARM64-DIVERGES       the two images disagree with each other.
+  refusal             the compiler said no.  Not a finding: a construct with
+                       no representation is CORRECTLY refused, and a fuzzer
+                       that counted those as bugs would spend its whole budget
+                       re-discovering `bugs/FORMAL_known_limits.md`.  Counted by
+                       message so the construct mix stays visible.
+  codegen-crash        the compiler raised something that is not a refusal
+                       (a traceback, or a signal).  THIS is a finding: a
+                       backend that dies on a source it merely cannot model is
+                       a crash the sweep classifies separately, and it is never
+                       cached, so it costs a build on every sweep until it is
+                       gone.
+
+The generator stays inside the modelled subset on purpose (`//` and `%` are
+only emitted with a provably positive divisor and a non-negative dividend,
+because Python FLOORS and the backends truncate toward zero BY DESIGN — see
+`formal/model.py`'s `fold_literal_expr`; integers are masked back into a small
+range because CPython integers are unbounded and a formal value is one 64-bit
+word).  A generator that ignored either fact would report the word-size model
+and the floor-division decision as miscompiles, hundreds of times, and the
+signal would be worthless.
+
+    python3 tools/formal_fuzz.py --minimize path/to/prog.mojo [--kind x86]
+"""
+import argparse
+import json
+import os
+import platform
+import random
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIRE = os.path.join(HERE, "fire.py")
+
+BUILD_TIMEOUT = 120
+RUN_TIMEOUT = 30
+PY_TIMEOUT = 30
+
+# The CPython side of the SAME TEXT.  A `def`'s annotations are evaluated when
+# the def executes, so `-> Int32` needs the name to exist; a local annotation
+# inside a function body is NOT evaluated (PEP 526), which is why the generator
+# can annotate locals without these aliases.
+PRELUDE = (
+    "import sys\n"
+    "Int = Int32 = Int64 = UInt = UInt32 = UInt64 = Bool = int\n"
+    "String = str\n"
+)
+
+
+# ── the harness ────────────────────────────────────────────────────────────
+
+def build(src, out, backend, timeout=BUILD_TIMEOUT):
+    """Compile `src` for `backend`; (rc, diagnostic).
+
+    The diagnostic is stderr or stdout, whichever carries text — a refusal is
+    printed where the build found it, and the two are not the same stream on
+    every failure.
+    """
+    cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
+           f"--backend={backend}", "-o", out, src]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, cwd=HERE)
+    except subprocess.TimeoutExpired:
+        return 124, f"BUILD TIMEOUT after {timeout}s"
+    return p.returncode, (p.stderr or p.stdout or "")
+
+
+def run(path, backend, timeout=RUN_TIMEOUT):
+    """Execute a built image — under Rosetta when it is an x86-64 one.
+
+    Selected by the BACKEND, not applied to whatever was built: on an arm64
+    host `arch -x86_64 <an arm64 image>` is "Bad CPU type in executable", which
+    is a failure that reads as the host's fault and is really the harness
+    asking the wrong machine to run the program.
+    """
+    argv = [path]
+    if (backend == "x86_64" and platform.machine() in ("arm64", "aarch64")
+            and sys.platform == "darwin"):
+        argv = ["arch", "-x86_64", path]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"RUN TIMEOUT after {timeout}s"
+    return (p.returncode, p.stdout), p.stderr
+
+
+def cpython_answer(text, tmpdir, name):
+    """(exit, stdout) for `text` + `main()`, run by the interpreter here."""
+    py = os.path.join(tmpdir, name + ".ref.py")
+    with open(py, "w") as f:
+        f.write(PRELUDE + text + "\nmain()\n")
+    try:
+        p = subprocess.run([sys.executable, py], capture_output=True, text=True,
+                           timeout=PY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, "CPYTHON TIMEOUT"
+    if p.returncode != 0:
+        # A generated program that CPython rejects is a GENERATOR bug (a
+        # ZeroDivisionError, say), not a finding about the backends.  Returned
+        # with its stderr so the caller can say so rather than silently drop it.
+        return ("error", p.stderr.strip()[-400:]), ""
+    return (p.returncode, p.stdout), ""
+
+
+def run_on(backend, text, tmpdir, name):
+    """Everything ONE backend says about `text`: built? ran? printed what?
+
+    Returns a dict whose `verdict` is one of `ok`, `refusal`, `crash`,
+    `timeout`; `ok` carries the exit status and stdout that the comparison
+    needs, and every verdict carries enough text to reproduce the report line.
+    """
+    src = os.path.join(tmpdir, f"{name}.mojo")
+    out = os.path.join(tmpdir, f"{name}.{backend}")
+    with open(src, "w") as f:
+        f.write(text)
+    rc, diag = build(src, out, backend)
+    if rc != 0:
+        # A crash is a traceback or a signal; a refusal is a sentence.  The
+        # distinction matters because only one of them is a defect: `formal`
+        # raises CodegenError with prose for a construct it declines to model.
+        crashed = ("Traceback (most recent call last)" in diag
+                   or "codegen-crash" in diag
+                   or rc < 0
+                   or rc in (134, 139, 136, 132, 133, 135, 137))
+        return {"verdict": "crash" if crashed else "refusal", "rc": rc,
+                "diag": diag.strip()[-400:]}
+    if not os.path.isfile(out):
+        return {"verdict": "crash", "rc": rc,
+                "diag": "reported success and wrote no binary"}
+    got, err = run(out, backend)
+    if got is None:
+        return {"verdict": "timeout", "rc": rc, "diag": err}
+    exit_code, stdout = got
+    if exit_code is not None and exit_code < 0:
+        return {"verdict": "crash", "rc": exit_code,
+                "diag": f"image died with signal {-exit_code}: "
+                        f"{err.strip()[:200]}"}
+    if exit_code is not None and exit_code > 128:
+        return {"verdict": "crash", "rc": exit_code,
+                "diag": f"image exited {exit_code} (signal "
+                        f"{exit_code - 128}): stdout={stdout[:120]!r}"}
+    return {"verdict": "ok", "rc": exit_code, "stdout": stdout, "stderr": err}
+
+
+
+# ── the generator ───────────────────────────────────────────────────────────
+#
+# One text, two engines.  Everything below emits the intersection of Mojo and
+# Python: no `var`, no `struct`/`fn`, no `^` ownership marker (a borrow-check
+# annotation in Mojo and a bitwise xor in Python — the one operator in the
+# language whose two readings differ), no comprehension, no f-string.  The
+# construct mix is weighted towards what a compiler gets wrong QUIETLY rather
+# than what it refuses loudly.
+#
+# The value discipline is the part that decides whether this tool is worth
+# anything, and it exists for three measured reasons:
+#
+#   * CPython integers are unbounded; a formal value is ONE 64-bit word.  So
+#     every growing expression is masked back into `0..0xFFFF` and every
+#     multiplication masks its own operands.  Without that the word-size model
+#     reports itself as a miscompile on almost every program.
+#   * Python's `//` and `%` FLOOR; the backends truncate toward zero BY DESIGN
+#     (`formal/model.py`'s `fold_literal_expr` says so).  So a divisor is made
+#     odd (`| 1`, hence non-zero) and a dividend is masked non-negative: a
+#     documented disagreement and a ZeroDivisionError are not findings, and a
+#     generator that produces either reports the same non-bug hundreds of
+#     times.
+#   * A local the program only sometimes assigns is a NameError in CPython and
+#     a zero on this path, which is not a disagreement about codegen at all.
+#     So EVERY local is declared up front, in one preamble, with the initial
+#     value CPython would otherwise not have.
+#
+# Those three are the whole difference between a fuzzer that finds bugs and one
+# that finds its own generator.
+
+STRINGS = ["ab", "cd", "ef", "gh", "", "a", "xyz", "pqrs"]
+
+# Which construct families appear, with weights.  `core` is the
+# arithmetic/control/comparison half — signedness, loop counters, augmented
+# assignment; `calls` adds user functions and nesting; `strings` and `lists`
+# add the two container halves of the value model.
+MIXES = {
+    "core": (("assign", 5), ("arith", 4), ("augassign", 5), ("shift", 3),
+             ("cmp", 4), ("logic", 2), ("if", 5), ("while", 3), ("for", 3),
+             ("div", 2), ("pow", 1), ("break", 1), ("cond_expr", 2)),
+    "calls": (("assign", 3), ("arith", 3), ("augassign", 3), ("cmp", 3),
+              ("if", 3), ("while", 2), ("for", 2), ("call", 5),
+              ("nested_call", 4), ("recursion", 2), ("arg_expr", 3)),
+    "strings": (("assign", 2), ("str_assign", 3), ("str_print", 3),
+                ("str_len", 2), ("str_cmp", 2), ("if", 3), ("call", 2)),
+    "lists": (("assign", 2), ("list_build", 3), ("list_read", 3),
+              ("list_write", 2), ("list_len", 2), ("if", 3), ("while", 2),
+              ("list_in_loop", 2)),
+}
+
+# The growing augmented operators, and the bound each one's RIGHT-HAND side is
+# held to.  `*=` and `<<=` are the two that can leave 16 bits very fast, and
+# both operands are masked so that a loop body which runs five times still
+# cannot reach the 64-bit ceiling: `0xFFFF * 0xF` per step is under 2^20, five
+# steps under 2^24.
+GROWTH_MASK = {"+=": "0xF", "-=": "0xF", "*=": "0xF", "<<=": "3"}
+
+
+class Gen:
+    """One random program, emitted as text.
+
+    `words` are masked and non-negative; `smalls` are signed and stay small.
+    Both families are read by comparisons against each other, which is how a
+    signed/unsigned disagreement in a lowering becomes an observable answer
+    rather than a variable nobody looks at.
+    """
+
+    def __init__(self, rng, mix="core"):
+        self.rng = rng
+        self.mix_name = mix
+        self.weights = dict(MIXES.get(mix, MIXES["core"]))
+        self.mix = set(self.weights)
+        self.words = []       # masked, 0..0xFFFF
+        self.smalls = []      # signed, small
+        self.strings = []     # String locals
+        self.lists = []       # (name, length) list locals of ints
+        self.funcs = []       # (name, [parameter names])
+        self.decls = []       # (name, initial value text) for the preamble
+        self.defs = []        # module-level function definitions
+        self.out = []         # the body being emitted
+        self.loop_depth = 0
+        self.counter = 0
+
+    # ── plumbing ──
+    def fresh(self, prefix):
+        self.counter += 1
+        return f"{prefix}{self.counter}"
+
+    def emit(self, indent, text):
+        self.out.append("    " * indent + text)
+
+    def pick(self, *kinds):
+        """One construct family, by weight, restricted to this mix."""
+        pool = [k for k in kinds if k in self.mix]
+        if not pool:
+            pool = ["assign"]
+        return self.rng.choices(pool, weights=[self.weights.get(k, 1)
+                                              for k in pool])[0]
+
+    def declare(self, name, value):
+        """Reserve a local and remember its initialiser for the preamble."""
+        self.decls.append((name, value))
+        return name
+
+    # ── expressions ──
+    def lit(self):
+        r = self.rng.random()
+        if r < 0.3:
+            return str(self.rng.randint(-9, 9))
+        if r < 0.5:
+            return str(self.rng.choice([0, 1, 2, 7, 10, 16, 100, 255, 1000]))
+        return str(self.rng.randint(-32, 32))
+
+    def small_expr(self, depth=1):
+        """An expression over the SMALL family only.
+
+        Bounded by construction — smalls are `-32..32`, literals are single
+        digits, there is no `*` and the depth is one — so the value cannot
+        leave the range CPython and a 64-bit word agree on.  This is what a
+        signed variable is written from, which is the only way a NEGATIVE
+        number reaches a comparison.
+        """
+        if depth <= 0 or self.rng.random() < 0.4:
+            if self.smalls and self.rng.random() < 0.6:
+                return self.rng.choice(self.smalls)
+            return str(self.rng.randint(-9, 9))
+        op = self.rng.choice(["+", "-"])
+        return f"({self.small_expr(depth - 1)} {op} {self.small_expr(depth - 1)})"
+
+    def word_expr(self, depth=2):
+        """An expression over the WORD family, already masked to 16 bits.
+
+        Every multiplication masks its own operands (`0..0xFFFF` times
+        `0..0xFF`), so a nested product cannot climb to the 64-bit ceiling and
+        turn CPython's unbounded integer into a "miscompile".
+        """
+        if depth <= 0 or self.rng.random() < 0.35:
+            if self.words and self.rng.random() < 0.7:
+                return self.rng.choice(self.words)
+            if self.smalls and self.rng.random() < 0.4:
+                return self.smalls[-1]
+            return str(self.rng.randint(0, 64))
+        kind = self.rng.choice(["add", "mul", "paren", "bit", "cond"])
+        if kind == "add":
+            op = self.rng.choice(["+", "-"])
+            return f"({self.word_expr(depth - 1)} {op} {self.word_expr(depth - 1)})"
+        if kind == "mul":
+            return (f"(({self.word_expr(depth - 1)} & 0xFFFF) * "
+                    f"({self.word_expr(depth - 1)} & 0xFF))")
+        if kind == "bit":
+            op = self.rng.choice(["&", "|", "^"])
+            return (f"({self.word_expr(depth - 1)} {op} "
+                    f"{self.rng.choice([1, 3, 7, 15, 255, 4095])})")
+        if kind == "cond":
+            # A bool is a WORD on this path (`model.print_format`: a bool is an
+            # integer by the time it is a value), so a boolean is never stored
+            # or printed bare — it is a condition, or the 1/0 a conditional
+            # expression produces.
+            return f"(1 if {self.cond(depth - 1)} else 0)"
+        return f"({self.word_expr(depth - 1)})"
+
+    def int_expr(self, depth=2):
+        """Any integer-valued expression, still safe to compute in both."""
+        if depth <= 0 or self.rng.random() < 0.45:
+            pool = self.words + self.smalls
+            if pool and self.rng.random() < 0.8:
+                return self.rng.choice(pool)
+            return self.lit()
+        r = self.rng.random()
+        if r < 0.35:
+            return self.word_expr(depth)
+        if r < 0.55:
+            return self.small_expr(1)
+        if r < 0.7:
+            op = self.rng.choice(["&", "|", "^"])
+            return (f"({self.int_expr(depth - 1)} {op} "
+                    f"{self.rng.choice([1, 3, 7, 255])})")
+        if r < 0.85:
+            return (f"(1 if {self.cond(depth - 1)} else "
+                    f"{self.int_expr(0)})")
+        n = self.rng.randint(0, 15)
+        return (f"(({self.int_expr(depth - 1)} & 0xFFFF) "
+                f"{self.rng.choice(['<<', '>>'])} {n})")
+
+    def pos_div_expr(self):
+        """`a // b` / `a % b` with a non-negative dividend and an odd divisor.
+
+        See the module docstring: flooring versus truncation is a documented
+        decision and a zero divisor is a trap, so neither may be generated.
+        """
+        a = f"({self.int_expr(1)} & 0xFFFF)"
+        b = f"(({self.int_expr(1)} & 0xFF) | 1)"
+        return f"({a} {self.rng.choice(['//', '%'])} {b})"
+
+    def cond(self, depth=2):
+        """A boolean-valued expression.
+
+        Comparisons MIX the two families on purpose (`w < s` with `w >= 0` and
+        `s < 0` is the shape a signedness bug answers wrongly and a fuzz run
+        hits by accident rather than by design), and a chained comparison
+        `a < b < c` is here because it is a different lowering from `a < b`:
+        the middle operand is read once in one and twice in the other.
+        """
+        if depth <= 0:
+            pool = self.words + self.smalls
+            return self.rng.choice(pool) if pool else "1"
+        kind = self.rng.choice(["cmp", "cmp", "chain", "logic", "not",
+                                "div_cmp", "truth"])
+        if kind == "truth":
+            pool = self.words + self.smalls
+            return f"({self.rng.choice(pool) if pool else '1'})"
+        if kind == "cmp":
+            op = self.rng.choice(["<", "<=", ">", ">=", "==", "!="])
+            pool = self.words + self.smalls
+            if pool and self.rng.random() < 0.6:
+                return (f"({self.rng.choice(pool)} {op} "
+                        f"{self.rng.choice(pool)})")
+            return f"({self.int_expr(1)} {op} {self.int_expr(1)})"
+        if kind == "chain":
+            op = self.rng.choice(["<", "<=", ">", ">=", "==", "!="])
+            pool = self.words + self.smalls
+            if len(pool) < 3:
+                return self.cond(depth - 1)
+            a, b, c = (self.rng.choice(pool) for _ in range(3))
+            return f"({a} {op} {b} {op} {c})"
+        if kind == "logic":
+            op = self.rng.choice(["and", "or"])
+            return f"({self.cond(depth - 1)} {op} {self.cond(depth - 1)})"
+        if kind == "not":
+            return f"(not {self.cond(depth - 1)})"
+        # A division compared against a literal: the quotient's SIGN is decided
+        # by the division, so this is where a truncating division and a
+        # flooring one cannot both be right.
+        op = self.rng.choice(["<", ">", "==", "!="])
+        return (f"(({self.int_expr(1)} & 0xFFFF) {op} "
+                f"{self.rng.randint(0, 40)})")
+
+    # ── statements ──
+    def new_word(self, indent):
+        name = self.declare(self.fresh("w"), "0")
+        self.words.append(name)
+        self.emit(indent, f"{name} = ({self.word_expr(2)}) & 0xFFFF")
+        return name
+
+    def new_small(self, indent):
+        name = self.declare(self.fresh("s"), "0")
+        self.smalls.append(name)
+        self.emit(indent, f"{name} = {self.rng.randint(-32, 32)}")
+        return name
+
+    def stmt(self, indent, budget=2):
+        kind = self.pick(
+            "assign", "arith", "augassign", "shift", "cmp", "logic", "if",
+            "while", "for", "div", "pow", "break", "cond_expr", "call",
+            "nested_call", "recursion", "arg_expr", "str_assign", "str_print",
+            "str_len", "str_cmp", "list_build", "list_read", "list_write",
+            "list_len", "list_in_loop")
+        if budget <= 0 and kind in ("if", "while", "for", "call",
+                                    "nested_call", "recursion",
+                                    "list_in_loop"):
+            kind = "assign"
+        if kind in ("assign", "arith", "cmp", "logic", "cond_expr"):
+            self.assign_stmt(indent)
+        elif kind == "augassign":
+            self.augassign_stmt(indent)
+        elif kind == "shift":
+            self.shift_stmt(indent)
+        elif kind == "div":
+            # `words` ONLY: the dividend is the target, and a signed dividend
+            # under a truncating division is the documented floor/truncate
+            # disagreement rather than a finding (see the module docstring).
+            if not self.words:
+                self.new_word(indent)
+            else:
+                self.emit(indent, f"{self.rng.choice(self.words)} "
+                                  f"{self.rng.choice(['//=', '%='])} "
+                                  f"(({self.int_expr(1)} & 0xFF) | 1)")
+        elif kind == "pow":
+            pool = self.words + self.smalls
+            if not pool:
+                self.new_word(indent)
+            else:
+                self.emit(indent, f"{self.rng.choice(pool)} = "
+                                  f"{self.rng.choice([2, 3])} ** "
+                                  f"{self.rng.randint(0, 5)}")
+        elif kind == "if":
+            self.emit(indent, f"if {self.cond(2)}:")
+            self.block(indent + 1, budget - 1)
+            if self.rng.random() < 0.5:
+                self.emit(indent, "elif " + self.cond(2) + ":")
+                self.block(indent + 1, budget - 1)
+            if self.rng.random() < 0.7:
+                self.emit(indent, "else:")
+                self.block(indent + 1, budget - 1)
+        elif kind == "while":
+            self.while_loop(indent, budget)
+        elif kind == "for":
+            self.for_loop(indent, budget)
+        elif kind == "break":
+            self.terminator(indent)
+        elif kind == "call":
+            self.call_stmt(indent)
+        elif kind == "nested_call":
+            self.nested_call_stmt(indent)
+        elif kind == "recursion":
+            self.recursion_stmt(indent)
+        elif kind == "arg_expr":
+            self.arg_expr_stmt(indent)
+        elif kind in ("str_assign", "str_print", "str_len", "str_cmp"):
+            self.string_stmt(indent, kind)
+        else:
+            self.list_stmt(indent, kind)
+
+    def assign_stmt(self, indent):
+        """A write to an EXISTING local, or a fresh one.
+
+        A write to a `word` is masked (that is what keeps the value inside the
+        range CPython and a word agree on); a write to a `small` is over the
+        small family only, so a negative value stays negative and stays small.
+        """
+        if self.rng.random() < 0.35 or not (self.words or self.smalls):
+            if self.rng.random() < 0.5 or not self.smalls:
+                self.new_word(indent)
+            else:
+                self.new_small(indent)
+            return
+        if self.words and (not self.smalls or self.rng.random() < 0.7):
+            target = self.rng.choice(self.words)
+            if self.rng.random() < 0.5:
+                self.emit(indent, f"{target}: Int64 = "
+                                  f"({self.word_expr(2)}) & 0xFFFF")
+            else:
+                self.emit(indent, f"{target} = ({self.word_expr(2)}) & 0xFFFF")
+        else:
+            self.emit(indent, f"{self.rng.choice(self.smalls)} = "
+                              f"{self.small_expr(1)}")
+
+    def augassign_stmt(self, indent):
+        """An augmented write, with the growing operators' RIGHT-HAND side
+        bounded so the accumulated value cannot reach 2^63 (see GROWTH_MASK)."""
+        if not (self.words or self.smalls):
+            self.new_word(indent)
+            return
+        op = self.rng.choice(["+=", "-=", "*=", "&=", "|=", "^="])
+        target = self.rng.choice(self.words + self.smalls)
+        if op in ("*=", "+=", "-=") and target in self.smalls:
+            # A `small` is only given the non-growing half of the set: `*=` on
+            # a signed small is the one combination that can leave the range
+            # both engines agree on within a handful of loop iterations.
+            op = self.rng.choice(["+=", "-="])
+        if op in GROWTH_MASK:
+            rhs = (f"(({self.int_expr(0)}) & {GROWTH_MASK[op]})"
+                   if op != "<<=" else self.rng.randint(1, 3))
+        else:
+            rhs = self.int_expr(0)
+        self.emit(indent, f"{target} {op} {rhs}")
+
+    def shift_stmt(self, indent):
+        if not (self.words or self.smalls):
+            self.new_word(indent)
+            return
+        target = self.rng.choice(self.words + self.smalls)
+        # A count of at most 7 on a `small` (so a shift cannot run away) and 15
+        # on a `word` (whose next write is masked anyway).
+        limit = 7 if target in self.smalls else 15
+        self.emit(indent, f"{target} {self.rng.choice(['<<=', '>>='])} "
+                          f"{self.rng.randint(0, limit)}")
+
+    def terminator(self, indent):
+        """`break`/`continue`, or a harmless statement when there is no loop.
+
+        A `break` outside a loop is a CPython SyntaxError, so the depth check
+        is not tidiness — it is the difference between a program that runs and
+        a generator error.
+        """
+        if self.loop_depth:
+            self.emit(indent, self.rng.choice(["break", "continue"]))
+        else:
+            self.new_small(indent)
+
+    def block(self, indent, budget):
+        for _ in range(self.rng.randint(1, 3)):
+            self.stmt(indent, budget)
+
+    def while_loop(self, indent, budget):
+        """A `while` whose trip count is bounded BY CONSTRUCTION.
+
+        A `while` with an unbounded condition is a generator bug waiting to
+        happen: both engines would be killed by their timeouts and the
+        comparison would report a TIMEOUT as if it were an answer.  The
+        counter is a fresh local incremented in the body, so the loop runs at
+        most `n` times whatever the condition says — and the condition is
+        still free to be false on the first test, which is the case that
+        separates a lowered compare from a lowered branch.
+        """
+        guard = self.declare(self.fresh("g"), "0")
+        limit = self.rng.randint(1, 5)
+        self.emit(indent, f"{guard} = 0")
+        self.emit(indent, f"while {guard} < {limit} and ({self.cond(2)}):")
+        self.emit(indent + 1, f"{guard} = {guard} + 1")
+        self.loop_depth += 1
+        self.block(indent + 1, budget - 1)
+        self.loop_depth -= 1
+
+    def for_loop(self, indent, budget):
+        name = self.fresh("i")
+        lo = self.rng.randint(0, 3)
+        hi = lo + self.rng.randint(1, 4)
+        self.emit(indent, f"for {name} in range({lo}, {hi}):")
+        self.loop_depth += 1
+        self.block(indent + 1, budget - 1)
+        if self.rng.random() < 0.3:
+            self.emit(indent + 1, self.rng.choice(["break", "continue"]))
+        self.loop_depth -= 1
+
+    # ── functions ──
+    def define_function(self):
+        """A helper at MODULE level with 0..3 int parameters.
+
+        Module level, not nested: a `def` inside `main` is a closure, and a
+        closure's environment is a different subject with its own refusals —
+        worth fuzzing, and not worth mixing into a run whose findings are all
+        supposed to be about plain calls.
+
+        Annotations are left OFF the parameters and the return.  An
+        unannotated parameter is this path's DEFAULT_INT_TYPE, which is what
+        most of the corpus is written with, and the annotated spelling is
+        already pinned by `test_formal_x86_64_parity.py`.
+        """
+        name = self.fresh("f")
+        nargs = self.rng.randint(0, 3)
+        params = [self.fresh("p") for _ in range(nargs)]
+        body = Gen(self.rng, self.mix_name)
+        body.counter = self.counter
+        body.decls = []
+        body.defs = []
+        body.out = []
+        body.stmt(1, 2)
+        body.stmt(1, 2)
+        self.counter = body.counter
+        lines = [f"def {name}({', '.join(params)}):"]
+        for dname, dval in body.decls:
+            lines.append(f"    {dname} = {dval}")
+        lines.extend(body.out)
+        if body.smalls and self.rng.random() < 0.6:
+            # Half the helpers return a SIGNED value and half return a masked
+            # word, because a caller cannot know which it got and a lowering
+            # that decided the question differently on the two machines would
+            # only show up where a signed value is returned through a mask.
+            lines.append(f"    return {body.small_expr(1)}")
+        else:
+            lines.append(f"    return ({body.word_expr(2)}) & 0xFFFF")
+        self.defs.extend(lines)
+        self.funcs.append((name, params))
+        return name, params
+
+    def call_args(self, params):
+        return [self.int_expr(1) for _ in params]
+
+    def call_stmt(self, indent):
+        if not self.funcs or self.rng.random() < 0.4:
+            self.define_function()
+        name, params = self.rng.choice(self.funcs)
+        args = ", ".join(self.call_args(params))
+        # `print(<call>)` — the call's RESULT is what is compared, and a call
+        # in argument position is where a register/stack ABI disagreement
+        # hides.
+        self.emit(indent, f"print({name}({args}))")
+
+    def nested_call_stmt(self, indent):
+        """A call whose ARGUMENT is itself a call.
+
+        Two frames are live at once, so a caller's argument that lands in the
+        outgoing area — or a callee's parameter read out of the wrong slot —
+        shows up in the answer instead of passing quietly.
+        """
+        while len(self.funcs) < 2:
+            self.define_function()
+        outer, outer_params = self.rng.choice(self.funcs)
+        inner, inner_params = self.rng.choice(self.funcs)
+        if not outer_params:
+            self.call_stmt(indent)
+            return
+        args = self.call_args(outer_params)
+        pos = self.rng.randrange(len(outer_params))
+        args[pos] = (f"{inner}("
+                     f"{', '.join(self.call_args(inner_params))})")
+        self.emit(indent, f"print({outer}({', '.join(args)}))")
+
+    def arg_expr_stmt(self, indent):
+        """A call written into an ARGUMENT of another expression — the shape
+        where the inner call's value has to survive the outer's own frame."""
+        if not self.funcs:
+            self.define_function()
+        name, params = self.rng.choice(self.funcs)
+        args = ", ".join(self.call_args(params))
+        self.emit(indent, f"print({name}({args}) + {self.int_expr(1)})")
+
+    def recursion_stmt(self, indent):
+        """A tail-recursive helper with a DECREASING counter.
+
+        The depth is bounded by the SEED rather than by a limit in the source,
+        so the program terminates in both engines without a guard that would
+        hide the thing being tested: a chain of frames, and the register
+        save/restore across it.
+        """
+        name = self.fresh("rec")
+        p = self.fresh("n")
+        step = self.rng.randint(1, 5)
+        self.defs.append(f"def {name}({p}):")
+        self.defs.append(f"    if {p} <= 0:")
+        self.defs.append(f"        return {self.rng.randint(0, 9)}")
+        self.defs.append(f"    return ({name}({p} - 1) + {step}) & 0xFFFF")
+        self.funcs.append((name, [p]))
+        self.emit(indent, f"print({name}({self.rng.randint(1, 6)}))")
+
+    # ── strings and lists ──
+    def string_stmt(self, indent, kind):
+        if kind == "str_assign" or not self.strings:
+            name = self.declare(self.fresh("t"), '"ab"')
+            self.strings.append(name)
+            if self.rng.random() < 0.4:
+                self.emit(indent, f"{name}: String = {self.str_expr()}")
+            else:
+                self.emit(indent, f"{name} = {self.str_expr()}")
+            return
+        if kind == "str_print":
+            self.emit(indent, f"print({self.str_expr()})")
+            return
+        if kind == "str_len":
+            # `len` of a string is the one container answer available for a
+            # `char *` on this path; every other string method needs a buffer
+            # it does not have (`model.string_concat_refusal`).
+            self.emit(indent, f"print(len({self.str_expr()}))")
+            return
+        self.emit(indent, f"if {self.str_expr()} == {self.str_expr()}:")
+        self.emit(indent + 1, f"print({self.rng.randint(0, 99)})")
+        if self.rng.random() < 0.5:
+            self.emit(indent, "else:")
+            self.emit(indent + 1, f"print({self.rng.randint(0, 99)})")
+
+    def str_expr(self):
+        if self.strings and self.rng.random() < 0.6:
+            return self.rng.choice(self.strings)
+        return repr(self.rng.choice(STRINGS))
+
+    def list_stmt(self, indent, kind):
+        if kind == "list_build" or not self.lists:
+            name = self.fresh("L")
+            n = self.rng.randint(1, 4)
+            items = ", ".join(str(self.rng.randint(0, 40)) for _ in range(n))
+            # The PREAMBLE copy has the same LENGTH as the one the body
+            # assigns, because a loop over `range(n)` may run before that
+            # assignment does, and a blob of a different length is an
+            # IndexError in CPython — a generator error, not a finding.
+            self.declare(name, "[" + ", ".join(["0"] * n) + "]")
+            self.emit(indent, f"{name} = [{items}]")
+            self.lists.append((name, n))
+            return
+        name, n = self.rng.choice(self.lists)
+        idx = self.rng.randrange(n)
+        if kind == "list_read":
+            self.emit(indent, f"print({name}[{idx}])")
+        elif kind == "list_write":
+            self.emit(indent, f"{name}[{idx}] = {self.rng.randint(0, 40)}")
+        elif kind == "list_len":
+            self.emit(indent, f"print(len({name}))")
+        elif kind == "list_in_loop":
+            i = self.fresh("i")
+            self.emit(indent, f"for {i} in range({n}):")
+            self.loop_depth += 1
+            self.emit(indent + 1, f"{name}[{i}] = {name}[{i}] + 1")
+            self.emit(indent + 1, f"print({name}[{i}])")
+            self.loop_depth -= 1
+
+    # ── the program ──
+    def program(self):
+        if "calls" in self.mix:
+            for _ in range(self.rng.randint(1, 3)):
+                self.define_function()
+        saved, self.out = self.out, []
+        for _ in range(self.rng.randint(2, 4)):
+            self.new_small(1)
+        for _ in range(self.rng.randint(1, 3)):
+            self.new_word(1)
+        for _ in range(self.rng.randint(5, 12)):
+            self.stmt(1, 2)
+        # A trailing observation of EVERY value, printed a few at a time: a
+        # variadic call keeps 8 arguments in registers on arm64 and 6 on
+        # x86-64, so a print with several operands is the cheapest probe there
+        # is of the two conventions disagreeing.  Five is under both.
+        watched = self.words + self.smalls
+        for i in range(0, len(watched), 5):
+            chunk = watched[i:i + 5]
+            if chunk:
+                self.emit(1, "print(" + ", ".join(chunk) + ")")
+        body, self.out = self.out, saved
+        lines = list(self.defs)
+        lines.append("def main() -> Int32:")
+        for dname, dval in self.decls:
+            lines.append(f"    {dname} = {dval}")
+        lines.extend(body)
+        lines.append("    return 0")
+        return "\n".join(lines) + "\n"
+
+
+def make_program(seed, index, mix="core"):
+    """Program `index` of `seed` — a pure function of the two.
+
+    Which is what makes a run reproducible, resumable, and order-independent:
+    the work can be spread over `--jobs` workers and still be re-run exactly,
+    and a program reported by index can be regenerated without the file that
+    produced it.
+    """
+    return Gen(random.Random(f"{seed}:{index}:{mix}"), mix).program()
+
+# ── the run ────────────────────────────────────────────────────────────────
+
+def check_one(index, args, tmpdir, lock=None):
+    text = make_program(args.seed, index, args.mix)
+    name = f"p{index}"
+    ref, err = cpython_answer(text, tmpdir, name)
+    results = {}
+    if isinstance(ref, tuple) and ref and ref[0] == "error":
+        return {"index": index, "verdict": "generator-error",
+                "detail": ref[1], "text": text}
+    want_exit, want_out = ref
+    for backend in args.backends:
+        results[backend] = run_on(backend, text, tmpdir, name)
+    finding = classify(results, want_exit, want_out, args)
+    rec = {"index": index, "verdict": finding, "text": text,
+           "want": {"exit": want_exit, "stdout": want_out}, "results": results}
+    if args.save_all or finding != "match":
+        d = os.path.join(args.work, "programs")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{name}.mojo"), "w") as f:
+            f.write(text)
+    return rec
+
+
+def classify(results, want_exit, want_out, args):
+    """The one question: did every engine that produced an ANSWER produce the
+    SAME answer?  A verdict names the engines that disagreed, because a
+    finding that does not say which image is wrong is a re-run."""
+    def answer(backend):
+        r = results.get(backend) or {}
+        return (r["rc"], r.get("stdout")) if r.get("verdict") == "ok" else None
+
+    x86 = answer("x86_64")
+    arm = answer("arm64")
+    if x86 is not None and (x86[0] != want_exit or x86[1] != want_out):
+        return "MISMATCH-X86"
+    if arm is not None and (arm[0] != want_exit or arm[1] != want_out):
+        return "MISMATCH-ARM64"
+    if x86 is not None and arm is not None and x86 != arm:
+        return "ARM64-DIVERGES"
+    if any(r.get("verdict") == "crash" for r in results.values()):
+        return "CODEGEN-CRASH"
+    if any(r.get("verdict") == "timeout" for r in results.values()):
+        return "TIMEOUT"
+    if any(r.get("verdict") == "refusal" for r in results.values()):
+        return "refusal"
+    return "match"
+
+
+def shorten(text, limit=160):
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def report(rec, args):
+    v = rec["verdict"]
+    if v == "match":
+        return None
+    if v == "refusal":
+        return f"  refusal  #{rec['index']}"
+    lines = [f"  {v}  #{rec['index']}"]
+    if v == "generator-error":
+        lines.append(f"      CPython rejected the generated program: "
+                     f"{shorten(rec['detail'])}")
+        return "\n".join(lines)
+    want = rec["want"]
+    lines.append(f"      want  exit={want['exit']} {shorten(want['stdout'])!r}")
+    for backend, r in rec["results"].items():
+        if r["verdict"] == "ok":
+            lines.append(f"      {backend:<7} exit={r['rc']} "
+                         f"{shorten(r['stdout'])!r}")
+        else:
+            lines.append(f"      {backend:<7} {r['verdict']}: "
+                         f"{shorten(r['diag'], 220)}")
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-n", "--count", type=int, default=50,
+                    help="how many programs to generate")
+    ap.add_argument("-s", "--seed", type=str, default="formal-fuzz",
+                    help="the seed; program i is a pure function of (seed, i)")
+    ap.add_argument("--start", type=int, default=0,
+                    help="first program index (for resuming or extending a run)")
+    ap.add_argument("-j", "--jobs", type=int, default=4)
+    ap.add_argument("--backends", default="x86_64,arm64",
+                    help="comma list; both, to check the two images against "
+                         "each other as well as against CPython")
+    ap.add_argument("--mix", default="core", choices=sorted(MIXES))
+    ap.add_argument("--work", default=os.path.join(HERE, ".tmp", "formal_fuzz"))
+    ap.add_argument("--save-all", action="store_true",
+                    help="write every program to --work, not only findings")
+    ap.add_argument("--minimize", metavar="PROG",
+                    help="shrink one program to a minimal reproducer and print it")
+    ap.add_argument("--min-kind", default="x86",
+                    choices=["x86", "arm", "any"],
+                    help="which disagreement --minimize must preserve")
+    ap.add_argument("--max-min-steps", type=int, default=400)
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+    args.backends = [b.strip() for b in args.backends.split(",") if b.strip()]
+    for b in args.backends:
+        if b not in ("x86_64", "arm64"):
+            print(f"ERROR: unknown backend {b!r}", file=sys.stderr)
+            return 2
+    if sys.version_info < (3, 10):
+        print("ERROR: the formal backend needs python3 >= 3.10 "
+              "(export PATH=/opt/homebrew/bin:$PATH first)",
+              file=sys.stderr)
+        return 2
+    os.makedirs(args.work, exist_ok=True)
+
+    if args.minimize:
+        with open(args.minimize) as f:
+            text = f.read()
+        return minimize(text, args)
+
+    started = time.time()
+    counts = {}
+    findings = []
+    tmpdir = tempfile.mkdtemp(prefix="formalfuzz.", dir=args.work)
+    try:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            recs = list(pool.map(
+                lambda i: check_one(i, args, tmpdir),
+                range(args.start, args.start + args.count)))
+        for rec in recs:
+            counts[rec["verdict"]] = counts.get(rec["verdict"], 0) + 1
+            line = report(rec, args)
+            if line and rec["verdict"] != "refusal":
+                print(line, flush=True)
+            elif line and not args.quiet:
+                print(line, flush=True)
+            if rec["verdict"].startswith(("MISMATCH", "ARM64-DIVERGES",
+                                          "CODEGEN-CRASH", "generator")):
+                findings.append(rec)
+    finally:
+        subprocess.run(["rm", "-rf", tmpdir])
+
+    with open(os.path.join(args.work, "findings.json"), "w") as f:
+        json.dump({"args": vars(args), "counts": counts,
+                   "findings": [{k: v for k, v in r.items() if k != "text"}
+                                for r in findings],
+                   "programs": {str(r["index"]): r["text"]
+                                for r in findings}},
+              f, indent=1)
+    elapsed = time.time() - started
+    print(f"\nformal_fuzz seed={args.seed} mix={args.mix} "
+          f"programs={args.count} in {elapsed:.1f}s "
+          f"({args.count / max(elapsed, 0.01):.1f}/s, jobs={args.jobs})")
+    for v, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {v:<18} {n}")
+    print(f"findings written to {args.work}/findings.json "
+          f"({len(findings)} program{'s' if len(findings) != 1 else ''})")
+    return 1 if findings else 0
+
+
+# ── minimisation ───────────────────────────────────────────────────────────
+#
+# Delta debugging over STATEMENTS, then over sub-expressions.  A miscompile
+# report is only useful if it is small: the first thing a reader does with a
+# 40-statement program is delete statements by hand, and the whole point of
+# reporting it automatically is that the answer is already smaller than the
+# question.  The predicate is the SAME comparison the sweep made — CPython
+# against the image — so a shrunk program still demonstrates the disagreement.
+
+def _still_fails(text, args):
+    name = "min"
+    with tempfile.TemporaryDirectory(dir=args.work) as td:
+        ref, err = cpython_answer(text, td, name)
+        if isinstance(ref, tuple) and ref and ref[0] == "error":
+            return False
+        want_exit, want_out = ref
+        for backend in args.backends:
+            r = run_on(backend, text, td, name)
+            if args.min_kind == "x86" and backend != "x86_64":
+                continue
+            if args.min_kind == "arm" and backend != "arm64":
+                continue
+            if r["verdict"] == "ok" and (r["rc"] != want_exit
+                                         or r["stdout"] != want_out):
+                return True
+            if args.min_kind == "any" and r["verdict"] in ("crash",):
+                return True
+    return False
+
+
+def _statement_spans(text):
+    """(start, end) line spans of every statement in the file, outermost first.
+
+    A span is a line that opens a block plus the block it owns, so deleting one
+    removes a whole `if` with its arms — which is the unit a reader deletes,
+    and the unit whose deletion can change a program's meaning (a `continue`
+    that stops skipping the rest of a loop body).
+    """
+    lines = text.split("\n")
+    opens = []
+    spans = []
+    for i, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        while opens and opens[-1][1] > indent:
+            opens.pop()
+        if opens:
+            spans.append((opens[-1][0], i))
+        opens.append((i, indent))
+    return lines, spans
+
+
+def minimize(text, args):
+    """Shrink until no single statement or sub-expression can go."""
+    if not _still_fails(text, args):
+        print("the program does not fail here any more — nothing to minimize",
+              file=sys.stderr)
+        return 2
+    steps = 0
+    # 1. statements, largest first (a big `if` goes before the one line inside
+    #    it, so the shrink converges on the OUTER construct when both work)
+    changed = True
+    while changed and steps < args.max_min_steps:
+        changed = False
+        lines, spans = _statement_spans(text)
+        for start, end in sorted(spans, key=lambda s: s[1] - s[0],
+                                 reverse=True):
+            if steps >= args.max_min_steps:
+                break
+            cand = "\n".join(lines[:start] + lines[end + 1:])
+            if not cand.strip():
+                continue
+            steps += 1
+            if _still_fails(cand, args):
+                text = cand
+                changed = True
+                break
+    # 2. sub-expressions: replace each parenthesised group with its operands
+    while steps < args.max_min_steps:
+        m = re.search(r"\(([^()]*)\)", text)
+        if not m:
+            break
+        inner = m.group(1)
+        alts = [a for a in re.split(r"[-+*/%&|^<>]=?|\band\b|\bor\b", inner)
+                if a.strip()]
+        if len(alts) < 2:
+            break
+        for a in alts:
+            steps += 1
+            cand = text[:m.start()] + a.strip() + text[m.end():]
+            if _still_fails(cand, args):
+                text = cand
+                break
+        else:
+            break
+    # 3. literals: shrink the numbers that are left
+    for m in list(re.finditer(r"(?<![\w.])(-?\d+)", text)):
+        if steps >= args.max_min_steps:
+            break
+        v = m.group(1)
+        for repl in ("0", "1", "-1"):
+            if repl == v:
+                continue
+            steps += 1
+            cand = text[:m.start()] + repl + text[m.end():]
+            if _still_fails(cand, args):
+                text = cand
+                break
+    print("--- minimized reproducer "
+          f"({steps} candidate tests, --min-kind={args.min_kind}) ---")
+    print(text)
+    print("--- end ---")
+    with open(os.path.join(args.work, "minimized.mojo"), "w") as f:
+        f.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

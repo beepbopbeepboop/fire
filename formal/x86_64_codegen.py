@@ -5380,9 +5380,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_expr(operand)
             self._push_slot(Reg.RAX)
         n = len(operands)
-        # Operand i was pushed i-th, so it now sits one _SLOT above RSP per
-        # operand pushed after it.
-        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.RSP, _SLOT * (n - 1)))
+        # The accumulator starts at 1 — the identity of the AND below — and NOT
+        # at the first operand's value, which is what this used to do
+        # (`mov R10, [RSP + _SLOT*(n-1)]`, a copy of the operand rather than a
+        # constant). The consequence is a chain whose answer is
+        # `operands[0] & link0 & link1 & …`, so every chain whose FIRST operand
+        # is even answers 0 and every chain whose first operand is odd answers
+        # the truth. Measured on this backend with `n = -20, m = 5, w = 243`:
+        # `print(1 if n <= m <= w else 0)` printed 0, `print(1 if m <= w <= w
+        # else 0)` printed 1, and arm64 printed 1 for both — a silent
+        # miscompile, not a refusal, and one that a test with an all-positive
+        # first operand passes (the corpus is mostly odd small integers).
+        # Found by `tools/formal_fuzz.py`'s CPython-vs-image differential,
+        # which named it: the first program it generated whose first operand
+        # was even. Pinned by `chain_first_operand_bits` in
+        # `test_formal_x86_64_parity.py`.
+        #
+        # Operand i was pushed i-th, so it sits one _SLOT above RSP per operand
+        # pushed after it — which is what the loop below reads, and all it
+        # reads: nothing here may consult a slot for any other reason.
+        self._emit_mov_imm(Reg.R10, 1)
         for i, op in enumerate(ops):
             if op not in _CMP_CONDS:
                 raise CodegenError(

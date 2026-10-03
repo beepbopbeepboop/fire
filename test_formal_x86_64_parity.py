@@ -1059,6 +1059,77 @@ CASES = [
      "    c = 0\n"
      "    sys.stdout.write(\"v=%d\" % (bump() if c else 99))\n"
      "    return 0\n"),
+    # A CHAINED COMPARISON whose first operand is EVEN — the one row of this
+    # construct that a hand-written case gets wrong by accident, because the
+    # corpus of small positive integers this file is made of is mostly ODD.
+    #
+    # x86-64's `_emit_compare_chain` seeded its running AND with the first
+    # OPERAND'S VALUE instead of 1, so every chain answered
+    # `operands[0] & link0 & link1 & …`: `n <= m <= w` with n = -20 printed 0
+    # while arm64 printed 1, and `m <= w <= w` with m = 5 printed 1 — so a case
+    # written with a first operand of 5 or 243 passes on both machines and
+    # never sees the defect.  These rows are the parity ladder over the
+    # LOW BIT of the first operand: 20 (even), 5 (odd), 0 (even), -20 (even,
+    # and the sign is a second axis — a negative first operand is what the
+    # fuzzer's generated programs hit first).
+    #
+    # Both spellings are here because they are different paths in the backend:
+    # the chain in a CONDITION goes through the truthy-word lowering, and the
+    # chain ASSIGNED to a name goes through the value path, and a fix that
+    # only reached one of them would leave the other reading a stale slot.
+    ("chain_first_operand_bits",
+     "def main():\n"
+     "    var n = -20\n"
+     "    var m = 5\n"
+     "    var w = 243\n"
+     "    printf(\"%d %d %d %d\", 1 if n <= m <= w else 0,"
+     " 1 if m <= w <= w else 0, 1 if 0 <= m <= w else 0,"
+     " 1 if w >= m >= n else 0)\n"
+     "    var r = n <= m <= w\n"
+     "    printf(\" %d\", 1 if r else 0)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    n = -20\n"
+     "    m = 5\n"
+     "    w = 243\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (1 if n <= m <= w else 0,\n"
+     "                                       1 if m <= w <= w else 0,\n"
+     "                                       1 if 0 <= m <= w else 0,\n"
+     "                                       1 if w >= m >= n else 0))\n"
+     "    r = n <= m <= w\n"
+     "    sys.stdout.write(\" %d\" % (1 if r else 0))\n"
+     "    return 0\n"),
+    # The SAME defect one link further out: a THREE-link chain, where the seed
+    # is ANDed with three link results rather than two.  Every row here is a
+    # chain whose answer is TRUE, so a seed of 0 shows up as a wrong 0 rather
+    # than as a coincidence — `20 <= 5 <= 243 <= 9` would answer 0 either way
+    # and assert nothing.
+    ("chain_three_links_first_operand_bits",
+     "def main():\n"
+     "    var a = 4\n"
+     "    var b = 5\n"
+     "    var c = 243\n"
+     "    var d = 250\n"
+     "    var e = 6\n"
+     "    var f = 7\n"
+     "    var g = 7\n"
+     "    printf(\"%d %d %d\", 1 if a <= b <= c <= d else 0,"
+     " 1 if e <= f <= c <= d else 0, 1 if g <= f <= c <= d else 0)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    a = 4\n"
+     "    b = 5\n"
+     "    c = 243\n"
+     "    d = 250\n"
+     "    e = 6\n"
+     "    f = 7\n"
+     "    g = 7\n"
+     "    sys.stdout.write(\"%d %d %d\" % (1 if a <= b <= c <= d else 0,\n"
+     "                                   1 if e <= f <= c <= d else 0,\n"
+     "                                   1 if g <= f <= c <= d else 0))\n"
+     "    return 0\n"),
 ]
 
 
