@@ -23,7 +23,10 @@ Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image, and an entire class of Mach-O emission bug
 can be green there; every case here exits with a status this file checks.
 
-Groups: `strings`, `fs`, `env`, `dirs`. With no argument, all of them.
+Groups: `strings`, `posixpath`, `fs`, `env`, `dirs`. With no argument, all of
+them. `posixpath` is the `strings` corpus and the same oracle under CPython's
+other name for the same module, which is what a re-export needs to be measured
+rather than assumed.
 """
 import argparse
 import os
@@ -181,16 +184,22 @@ def render(values, kind):
     return f"[{values}]" if kind == "s" else str(values)
 
 
-def build_strings_program():
+def build_strings_program(module="os.path"):
     """The whole `strings` group as one program, plus the expected output.
 
     One program rather than one per case: the module is compiled once, so a
     hundred cases cost one build, and a failure in the module is reported once
     with its message instead of a hundred times as a timeout.
+
+    `module` is the SPELLING the program imports from, and the only thing it
+    changes: the corpus, the emitted calls and every expected answer are the
+    same, and the oracle is this process's own `posixpath` either way. That is
+    what makes the `posixpath` group a measurement of the RE-EXPORT rather than a
+    second copy of the corpus — see `group_posixpath`.
     """
     imports = sorted({c[1].split("(")[0] for c in ONE_ARG_CASES}
                      | {c[0] for c in TWO_ARG_CASES})
-    lines = ["from os.path import " + ", ".join(imports), "",
+    lines = [f"from {module} import " + ", ".join(imports), "",
              "def main(n):"]
     expected = []
     for label, tmpl, py, kind in ONE_ARG_CASES:
@@ -409,6 +418,52 @@ def group_strings(tmpdir, verbose):
 
 def render_strings_program():
     return build_strings_program()
+
+
+def group_posixpath(tmpdir, verbose):
+    """`posixpath` — the SAME corpus, the SAME oracle, the other SPELLING.
+
+    `formal/hostmods/posixpath.mojo` re-exports `os/path/__init__.mojo` under
+    CPython's own name for it, so what this group asserts is that the
+    RE-EXPORT is honest: every name it publishes reaches the same code, over the
+    whole corpus and against the same CPython answers. A re-export is the one
+    kind of module where "it built" says almost nothing — a name bound to the
+    wrong function, or to nothing at all, still builds — so the differential is
+    the whole of the test and there is deliberately no second corpus to keep in
+    step: a divergence here is a wiring defect, and the corpus is already the one
+    `os.path` is measured with.
+    """
+    src = os.path.join(tmpdir, "posixpath_strings.mojo")
+    program, expected = build_strings_program("posixpath")
+    with open(src, "w") as f:
+        f.write(program)
+    out = os.path.join(tmpdir, "posixpath_strings")
+    rc, text = build(src, out)
+    if rc != 0:
+        return False, f"build failed: {text.strip()[-400:]}"
+    rc, stdout, stderr = run(out)
+    if rc != 0:
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
+    got = parse(stdout)
+    want = {}
+    for line in expected:
+        label, ai, part, value = line.split("|", 3)
+        want[(label, int(ai), int(part))] = value
+    bad = []
+    for key in sorted(want, key=lambda k: (k[0], k[1], k[2])):
+        if key not in got:
+            bad.append(f"{key}: CPython says {want[key]!r}, `posixpath` printed "
+                       f"NOTHING")
+        elif got[key] != want[key]:
+            bad.append(f"{key}: CPython says {want[key]!r}, `posixpath` says "
+                       f"{got[key]!r}")
+    if bad:
+        return False, ("%d of %d answers differ from CPython's:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad[:20])))
+    if verbose:
+        print(f"      {len(want)} answers identical to CPython, through the "
+              f"`posixpath` spelling")
+    return True, ""
 
 
 def make_fixture(tmpdir):
@@ -829,6 +884,7 @@ def group_blob(tmpdir, verbose):
 
 GROUPS = {
     "strings": group_strings,
+    "posixpath": group_posixpath,
     "fs": group_fs,
     "env": group_env,
     "dirs": group_dirs,

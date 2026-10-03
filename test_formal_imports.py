@@ -1035,12 +1035,20 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
         enumerate itself, and `sysconfig` because `fire.py` imports it and
         never uses it, so what it wants is where an interpreter that is not here
         would be installed.
-      * `html`, `datetime`, `resource` and `posixpath` are MODELLED, because
-        none of the four needs an object this target does not have: `html` is
-        five character replacements, `datetime` is a clock this tree already
-        reads plus calendar arithmetic, `resource` is `getrusage(2)` in
-        libSystem with a fixed struct, and `posixpath` IS
-        `formal/hostmods/os/path/__init__.mojo` under another spelling.
+      * `html`, `datetime` and `resource` are MODELLED, because none of the
+        three needs an object this target does not have: `html` is five
+        character replacements, `datetime` is a clock this tree already reads
+        plus calendar arithmetic, and `resource` is `getrusage(2)` in libSystem
+        with a fixed struct. **`posixpath` WAS the fourth and is not a tier at
+        all any more**: it was here for a measured reason -- the model is
+        `formal/hostmods/os/path/__init__.mojo` and only the SPELLING was
+        missing -- and `formal/hostmods/posixpath.mojo` re-exported every public
+        name on 2026-10-03, so it left by being WRITTEN, which is the same rule
+        `shutil` and `tempfile` followed. `test_formal_os.py` runs its whole path
+        corpus through both spellings against CPython's own `posixpath`, so the
+        re-export is measured; the refusal this table used to pin for it is now
+        pinned by `test_formal_link_accounting.py`'s `HOST_SET_ADDED_THEN_
+        WRITTEN`, and the resolver reaches a real file instead.
 
     So: the premise (each is a real CPython stdlib module, read from
     `sys.stdlib_module_names` and not trusted), the membership (each is in a
@@ -1058,8 +1066,6 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
         "html": ("modelled", "five character replacements over a string"),
         "datetime": ("modelled", "a clock this tree reads, plus arithmetic"),
         "resource": ("modelled", "`getrusage(2)` is libSystem"),
-        "posixpath": ("modelled",
-                      "`os/path/__init__.mojo` IS CPython's posixpath"),
     }
     for name, (tier, why) in sorted(placed.items()):
         check(name in _sys.stdlib_module_names,
@@ -1077,6 +1083,11 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
     root = os.path.join(tmpdir, "untiered")
     os.makedirs(root, exist_ok=True)
     for name in sorted(placed):
+        # `posixpath` is not in `placed` any more, and this loop asserts that
+        # every name IN it is still refused as a host module — so a name that has
+        # been written cannot be added here without failing, which is the point.
+        # Its own assertion is that `import posixpath` BUILDS (see
+        # `test_posixpath_is_provided_by_a_re_export`).
         # A DIRECTORY PER NAME, and the reason is worth recording because the
         # first version of this test put `builtins.mojo` NEXT TO the program
         # that imports `builtins` and watched it build: the resolver's third

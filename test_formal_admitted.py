@@ -85,6 +85,13 @@ ADMITTED_COUNTS = {
     "os._syscalls": 0,
     "os.path": 0,
     "pathlib": 0,
+    # A RE-EXPORT, and its zero is the claim: `formal/hostmods/posixpath.mojo`
+    # publishes `os/path/__init__.mojo`'s names and admits nothing of its own,
+    # because everything it publishes is computed. It is here because a module
+    # with a model that is not in this table is a claim of trust nobody counted,
+    # and this file's rule is that "not in the table" and "in the table with a
+    # zero" must be distinguishable -- only the second is allowed to be wrong.
+    "posixpath": 0,
     "platform": 0,
     "re": 0,
     "shutil": 0,

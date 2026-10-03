@@ -483,21 +483,18 @@ HOST_MODELLED = frozenset((
     #     than a new capability. Both files that want it
     #     (`tools/mem_slope.py`, `test_selfhost_memory.py`) spell exactly
     #     `resource.getrusage(resource.RUSAGE_CHILDREN)`.
-    #   `posixpath`  — **THE MODEL IS ALREADY WRITTEN AND THIS ENTRY IS A
-    #     SPELLING, not a capability.** `formal/hostmods/os/path/__init__.mojo`
-    #     IS CPython's `posixpath` (its own header says so) and answers
-    #     `abspath`, `basename`, `commonprefix`, `dirname`, `isabs`, `join`,
-    #     `normpath`, `realpath` and the rest, compared against CPython's own by
-    #     `test_formal_os.py`. What a file that writes `import posixpath` gets
-    #     instead is a module-RESOLUTION failure, because the resolver looks
-    #     for a source NAMED `posixpath`. One file wants it that way
-    #     (`test_formal_os.py`, measured — eight distinct `posixpath.` names), and
-    #     the fix is a `formal/hostmods/posixpath.mojo` that re-exports
-    #     `os.path`, which is what `os/__init__.mojo` already does for its own
-    #     five names. It is not written: `test_formal_os.py` spells `os.path`
-    #     everywhere else, so the one file is not evidence that CPython's
-    #     spelling is wanted.
-    "shlex", "html", "datetime", "resource", "posixpath",
+    # `posixpath` WAS HERE and left on 2026-10-03, and its entry was the reason
+    # the removal is a spelling rather than a capability: the model was already
+    # written (`formal/hostmods/os/path/__init__.mojo` IS CPython's `posixpath`,
+    # its own header says so, and `test_formal_os.py` compares every answer
+    # against CPython's own), and what a file writing `import posixpath` got
+    # instead was a module-RESOLUTION failure, because the resolver looks for a
+    # source NAMED `posixpath`. `formal/hostmods/posixpath.mojo` is that source:
+    # every public name re-exported, which is what `os/__init__.mojo` already
+    # does for its own five. `test_formal_os.py` runs its whole path corpus
+    # through BOTH spellings and compares both against CPython, so the
+    # re-export is measured rather than asserted.
+    "shlex", "html", "datetime", "resource",
     #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
     #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
     #     over a source larger than its own copy buffer, `copy`/`copy2`'s

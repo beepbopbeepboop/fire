@@ -266,7 +266,8 @@ def written_modules():
     for.
     """
     found = set()
-    pool = set(PRE_SPLIT_HOST_MODULES) | set(getattr(I, "HOST_ADMITTED", ()))
+    pool = (set(PRE_SPLIT_HOST_MODULES) | set(getattr(I, "HOST_ADMITTED", ()))
+            | set(HOST_SET_ADDED_THEN_WRITTEN))
     for name in sorted(pool):
         if I.is_frontend_provided(name):
             found.add(name)
@@ -382,11 +383,37 @@ ADMITTED_HOST_MODULE_TESTS = {
 # document asked for.  `fcntl` was the first name to answer the other way (a real
 # `formal/hostmods/fcntl.mojo`, so it LEFT the set instead);
 # `builtins` and `sysconfig` are the first two instances of the `unreachable`
-# answer, `shlex` / `html` / `datetime` / `resource` / `posixpath` the first of
-# the `modelled` one.  What a table cannot derive, and therefore still carries, is
+# answer, `shlex` / `html` / `datetime` / `resource` the first of the `modelled`
+# one.  What a table cannot derive, and therefore still carries, is
 # the FACT each permanent claim rests on -- an entry here is a sentence about the
 # target, so it is written down; the tier assignment is asserted exactly, in both
 # directions, so an addition that nobody justified fails and a stale row fails.
+# Names added to a TIER after the split and since WRITTEN — the third shape, and
+# `posixpath` is the first.  The 2026-10-03 classification put it in
+# `HOST_MODELLED` with the reason written out (`os/path/__init__.mojo` IS
+# CPython's `posixpath`, so only the SPELLING was missing), and
+# `formal/hostmods/posixpath.mojo` re-exported every public name a day later.
+# It is now in neither `PRE_SPLIT_HOST_MODULES` nor any tier, so the account in
+# `test_host_tiers` cannot see it MOVE — and a name that cannot be seen to move is
+# a name whose tier entry can rot, which is how `tempfile` sat in
+# `HOST_UNREACHABLE` with a `mkdir` and an `mkdtemp` behind it for a day.
+#
+# Separate from `IMPLEMENTED_HOST_MODULE_TESTS` because that table is the names
+# that left the PRE-SPLIT list, and this one never was in it; the difference is
+# the same one `PROVIDED_NEVER_A_HOST_MODULE` exists for.
+#
+# ONE ROW, and the honest reason it is not derived is that there is nothing to
+# derive it from: the tier a name was added to is gone, and the pre-split list
+# never had it.  It grows only when the shape recurs, and each row says which
+# test keeps the module honest.
+HOST_SET_ADDED_THEN_WRITTEN = {
+    # `formal/hostmods/posixpath.mojo` re-exports `os/path/__init__.mojo` under
+    # CPython's own name for it, so a program that spells `import posixpath`
+    # reaches the model instead of a host-module refusal.
+    "posixpath": "test_formal_os.py",
+}
+
+
 HOST_SET_ADDED_TIERS = {
     # `set(dir(builtins))` asks the interpreter to enumerate ITSELF.  A formal
     # image is a Mach-O binary with an embedded CPython to compile it and none to
@@ -408,10 +435,6 @@ HOST_SET_ADDED_TIERS = {
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",
-    # THE MODEL IS ALREADY WRITTEN: `formal/hostmods/os/path/__init__.mojo` is
-    # CPython's `posixpath`.  What was missing was the SPELLING, and that is a
-    # re-export rather than a module.
-    "posixpath": "modelled",
 }
 
 
@@ -497,16 +520,23 @@ def test_host_tiers():
         # requiring that of one would be requiring a module that was never in
         # `orig` — `subprocess` and its four siblings — to have been there
         # before, which is the opposite of what admitting it did.
+        # Every name that has EVER been a host module: the pre-split list, plus
+        # the ones the 2026-10-03 classification added and then a module
+        # answered.  Without the second set the account below cannot see
+        # `posixpath` leave, and a name that cannot be seen to move is a name
+        # whose tier entry can rot.
+        ever = orig | set(HOST_SET_ADDED_THEN_WRITTEN)
         left = written_modules() - set(ADMITTED_HOST_MODULE_TESTS)
-        check(left <= (orig - union),
+        check(left <= (ever - union),
               'every name that left the host set is one with real source '
               'behind it',
-              f'left without source {sorted((orig - union) - left)}')
-        check(set(orig) - union == left,
+              f'left without source {sorted((ever - union) - left)}')
+        check(ever - union == left,
               'the account of what left the host set is exact',
-              f'unaccounted {sorted((orig - union) ^ left)}')
+              f'unaccounted {sorted((ever - union) ^ left)}')
         all_written = {**IMPLEMENTED_HOST_MODULE_TESTS,
-                       **ADMITTED_HOST_MODULE_TESTS}
+                       **ADMITTED_HOST_MODULE_TESTS,
+                       **HOST_SET_ADDED_THEN_WRITTEN}
         check(set(all_written) == written_modules(),
               'every written module names the test that keeps it honest, and '
               'no other name claims one',
@@ -519,6 +549,15 @@ def test_host_tiers():
             check(os.path.isfile(os.path.join(HERE, test_file)),
                   f'{name} is provided on the strength of {test_file}, and '
                   f'that test exists')
+        for name, test_file in sorted(HOST_SET_ADDED_THEN_WRITTEN.items()):
+            check(os.path.isfile(os.path.join(HERE, test_file)),
+                  f'{name} was added to a tier and then written; the claim is '
+                  f'that {test_file} keeps the module honest, and that test '
+                  f'exists')
+            check(not I._is_host_module(name) and I.host_module_tier(name) == '',
+                  f'{name} left every tier by being written, so it is not a '
+                  f'host module: a name this tree answers for does not belong '
+                  f'in a set that says "nothing here can compile it"')
         # The admitted half is checked against the TREE and not only against the
         # table above: a name in `HOST_ADMITTED` with no `formal/hostmods` source
         # would be a claim the table cannot keep true by itself, and a hostmod
