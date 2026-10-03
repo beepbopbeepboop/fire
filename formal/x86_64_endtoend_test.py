@@ -628,9 +628,15 @@ _SUCCS = {
     "leave":
         "{ $s with rbp := mem_read_bytes $s.mem $s.rbp.toNat 8, "
         "rsp := $s.rbp + 8, rip := $next }",
+    # `$rip` and not the model's read inline, because the PATH-TREE emitter has
+    # to override it: a `ret` that returns into a caller needs the popped value
+    # to be the literal the `call` pushed, and it supplies that as its own named
+    # fact (`hpop{k}`) and rewrites the step with it. The default is still the
+    # model's own expression -- `emit`, the straight-line emitter, never takes
+    # the override and so still quotes the model -- and B12's rule is the reason
+    # the override is a LITERAL rather than arithmetic on `$m`.
     "ret":
-        "{ $s with rip := (mem_read_bytes $s.mem ($s.rsp.toNat) 8).toNat, "
-        "rsp := $s.rsp + 8 }",
+        "{ $s with rip := $rip, rsp := $s.rsp + 8 }",
 }
 
 
@@ -667,13 +673,47 @@ def _byte_facts(insns, code, base):
     return " ∧\n    ".join(facts)
 
 
+#: **Every hypothesis about the CODE is computed, not looked up.**  The bytes
+#: (`b0`..`b3`), the immediates and the displacements are all closed equalities
+#: over `rc`, which is a `def` of an `if` and a list literal and therefore
+#: computable at a literal address — so `native_decide` settles each one outright,
+#: and the `simp [read_i32_le, read_i8, hb]` that used to stand here is kept only
+#: as the fallback.
+#:
+#: It is not tidiness; it is the difference between a proof and a heartbeat
+#: timeout.  `hb` is `all_bytes`, one conjunct per byte of the function, so
+#: handing it to `simp` adds one rewrite rule per byte — and each rule makes the
+#: simplifier evaluate `rc` at its own literal, so the cost of ONE byte fact
+#: grows with the size of the whole function, and there are five byte facts per
+#: instruction.  The 45-example corpus is small enough that this never showed:
+#: measured on a 24-argument call (164 steps, 220 KB of generated Lean, 579
+#: byte-fact side conditions) the old form exhausted `maxHeartbeats 4000000` at
+#: `whnf` on step 19's `h_b1` and on step 105's `h_disp`, and the FILE DIED both
+#: times — a heartbeat timeout is not a tactic failure, so the `try` guard that
+#: admits everything else cannot catch it and admit its way out.  With this, the
+#: same file elaborates and reports its remaining gaps as sorries, which is the
+#: only shape in which a gap is a number.
+#:
+#: The fallback is what keeps this strictly a performance change: a fact
+#: `native_decide` cannot settle (a non-literal address, or a hypothesis about an
+#: address outside the image) still goes through the simplifier and is still
+#: admitted by the guard if neither goes through.
+_BYTES = "first | native_decide | simp [read_i32_le, read_i8, hb]"
+
+
 def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
-             length=1):
+             length=1, rip=None):
     """`(call, succ)` for one instruction: the step lemma applied at `addr`, and
     the successor expression its conclusion has.
 
     Both the straight-line and the path-tree emitters go through here, so a form
     cannot be wired up in one and forgotten in the other.
+
+    `rip` overrides a successor's program counter with a LITERAL, which is only
+    ever right where the tree knows the address the machine goes to next and the
+    model says it reads it out of memory — a `ret` that returns into a caller.
+    The caller then proves the value separately and rewrites the step with it, so
+    the step is still the model's; see `emit_terminates`.
     """
     lemma, takes_imm, conds = _FORMS[form]
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
@@ -714,18 +754,8 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
                 # exist yet -- "Unknown identifier hs20".
                 sc.append(sc_("simp [" + ", ".join(
                     [hs_in or ("hs%d" % k)] + list(cases)) + "]"))
-        elif c in ("b0", "b1", "b2", "b3"):
-            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
-        elif c == "imm":
-            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
-        elif c == "disp":
-            sc.append(sc_("simp [read_i8, hb]"))
-        elif c == "disp32":
-            # `read_i32_le`, and signed: a frame store is at a negative offset
-            # and `read_i8` here would read one byte of a four-byte field.
-            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
-        elif c == "off":
-            sc.append(sc_("simp [read_i32_le, read_i8, hb]"))
+        elif c in ("b0", "b1", "b2", "b3", "imm", "disp", "disp32", "off"):
+            sc.append(sc_(_BYTES))
         elif c in ("dst", "dst_lt", "rm_ne", "rm_ne4", "rm_ne5"):
             # Closed arithmetic on the encoding: the destination register is
             # read out of the ModRM/REX bytes and the addressing-mode exclusions
@@ -999,6 +1029,12 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     # step.  Two spellings of `$imm` in one table is the same hazard as B3's
     # positional substitution: one placeholder, one source.
     subs.setdefault("$imm", str(imm) if imm is not None else "0")
+    # `x86_ret_post`'s own expression for where a `ret` goes. The DEFAULT, so
+    # the straight-line emitter still quotes the model; the path-tree emitter
+    # passes `rip=` when it knows the address as a literal, and then it has
+    # proved the value itself (see the `hpop` in `emit_terminates`).
+    subs["$rip"] = ("(mem_read_bytes $s.mem ($s.rsp.toNat) 8).toNat" if rip is None
+                    else str(rip))
     if len(raw) > 2:
         modrm = raw[2]
         subs.setdefault("$rex", str(raw[0]))
@@ -1279,25 +1315,43 @@ def _tree(code, info, shapes):
             # program in `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
             # was filed with, and it is not what is wrong.
             #
-            # So the case is DECLINED, with its own reason, rather than walked.
-            # Walking it is the fix and it is not free: the step after a `ret`
-            # has to prove `s_k.rip = <literal>` from `(mem_read_bytes s_{k-1}.mem
-            # s_{k-1}.rsp.toNat 8).toNat`, which is a memory-separation fact over
-            # the whole chain, and measured on `wide_recv` (112 steps, four
-            # calls) that one `simp [hs97]` exhausts the 4 000 000 heartbeat
-            # budget in 110 s -- and a heartbeat timeout is NOT catchable by the
-            # `try` guard the side conditions use, so the file dies instead of
-            # admitting. The next step is in that bug doc; what is right today is
-            # to say the theorem cannot be stated yet rather than to emit a false
-            # one. See B21 on why the fourth outcome needs its own line.
+            # So the return is FOLLOWED, which is the fix, and it is not free.
+            # The step after a `ret` has to know `s_k.rip`, and the model says
+            # that is `(mem_read_bytes s_{k-1}.mem s_{k-1}.rsp.toNat 8).toNat`:
+            # a value read out of the frame, so the emitter states it as its own
+            # named fact `hret{k}` and rewrites the successor's `rip` with it
+            # (`rw [hret{k}]`), after which the rest of the chain is ordinary
+            # again.  See `emit_terminates` for how `hret{k}` is proved and what
+            # it costs where it does not go through, and for the bug doc's
+            # remaining boundary.
+            #
+            # The address is the top of `rets`, which the `call` pushed as
+            # `UInt64.ofNat (m + 5)` -- read off the ENCODING at the `call`, so
+            # the two agree about where the machine goes next.
+            #
+            # `seen` is passed on UNCHANGED rather than reset: the callee's own
+            # addresses have been accumulating since the `call` branched off, so
+            # a continuation that walks back into one is a genuine revisit. The
+            # `call` resets it in the other direction -- the callee starts fresh
+            # -- because a second call to the same body is two calls, not a
+            # cycle, and the caller's `seen` cannot cross a frame boundary.
             if rets:
-                # Kept under the 60 characters the reporter prints, and it is a
-                # MESSAGE rather than a prefix the caller parses -- the kind is
-                # the machine-readable half, and `detail[:60]` here is only
-                # there so this sentence is not itself cut in half.
-                raise _NoTree(
-                    "call",
-                    "the run continues into the caller after the callee's ret")
+                node = _Node(insn, form, raw, addr, "ret", state, rets[-1])
+                kid = build(rets[-1], None, depth + 1, seen, rets[:-1])
+                if kid is None:
+                    # Its own reason, and not `None`: a continuation that does
+                    # not walk is a different thing from a body that loops, and
+                    # B21 is the whole argument for saying which. It is also
+                    # unreachable for the corpus — a return address is `m + 5`
+                    # for a `call` in the same function, so it is inside the body
+                    # by construction — which is what makes this a bound rather
+                    # than a gap.
+                    raise _NoTree(
+                        "call",
+                        "the callee's ret returns into the caller and the "
+                        "continuation does not walk")
+                node.kids = [kid]
+                return node
             return _Node(insn, form, raw, addr, "ret", state, None)
         node = _Node(insn, form, raw, addr, "seq", state, addr + insn.length)
         node.kids = [build(addr + insn.length, None, depth + 1, seen, rets)]
@@ -1541,6 +1595,11 @@ def emit_terminates(path):
     out.append("  let i0 : X86State := X86State.init n %d" % entry)
 
     counter = [0]
+    # Whether this path has returned out of a callee and back into its caller.
+    # Read at the closing `hrip`, where it decides whether the exit-slot read is
+    # attempted in full or admitted — see there for why crossing a frame is what
+    # makes the difference.
+    crossed = [False]
 
     def walk(node, state, ind, cases, rules, hs_in=None, hs_path=()):
         """Emit one node and, for a branch, both of its children.
@@ -1551,8 +1610,17 @@ def emit_terminates(path):
         """
         k = counter[0]
         counter[0] = k + 1
+        # A `ret` with a successor is returning into a CALLER; one without is
+        # the outermost `ret`, which pops the zero `X86State.init` leaves on the
+        # stack and so ends the run at the exit sentinel. `_tree` tells them
+        # apart by exactly this, and the difference is the whole of
+        # bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md:
+        # treating the first as the second is what emitted `s_N.rip = 0` where
+        # the machine pops the address the `call` pushed.
+        ret_to = node.succ if node.kind == "ret" else None
         call, succ = _resolve(node.form, node.raw, node.addr, state, k,
-                              cases, hs_in, node.insn.length)
+                              cases, hs_in, node.insn.length,
+                              rip=ret_to)
         nxt = "s%d" % (k + 1)
         pad = "  " * ind
         case_simp = (", " + ", ".join(cases)) if cases else ""
@@ -1560,8 +1628,63 @@ def emit_terminates(path):
         def emit(line):
             out.append(pad + line if line else "")
 
-        emit("have hstep%d : x86_step %s rc = some %s :=" % (k, state, succ))
-        emit("  " + call)
+        if ret_to is not None:
+            # The chain has crossed a FRAME boundary, which is what the closing
+            # read below has to know: see the `hrip` block.
+            crossed[0] = True
+            # **The popped return address, as its own named fact.** The step
+            # below is still the model's `x86_step_ret`; this supplies the one
+            # field the tree knows and the model reads out of memory, and `rw`
+            # puts it in, after which every later step sees an ordinary literal
+            # `rip` and the chain carries on into the caller.
+            #
+            # The proof is the doc's option 2 and it is deliberately the CHEAP
+            # one: `simp only [hs{k}]` peels the single successor equation that
+            # writes memory and leaves `(mem_read_bytes …) = <literal>`
+            # unsolved, which the guard admits. The expensive alternative --
+            # `simp` over every equation on the path, which is what the closing
+            # `hrip` does -- exhausts the 4 000 000 heartbeat budget in 110 s on
+            # `wide_recv`, and a heartbeat timeout is NOT catchable by `try`, so
+            # it would take the whole file down rather than admitting one fact.
+            # What this buys is a theorem stated over a chain that runs to the
+            # exit instead of one that stops at a return it must not stop at.
+            #
+            # What it costs needs saying precisely, because the REPORT does not
+            # say it: Lean reports "declaration 'terminates' uses 'sorry'" once
+            # per declaration and `formal/lean.py::_census_from_output`
+            # de-duplicates by name, so a chain with four admitted `hpop`s reads
+            # as `proved, 1 sorry` exactly like one with a single gap in it.
+            # The number is a bound and not a count of holes (which is what
+            # bugs/FORMAL_x86_64_end_to_end_proof.md concluded about it
+            # independently), and these holes are countable by NAME in the
+            # generated file: `hpop{k}`, one per returned-to. Closing them is the
+            # per-step separation invariant the bug doc names as the remaining
+            # work.
+            emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
+                 " = %d := by" % (k, state, state, ret_to))
+            emit("  simp only [hs%d]" % k)
+            emit("  all_goals sorry")
+        emit("have hstep%d : x86_step %s rc = some %s := by"
+             % (k, state, succ) if ret_to is not None
+             else "have hstep%d : x86_step %s rc = some %s :="
+             % (k, state, succ))
+        if ret_to is not None:
+            # An explicit `by`, and the rewrite in the direction that makes the
+            # lemma apply. Two things, both found by running it:
+            #
+            #  * `have h : T :=` followed by two indented lines parses the
+            #    second as a TERM, so `rw [hpop157]` reads as an unknown
+            #    identifier applied to the lemma — `error: Unknown identifier
+            #    'rw'`, which says nothing about the return. Hence `by`.
+            #  * the rewrite goes `←`. The successor already carries the literal
+            #    (that is what `rip=ret_to` put there), so `rw [hpop{k}]` finds
+            #    no occurrence of the read to replace; what has to happen is the
+            #    literal going BACK to the model's `(mem_read_bytes …).toNat` so
+            #    that `x86_step_ret`'s own conclusion matches. So the step is
+            #    still proved by the model, and the tree's knowledge enters as the
+            #    one rewrite that says the two are the same word.
+            emit("  rw [← hpop%d]" % k)
+        emit("  " + ("exact " if ret_to is not None else "") + call)
         emit("obtain \u27e8%s, h%d\u27e9 : \u2203 t, x86_step %s rc = some t :="
              % (nxt, k, state))
         emit("  \u27e8_, hstep%d\u27e9" % k)
@@ -1600,7 +1723,13 @@ def emit_terminates(path):
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),))
             return
 
-        if node.kind == "ret":
+        if node.kind == "ret" and node.succ is None:
+            # The OUTERMOST return, and the only place the exit sentinel is
+            # read: `X86State.init` leaves the stack zeroed, so this `ret` pops
+            # address 0 and `x86_exec_go_exit` stops there. A `ret` with a
+            # successor does not come here — it has already emitted its `hpop`
+            # above and recurses into the caller below.
+            #
             # The successor equations IN SCOPE ON THIS PATH, collected as the
             # walk went -- not `hs1..hs{k}`.  The counter is global across both
             # arms of every fork, so a range over it names hypotheses the other
@@ -1613,6 +1742,37 @@ def emit_terminates(path):
             # "made no progress" on a set that looks complete.
             hs = ", ".join(hs_path + ("hs%d" % (k + 1),))
             emit("have hrip : %s.rip = 0 := by" % nxt)
+            if crossed[0]:
+                # **A chain that came back through a `ret` cannot afford the
+                # closing `simp`, and the admission is the honest answer.**
+                #
+                # The block below proves `s.rip = 0` by unfolding EVERY successor
+                # equation on the path at once, with `x86_set_reg` and
+                # `x86_get_reg` in the set so that the register-derived write
+                # addresses reduce. Measured on the 45-example corpus that is
+                # 93 s for `wide_recv`'s 40-step chain — and the chain that
+                # follows the return is 112 steps, because the caller's
+                # continuation is now part of it and the register file has to be
+                # reconstructed across the frame boundary. At 112 it does not
+                # finish: 1190 s of wall and then `(deterministic) timeout at
+                # `whnf``, which is B21's lesson arriving from the other side —
+                # an unaffordable attempt reported as a FAILURE is worse than an
+                # admitted gap, because the failure is 20 minutes that say
+                # nothing and the gap is one number.
+                #
+                # So the crossing is what selects the treatment, and it is a
+                # fact about the PATH rather than a guess about its size: a
+                # chain that never left its own frame has one frame's worth of
+                # register file to reduce, and one that has is the case the
+                # attempt is not for. What is admitted here is exactly the
+                # separation fact, and the report counts it like any other.
+                emit("  simp only [hs%d]" % (k + 1))
+                emit("  all_goals sorry")
+                full = rules + [step_rule,
+                                "x86_exec_go_exit_at (by decide) hrip"]
+                emit("rw [%s]" % ",\n    ".join(full))
+                emit("simp")
+                return
             # The separation step is the genuinely hard part -- its side
             # condition is an inequality over a `mem_write_bytes` chain, closed
             # for a function that spills at literal stack offsets and not

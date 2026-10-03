@@ -6,6 +6,8 @@ All ARM64 instructions are 4 bytes (32 bits), little-endian encoded.
 
 import struct
 
+from formal.model import CodegenError
+
 # ARM64 register numbers
 # X0-X30: general purpose 64-bit registers
 # XZR/WZR: zero register (31)
@@ -668,7 +670,28 @@ class Assembler:
         self._org = addr
 
     def label(self, name: str):
-        """Record a label at the current position."""
+        """Record a label at the current position — once.
+
+        A SECOND binding of the same name is an error rather than a rebinding.
+        Every branch is patched out of this table, so a later definition
+        silently retargets every earlier reference to it, and what that builds
+        is a branch into the middle of a different instruction sequence: the
+        image is well formed, the run exits 0, and the answer is a different
+        number. Both backends share this because both have shipped it —
+        `x86_64.Assembler.label` carries the same check and the longer account,
+        and the x86-64 slice-clamp collision it describes
+        (fixed 2026-10-03 in 68671a62) is the same defect
+        a label name without a per-site counter produces.
+        """
+        if name in self.labels:
+            raise CodegenError(
+                f"internal: label {name!r} is defined twice, at 0x"
+                f"{self.labels[name]:x} and at 0x"
+                f"{self._org + len(self.sections['text']):x}. Branch targets "
+                "are patched from this table, so every earlier branch to it now "
+                "lands in the middle of this second block. A label name must "
+                "carry a per-site counter (see every label in "
+                "formal/arm64_codegen.py).")
         self.labels[name] = self._org + len(self.sections["text"])
 
     def emit(self, data: bytes):

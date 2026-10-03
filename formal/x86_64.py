@@ -19,6 +19,8 @@ Naming convention mirrors formal/arm64.py: `encode_<mnemonic>_<operands>`,
 import struct
 from enum import Enum
 
+from formal.model import CodegenError
+
 
 class Reg(Enum):
     RAX = 0
@@ -833,6 +835,37 @@ class Assembler:
         self._org = addr
 
     def label(self, name: str):
+        """Bind `name` to the current address — once.
+
+        A SECOND binding of the same name is an error rather than a rebinding.
+        Every branch to a label is patched in `resolve` out of this table, so a
+        later definition silently retargets every earlier reference to it, and
+        what that builds is a branch into the middle of a different instruction
+        sequence. Nothing downstream can see it: the image is well formed, the
+        run exits 0, and the answer is simply a different number.
+
+        That is not hypothetical. Two label names in `x86_64_codegen.py` were
+        built without the per-site counter every other one carries — the three
+        bound-clamp labels of `_emit_slice_parts`, named after the register
+        alone — so a second slice in one function rebound the first slice's
+        `jge` and `xs[1:3]` followed by `xs[2:6]` answered 14 for a sum of 23,
+        or died
+        (fixed 2026-10-03 in 68671a62). The
+        `_emit_range_list` labels collided the same way before that
+        (`bugs/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
+        a name is required to be unique per emission site, and this is where
+        that is enforced rather than remembered; `arm64.Assembler.label` carries
+        the same check for the same reason.
+        """
+        if name in self.labels:
+            raise CodegenError(
+                f"internal: label {name!r} is defined twice, at 0x"
+                f"{self.labels[name]:x} and at 0x"
+                f"{self._org + len(self.sections['text']):x}. Branch targets "
+                "are patched from this table, so every earlier branch to it now "
+                "lands in the middle of this second block. A label name must "
+                "carry a per-site counter (see every label in "
+                "formal/x86_64_codegen.py, e.g. assert{aid} / sl{sid}).")
         self.labels[name] = self._org + len(self.sections["text"])
 
     def emit(self, data: bytes):

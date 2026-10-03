@@ -121,7 +121,114 @@ The `sorry` count did not fall because a proof got stronger. `wide_recv` moved
 from the proved column to the no-tree column, where it belongs. Both numbers are
 worth reading together for that reason.
 
-## The one real boundary, stated exactly
+## Status (2026-10-03 — the return is FOLLOWED; the separation fact is still admitted)
+
+Option 2 of the list below is landed, and with it both programs in this doc emit a
+theorem for the first time.
+
+| | 2026-10-02 | 2026-10-03 |
+|---|---|---|
+| `.tmp/w24np.mojo` (24 arguments, 164 steps) | `no tree: returns into a caller` | **`terminates: proved, 1 sorry`** (127 s, 5.0 GB) |
+| `formal/examples/wide_recv.mojo` | `no tree: returns into a caller` | **`terminates: proved, 1 sorry`** (34 s, 2.3 GB) |
+| `no finite tree` — the "returns into a caller" column | 1 | **0** (that outcome is no longer reachable for either) |
+| `failing` | 0 | **0** |
+
+What landed, in `formal/x86_64_endtoend_test.py`:
+
+* `_tree` gives a `ret` with a frame to return to the successor the matching
+  `call` pushed (`rets[-1]`, read off the call's encoding as `m + 5`) and walks
+  the caller's continuation with the frame popped. `seen` crosses the return
+  UNCHANGED — the callee's addresses have been accumulating since the `call`
+  branched off — while the `call` still resets it, so calling one body twice is
+  still two calls rather than a cycle. `_NoTree("call")` survives for the one
+  decline that is left and now says something true: the continuation after a
+  return does not walk.
+* The step after a `ret` needs `s_k.rip` and the model says it is read out of
+  the frame, so the emitter states it as `hpop{k}` and rewrites the step with
+  `rw [← hpop{k}]` — backwards, because the successor already carries the
+  literal and the literal has to become `(mem_read_bytes …).toNat` again for
+  `x86_step_ret`'s conclusion to match. **The step is still proved by the model.**
+* `hpop{k}` is admitted: `simp only [hs{k}]` and the guard takes the rest.
+* A chain that crossed a frame is also admitted at its closing `hrip`, because
+  the alternative is not affordable (below).
+
+**The report does not show what this costs, and that is worth stating.** Lean
+reports "declaration uses `sorry`" once per DECLARATION and
+`formal/lean.py::_census_from_output` de-duplicates by name, so four admitted
+`hpop`s read as `proved, 1 sorry` exactly like one gap. The option-2 note below
+("one `sorry` per post-`ret` step, so `wide_recv` reads worse") is right about
+the holes and wrong about the number. They are countable by NAME in the
+generated file.
+
+## The second thing this pass found, which was the actual blocker
+
+The return was not what stopped the 24-argument program from being *checked*; a
+byte-fact side condition was, and it is fixed. Every hypothesis about the code —
+`b0..b3`, the immediates, the displacements — was `simp [read_i32_le, read_i8,
+hb]`, and `hb` is `all_bytes`: one conjunct per byte of the function, so each
+byte fact became a `simp` set that grows with the size of the program, five
+times per instruction. Measured on this program (164 steps, 220 KB of generated
+Lean, 579 byte-fact side conditions) that exhausted `maxHeartbeats 4000000` at
+`whnf` on **step 19's `h_b1`** and again on **step 105's `h_disp`**, and the file
+DIED both times — a heartbeat timeout is not a tactic failure, so the `try`
+guard that admits everything else cannot catch it and admit its way out.
+
+`first | native_decide | simp [read_i32_le, read_i8, hb]` settles each one
+outright (`rc` is a `def` of an `if` and a list literal, so it is computable at a
+literal address) and keeps the simplifier as the fallback, so the change is a
+performance change and not a weakening: `bitops` and `const2` report identically
+with and without it. After it the same file elaborates in 127 s and reports its
+remaining gap as a `sorry`, which is the only shape in which a gap is a number.
+
+This is why the 24-argument program looked like a *chain-length* problem for as
+long as it did: the doc's 6m18s → 27m50s heartbeat experiment was raising a
+budget for a goal that was both false (B25) and, separately, in a file that could
+not finish for an unrelated reason.
+
+## The one real boundary, still open, now measured twice
+
+The two boundaries this doc's table already recorded are still fixed
+(`_body`'s lower bound is `entry`; `_tree`'s loop test is a revisited address).
+The third is not a boundary at all — it was this bug. What is left is the
+separation a followed return needs, and it is a specific statement:
+
+> For the state `s` after a `call` at `m` with the callee's frame pushed below,
+> `mem_read_bytes s.mem s.rsp.toNat 8` is the literal `m + 5`.
+
+and — the part option 1 above names and this pass confirms — it needs the READ
+ADDRESS to be a literal, because that is what makes each `key` peel's side
+condition `a + 8 ≤ b` decidable. Measured again 2026-10-03 on the 24-argument
+program, with the read address still symbolic (`s157.rsp.toNat`):
+
+* `simp only [hs1, …, hs157]` followed by `repeat rw [key _ _ _ _ (by first |
+  decide | omega)]` did not finish in **1500 s of wall** and was killed by
+  `formal/lean.py`'s own bound. That is the doc's 110 s measurement, taken on a
+  longer chain and with the cheap `simp only` in place of the full one, so the
+  conclusion is stronger than "does not scale": **one such goal is not affordable
+  at all** at this size.
+* So a per-step separation invariant over a SYMBOLIC address is not the fix; the
+  address has to be computed. `X86State.init`'s `rsp` is the literal
+  `0xfffffffffffffff0` (`lib/ProofLib.lean`), so an emitter-side stack/frame
+  tracker — `push`/`pop`/`call`/`ret`/`sub rsp`/`add rsp`/`leave`, and `mov rbp,
+  rsp` — makes every `rsp` and every `rbp`-relative write address along the path
+  a compile-time literal, which is what turns each peel into `decide`.
+* **A form the tracker does not classify must mean "cannot attempt"**, never
+  "unchanged": B22's lesson is that a form with no entry conceals everything
+  after it, and here the failure would be a wrong bound rather than a missing
+  lemma.
+
+`lib/X86.lean` already has the two round-trip lemmas this needs
+(`x86_call_ret_restores_rip`, `x86_call_return_slot_separated`,
+`x86_call_ret_balances_stack`, `mem_read_bytes_write_same`,
+`mem_read_bytes_write_above`, `lowMask_eight`); what is missing is a way to CARRY
+`x86_call_return_slot_separated` across the callee's N steps, which is the
+invariant the doc named and still the whole of the remaining work.
+
+## The one real boundary, stated exactly (SUPERSEDED — kept for the measurement)
+
+**Everything below this line is the 2026-10-02 state and is left as written.
+Option 2 is LANDED; option 1 is still open and its own sketch is now known to be
+wrong, which the Status above says where and why.**
 
 The two boundaries this doc's table already recorded are still fixed
 (`_body`'s lower bound is `entry`; `_tree`'s loop test is a revisited address).
@@ -177,4 +284,10 @@ landed, and the reason is below):
 `formal/x86_64_model_test.py` (model vs hardware) was not run: nothing here
 touches the model. The two boundaries in the table above were not re-measured
 either — they were already fixed before this pass and this change does not touch
-them.
+them. **And neither was the 45-example sweep**: this pass ran the two programs
+this doc is about plus `bitops` and `const2` as the no-call control, so the
+corpus-wide numbers in `bugs/FORMAL_x86_64_end_to_end_proof.md` are NOT
+re-measured and its table stands as of 2026-10-02. The one prediction to check
+first is `terminates proved with no sorry`, which must still read 32: the
+return-following code is unreachable for an image with no `call`, and that is
+pinned Lean-free by `test_formal_sweep_truth.py::TestX86EndToEndEmitter`.

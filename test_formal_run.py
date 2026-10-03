@@ -10905,7 +10905,8 @@ X86_ONLY_1SLOT_BUG_CASE = (
 # emitter cannot lower a SECOND slice in the same function — it reads a
 # pointer that is not one — so a table with two per program would be a table of
 # failures about that instead of about these. The reproducer and what is known
-# about the cause are `bugs/FORMAL_x86_64_a_second_slice_in_a_function.md`.
+# about the cause are the three bound-clamp labels of `_emit_slice_parts`, fixed
+# 2026-10-03 in 68671a62.
 #
 # What each case pins, and what it was before:
 #

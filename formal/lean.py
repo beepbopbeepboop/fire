@@ -110,6 +110,7 @@ a budget was the wrong instrument three times over, so the bound here is the
 instrument and the emitter owes the tree goals small enough to need it.
 """
 import collections
+import contextlib
 import hashlib
 import os
 import re
@@ -465,6 +466,43 @@ def run_lean(lean: str, args, cwd: str | None = None, env: dict | None = None,
                   + (f" EXCEEDED: {res.exceeded}" if res.exceeded else "")
                   + "]", file=sys.stderr)
         return res
+
+
+@contextlib.contextmanager
+def scratch_dir(prefix: str, base: str | None = None):
+    """A PRIVATE directory for a generated `.lean` file, removed afterwards.
+
+    `run_lean` above is the one launcher, and this is the one place a generated
+    file is allowed to live. Both halves of that matter, and the reason is a bug
+    this tree shipped: `formal/x86_64_model_test.py` and
+    `formal/x86_64_model_coverage_test.py` each wrote their generated source to a
+    hard-coded `os.path.join("/tmp", "<a fixed name>")` and handed it to `lean`
+    BY RELATIVE NAME with `cwd` set there. Both are registered suite jobs, the
+    corpus has several worktrees, and `tools/suite.py` runs `-j 18` — so two
+    concurrent invocations wrote the SAME `Coverage.lean`, and the second
+    writer's bytes were what the first invocation's `lean` read. The coverage
+    file is 151 `native_decide` goals plus 482 hypothesis checks, so an
+    interleaved read is not a small corruption, and it would be reported as "a
+    form is not steppable" or "hypothesis N does not hold": a model or lemma
+    bug, in the wrong file, in someone else's run. This is precisely the hazard
+    `ensure_library` takes an exclusive `flock` over further down.
+
+    So the directory is `mkdtemp` (0700, unique) rather than a named path, it is
+    removed in a `finally` so a crashed run leaves nothing, and callers hand
+    `lean` an ABSOLUTE path rather than a relative one — the cwd no longer has
+    to be the directory, which is what made the shared name load-bearing.
+
+    `base` defaults to `TMPDIR`, which `tempfile` already prefers, so a caller
+    that must land inside the checkout (a sandbox with no writable `/tmp`, or a
+    worker whose `TMPDIR` is the worktree's `.tmp`) needs no argument here; the
+    parameter exists for the caller that wants a specific parent.
+    """
+    root = base if base else (os.environ.get("TMPDIR") or None)
+    path = tempfile.mkdtemp(prefix=prefix + "-", dir=root)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _sha256_file(path: str) -> str:
