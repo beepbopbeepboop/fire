@@ -2621,8 +2621,14 @@ def _build_cfg(body) -> tuple:
                 t = first([s], pending)
                 pending = [t.index]
                 cur = None
-                arm_exits = run(getattr(s, "body", None) or [], loops,
-                                [t.index])
+                # The body's FIRST block, which is where the "the body raised"
+                # path starts: nothing in `try:` itself evaluates anything, so
+                # this is the earliest point that can raise. See the `finally`
+                # note below for what it is an edge from.
+                body_first = len(blocks)
+                body_exits = run(getattr(s, "body", None) or [], loops,
+                                 [t.index])
+                arm_exits = list(body_exits)
                 for h in (getattr(s, "handlers", None) or []):
                     arm_exits += run(getattr(h, "body", None) or [], loops,
                                      [t.index])
@@ -2631,8 +2637,31 @@ def _build_cfg(body) -> tuple:
                 # rather than a chain. That is what makes a `return` inside
                 # `finally` a terminating path rather than a fallthrough, and
                 # a store in only one handler not a dominating store.
+                #
+                # …and `else` hangs off the BODY's exits, never off the
+                # header. The header reaches `else` only when the body raised,
+                # which is precisely the path on which `else` does NOT run, so
+                # an edge from there is not a conservative extra edge — it is a
+                # claim that control reaches a clause the language skips, and
+                # it refused a program CPython runs:
+                #
+                #     try:
+                #         out = build(...)
+                #     except Exception:
+                #         pass
+                #     else:
+                #         use(out)        # 'out' is always stored here
+                #
+                # measured on `test_struct_formal.py:603` (`out = build_module_
+                # dylib(…)` in the `try`, `os.path.isfile(out)` in the `else`)
+                # and in `test_formal_read_before_store.py` as
+                # `try_else_clause_runs_only_when_the_body_completed`. The
+                # body's exits are the only predecessors `else` really has, so
+                # an `else` after a body that always returns or raises gets an
+                # unreachable block — whose IN set the fixpoint initializes
+                # from the top, which is the direction that cannot refuse.
                 if getattr(s, "else_body", None) is not None:
-                    arm_exits += run(s.else_body, loops, [t.index])
+                    arm_exits += run(s.else_body, loops, body_exits)
                 # The `finally` clause runs on every way OUT of the try, so it
                 # is entered from the ARMS and the statement after the whole
                 # statement is reached only through it. Modelling that
@@ -2648,9 +2677,40 @@ def _build_cfg(body) -> tuple:
                 # `finally` falls out of the same branch correctly, because
                 # `run` on an empty run returns the exits that reach it, so
                 # the arms' exits and the finally's exits are the same list.
+                #
+                # "…and the body may have RAISED" is the one way out of the
+                # statement that the arms do not carry, and the OLD answer was
+                # `arm_exits or [t.index]` — a fallback used only when the body
+                # has no fall-through exit, which is a body that always
+                # `return`s or `raise`s. Two things are wrong with the header it
+                # pointed at, and both are fixed here:
+                #
+                #   * the header is not a point that can raise at all. Nothing
+                #     in `try:` evaluates anything before the body, so the
+                #     earliest point that can is the body's FIRST block, and a
+                #     store in it dominates the clause. `tools/mem_slope.py`
+                #     is the measured case: `try: exes = []; …; return 0 /
+                #     finally: unlink(e) for e in exes` is a legal program and
+                #     was refused for `exes`.
+                #   * it is a real path, so it cannot simply be dropped either:
+                #     a store LATER in the body is skipped by it, which is why
+                #     the edge stays for every other shape.
+                #
+                # The narrower form is also the only affordable one. Adding this
+                # edge UNCONDITIONALLY — the shape that would close the
+                # soundness hole below — was measured on this repository and
+                # cost 6 more refusals than it removed (7 files): `try: …
+                # total = … / finally: cleanup` then `print(total)` is the
+                # single most common reason to have a `finally` at all, and
+                # every one of those 7 is a program CPython runs. Whether an
+                # intervening statement can raise is the question that decides
+                # it, and no statement-level reader here answers it. So the hole
+                # stays, in
+                # `bugs/FORMAL_read_before_store_the_body_may_have_raised.md`.
                 fin = getattr(s, "finally_body", None)
                 if fin is not None:
-                    fin_exits = run(fin, loops, arm_exits or [t.index])
+                    fin_exits = run(fin, loops,
+                                    arm_exits or [body_first])
                     pending = fin_exits
                 else:
                     pending = arm_exits
@@ -5697,6 +5757,49 @@ def pointer_bounded_method(method: str):
     return entry[0] if entry else None
 
 
+# The string methods that are a CONVERSION to a bare `char *` and are therefore
+# the IDENTITY on this path.  Separate from `POINTER_BOUNDED_METHODS` because
+# those COMPUTE something from the receiver's bytes and these compute nothing:
+# a `String` here IS its own address (a literal is NUL-terminated, so its
+# address is its length — `formal/arm64_codegen.py`'s empty-`String()` arm says
+# so), and the type these return is a ONE-FIELD struct whose only field is that
+# pointer, whose value on this path IS its field.  So `s.as_c_string_span()` is
+# `s`, and saying otherwise would be inventing a conversion this value model
+# does not have.
+#
+# `std/os/env.mojo` is the shape, and it is three call sites in one file whose
+# every argument to `external_call` is spelled this way: measured on
+# 2026-10-02, the file's terminal cause after the `OptionalPointer` return type
+# was answered is
+#
+#     name.as_c_string_span() is a method call on a value, and this backend
+#     lowers only append, close, write … and the string methods
+#
+# — a refusal that reads as "add it to the string table", which is what this
+# table is, and whose real content is that the conversion is already a no-op.
+#
+# `as_c_string_slice` is the stdlib's PREVIOUS name for the same conversion
+# (`bugs/FORMAL_env_family_next_terminal.md` records the old spelling's
+# `unsafe_ptr()` blocker, and `test_formal_external_call.py` still transcribes
+# it), so both are here: a rename is not a reason to refuse a construct whose
+# lowering did not change.
+#
+# **`CStringSpan.ptr()` is deliberately NOT here**, and the reason is worth
+# stating because it looks like the same case: on the real type it is the
+# identity, but on THIS path a one-field struct's value and its field are the
+# same word, so `s.as_c_string_span().ptr()` is a method on a method RESULT —
+# which the emitters have no kind for, since the result of a call is not
+# tracked in `ValueKinds`.  Lowering the inner conversion is what makes the
+# outer one a bare name; the outer one is then a field read the frame analysis
+# already owns.
+STRING_IDENTITY_METHODS = ("as_c_string_span", "as_c_string_slice")
+
+
+def string_identity_method(method: str):
+    """`"str_identity"` when `recv.<method>()` is the receiver itself, else None."""
+    return "str_identity" if method in STRING_IDENTITY_METHODS else None
+
+
 def is_string_method(method: str) -> bool:
     """True when `method` is a method of `str` in this model — whether it is
     lowered (POINTER_BOUNDED_METHODS) or refused by name
@@ -5746,6 +5849,30 @@ def value_method_refusal(method: str, receiver_kind, dotted: str, *,
                 f"classified as {receiver_kind!r} rather than a string. "
                 f"{method!r} is only lowered on a char *, and on anything else "
                 f"the same bytes mean something different")
+    if method in STRING_IDENTITY_METHODS:
+        # The SAME kind guard as the pointer-bounded arm above, and for the same
+        # reason: the conversion's answer is the receiver's ADDRESS, so on a
+        # receiver this path cannot establish to be a char * the answer is an
+        # address it made up. The two messages are deliberately not shared —
+        # `STRING_IDENTITY_METHODS`'s own comment is the difference between them
+        # (this one computes nothing) and a reader who is told "the source does
+        # not say what its receiver holds" is being told the truth either way.
+        if receiver_kind == STR_KIND:
+            return None
+        if receiver_kind is None:
+            return (f"{dotted}() converts a string to a `char *`, and the "
+                    f"source does not say what its receiver holds — this path "
+                    f"has no way to tell a char * from a word here, and the "
+                    f"conversion's answer IS the receiver's address, so "
+                    f"lowering it anyway would hand a C callee an address "
+                    f"assembled from whatever word the receiver happens to "
+                    f"hold. Annotate the receiver (e.g. `s: String`) or bind "
+                    f"it to a string literal")
+        return (f"{dotted}() converts a string to a `char *`, and its receiver "
+                f"is classified as {receiver_kind!r} rather than a string. On "
+                f"this path a `String` is its own address, so the conversion is "
+                f"the identity — and on anything else the same word is not an "
+                f"address at all")
     if method in LENGTH_DEPENDENT_METHODS:
         return (f"{dotted}() is a real method of String, but it {LENGTH_DEPENDENT_METHODS[method]}. "
                 f"Answering it would need a string representation that "
@@ -5920,8 +6047,32 @@ VALUE_METHOD_RECEIVERS = {
 # worth saying because wave 4's D4 found the binding half of this problem
 # (`_PhiloxWrapper._rng: PhiloxRandom[10]` behind an import alias) and it does
 # NOT apply to the one construct the sweep reaches.
+#
+# The ALIAS FAMILY is here for the same reason and is not a new fact: every name
+# below is `= Pointer[…]` or `= Optional[Pointer[…]]` in the language's own
+# `memory/pointer.mojo` (measured 2026-10-02 at lines 133-211), so each one is a
+# pointer by definition and the table's question — "does this name say a
+# pointer" — has the same answer for all of them. Leaving them out is what made
+# `std/os/env.mojo` REFUSE `external_call["getenv", OptionalPointer[UInt8,
+# ImmUntrackedOrigin]]` with "this path has no value of that kind to put in the
+# return register": a one-word nullable address, refused because the table had
+# never heard of the name, and `external_call_return_kind`'s own docstring says
+# a pointer "is an address, so `word`, and it needs no pointee" while the table
+# it consults said the name was not one. A name this path cannot read is the
+# safe direction, so the absence was not a wrong answer — but it was a refusal
+# of a construct the table's own rule already answers, on a file the sweep
+# reaches (`env.mojo`, and every `getpwuid`/`PyObject_Malloc` in `pwd/` and
+# `python/bindings.mojo` that spells its return type the same way).
+#
+# `pointee_args` reads the first argument that is not an attribute, and the
+# `mut: Bool, //` parameter ELISION in `OptionalPointer`'s own signature is what
+# keeps that right for it: `OptionalPointer[UInt8, ImmUntrackedOrigin]` spells
+# two positional arguments for three parameters, so the positional sequence is
+# `(T, origin)` exactly as it is for `Pointer` itself.
 POINTER_TYPE_CTORS = ("Pointer", "UnsafePointer", "_CPointer", "CPointer",
-                      "DTypePointer", "Reference")
+                      "DTypePointer", "Reference",
+                      "OptionalPointer", "MutPointer", "ImmPointer",
+                      "OpaquePointer", "MutOpaquePointer", "ImmOpaquePointer")
 
 # A pointee base name -> `(width in bytes, signed)`.  One table, read by both
 # backends through `dereference_lowering`, so the two architectures cannot
@@ -6631,9 +6782,97 @@ def _offset_scale(fn, expr, width, seen=()):
     return (True, None)
 
 
+# The spellings that are `Optional[Pointer[…]]` — a NULLABLE pointer — and the
+# reader that recognises one.  Both halves are here rather than at the call site
+# because `dereference_lowering` is not the only reader: `subscript_base_lowering`
+# asks the same question about `p[i]`, and a second place that spelled the
+# nullable-pointer test would be a second place for the two to disagree about
+# what `OptionalPointer` is.
+#
+# `_CPointer` is the stdlib's PREVIOUS name for the same type — measured
+# 2026-10-02, `new-modular`'s `std/` no longer spells it anywhere, so the name is
+# here because the corpus this path was measured on used it and because removing
+# it would change the answer for a spelling that is still in the table's own
+# docstrings, not because anything reads it today.
+NULLABLE_POINTER_ALIASES = ("OptionalPointer", "_CPointer")
+
+
+def nullable_pointer_unwrap(fn, expr, decls: dict, functions: dict = None):
+    """`(True, why)` when this receiver's DECLARED type is a nullable pointer.
+
+    **And the reason it is asked before any pointee question is the whole of
+    this function.**  A nullable pointer has BOTH a pointee and an unwrap, and
+    Mojo's two answers are different numbers:
+
+    * `Pointer[UInt8].value()` is the BYTE AT the address — a load;
+    * `OptionalPointer[UInt8, o].value()` — that is `Optional[Pointer[UInt8, o]]`
+      in the language's own definition (`memory/pointer.mojo:163-170`), so the
+      method resolved is `Optional.value()`, which is the UNWRAP: the pointer
+      itself, unchanged.
+
+    `dereference_lowering` sees only the SPELLING `value`, and the receiver's
+    declared type is the only thing in hand that tells the two apart, so a
+    nullable pointer read as a pointer produced the byte where the source says
+    the address.  Measured on this tree, `std/os/env.mojo`'s own `getenv` shape
+    with the previous spelling and no other change:
+
+        p = external_call["getenv", _CPointer[UInt8, UntrackedOrigin[mut=False]]](name)
+        String(unsafe_from_utf8_ptr=p.value())
+
+    BUILDS, RUNS, and dies of SIGSEGV (exit 139) — the image builds a `char *`
+    out of the first BYTE of the string ("hello" → 104 → address 104), and
+    address 104 is not mapped.  Nothing exits non-zero before that and no
+    diagnostic says anything: the wrong answer is a pointer to the low bytes of
+    a string.
+
+    **The identity is the correct VALUE, and it is correct for a reason that is
+    about the representation rather than about the source**: `Optional[T]`'s
+    payload here is one word (`bugs/FORMAL_stdlib_optional_needs_a_representation.md`
+    measures `Optional` at one field), so the pointer and its wrapper are the
+    same storage, and unwrapping is the identity on it — exactly the identity
+    `Pointer()` already is on this path (wave 4's D4) and the same one
+    `dereference_lowering`'s own struct branch derives and refuses for a
+    different reason.
+
+    **What the identity does NOT give is the RAISE.**  `Optional.value()` on
+    `None` raises in Mojo, and this backend has no raise: a nullable pointer
+    whose word is 0 unwraps to 0 here, and the source would have stopped.  That
+    is a control-flow difference and it is a real one, so it is stated rather
+    than claimed away — and it is the same gap the `Optional` doc records for
+    every other unwrap (`None` and `Some(0)` are the same word on this path).
+    It is not a reason to emit the byte instead: the load is wrong for a
+    POPULATED one too, which is the case the measurement above is.
+
+    The declared type is read with `_rhs_declared_text`, the same narrow reader
+    `dereference_lowering`'s SIMD branch uses, for the same reason: it recovers a
+    parameter annotation, a local's annotation, and an `external_call`'s declared
+    return type, which are the three shapes a nullable pointer arrives in, and
+    returns None for everything else rather than re-deriving the derivation.
+    """
+    text = _rhs_declared_text(fn, expr, decls, functions)
+    if not text:
+        return (False, None)
+    base = annotation_base_name(text)
+    if base in NULLABLE_POINTER_ALIASES:
+        return (True, f"{text} is `Optional[Pointer[...]]` — the stdlib's own "
+                      f"definition of {base} — so `value()` is "
+                      f"`Optional.value()`, the UNWRAP, and a nullable "
+                      f"pointer's payload is one word on this path: the "
+                      f"receiver is already the pointer")
+    if base == "Optional":
+        args = pointee_args(text)
+        if args and annotation_base_name(args[0]) in POINTER_TYPE_CTORS:
+            return (True, f"{text} is `Optional[Pointer[...]]`, so `value()` is "
+                          f"`Optional.value()`, the UNWRAP, and a nullable "
+                          f"pointer's payload is one word on this path: the "
+                          f"receiver is already the pointer")
+    return (False, None)
+
+
 def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
                          structs_by_name: dict = None, index_scaled: bool = False):
-    """`("load", width, signed)` | ("frame", struct) | None — with a refusal.
+    """`("load", width, signed)` | ("identity", 8, False) | ("frame", struct)
+    | None — with a refusal.
 
     `index_scaled=True` says the CALLER scales the index it supplies, so
     `_offset_scale` must judge the base address alone. It is the flag for a
@@ -6651,8 +6890,8 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
     string is `None`, and the `why` is the refusal to emit.
 
-    Two answers, and one of them is the one that makes this a value model rather
-    than a load:
+    Three answers, and the third is what makes this a value model rather than a
+    load:
 
       * `("load", width, signed)` — a scalar pointee whose width the table
         established.  `width` is 1, 2, 4 or 8 and is never anything else: a
@@ -6662,6 +6901,11 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         reasoning had only the 8-byte load available, which over-reads a
         `UInt8` pointee by seven bytes; with the pointee known the load is one
         byte, and one byte is the correct answer rather than an approximation.
+      * `("identity", 8, False)` — the receiver is a NULLABLE POINTER and the
+        `.value()` is the UNWRAP of it, not a load.  `nullable_pointer_unwrap`
+        is asked first, before any pointee question, because a nullable pointer
+        has a pointee AND an unwrap and the two answers are different numbers;
+        see that function for the whole of why the load was the wrong one.
       * `None` — no pointee, a pointee with no width, a FLOAT or a wide `SIMD`
         or a blob, or a STRUCT.  The struct case is the interesting one and its
         derivation is CORRECT (a struct's value is a frame address, so the
@@ -6672,7 +6916,18 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         and emitting the identity today returns 0 where the source says 22 on
         BOTH architectures.  The `why` spells that out, and the `why` is the
         same text on both architectures because it comes from here.
+
+    The three-tuple shape is kept for all three answers on purpose: every
+    existing reader unpacks `shape, width, signed`, and the two that ignore the
+    shape (`subscript_base_lowering` and both `_emit_dereference`) have to be
+    taught to look at it.  A second arity for the new answer would make every
+    reader a two-tuple branch, and the whole reason this function is shared is
+    that the two architectures cannot come to different answers about a load.
     """
+    unwrapped, unwrap_why = nullable_pointer_unwrap(fn, expr, decls,
+                                                    functions)
+    if unwrapped is True:
+        return (("identity", 8, False), unwrap_why)
     inner, why = pointer_pointee(fn, expr, decls, functions)
     if inner is None:
         return (None, why)
@@ -7046,6 +7301,16 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                                     index_scaled=True)
     if how is not None:
         _shape, width, signed = how
+        if _shape == "identity":
+            return (None, None, None,
+                    f"the base is a NULLABLE POINTER, so `{spelled(obj)}[i]` is "
+                    f"the element AT the pointer and this path would have to "
+                    f"load it at the pointee's width from an address that is "
+                    f"either a live `char *` or 0 — there is no bounds check "
+                    f"against the pointee here and the source's own "
+                    f"`if not p:` is what establishes which. {_sentence(why)} "
+                    f"Read through `p.value()[i]` once the unwrap is written "
+                    f"out, which is the same program with the check spelled out")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "
@@ -9590,6 +9855,48 @@ def _kind_of_elements(elems) -> str | None:
     return kinds.pop() if len(kinds) == 1 else None
 
 
+def container_literal_elem_kind(node) -> str | None:
+    """What a subscript of the container LITERAL `node` yields, or None.
+
+    The one reader of "what do this container's elements hold", asked of the
+    initializer that states it, and it is asked in two places that used to
+    disagree — which is why it is one function rather than two rules:
+
+      * a dict literal bound to a LOCAL (`d = {"a": 10}`), through
+        `ValueKinds.kind_of`, and
+      * a container literal bound at MODULE level (`D = {"a": 10}`), through
+        `global_slot_kind`, whose slot records the same initializer.
+
+    Only a DICT is a new answer. A list/tuple/set literal already classified by
+    element (`list_kind(_kind_of_elements(...))`), and a dict did not — it
+    classified as a bare `LIST_PREFIX`, so `list_elem_kind` had nothing to hand
+    back and every use site that must decide before emitting refused. `print()`
+    is the one those programs meet first:
+
+        d = {"a": 10, "b": 20}
+        print("Value of a:", d["a"])   # -> print() cannot tell whether
+                                       #    SubscriptExpr is a string or a number
+
+    The VALUES and not the keys, because a dict blob is `[npairs][k0][v0]…` and
+    a subscript of it is a key SCAN that leaves the value in hand
+    (`arm64_codegen._emit_dict_lookup_addr`); the kind asked for is therefore the
+    value's, and `_kind_of_elements` over the keys would claim a string element
+    where the word read out is a number.
+
+    `_kind_of_simple` underwrites on purpose: it classifies a LITERAL, so
+    `{i: 100 + i for i in range(3)}[2]` stays undecided rather than guessing
+    from the first operand of an arithmetic form. Unanimity is the other half
+    of the safety argument — a dict whose values disagree claims nothing, which
+    is what keeps this from being a way to print one of two kinds as the other.
+    """
+    if isinstance(node, F.DictExpr):
+        values = [p[1] for p in (node.pairs or []) if len(p) >= 2]
+        return _kind_of_elements(values)
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return _kind_of_elements(node.elements or [])
+    return None
+
+
 def _kind_of_simple(e) -> str | None:
     """The kind of an expression that needs nothing but itself to classify."""
     if isinstance(e, F.StringLiteral):
@@ -9633,15 +9940,30 @@ class ValueKinds:
         `declared_type_kind` for the whole of it; the hook is consulted only
         where the answer would otherwise be a guess, and a `None` from it leaves
         every existing decision exactly where it was.
+      * `ctor_field_value(struct_name, call, field)` — the expression a
+        CONSTRUCTION puts in a field's slot, or None.  The fifth hook, and it
+        exists because `declared_kind` answers about the struct while a
+        construction's arguments are about the CALL SITE, which is the only
+        place the value is: `p = Point(3, 4)` gives field `x` an integer and a
+        declaration says nothing about it (the common case has no annotation
+        at all), while `p = Point(a, b)` where the arguments are this function's
+        unannotated parameters gives nothing — and both were refused, by name,
+        for the same sentence.  Measured on both architectures before this hook:
+        `print("Point:", p.x, p.y)` on an unannotated two-field class refused
+        with "print() cannot tell whether MemberExpr is a string or a number".
+        `None` leaves every existing decision exactly where it was, which is
+        why this is consulted after `declared_kind` and not instead of it.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
-                 slot_key=None, declared_kind=None):
+                 slot_key=None, declared_kind=None, ctor_field_value=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
         self._declared_kind = declared_kind or (lambda expr: None)
+        self._ctor_field_value = ctor_field_value or (
+            lambda struct_name, call, field: None)
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
@@ -9652,6 +9974,21 @@ class ValueKinds:
         # whole of what separates "the source SAYS this name holds an
         # integer" from "we could not classify it"; see that method.
         self._own_shape: dict = {}
+        # The CONSTRUCTIONS that bound a name in this function's body, keyed by
+        # name — `{(callee, call)}`, and a `None` VALUE as the tombstone for a
+        # name some other statement also binds.  It is the evidence
+        # `_constructed_field_kind` reads, and the tombstone is the reason that
+        # reading is sound under a flow-INsensitive map: `p = Point(3, 4)` and
+        # then `p = something_else` leaves one name with two homes, and a kind
+        # read off the construction would be a claim about the first
+        # instruction rather than about the slot.  Keyed by the call's identity
+        # because the scan runs twice and a list would collect each site twice.
+        self._ctor_calls: dict = {}
+        # The fields of a holder this function WRITES THROUGH, which retracts
+        # the construction's claim about that field and only that field.  See
+        # `_note_field_stores`, which carries the measurement that makes it
+        # load-bearing rather than tidy.
+        self._field_stores: dict = {}
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -9754,22 +10091,155 @@ class ValueKinds:
             for nm in _target_names(target):
                 self._bind(nm, kind, own=own)
 
+    def _note_construction(self, target, value) -> None:
+        """Record (or retract) the construction evidence a binding gives.
+
+        A construction is `target = <call to a bare name>` — a type
+        constructor, since a call to a name that is not a type is answered by
+        `func_kind` instead and the hook returns None for it anyway. Everything
+        else that binds the name is a RETRACTION: the name then has a home this
+        map cannot describe, and a field kind read off the construction would be
+        a claim about the construction site rather than about the slot. So a
+        tombstone is written, and a tombstone is what a later construction does
+        not overwrite (`setdefault`), which makes the answer order-independent
+        rather than a function of where in the body the two bindings sit.
+
+        A `str` target (a `VarDecl`'s name) and a tuple target are both
+        refusals here for the same reason: `_bind_target` splits them, and the
+        construction evidence wants ONE name."""
+        name = target if isinstance(target, str) else (
+            target.name if isinstance(target, F.IdentExpr) else None)
+        if name is None:
+            return
+        if isinstance(value, F.CallExpr) and isinstance(value.func,
+                                                        F.IdentExpr):
+            if name not in self._ctor_calls:
+                self._ctor_calls[name] = {}
+            sites = self._ctor_calls[name]
+            # A tombstone is not replaced by a later construction, which is what
+            # makes the answer independent of where in the body the two bindings
+            # sit — so this reads the existing entry rather than `setdefault`ing
+            # one.  The `in` test above is what tells an ABSENT entry from a
+            # tombstone: `dict.get` answers None for both, and conflating them
+            # silently dropped every construction with no retraction before it,
+            # which is measured and pinned in `test_formal_value_model.py`'s
+            # `a_constructed_field_prints` — a whole evidence source that reads
+            # as "this function constructs nothing".
+            if sites is not None:
+                sites[id(value)] = (value.func.name, value)
+        else:
+            self._ctor_calls[name] = None
+
+    def _note_field_stores(self, target) -> None:
+        """Record that a statement writes THROUGH a holder's field.
+
+        Per FIELD rather than per holder, because the claim is per field: `p` is
+        a frame, a store to one of its slots changes that slot and no other, and
+        `p = P("hi", 7); p.n = 8; print(p.s)` still has an answerable `p.s`.
+
+        It has to exist at all. The construction says what went into the slot
+        WHEN THE OBJECT WAS BUILT, and a statement after it in the same
+        function can put something else there — which is not a theoretical gap.
+        Measured on both architectures, from a GREEN build, with nothing in the
+        image wrong:
+
+            class P:
+                def __init__(self, s, n):
+                    self.s = s
+                    self.n = n
+            def main():
+                p = P("hi", 7)
+                p.s = 5
+                print("s:", p.s)
+
+        → SIGSEGV, exit 139, both architectures. `p.s` classified as a string
+        from the construction, `p.s = 5` made it the integer 5, and `%s` walked
+        bytes at address 5 looking for a NUL — the same fault
+        `test_formal_value_model.py`'s `a_percent_s_of_an_integer_is_refused`
+        exists to keep out, reached through a field rather than through a name.
+
+        Depth 1 only, and the reason is the same one `declared_kind` documents:
+        `a.b.c = v` writes the slot of the frame `a.b` names, not a slot of the
+        frame `a` names, so it says nothing about `a`'s own words. A SUBSCRIPT
+        store (`p.items[0] = x`) writes through a pointer and changes no word of
+        `p` either, which is why neither shape is recorded."""
+        if isinstance(target, (F.TupleExpr, F.ListExpr)):
+            for el in target.elements or []:
+                self._note_field_stores(el)
+            return
+        if not isinstance(target, F.MemberExpr) or not isinstance(
+                target.obj, F.IdentExpr):
+            return
+        self._field_stores.setdefault(target.obj.name, set()).add(target.member)
+
+    def _constructed_field_kind(self, e):
+        """What `e.obj`'s construction put in `e.member`, or None.
+
+        The second evidence source for a FIELD, and the one that is about the
+        call site: a declaration says what a field's TYPE is, and a
+        construction says what the VALUE in the slot is, and for the ordinary
+        unannotated class only the second is stated anywhere.
+
+        Unanimity or nothing, on the same rule `own_shape_kind` and
+        `struct_field_kind` use and for the same reason: this map is
+        flow-insensitive, so every construction of the name in this function is
+        a statement about the same slot and two that disagree leave it
+        undecided. One construction, one field, one kind — and the argument's
+        own kind has to be EVIDENCE, not a fallback, which is why a bare name
+        is asked of `own_shape_kind` and a call result is refused by
+        `_own_shape_of`'s filter: `Point(a, b)` where `a` and `b` are this
+        function's unannotated parameters says nothing about anything, and
+        claiming otherwise is how a field would end up printed as a number."""
+        obj = e.obj
+        if not isinstance(obj, F.IdentExpr):
+            return None
+        if e.member in self._field_stores.get(obj.name, ()):
+            return None
+        calls = self._ctor_calls.get(obj.name)
+        if not calls:
+            return None
+        kinds = set()
+        for struct_name, call in calls.values():
+            value = self._ctor_field_value(struct_name, call, e.member)
+            if value is None:
+                return None
+            if isinstance(value, F.IdentExpr) and \
+                    self.own_shape_kind(value.name) is None:
+                return None
+            kind = self.kind_of(value)
+            if kind is None:
+                return None
+            kinds.add(kind)
+        return kinds.pop() if len(kinds) == 1 else None
+
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
                 self._bind_target(s.target, self._value_kind(s.value),
                                   own=self._own_shape_of(s.value))
+                self._note_construction(s.target, s.value)
+                self._note_field_stores(s.target)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value)
+                self._note_construction(s.name, s.value)
+                self._note_field_stores(s.name)
             elif isinstance(s, F.AugAssignStmt):
                 # `x += e` leaves x holding what it held; an unknown x stays
                 # unknown rather than being called an int by the operator.
                 self._bind_target(s.target, self.locals.get(
                     s.target.name if isinstance(s.target, F.IdentExpr) else ""))
+                self._note_construction(s.target, s.value)
+                self._note_field_stores(s.target)
             elif isinstance(s, F.MultiAssignStmt):
                 vkind = self._own_shape_of(s.value)
                 for t in s.targets:
                     self._bind_target(t, self.kind_of(s.value), own=vkind)
+                # One value for every target, so it is not a construction of
+                # any one of them in the sense the field evidence needs; the
+                # tombstone is what says so.
+                for t in s.targets:
+                    self._note_construction(t, s.value)
+                    self._note_field_stores(t)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
             elif isinstance(s, F.IfStmt):
@@ -9972,6 +10442,18 @@ class ValueKinds:
             declared = self._declared_kind(e)
             if declared is not None:
                 return declared
+            # …and the CONSTRUCTION is the second source, for the case the
+            # declaration cannot reach at all: an unannotated class states
+            # nothing, and `struct_field_kind`'s own gate — a kind is a claim
+            # about the VALUE in the slot, and `S()` leaves every slot at its
+            # class-level default — is right about `S()` and wrong about a
+            # frame this very function built with arguments.  Asked AFTER the
+            # declaration, so a class that says both is decided by the
+            # declaration, and a `None` from either leaves the lookup below
+            # exactly as it was.
+            constructed = self._constructed_field_kind(e)
+            if constructed is not None:
+                return constructed
             key = self._slot_key(e)
             return self.name_kind(key) if key is not None else None
         if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
@@ -10008,10 +10490,17 @@ class ValueKinds:
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
             return list_kind(_kind_of_elements(e.elements))
         if isinstance(e, F.DictExpr):
-            return LIST_PREFIX
+            # The VALUES, because that is what a subscript of a pair blob
+            # yields — the same element the layout interleaves them in
+            # (`_emit_dict`), read here by the one function every container
+            # literal's element kind comes from.
+            return list_kind(container_literal_elem_kind(e))
         if isinstance(e, F.Comprehension):
             if e.kind == "dict":
-                return LIST_PREFIX
+                # `e.element` is the dict comprehension's VALUE (`e.key` is the
+                # key), so this is the same arm as the `DictExpr` above and not
+                # the key/value unification a LIST comprehension does below.
+                return list_kind(_kind_of_simple(e.element))
             ek = _kind_of_simple(e.element)
             if e.key is not None:
                 ek = _unify(ek, _kind_of_simple(e.key))
@@ -15265,6 +15754,84 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     return (stores, None)
 
 
+def struct_ctor_field_value(struct_def, call, field, decls: dict = None):
+    """The AST node this construction puts in `field`'s slot, or None.
+
+    `init_body_stores` is asked rather than re-walked, and that is the whole
+    point: it is the ONE function that decides what `S(a, b)` stores where, and
+    the emitters emit from its answer. So the VALUE this returns is the very
+    expression the image will evaluate into the slot — a bare parameter name
+    already resolved to the CALLER's argument expression, which is the step
+    that makes the answer about this construction rather than about the
+    constructor. A second walk of `__init__` would be a second opinion about
+    which argument lands in which slot, and a disagreement between the two is a
+    kind read off the wrong word.
+
+    None means "this construction says nothing about that field", and it is the
+    answer for every case where the question is not decidable rather than
+    merely absent: no `__init__` at all (the positional filling of a struct
+    that declares no constructor is a different question, and `S()` brings
+    every slot up from its class default instead), an arity that matches no
+    declared overload or more than one, a keyword against a declared
+    constructor, a body statement this path refuses to lower, and a field the
+    constructor does not assign. Every one of those is a refusal at the
+    CONSTRUCTION for all but the last, so a program that reaches codegen is
+    only ever asking about a construction that really does perform the store.
+
+    The one case that is not a refusal anywhere and still has to answer None is
+    a field some OTHER method writes. Nothing here knows the whole struct's
+    methods, and a kind claimed from the constructor alone would be a claim
+    about the slot at the construction site and nowhere else — so the caller
+    pairs this with `struct_field_written_outside_init`, which is the check
+    that keeps it a claim about the object's field rather than about its
+    first instruction."""
+    if not struct_init_shapes(struct_def):
+        return None
+    shape, why = init_overload_for_arity(struct_init_shapes(struct_def),
+                                         len(getattr(call, "args", None) or []))
+    if shape is None or why is not None:
+        return None
+    stores, refusal = init_body_stores(struct_def, call, shape, decls or {})
+    if refusal is not None:
+        return None
+    for name, _slot, value in stores or ():
+        if name == field:
+            return value
+    return None
+
+
+def struct_field_written_outside_init(struct_def, field) -> bool:
+    """True when some method OTHER than `__init__` writes `self.<field>`.
+
+    The check that makes a constructor argument a claim about the FIELD rather
+    than about the moment of construction. `ValueKinds` is flow-INsensitive by
+    construction (its own docstring), so a name it saw built by `Point(3, 4)`
+    answers the same wherever it is asked; if a setter ran in between, the slot
+    holds whatever the setter put there and the constructor's argument says
+    nothing about it. `bugs/FORMAL_method_param_field.md`'s neighbourhood is
+    where field stores through a method are measured, so this is asked of the
+    whole method set rather than of the constructor alone.
+
+    Every method of the struct is read, and an assignment is recognised only
+    in the two shapes the emitter performs: `self.f = v` and `self.a, self.b =
+    v, w` (`_init_statement_field_stores`, the one reader of that shape). A
+    write this predicate cannot see is a write it does not veto, which is the
+    wrong direction — so the callers' evidence test (`own_shape_kind`) is what
+    keeps an unclassifiable argument out, and this is a second gate rather than
+    the only one."""
+    receivers = struct_receivers(struct_def)
+    for method in struct_methods(struct_def):
+        if method.name == "__init__":
+            continue
+        for stmt in (getattr(method, "body", None) or []):
+            for target, _value in (_init_statement_field_stores(stmt, receivers)
+                                   or ()):
+                if isinstance(target, F.MemberExpr) and \
+                        target.member == field:
+                    return True
+    return False
+
+
 def _init_statement_field_stores(stmt, receivers) -> list | None:
     """`[(target, value_node)]` — the receiver-field stores one statement IS.
 
@@ -16709,6 +17276,75 @@ def iter_nodes(node):
         yield from iter_nodes(getattr(node, name))
 
 
+# The tree shapes a walk has to know about, and the reason they are NAMED here
+# rather than spelled out in each walk: **`IfStmt.elifs` is a list of TUPLES**,
+# `(condition, body)`, which is the only place in the tree where a container is
+# not a `list`, and it is invisible from the node's field list — a field is a
+# field whether its value is a list or a tuple.
+#
+# A walk that recurses on `isinstance(node, list)` therefore descends every
+# `if` body and every `else` and stops dead at the first `elif`, while
+# `iter_nodes` — which tests `(list, tuple)` — walks all of them. Two walks over
+# one tree that disagree about a third of the conditionals is not a small gap,
+# because the readers and the rewriters are exactly the pair that disagrees: a
+# rewrite that misses an `elif` leaves the source construct standing where a LATE
+# check reads it and reports it as something it is not.
+#
+# Measured 2026-10-02, arm64 and x86-64 identically: a method call inside an
+# `elif` arm is not lifted (`formal/build.py`'s `_rewrite_method_calls`), so
+# `struct/testing/prop/random.mojo`'s `Rng.rand_scalar` reached
+# `check_value_position_method_reads` with its `self._next(diff)` intact and the
+# program was refused with
+#
+#     self._next is not a field of Rng — _next is one of its METHODS … Call it
+#     (`self._next(...)`), which is a receiver and a call and lowers
+#
+# about a call that HAS its parentheses and was in an `elif`. Removing the
+# `elif` (an `if` with the same body) builds and computes the right answer, so
+# the arm and not the construct is the whole of it.
+
+
+def rewrite_tree(node, visit):
+    """`node` with `visit` applied to every node, replacements put back.
+
+    The mutating sibling of `iter_nodes`, for a rewrite: `visit(node)` is called
+    on each node and its return value decides what happens next.
+
+      * `None` — handled, do NOT descend. This is the arm a rewrite takes when
+        it has consumed the node (a lifted call's arguments are not part of the
+        construct any more), and it is why this is not just
+        `iter_nodes` plus a `setattr`: descending where the previous version did
+        not is a BEHAVIOUR change, and a rewrite pass that starts refusing
+        programs it used to build is not a refactor.
+      * the node ITSELF — keep it, and descend into its children. The common
+        case for a walk whose work is in place (this is what both current callers
+        return for a node they had nothing to do with).
+      * any OTHER value — the replacement to put in the parent's slot, and
+        descend into it.
+
+    Descends into every dataclass field AND through `list` and `tuple`
+    containers, so a caller cannot forget the `elifs` shape — that is the entire
+    reason this function exists rather than each rewrite spelling its own
+    recursion.
+    """
+    if isinstance(node, (list, tuple)):
+        rebuilt = [rewrite_tree(x, visit) for x in node]
+        if isinstance(node, tuple):
+            return tuple(rebuilt)
+        node[:] = rebuilt
+        return node
+    if not hasattr(node, "__dataclass_fields__"):
+        return node
+    replaced = visit(node)
+    if replaced is None:
+        return node
+    if replaced is not node:
+        return rewrite_tree(replaced, visit)
+    for name in node.__dataclass_fields__:
+        setattr(node, name, rewrite_tree(getattr(node, name), visit))
+    return node
+
+
 def struct_block_children(struct_def, decls: dict, base: int = 0,
                           depth=None) -> list:
     """`[(field, slot, child_struct, offset)]` — the nested frames in this
@@ -17138,12 +17774,31 @@ def returned_frame_container_writes(fn, holder) -> list:
 
 
 
-# How many source arguments a frame-returning callee may take. Six, because
-# that is what the SMALLER of the two ABIs on this path passes in registers
-# (see `returned_frame_convention_refusal`), and the hidden word is one of
-# them. Named rather than written at each use because the two backends have to
-# apply the same number: a build that answers "8 is fine" on arm64 and
-# "8 is not fine" on x86-64 is a two-backend disagreement about one program.
+# How many source arguments a frame-returning callee may take. Six, and the
+# reason is the HIDDEN WORD rather than the arity: it is one more argument, and
+# both backends read it out of an argument REGISTER
+# (`formal/arm64_codegen.py` and `formal/x86_64_codegen.py` move it home by the
+# register path, with no stack convention for it), so the budget is the smaller
+# of the two REGISTER FILES — six on x86-64, eight on arm64.
+#
+# **It is not the limit on how many arguments a function may take.**  Both ABIs
+# put the arguments past their register file in the caller's frame and both
+# backends implement that now (`_MAX_INCOMING_ARGS`, 24, in each), so a
+# frame-returning callee could be handed its hidden word in that area and this
+# number would become twenty-three on both machines.  It has not moved, and the
+# reason it did not is worth stating rather than leaving to be inferred from the
+# digit: the hidden word travels by a DIFFERENT path from every source argument,
+# and widening the source path is not the same change as widening this one.  A
+# callee's block address also has to survive being read out of the frame rather
+# than a register, which is a second question from whether the offset is right.
+# The filing that asked for this number to be decided BEFORE the register
+# ceiling was lifted (`bugs/FORMAL_x86_64_argument_registers.md`, deleted
+# 2026-10-02 with the emitters half landed) is the reason it is written down
+# here rather than left implicit: this is the decision.
+#
+# Named rather than written at each use because the two backends have to apply
+# the same number: a build that answers "8 is fine" on arm64 and "8 is not fine"
+# on x86-64 is a two-backend disagreement about one program.
 RETURNED_FRAME_MAX_ARGS = 6
 
 
@@ -17186,23 +17841,39 @@ def returned_frame_convention_refusal(callee, n_source_args: int,
        than an ABI one.
 
        The cost is a limit this has to refuse rather than approximate: the
-       The cost is a limit this has to refuse rather than approximate: the
-       hidden word is an argument register, and this path has a fixed number of
-       them — eight on arm64, six on x86-64, which is why `arg_regs` is a
-       parameter and the message quotes the number it was given. A callee that
-       already takes that many arguments cannot be given the word, and a
-       program that does that is refused HERE, by name, instead of being handed
-       a dropped argument and a frame written into scratch nobody reserved.
+       hidden word is an argument REGISTER — both backends move it home by
+       the register path and neither has a stack convention for it — and this
+       path has a fixed number of those, eight on arm64 and six on x86-64,
+       which is why `arg_regs` is a parameter and the message quotes the number
+       it was given. A callee that already takes that many arguments cannot be
+       given the word, and a program that does that is refused HERE, by name,
+       instead of being handed a dropped argument and a frame written into
+       scratch nobody reserved.
 
-       **THE DEFAULT IS THE SMALLER OF THE TWO, and that is a decision rather
-       than an oversight.** The build pass raises this refusal from a DECLARED
-       parameter list (`_check_returned_frame_budget`), before any backend has
-       been chosen, so it cannot quote a per-architecture budget. A build that
-       answered "8 is fine" there and then refused at emission on x86-64 would
-       be a two-backend disagreement about one source file, which is the one
-       thing this pair is not allowed to do — so the shared default is
-       `RETURNED_FRAME_MAX_ARGS` (six), each backend passes its own `arg_regs`
+       **THE DEFAULT IS THE SMALLER REGISTER FILE, and that is a decision
+       rather than an oversight.** The build pass raises this refusal from a
+       DECLARED parameter list (`_check_returned_frame_budget`), before any
+       backend has been chosen, so it cannot quote a per-architecture budget. A
+       build that answered "8 is fine" there and then refused at emission on
+       x86-64 would be a two-backend disagreement about one source file, which
+       is the one thing this pair is not allowed to do — so the shared default
+       is `RETURNED_FRAME_MAX_ARGS` (six), each backend passes its own `arg_regs`
        when it is the one asking, and the message says which budget it quoted.
+
+       **Six is NOT the limit on a function's arity, and that is the half of
+       this that is easy to misread now that both ABIs have a stack area.**
+       Arguments past the register file travel in the caller's frame on both
+       backends (`_MAX_INCOMING_ARGS`, 24, in each), so a frame-returning callee
+       could be handed its hidden word there and this budget would become
+       twenty-three on both machines at once. It has not moved, because the
+       hidden word takes a DIFFERENT path from every source argument and
+       widening the source path is not the same change: the callee would be
+       reading the CALLER's block address out of memory rather than out of a
+       register, which is a question about that address's lifetime and not about
+       the offset arithmetic both ends would otherwise share. `RETURNED_FRAME_MAX_
+       ARGS`'s own comment carries the decision in full; it was asked for by
+       step 3 of the filing that is now fixed, and answering it is half of what
+       that filing needed.
 
        **The block is COPIED into the caller's, not built in place**, and the
        copy is what a frame that arrived as a PARAMETER needs: `def fwd(r):
@@ -17562,6 +18233,86 @@ def literal_default_word(value) -> tuple:
             and isinstance(value.value, str) and not value.is_bytes:
         return (DEFAULT_STRING, value.value)
     return (DEFAULT_OPAQUE, None)
+
+
+# The accessors CPython's `enum` puts on a MEMBER, and the bases that make a
+# class one. A class deriving from any of these has members whose `.value` is the
+# class constant itself and whose `.name` is the constant's own spelling — which is
+# the whole of what `enum` asks of this path, and the reason `enum.mojo` can be
+# written at all.
+#
+# Transitive through `struct_derived_names`, so `class Reg(MyEnumBase)` is
+# recognised as well as `class Reg(Enum)`.
+ENUM_BASES = frozenset(("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag",
+                        "ReprEnum"))
+
+
+def struct_is_enum(struct_defs, struct_name: str) -> bool:
+    """True when `struct_name` derives from one of CPython's `enum` bases.
+
+    The gate on `enum_member_accessor`, and the reason it is a question about the
+    CLASS rather than about the member access. `S.NAME.value` is only an enum
+    member's value when `S` IS an enum: on a plain class CPython raises
+    `AttributeError` (`'int' object has no attribute 'value'`, measured), so
+    answering it there would be inventing an attribute the class does not have.
+
+    `struct_derived_names` already answers "which structs derive from THIS name"
+    for one name, so this asks it once per enum base and ORs — the transitive walk
+    is that function's, not a second copy of its fixed point. It takes a LIST of
+    StructDefs (it reads `name`/`bases` off each), so a caller holding the usual
+    `{name: struct}` mapping passes `list(...values())`; `_values` below does it so
+    no caller has to remember.
+
+    The base is matched by NAME because that is all this path has: `class
+    Reg(Enum)` records `bases == ['Enum']` and the enum machinery behind the name
+    is never run, so the names above ARE the rule. A program that defines its own
+    class called `Enum` is indistinguishable here from CPython's — which is the
+    same answer this path already gives for any other erased base, and the same
+    direction it takes when it cannot see a derivation (see
+    `struct_is_derived_from`)."""
+    if not struct_name:
+        return False
+    if struct_name in ENUM_BASES:
+        return True
+    return any(struct_name in struct_derived_names(_struct_def_values(struct_defs),
+                                                  base)
+               for base in ENUM_BASES)
+
+
+def _struct_def_values(struct_defs) -> list:
+    """The StructDefs in `struct_defs`, whether it is a list or a name mapping.
+
+    `struct_derived_names` and `struct_is_derived_from` both read `name`/`bases`
+    off what they are given, so they want a LIST — and every caller of the
+    derivation helpers in `formal/build.py` holds a `{name: struct}` mapping,
+    because that is what the constant census is keyed by. Normalizing here is what
+    lets both take either, which is the alternative to every call site remembering
+    (and `struct_is_enum` was wrong for exactly that reason when first written)."""
+    if isinstance(struct_defs, dict):
+        return list(struct_defs.values())
+    return list(struct_defs or [])
+
+
+def enum_member_accessor(struct_defs, struct_name: str, member: str):
+    """`'value'` / `'name'` when `S.member` is an enum member's accessor, else None.
+
+    The two attributes CPython gives every `enum` member, and the two that carry
+    an answer this path can produce exactly:
+
+      * `S.NAME.value` is the class constant `NAME` holds — the SAME literal
+        `S.NAME` itself materializes to (`class_constant_word`), because on this
+        path a member is not an object and so the member and its value are one
+        word. Verified against CPython: for `Reg.RAX = 0`, `Reg.RAX.value` is 0.
+      * `S.NAME.name` is the constant's own spelling as a string, which is the
+        member's `name` in CPython and needs nothing but the declaration site.
+
+    Gated on `struct_is_enum` because that is what makes the read an enum
+    accessor's rather than an arbitrary attribute: `S.NAME.foo` is still an
+    `AttributeError` in CPython, and so is `S.NAME.value` on a class that is not
+    an enum. Returning None for those keeps this from inventing an attribute."""
+    if member not in ("value", "name"):
+        return None
+    return member if struct_is_enum(struct_defs, struct_name) else None
 
 
 def class_constant_word(name: str, default) -> tuple:
@@ -18007,17 +18758,33 @@ def module_constant_literal(name: str):
 # The literal-only expression folder. Deliberately tiny and deliberately
 # literal-only: its whole job is to decide "can the build KNOW this value", and
 # every operator added here is one more way for a fold to be wrong. `-` and `+`
-# on integers and `+ - *` between integers is the closure that covers the
+# on integers and `+ - * //` between integers is the closure that covers the
 # module-level constants in this repository (`_PASS = 0`, `_CMP_OPS = 6`,
-# `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`); `~` is F3's operator surface and is
-# deliberately NOT here, so a module constant folded with it lands in the
-# "cannot fold" refusal rather than in a second, disagreeing implementation.
+# `_BIN_OPS = 8`, `CASE_TIMEOUT = 30 * 2`, and `std/utils/_serialize.mojo`'s
+# `_kCompactElemPerSide = _kCompactMaxElemsToPrint // 2`); `~` is F3's operator
+# surface and is deliberately NOT here, so a module constant folded with it
+# lands in the "cannot fold" refusal rather than in a second, disagreeing
+# implementation.
+#
+# `//` is the same operator `mojo/middle/comptime.py:fold_arith` gained, and
+# for the same reason, and the two must not drift: that folder decides what a
+# FUNCTION's own `comptime NAME = …` binds, this one decides what a
+# MODULE-level one binds, and `comptime_fold_refusal`'s text tells the reader
+# to write "an expression of literals and other `comptime` names" — which is
+# one folder's rule spoken for both. Python's `//` is floor division and the
+# backends' runtime division is truncation toward zero (`_emit_div_shift_pow`
+# says so), so for a NEGATIVE literal the two disagree by design; a compile-time
+# fold has to answer the SOURCE's question, and this is the source's operator.
+# A literal-zero divisor raises out of the lambda and is caught one line below,
+# the same shape `fold_arith` uses, so a module constant divided by zero lands
+# in the refusal rather than in a `ZeroDivisionError` traceback.
 _FOLD_BINOPS = {"+": lambda a, b: a + b,
                 "-": lambda a, b: a - b,
-                "*": lambda a, b: a * b}
+                "*": lambda a, b: a * b,
+                "//": lambda a, b: a // b}
 
 
-def fold_literal_expr(node):
+def fold_literal_expr(node, names=None):
     """The value of `node` when it is literal-only, else None.
 
     None means "the build does not know this", which is a refusal and not a
@@ -18027,7 +18794,22 @@ def fold_literal_expr(node):
     `None` folds to the word 0, which is the representation rather than an
     approximation (see NONE_WORD), and it is the one folded value that is not
     interchangeable with the integer 0 it is spelled as —
-    `refuse_none_comparisons` is what keeps the two apart."""
+    `refuse_none_comparisons` is what keeps the two apart.
+
+    `names` is the ONE caller-supplied thing, and it exists for
+    `fold_module_value` alone: a `{name: already-folded value}` a module-level
+    initializer may read. Every other caller passes nothing and gets exactly
+    the previous behaviour, because a name is a value only where the build has
+    already decided what that name's value is — and one place does: the
+    module-level table `collect_module_symbols` builds in source order. A
+    literal folder with a free name in it is the thing that produced a
+    fabricated word, so the parameter is deliberately narrow rather than a
+    general "resolve names" hook."""
+    if isinstance(node, F.IdentExpr) and names:
+        known = names.get(node.name)
+        if isinstance(known, (int, str)) and not isinstance(known, bool):
+            return known
+        return None
     if isinstance(node, F.IntLiteral):
         try:
             return int(node.value)
@@ -18041,23 +18823,23 @@ def fold_literal_expr(node):
             and isinstance(node.value, str):
         return node.value
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
-        v = fold_literal_expr(node.operand)
+        v = fold_literal_expr(node.operand, names)
         if isinstance(v, int) and not isinstance(v, bool):
             return -v if node.op == "-" else v
         return None
     if isinstance(node, F.BinaryOp) and node.op in _FOLD_BINOPS:
-        a = fold_literal_expr(node.left)
-        b = fold_literal_expr(node.right)
+        a = fold_literal_expr(node.left, names)
+        b = fold_literal_expr(node.right, names)
         if isinstance(a, int) and isinstance(b, int) \
                 and not isinstance(a, bool) and not isinstance(b, bool):
             try:
                 return _FOLD_BINOPS[node.op](a, b)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, ZeroDivisionError):
                 return None
     return None
 
 
-def fold_module_value(node):
+def fold_module_value(node, names=None):
     """The value of a module-level INITIALIZER this build knows, or None.
 
     Two folders, deliberately separate and deliberately in this order.
@@ -18075,8 +18857,19 @@ def fold_module_value(node):
     about to act on. What the build cannot state — a CPU feature, the target's
     own triple spelling — comes back as None, which is the same "does not know"
     the literal folder returns, so the caller keeps one code path and a
-    non-folding binding keeps its existing refusal."""
-    folded = fold_literal_expr(node)
+    non-folding binding keeps its existing refusal.
+
+    `names` is passed straight through to `fold_literal_expr` and is the
+    module-level table's own already-folded values, so an initializer may read
+    a name an EARLIER module-level statement bound. That is not a second
+    resolution rule: it is the same rule `mojo/middle/comptime.py:eval_const`
+    applies to a function-local `comptime` binding, which resolves its operand
+    names out of the bindings already recorded for the same function — and the
+    module level is the same fact about the same source shape, at the same
+    point in the same order. Before, one of the two halves existed and the other
+    did not, and the message told the reader to write exactly the half that was
+    missing."""
+    folded = fold_literal_expr(node, names)
     if folded is not None:
         return folded
     got = target_template(node)
@@ -18133,8 +18926,80 @@ def collect_module_symbols(stmts: list) -> dict:
     A module-level `if`/`for`/`try` is NOT descended into for bindings: the
     build cannot know which arm ran, so a name bound in one is `rebound` unless
     it was already bound. That is a refusal rather than a fold, and it is the
-    honest one — a fold from a conditional is a guess."""
+    honest one — a fold from a conditional is a guess.
+
+    ONE MORE THING IS WALKED IN, and it is the order of this loop that makes it
+    safe: `known` accumulates the folded value of every name bound SO FAR, and
+    an initializer may read one. The module-level sequence runs top to bottom,
+    so at the point a later statement executes, an earlier binding's value is
+    exactly the value that name has — the same premise `mojo/middle/comptime.py`
+    relies on for a function's own `comptime` bindings, where `eval_const`
+    resolves operand names out of the table recorded so far for that function.
+    Before this, the module level had the folder and not the resolution, so
+
+        comptime _kCompactMaxElemsToPrint = 7
+        comptime _kCompactElemPerSide = _kCompactMaxElemsToPrint // 2
+
+    was refused as "does not fold to a compile-time constant" — for
+    `std/utils/_serialize.mojo`, and while `comptime_fold_refusal`'s own text
+    told the reader to write "an expression of literals and other `comptime`
+    names". Only names already in `known` resolve, and only ones with a folded
+    non-`None` value: a `rebound` name whose last binding did not fold, an
+    `imported` name (its value lives in another image) and a `declared` name
+    are all absent, which is the honest answer for each. A `None`-valued
+    binding is excluded too, because its folded word is `NONE_WORD` — the
+    integer 0 wearing `None`'s spelling — and `7 + <that>` folding to 7 is
+    exactly the conflation `refuse_none_comparisons` exists to prevent.
+
+    AND ONE MORE IS DELIBERATELY LEFT OUT, which is what makes the "so far"
+    above sound rather than merely plausible: a name some FUNCTION writes through
+    `global` never enters `known`, however it was bound at module level.
+
+        G = 5
+        def bump():
+            global G
+            G = 100
+        bump()
+        comptime B = G + 1        # CPython: 101
+
+    `known[G]` is 5, and 5 + 1 is 6. The module-level sequence is not the only
+    thing that runs before that initializer: a module body may CALL a function,
+    and the caller's write lands before the read. So a name that `bump` writes
+    is excluded from resolution and `B` is refused, which is the honest answer
+    for a program this build cannot order. `functions_writing_globals` is the
+    reader, and it is the same one `collect_global_slots` uses for the same
+    reason — the value is stated at module level and the writes are stated
+    inside the bodies, so the question needs both lists — which is also why the
+    gate keys on the `global` DECLARATION and not on the assignment targets: a
+    function that assigns `G` without declaring it global binds a local that
+    shadows the module's, and such a name really is read-only at module level."""
     table: dict = {}
+    known: dict = {}
+    # EVERY FunctionDef at any depth, not the top-level ones. A `global G`
+    # inside a method is a write to the module's `G` exactly as one inside a
+    # free function is — the module is the scope either way, and the method's
+    # `self` receiver has nothing to do with which name is written — so a gate
+    # that read only the top-level list would let `class C: def bump(self):
+    # global G` through and fold a later initializer against a value that
+    # method can change. `iter_nodes` reaches a nested def and a def inside a
+    # `StructDef`'s body, which is the whole of what "any depth" has to mean
+    # here.
+    written = set(functions_writing_globals(
+        [n for n in iter_nodes(stmts or []) if isinstance(n, F.FunctionDef)]))
+
+    def remember(name, folded, value) -> None:
+        """`known[name] = folded`, unless the name is one of the four cases.
+
+        A name a FUNCTION writes through `global` is never resolvable (see the
+        section note); a `None`-valued binding is not, because its folded word
+        is `NONE_WORD` rather than the integer it is spelled as. Both are
+        absences rather than values, so this is the one place the rule is
+        written and `pop` is what says "not known"."""
+        if name in written or is_none_expr(value):
+            known.pop(name, None)
+        else:
+            known[name] = folded
+
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
@@ -18150,17 +19015,20 @@ def collect_module_symbols(stmts: list) -> dict:
         if value is None and isinstance(stmt, F.VarDecl):
             table[name] = GlobalSymbol(name, None, "declared", None,
                                        getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
         if isinstance(stmt, F.AugAssignStmt):
             table[name] = GlobalSymbol(name, None, "rebound", None,
                                        getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
-        folded = fold_module_value(value)
+        folded = fold_module_value(value, known)
         if folded is None:
             table[name] = GlobalSymbol(
                 name, None,
                 "comptime" if _comptime_statement(stmt) else "rebound",
                 None, getattr(stmt, "line", 0) or 0)
+            known.pop(name, None)
             continue
         prior = table.get(name)
         if prior is not None and prior.site not in ("imported", "declared"):
@@ -18171,11 +19039,13 @@ def collect_module_symbols(stmts: list) -> dict:
             table[name] = GlobalSymbol(
                 name, folded_literal_node(folded, value), "rebound", None,
                 getattr(stmt, "line", 0) or 0)
+            remember(name, folded, value)
             continue
         table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
                                    getattr(stmt, "line", 0) or 0,
                                    is_none_expr(value))
+        remember(name, folded, value)
     return table
 
 
@@ -19554,14 +20424,31 @@ def global_slot_kind(name: str):
     everywhere else (`ValueKinds.kind_of`), and this path's dict is a pair blob
     with a count in its first word, which is all `len` needs. The dict-vs-
     sequence distinction that a SUBSCRIPT needs is not a kind question and is
-    `global_slot_is_dict`'s."""
+    `global_slot_is_dict`'s.
+
+    A blob's kind carries its ELEMENT kind, read from the initializer that
+    stated it (`container_literal_elem_kind`), and that is the same answer
+    `ValueKinds.kind_of` gives the same literal bound to a local — so
+    `D = {"a": 10}` at module level and `d = {"a": 10}` inside a function are
+    one question with one answer, and `print(d["a"])` stops being a refusal in
+    one spelling only. The slot's own `site` is the initializer statement, which
+    is what makes the read a question about the source rather than about the
+    words the linker happened to lay out.
+
+    ONLY a slot whose initializer is a literal says this. A blob written by a
+    function (`global L; L[0] = 5` on a list of strings) has an initializer
+    that states no element kind, and `container_literal_elem_kind` answers None
+    for it, which leaves the bare `LIST_PREFIX` — an honest "a container, and
+    nothing here says what is in it" rather than a claim about a word that is
+    written at run time."""
     slot = module_slot(name)
     if slot is None:
         return None
     if slot.init[0] == "str":
         return STR_KIND
     if slot.init[0] == "blob":
-        return LIST_PREFIX
+        elem = container_literal_elem_kind(getattr(slot.site, "value", None))
+        return list_kind(elem)
     return None
 
 

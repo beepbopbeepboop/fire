@@ -602,11 +602,12 @@ def test_the_corpus_against_cpython(tmpdir):
 def test_the_corpus_against_cpython_on_x86_64(tmpdir):
     """The same corpus, on the OTHER backend, run and compared the same way.
 
-    This is new coverage rather than a repeat: until `re.mojo` fit six integer
-    argument registers it could not be compiled for x86-64 AT ALL, so the
-    45 files that import it were refused with `sub: 7 parameters exceeds the 6
-    …` and nothing here ever looked at an x86-64 `re` image. A backend that
-    can now build the module can also get it wrong — the `sub` walk keeps its
+    This is new coverage rather than a repeat: `re.mojo` used to be seven
+    parameters wide at its widest and could not be compiled for x86-64 AT ALL,
+    so the 45 files that import it were refused with `sub: 7 parameters exceeds
+    the 6 …` and nothing here ever looked at an x86-64 `re` image. It is now
+    six wide and builds for both. A backend that can build the module can also
+    get it wrong — the `sub` walk keeps its
     output-buffer state in the arena rather than in parameters, which is a
     different program to the one arm64 lowers — so the answers are compared
     against CPython on this backend too, over the same 128 cases.
@@ -943,15 +944,24 @@ def test_the_corpus_patterns_all_work(tmpdir):
 
 def test_no_signature_is_wider_than_the_smaller_abi(tmpdir=None):
     """No function in `re.mojo` takes more parameters than the SMALLER of the
-    two backends' integer argument register files passes.
+    two backends' integer argument register files passes — six.
 
-    The cheap pre-check for the thing that made this module x86-64-unbuildable
-    — `sub: 7 parameters exceeds the 6 the formal x86-64 ABI passes in
-    registers`, which cost the module itself and the 45 files that import it.
-    The x86-64 half of `test_the_module_builds_as_a_dylib_on_both_backends` is
-    the real check and it costs a whole module compile; this one parses and
-    costs nothing, so it says WHICH function is too wide instead of that a
-    build failed.
+    **That ceiling is no longer the ABI's, and the check is now narrower than
+    the rule on purpose.**  Both conventions put the arguments past the register
+    file in the caller's frame (`_MAX_INCOMING_ARGS` = 24 in each backend), so
+    `sub: 7 parameters` builds on x86-64 as it always did on arm64, and the
+    ceiling a module written today has to fit is twenty-four rather than six.
+    `re.mojo`'s widest signatures are six (`split`, `group_text`, `findall`,
+    `_term`, `_subwalk`, `_subfill`, `_run`, `_push`) because its functions were
+    NARROWED to fit six registers while there was no alternative; nothing needs
+    them wider now, and widening a host module's signatures back out is a
+    decision somebody should take rather than drift nobody notices.  So the check
+    stays at six and says why.
+
+    It is still the cheap pre-check it was written as.  The x86-64 half of
+    `test_the_module_builds_as_a_dylib_on_both_backends` is the real check and
+    it costs a whole module compile; this one parses and costs nothing, so it
+    says WHICH function is too wide instead of that a build failed.
 
     The ceiling is DERIVED from the two emitters rather than written down, for
     `test_struct_formal.py`'s reason: a hardcoded 6 would keep passing if either
@@ -1031,15 +1041,20 @@ def test_module_resolves_and_host_modelled_is_gone(tmpdir):
 def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
     """`re.mojo` compiles for arm64 AND x86-64.
 
-    The same question `test_struct_formal.py` asks, for the same reason: a
-    module compiled for BOTH backends has to fit the smaller of their integer
-    argument register files, and that is not discoverable from either backend
-    alone. It is a question about the widest signature in the file, and the
-    widest one used to be `sub`'s seven parameters — six of which the x86-64
-    ABI does not pass in registers — so this whole half of the test was
-    unreachable: the build raised the arity refusal before a container was ever
-    chosen, and the refusal was caught by the `except` arm below, which
-    accepted it. Nothing here had ever looked at an x86-64 `re` dylib.
+    The same question `test_struct_formal.py` asks, for the same reason, and it
+    used to have a premise that has since stopped being true: "a module compiled
+    for BOTH backends has to fit the smaller of their integer argument register
+    files" was right while neither ABI had a stack area, and both do now, so the
+    constraint is a shared frame budget rather than a register count. The check
+    is unaffected — it asserts the module builds for both — and it is now a
+    statement about something weaker than it was.
+
+    It is here because the widest signature in the file USED to be `sub`'s seven
+    parameters, six of which the x86-64 ABI did not pass in registers, so this
+    whole half of the test was unreachable: the build raised the arity refusal
+    before a container was ever chosen, and the refusal was caught by the
+    `except` arm below, which accepted it. Nothing here had ever looked at an
+    x86-64 `re` dylib, and `sub` has since been narrowed to six.
 
     The container is asserted against `default_format(arch)` and NOT hardcoded,
     for `test_struct_formal.py`'s reason and because this check used to carry

@@ -342,17 +342,35 @@ CAUSE_SAMPLES = [
     ("a method on a multi-field struct where a descriptor is meant",
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame"),
-    # TWO samples, one cause: this row is the register-argument count and both
-    # architectures word it from the same f-string with their own constant
-    # interpolated (`_ABI_ARG_REGS` = 8, `len(ARG_REGS)` = 6), so a table that
-    # only knew the arm64 number read 57 x86-64 files as unclassified. Both
-    # wordings are real messages from the 2026-10-01 r2 logs, one per arch.
+    # FOUR samples for one cause, because the message has been reworded once and
+    # a classifier that only knows the current wording stops seeing every sweep
+    # log ever taken — which is the failure this file exists to catch, in the
+    # direction that actually happens.
+    #
+    # The first two are the REGISTER-count wording, both real messages from the
+    # 2026-10-01 r2 logs, one per architecture: both backends build the sentence
+    # from one f-string with their own constant (`_ABI_ARG_REGS` = 8,
+    # `len(ARG_REGS)` = 6), so a table that only knew the arm64 number read 57
+    # x86-64 files as unclassified.
+    #
+    # The last two are the FRAME-BUDGET wording that replaced it on 2026-10-02,
+    # when both ABIs grew their stack-argument convention: the ceiling is now 24
+    # on both machines and the register counts are the REGISTER half of a split.
+    # Keeping the old two is not sentiment — the dated work-map tables in
+    # `bugs/` are written against logs that carry the old wording, and a sweep
+    # re-read tomorrow has to classify them the same way.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      "_build_segment_64: 9 parameters exceeds the 8 the formal arm64 ABI "
      "passes in registers"),
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      "b2_g: 7 parameters exceeds the 6 the formal x86-64 ABI passes in "
      "registers"),
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     "_build_segment_64: 25 parameters exceeds the 24 the formal arm64 ABI "
+     "passes (8 in registers and 16 on the stack)"),
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     "wide: 25 arguments exceeds the 24 the formal x86-64 ABI passes "
+     "(6 in registers and 18 on the stack)"),
     # The two x86-64-only refusals. They are the two files whose message DIFFERS
     # between architectures on an otherwise class-identical sweep
     # (`bugs/FORMAL_known_limits.md` §6.5), and they are here because the doc

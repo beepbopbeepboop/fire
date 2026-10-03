@@ -6385,7 +6385,7 @@ def _one_word_sole_field_chain(st, structs_by_name: dict) -> tuple:
 
 
 def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
-    """{local name: the SOLE-FIELD CHAIN it holds} for one-word-struct locals.
+    """{local name: the ONE-WORD STRUCT it holds} for one-word-struct locals.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
@@ -6400,12 +6400,16 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     the two never both fire for one name and cannot disagree about which field
     a name means.
 
-    The value is a CHAIN rather than one field name because the identity does
-    not stop at one level: `_one_word_sole_field_chain` has the argument, and a
-    map that recorded only the first name made `_rewrite_self_fields` rewrite
-    the first level of `b.inner.v` and leave `b.v` standing — a name that is in
-    no register home and no frame slot, so the emitter refused a field access
-    the source never wrote.
+    **The value is the STRUCT and not the chain**, which is a change of what
+    this table holds rather than of what it means, and it is what lets ONE
+    recognition of "this name is a one-word struct's word" serve both of the
+    rewrites that need it: `_rewrite_self_fields`, which wants the chain
+    (`_one_word_sole_field_chain` derives it from the struct in one line), and
+    `_rewrite_one_word_field_method_calls`, which needs the struct itself to
+    read a field's DECLARED type off it.  Recording the chain here would have
+    left the second rewrite unable to do its job without a second walk of the
+    same bindings — and two walks of one set of bindings is two recognitions
+    that can come apart, which is the shape of every drift this file has.
     """
     mapping = {}
     for node in M.iter_nodes(fn.body):
@@ -6421,12 +6425,12 @@ def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
             continue
         st = structs_by_name.get(value.func.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping[target] = _one_word_sole_field_chain(st, structs_by_name)
+            mapping[target] = st
     for pname, pst in M.parameter_declared_structs(
             fn, structs_by_name, owner).items():
         if pname in mapping or not M.struct_is_one_field(pst):
             continue
-        mapping[pname] = _one_word_sole_field_chain(pst, structs_by_name)
+        mapping[pname] = pst
     return mapping
 
 
@@ -6643,6 +6647,147 @@ def _is_sole_field_prefix(path: str, sole: tuple) -> bool:
     return bool(fields) and fields == list(sole[:len(fields)])
 
 
+def _rewrite_one_word_field_method_calls(node, one_word: dict,
+                                         structs_by_name: dict,
+                                         receiverless=()) -> None:
+    """`recv.f.m(x)` -> `F_m(recv.f, x)`, where `recv.f` is a ONE-WORD field.
+
+    **This runs before `_rewrite_self_fields`, and it has to.** That rewrite is
+    the identity `self._inner` IS `self` for a one-word struct, and it is
+    correct for a field READ. It is catastrophic for a field READ that is a
+    CALL'S RECEIVER, because the rewrite keeps the method NAME and throws away
+    the struct that name was looked up in:
+
+    ```
+    struct Slice:  var start: Int
+                   def write_to(self, w) -> Int: return self.start + w
+    struct StridedSlice:  var _inner: Slice
+                   def write_to(self, w) -> Int: return self._inner.write_to(w)
+    ```
+
+    `self._inner.write_to(w)` is a call of **`Slice.write_to`** with `self` as
+    the receiver word. After the identity rewrite the callee reads
+    `self.write_to(w)`, which is `StridedSlice.write_to` with `self` — a
+    different function, which recurses into itself forever. Measured on this
+    tree, arm64 and x86-64 identically, three different refusals depending on
+    which pass noticed:
+
+    * when `write_to` is declared by both structs, `check_value_position_
+      method_reads` sees `self.write_to` and refuses the program as "a
+      value-position method reference", which is FALSE of it (it is a call, and
+      it was Slice's) — `std/builtin/builtin_slice.mojo`'s own
+      `StridedSlice_write_to`, verbatim;
+    * when the outer method has a name of its own, the name survives and the
+      value-receiver path refuses with "`self.write_to()` is a method call on a
+      value … 'write_to' is not one of those methods";
+    * when the inner struct has two fields, there is no identity to apply and
+      `_rewrite_nested_method_calls` WOULD lift this to `Slice_write_to` — but
+      it runs inside `_frame_receivers`, which is the last rewrite in the
+      pipeline, and by then the one-word case has already been collapsed.
+
+    So the lift has to happen while the declared type is still readable, and the
+    DECLARED TYPE is the only thing that settles it: `f`'s annotation names the
+    struct the method belongs to. No inference, no second opinion — the same
+    fact `_rewrite_nested_method_calls` uses, read one pass earlier because that
+    pass is too late.
+
+    **The receiver argument stays the field access, not the local.** After this
+    rewrite `_rewrite_self_fields` collapses `recv.f` to `recv` on its way
+    through, which is exactly right: for a one-word field the two ARE the same
+    word, and that is the identity this path already relies on everywhere.
+
+    Four conditions, and each is load-bearing rather than cautious:
+
+      * the root is a one-word receiver or local (`one_word`), because that is
+        the set whose field access is about to be collapsed — a root outside it
+        is untouched by the identity and `_rewrite_nested_method_calls` still
+        sees it;
+      * the chain from the root is a prefix of the root's sole-field chain
+        (`_is_sole_field_prefix`), so the rewrite fires on exactly the
+        expressions the identity will rewrite and not on one it will leave
+        standing;
+      * the LAST field's declared type names a struct of THIS unit, which is
+        what makes the method name resolvable at all — a field declared `Int`
+        has no struct, and the emitter's own diagnosis is the true one there;
+      * the field's struct DECLARES the method. Without that last clause this
+        would lift `recv.f.m(...)` to `F_m(...)` for a name that is not a method
+        of `F`, producing a call to a symbol nothing defines — the outcome
+        `formal/model.py`'s `type_constructor_prefers_local_struct` calls out by
+        name.
+    """
+    # `model.rewrite_tree` for the `elifs` reason its own comment gives, and
+    # this walk is the SECOND consumer of it — the first is `_rewrite_method_calls`,
+    # which had the same hole and is what `std/testing/prop/random.mojo` hit. A
+    # lift that silently skips an `elif` arm is the same defect as the collapse
+    # it exists to prevent, one conditional deeper.
+    M.rewrite_tree(
+        node,
+        lambda n: None if (isinstance(n, F.CallExpr)
+                           and isinstance(n.func, F.MemberExpr)
+                           and _lift_one_word_field_method(
+                               n, one_word, structs_by_name, receiverless))
+        else n)
+
+
+def _lift_one_word_field_method(call, one_word: dict, structs_by_name: dict,
+                                receiverless) -> bool:
+    """The one call `_rewrite_one_word_field_method_calls` lifts. True if it did.
+
+    Split out so the walk above stays a walk: the conditions are five facts about
+    one node and they read as one question ("does this callee name a method of
+    the struct its receiver's DECLARED type names?"), which is not the same
+    shape as "visit every node".
+    """
+    func = call.func
+    obj = func.obj
+    if not isinstance(obj, F.MemberExpr):
+        return False
+    # `_root_ident` and not `obj.obj` being an `IdentExpr`, because the chain can
+    # be any depth: `self.x.w.m(...)` has a `MemberExpr` at the bottom of `obj`
+    # too, and a depth-2 test would leave every chain longer than one hop to be
+    # collapsed without a lift — which is the same defect one level down.
+    key = _root_ident(obj)
+    if key is None or key[1] < 1:
+        return False
+    root = key[0]
+    st = one_word.get(root)
+    if st is None:
+        return False
+    chain = _member_chain(obj)
+    if chain == root:
+        return False                      # `recv.m(x)`, `_rewrite_method_calls`'s
+    sole = _one_word_sole_field_chain(st, structs_by_name)
+    _, _, path = chain.partition(".")
+    if not _is_sole_field_prefix(path, sole):
+        return False
+    inner = _chain_declared_struct(st, path.split("."), structs_by_name)
+    if inner is None or not any(m.name == func.member
+                                for m in M.struct_methods(inner)):
+        return False
+    call.func = F.IdentExpr(name=M.method_function_name(inner.name, func.member))
+    if func.member not in (receiverless or ()):
+        call.args = [obj] + list(call.args)
+    return True
+
+
+def _chain_declared_struct(st, fields, structs_by_name: dict):
+    """The struct `st.<fields…>` names by DECLARED type, or None.
+
+    The walk `struct_field_type` makes one level at a time, and it is the same
+    reader `_one_word_sole_field_chain` uses for the identity, so the two cannot
+    disagree about what `st.f` holds. `None` at any step is the honest answer: a
+    field with no declared type, or one naming a type this unit does not
+    declare, and there is no struct to name in either case.
+    """
+    cur = st
+    for field in fields:
+        base = M.struct_field_type(cur, field, structs_by_name)[0]
+        cur = structs_by_name.get(base) if base else None
+        if cur is None:
+            return None
+    return cur
+
+
 def _constant_read_sites(fn, structs_by_name: dict, owner=None,
                          receiver_structs: dict = None) -> dict:
     """{access path: (struct, kind)} for every read of a class-level constant.
@@ -6699,6 +6844,9 @@ def _constant_read_sites(fn, structs_by_name: dict, owner=None,
             sites[f"{st.name}.{name}"] = (
                 st, "comptime" if name in M.struct_comptime_aliases(st)
                 else "constant")
+    for path, (st, kind, member) in _enum_member_sites(
+            structs_by_name, bound).items():
+        sites[path] = (st, kind, member)
     def publish(holder, st, comptime_only):
         """Every read of `st`'s class-level values through `holder`.
 
@@ -7037,6 +7185,37 @@ def _holder_class_constant_bases(by_name: dict, structs_by_name: dict) -> dict:
         if all(c is first for c in cands[1:]):
             out[name] = first
     return out
+
+
+def _enum_member_refusal(struct_def, name: str, accessor: str, default):
+    """The message for an enum member's accessor whose VALUE is not a literal.
+
+    Kept beside `_constant_literal` because it is the same refusal about the same
+    value: `S.NAME.value` is answered from the constant `NAME` holds, so a
+    `NAME` this path cannot materialize makes the accessor unanswerable too. It
+    is worded for the two-node spelling (`S.NAME.value`) rather than reusing the
+    bare-`S.NAME` text verbatim, because the reader is looking at a line that
+    says `.value` and a message about `S.NAME` alone sends them to edit the wrong
+    token.
+
+    The `name` accessor is NOT here and does not need to be: it is the constant's
+    spelling, which is a fact about the declaration site and not about its value.
+    That asymmetry is CPython's too — `Reg.A.value` fails for a computed value and
+    `Reg.A.name` still answers — which is why the rewrite tries `name` first."""
+    spelled = M.expr_spelling(default) if default is not None else "nothing at all"
+    reason = ("a `comptime` binding's value is written in the class body and is "
+              "often a CALL or a COMPUTATION rather than a literal, and this "
+              "path has no comptime evaluator to run one"
+              if _constant_kind(struct_def, name) == "comptime" else
+              "a class-level constant's value is written in the class body, and "
+              "this path has no module-global storage to read it back out of")
+    return (f"{struct_def.name}.{name}.{accessor} reads the `{accessor}` of an "
+            f"`enum` member whose value is `{spelled}` — and a formal value is "
+            f"one 64-bit word with nowhere to keep a non-literal one: {reason}. "
+            f"Write the value at the use site (a literal, or an assignment the "
+            f"compiler can see), which is the same program with a "
+            f"representation. The member's `.name` is answerable either way: it "
+            f"is the constant's spelling, not its value.")
 
 
 def _constant_literal(struct_def, name: str):
@@ -9002,6 +9181,34 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     there: a frame slot is placed by a CONSTRUCTOR, and whether the
     constructor has run is not a question a name walk can answer.
 
+    **`placed` is a union of SEVERAL kinds of home, and only one of them is
+    this function's own storage.** The walk above builds it as params ∪
+    `_names_bound_in` ∪ comptime bindings ∪ struct names ∪ every function this
+    image defines ∪ the call-site exemptions (a specialization's base, an
+    imported module, `external_call`), and "has a home" is the right question
+    for THAT walk. It is the wrong question here: the remaining kinds are
+    placed by the MODULE, not by any statement of this body, so a read of one
+    is not a read of an unstored local. Measured, on both architectures, for
+
+        def helper() -> Int:
+            return 1
+        def main():
+            f = helper
+            printf("f=%d", f())
+
+    — a program CPython runs (it prints 1; `main` is not even its entry
+    point) — refused with
+
+        main: 'helper' is read at line 5 before anything in this function
+        stores it, and CPython raises UnboundLocalError for that program
+
+    which is false in both halves: `helper` is a module-level binding the
+    body never stores and never has to, and no CPython error exists for this
+    text. The same line refused `test_stdlib.py:55` (`ex.submit(run_one, …)`,
+    a function handed to a call as a VALUE) and 96 further reads across the
+    repository, so this was a false positive on 62 files rather than a
+    diagnostic.
+
     Returns rather than raises, because of where it is called from — see the
     ordering note at the call site.
     """
@@ -9016,10 +9223,29 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     # and did not. One reader of "the names a call site binds", and it is the
     # one the ABI itself is written against.
     params = {name for name, _ptype in M.incoming_args(fn)}
+    # `incoming_args` spells a variadic parameter the way the SIGNATURE does,
+    # stars included (`*args`, `**kw`), so a body that reads one matched no
+    # entry and `read_before_store` counted a value the CALLER stored as a
+    # local nothing stored. `function_param_shape` is the reader that strips
+    # them, and it is already the one `placed` is built from above, so this is
+    # one reader of the parameter list rather than two that disagree. The
+    # build refuses such a read by name before it gets here
+    # (`_refuse_variadic_reads`, with the reason), which is why this was
+    # latent rather than visible: the analysis has to be right on its own for
+    # the direct call in `test_formal_read_before_store.py` to mean anything.
+    shape = M.function_param_shape(fn)
+    params |= {shape.vararg, shape.kwarg}
+    params.discard(None)
     # Only names this function ITSELF binds can be unstored: a parameter is
-    # stored by the caller, and everything else in `placed` is stored by
-    # something this walk does not see.
-    own = placed - params - set(frame_slots)
+    # stored by the caller, and `placed` also carries the names placed for the
+    # other reasons the docstring lists — a struct TYPE (which has no register
+    # at all, so "the allocator gave it a home" was never true of it), a
+    # function this image defines, an imported module name, a specialization's
+    # base. `_names_bound_in` is the module's one reader of "what this function
+    # writes", and intersecting with it is what makes `own` the set the
+    # refusal's sentence is about.
+    own = (placed & (_names_bound_in(fn) | _comptime_bound_names(fn))
+           ) - params - set(frame_slots)
     if not own:
         return None
     hit = M.read_before_store(fn, params, own)
@@ -9215,6 +9441,57 @@ def _first_unanswerable_mlir(value):
 
 
 
+def _enum_member_sites(structs_by_name: dict, bound: set) -> dict:
+    """`{access path: (struct, kind, 'value'|'name')}` for every ENUM accessor read.
+
+    The `.value` / `.name` half of the census, and it exists because of a measured
+    SILENT WRONG ANSWER rather than a refusal. Before it, on this tree, arm64:
+
+        class Reg(Enum):
+            RAX = 0
+            R15 = 15
+        def main() -> int:
+            printf("%d %d\\n", Reg.R15.value, Reg.RAX.value)   # prints 0 0
+            return 0
+
+    CPython prints `15 0`. The cause is ordering, and it is not the backends': a
+    read of `Reg.R15` is a class-level constant and `_apply_constant_sites`
+    substitutes the literal `15` for it, so the tree reaching the emitter holds
+    `15.value` — a `MemberExpr` whose object is a literal, and the arm that
+    handles "a field read through a base this image cannot classify" evaluates
+    the base for its side effects and returns 0 (the comment there says so). The
+    constant was answered correctly one node too early and the accessor was then
+    answered as if the member were storage.
+
+    That is the worst shape a backend bug can have here, and it is why the fix is
+    in the SHARED rewrite rather than in either emitter: `formal/x86_64.py` reads
+    `Reg.RAX.value` and `Reg.R15.value` in its register-number arithmetic
+    (`_rm_disp`, `_modrm`, the RAX..R15 range assertions), so an image built with
+    the answer wrong there computes wrong machine code, prints it, and exits 0.
+
+    Only an ENUM's members get this (`model.struct_is_enum`), because `value` and
+    `name` are attributes the enum machinery adds: on any other class CPython
+    raises `AttributeError` (`'int' object has no attribute 'value'`, measured on
+    this tree's 3.14), and answering it there would be inventing an attribute.
+
+    `kind` is the constant's own kind, carried through so the refusal arm can say
+    whether the value it cannot materialize is a `comptime` binding or an
+    assignment — the same distinction the bare `S.NAME` read makes.
+    """
+    sites = {}
+    for st in structs_by_name.values():
+        if st.name in bound:
+            continue
+        if not M.struct_is_enum(structs_by_name, st.name):
+            continue
+        for name, _default in M.struct_class_constants(st):
+            kind = ("comptime" if name in M.struct_comptime_aliases(st)
+                    else "constant")
+            for accessor in ("value", "name"):
+                sites[f"{st.name}.{name}.{accessor}"] = (st, kind, accessor)
+    return sites
+
+
 def _apply_constant_sites(node, sites: dict, disputed: dict = None):
     """The substitution itself, over a statement tree, in place.
 
@@ -9256,6 +9533,28 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
             return tuple(items)
         node[:] = items
         return node
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.MemberExpr) \
+            and isinstance(node.obj.obj, F.IdentExpr):
+        # `S.NAME.value` / `S.NAME.name` on an ENUM, which is TWO nodes and is
+        # therefore missed by the arm below (its object is a MemberExpr, not the
+        # IdentExpr that arm requires). Left alone it is worse than missed: the
+        # arm below substitutes `Reg.R15` -> `15` on the INNER node, and the
+        # outer one then reaches the emitter as `15.value`, which reads 0 where
+        # CPython reads 15. So this arm has to come FIRST, and it consumes the
+        # whole two-node path. See `_enum_member_sites` for the measurement.
+        inner = sites.get(f"{node.obj.obj.name}.{node.obj.member}.{node.member}")
+        if inner is not None:
+            st, kind, accessor = inner
+            if node.member == "name":
+                # The member's `name` is the constant's own spelling, which is a
+                # fact about the DECLARATION SITE and not about its value, so it
+                # is answerable even where the value is not (see below).
+                return F.StringLiteral(value=node.obj.member)
+            literal, default = _constant_literal(st, node.obj.member)
+            if literal is not None:
+                return literal
+            raise CodegenError(_enum_member_refusal(
+                st, node.obj.member, accessor, default))
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         why = (disputed or {}).get(f"{node.obj.name}.{node.member}")
         if why is not None:
@@ -9645,13 +9944,26 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                                  method_owners.get(fn.name),
                                  _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
-        # constructor holds that struct's only field directly.  The chain, not
-        # the first name, for the reason `_one_word_sole_field_chain` gives.
-        mapping = _one_word_field_map(fn, structs_by_name,
-                                      method_owners.get(fn.name))
+        # constructor holds that struct's sole field directly.  The table holds
+        # the STRUCT and the chain is derived from it in one line, because the
+        # rewrite below needs the struct and the rewrite after that needs the
+        # chain — one recognition of "this name is a one-word word", read twice.
+        one_word = _one_word_field_map(fn, structs_by_name,
+                                       method_owners.get(fn.name))
         st = method_owners.get(fn.name)
         if st is not None and M.struct_is_one_field(st):
-            mapping["self"] = _one_word_sole_field_chain(st, structs_by_name)
+            one_word["self"] = st
+        # A method call THROUGH a one-word field, lifted while the field's
+        # DECLARED type can still be read — the identity below is about the same
+        # storage but it keeps the method name and loses the struct, and a
+        # method name without its struct is a call to the wrong function
+        # (`_rewrite_one_word_field_method_calls` has the three refusals and the
+        # measurement; `std/builtin/builtin_slice.mojo`'s `StridedSlice` is the
+        # source of the shape).
+        _rewrite_one_word_field_method_calls(fn.body, one_word,
+                                             structs_by_name, receiverless)
+        mapping = {name: _one_word_sole_field_chain(one, structs_by_name)
+                   for name, one in one_word.items()}
         _rewrite_self_fields(fn.body, mapping)
         # A class-level CONSTANT is not part of any value, so it is not
         # lowered as a field: it is materialized where it is read. Without
@@ -9932,46 +10244,52 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     the argument for why that has to happen here rather than being left to the
     link audit. Before it, `bs[0].get()` compiled to a call against a symbol
     spelled `get`."""
-    if isinstance(node, list):
-        for x in node:
-            _rewrite_method_calls(x, owners, wide, receiverless, fn_name,
-                                  imported)
-        return
-    if isinstance(node, F.CallExpr):
-        target = _method_call_target(node, owners)
+    # `model.rewrite_tree`, and the walk it brings with it: `IfStmt.elifs` is a
+    # list of TUPLES, so a recursion that tests `isinstance(node, list)` stops
+    # dead at the first `elif` while `model.iter_nodes` — which every LATE check
+    # uses — walks all of them. That gap is what made a method call inside an
+    # `elif` reach `check_value_position_method_reads` unlifted and be refused
+    # as a value-position method reference, with the message telling the reader
+    # to add parentheses a call already had (`std/testing/prop/random.mojo`'s
+    # `Rng.rand_scalar`, measured 2026-10-02; `model.rewrite_tree`'s comment is
+    # the long form). `None` from `visit` means "handled, do not descend", which
+    # is what the two `return`s below did.
+    def visit(n):
+        if not isinstance(n, F.CallExpr):
+            return n
+        target = _method_call_target(n, owners)
         if target is None:
-            why = _receiver_shape_refusal(node, owners, fn_name, imported)
+            why = _receiver_shape_refusal(n, owners, fn_name, imported)
             if why is not None:
                 raise CodegenError(why)
-        if target is not None:
-            owner, member, receiver = target
-            if (wide or {}).get(owner) is not None:
-                st = wide[owner]
-                raise CodegenError(
-                    f"{owner}.{member}() cannot be lowered: its "
-                    f"receiver has {M.struct_field_summary(st)}, and a formal "
-                    f"value is one 64-bit word, so `self.<field>` has no "
-                    f"representation on this path. The receiver would have to "
-                    f"be a pointer to an out-of-line frame of fields, which is "
-                    f"a change to the value model the two backends AND the Lean "
-                    f"proof share, not to this one function. Concretely, "
-                    f"{M.struct_width_cost(st)}")
-            lifted = F.IdentExpr(name=M.method_function_name(owner, member))
-            if member not in (receiverless or ()):
-                node.args = [receiver] + list(node.args)
-            if isinstance(node.func, F.SubscriptExpr):
-                # The brackets stay, and stay on the callee: they are the
-                # specialization, and the emitter reads them off the callee
-                # (`arm64_codegen._specialization_of`).  Only the BASE is
-                # replaced, which is the one thing that changes — it becomes the
-                # lifted name instead of the receiver's.
-                node.func.obj = lifted
-                return
-            node.func = lifted
-            return
-    for name in getattr(node, "__dataclass_fields__", {}):
-        _rewrite_method_calls(getattr(node, name), owners, wide, receiverless,
-                              fn_name, imported)
+            return n
+        owner, member, receiver = target
+        if (wide or {}).get(owner) is not None:
+            st = wide[owner]
+            raise CodegenError(
+                f"{owner}.{member}() cannot be lowered: its "
+                f"receiver has {M.struct_field_summary(st)}, and a formal "
+                f"value is one 64-bit word, so `self.<field>` has no "
+                f"representation on this path. The receiver would have to "
+                f"be a pointer to an out-of-line frame of fields, which is "
+                f"a change to the value model the two backends AND the Lean "
+                f"proof share, not to this one function. Concretely, "
+                f"{M.struct_width_cost(st)}")
+        lifted = F.IdentExpr(name=M.method_function_name(owner, member))
+        if member not in (receiverless or ()):
+            n.args = [receiver] + list(n.args)
+        if isinstance(n.func, F.SubscriptExpr):
+            # The brackets stay, and stay on the callee: they are the
+            # specialization, and the emitter reads them off the callee
+            # (`arm64_codegen._specialization_of`).  Only the BASE is
+            # replaced, which is the one thing that changes — it becomes the
+            # lifted name instead of the receiver's.
+            n.func.obj = lifted
+            return None
+        n.func = lifted
+        return None
+
+    M.rewrite_tree(node, visit)
 
 
 def _receiver_shape_refusal(call, owners: dict, fn_name, imported=()):
@@ -11312,7 +11630,11 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     # module's source with its own `_frame_receivers` pass, has no table saying
     # which of this library's functions take the extra word, and passes
     # arguments the way the source spells them — so an exported one copies its
-    # caller's block into whatever the seventh argument register held.
+    # caller's block into whatever the argument register the caller passed it in
+    # held.  (The word, not the index: the hidden word travels by the REGISTER
+    # path on both backends — `model.RETURNED_FRAME_MAX_ARGS` — while source
+    # arguments past the register file travel in the caller's frame, so "the
+    # seventh argument register" names x86-64's first STACK slot.)
     frame_returns = [fn.name for fn in ordered
                      if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
     offered = [n for n in frame_returns
