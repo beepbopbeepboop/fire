@@ -565,16 +565,37 @@ _TRACEBACK_MARK = "Traceback (most recent call last)"
 _FRAME_RE = re.compile(r'^\s+File "([^"]+)"', re.M)
 
 # Substrings of the messages formal/build.py and formal/imports.py raise for a
-# failed import. Both raise ImportBuildError with one wording for one
-# condition (build.py's own comment says two messages for one cause is how a
-# real failure ends up filed under the wrong heading), so these two markers
-# partition that error space between them. Matching the wording rather than
-# re-deriving the condition is deliberate: formal/ owns the condition, and a
-# second copy of HOST_MODULES here would be a list that silently rots.
-# Nothing keys off the exact template — an unrecognised shape falls into
-# CLASS_UNKNOWN below rather than being guessed at.
+# failed import. All raise ImportBuildError with one wording for one condition
+# (build.py's own comment says two messages for one cause is how a real failure
+# ends up filed under the wrong heading), so these markers partition that error
+# space between them. Matching the wording rather than re-deriving the condition
+# is deliberate: formal/ owns the condition, and a second copy of HOST_MODULES
+# here would be a list that silently rots. Nothing keys off the exact template —
+# an unrecognised shape falls into CLASS_UNKNOWN below rather than being guessed
+# at. There are THREE markers rather than two because
+# `formal/imports.py::unresolvable_import_error` has three wordings, not two.
 _HOST_MARK = "host module (CPython standard library)"
 _UNRESOLVED_MARK = "not a stdlib or sibling module"
+# THE THIRD of the three wordings `formal/imports.py::unresolvable_import_error`
+# can produce, and the one this pair of markers above did not know about. It is
+# the SAME class of fact — a CPython stdlib module with no Mojo source in this
+# tree — said apart from `_HOST_MARK`'s on purpose, because the two differ in
+# something a reader acts on: a name in `host_module_tier`'s `modelled` or
+# `admitted` tier has an owner and a next step, and a name in NO tier has
+# neither (`bugs/FORMAL_stdlib_module_names_are_not_classified.md` is the queue;
+# `formal/imports.py`'s own comment says the split is deliberate).
+#
+# Measured on the 2026-10-03 sweep, and the cost of not having this marker was
+# four files in `unknown` — a class that is in NO rate — with the reason printed
+# in full on the row: `test_ast_formal.py` and `test_no_new_container_casts.py`
+# (`tokenize`), `test_formal_platform.py` (`plistlib`), `tools/codeindex.py`
+# (`sqlite3`). The backend was RIGHT about all four; this tool could not read it.
+# Classified as CLASS_HOST, which is the not-answerable bucket the fact belongs
+# to, and deliberately NOT added to `IN_REACH_HOST_MODULES`: this sweep reports
+# a build's verdict and does not claim a tier for a name the build says it cannot
+# classify. A name that gains a tier moves out of here on its own, because the
+# next build stops refusing it.
+_STDLIB_UNCLASSIFIED_MARK = "a CPython standard-library module"
 _EXTERN_MARK = "import(s) dyld cannot resolve"
 # The SAME fact, caught a step earlier. `formal/build.py`'s bind audit refuses a
 # build whose image would bind a symbol no linked library provides, and says so
@@ -1239,19 +1260,46 @@ def _system_module_call(term: str, source=None) -> str:
         for a host module `mod` this file actually imports. Structural, and
         the file's own source is the confirmation, so a coincidental `a.b` in a
         diagnostic cannot put a file in a class its own text contradicts.
+
+    **The second way asks the TIER and not membership of `HOST_MODULES`, and
+    that is the fix, not a refinement.** `HOST_MODULES` is
+    `HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED`, so it answers "does the
+    backend know this name", and a name in the `modelled` or `admitted` tier
+    HAS a `formal/hostmods/` source — which makes this class's own sentence,
+    "no Mojo source on any path", false of it. Measured on the 2026-10-03
+    sweep: 11 files whose refusal is
+
+        line 324: `subprocess.TimeoutExpired` is a handler arm with a body this
+        path cannot put in the image, so it is refused rather than dropped: …
+
+    were filed `not-answerable/system-module-call`, on the strength of the
+    mention — `subprocess` is in `HOST_MODULES`, being admitted, and the file
+    does import it. Every clause of the class's claim is false of that row:
+    nothing is CALLED, `subprocess` answers under declared contracts, and the
+    refusal is a construct refusal (`FORMAL_except_arm_is_never_emitted`,
+    another worker's row) which this class had just hidden from the codegen
+    count. `host_module_tier` is the authority the sweep's own reach split and
+    its own test suite already read for exactly this question, so the fix is one
+    reader of one table rather than a second copy of the division.
+
+    `test_formal_sweep_truth.py` states the rule this now implements: "a name in
+    `HOST_MODULES` that is MODELLED or ADMITTED answers, so a refusal naming it
+    is about a construct in a module this build compiles and not a fact about
+    the target". The first arm is untouched on purpose: when the BUILD says "no
+    Mojo source on any path", that is the backend talking about itself and this
+    tool does not get to have an opinion about it.
     """
     if _SYSCALL_MARK in term:
         m = _MEMBER_RE.search(term)
         return m.group(1) if m else "a system module"
     if not source:
         return ""
-    declared = _declared_host()
     try:
-        from formal.imports import HOST_MODULES
+        from formal.imports import HOST_UNREACHABLE, host_module_tier
     except Exception:
         return ""
     for mod, member in _MEMBER_RE.findall(term):
-        if (mod in HOST_MODULES or mod.split(".")[0] in HOST_MODULES) \
+        if (mod in HOST_UNREACHABLE or host_module_tier(mod) == "unreachable") \
                 and _source_imports(source, mod):
             return mod
     return ""
@@ -1435,7 +1483,8 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
             # would file a missing-module finding under "not fixable here".
             if _UNRESOLVED_MARK in multi.group("body"):
                 cls = CLASS_UNRESOLVED
-            elif _HOST_MARK in multi.group("body"):
+            elif _HOST_MARK in multi.group("body") \
+                    or _STDLIB_UNCLASSIFIED_MARK in multi.group("body"):
                 cls = CLASS_HOST
             else:
                 # A wording this tool has not learned to read, kept in its own
@@ -1457,7 +1506,7 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
         # is the one to report; naming the outer module instead would blame a
         # module that resolves perfectly well.
         mod = mods[-1]
-        if _HOST_MARK in detail:
+        if _HOST_MARK in detail or _STDLIB_UNCLASSIFIED_MARK in detail:
             return CLASS_HOST, mod
         if _UNRESOLVED_MARK in detail:
             return _import_class(mod)

@@ -671,6 +671,74 @@ class TestSystemModuleCall(unittest.TestCase):
                                   "import os\n\ndef main():\n    pass\n"),
             "")
 
+    # ── the TIER, not membership of HOST_MODULES ──────────────────────────
+    #
+    # Measured on the 2026-10-03 sweep: 11 files were filed
+    # `not-answerable/system-module-call` whose refusal is an except-ARM
+    # refusal, and every clause of this class's claim was false of them.
+
+    _ADMITTED_MEMBER = "subprocess.TimeoutExpired"
+    _ARM_REFUSAL = (
+        "line 324: `subprocess.TimeoutExpired` is a handler arm with a body "
+        "this path cannot put in the image, so it is refused rather than "
+        "dropped: `formal` has no exception unwinder, so no edge runs from a "
+        "raise site into an arm")
+    _ARM_SRC = ("import subprocess\n\n"
+                "def main():\n"
+                "    try:\n"
+                "        subprocess.run(['x'])\n"
+                "    except subprocess.TimeoutExpired as e:\n"
+                "        print('timed out', e)\n")
+
+    def test_a_handler_arm_naming_an_ADMITTED_module_is_a_construct_refusal(self):
+        """The regression, verbatim from the run, and it is 11 files.
+
+        `subprocess` is in `HOST_MODULES` because that set is
+        `UNREACHABLE | MODELLED | ADMITTED`, and the file really does import it
+        — so the structural arm fired on a MENTION. Nothing is called, and
+        `subprocess` answers under declared contracts, so "has no Mojo source
+        on any path" is false of it. The refusal underneath is a construct
+        refusal (`FORMAL_except_arm_is_never_emitted`), and filing it here hid
+        a real codegen gap from the count that exists to measure them.
+        """
+        import formal.imports as I
+        self.assertEqual(I.host_module_tier("subprocess"), "admitted",
+                         "the fixture names an ADMITTED module; if subprocess "
+                         "moved tier, re-pick the fixture")
+        self.assertEqual(
+            S._system_module_call(self._ARM_REFUSAL, self._ARM_SRC), "",
+            "a construct refusal was filed as a fact about the target")
+        cls, _reason = S.classify(False, f"build: {self._ARM_REFUSAL}",
+                                  None, self._ARM_SRC)
+        self.assertEqual(cls, S.CLASS_CODEGEN)
+
+    def test_the_tier_is_what_the_rule_asks_and_not_HOST_MODULES(self):
+        """The premise, asserted, because the rule reads a set that grows.
+
+        `HOST_MODULES` grew by every hostmod written since; the class did not,
+        and the two disagreeing is exactly what put 11 files in the wrong
+        bucket. So the authority is named here rather than left to the fix's
+        own comment: the class fires for `unreachable` names and for nothing
+        else.
+        """
+        import formal.imports as I
+        for name in I.HOST_UNREACHABLE:
+            if "." in name or not I._is_host_module(name):
+                continue
+            src = f"import {name}\n\ndef main():\n    pass\n"
+            self.assertEqual(
+                S._system_module_call(f"build: {name}.somefn() cannot be "
+                                      f"lowered here", src), name)
+            break
+        for name in sorted(I.HOST_ADMITTED)[:5]:
+            top = name.split(".")[0]
+            src = f"import {top}\n\ndef main():\n    pass\n"
+            self.assertEqual(
+                S._system_module_call(f"build: {top}.somefn() cannot be "
+                                      f"lowered here", src), "",
+                f"{top} is admitted and answers, so a refusal naming it is "
+                f"about a construct, not about the target")
+
     def test_classify_routes_it_out_of_codegen(self):
         cls, reason = S.classify(
             False, "build: os.getenv: os has no Mojo source on any path",
@@ -791,6 +859,58 @@ class TestSeveralUnresolvableImports(unittest.TestCase):
             source="import nope_xyz\n", path="prog.mojo")
         self.assertEqual(cls, S.CLASS_UNRESOLVED)
         self.assertEqual(reason, "nope_xyz")
+
+
+class TestTheThirdImportWording(unittest.TestCase):
+    """`unresolvable_import_error` has THREE wordings and this tool knew two.
+
+    The third is for a CPython stdlib name that `formal/imports.py` does not
+    put in any tier — `tokenize`, `plistlib`, `sqlite3` — and it says so
+    ("no tier in `formal/imports.py` saying whether implementing it would need
+    an object this target does not have"). Before the marker existed, the
+    2026-10-03 sweep filed four files as `unknown`: a class that is in NO rate,
+    with the backend's own correct answer printed in full on the row.
+    """
+
+    WORDING = ("build: test_ast_formal.py imports 'tokenize', which is a "
+               "CPython standard-library module, which has no Mojo source in "
+               "this tree and no tier in `formal/imports.py` saying whether "
+               "implementing it would need an object this target does not "
+               "have — so nothing here can say whether it is reachable")
+
+    def test_it_is_host_import_and_not_unknown(self):
+        cls, reason = S.classify(False, self.WORDING,
+                                 source="import tokenize\n", path="a.py")
+        self.assertEqual(cls, S.CLASS_HOST)
+        self.assertEqual(reason, "tokenize")
+
+    def test_the_backend_still_produces_this_wording(self):
+        """The anti-rot: a marker with no producer is a marker with no cause.
+
+        Read out of `formal/imports.py` rather than pinned here, so the day the
+        backend words this differently the test says so instead of the sweep
+        quietly going back to `unknown`.
+        """
+        import formal.imports as I
+        got = I.unresolvable_import_error("x.py", "tokenize")
+        self.assertIn(S._STDLIB_UNCLASSIFIED_MARK, got,
+                      "the wording the classifier matches is not the one the "
+                      "backend emits; re-read it rather than adding a second "
+                      "spelling")
+        self.assertEqual(I.host_module_tier("tokenize"), "",
+                         "the fixture names an UNTYPED module; if tokenize "
+                         "gained a tier this row is about something else")
+
+    def test_it_is_not_added_to_the_reach_mirror(self):
+        """Deliberate, and pinned so a later reader does not "fix" it.
+
+        This sweep reports a build's verdict. Claiming a tier for a name the
+        build says it cannot classify would be the tool inventing the fact its
+        own reason string says is missing — and it would move the reach line
+        without anyone writing a module. A name that gains a tier stops being
+        refused, and then it leaves here on its own.
+        """
+        self.assertNotIn("tokenize", S.IN_REACH_HOST_MODULES)
 
 
 # ── 4. an interpreter that cannot import the backend ─────────────────────────
