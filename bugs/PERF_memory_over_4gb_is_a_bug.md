@@ -16,9 +16,10 @@ them the self-hosted subject:
 
 | what | before | after | where |
 |---|---|---|---|
-| `print` of a container in a loop (`gimple_printed_container_does_not_grow`, seven shapes x 60000) | 87.2 MB | **12.8 MB** | `PERF_printed_container_repr_leaks_its_cat_buffers.md` |
+| `print` of a container in a loop (`gimple_printed_container_does_not_grow`, seven shapes x 60000) | 87.2 MB | **12.8 MB** | the `mojo_str_cat` chain's left operand, per element (doc deleted with its fix) |
+| `print` of a struct in a loop (`gimple_printed_struct_repr_does_not_grow`, 100000 lines) | 18.6 MB | **9.4 MB** | one leaked string per FIELD of `_mojo_repr_{sn}`; the residual 80 B/print is the unfreed top-level repr result, filed separately |
 | a per-character string scan (`gimple_char_scan_allocates_nothing_per_character`, 16M characters) | 246.7 MB | **1.6 MB** | one `malloc(2)` per character: `s[i]` was `mojo_cstr_slice(s, i, i+1)` |
-| a printed container's own report (`print(xs)` x 200000) | 99.7 MB | — | same |
+| a printed container's own report (`print(xs)` x 200000) | 99.7 MB | — | same family |
 | an integer that reached a dict key as a computed address | SIGSEGV | correct | `RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md` |
 
 Two are orders of magnitude under the 3-4 GB line and always were; what they

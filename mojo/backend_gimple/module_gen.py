@@ -1119,16 +1119,20 @@ def _emit_reflection_dispatch(self, parts):
                # shared static, and "None" is a literal. Every walker in the
                # four functions below therefore had to leave its per-slot
                # string alone, which is why a printed N-element container
-               # leaked N of them on top of the N+1 cat buffers:
-               # bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md.
+               # leaked N of them on top of the N+1 cat buffers (a bug doc
+               # since deleted with the fix, which is what this comment used to
+               # cite by path).
                # Copying the two non-owned answers on the way out is the same
                # remedy `_key_slot_str` already applies on the dict-key path
                # (runtime/fire_runtime.c), for the same reason.
                #
-               # `_mojo_dispatch_repr` and the per-struct `_mojo_repr_{sn}`
-               # dumps keep their shared returns: no walker frees either of
-               # them, so there is nothing to release, and this change does not
-               # get to invent a second ownership story for them.
+               # `_mojo_dispatch_repr` keeps its shared returns: its other
+               # caller (the `repr(x)` site) has no release point for them, so
+               # making it own its result would trade one leak for another.
+               # The per-struct `_mojo_repr_{sn}` field dump no longer has that
+               # problem — it COPIES this dispatch's answer, the same way it
+               # gets its `"None"` fallback from `_mojo_repr_none()`, so the
+               # dump can release every one of its fields.
                "static char * _mojo_repr_list (MojoList *lst) {\n"
                "  /* A list that carries its own per-slot element kinds — a\n"
                "     `struct.unpack` result for a format that MIXES int/float/\n"

@@ -7031,8 +7031,8 @@ char *mojo_repr_list_doubles(MojoList *l) {
            chain of N cats that never frees its left operands leaked N+1
            buffers (sized to the text so far, so O(N^2) bytes) per printed
            container -- ~500 B per `print` of an 8-element list, which is a
-           `--dump`, a logging line, or any other loop that prints.
-           bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md */
+           `--dump`, a logging line, or any other loop that prints. Fixed; the
+           bug doc is deleted with the fix and its reasoning is this comment. */
         char *_s = mojo_repr_float(mojo_list_get_double(l, _i));
         _buf = mojo_str_cat_free(_buf, _s);
         free(_s);

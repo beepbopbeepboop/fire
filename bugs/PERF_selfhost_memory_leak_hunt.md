@@ -91,9 +91,13 @@ Two of the leaks in this tree's own "before/after" story were real programs, not
 the self-hosted compiler, and both are now measured:
 
 * a printed container leaked its `mojo_str_cat` buffers — 200000 `print(xs)` of
-  an 8-element list peaked at **99.7 MB**, and seven shapes 60000 times now
-  peak at **12.8 MB** against the same program
-  (`bugs/PERF_printed_container_repr_leaks_its_cat_buffers.md`);
+  an 8-element list peaked at **99.7 MB**. All of that family is now fixed and
+  its doc is deleted with the fix: seven container shapes 60000 times peak at
+  **12.8 MB**, and a printed STRUCT's per-field strings went with it
+  (176.7 -> 80.4 B/iteration, `gimple_printed_struct_repr_does_not_grow`). What
+  remains in that family is the top-level repr result `print` never frees —
+  16.4 B per container print —
+  `bugs/CODEGEN_print_of_a_container_never_frees_the_repr_it_asked_for.md`;
 * a per-character string scan allocated one `malloc(2)` per character —
   `gimple_char_scan_allocates_nothing_per_character` measured **246.7 MB** and
   now measures **1.6 MB**. That one was `s[i]` spelled `mojo_cstr_slice(s, i,
