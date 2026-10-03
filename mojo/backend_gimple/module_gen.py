@@ -39,7 +39,29 @@ import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.coro as gimple_gen_coro
-import mojo.middle.infra_infer as ginf
+# `mojo.middle.infra_infer` is imported at its USE SITE, not here, and that is
+# the layering rule rather than a style choice. The middle tier's own
+# `module_shared` says it: the direction that stays top-level is
+# `middle -> gimple_codegen`, and every edge back down into the middle tier is
+# deferred. This file is DOWNSTREAM of `gimple_codegen`, so a top-level
+# `import mojo.middle.infra_infer` here starts the chain before
+# `gimple_codegen` has defined anything, and `infra_infer`'s own top-level
+# `import gimple_codegen` then leads `emit_infra`'s top-level
+# `from mojo.middle.infra_infer import _FC_SEP, ...` back into a half-built
+# `infra_infer`:
+#
+#   ImportError: cannot import name '_FC_SEP' from partially initialized
+#   module 'mojo.middle.infra_infer' (most likely due to a circular import)
+#
+# So this module could not be a process's FIRST `mojo.*` import at all — the
+# one thing `test_suite.py`'s `imports: every real entry point imports first`
+# exists to catch, and the shape of it is identical for the eight middle
+# modules that exemption list already names. `gimple_codegen` imports THIS
+# module at its own top level, so the re-entrancy it causes is already here
+# and already works; what has to stay away is the edge that begins the chain
+# in the wrong direction. Same rule and same precedent as
+# `emit_funcs._struct_method_qualifier`'s function-local
+# `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -5634,7 +5656,11 @@ def gen_module_impl(self, stmts):
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
                 # Same key, for the sibling table the ASSIGNMENT SITE reads
                 # mid-body under `current_func_name` — see
-                # `ginf.alias_multi_kind_locals`.
+                # `ginf.alias_multi_kind_locals`, imported here rather than at
+                # this module's top level so that `import
+                # mojo.backend_gimple.module_gen` can be a process's FIRST
+                # `mojo.*` import (see the import block's comment).
+                import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
@@ -7679,7 +7705,11 @@ def gen_module_impl(self, stmts):
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
                 # Same key, for the sibling table the ASSIGNMENT SITE reads
                 # mid-body under `current_func_name` — see
-                # `ginf.alias_multi_kind_locals`.
+                # `ginf.alias_multi_kind_locals`, imported here rather than at
+                # this module's top level so that `import
+                # mojo.backend_gimple.module_gen` can be a process's FIRST
+                # `mojo.*` import (see the import block's comment).
+                import mojo.middle.infra_infer as ginf
                 ginf.alias_multi_kind_locals(self, key, m)
     _reconcile_param_container_kinds()
 
