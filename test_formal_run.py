@@ -1679,6 +1679,27 @@ CASES = [
      "    return poly([1, 2, 3])\n",
      "refuse_either:does not fold to a compile-time constant"
      "|unsupported statement ComptimeVarStmt", None),
+    # The ninth FLOATING conversion of a variadic call, which is the boundary
+    # of `model.printf_argument_classes`'s placement and the reason the boundary
+    # is a refusal rather than an approximation. SysV AMD64 has eight XMM
+    # registers, so the ninth `double` is an overflow argument in the caller's
+    # frame at a slot nothing on this path assigns; the eight that fit are
+    # placed by `encode_movq_xmm_rm64`.
+    #
+    # `refuse_either:` because the two backends refuse for DIFFERENT and both
+    # honest reasons — arm64 has no second register file at all (AAPCS passes
+    # everything in x0..x7) and says the variadic stack area is unplaced, while
+    # x86-64 says what its own ABI says the ninth one is. Same verdict, and the
+    # shared-text rule cannot apply because the two limits are genuinely
+    # different facts about two ABIs.
+    ("limit_a_ninth_floating_printf_operand",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 4607182418800017409\n"
+     "    printf(\"%f %f %f %f %f %f %f %f %f\",\n"
+     "           a, a, a, a, a, a, a, a, a)\n"
+     "    return 0\n",
+     "refuse_either:floating conversions"
+     "|puts 2 of them past the 8 argument registers", None),
     # A body written `...` is a declaration with no instructions behind it, and
     # there is nothing to emit. Reached only where the walk actually gets to
     # the body — an `...` in a trait method nothing calls compiles, which is
@@ -5634,6 +5655,33 @@ BOTH_ARCH_CASES = [
      "    comptime c = ~3\n"
      "    comptime d = -2\n"
      "    return c + d + 11\n", 5, None),
+    # A `while` BODY's store read after the loop, where the condition is
+    # decidable on entry because the preheader states it.  This is the shape
+    # `bugs/FORMAL_while_body_store_refused_though_the_loop_runs.md` is about,
+    # and the reason the row is here and not only in
+    # `test_formal_read_before_store.py` is that the analysis answering `ok` and
+    # the EMITTED image printing 1 are two different claims: the analysis runs
+    # no code at all, and the register the read comes from is a caller-supplied
+    # word, so "the analysis stopped refusing" would be satisfied by a build
+    # that answers 8432255232.
+    #
+    # `t` is stored ONLY in the loop body, which is the whole point: before
+    # `model._preheader_literals` this program's build was REFUSED, because the
+    # body's first iteration depended on a condition the graph could not decide.
+    # The values distinguish the iteration counts — `t` takes `i + 1` on each
+    # pass, so it ends at 3 for `i = 2` and `i` at 3 — so a build that ran the
+    # body zero times, or once, or twice, prints a different pair, and a build
+    # that left the slot at the caller's word does not print this at all.
+    ("both_arch_while_body_store_read_after_the_loop",
+     "def f(n):\n"
+     "    var i = 0\n"
+     "    while i < 3:\n"
+     "        t = i + 1\n"
+     "        i = i + 1\n"
+     "    printf(\"t=%d i=%d\", t, i)\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(0)\n", 0, "t=3 i=3"),
 ]
 
 ASSIGNED_TYPE_REFUSALS = [
@@ -13139,6 +13187,94 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # ANSWERED ones (`run_case` dispatches on the expectation, not the group), so
 # they no longer say what this paragraph says about them; they are here
 # because the diagnosis they record is a diagnosis about a refusal.
+# `int(s)` and `int(s, base)` — a PARSE, not a conversion. See
+# bugs/FORMAL_two_argument_int_is_refused.md (deleted by the commit that landed
+# this) for the two-operand refusal that used to fire; what is here is the
+# one-operand half, which was WORSE and silent: the arity test did not fire, so
+# a string was read as the NUMBER its bit pattern is and `int("41")` answered the
+# ADDRESS of the literal — 48694217 on arm64 and 4449243 on x86-64, two
+# architectures disagreeing about one program.
+#
+# Every expected value is CPython's, and each is chosen so a lowering wrong in an
+# interesting way prints something else: `0x29` is 41 only if the `0x` PREFIX is
+# read, `-7` is negative only if the sign survives, `  41  ` is 41 only if BOTH
+# ends' whitespace is, and `ff` is 255 only if the base is the STATED one rather
+# than base 10. 0 is in there because `int("0")` is 0: a parse that could not
+# tell "parsed zero" from "parsed nothing" would have no way to refuse anything.
+INT_PARSE_CASES = [
+    ("int_of_a_decimal_string",
+     'def main():\n'
+     '    printf("%d %d %d %d", int("41"), int("0"), int("-7"),'
+     ' int("  41  "))\n'
+     '    return 0\n', 0, "41 0 -7 41"),
+    ("int_with_a_stated_base",
+     'def main():\n'
+     '    printf("%d %d %d %d %d", int("41", 10), int("ff", 16),'
+     ' int("101010", 2), int("777", 8), int("+7", 10))\n'
+     '    return 0\n', 0, "41 255 42 511 7"),
+    # A base's own PREFIX, which is the case a reader is most likely to think is
+    # about the base rather than about the digits: C's `strtoll` takes `0x` with
+    # an explicit 16 and `strtoll`'s auto-detection takes it with 0, and both are
+    # this path. It also pins that the base is not double-applied — `0x29` in
+    # base 16 is 41, and a lowering that passed 16 twice would not be.
+    ("int_in_base_sixteen_reads_the_0x_prefix",
+     'def main():\n'
+     '    printf("%d %d %d", int("0x29", 16), int("FF", 16), int("0xff", 16))\n'
+     '    return 0\n', 0, "41 255 255"),
+    # The one-operand form through a PARAMETER, which is the shape a real caller
+    # has and the one the emitter's evidence test turns on: an annotated
+    # `String` parameter is positively text, and an undecided operand keeps the
+    # number conversion.
+    ("int_of_a_string_parameter",
+     'def parse(s: String) -> Int:\n'
+     '    return int(s)\n'
+     'def main():\n'
+     '    printf("%d %d", parse("41"), parse("-123"))\n'
+     '    return 0\n', 0, "41 -123"),
+    # …and the CONTROL: `int(n)` for a NUMBER is unchanged, which is what the
+    # permissive `None` in `model.int_parse_lowering` exists for. A parse applied
+    # to a number would make every numeric `int(x)` in the corpus a parse of
+    # digits, and the operand is an unannotated word there.
+    ("int_of_a_number_is_still_a_conversion",
+     'def widen(n: Int) -> Int:\n'
+     '    var v = int(n)\n'
+     '    var w = Int32(n)\n'
+     '    printf("%d %d", v, w)\n'
+     '    return 0\n'
+     'def main():\n'
+     '    widen(300)\n'
+     '    return 0\n', 0, "300 300"),
+]
+
+# The four ways the parse is REFUSED, and each is a different fact:
+#
+#   * a base that is not a constant the build knows — the base is an immediate in
+#     both lowerings, so a run-time base would need a slot to survive the call;
+#   * base 0, which is CPython's "detect from the prefix" and NOT something
+#     `strtoll` does the same way (`model.int_parse_base_is_valid` has the
+#     measured table);
+#   * a first operand that is not text, which is a CATEGORY error rather than an
+#     arity one and so must not borrow the arity sentence;
+#   * a base outside 2..36, which is `int(s, 1)` and is refused because neither
+#     C nor CPython has a base 1 — a `0 <= base <= 36` test would let it through.
+INT_PARSE_REFUSALS = [
+    ("int_parse_base_zero_refused",
+     "def f(s: String) -> Int:\n    return int(s, 0)\n",
+     "refuse:0 is CPython's", None),
+    ("int_parse_non_constant_base_refused",
+     "def f(s: String, n: Int) -> Int:\n    return int(s, n)\n",
+     "refuse:it is not a constant the build knows", None),
+    ("int_parse_non_text_first_operand_refused",
+     "def f(n: Int) -> Int:\n    return int(n, 16)\n",
+     "refuse:the second operand of this call is a BASE", None),
+    ("int_parse_base_one_refused",
+     "def f(s: String) -> Int:\n    return int(s, 1)\n",
+     "refuse:1 is not a base", None),
+    ("int_parse_three_operands_refused",
+     "def f(s: String) -> Int:\n    return int(s, 16, 3)\n",
+     "refuse:takes exactly one value to convert on this path (got 3", None),
+]
+
 REFUSAL_CASES = [
     # The ARITY LADDER rows below were REFUSALS here and are ANSWERED ones in
     # `BOTH_ARCH_CASES` now, so they no longer say what the paragraph this group
@@ -13292,6 +13428,26 @@ REFUSAL_CASES = [
      "    printf(\"total=%d\", total)\n"
      "    return 0\n",
      "refuse:is read at line 2 before anything in this function stores it",
+     None),
+    # A `while` BODY's store read after the loop, with the counter coming from a
+    # PARAMETER. This is the limit `model._preheader_literals` leaves in place
+    # and it is pinned here rather than only in
+    # `test_formal_read_before_store.py`, because a refusal that holds on one
+    # machine and not the other is the divergence this pair of backends is not
+    # allowed to have, and `run_case` checks the needle on BOTH for a
+    # `refuse:` row without needing the `BOTH_ARCH_CASES` group. CPython raises
+    # `UnboundLocalError` for `n == 0`, where the body never runs.
+    ("while_body_store_from_a_parameter_refused",
+     "def f(n):\n"
+     "    var i = n\n"
+     "    while i < 3:\n"
+     "        t = 1\n"
+     "        i = i + 1\n"
+     "    printf(\"t=%d\", t)\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    return f(0)\n",
+     "refuse:is read at line 6 before anything in this function stores it",
      None),
     # THE CONTROLS, and they are the reason the three above are believable:
     # each is a name that IS stored before it is read, in a shape close
@@ -14899,7 +15055,8 @@ def main():
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
-                  + SHIFT_CASES + REFUSAL_CASES
+                  + SHIFT_CASES + REFUSAL_CASES + INT_PARSE_CASES
+                  + INT_PARSE_REFUSALS
                   + TYPE_APPLICATION_REFUSALS + TYPE_VALUE_CASES \
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \

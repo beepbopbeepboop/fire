@@ -2870,35 +2870,61 @@ _CMP_OPS = {
 }
 
 
-def _literal_truth(e) -> object:
+def _cfg_int_value(e, consts=None) -> object:
+    """The `int` an operand stands for, reading `consts` for a NAME.
+
+    `_cfg_int_literal` answers "is this node a literal"; this answers "what
+    integer is this operand", which is the same question plus one source of
+    evidence. `consts` is `_preheader_literals`'s `{name: int}`, and a name it
+    does not have is still None — the conservative answer, and the one that
+    keeps the edge."""
+    v = _cfg_int_literal(e)
+    if v is None and consts and isinstance(e, F.IdentExpr):
+        v = consts.get(e.name)
+    return v
+
+
+def _literal_truth(e, consts=None) -> object:
     """True/False when `e`'s value is decidable here, None when it is not.
 
-    Only INTEGER LITERALS, and that restriction is the point: an answer
-    computed from a literal is a fact about the program, while an answer
-    computed from a name would be an assumption about what the name holds,
-    and the whole analysis is careful to make no such assumption. Anything
-    unrecognised — a name, a call, a chained comparison with a name in it, a
-    float — is None, and None is the answer that keeps the edge.
+    Only INTEGER LITERALS and the NAMES `consts` has decided, and that
+    restriction is the point: an answer computed from a literal is a fact about
+    the program, while an answer computed from a name would be an assumption
+    about what the name holds — unless the name's every binding on the path is
+    itself a literal, which is what `consts` carries and
+    `_preheader_literals` establishes. Anything unrecognised — an undecided
+    name, a call, a chained comparison with an undecided operand, a float — is
+    None, and None is the answer that keeps the edge.
 
     A single `a < b` is a `BinaryOp` in this AST and only a CHAIN of two or
     more comparisons is a `CompareChain`, so both are here: reading only the
     chain is how `while 1 < 2:` — the shape a generated bound is written in —
     came out undecidable.
+
+    `consts` is optional and its absence is exactly the old behaviour, so the
+    caller that has no evidence (every caller but `_loop_body_always_runs`)
+    reads the same function rather than a second copy of it.
     """
     if isinstance(e, F.BoolLiteral):
         return bool(e.value)
+    if isinstance(e, F.IdentExpr) and consts and e.name in consts:
+        # A name that is DECIDED is a value, and a value is either truthy or
+        # not: `while i:` with `i = 0` is a loop that never runs, and answering
+        # anything else would be inventing an edge.
+        return bool(consts[e.name])
     if isinstance(e, F.UnaryOp) and getattr(e, "op", None) == "not":
         inner = _literal_truth(getattr(e, "operand", None) or
-                               getattr(e, "expr", None))
+                               getattr(e, "expr", None), consts)
         return None if inner is None else (not inner)
     if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
-        left = _cfg_int_literal(getattr(e, "left", None))
-        right = _cfg_int_literal(getattr(e, "right", None))
+        left = _cfg_int_value(getattr(e, "left", None), consts)
+        right = _cfg_int_value(getattr(e, "right", None), consts)
         if left is None or right is None:
             return None
         return bool(_CMP_OPS[e.op](int(left), int(right)))
     if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
-        vals = [_cfg_int_literal(o) for o in (getattr(e, "operands", None) or [])]
+        vals = [_cfg_int_value(o, consts)
+                for o in (getattr(e, "operands", None) or [])]
         if any(v is None for v in vals):
             return None
         for op, a, b in zip(e.ops, vals, vals[1:]):
@@ -2909,7 +2935,142 @@ def _literal_truth(e) -> object:
     return None
 
 
-def _loop_body_always_runs(s) -> bool:
+def _cfg_literal_effects(stmts, consts: dict) -> dict:
+    """`consts` after a straight-line run, with each statement's own effect.
+
+    The same statement vocabulary as `_cfg_block_defs` and the same rule about
+    what a block holds — a control-flow statement is always ALONE in its block
+    and its arms are separate blocks, so it has no effect here either, and the
+    join intersects.
+
+    **A binding to anything but an integer literal REMOVES the name**, and that
+    is the direction that matters. `i = 0` then `i = f()` leaves `i` undecided,
+    so a later `while i < 3` keeps its zero-iteration edge; the alternative —
+    keeping the older literal — would answer `True` for a program whose loop may
+    not run at all, which is the wrong-answer direction this whole analysis is
+    built to refuse.
+    """
+    out = dict(consts)
+    for s in (stmts or []):
+        kind = type(s).__name__
+        if kind in ("AssignStmt", "VarDecl"):
+            target = getattr(s, "target", None)
+            name = getattr(s, "name", None)
+            value = _cfg_int_literal(getattr(s, "value", None))
+            if value is not None:
+                if kind == "AssignStmt":
+                    for n in _store_names(target):
+                        out[n] = int(value)
+                elif isinstance(name, str):
+                    out[name] = int(value)
+                continue
+            names = _store_names(target) if kind == "AssignStmt" else (
+                {name} if isinstance(name, str) else set())
+        elif kind in ("AugAssignStmt", "MultiAssignStmt", "DelStmt",
+                      "ComptimeVarStmt", "ForStmt", "ComptimeForStmt"):
+            if kind in ("MultiAssignStmt", "DelStmt"):
+                names = set()
+                for t in (getattr(s, "targets", None) or []):
+                    names |= _store_names(t)
+            else:
+                names = _store_names(getattr(s, "target", None))
+        elif kind == "WithStmt":
+            names = {getattr(it, "alias", None)
+                     for it in (getattr(s, "items", None) or [])}
+        elif kind == "TryStmt":
+            names = {getattr(h, "name", None)
+                     for h in (getattr(s, "handlers", None) or [])}
+        elif kind == "MatchStmt":
+            # A `match` head binds no name of its own, and its arms'
+            # CAPTURES are `None`-valued on every path, so nothing here can
+            # keep a name decided that the head did not.
+            names = set()
+        else:
+            continue
+        for n in names:
+            if isinstance(n, str):
+                out.pop(n, None)
+    return out
+
+
+def _preheader_literals(blocks: list, head_index: int, entry: int) -> dict:
+    """`{name: int}` bound to an integer literal on EVERY path into `head_index`.
+
+    **The second source of evidence `_loop_body_always_runs` reads.** "Did the
+    body run at least once" is a question about the condition ON ENTRY, and the
+    graph says nothing about values: `i = 0` then `while i < 3:` is a fact the
+    preheader states and the edges cannot. So this walks the same CFG a third
+    time — `head_index`'s predecessors, and everything that reaches them,
+    which is every block on some path to the header and no block after it — and
+    carries a "definitely this integer" table along each edge.
+
+    The lattice is a partial map, and the two directions are both deliberate:
+
+    * a name enters a block's IN set only when EVERY predecessor's OUT set has
+      it at the same value, and a predecessor with no entry for it (a path that
+      does not bind it at all, or binds it from a parameter) removes it. This is
+      the same intersection `_definitely_stored` does over NAMES rather than
+      values, and it is why `i = 0` before one arm and `i = 5` before the other
+      decides nothing;
+    * it starts EMPTY and iterates up, not top-initialised, because the answer
+      being computed is "is this name decided here" and an undecided name must
+      not be assumed. `_definitely_stored` top-initialises because it answers
+      the opposite question.
+
+    A block's SEEDED names are dropped (`seed` is what a `match` capture puts
+    there): a capture binds the subject, whose value is not a literal, and a
+    seed is per-arm anyway.
+    """
+    region = set()
+    stack = [p for p in blocks[head_index].preds] if blocks else []
+    while stack:
+        i = stack.pop()
+        if i in region or not (0 <= i < len(blocks)) or i == head_index:
+            continue
+        region.add(i)
+        stack.extend(blocks[i].preds)
+    if not region:
+        return {}
+    order = sorted(region)
+    out: dict = {i: {} for i in order}
+    changed = True
+    rounds = 0
+    while changed:
+        changed = False
+        rounds += 1
+        nxt: dict = {}
+        for i in order:
+            b = blocks[i]
+            merged = None
+            for p in b.preds:
+                if p == head_index or p not in region:
+                    continue
+                p_out = _cfg_literal_effects(blocks[p].stmts, out[p])
+                merged = dict(p_out) if merged is None else {
+                    n: v for n, v in merged.items()
+                    if n in p_out and p_out[n] == v}
+            if merged is None:
+                merged = {}
+            for n in b.seed:
+                merged.pop(n, None)
+            nxt[i] = _cfg_literal_effects(b.stmts, merged)
+        for i in order:
+            if nxt[i] != out[i]:
+                out[i] = nxt[i]
+                changed = True
+        if rounds > len(order) + 2:
+            break
+    merged = None
+    for p in blocks[head_index].preds:
+        if p not in region:
+            continue
+        p_out = _cfg_literal_effects(blocks[p].stmts, out[p])
+        merged = dict(p_out) if merged is None else {
+            n: v for n, v in merged.items() if n in p_out and p_out[n] == v}
+    return merged or {}
+
+
+def _loop_body_always_runs(s, consts=None) -> bool:
     """Whether this loop's body is guaranteed to execute at least once.
 
     **The one question a CFG cannot answer, and the two cases where it can.**
@@ -2925,17 +3086,27 @@ def _loop_body_always_runs(s) -> bool:
     a refusal, and only when the body provably ran, so this cannot introduce a
     wrong answer. Keeping it when the answer is merely unknown refuses a
     program that works — `while i < 3: t = 1; i = i + 1` then `print(t)` is
-    such a program, and the cost of answering that one exactly is a constant
-    propagation the model does not do. It is the one limit this analysis has
-    that can break working code, it is recorded in
-    `test_formal_read_before_store.py`, and it is the reason the rule is here
-    at all: without it, every `while True:` in the corpus would have its body's
-    stores treated as non-dominating, which is a false refusal of a shape the
-    language writes constantly.
+    exactly such a program, and `consts` is what now answers it: the preheader
+    says `i = 0` and the condition says `i < 3`, so the body provably ran. The
+    residual limit is a binding the preheader cannot state as a literal (`i =
+    f()`, or `i` a parameter), and that one is recorded in
+    `test_formal_read_before_store.py`; it is the reason the rule is here at
+    all, since without it every `while True:` in the corpus would have its
+    body's stores treated as non-dominating, which is a false refusal of a shape
+    the language writes constantly.
     """
     kind = type(s).__name__
     if kind == "WhileStmt":
-        return _literal_truth(getattr(s, "condition", None)) is True
+        cond = getattr(s, "condition", None)
+        # Two sources of evidence, in one order and through one reader: the
+        # condition's OWN literals first, which is `_literal_truth` unchanged,
+        # and the preheader's constants second. The order is not cosmetic — a
+        # condition the preheader makes False is still False, and answering
+        # `True` from the condition's own literals alone would drop an edge the
+        # program really has.
+        if _literal_truth(cond) is True:
+            return True
+        return _literal_truth(cond, consts) is True
     if kind in ("ForStmt", "ComptimeForStmt"):
         it = getattr(s, "iterable", None)
         if isinstance(it, (F.ListExpr, F.TupleExpr, F.SetExpr)):
@@ -3018,6 +3189,24 @@ def _build_cfg(body) -> tuple:
         blocks.append(b)
         return b
 
+    def edge(src, dst) -> None:
+        """Record `src -> dst` on BOTH lists, and it is one function because
+        they have to be added together.
+
+        `preds` used to be filled in a single pass at the end of the build, out
+        of `succs`. That cannot serve `_preheader_literals`, which is called
+        from INSIDE the build (a loop header's condition has to be decided
+        while its own block is being emitted) and reads `preds` to find the
+        blocks that reach it. Two lists maintained in two places is also how one
+        of them ends up describing a different graph from the other.
+        """
+        if src is None or dst is None:
+            return
+        if not (0 <= src < len(blocks) and 0 <= dst < len(blocks)):
+            return
+        blocks[src].succs.append(dst)
+        blocks[dst].preds.append(src)
+
     def open_block(stmts, pending: list, seed=None, facts=None) -> _Block:
         """Open a block for `stmts` and make every `pending` exit reach it.
 
@@ -3040,8 +3229,8 @@ def _build_cfg(body) -> tuple:
         if facts:
             b.intro.update(facts)
         for p in pending:
+            edge(p, b.index)
             if p is not None and 0 <= p < len(blocks):
-                blocks[p].succs.append(b.index)
                 key = false_exits.get(p)
                 if key:
                     b.false_from[p] = key
@@ -3160,18 +3349,19 @@ def _build_cfg(body) -> tuple:
                 # every loop, `while True:` included.
                 latch = new([])
                 for be in body_exits:
-                    blocks[be].succs.append(latch.index)
+                    edge(be, latch.index)
                 for c in frame["continues"]:
-                    blocks[c].succs.append(latch.index)
+                    edge(c, latch.index)
                 if frame["first"] is not None:
-                    blocks[latch.index].succs.append(frame["first"])
+                    edge(latch.index, frame["first"])
                 # The loop's `else` clause runs when the loop finished without
                 # a `break`, which is the same two paths — so it hangs off the
                 # latch AND, when the body may never run, off the header.
                 # Emitted with this loop POPPED, so a `break` inside it is the
                 # enclosing loop's rather than this one's.
                 exit_from = [latch.index]
-                if not _loop_body_always_runs(s):
+                if not _loop_body_always_runs(
+                        s, _preheader_literals(blocks, head.index, entry)):
                     exit_from.append(head.index)
                     # The header's exit edge IS "the condition failed", the same
                     # fact the `else` clause carries and for the same reason.
@@ -5203,6 +5393,96 @@ def string_operand_is_string(kind) -> bool:
 # wrote and hands it to C unchecked.
 PRINTF_TEXT_CONVERSIONS_CALLEES = frozenset({"printf"})
 
+# The two argument classes SysV AMD64 sorts arguments into, as the two short
+# strings the tables below spell them with. `str` is not one of them: a `char *`
+# is an INTEGER argument (a pointer), which is why `%s` costs a GPR on this ABI
+# and not an XMM.
+INTEGER_CLASS = "integer"
+SSE_CLASS = "sse"
+
+# ── the FLOATING conversions, and the class each conversion puts its argument in ──
+#
+# SysV AMD64 classifies every argument as INTEGER or SSE and allocates the two
+# classes from INDEPENDENT register files: an INTEGER argument consumes the next
+# of the six GPRs, an SSE one the next of the eight XMMs, and only a class that
+# has run out of registers goes to the stack. So a `double` at vararg position 0
+# is XMM0 and does NOT consume RDI, which means the INTEGER argument after it is
+# RDI and not RSI — a call that "passes the arguments in order" gets that case
+# wrong in a way no amount of moving a single operand can repair.
+#
+# `aA` are the floating conversions; the `L`/`l` length modifiers and the `0`
+# flags are already consumed by `_PRINTF_CONVERSION_RE`, which returns the
+# CONVERSION character, so `%.17g`, `%le` and `%La` all arrive here as `g`, `e`
+# and `a`. `%n` is not in it (it writes through a pointer) and `%p` is not
+# (Darwin's `%p` renders the ADDRESS, which is an integer word).
+PRINTF_FLOAT_CONVERSIONS = frozenset("aAeEfFgG")
+# Eight XMM registers, and the boundary is the ABI's rather than this path's.
+PRINTF_SSE_REGISTERS = 8
+PRINTF_INTEGER_REGISTERS = 6
+
+
+def printf_argument_classes(fmt_text) -> list | None:
+    """`[INTEGER|SSE]` per vararg of a format string, or None if unparsed.
+
+    Index `j` of the answer is vararg `j` — the argument after the format
+    string — and it is the same index arithmetic
+    `printf_conversion_specifiers` establishes, read from the same parse, so the
+    two cannot disagree about where a conversion's argument is. A `*` width or
+    precision consumes an argument and is classified INTEGER, which is what C
+    says: a `*` reads an `int`.
+
+    The format STRING is argument 0 and is INTEGER — it is a pointer, and it is
+    the caller's one fixed argument rather than a vararg, so the answer starts
+    at the first conversion and the caller is expected to prepend it.
+
+    None for a format this does not parse, and that is the permissive direction
+    and the same one `printf_conversion_specifiers` takes: a call whose
+    conversions cannot be enumerated keeps whatever behaviour it had, rather
+    than becoming a new refusal.
+    """
+    convs = printf_conversion_specifiers(fmt_text)
+    if convs is None:
+        return None
+    return [SSE_CLASS if c in PRINTF_FLOAT_CONVERSIONS else INTEGER_CLASS
+            for c in convs]
+
+
+def printf_float_operand_indices(fmt_text) -> set | None:
+    """Which vararg positions a floating conversion reads, or None if unparsed.
+
+    The narrower question `printf_argument_classes` answers, and the one the
+    emitter actually asks at the point where it moves a word into an XMM: given
+    `"%f %lld %g"`, the answer is `{0, 2}` — position 1 is an integer and must
+    NOT be moved. Asking for the classes and filtering is one reader of the
+    same parse, not a second parser that could enumerate the conversions
+    differently.
+    """
+    classes = printf_argument_classes(fmt_text)
+    if classes is None:
+        return None
+    return {j for j, c in enumerate(classes) if c == SSE_CLASS}
+
+
+def printf_float_conversion_refusal(callee: str, n_float: int) -> str:
+    """Why a floating conversion this path does not place is refused.
+
+    The ninth and later floating conversions are the boundary, and it is the
+    ABI's: SysV AMD64 has eight XMM registers, so the ninth `double` is an
+    OVERFLOW argument and lives in the caller's frame at a slot the register
+    numbering no longer describes. That is a construct this path could place —
+    the stack half of the calling convention is here — and it is not placed
+    here, so it is refused by name rather than emitted into the wrong slot,
+    which would print one operand's bits under another operand's conversion.
+    """
+    return (
+        f"{callee}'s format string has {n_float} floating conversions, and "
+        f"this path places the first {PRINTF_SSE_REGISTERS} of them: SysV "
+        f"AMD64 passes a `double` in XMM0..XMM{PRINTF_SSE_REGISTERS - 1} and "
+        f"the one after that in the caller's frame, at a slot this path does "
+        f"not assign. Refused rather than emitted, because a conversion "
+        f"reading another operand's word is a wrong answer that prints."
+    )
+
 # A printf conversion specification: `%`, the flags, an optional width and
 # precision (each of which may be `*`, which is itself an argument), an
 # optional length modifier, and the conversion character.  `%%` matches and is
@@ -5627,6 +5907,212 @@ def printf_format_refusal(callee: str, fmt_text, args: list, text_of):
     """
     return (printf_missing_operand_refusal(callee, fmt_text, len(args))
             or printf_text_conversion_refusal(callee, fmt_text, args, text_of))
+
+
+
+# ── `int(s, base)`: a PARSE, not a conversion ─────────────────────────────────
+#
+# A conversion takes one operand and `int(x)` for a NUMBER is one: it is an
+# `IntN(...)` width/sign change and `INT_TYPE_CTORS` is the table of them. What
+# is not a conversion is `int(s, base)`, where the first operand is TEXT and the
+# second is a parameter of the same operation rather than a second value. The
+# two backends each carried the refusal for that as a private copy of one arity
+# test, which is why a construct the language has and the target can express was
+# refused identically on both machines with a message about arity.
+#
+# The answer needs no new storage and no new value: it is a machine word, which
+# is what a formal value already is, and `strtoll` is libc, already on the link
+# line and already used for `strlen` and `strncmp`. What the lowering CANNOT
+# skip is the validation — `strtoll` returns 0 for a string with no digits in it
+# where CPython raises `ValueError` — so the emitters pass an `endptr` and stop
+# the program when it is not at the end (see `int_parse_trap_message`).
+#
+# The one-operand `int(s)` is in the SAME table and was the worse defect: with
+# one operand the old arity test did not fire, so a string was read as the NUMBER
+# its bit pattern is and `int("41")` answered the ADDRESS OF THE LITERAL. The two
+# architectures answered different addresses for the same program
+# (`a=48694217` on arm64, `a=4449243` on x86-64, measured), which is the
+# divergence this pair of backends is not allowed to have.
+
+#: C's six whitespace characters, as the NUL-terminated string `strspn` measures
+#: a run against. In `model.py` and not in either emitter because it is a fact
+#: about CPython's `int(s)` that BOTH backends have to honour, and two copies of
+#: a six-character set is two chances for them to disagree about whether
+#: `int(" 41 ")` is 41.
+C_WHITESPACE = " \t\n\v\f\r"
+
+#: `0` is CPython's "detect the base from the prefix". It is named here because
+#: the REFUSAL below has to name what it refuses, and it is not a base this path
+#: accepts — see `int_parse_base_is_valid`.
+INT_PARSE_BASE_AUTO = 0
+INT_PARSE_BASE_MIN = 2
+INT_PARSE_BASE_MAX = 36
+
+
+def int_parse_base_is_valid(base) -> bool:
+    """Whether `base` is a base both CPython's `int(s, base)` and `strtoll` take.
+
+    `2..36`, and nothing else. **`0` is NOT valid**, which is the one decision
+    here that a reader is most likely to disagree with, so it is measured rather
+    than argued: CPython's auto-detection and C's are the same function with
+    three different rules, and `strtoll` is the only implementation available on
+    this path.
+
+    | spelling | CPython | `strtoll(s, &end, 0)` |
+    |---|---|---|
+    | `"41"` | 41 | 41 |
+    | `"0x1f"` | 31 | 31 |
+    | `"0o17"` | 15 | stops at `o` — 0 |
+    | `"0b1"` | 1 | stops at `b` — 0 |
+    | `"017"` | `ValueError` | 15 |
+    | `"00"` | 0 | 0 |
+    | `"1_000"` | 1000 | 1 |
+    | `"  41  "` | 41 | 41 (leading skipped, trailing needs the `strspn` the emitters do) |
+
+    Three of those are a WRONG ANSWER rather than a missing one: `0o`/`0b` would
+    answer 0 for a value that is 15 and 1, and `017` answers 15 where CPython
+    raises. Answering them needs CPython's rule written out — skip whitespace,
+    take a sign, apply it to the digits rather than to the string, then decide
+    among four prefixes and validate the digit class — which is a mini-parser in
+    two backends for a spelling whose only user in this repository is
+    `mlir.py`'s `int(head, 0)` on a hex string, and `int(head, 16)` says the same
+    thing. So base 0 is REFUSED by name, which is the direction this path takes
+    everywhere else: `model.int_parse_base_refusal` states the bases that do
+    work rather than approximating one that does not.
+    """
+    return (isinstance(base, int) and not isinstance(base, bool)
+            and INT_PARSE_BASE_MIN <= base <= INT_PARSE_BASE_MAX)
+
+
+def int_parse_lowering(name: str, operands: list, text_of) -> tuple:
+    """`("parse", base)` | `("convert", None)` | `("refuse", reason)`.
+
+    The decision is arch-free and it is HERE rather than in either backend's
+    conversion emitter, for the reason every other rule on this path lives here:
+    both backends carried the same refusal as two copies of one arity test, and
+    two copies are how a construct ends up answered one way on arm64 and another
+    on x86-64.
+
+    `text_of(op)` is the emitter's THREE-WAY question "is this operand text",
+    the same shape `printf_text_conversion_refusal` is written against and for
+    the same reason:
+
+    | `text_of` | meaning | `int(op)` | `int(op, base)` |
+    |---|---|---|---|
+    | `True` | the operand is a string | a parse in base 10 | a parse in `base` |
+    | `False` | it is not, and the source says so | a conversion (unchanged) | refused |
+    | `None` | the source does not say | a conversion (unchanged) | refused |
+
+    **`None` is the permissive direction and it is load-bearing.** An
+    unannotated parameter is a word this build cannot classify, and
+    `int(n)` where `n` really is a number is the conversion this path has always
+    performed; reading "not known to be text" as "text" would parse a number as
+    digits, and reading it as "not text" for the ONE-operand form would refuse
+    every numeric `int(x)` in the corpus. So the one-operand form keeps today's
+    answer for an undecided operand and the two-operand form refuses, where the
+    second operand's meaning makes guessing impossible in both directions.
+
+    A base is a COMPILE-TIME constant here (`fold_literal_expr`, which also
+    answers `0 - 1` and `1 * -1`), because `strtoll` takes it as an immediate in
+    both lowerings and because a base computed at run time is a different
+    question: it would need a register and, on arm64, a frame slot to survive
+    the call. It is refused by name rather than approximated.
+    """
+    if len(operands) == 1:
+        if text_of(operands[0]) is True:
+            return ("parse", 10)
+        return ("convert", None)
+    if len(operands) != 2:
+        return ("refuse", int_parse_arity_refusal(name, len(operands)))
+    if text_of(operands[0]) is not True:
+        return ("refuse", int_parse_non_text_refusal(name, spelled(operands[0])))
+    base = fold_literal_expr(operands[1])
+    if base is None:
+        return ("refuse", int_parse_base_refusal(
+            name, spelled(operands[1]),
+            "it is not a constant the build knows, and the base is passed to "
+            "`strtoll` as an immediate in both lowerings — a base read at run "
+            "time would need a slot of its own to survive the call, and it is a "
+            "different question from a stated one"))
+    if not int_parse_base_is_valid(base):
+        why = ("0 is CPython's \"detect the base from the prefix\", and this "
+               "path cannot: `strtoll` is the only parser here and its "
+               "auto-detection is not CPython's — `int(\"0o17\", 0)` is 15 and "
+               "`strtoll` gives 0, `int(\"0b1\", 0)` is 1 and `strtoll` gives "
+               "0, and `int(\"017\", 0)` RAISES where `strtoll` gives 15. Two "
+               "of those are wrong answers rather than missing ones, and the "
+               "alternative is CPython's prefix rule written out by hand in "
+               f"both backends. Say the base: {INT_PARSE_BASE_MIN} through "
+               f"{INT_PARSE_BASE_MAX} are exact, and `int(s)` is base "
+               f"{INT_PARSE_BASE_MIN + 8}"
+               if base == INT_PARSE_BASE_AUTO else
+               f"{base} is not a base (CPython's `int(s, base)` takes "
+               f"{INT_PARSE_BASE_MIN}..{INT_PARSE_BASE_MAX})")
+        return ("refuse", int_parse_base_refusal(name, spelled(operands[1]),
+                                                 why))
+    return ("parse", int(base))
+
+
+def int_parse_arity_refusal(name: str, got: int) -> str:
+    """`f(x, y, z)` where a conversion or a parse takes at most two."""
+    return (f"{name}(...) takes exactly one value to convert on this path "
+            f"(got {got} argument(s))")
+
+
+def int_parse_non_text_refusal(name: str, operand: str) -> str:
+    """`int(x, base)` where the first operand is not text.
+
+    A different refusal from the arity one on purpose: the arity message is
+    about a count, and the count here is right. What is wrong is the CATEGORY —
+    the second operand is a BASE, and a base is a parameter of a parse, so this
+    is only a question when the first operand is a string. CPython raises
+    `TypeError` for the same program.
+    """
+    return (f"{name}({operand}, ...) is refused on this path: the second "
+            f"operand of this call is a BASE, so the first is a string to parse "
+            f"and `{operand}` is not one this build knows to be text. "
+            f"`{name}(x)` with one operand is still the number conversion it "
+            f"always was; it is the second operand that makes this a parse, and "
+            f"a parse of a number is not a question this path answers")
+
+
+def int_parse_base_refusal(name: str, base: str, why: str) -> str:
+    """A base this path cannot state to `strtoll`.
+
+    The whole reason is the `why`, and it is a parameter rather than a sentence
+    here because the two reasons are genuinely different facts about different
+    things: a base read at RUN TIME is a register and a slot to keep across the
+    call, and base 0 is a RULE this path does not have. Both are refusals and
+    both are about the second operand, so one wording is one sentence each.
+    """
+    return f"{name}(s, {base}) is refused on this path: {why}."
+
+
+def int_parse_trap_message(base: int) -> str:
+    """The ONE text a failed parse writes to fd 2 before it stops the program.
+
+    For BOTH backends, because two architectures printing two different sentences
+    for one limit is how a reader ends up looking for a construct one of them
+    invented — and the shape is `list_append_overflow_message`'s, which is the
+    only other place on this path where a bounded operation that cannot be
+    decided at build time stops at run time and says which bound it hit.
+
+    **Why a stop and not an answer.** `strtoll` returns 0 and leaves `errno` set
+    when it finds no digits, and returns the digits it managed when the rest of
+    the string is not in the base; CPython raises `ValueError` for both. This
+    path has no exception, so the two arms are refused rather than answered: the
+    `endptr` is checked against the end of the string and the program stops if
+    it is not there. `0` is not available as the answer either — `int("0")` is 0
+    and `formal/hostmods/argparse.mojo`'s own `is_decimal` says so — so nothing
+    here distinguishes "parsed zero" from "parsed nothing" but the endptr.
+    """
+    spelled_base = f"base {base}"
+    return (f"ValueError: this program called int(s, ...) on a string that is "
+            f"not an integer in {spelled_base}, and left it at least as it "
+            f"found it. CPython raises ValueError for that program; this "
+            f"formal image has no way to raise, so it stops here rather than "
+            f"answer the 0 strtoll returns for a string with no digits in "
+            f"it.\n")
 
 
 def _is_zero_literal(e) -> bool:
@@ -17230,10 +17716,23 @@ def struct_frame_block_bytes(struct_def, decls: dict,
     too, and bounded by `MAX_NESTED_FRAME_DEPTH` because the declaration graph
     can be cyclic (`struct A: var b: B` / `struct B: var a: A`) and an
     unbounded block size is an emitter that hangs rather than one that refuses.
+
+    Running out of depth with a typed-nested field STILL under this struct is a
+    REFUSAL and not a truncated block, which is what it used to be: the
+    reservation came back short by exactly the frames the cut dropped, every
+    blob above it landed on one of those frames, and the program took a
+    SIGSEGV with no diagnostic — measured at six nested levels (five hops) on
+    both backends, where the same source built and ran correctly at five. A
+    bound whose whole purpose is "a cyclic graph refuses instead of hanging"
+    cannot be honoured by silently allocating less than the layout walks.
     """
     depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
     total = struct_frame_bytes(struct_def)
     if depth <= 0:
+        past = struct_nested_frame_fields(struct_def, decls, 1)
+        if past:
+            raise CodegenError(
+                struct_frame_depth_exceeded(struct_def, decls, past))
         return total
     for _name, _slot, nested in struct_nested_frame_fields(struct_def, decls,
                                                           depth):
@@ -17241,10 +17740,38 @@ def struct_frame_block_bytes(struct_def, decls: dict,
     return total
 
 
+def struct_frame_depth_exceeded(struct_def, decls: dict, past) -> str:
+    """The chain outran `MAX_NESTED_FRAME_DEPTH`, named in the user's words.
+
+    `past` is what `struct_nested_frame_fields` still found at the level the
+    recursion ran out on, so the sentence names a field the file actually
+    declares rather than a depth counter.  A declaration CYCLE arrives here
+    too and is the case the bound was written for; it gets the same message
+    because the two need the same answer from the user — a chain this path
+    cannot size is a chain this path must not lay out — and because the
+    sentence already says a cycle lands here, so a reader with one is not sent
+    looking for a different error.
+    """
+    name = next((k for k, v in decls.items() if v is struct_def), "this struct")
+    spelled = ", ".join(repr(f) for f, _s, _n in past)
+    return (
+        f"{name} nests a typed struct field past the "
+        f"{MAX_NESTED_FRAME_DEPTH} levels this path lays out ({spelled} is "
+        f"below that cut), so the block this construction needs has no size "
+        f"this path can state. Refused rather than laid out short: a truncated "
+        f"block puts every frame above the cut inside the caller's own "
+        f"expression scratch, which faults with no diagnostic naming the file. "
+        f"A struct that nests itself through a cycle reaches here too, and is "
+        f"the case the bound was written for."
+    )
+
+
 # How deep a chain of typed-nested fields this path will place.  One is the
-# real answer for every struct in this repository and the bound exists only so
-# that a cyclic declaration graph produces a refusal rather than a hang; it is
-# checked in `struct_nested_frame_fields` and the refusal names the cycle.
+# real answer for every struct in this repository and the bound exists so that
+# a chain the layout cannot size — a cyclic declaration graph above all —
+# produces a refusal rather than a hang or a short block; it is enforced in
+# `struct_frame_block_bytes`, which is where the reservation is computed and so
+# the one place a truncation could become a fault.
 MAX_NESTED_FRAME_DEPTH = 4
 
 
@@ -17627,6 +18154,29 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
             continue
         out.append((name, slot, nested))
     return out
+
+
+def nested_frame_hop_unplaced(chain, base, field, rows) -> str:
+    """An INTERMEDIATE hop of a nested read has no slot to load.
+
+    Only reachable for a chain of three or more field accesses, because the
+    first hop is the depth-2 case the two-level refusal already covers. It is
+    its own message and not a reuse of that one because the two say different
+    things: that one says the OUTER field is a plain VALUE, and this says a
+    field the chain has already agreed is a nested FRAME has no index in the
+    layout — which is a disagreement between two tables rather than a missing
+    type, and a reader sent to add an annotation would find one already there.
+    """
+    return (
+        f"{chain} reads through {base}.{field}, and the field is agreed to be "
+        f"a nested FRAME — the hop before it named its struct and every "
+        f"binding of it agrees — but there is no slot to load it from: a slot "
+        f"index is what the read loads, and the layout for the struct that "
+        f"declares {field!r} has none. That is a disagreement between the frame "
+        f"layout and the declaration rather than a missing type, so adding an "
+        f"annotation will not close it. The candidates for the field, for a "
+        f"reader who wants them: {rows}"
+    )
 
 
 def struct_frame_bytes(struct_def) -> int:
@@ -19864,8 +20414,9 @@ def rewrite_tree(node, visit):
 
 def struct_block_children(struct_def, decls: dict, base: int = 0,
                           depth=None) -> list:
-    """`[(field, slot, child_struct, offset)]` — the nested frames in this
-    struct's BLOCK and where each one sits, to EVERY depth the model places.
+    """`[(field, slot, child_struct, offset, parent_offset)]` — the nested frames
+    in this struct's BLOCK and where each one sits, to EVERY depth the model
+    places.
 
     The offset arithmetic `struct_frame_block_bytes` performs, made a function
     rather than an inline loop, because two readers need the answer and the
@@ -19878,7 +20429,10 @@ def struct_block_children(struct_def, decls: dict, base: int = 0,
     `base` is added to every offset, so `base=0` answers "relative to this
     struct's own block" — which is what a caller that hands the block over
     wants, since the block it is building into is not at a compile-time offset
-    in the callee's frame at all.
+    in the callee's frame at all. The FIFTH element is the offset of the block
+    that DECLARES the field, measured the same way, and it is the one that makes
+    the store side of a nested frame correct at a second level: the address of a
+    nested frame lives in its parent's slot array and nowhere else.
 
     The recursion's depth bookkeeping is `struct_frame_block_bytes`'s exactly:
     children come from `struct_nested_frame_fields(st, decls, depth)` and their
@@ -19947,6 +20501,12 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
     two elements is still a struct with no nested frames — but the emitters
     read three, because the whole point of the declared-type check is that the
     nested frame is PLACED here rather than hoped for at the use site.
+
+    A FLAT list cannot carry the parent of each row, which is why the emitters
+    read `struct_block_direct_children` for placement and recurse on it rather
+    than walking this one: the address of a frame two levels down has to go into
+    the slot array of the block that DECLARES the field, and only a recursion
+    knows which block that is.
     """
     framed = framed_struct_names(list(structs_by_name.values()))
     if not framed:
@@ -19969,7 +20529,8 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
 def struct_frame_block_layout(struct_def, decls: dict, depth=None):
     """`(nested, total_bytes)` — one BLOCK's internal layout.
 
-    `nested` is `[(field_name, slot, struct, offset_from_block_base)]`: the
+    `nested` is `[(field_name, slot, struct, offset_from_block_base,
+    parent_offset_from_block_base)]`: the
     frames this struct's typed-nested fields get inside the SAME block, each
     with its own offset measured from the block's own base, in declaration
     order, immediately above the object's own slots.  `total_bytes` is the

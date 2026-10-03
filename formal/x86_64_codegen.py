@@ -1207,8 +1207,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # silent zero rather than a wrong register.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
-            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested))
+            # One load per HOP, and the holder is everything before the first
+            # dot: `h.a.b` is the two loads this table has always meant and
+            # `h.a.b.c` is the same sequence with a third step, which is why the
+            # value is a tuple of slots and the walk is a loop. R11 carries the
+            # middle frames' ADDRESSES, so the last hop writes the VALUE into
+            # `dst`. The arm64 twin of this is the same loop over X17.
+            self._load_var(name[:name.index(".")], Reg.R11)
+            for hop in nested[:-1]:
+                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
+            self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1422,11 +1430,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # the one-load case above, for the same reason.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
+            # The `_load_var` twin, hop by hop, for the same reason and with the
+            # same R11 parking.
             if src == Reg.R11:
                 self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
                 src = Reg.R10
-            self._load_var(name.rsplit(".", 1)[0], Reg.R11)
-            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
+            self._load_var(name[:name.index(".")], Reg.R11)
+            for hop in nested[:-1]:
+                self.asm.emit(encode_mov_r64_rm64(Reg.R11, Reg.R11, 8 * hop))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested[-1], src))
             return
         gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
@@ -3421,6 +3433,102 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._pop_slot(Reg.RAX)
         self._pop_slot(Reg.RAX)
         self._emit_mov_imm(Reg.RAX, 0)             # None
+
+    def _conversion_operand_is_text(self, operand) -> object:
+        """True / False / None: does this conversion's operand hold text.
+
+        The three-way answer `model.int_parse_lowering` and
+        `model.printf_text_conversion_refusal` are both written against, asked
+        here through `model.string_operand_is_string` so that the string reader
+        is `_expr_str_kind`'s — the flow-sensitive one that tracks what THIS
+        function's emission has bound, a parameter's annotation and a
+        `comptime` binding included.
+
+        `None` is the permissive direction and is the whole reason `int(n)` keeps
+        working: an unannotated parameter is a word this build cannot classify,
+        and reading "not known to be text" as text would parse a number as
+        digits.
+        """
+        if M.string_operand_is_string(self._expr_str_kind(operand)):
+            return True
+        return None
+
+    def _emit_int_parse(self, text_expr, base: int) -> None:
+        """`int(s, base)` — `strtoll(s, &end, base)`, and the `end` is checked.
+
+        The arm64 twin (`ARM64Codegen._emit_int_parse`), on the same decision
+        from `formal/model.py` and the same message, and the steps are the same
+        four because they are the four things CPython's `int(s)` asks:
+
+        1. `strtoll(s, &end, base)` — libc, already on this link line for
+           `strlen` and `strncmp`, and the answer is a machine word, which is
+           what a formal value already is, so nothing new is stored;
+        2. `end == s` means no digit was consumed, and CPython raises rather
+           than answering 0;
+        3. `*end` past any TRAILING whitespace is a NUL when the whole string was
+           consumed, and CPython accepts the padding (`int("  41  ")` is 41), so
+           the run is measured with `strspn` over `model.C_WHITESPACE`;
+        4. otherwise the program stops with a named message on fd 2, because a
+           silent `exit(1)` is the worst of the three answers this path can give
+           (`_emit_list_append`'s docstring is the argument) and because 0 is not
+           available as the answer — `int("0")` is 0.
+
+        32 bytes of frame below RSP, as a multiple of 16 so RSP is still aligned
+        at each call, which is the SysV requirement and the same reason every
+        other RSP movement here is. `[rsp+0]` the string, `[rsp+8]` the `endptr`
+        `strtoll` writes and `[rsp+16]` the value it returns.
+
+        The `end == s` comparison is 64-bit and through a REGISTER: two pointers
+        four bytes apart compare equal as bytes, so a byte-width test would call
+        `int("4x1")` … fine and `int("xy")` … not, which is not a rule.
+        """
+        self._while_counter += 1
+        trap = f"{self.func_name}_ip{self._while_counter}_trap"
+        endl = f"{self.func_name}_ip{self._while_counter}_end"
+        self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 32))
+        self._emit_expr(text_expr)                       # RAX = s
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 0, Reg.RAX))
+        # An expression's result is in RAX; SysV's first INTEGER argument is in
+        # RDI, and arm64 needing nothing here (X0 is both) is exactly why this
+        # line was missing until the program faulted.
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, 8))   # &end
+        self._emit_mov_imm(Reg.RDX, base)
+        self._emit_mov_imm(Reg.RAX, 0)   # AL = 0 vector registers (varargs)
+        self._emit_extern_call("strtoll")
+        self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 16, Reg.RAX))
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 8))     # RCX = end
+        self.asm.emit(encode_mov_r64_rm64(Reg.RDX, Reg.RSP, 0))     # RDX = s
+        self.asm.emit(encode_cmp_r64_r64(Reg.RCX, Reg.RDX))
+        self.asm.emit(encode_je_rel8(0))
+        self.asm.emit_label_rel8(trap, here_offset=-1)
+        # The POINTER to the remainder, not the byte at it: `strspn` takes
+        # a `const char *`. arm64 gets this for free (X0 already holds it).
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RCX))         # RDI = end
+        self.asm.emit(encode_lea_r64_rip(Reg.RSI, 0))
+        self.asm.emit_label_rip(self._intern_string(M.C_WHITESPACE),
+                                here_offset=-4)
+        self._emit_mov_imm(Reg.RDX, 0)
+        self._emit_extern_call("strspn")                            # RAX = run
+        self.asm.emit(encode_mov_r64_rm64(Reg.RCX, Reg.RSP, 8))
+        self.asm.emit(encode_add_r64_r64(Reg.RCX, Reg.RAX))
+        # ONE BYTE, not eight: `*past` is a NUL when the string was consumed, and
+        # an 8-byte load there has the NUL in its low byte and whatever follows
+        # the string in the other seven, so the word is non-zero and every parse
+        # of a valid string stops.
+        self.asm.emit(encode_movzx_r64_rm8(Reg.RCX, Reg.RCX, 0))
+        self.asm.emit(encode_test_r64_r64(Reg.RCX, Reg.RCX))
+        self.asm.emit(encode_jne_rel8(0))
+        self.asm.emit_label_rel8(trap, here_offset=-1)
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP, 16))
+        self.asm.emit(encode_add_r64_imm32(Reg.RSP, 32))
+        self.asm.emit(encode_jmp_rel8(0))
+        self.asm.emit_label_rel8(endl, here_offset=-1)
+        self.asm.label(trap)
+        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
+        self._emit_call_exit(M.SHIFT_TRAP_STATUS)
+        self.asm.label(endl)
+        self.asm.label(endl)
 
     def _emit_overflow_diagnostic(self, text: str) -> None:
         """`write(2, text, len)` — say WHICH bound was hit before stopping.
@@ -6910,7 +7018,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # that reads a dropped argument as whatever the register held — a wrong
         # value being strictly worse than a refusal, but so is a refusal to a
         # program the ABI can express.
-        n_stack = max(0, len(args) - len(ARG_REGS))
+        # The REGISTER each argument goes in, which for an ordinary call is
+        # `ARG_REGS[j]` and for a `printf` with a floating conversion is not —
+        # see `_vararg_placement`, and the reason it is asked here rather than
+        # in the argument loop below is that the stack half and the register
+        # half both need the same answer.
+        placement = self._vararg_placement(name, args)
+        n_stack = sum(1 for _c, _slot in placement if _c == "stack")
         if len(args) > _MAX_INCOMING_ARGS:
             raise CodegenError(
                 f"call {name}(): {len(args)} arguments exceeds the "
@@ -6965,7 +7079,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # nested call in a stack argument safe: with the area reserved and
         # nothing else pushed yet, that nested call pushes strictly below it.
         for k in range(n_stack):
-            self._emit_expr(args[len(ARG_REGS) + k])
+            arg = args[next(j for j, (c, s) in enumerate(placement)
+                            if c == "stack" and s == k)]
+            self._emit_expr(arg)
             self.asm.emit(encode_mov_rm64_r64(Reg.RSP, 8 * k, Reg.RAX))
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
@@ -6973,22 +7089,62 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # POP only ever targets RAX, so each popped value is moved across
         # after the pop — including argument 0, whose register is RDI and not
         # RAX the way the arm64 ABI's X0 would have been.
-        for arg in args[:len(ARG_REGS)]:
-            self._emit_expr(arg)
+        #
+        # The register arguments are `placement`'s, not `args[:6]`: an SSE
+        # argument goes in an XMM and so does not consume a GPR, which for
+        # `printf("%f %lld", d, n)` puts `n` in RDI rather than RSI. Pushing by
+        # argument ORDER and popping into the plan's registers is what keeps the
+        # two halves of one plan from disagreeing with each other.
+        reg_plan = [(j, c, slot) for j, (c, slot) in enumerate(placement)
+                    if c in ("gpr", "xmm")]
+        for j, _c, _slot in reg_plan:
+            self._emit_expr(args[j])
             self._push_slot(Reg.RAX)
         if sret_site is not None:
             self._emit_blob_base(self._blob_base + self._ret_frame_base
                                  + sret_site[1], Reg.RAX)
             self._push_slot(Reg.RAX)
-        for i in range(min(nargs, len(ARG_REGS)) - 1, -1, -1):
+            reg_plan.append((len(args), "sret", len(reg_plan)))
+        # An SSE argument goes STRAIGHT from the pop into its XMM register and
+        # never through a GPR, because SysV AMD64 passes a `double` in
+        # XMM0..XMM7 and nowhere else: a `printf("%f", w)` whose word is in RDI
+        # reads whatever XMM0 happened to contain, which is a DENORMAL and a
+        # DIFFERENT one on each run of the same binary, because the register was
+        # never written. arm64 needs none of this — AAPCS passes a double and an
+        # integer in register number 0 both, so there is no second register file
+        # to reach.
+        #
+        # `%lld` must not gain the move, and what says which is which is
+        # `model.printf_argument_classes`, read from the SAME parse as the `%s`
+        # check (`model.printf_text_conversion_refusal`) — one reader of one
+        # format string, so the two cannot disagree about where a conversion's
+        # argument is.
+        nxmm = 0
+        for _j, c, slot in reversed(reg_plan):
             self._pop_slot(Reg.RAX)
-            self.asm.emit(encode_mov_r64_r64(ARG_REGS[i], Reg.RAX))
+            if c == "sret":
+                # The hidden word is the LAST register argument and the first
+                # one popped, so it is already in RAX. Every ordinary argument
+                # that follows it in argument order is popped after it and
+                # overwritten by its own pop.
+                continue
+            if c == "xmm":
+                self.asm.emit(encode_movq_xmm_rm64(slot, Reg.RAX))
+                nxmm = max(nxmm, slot + 1)
+            else:
+                self.asm.emit(encode_mov_r64_r64(ARG_REGS[slot], Reg.RAX))
 
         if is_extern:
-            # AL = number of vector registers used, which the ABI requires a
-            # variadic callee be told; 0 is always right for the calls this
-            # path makes, and harmless for the rest.
-            self._emit_mov_imm(Reg.RAX, 0)
+            # AL = how many vector registers the caller used, which the ABI
+            # requires a variadic callee to be told: `va_start` builds the
+            # register-save area from it, so a callee told 0 while the caller
+            # put a word in XMM0 reads the SAVE AREA rather than the register —
+            # the same wrong answer as not moving the word across at all. It
+            # was a constant 0 for every call this path made before a floating
+            # conversion was placed, and it is the plan's own count so the number
+            # in AL and the moves above cannot disagree. RAX is not an argument
+            # register on this ABI, so writing it disturbs no argument.
+            self._emit_mov_imm(Reg.RAX, nxmm)
             self._emit_extern_call(symbol)
 
         else:
@@ -7004,6 +7160,90 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_add_r64_imm32(Reg.RSP, stack_bytes))
         if ext_return is not None:
             self._emit_extern_return(ext_return)
+
+    def _vararg_placement(self, name: str, args: list) -> list:
+        """`[(class, register-or-slot index)]` per argument of a call.
+
+        **`("gpr", j)` for the first `len(ARG_REGS)` arguments and
+        `("stack", k)` after them, which is the whole ABI story for everything
+        this path called until a floating conversion existed.** A `printf` with a
+        `%f` is not that: SysV AMD64 classifies each argument as INTEGER or SSE
+        and allocates the two classes from INDEPENDENT register files, so an SSE
+        argument is XMM0..XMM7 and does NOT consume RDI..R9.
+        `printf("%f %lld", d, n)` therefore wants `d` in XMM0 and `n` in **RDI**
+        — passing them "in order" puts `n` in RSI and prints whatever the caller
+        had there.
+
+        So the answer is the identity for every call whose arguments are all
+        INTEGER-class, and the classified allocation otherwise. `classes` is
+        `model.printf_argument_classes`, which reads the SAME parse as
+        `printf_text_conversion_refusal` (the `%s` check) does, so the two
+        cannot enumerate a format's conversions differently; the caller is
+        `model.PRINTF_TEXT_CONVERSIONS_CALLEES`, the same set that one consults.
+
+        Four reasons the identity is the answer for everything else, rather than
+        a classification applied everywhere:
+
+        * A LOCAL function is not variadic, so it reads its arguments out of the
+          GPRs by parameter position and an XMM placement would be a wrong
+          answer, not a conservative one;
+        * an extern call whose format cannot be parsed (`printf_conversion_
+          specifiers` returns None) keeps the previous behaviour, which is the
+          permissive direction `printf_text_conversion_refusal` also takes;
+        * the format string is argument 0 and is a POINTER, so it is INTEGER and
+          takes RDI whatever the conversions say;
+        * `*width` is an `int` argument, so `printf("%*f", w, d)` puts `w` in
+          RDI and `d` in XMM0 — which the classification already says, and is
+          the row that would fail if a `*` were counted as a conversion.
+
+        `("stack", k)` is the overflow argument slot, assigned in ARGUMENT ORDER
+        across both classes — which is what `overflow_arg_area` does in C: every
+        argument that has run out of registers takes the next 8 bytes, in order.
+        The ninth floating conversion is where that stops being placeable here,
+        so it is refused by name (`printf_float_conversion_refusal`) rather than
+        emitted into a slot whose order nothing on this path states.
+        """
+        out: list = []
+        nstack = 0
+        for j in range(len(args)):
+            if j < len(ARG_REGS):
+                out.append(("gpr", j))
+            else:
+                out.append(("stack", nstack))
+                nstack += 1
+        if name not in M.PRINTF_TEXT_CONVERSIONS_CALLEES or not args:
+            return out
+        fmt = args[0]
+        if not isinstance(fmt, F.StringLiteral):
+            return out
+        classes = M.printf_argument_classes(fmt.value)
+        if classes is None:
+            return out
+        # A format that names MORE conversions than the call passes arguments
+        # for keeps the identity: that is the caller's own bug, the extra
+        # conversion reads a register nobody wrote on both backends, and the
+        # alternative would be a refusal on a shape C allows a program to write
+        # deliberately (`printf("%s")`). `classes[:len(args) - 1]` is the
+        # matching slice below and the reason the two agree about which operand
+        # is which.
+        n_float = sum(1 for c in classes if c == M.SSE_CLASS)
+        if n_float > M.PRINTF_SSE_REGISTERS:
+            raise CodegenError(M.printf_float_conversion_refusal(name, n_float))
+        out = [("gpr", 0)]              # the format string, a pointer
+        ngpr = 1
+        nxmm = 0
+        nstack = 0
+        for c in classes[:len(args) - 1]:
+            if c == M.SSE_CLASS and nxmm < M.PRINTF_SSE_REGISTERS:
+                out.append(("xmm", nxmm))
+                nxmm += 1
+            elif c != M.SSE_CLASS and ngpr < len(ARG_REGS):
+                out.append(("gpr", ngpr))
+                ngpr += 1
+            else:
+                out.append(("stack", nstack))
+                nstack += 1
+        return out
 
     def _emit_extern_return(self, kind) -> None:
         """Put the return register into the shape the DECLARED return type says.
@@ -7176,6 +7416,19 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # conversion has one operand, and two of them, positioned or named, is
         # not a conversion.
         operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+        # `int(s)` and `int(s, base)` are a PARSE, not a conversion, and the
+        # decision is `model.int_parse_lowering`'s so that arm64 cannot answer
+        # this differently. It has to be asked here, before the zero-operand and
+        # arity arms below, because those two are about a CONVERSION's arity and
+        # a parse has a different one.
+        if name in M.INT_TYPE_CTORS:
+            verdict = M.int_parse_lowering(
+                name, operands, self._conversion_operand_is_text)
+            if verdict[0] == "parse":
+                self._emit_int_parse(operands[0], verdict[1])
+                return
+            if verdict[0] == "refuse":
+                raise CodegenError(verdict[1])
         if not operands:
             # The ONE zero-operand conversion this path can answer, and the
             # reason is a property of STRINGS and of nothing else: a literal

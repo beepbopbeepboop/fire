@@ -3839,20 +3839,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             f"lifetime this analysis can see"
                         )
                     if why is _UNPLACED:
-                        odis = M.struct_frame_slot_candidates(
-                            level, outer_field)[1][0]
-                        raise CodegenError(
-                            f"{chain} reads through {base}.{outer_field}, which "
-                            f"cannot be placed, so the walk has no load at that "
-                            f"level: "
-                            + ("the candidate layouts disagree — "
-                               + M.field_type_disagreement(
-                                   level, outer_field,
-                                   _type_rows(level, outer_field,
-                                              structs_by_name))
-                               if odis else
-                               f"no candidate declares it as a field of a frame")
-                        )
+                        # `model.nested_frame_hop_unplaced`, and not a second
+                        # sentence for the same fact: this arm and the
+                        # method-receiver arm both reach it through the same
+                        # `_nested_frame_levels` answer, so two messages here
+                        # would be two texts for one refusal and only one of
+                        # them would say the candidates — which is what tells a
+                        # reader that an ANNOTATION will not close it.
+                        raise CodegenError(M.nested_frame_hop_unplaced(
+                            chain, base, outer_field,
+                            _type_rows(level, outer_field, structs_by_name)))
                     # Agreed, and not a frame of this unit — so this level is a
                     # plain value and the rest of the chain names members of
                     # whatever that value is.  Not this pass's business UNLESS

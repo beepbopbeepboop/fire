@@ -62,15 +62,15 @@ the case where a two-architecture divergence would be a pure lowering bug with
 nothing in `math.mojo` to blame. Every group is built and RUN for arm64 and for
 x86-64 and both answers are compared with CPython AND with each other.
 
-The `consts` group is the one exception, and it is an exception with a MEASURED
-reason rather than a skip for convenience. The five float constants are WORDS on
-both architectures and are compared on both. Printing a word as a double is not:
-`printf("%.17g", bits)` prints `3.1415926535897931` on arm64 and whatever
-`XMM0` held on x86-64 — `6.4810864235206578e-314` and `6.4024130938526187e-314`
-on two runs of the same image, so not even a stable wrong answer. The printed
-half of that group is therefore compared on arm64 only, and the reason is in the
-group's own result line. The filing is
-`bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`.
+The `consts` group used to be the one exception, and it was an exception with a
+MEASURED reason rather than a skip for convenience: the five float constants are
+WORDS on both architectures and are compared on both, and PRINTING a word as a
+double was compared on arm64 only, because `printf("%.17g", bits)` printed
+`3.1415926535897931` on arm64 and whatever `XMM0` held on x86-64 —
+`6.4810864235206578e-314` and `6.4024130938526187e-314` on two runs of the same
+image, so not even a stable wrong answer. The whole group is compared on both
+now; `model.printf_argument_classes` is what says which operand is a double, and
+`encode_movq_xmm_rm64` is what puts it where SysV AMD64 looks for it.
 """
 import argparse
 import math as CPY
@@ -569,24 +569,24 @@ def group_consts(tmpdir, archs, verbose):
         check(not bad, f"[{arch}] {len(bad)} of {len(want_bits)} bit patterns "
                        f"differ from `struct.pack('<d', …)`: " +
                        "; ".join(bad))
-        if arch == "arm64":
-            bad = [f"{k}: image {doubles.get(k)!r}, CPython {v!r}"
-                   for k, v in want_dbl.items() if doubles.get(k) != v]
-            check(not bad, f"[{arch}] {len(bad)} of {len(want_dbl)} printed "
-                           f"doubles differ from CPython's own value: " +
-                           "; ".join(bad))
+        # The PRINTED doubles are compared on BOTH architectures, and they were
+        # not for a while: a `double` reaches a SysV variadic callee in XMM0 and
+        # an integer in RDI, and nothing on this path moved between them, so
+        # `printf("%.17g", bits)` printed whatever XMM0 held — a denormal, and a
+        # DIFFERENT one on each run of the same image. The fix is
+        # `model.printf_argument_classes` plus one `movq`, and the reason the row
+        # lives HERE and not only in a backend's own suite is that this group
+        # already asks two oracles of one constant (the word and the rendering)
+        # and the rendering half was the half that could not be asked.
+        bad = [f"{k}: image {doubles.get(k)!r}, CPython {v!r}"
+               for k, v in want_dbl.items() if doubles.get(k) != v]
+        check(not bad, f"[{arch}] {len(bad)} of {len(want_dbl)} printed "
+                       f"doubles differ from CPython's own value: " +
+                       "; ".join(bad))
 
-    both_ways(archs, tmpdir, "math_consts", consts_source(), compare, verbose,
-              cross=lambda recs: [r for r in recs if "_bits=" in r])
-    note = ""
-    if "x86_64" in archs:
-        note = ("; the PRINTED form is not compared on x86-64, because a "
-                "double is `XMM0` there and an integer is `RDI` and nothing on "
-                "this path moves between them — "
-                "bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md")
-    return True, (f"{len(BITS)} constants agree as bit patterns on "
-                  f"{' and '.join(archs)}, and as printed doubles on arm64"
-                  f"{note}")
+    both_ways(archs, tmpdir, "math_consts", consts_source(), compare, verbose)
+    return True, (f"{len(BITS)} constants agree as bit patterns and as printed "
+                  f"doubles on {' and '.join(archs)}")
 
 
 def c_17g(v):

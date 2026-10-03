@@ -29,7 +29,18 @@ rather than of this module, and every function below is shaped by them.
     `time.time()` cannot return CPython's float: there is no fractional value
     in the model, and `0.5` in a source file is the integer 0. What CAN cross
     is the IEEE-754 BIT PATTERN of a double, and `printf("%.6f", bits)` prints
-    it exactly — measured, and pinned in `test_formal_time.py` — so
+    it exactly on BOTH architectures — measured, and pinned in
+    `test_formal_time.py`, whose `--backend` flag is what makes the x86-64 half
+    of that claim a thing the suite can run at all (there was no way to ask it
+    before, which is how an arm64-only measurement came to be written down as a
+    property of both). On x86-64 that needs the floating conversion placed in
+    `XMM0` rather than read out of the integer register the word is in;
+    `formal/model.py`'s `printf_argument_classes` is the reader and
+    `formal/x86_64.py`'s `encode_movq_xmm_rm64` is the move. What is still
+    absent, and for a different reason, is every function whose CPython answer
+    is a float VALUE rather than a double rendered by a variadic call: a
+    non-variadic `double` parameter says what it wants in a prototype, and a
+    freestanding image has no header to read it from. So
     `time_seconds_bits()` below returns that pattern and the module's own
     docstrings say what to do with it. Every function whose CPython answer is
     a float therefore has BOTH a `_bits` form (faithful, this target's

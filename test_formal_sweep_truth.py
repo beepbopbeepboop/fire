@@ -519,40 +519,90 @@ class TestSweepReach(unittest.TestCase):
             self.assertNotIn(name, S.IN_REACH_HOST_MODULES)
 
 
+def _first_unreachable_host_module() -> str:
+    """The first name in `HOST_UNREACHABLE` that is a plain module.
+
+    Read, never copied: the tier is what `formal.imports.host_module_tier`
+    decides, and it is the answer to "is a refusal naming this module a fact
+    about the TARGET". A name that has a `formal/hostmods/` source is not in
+    `HOST_MODULES` at all, and one that is modelled or admitted is in it and
+    answers, so neither may be the fixture. Dotted names are skipped because a
+    fixture has to be able to `import` what it names.
+    """
+    import formal.imports as I
+    names = [n for n in sorted(I.HOST_UNREACHABLE) if "." not in n]
+    assert names, "HOST_UNREACHABLE is empty, so there is no target fact to "\
+                  "name and this class is about nothing"
+    return names[0]
+
+
 class TestSystemModuleCall(unittest.TestCase):
-    # `os`, `json`, `math` and `socket`, and WHY each is here: a host module
-    # stops being a target fact the moment it has a Mojo source, and three of
-    # these four used to be named by this class when they had none.
-    # `json` got `formal/hostmods/json.mojo` on 2026-09-30, `math` got one after
-    # that, and `os` has had one for most of the tree's life — so all three are
-    # kept as the NEGATIVE cases below rather than as the positive one, because
-    # "a `math.floor()` refusal is a target fact" stopped being true the day
-    # `formal/hostmods/math.mojo` landed and the sweep is RIGHT not to believe
-    # it: a refusal about a module that EXISTS is a refusal about a construct in
-    # a module this build can compile, which is `codegen`, not "not fixable
-    # here". `socket` is the positive case now, and it is checked against
-    # `HOST_MODULES` rather than against a list of its own, so the day
-    # `socket.mojo` lands this row goes red and says why.
+    # The host module these rows name is CHOSEN, not spelled, because the choice
+    # is a fact about the tree that goes stale on its own: `json` was named here
+    # until `formal/hostmods/json.mojo` landed on 2026-09-30, `math` until
+    # `formal/hostmods/math.mojo` landed in 9c7ec795, and `socket` until the day
+    # `socket.mojo` lands — and a host module with real Mojo source is not in
+    # `formal.imports.HOST_MODULES` at all, so the row stopped firing and
+    # asserted `'' != 'math'`, which is a test failure that reads like a sweep
+    # bug and is not one. `_HOSTMEMBER` is picked from what the build still
+    # treats as a host module, and the three rows below keep the choice honest:
+    # it must have no `formal/hostmods` source, the build must not say it
+    # ANSWERS it, and the file really must import it.
     #
-    # A name in the POSITIVE slot is a CLAIM that it has no Mojo source, and
-    # the claim stops being true the day the module is written — at which point
-    # the name leaves HOST_MODULES entirely (it is not refused at all any more)
-    # and this test fails on the tool being right. The premise is therefore
-    # asserted below rather than trusted: a fixture that has quietly stopped
-    # being an example of anything is a silent hole in a suite whose whole
-    # subject is the difference between a fact about the target and a gap in
-    # the backend.
-    SRC = "import os\nimport socket\n\ndef main():\n    pass\n"
+    # The choice is made from `formal.imports.HOST_UNREACHABLE` rather than from
+    # a list written out here, and that is the whole of what makes it keep
+    # holding: a name in `HOST_MODULES` that is MODELLED or ADMITTED answers, so
+    # a refusal naming it is about a construct in a module this build compiles
+    # and not a fact about the target — the same division the sweep's own
+    # `IN_REACH_HOST_MODULES` makes, read from the table that decides it instead
+    # of from a snapshot of it. formal8-13's hand-written exclusion list named
+    # the six names that were unreachable when it was written; `abc`, `array`,
+    # `bisect` and forty more have models now, and picking one of those would
+    # have made this class assert a target fact that is not one.
+    #
+    # `os`, `json` and `math` are the NEGATIVE cases below rather than the
+    # positive one: `os` has had `formal/hostmods/os/` for most of the tree's
+    # life and `json` since 2026-09-30, and `math` since 9c7ec795, so none of
+    # the three is in `HOST_MODULES` at all. "a `math.floor()` refusal is a
+    # target fact" stopped being true the day `math.mojo` landed and the sweep is
+    # RIGHT not to believe it: a refusal about a module that EXISTS is a refusal
+    # about a construct in a module this build can compile, which is `codegen`,
+    # not "not fixable here" — the one class a coverage number must never grow.
+    _HOSTMEMBER = _first_unreachable_host_module()
+    SRC = f"import os\nimport {_HOSTMEMBER}\n\ndef main():\n    pass\n"
+
+    def test_the_named_host_module_still_has_no_mojo_source(self):
+        """The anti-rot for the choice above, and the reason it is a test.
+
+        Without this row the class would go quietly vacuous the next time a
+        host module gains source: `_HOSTMEMBER` would pick a different name,
+        every other row would still pass, and nothing would say the original
+        one had stopped being the thing the rows are about.
+        """
+        import os.path
+        self.assertFalse(
+            os.path.exists(os.path.join("formal", "hostmods",
+                                        f"{self._HOSTMEMBER}.mojo")),
+            f"{self._HOSTMEMBER} gained a formal/hostmods source, so it is no "
+            f"longer a host module the build cannot resolve and the rows below "
+            f"are about something else")
+        from formal.imports import HOST_MODULES
+        self.assertIn(self._HOSTMEMBER, HOST_MODULES)
 
     def test_the_example_is_still_a_host_module_with_no_reach(self):
-        # Read from the tool's own tables, not from this comment: the rule
-        # under test is structural (`mod in HOST_MODULES`, and the file imports
-        # it), so its premise is a fact about two sets that this tree edits
-        # whenever a hostmod is written.
+        """The other two premises of the choice, and neither is about source.
+
+        Read from the tool's own tables, not from the comment: the rule under
+        test is structural (`mod in HOST_MODULES`, and the file imports it), so
+        its premise is a fact about two sets that this tree edits whenever a
+        hostmod is written. A name that is in `IN_REACH_HOST_MODULES` answers —
+        it has a model or an admitted contract — so a refusal naming it is not
+        a target fact by that table's own account either.
+        """
         from formal.imports import HOST_MODULES
-        self.assertIn("socket", HOST_MODULES)
-        self.assertNotIn("socket", S.IN_REACH_HOST_MODULES)
-        self.assertTrue(S._source_imports(self.SRC, "socket"))
+        self.assertIn(self._HOSTMEMBER, HOST_MODULES)
+        self.assertNotIn(self._HOSTMEMBER, S.IN_REACH_HOST_MODULES)
+        self.assertTrue(S._source_imports(self.SRC, self._HOSTMEMBER))
 
     def test_a_module_that_HAS_a_source_is_not_a_target_fact(self):
         """The anti-rot for the row above, and the reason it changed hands.
@@ -561,9 +611,9 @@ class TestSystemModuleCall(unittest.TestCase):
         did not exist. It does now, so a refusal naming `math` is about a
         construct in a module this backend compiles, and filing it as a target
         fact would put real codegen findings in the bucket that is "not fixable
-        here" — which is the one class a coverage number must never grow. Its
-        own source, and NOT this class's `SRC`, which imports `socket`
-        deliberately because the positive case above needs a file that does.
+        here". Its own source, and NOT this class's `SRC`, which imports
+        `_HOSTMEMBER` deliberately because the positive case above needs a file
+        that does.
         """
         from formal.imports import HOST_MODULES
         self.assertNotIn("math", HOST_MODULES,
@@ -584,9 +634,10 @@ class TestSystemModuleCall(unittest.TestCase):
 
     def test_a_message_naming_a_host_member_is_a_target_fact(self):
         got = S._system_module_call(
-            "build: socket.recv() cannot be lowered: socket is not available "
-            "here", self.SRC)
-        self.assertEqual(got, "socket")
+            f"build: {self._HOSTMEMBER}.somefn() cannot be lowered: "
+            f"{self._HOSTMEMBER} is not available here",
+            self.SRC)
+        self.assertEqual(got, self._HOSTMEMBER)
 
     def test_a_construct_refusal_is_not(self):
         """The negative that matters most, because the fallback is `codegen`.

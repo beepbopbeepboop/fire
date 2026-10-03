@@ -28,7 +28,10 @@ and this path has no float:
     arrives in `d0` and on SysV x86-64 in `XMM0`, while the only word this path
     can pass is an integer register — so `sqrt(x)` where `x` is this path's
     representation of a double hands the C library a garbage bit pattern and
-    gets a plausible wrong answer back. That is the `time.time()` failure shape
+    gets a plausible wrong answer back. (That is for a NON-VARIADIC callee,
+    whose double parameter is declared in a prototype; a variadic one declares
+    it in its format string instead, and that one IS placed on both — see the
+    printing paragraph below.) That is the `time.time()` failure shape
     `formal/hostmods/time.mojo` refuses to ship, and it is why
     `time_seconds_bits()` exists there instead of `time_seconds()`.
 
@@ -70,21 +73,33 @@ WHAT IS HERE, AND WHAT EACH ONE ANSWERS
     `test_formal_math.py` compares each against `struct.pack('<d', math.pi)`
     — the ORACLE, not a decimal the test wrote.
 
-    **THE WORD IS THE PORTABLE ANSWER; PRINTING IT AS A DOUBLE IS NOT, AND THE
-    DIFFERENCE IS AN ABI, NOT A LIMIT OF THIS MODULE.** On arm64 a `double`
-    argument and an integer argument both go in the same register number, so
-    `printf("%.17g", pi_bits())` prints `3.1415926535897931`. On SysV x86-64
-    the double goes in `XMM0` and the integer in `RDI`, and nothing on this
-    path moves between them — so the same call prints whatever `XMM0` happened
-    to hold, MEASURED as `6.4810864235206578e-314` and `6.4024130938526187e-314`
-    on two runs of the same image, i.e. not even the same wrong answer twice.
-    Annotating the local `Float64` does not change it (measured: still
-    `0.000000`). So: compare the WORDS, and treat the printed form as arm64
-    only. The filing is
-    `bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`, and it is the
-    same ABI fact that keeps every float-valued function out of this module —
-    `time.mojo`'s `time_seconds_bits()` has the same arm64-only printing
-    property and its test has never run on x86-64.
+    **THE WORD IS THE PORTABLE ANSWER; PRINTING IT AS A DOUBLE IS A SEPARATE
+    ABI FACT, AND IT IS NOW PLACED ON BOTH.** On arm64 a `double` argument and
+    an integer argument both go in the same register number, so
+    `printf("%.17g", pi_bits())` prints `3.1415926535897931` with nothing to do.
+    On SysV x86-64 a floating conversion reads its operand from `XMM0` while
+    the only word this path holds is in an integer register, and this used to
+    print whatever `XMM0` happened to hold — MEASURED as
+    `6.4810864235206578e-314` and `6.4024130938526187e-314` on two runs of the
+    same image, i.e. not even the same wrong answer twice. It does not any
+    more: `model.printf_argument_classes` reads the format string, says which
+    conversion is floating, and `formal/x86_64_codegen.py`'s call path moves
+    that operand into `XMM0`..`XMM7` (and sets `AL` to the count, which the ABI
+    requires of a variadic caller). `test_formal_math.py`'s `consts` group
+    compares the PRINTED form on both architectures.
+
+    **THE REASON EVERY FLOAT-VALUED FUNCTION IS STILL ABSENT IS NOT THIS.**
+    `printf` is variadic, so its conversions ARE its only declaration of what
+    each argument is, and a format string is something this path can read. A
+    non-variadic `sqrt(double)` takes its argument in `XMM0` on the same ABI
+    and says so in a PROTOTYPE rather than in a format string — and this path
+    has no prototype to read (there is no C header in a freestanding image, and
+    an extern declaration exists only for the functions a formal dylib
+    publishes). So `sqrt(pi_bits())` still hands the C library an integer
+    register's worth of bits, which is the original failure and is why
+    `sqrt`, `exp`, `sin` and the rest are not here. Printing a double needs a
+    reader; passing one needs a declaration, and only one of the two exists.
+    """
 
 WHAT IS NOT HERE, AND WHY — the absences worth naming
 ----------------------------------------------------
@@ -130,13 +145,14 @@ WHAT IS NOT HERE, AND WHY — the absences worth naming
 def pi_bits() -> int:
     """`math.pi` as the IEEE-754 bit pattern of a double: 0x400921FB54442D18.
 
-    `printf("%.17g", pi_bits())` prints `3.1415926535897931` on arm64, which is
-    CPython's own `repr(math.pi)` with one more digit than a double holds — the
-    %.17g is the C library's shortest round-tripping form and CPython's repr is
-    the same algorithm, so a program on THIS architecture can show the value by
-    asking for it this way rather than needing a float local to hold it. On
-    x86-64 the same call prints garbage; the module's docstring has the
-    measurement and the reason.
+    `printf("%.17g", pi_bits())` prints `3.1415926535897931` on BOTH
+    architectures, which is CPython's own `repr(math.pi)` with one more digit
+    than a double holds — the `%.17g` is the C library's shortest
+    round-tripping form and CPython's repr is the same algorithm, so a program
+    on this path can show the value by asking for it this way rather than
+    needing a float local to hold it. On x86-64 that needs the floating
+    conversion to be PLACED rather than merely rendered: see the module's
+    docstring for the measurement of what it used to print instead.
     """
     return 4614256656552045848
 

@@ -1220,9 +1220,17 @@ dylib_exports: list = None, globals_base: int = None,
         # than by a refusal.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            outer, _dot, _rest = name.rpartition(".")
+            # One load per HOP, and the holder is everything before the first
+            # dot: `h.a.b` is the two loads this table has always meant and
+            # `h.a.b.c` is the same sequence with a third step, which is why the
+            # value is a tuple of slots and the walk is a loop. The temporary is
+            # X17 throughout because a middle frame's ADDRESS is what the next
+            # hop loads from, so the last hop writes the VALUE into `dst`.
+            outer = name[:name.index(".")]
             self._load_var(outer, 17)
-            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested))
+            for hop in nested[:-1]:
+                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
+            self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -1459,13 +1467,19 @@ dylib_exports: list = None, globals_base: int = None,
         # X19, and X19 is argument 0.
         nested = self._frame_nested_slots.get(name)
         if nested is not None:
-            outer = name.rsplit(".", 1)[0]
+            # The `_load_var` twin, hop by hop: every step but the last reads a
+            # nested frame's ADDRESS into X17 and the last writes the value into
+            # the parked source register. A chain of any length the constructor
+            # placed to the bound is therefore storable as well as readable.
+            outer = name[:name.index(".")]
             parked = src
             if src == 17:
                 self.asm.emit(encode_mov_zr_xn(16, src))
                 parked = 16
             self._load_var(outer, 17)
-            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested))
+            for hop in nested[:-1]:
+                self.asm.emit(encode_ldr_xt_xn_imm(17, 17, 8 * hop))
+            self.asm.emit(encode_str_xt_xn_imm(parked, 17, 8 * nested[-1]))
             return
         if name in self._var_regs:
             r = self._var_regs[name]
@@ -5034,6 +5048,116 @@ dylib_exports: list = None, globals_base: int = None,
         self._emit_extern_call("write", 3)
         _emit_add_imm(self.asm, 31, 31, 16)
 
+    def _conversion_operand_is_text(self, operand) -> object:
+        """True / False / None: does this conversion's operand hold text.
+
+        The three-way answer `model.int_parse_lowering` and
+        `model.printf_text_conversion_refusal` are both written against, asked
+        here through `model.string_operand_is_string` so that the string reader
+        is `_expr_str_kind`'s — the flow-sensitive one that tracks what THIS
+        function's emission has bound, a parameter's annotation and a
+        `comptime` binding included.
+
+        `False` is positive evidence and comes from the type as well as the
+        binding: an operand whose declared type is an integer one is not text
+        whatever else this build does or does not know about it. `None` is the
+        permissive direction and is the whole reason `int(n)` keeps working —
+        an unannotated parameter is a word this build cannot classify.
+        """
+        if M.string_operand_is_string(self._expr_str_kind(operand)):
+            return True
+        if M.string_operand_is_string(getattr(
+                self._expr_str_kind(operand), "kind", None)):
+            return False
+        return None
+
+    def _emit_int_parse(self, text_expr, base: int) -> None:
+        """`int(s, base)` — `strtoll(s, &end, base)`, and the `end` is checked.
+
+        Three values have to survive the `strtoll` call and there is no
+        callee-saved register free, so they go in a 32-byte window:
+        `[sp+0]` the string, `[sp+8]` the `endptr` `strtoll` writes, `[sp+16]`
+        the value it returns and `[sp+24]` that end pointer parked across the
+        `strspn` below. 32 rather than 24 so SP is still 16-byte aligned at the
+        call, which is what AAPCS and the C library both assume — the same
+        bargain `f.write(s)` makes two hundred lines up.
+
+        **The `endptr` check is the half that must not be skipped.** `strtoll`
+        returns 0 for a string with no digits in it and returns the digits it
+        managed for one with trailing rubbish, where CPython raises
+        `ValueError`; this path has no exception, so the two are refused at run
+        time rather than answered. `0` is not available as the answer either —
+        `int("0")` is 0, and `formal/hostmods/argparse.mojo`'s own `is_decimal`
+        says so — so nothing but the `endptr` distinguishes "parsed zero" from
+        "parsed nothing". The stop writes `model.int_parse_trap_message` to fd 2
+        first, because a silent exit is the worst of the three answers this
+        backend can give (`_emit_list_append`'s own docstring is the argument).
+
+        `base` is a compile-time constant (`model.int_parse_lowering` refuses
+        anything else), which is why it is a `movz` immediate and not a
+        register: a base read at run time would need a slot of its own to
+        survive the call, and it is a different question from a stated one.
+        """
+        self._while_counter += 1
+        trap = f"{self.func_name}_ip{self._while_counter}_trap"
+        end = f"{self.func_name}_ip{self._while_counter}_end"
+        _emit_sub_imm(self.asm, 31, 31, 32)
+        self._emit_expr(text_expr)                        # X0 = s
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 0))     # [sp+0] = s
+        _emit_add_imm(self.asm, 1, 31, 8)                 # X1 = &end
+        self.asm.emit(encode_movz_xd_imm(2, base))         # X2 = base
+        self._emit_extern_call("strtoll", 3)               # X0 = value
+        self.asm.emit(encode_str_xt_xn_imm(0, 31, 16))    # [sp+16] = value
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 8))     # X1 = end
+        # TWO questions about `end`, and `strtoll`'s answers to them are what
+        # CPython's two rules are:
+        #
+        #   * `end == s` means NO DIGIT was consumed. `*end` is then the NUL of
+        #     an empty or all-whitespace string, so the trailing test below would
+        #     pass and the parse would answer 0 for `int("")` — which CPython
+        #     raises on. The difference is the whole of `strspn`'s `s` versus
+        #     CPython's "at least one digit".
+        #   * `*end` is a NUL only when the rest of the string is empty. It is
+        #     the first TRAILING whitespace when the string was padded, and
+        #     CPython accepts that (`int("  41  ")` is 41), so the rest of the
+        #     remainder is measured with `strspn` over C's own six whitespace
+        #     characters and the test is on what is past THAT. Without it every
+        #     padded read stops, which is a false refusal of a program CPython
+        #     runs — the one shape `int(user_input)` has.
+        #
+        # `end` is PARKED at [sp+24] rather than kept in X1 across the call,
+        # because `strspn`'s set is the second argument and lands in X1: leaving
+        # `end` there made the addition below add the run to the WHITESPACE SET's
+        # address, and every parse stopped. The window is 32 bytes for exactly
+        # this reason — [sp+24] is the one slot nothing else wanted.
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 24))    # [sp+24] = end
+        self.asm.emit(encode_ldr_xt_xn_imm(3, 31, 0))     # X3 = s
+        self.asm.emit(encode_sub_xd_xn_xm(4, 1, 3))       # X4 = end - s
+        self.asm.emit(encode_cbz_xn(0, 4))                # no digits -> stop
+        self.asm.emit_label_rel(trap, here_offset=-4)
+        self.asm.emit(encode_mov_zr_xn(0, 1))            # X0 = end
+        self.asm.emit_adrp_add(1, self._intern_string(M.C_WHITESPACE))
+        self._emit_extern_call("strspn", 2)               # X0 = trailing run
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 24))    # X1 = end
+        self.asm.emit(encode_add_xd_xn_xm(1, 1, 0))      # X1 = past the run
+        # ONE BYTE, not eight: `*past` is a NUL when the string was consumed,
+        # and an 8-byte load at that address has the NUL in its low byte and
+        # whatever follows the string in the other seven, so the word is
+        # non-zero and every parse of a valid string stops. LDRB zero-extends,
+        # so X2 is zero exactly when the byte is the NUL.
+        self.asm.emit(encode_ldrb_wd_wn(2, 1, 0))        # W2 = *past
+        self.asm.emit(encode_cbnz_xn(0, 2))              # not NUL -> stop
+        self.asm.emit_label_rel(trap, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 16))    # X0 = the value
+        _emit_add_imm(self.asm, 31, 31, 32)
+        self._emit_b_to(end)
+        self.asm.label(trap)
+        self._emit_overflow_diagnostic(M.int_parse_trap_message(base))
+        self.asm.emit(encode_movz_xd_imm(0, M.SHIFT_TRAP_STATUS))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(end)
+
     def _emit_file_write(self, e: F.CallExpr) -> None:
         """`f.write(s)` — `write(fd, s, strlen(s))` through the C library.
 
@@ -5991,6 +6115,19 @@ dylib_exports: list = None, globals_base: int = None,
         # still refused is a genuine mismatch of ARITY — a conversion has one
         # operand, and two of them (positioned or named) is not a conversion.
         operands = list(e.args) + [v for _n, v in e.kwargs]
+        # `int(s)` and `int(s, base)` are a PARSE, not a conversion, and the
+        # decision is `model.int_parse_lowering`'s so that x86-64 cannot answer
+        # this differently. It has to be asked here, before the zero-operand and
+        # arity arms below, because those two are about a CONVERSION's arity and
+        # a parse has a different one.
+        if name in M.INT_TYPE_CTORS:
+            verdict = M.int_parse_lowering(
+                name, operands, self._conversion_operand_is_text)
+            if verdict[0] == "parse":
+                self._emit_int_parse(operands[0], verdict[1])
+                return
+            if verdict[0] == "refuse":
+                raise CodegenError(verdict[1])
         if not operands:
             if name in M.STRING_TYPE_CTORS:
                 # `String()` is `String("")`, and the reason it can be is the
@@ -7419,14 +7556,23 @@ dylib_exports: list = None, globals_base: int = None,
             # X0 = exp
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self.asm.emit(encode_cset_xd_cond(1, "lt"))
-            self.asm.emit(encode_cbz_xn(0, 1))
+            # X1 is a CSET flag, so "exp < 0" is X1 NON-zero: the negative exit
+            # is a CBNZ, and the loop head below is the same. Both were CBZ,
+            # which asks the flag for `exp >= 0` and `exp > 0` respectively and
+            # therefore took the NEGATIVE exit for every non-negative exponent
+            # and the loop exit on the first iteration — `2 ** n` for a local
+            # `n` answered 0 on arm64 for every exponent, where x86-64's loop
+            # (which tests the flags the same way) was right. The third branch
+            # here, over `exp & 1`, is a CBZ and is right: the multiply is the
+            # thing to SKIP when the bit is clear.
+            self.asm.emit(encode_cbnz_xn(0, 1))
             self.asm.emit_label_rel(neg, here_offset=-4)
             # result = 1 in X2; keep exp in X0, base on stack
             self.asm.emit(encode_movz_xd_imm(2, 1))
             self.asm.label(loop)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self.asm.emit(encode_cset_xd_cond(1, "le"))
-            self.asm.emit(encode_cbz_xn(0, 1))
+            self.asm.emit(encode_cbnz_xn(0, 1))
             self.asm.emit_label_rel(done, here_offset=-4)
             self.asm.label(body)
             # if exp & 1: result *= base  (X1 = exp & 1; skip if zero)
@@ -7447,12 +7593,22 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_b_to(loop)
             self.asm.label(done)
             self.asm.emit(encode_mov_zr_xn(0, 2))
-            self.asm.emit(encode_ldp_sp_post(0, 31))     # drop base
+            # Drop the base into the two registers the body had scratch for
+            # (X4 = the mask 1, X5 = the multiply temp), NOT into (0, 31).
+            # LDP-post into X0 is the shape the literal unroller uses above to
+            # DISCARD the popped base, and it is right there because x0 holds
+            # the answer. Here x0 has just been given the answer too, so
+            # popping into it overwrote the result with the base — and
+            # `2 ** n` for a local `n` answered 0 (or the base) on arm64 for
+            # every exponent, while x86-64's loop, which pops into a scratch,
+            # was right. X4 and X5 are dead at `done`: the body writes them and
+            # reads neither after the last LSR.
+            self.asm.emit(encode_ldp_sp_post(4, 5))     # drop base
             self._emit_trunc(common_type(self._ttype(e.left),
                                          self._ttype(e.right)))
             self._emit_b_to(f"{fn}_pow{pid}_end")
             self.asm.label(neg)
-            self.asm.emit(encode_ldp_sp_post(0, 31))
+            self.asm.emit(encode_ldp_sp_post(4, 5))
             self.asm.emit(encode_movz_xd_imm(0, 0))
             self.asm.label(f"{fn}_pow{pid}_end")
             return

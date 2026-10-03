@@ -352,9 +352,116 @@ CASES = [
      "def main():\n"
      "    printf(\"%d %d %d %d %d\", 3 ** 3, 3 ** 4, 3 ** 5, 2 ** 8, 3 ** 8)\n"
      "    return 0\n",
-     "import sys\n\ndef main():\n"
+"import sys\n\ndef main():\n"
      "    sys.stdout.write(\"%d %d %d %d %d\" % (3 ** 3, 3 ** 4, 3 ** 5,\n"
      "                                            2 ** 8, 3 ** 8))\n"
+     "    return 0\n"),
+     # A COMPUTED exponent, which is a different path and not a variation: the
+     # case above is the unroll over a literal, and arm64's binary
+     # exponentiation loop — the path every exponent that is not a literal in
+     # `0..64` takes, and the one `**=` shares — answered 0 for every
+     # non-negative exponent because both of its conditional branches tested a
+     # CSET flag with the wrong sense (`CBZ` where the flag being ZERO is the
+     # loop continuing), so every non-negative exponent took the negative exit
+     # and every positive one left the loop on its first test.  The one defect
+     # `test_formal_run.py`'s `run_case` could not see is that it builds the
+     # HOST's architecture, which on this repository's CI is arm64 — the
+     # architecture that was wrong.
+     #
+     # Exponents 1, 2 and 5 over two bases, because the loop halves the
+     # exponent and 1 is the one value a `result = 1` seed that is never
+     # multiplied cannot get right, and a base of 0 or 1 hides a wrong squaring
+     # entirely.  `3 ** 5` is the one that needs two loop iterations, so a loop
+     # that ran its body once and left would answer 3 where the source says 243.
+     ("variable_exponent_power",
+     "def main():\n"
+     "    var n = 1\n"
+     "    printf(\"%d \", 2 ** n)\n"
+     "    n = 2\n"
+     "    printf(\"%d \", 3 ** n)\n"
+     "    n = 5\n"
+     "    printf(\"%d %d \", 2 ** n, 3 ** n)\n"
+     "    printf(\"%d\", 1 ** n)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    n = 1\n"
+     "    out = \"%d \" % (2 ** n)\n"
+     "    n = 2\n"
+     "    out += \"%d \" % (3 ** n)\n"
+     "    n = 5\n"
+     "    out += \"%d %d \" % (2 ** n, 3 ** n)\n"
+     "    out += \"%d\" % (1 ** n)\n"
+     "    sys.stdout.write(out)\n"
+     "    return 0\n"),
+     # The exponent as a PARAMETER, which is the distinction this defect turns
+     # on and a different route to the exponent than a local: a parameter is
+     # read out of the caller's frame rather than out of a local's home, and a
+     # `**=` writes the accumulator back through `_store_var` where the binary
+     # form leaves it in a register.
+("variable_exponent_through_a_parameter_and_an_augmented_power",
+     "def power(k: Int) -> Int:\n"
+     "    return 2 ** k\n"
+     "def main():\n"
+     "    var n = 4\n"
+     "    var a = 2\n"
+     "    a **= n\n"
+     "    var b = 3\n"
+     "    b **= n\n"
+     "    printf(\"%d %d %d\", power(n), a, b)\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    def power(k):\n"
+     "        return 2 ** k\n"
+     "    n = 4\n"
+     "    a = 2\n"
+     "    a **= n\n"
+     "    b = 3\n"
+     "    b **= n\n"
+     "    sys.stdout.write(\"%d %d %d\" % (power(n), a, b))\n"
+     "    return 0\n"),
+    # A FLOATING CONVERSION, which is a whole ABI question and not a
+    # rendering: SysV AMD64 hands a `double` to a variadic callee in XMM0..XMM7
+    # and an integer in RDI..R9, out of two INDEPENDENT register files, so
+    # `printf("%f", w)` read whatever XMM0 held — a denormal, and a different
+    # one on each run of the same binary, because the register was never
+    # written. arm64 needs nothing: AAPCS passes a double and an integer in
+    # register number 0 both, which is why this was invisible from every suite
+    # that builds one architecture.
+    #
+    # The values are the IEEE-754 BIT PATTERNS of doubles (`math.mojo`'s own
+    # representation, and the module's docstring says why), and 17 digits is
+    # the shortest round-tripping form, so CPython's `repr` and the C library's
+    # `%.17g` produce the same text. The `1.0000000000000002` is deliberate: it
+    # is the smallest double above 1.0 and its low 32 bits are 1, so a lowering
+    # that truncated the word to 32 bits — which is what an unannotated integer
+    # does on this path — would print `1.000000` and this row would still pass
+    # on that conversion alone. The mixed rows are the other half and are the
+    # reason this is not one `movq`: an SSE argument does not consume a GPR, so
+    # `printf("%f %lld", d, n)` needs `n` in **RDI** rather than RSI, and a fix
+    # that only moved the float would print `n` one register late.
+    ("printf_float_operand_read_from_an_xmm_register",
+     "def main():\n"
+     "    var one = 4607182418800017409\n"
+     "    var two = 4611686018427387904\n"
+     "    var n = 12345\n"
+     "    printf(\"%.17g %.17g\\n\", one, two)\n"
+     "    printf(\"%f %d\\n\", one, n)\n"
+     "    printf(\"%d %f %d %f\\n\", n, one, 99, two)\n"
+     "    printf(\"%e %g\\n\", one, two)\n"
+     "    printf(\"%d %d\\n\", n, 7)\n"
+     "    return 0\n",
+     "import sys\nimport struct\n\n"
+     "def d(u):\n"
+     "    return struct.unpack('<d', struct.pack('<Q', u))[0]\n\n"
+     "def main():\n"
+     "    one = 4607182418800017409\n"
+     "    two = 4611686018427387904\n"
+     "    n = 12345\n"
+     "    sys.stdout.write(\"%.17g %.17g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%f %d\\n\" % (d(one), n))\n"
+     "    sys.stdout.write(\"%d %f %d %f\\n\" % (n, d(one), 99, d(two)))\n"
+     "    sys.stdout.write(\"%e %g\\n\" % (d(one), d(two)))\n"
+     "    sys.stdout.write(\"%d %d\\n\" % (n, 7))\n"
      "    return 0\n"),
     # THE SAME DELEGATION THROUGH A FRAME SLOT, which is a different route and
     # not a variation: a plain name loads and stores a local, while `self.x`
@@ -657,6 +764,190 @@ CASES = [
      "    del h.xs[0]\n"
      "    sys.stdout.write(\"%d %d\" % (h.xs[0], h.xs[1]))\n"
      "    return 0\n"),
+    # A chain of typed-nested FRAMES, which is the shape the block layout is
+    # recursive for, and every level is given a DISTINCT value so a lowering
+    # that put any two frames at the same address cannot pass by printing one
+    # number twice.  The read is the half that used to be one hop deep whatever
+    # the chain's length: `o.n.n.v` was computed as `o.n.v`, so the innermost
+    # read either refused (`'n' is not a field of the holder's struct`, which
+    # is true of the OUTER struct and false of the file) or read the wrong slot.
+    ("nested_frame_chain_three_levels",
+     "struct In:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var v: Int\n"
+     "    var n: In\n"
+     "\n"
+     "struct Out:\n"
+     "    var v: Int\n"
+     "    var n: Mid\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 4\n"
+     "    printf(\"%d %d %d %d\", o.v, o.n.v, o.n.n.v, o.n.n.w)\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = In()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = Mid()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 4\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (o.v, o.n.v, o.n.n.v, o.n.n.w))\n"
+     "    return 0\n"),
+    # The same chain HANDED TO A CALLEE, which is the `_emit_frame_copy` half and
+    # not the `_emit_frame_nested_addresses` half: the copy reserves its own
+    # block and has to lay the nested frames out in it identically, so a fix
+    # that stored each level's address against the OUTER base (as both backends
+    # did) passes the case above — which never copies — and fails this one by
+    # overwriting the outer frame's own first-level address with the inner one.
+    ("nested_frame_chain_three_levels_survives_a_call",
+     "struct In:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct Mid:\n"
+     "    var v: Int\n"
+     "    var n: In\n"
+     "\n"
+     "struct Out:\n"
+     "    var v: Int\n"
+     "    var n: Mid\n"
+     "\n"
+     "def take(x: Out) -> Int:\n"
+     "    printf(\"%d %d %d\", x.v, x.n.v, x.n.n.v)\n"
+     "    return x.n.n.w\n"
+     "\n"
+     "def main():\n"
+     "    var o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 9\n"
+     "    printf(\" %d \", o.n.n.v)\n"
+     "    printf(\"%d\", take(o))\n"
+     "    return 0\n",
+     "class In:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class Mid:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = In()\n"
+     "\n"
+     "class Out:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = Mid()\n"
+     "\n"
+     "import sys\n\n"
+     "def take(x):\n"
+     "    sys.stdout.write(\"%d %d %d\" % (x.v, x.n.v, x.n.n.v))\n"
+     "    return x.n.n.w\n"
+     "\n"
+     "def main():\n"
+     "    o = Out()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.w = 9\n"
+     "    sys.stdout.write(\" %d \" % o.n.n.v)\n"
+     "    sys.stdout.write(\"%d\" % take(o))\n"
+     "    return 0\n"),
+    # FIVE nested levels, which is `MAX_NESTED_FRAME_DEPTH` and the deepest
+    # chain the layout sizes.  It is here as the anti-rot for the bound: raise
+    # the constant and this keeps passing while the REFUSAL below stops firing,
+    # which is the pair that says the constant is the whole of the limit.
+    ("nested_frame_chain_at_the_depth_bound",
+     "struct S1:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct S2:\n"
+     "    var v: Int\n"
+     "    var n: S1\n"
+     "\n"
+     "struct S3:\n"
+     "    var v: Int\n"
+     "    var n: S2\n"
+     "\n"
+     "struct S4:\n"
+     "    var v: Int\n"
+     "    var n: S3\n"
+     "\n"
+     "struct S5:\n"
+     "    var v: Int\n"
+     "    var n: S4\n"
+     "\n"
+     "def main():\n"
+     "    var o = S5()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.n.v = 4\n"
+     "    o.n.n.n.n.v = 5\n"
+     "    printf(\"%d %d %d %d %d\", o.v, o.n.v, o.n.n.v, o.n.n.n.v,\n"
+     "           o.n.n.n.n.v)\n"
+     "    return 0\n",
+     "class S1:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.w = 0\n"
+     "\n"
+     "class S2:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S1()\n"
+     "\n"
+     "class S3:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S2()\n"
+     "\n"
+     "class S4:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S3()\n"
+     "\n"
+     "class S5:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.n = S4()\n"
+     "\n"
+     "import sys\n\n"
+     "def main():\n"
+     "    o = S5()\n"
+     "    o.v = 1\n"
+     "    o.n.v = 2\n"
+     "    o.n.n.v = 3\n"
+     "    o.n.n.n.v = 4\n"
+     "    o.n.n.n.n.v = 5\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (o.v, o.n.v, o.n.n.v,\n"
+     "                                        o.n.n.n.v, o.n.n.n.n.v))\n"
+     "    return 0\n"),
 ]
 
 
@@ -727,6 +1018,60 @@ REFUSALS = [
      "    var v: Int\n"
      "    var w: Int\n",
      "+ - * / // % & | ^ << >> **"),
+    # A chain of typed-nested frames ONE LEVEL past what the layout sizes, and a
+    # DECLARATION CYCLE, which is the case `MAX_NESTED_FRAME_DEPTH` is written
+    # for.  Both used to build: the recursion's `depth <= 0` arm returned the
+    # object's own bytes and DROPPED the frames below the cut, so the reserved
+    # block came back short by exactly those frames, the blob cursor started
+    # inside one, and the program took a SIGSEGV with no diagnostic naming the
+    # file.  A bound that hangs is a bug; a bound that faults silently is
+    # worse, and this row is the refusal both must now make instead.
+    ("nested_frame_chain_past_the_depth_bound_refused",
+     "struct S1:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "\n"
+     "struct S2:\n"
+     "    var v: Int\n"
+     "    var n: S1\n"
+     "\n"
+     "struct S3:\n"
+     "    var v: Int\n"
+     "    var n: S2\n"
+     "\n"
+     "struct S4:\n"
+     "    var v: Int\n"
+     "    var n: S3\n"
+     "\n"
+     "struct S5:\n"
+     "    var v: Int\n"
+     "    var n: S4\n"
+     "\n"
+     "struct S6:\n"
+     "    var v: Int\n"
+     "    var n: S5\n"
+     "\n"
+     "def main():\n"
+     "    var o = S6()\n"
+     "    o.v = 1\n"
+     "    printf(\"%d\", o.v)\n"
+     "    return 0\n",
+     "past the 4 levels this path lays out"),
+    ("cyclic_nested_frames_refused",
+     "struct A:\n"
+     "    var x: Int\n"
+     "    var b: B\n"
+     "\n"
+     "struct B:\n"
+     "    var y: Int\n"
+     "    var a: A\n"
+     "\n"
+     "def main():\n"
+     "    var o = A()\n"
+     "    o.x = 1\n"
+     "    printf(\"%d\", o.x)\n"
+     "    return 0\n",
+     "past the 4 levels this path lays out"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

@@ -195,6 +195,36 @@ def encode_mov_r64_r64(dst: Reg, src: Reg) -> bytes:
     return bytes([rex, 0x89, _modrm(3, src.value & 7, dst.value & 7)])
 
 
+def encode_movq_xmm_rm64(xmm: int, src: Reg) -> bytes:
+    """movq xmm<k>, r64 — 66 REX.W 0F 7E /r, the GPR-to-SSE move.
+
+    **Why this instruction exists at all**, because nothing else on this path
+    crosses that boundary: a value here is one 64-bit word and it lives in a
+    general-purpose register, and the SysV AMD64 ABI hands a `double` to a
+    variadic callee in `XMM0`..`XMM7` and nowhere else. So a `printf("%f", w)`
+    whose word is in `RDI` reads whatever `XMM0` happened to contain — which is
+    why the wrong answer was a DENORMAL and why it CHANGED BETWEEN RUNS of the
+    same binary rather than merely being wrong.
+
+    The encoding is `66 REX.W 0F 6E /r` and the direction matters, because the
+    two moves share a ModRM shape and differ only in which half is the XMM:
+    `0F 6E` is `MOVQ xmm, r/m64` (XMM in the reg field, GPR in r/m — the
+    direction wanted here) and `0F 7E` is `MOVQ r/m64, xmm` (the reverse, which
+    assembles, links and quietly loads whatever was already in XMM0 into RDI).
+    The width modifiers are load-bearing for the same reason: `0F 6E` without
+    REX.W is `MOVD`, which drops all but the low 32 bits and so moves a
+    DIFFERENT VALUE rather than a different placement of the same one.
+
+    `xmm` is the XMM number 0..7 and is the low three bits of ModRM.reg; there
+    is no REX.R because no XMM register is numbered 8 or above in this ABI, and
+    the B bit carries the GPR's own extension.
+    """
+    assert 0 <= xmm <= 7
+    assert isinstance(src, Reg)
+    rex = _rex(w=1, b=1 if src.value >= 8 else 0)
+    return bytes([0x66, rex, 0x0F, 0x6E, _modrm(3, xmm, src.value & 7)])
+
+
 def encode_mov_r64_rm64(dst: Reg, base: Reg, disp: int = 0) -> bytes:
     """mov dst, [base + disp] — REX.W 8B /r."""
     modrm, extra = _mem_modrm(base, disp, dst)
