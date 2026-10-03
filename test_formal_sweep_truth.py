@@ -520,11 +520,38 @@ class TestSweepReach(unittest.TestCase):
 
 
 class TestSystemModuleCall(unittest.TestCase):
-    # `math` and not `json`: `json` used to be the host module named here, and
-    # `formal/hostmods/json.mojo` landed in 2026-09-30, so a `json` that is
-    # "not available here" is no longer a fact about anything. `math` has no
-    # Mojo source in this tree, so the message this rule reads is still true.
-    SRC = "import os\nimport math\n\ndef main():\n    pass\n"
+    # The host module these rows name is CHOSEN, not spelled, because the choice
+    # is a fact about the tree that goes stale on its own: `json` was named here
+    # until `formal/hostmods/json.mojo` landed on 2026-09-30, and `math` until
+    # `formal/hostmods/math.mojo` landed in 9c7ec795 — and a host module with
+    # real Mojo source is not in `formal.imports.HOST_MODULES` at all, so the row
+    # stopped firing and asserted `'' != 'math'`, which is a test failure that
+    # reads like a sweep bug and is not one. `_HOSTMEMBER` is picked from what
+    # the build still treats as a host module, and `test_the_named_host_module
+    # _still_has_no_mojo_source` keeps the choice honest.
+    _HOSTMEMBER = next(m for m in sorted(S._declared_host())
+                       if "." not in m and m not in ("socket", "asyncio",
+                                                    "subprocess", "threading",
+                                                    "tempfile", "ctypes"))
+    SRC = f"import os\nimport {_HOSTMEMBER}\n\ndef main():\n    pass\n"
+
+    def test_the_named_host_module_still_has_no_mojo_source(self):
+        """The anti-rot for the choice above, and the reason it is a test.
+
+        Without this row the class would go quietly vacuous the next time a
+        host module gains source: `_HOSTMEMBER` would pick a different name,
+        every other row would still pass, and nothing would say the original
+        one had stopped being the thing the rows are about.
+        """
+        import os.path
+        self.assertFalse(
+            os.path.exists(os.path.join("formal", "hostmods",
+                                        f"{self._HOSTMEMBER}.mojo")),
+            f"{self._HOSTMEMBER} gained a formal/hostmods source, so it is no "
+            f"longer a host module the build cannot resolve and the rows below "
+            f"are about something else")
+        from formal.imports import HOST_MODULES
+        self.assertIn(self._HOSTMEMBER, HOST_MODULES)
 
     def test_a_self_describing_message_is_a_target_fact(self):
         got = S._system_module_call(
@@ -534,9 +561,10 @@ class TestSystemModuleCall(unittest.TestCase):
 
     def test_a_message_naming_a_host_member_is_a_target_fact(self):
         got = S._system_module_call(
-            "build: math.floor() cannot be lowered: math is not available here",
+            f"build: {self._HOSTMEMBER}.somefn() cannot be lowered: "
+            f"{self._HOSTMEMBER} is not available here",
             self.SRC)
-        self.assertEqual(got, "math")
+        self.assertEqual(got, self._HOSTMEMBER)
 
     def test_a_construct_refusal_is_not(self):
         """The negative that matters most, because the fallback is `codegen`.
