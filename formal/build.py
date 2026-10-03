@@ -1923,7 +1923,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # A `@dataclass` option this backend cannot lower is a fact about the FILE
     # rather than about the image, so it belongs with this group rather than
     # with the construct checks that only an executable's codegen can answer.
-    check_dataclass_constructs(stmts, functions)
+    check_dataclass_constructs(stmts, functions, by_name)
     check_module_symbols(functions, by_name,
                          imported_module_names=imported_module_names,
                          link_line=link_line,
@@ -5682,7 +5682,8 @@ def check_frame_field_blob_premises(structs) -> None:
             raise CodegenError(M.frame_field_premise_refusal(st))
 
 
-def check_dataclass_constructs(stmts: list, functions: list) -> None:
+def check_dataclass_constructs(stmts: list, functions: list,
+                                structs_by_name: dict = None) -> None:
     """Every `@dataclass` construct in the unit, checked. One refusal each.
 
     Called by the ENTRY POINTS, beside `check_construction_shapes`, and for the
@@ -5693,6 +5694,11 @@ def check_dataclass_constructs(stmts: list, functions: list) -> None:
     (`formal/dataclass_transform.py` has the measurement that decides the
     layer), so this check is the back half of it: the rewrites happened in
     `_prepare_functions`, and what is left is what cannot be rewritten.
+
+    `structs_by_name` is this unit's StructDefs by name, and it is here only
+    for `_check_own_eq_dispatch` — which needs it to ask the SAME question the
+    eq rewrite asked about a comparison whose operand is a CALL, rather than a
+    second recognition of it. `_run_late_checks` already holds it as `by_name`.
 
     Two halves, and they are different in kind:
 
@@ -5719,9 +5725,165 @@ def check_dataclass_constructs(stmts: list, functions: list) -> None:
     classes = DC.dataclass_classes(stmts)
     if classes:
         DC.check_dataclass_classes(classes)
+        _check_own_eq_dispatch(classes, functions, structs_by_name)
     names = DC.bound_module_names(stmts)
     if names:
         DC.check_reflection_calls(functions, names)
+
+
+def _check_own_eq_dispatch(classes: dict, functions: list,
+                           structs_by_name: dict = None) -> None:
+    """A `@dataclass` with its own `__eq__`, against the COMPARISONS of it.
+
+    The dataclass transform accepts such a class: it declines to desugar `==`
+    into a field-wise chain (`rewrite_equality` skips `info["own_eq"]`), so the
+    operator's own dispatch owns the comparison — and that dispatch lowers a
+    SHAPE, not a promise. Both operands must be bare names, or CALLS whose
+    declared return type this image can name, that it can say are values of the
+    SAME struct (`_rewrite_eq_on_frame_receivers`/`_eq_dispatch_call`), because
+    a name is the only thing that can say what a word holds, and
+    `NotImplemented` has no representation for the reflected-operand case.
+
+    So this asks, for every comparison in the file that names such a class, the
+    SAME question the rewrite asked, with the SAME tables — the ones
+    `_frame_receivers` published on each function — and refuses when the answer
+    is "leave the operator be". Asking `_eq_dispatch_call` rather than a second
+    recognition is the point: two recognitions of "does the dispatch own this
+    comparison" is exactly the pair that agrees until the day it does not, and
+    the residue of that day is a program that answers 0 where the source's own
+    `__eq__` says True.
+
+    `structs_by_name` is what makes the CALL-operand case decidable, and it is
+    the same `_call_frame_structs` answer the rewrite pass hands over: a
+    construction (`Point(3, 4)`) names no function with a declared return type,
+    so `call_result_frame_struct` answers None for it and this still refuses it —
+    while a call to `def mk() -> Point` IS dispatched by the rewrite and is
+    therefore not refused here. Asking for less than the rewrite asks would put
+    the two passes back out of step, which is the failure this function exists
+    to prevent.
+
+    `p == 5` and `p == None` are the shapes this refuses, and each message
+    quotes the comparison so the reader can see which line is the problem.
+    `bugs/FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works.md`
+    measured the row and is closed by this.
+    """
+    own = {}
+    for name, info in (classes or {}).items():
+        if info.get("own_eq") and info.get("struct") is not None:
+            own[id(info["struct"])] = name
+    if not own:
+        return
+    # A CONSTRUCTION of one of these classes is the same question with no name
+    # in it: `Always(3, 4) == p` builds a fresh frame, so the operator compare
+    # is two ADDRESSES and answers 0 for a class whose `__eq__` returns True.
+    # It is the spelling most likely to be written, and it is the one a
+    # name-only recognition cannot see — which is why this audit exists rather
+    # than a filter on `rewrite_equality`.
+    own_names = set(own.values())
+    functions_by_name = {fn.name: fn for fn in (functions or ())
+                         if getattr(fn, "name", None)}
+    for fn in functions or ():
+        cands = getattr(fn, "_frame_candidates", None) or {}
+        one_word = getattr(fn, "_one_word_candidates", None) or {}
+        # NOT `if not cands and not one_word: continue`. A function whose only
+        # comparison of the class is `Always(3, 4) == Always(9, 9)` has no
+        # holder at all — the values are temporaries — and skipping it on the
+        # empty tables is how the construction spelling got through: it built
+        # and answered 0, where the source's own `__eq__` says True.
+        hs = getattr(fn, "_frame_holders", None) or set()
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            for op, left, right in _comparison_operands(node):
+                name = _own_eq_class_touching(own, own_names, cands, one_word,
+                                              left, right)
+                if name is None:
+                    continue
+                if _eq_dispatch_call(
+                        node, op, left, right, cands, hs, one_word,
+                        _call_frame_structs(node, functions_by_name,
+                                            structs_by_name)) is not None:
+                    continue
+                spelled = f"{M.spelled(left)} {op} {M.spelled(right)}"
+                raise CodegenError(DC.own_eq_refusal(
+                    name, spelled, _own_eq_gap(left, right)))
+
+
+def _comparison_operands(node):
+    """`(op, left, right)` for every adjacent pair of a comparison node.
+
+    A `CompareChain` is one node with several pairs, and a chain whose middle
+    operands are bare names is lowered as the `and` of its pairwise
+    comparisons — so the audit has to see each pair separately or a
+    three-element chain with one bad link reads as covered by the two good ones.
+    """
+    if isinstance(node, F.BinaryOp) and node.op in ("==", "!="):
+        return [(node.op, node.left, node.right)]
+    if isinstance(node, F.CompareChain) and len(node.ops) >= 2:
+        return [(node.ops[i], node.operands[i], node.operands[i + 1])
+                for i in range(len(node.ops))]
+    return []
+
+
+def _own_eq_class_touching(own: dict, own_names: set, cands: dict,
+                           one_word: dict, left, right):
+    """The own-`__eq__` dataclass either operand of this pair can be a value of.
+
+    `None` when neither operand is a value of one — which is most comparisons
+    in a file, and the reason this is a filter rather than a refusal on every
+    `==`. The holder tables are keyed by struct IDENTITY because two dataclasses
+    can share a name across a module boundary and those tables hold the StructDef
+    itself; a CONSTRUCTION is recognised by its callee's NAME, which is the only
+    thing a call site has.
+    """
+    for side in (left, right):
+        if isinstance(side, F.CallExpr) and isinstance(side.func, F.IdentExpr) \
+                and side.func.name in own_names:
+            return side.func.name
+        name = getattr(side, "name", None)
+        if not isinstance(side, F.IdentExpr) or not name:
+            continue
+        table = cands if name in cands else one_word
+        for st in table.get(name) or ():
+            if id(st) in own:
+                return own[id(st)]
+    return None
+
+
+def _own_eq_gap(left, right) -> str:
+    """Which of the two dispatch requirements this pair misses, in one clause.
+
+    Three clauses, and which one is named is the whole of the usefulness: a
+    reader who is told "5 is a construction" learns nothing, and one who is told
+    "the literal `5` is not a plain name" knows which line of the source to
+    change. `a == 5`, `Always(3, 4) == p` and `p == q` across two classes are
+    three different gaps and three different repairs.
+    """
+    sides = [(M.spelled(side), side) for side in (left, right)
+             if not isinstance(side, F.IdentExpr)]
+    if not sides:
+        return ("the two names are not both values of the SAME class as far as "
+                "this image can tell, and Python resolves `==` through "
+                "`type(a)`")
+    ctors = [text for text, node in sides if isinstance(node, F.CallExpr)]
+    plain = [text for text, node in sides if not isinstance(node, F.CallExpr)]
+    parts = []
+    if ctors:
+        parts.append(f"{_join(ctors)} " + ("is a construction" if len(ctors) == 1
+                                           else "are constructions")
+                     + ", and a fresh frame compared against anything is a "
+                     "compare of two ADDRESSES")
+    if plain:
+        parts.append(f"{_join(plain)} " + ("is not a plain name" if len(plain) == 1
+                                           else "are not plain names")
+                     + ", and a name is the only thing this path can ask what a "
+                     "word holds")
+    return "; ".join(parts)
+
+
+def _join(items) -> str:
+    """`a`, `a and b`, `a, b and c` — for a clause naming one or two operands."""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def check_construction_shapes(functions, structs_by_name,

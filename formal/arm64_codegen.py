@@ -20,7 +20,7 @@ from formal.arm64 import *
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, _range_args, TYPE_NAMES,
-                          STRING_TYPE_NAMES)
+                          STRING_TYPE_NAMES, DICT_TYPE_NAMES)
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -2955,7 +2955,10 @@ dylib_exports: list = None, globals_base: int = None,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
-            ctor_field_value=self._ctor_field_value_for(name))
+            ctor_field_value=self._ctor_field_value_for(name),
+            callee_is_dict=lambda callee: self._callee_is_dict(
+                callee, stack | {name}),
+            dict_names=DICT_TYPE_NAMES)
         self._vkinds_cache[name] = vk
         return vk
 
@@ -3252,6 +3255,32 @@ dylib_exports: list = None, globals_base: int = None,
             return M.INT_KIND
         return vk.return_kind
 
+    def _callee_is_dict(self, name, stack):
+        """Whether a call to this unit's function `name` produces a DICT, or
+        None when the source does not say.
+
+        `_callee_kind`'s evidence read on the other axis. That one answers what
+        KIND a call result is, and on this path a dict and a list are one word
+        pointing at a blob with the same 8-byte count header — so `return_kind`
+        says "a blob" for both and `d["a"]` on the result of either took the
+        sequence subscript. The two questions need two pieces of evidence, and
+        this one is assembled from the same two: the callee's DECLARED return
+        type first (`-> Dict[String, Int]` says it outright), then its RETURN
+        STATEMENTS by unanimous agreement (`def mk(): … return d` states a dict
+        without annotating anything).
+
+        The stack and the memo are `_callee_kind`'s, deliberately: a
+        `def a(): return b()` / `def b(): return a()` cycle is a word here and
+        must be a word here too.
+        """
+        fn = self._functions.get(name)
+        if fn is None or name in stack or len(stack) >= 3:
+            return None
+        if M.declared_type_is_dict(getattr(fn, "return_type", None),
+                                   DICT_TYPE_NAMES):
+            return True
+        return self._vkinds_for(name, fn, stack).return_is_dict
+
     def _scan_list_caps(self, fn, vkinds: M.ValueKinds):
         """({ListExpr node: slots}, {name: slots}) for `fn`'s appendable lists.
 
@@ -3351,6 +3380,21 @@ dylib_exports: list = None, globals_base: int = None,
         if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
+        elif isinstance(value, F.CallExpr) and self._callee_is_dict(
+                M.subscript_callee_name(value) or M._flat_callee(value),
+                frozenset()):
+            # `d = mk()` where `mk` returns a dict. The binding has no literal
+            # in it, so this arm used to fall through to the clearing `else`
+            # below and the subscript that followed took the SEQUENCE path:
+            # `d["a"]` was emitted as a load at the key's interned ADDRESS, and
+            # the image exited 1 from a build that was green. Measured on both
+            # architectures, for an annotated callee and for an unannotated one
+            # whose `return` states a dict literal. See
+            # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md
+            # (deleted with the fix). The same shape as the `M.is_dict_expr`
+            # arm above, so it clears the other two marks the same way.
+            self._dict_vars.add(name)
+            self._string_vars.discard(name)
             self._blob_vars.discard(name)
         elif self._is_container_expr(value):
             # A list/set/tuple literal, a comprehension, a SLICE and a `+`/`|`
@@ -3406,19 +3450,35 @@ dylib_exports: list = None, globals_base: int = None,
             self._blob_vars.discard(name)
 
     def _is_dict_subscript(self, obj) -> bool:
-        """True when `obj` is known to hold a dict pair-blob pointer."""
+        """True when `obj` is known to hold a dict pair-blob pointer.
+
+        Three sources, and the ORDER is the same precedence `_expr_str_kind`
+        uses for the string axis: the flow-sensitive `_dict_vars` first, since
+        it is strictly better informed than the whole-function map, and
+        `ValueKinds` after it for the shapes no BINDING statement can describe.
+
+        * `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+          COMPREHENSION is a `Comprehension` with kind='dict', and asking
+          only about literals sent `d[k]` down the index path. See
+          `M.is_dict_expr`.
+        * `_dict_vars` — what the emission of this very function has bound.
+        * `ValueKinds.is_dict_value` — the base with NO binding statement at
+          all, which is a `Dict[String, Int]` PARAMETER. Measured: `def show(d:
+          Dict[String, Int]): d["a"]` exited 1 with nothing printed on both
+          architectures, because a parameter is bound by the signature and
+          `_note_binding` never sees it. See
+          `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+        """
         if isinstance(obj, F.IdentExpr):
-            return obj.name in self._dict_vars
+            if obj.name in self._dict_vars:
+                return True
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
-            return key is not None and key in self._dict_vars
-        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
-        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
-        # only about literals sent `d[k]` down the index path. See
-        # `M.is_dict_expr`.
+            if key is not None and key in self._dict_vars:
+                return True
         if M.is_dict_expr(obj):
             return True
-        return False
+        return self._vkinds.is_dict_value(obj) is True
 
     def _is_string_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a char* (byte index path).
@@ -3832,6 +3892,20 @@ dylib_exports: list = None, globals_base: int = None,
         if self._is_dict_key_subscript(e):
             self._emit_dict_lookup_addr(e)
             return
+        # A string index against a base whose shape nothing states: the one
+        # spelling of this subscript that neither the dict path nor the byte
+        # path can answer, and the residue after
+        # `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`'s
+        # other three (a module slot, a call result and a `Dict[…]`-annotated
+        # parameter all have evidence now). Asked here — after the dict
+        # dispatch and before the blob fallback — because those two are the
+        # readings that DO exist and this is the pair the source does not
+        # choose between.
+        why = M.unstated_base_string_index_refusal(
+            False, self._expr_str_kind(e.obj), self._expr_str_kind(e.index),
+            M.spelled(e.obj), M.spelled(e.index))
+        if why is not None:
+            raise CodegenError(why)
         if self._is_string_subscript(e.obj):
             # A string INDEX would make this `s + i` with two addresses. Asked
             # HERE, in the single choke point a read, a store and an augmented
@@ -8679,14 +8753,22 @@ dylib_exports: list = None, globals_base: int = None,
 
         Bare Ident/Member del is a no-op (no GC; SRA slots persist).
 
-        A multi-element subscript index is refused HERE, before the branches
-        below, because the SubscriptExpr branch below is unreachable (it sits
-        after the SliceExpr branch's `continue`), so without this
-        `del a[i, j]` fell off the end of the loop and did NOTHING: it built,
-        it ran, and the list still had three elements. A silent no-op where
-        the source says "remove" is the one outcome this backend may not
-        produce, and the refusal belongs at the point where the shape is still
-        visible rather than in a branch nothing reaches."""
+        The SubscriptExpr arm below used to sit UNDER the SliceExpr arm's
+        `continue`, so every subscript target fell off the end of the loop body
+        and emitted no instructions at all: `del lst[0]` and `del lst[1:3]`
+        built, ran, exited 0, and removed nothing, on both list and dict
+        (`len(a)` still 3, `a[0]` still 10). A silent no-op where the source
+        says "remove" is the one outcome this backend may not produce, and the
+        four `_emit_del_*` helpers it needed were dead code behind that one
+        `continue` — written, reviewed, and stranded.
+
+        A multi-element subscript index is refused BEFORE the branches below,
+        for the same reason: `del a[i, j]` is not one of the three lowered
+        shapes, and the refusal belongs where the shape is still visible.
+
+        The shapes this cannot lower are refused through the shared
+        `M.del_refusal`, so this backend and its x86-64 twin say the same
+        words about the same source."""
         for target in stmt.targets:
             if isinstance(target, (F.IdentExpr, F.MemberExpr)):
                 continue
@@ -8700,27 +8782,46 @@ dylib_exports: list = None, globals_base: int = None,
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "
                     "on the formal arm64 path")
+            why = M.del_refusal(
+                target,
+                self._is_string_subscript(target.obj)
+                if isinstance(target, F.SubscriptExpr) else False,
+                self._del_base_is_pointer(target))
+            if why is not None:
+                raise CodegenError(why)
             if isinstance(target, F.SliceExpr):
                 self._emit_del_slice(target)
                 continue
-                if isinstance(target, F.SubscriptExpr):
-                    if self._is_dict_subscript(target.obj):
-                        self._emit_del_dict_key(target)
-                        continue
-                    if isinstance(target.index, F.SliceExpr):
-                        self._emit_del_slice_index(target)
-                        continue
-                    if self._is_string_subscript(target.obj):
-                        raise CodegenError(
-                            "del on a string index is not supported on the "
-                            "formal arm64 path")
-                    self._emit_del_list_index(target)
+            if isinstance(target, F.SubscriptExpr):
+                if self._is_dict_subscript(target.obj):
+                    self._emit_del_dict_key(target)
                     continue
-                # Dict/list slot behind a bare MemberExpr base is handled
-                # above via _member_slot_key; unknown shapes fall through.
-                raise CodegenError(
-                    f"unsupported del target on the formal arm64 path "
-                    f"(got {type(target).__name__})")
+                if isinstance(target.index, F.SliceExpr):
+                    self._emit_del_slice_index(target)
+                    continue
+                self._emit_del_list_index(target)
+                continue
+            # Dict/list slot behind a bare MemberExpr base is handled
+            # above via _member_slot_key; unknown shapes fall through.
+            raise CodegenError(
+                f"unsupported del target on the formal arm64 path "
+                f"(got {type(target).__name__})")
+
+    def _del_base_is_pointer(self, target) -> bool:
+        """Whether `target`'s base is a POINTER rather than a container.
+
+        The READ path's own question — `subscript_base_lowering`, which answers
+        `"load"` for a pointer whose pointee width this module established —
+        asked here so `del` over a `Pointer` is refused instead of taking the
+        buffer's first word for a count. A `SliceExpr` target has the same base
+        as a subscript, and `del p[0:2]` is the same mistake with two bounds.
+        """
+        obj = getattr(target, "obj", None)
+        if obj is None:
+            return False
+        shape, _width, _signed, _why = M.subscript_base_lowering(
+            self._cur_fn, obj, self._structs, self._functions, self._structs)
+        return shape == "load"
 
     def _emit_del_list_index(self, target) -> None:
         """`del lst[i]` / `del obj.attr[i]` — shift left, count-- (OOB → exit).
@@ -8750,9 +8851,16 @@ dylib_exports: list = None, globals_base: int = None,
         loop = f"{fn}_dls{wid}"
         endl = f"{fn}_dle{wid}"
         self.asm.label(loop)
+        # `CBNZ` and not `CBZ`: the exit is the `>= count` case, and the
+        # scanner in `_emit_dict_lookup_addr` spells the same test the same
+        # way. With `CBZ` the loop left before its own body on every
+        # iteration, so the count came down and the elements did not move —
+        # `del a[0]` on `[10, 20, 30]` printed `2 10`, which is a shorter
+        # list rather than a removal. Invisible until now only because
+        # nothing reached this function (see `_emit_del`).
         self.asm.emit(encode_cmp_xn_xm(3, 1))
         self.asm.emit(encode_cset_xd_cond(4, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 4))
+        self.asm.emit(encode_cbnz_xn(0, 4))
         self.asm.emit_label_rel(endl, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(5, 10, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl3(5, 5, 3))
@@ -8812,9 +8920,10 @@ dylib_exports: list = None, globals_base: int = None,
         # shift pairs [i+1, count) → [i, count-1); count--
         self.asm.emit(encode_add_xd_xn_imm(2, 2, 1))  # j = i+1
         self.asm.label(shift)
+        # `CBNZ`, matching the scan loop above: `j >= count` is the exit.
         self.asm.emit(encode_cmp_xn_xm(2, 1))
         self.asm.emit(encode_cset_xd_cond(3, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(shd, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 2))
@@ -8873,64 +8982,76 @@ dylib_exports: list = None, globals_base: int = None,
     def _emit_del_list_range(self, name: str, start, stop, step) -> None:
         """Remove [start, stop) from list `name` (memmove tail + count).
 
-        Bounds are Python-normalized (negative → +count; stop clamped to
-        [start, count]). start >= stop is a no-op. Callers reject step."""
+        Bounds are Python-normalized: a negative bound gains the count, one
+        still negative after that clamps to 0, `stop` clamps to
+        [start, count], and start >= stop removes nothing. Callers reject a
+        step.
+
+        TWO THINGS THIS FUNCTION HAD WRONG, both of them measured, and both of
+        them invisible while the function was unreachable.
+
+        **The branches were backwards.** Each test is spelled
+        `cset X3, <cond>` then a `CBZ`/`CBNZ X3` that `emit_label_rel` points
+        at the SKIP label — so the body runs when the condition is TRUE. The
+        previous version wrapped that in an extra unconditional `encode_b(0)`,
+        which inverts it: with `cset X3, lt` and `CBNZ X3, #0` followed by
+        `B <clamp-to-zero>`, a NON-negative bound went to the clamp and a
+        negative one was wrapped. So `del lst[1:3]` normalized `start` to 0
+        and then `stop = max(stop, start)` took it the other way, `n_del`
+        came out 0, and the list was unchanged — the silent no-op this whole
+        construct is about, reached for a second time and by a different
+        route. `_emit_slice_store` above is the same normalization written the
+        other way round, and that one works.
+
+        **The base and the count were live across the bound EXPRESSIONS.**
+        `X10` (base) and `X1` (count) were loaded first and the bounds were
+        evaluated afterwards, and a bound is where a call, a nested
+        subscript or a blob materialization runs — any of which writes
+        scratch registers. They are pushed here instead, and the copy loop
+        reloads them, which costs two loads and removes the question.
+        """
         if step is not None:
             raise CodegenError(
                 "del slice with step is not supported on the formal arm64 "
                 "path")
         self._load_var(name, 10)                       # X10 = base
         self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))  # X1 = count
+        self.asm.emit(encode_stp_sp_pre(1, 31))        # [SP+0] count
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         # --- start index → X2 ---
+        # ALWAYS pushed, omitted bound included: the count sits at [SP+16]
+        # once start is on the stack, and a conditional push would make every
+        # later offset conditional too (`del lst[:2]` read the count out of
+        # the slot `start` had not taken and removed nothing).
         if start is None:
             self.asm.emit(encode_movz_xd_imm(2, 0))
         else:
             self._emit_expr_to(start, "X2")
-            self.asm.emit(encode_cmp_xn_imm(2, 0))
-            self.asm.emit(encode_cset_xd_cond(3, "lt"))
-            self.asm.emit(encode_cbnz_xn(0, 3))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drn{wid}", here_offset=-4)
-            self.asm.emit(encode_add_xd_xn_xm(2, 2, 1))  # start += count
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drc{wid}", here_offset=-4)
-            self.asm.label(f"{fn}_drn{wid}")
-            self.asm.emit(encode_movz_xd_imm(2, 0))       # negative → 0
-            self.asm.label(f"{fn}_drc{wid}")
+            self._emit_slice_bound_normalize(2, 0)
+        self.asm.emit(encode_stp_sp_pre(2, 31))         # [SP+0] start
         # --- stop index → X4 ---
         if stop is None:
-            self.asm.emit(encode_mov_zr_xn(4, 1))
+            self.asm.emit(encode_ldr_xt_xn_imm(4, 31, 16))   # stop = count
         else:
             self._emit_expr_to(stop, "X4")
-            self.asm.emit(encode_cmp_xn_imm(4, 0))
-            self.asm.emit(encode_cset_xd_cond(3, "lt"))
-            self.asm.emit(encode_cbnz_xn(0, 3))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_dro{wid}", here_offset=-4)
-            self.asm.emit(encode_add_xd_xn_xm(4, 4, 1))  # stop += count
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(f"{fn}_drp{wid}", here_offset=-4)
-            self.asm.label(f"{fn}_dro{wid}")
-            self.asm.emit(encode_movz_xd_imm(4, 0))       # negative → 0
-            self.asm.label(f"{fn}_drp{wid}")
+            self._emit_slice_bound_normalize(4, 16)
+            self.asm.emit(encode_ldr_xt_xn_imm(2, 31, 0))    # start
         # stop = min(stop, count)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 31, 16))  # X1 = count
         self.asm.emit(encode_cmp_xn_xm(4, 1))
-        self.asm.emit(encode_cset_xd_cond(3, "hi"))
-        self.asm.emit(encode_cbnz_xn(0, 3))
-        self.asm.emit(encode_b(0))
+        self.asm.emit(encode_cset_xd_cond(3, "hi"))      # 1 when stop > count
+        self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(f"{fn}_dru{wid}", here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 1))
+        self.asm.emit(encode_mov_zr_xn(4, 1))           # stop = count
         self.asm.label(f"{fn}_dru{wid}")
         # stop = max(stop, start)  (empty when stop <= start)
         self.asm.emit(encode_cmp_xn_xm(4, 2))
-        self.asm.emit(encode_cset_xd_cond(3, "lt"))
-        self.asm.emit(encode_cbnz_xn(0, 3))
-        self.asm.emit(encode_b(0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))      # 1 when stop < start
+        self.asm.emit(encode_cbz_xn(0, 3))
         self.asm.emit_label_rel(f"{fn}_drv{wid}", here_offset=-4)
-        self.asm.emit(encode_mov_zr_xn(4, 2))
+        self.asm.emit(encode_mov_zr_xn(4, 2))           # stop = start
         self.asm.label(f"{fn}_drv{wid}")
         # n_del = stop - start; if 0 → done
         self.asm.emit(encode_sub_xd_xn_xm(5, 4, 2))
@@ -8940,6 +9061,10 @@ dylib_exports: list = None, globals_base: int = None,
         dskip = f"{fn}_drs{self._while_counter}"
         self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(dskip, here_offset=-4)
+        # The bounds may have clobbered the base and the count; both are on the
+        # stack, so reload rather than trust the registers.
+        self._load_var(name, 10)
+        self.asm.emit(encode_ldr_xt_xn_imm(1, 10, 0))
         # copy [stop, count) → [start, start + (count - stop))
         self.asm.emit(encode_mov_zr_xn(6, 4))             # j = stop
         self._while_counter += 1
@@ -8947,8 +9072,8 @@ dylib_exports: list = None, globals_base: int = None,
         mend = f"{fn}_dre{self._while_counter}"
         self.asm.label(mloop)
         self.asm.emit(encode_cmp_xn_xm(6, 1))
-        self.asm.emit(encode_cset_xd_cond(3, "ge"))
-        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit(encode_cset_xd_cond(3, "ge"))      # 1 when j >= count
+        self.asm.emit(encode_cbnz_xn(0, 3))
         self.asm.emit_label_rel(mend, here_offset=-4)
         self.asm.emit(encode_sub_xd_xn_xm(7, 6, 4))       # j - stop
         self.asm.emit(encode_add_xd_xn_xm(7, 7, 2))       # + start
@@ -8964,6 +9089,44 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_sub_xd_xn_xm(1, 1, 5))       # count -= n_del
         self.asm.emit(encode_str_xt_xn_imm(1, 10, 0))
         self.asm.label(dskip)
+        # pop start and count — on BOTH paths, `dskip` included, because the
+        # push above is unconditional and a pop that only sometimes happens is
+        # a stack that only sometimes comes back.
+        self.asm.emit(encode_ldp_sp_post(2, 31))
+        self.asm.emit(encode_ldp_sp_post(1, 31))
+
+    def _emit_slice_bound_normalize(self, reg: int, count_off: int) -> None:
+        """Python's negative-index rule for one slice bound, in `reg`.
+
+        A negative bound gains the count; one still negative after that
+        clamps to 0, because `del lst[-99:2]` on a four-element list removes
+        two elements and not the whole list. `count_off` is the byte offset
+        from SP of the count pushed by the caller, so this is safe to run
+        between two bound EXPRESSIONS — which may write any scratch register.
+
+        The idiom is `_emit_slice_store`'s, which is the one in this file that
+        runs: `cset` the condition, `CBZ` past the body, and point the `CBZ`
+        at the label after it. Everything about `del` that was wrong was this
+        shape spelled the other way round.
+        """
+        self._while_counter += 1
+        w = self._while_counter
+        fn = self.func_name
+        wrapped = f"{fn}_drw{w}"
+        clamped = f"{fn}_drcl{w}"
+        self.asm.emit(encode_cmp_xn_imm(reg, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(wrapped, here_offset=-4)
+        self.asm.emit(encode_ldr_xt_xn_imm(17, 31, count_off))   # X17 = count
+        self.asm.emit(encode_add_xd_xn_xm(reg, reg, 17))
+        self.asm.label(wrapped)
+        self.asm.emit(encode_cmp_xn_imm(reg, 0))
+        self.asm.emit(encode_cset_xd_cond(3, "lt"))
+        self.asm.emit(encode_cbz_xn(0, 3))
+        self.asm.emit_label_rel(clamped, here_offset=-4)
+        self.asm.emit(encode_movz_xd_imm(reg, 0))
+        self.asm.label(clamped)
 
 
 def _always_returns(stmts: list) -> bool:

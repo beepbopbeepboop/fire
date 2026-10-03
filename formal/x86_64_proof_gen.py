@@ -33,7 +33,7 @@ audit tooling in the toy project counts exactly these.
 """
 
 from formal.types import (DEFAULT_INT_TYPE, function_var_types, parse_type_name,
-                          resolve)
+                          resolve, uses_typed_model)
 
 # The file's own preamble, matching formal/arm64_proof_gen.py's: the deep
 # recursion is the model equations and `native_decide` runs, and the linter
@@ -580,11 +580,9 @@ def generate_x86_64_proof(prog, code, info) -> str:
                                   or DEFAULT_INT_TYPE)
                   for g in functions}
     vtypes = function_var_types(fn, call_types)
-    all_t = list(vtypes.values())
-    rt = resolve(parse_type_name(getattr(fn, "return_type", None)))
-    if rt != DEFAULT_INT_TYPE:
-        all_t.append(rt)
-    typed = any(t != DEFAULT_INT_TYPE for t in all_t)
+    # The decision is `types.uses_typed_model`, shared with arm64's generator
+    # and carrying the reasoning for it.
+    typed = uses_typed_model(fn, call_types)
     tc = {"typed": typed, "vtypes": vtypes, "call_types": call_types}
 
     parts = [_PREAMBLE, _TRUST_HEADER]

@@ -29,7 +29,7 @@ from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
-                          parse_type_name, _range_args)
+                          parse_type_name, _range_args, uses_typed_model)
 
 # Fallback leaf word for structured value-flow obligations the generator
 # cannot yet close automatically.  It is assembled from two halves because a
@@ -7202,16 +7202,14 @@ def generate_arm64_proof(prog, code, info) -> str:
         if k and any(sp == k or sp == k.split(".")[-1] for sp in _called))
     _admitted_model = bool(_admitted_used_names)
 
-    # Typed (fixed-width int) context.  A function is "typed" when any variable
-    # or the return type is not the default UInt64 (Int64 counts: signed cmps).
+    # Typed (fixed-width int) context.  The decision is `types.uses_typed_model`
+    # and its own docstring is the reasoning; it used to be five lines spelled
+    # here and five more in `x86_64_proof_gen.py`, which is two chances for the
+    # two architectures to prove different programs.
     call_types = {g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
                   for g in prog.functions}
     vtypes = function_var_types(fn, call_types)
-    _all_t = list(vtypes.values())
-    _rt = resolve(parse_type_name(getattr(fn, "return_type", None)))
-    if _rt != DEFAULT_INT_TYPE:
-        _all_t.append(_rt)
-    is_typed = any(t != DEFAULT_INT_TYPE for t in _all_t)
+    is_typed = uses_typed_model(fn, call_types)
     tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types}
     # The fixed-width truncator helpers (t8u/t8s/.../t32s) and the
     # SXTW-after-SXTB/SXTH idempotency lemmas live in ProofLib (single source of

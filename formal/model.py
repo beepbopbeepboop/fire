@@ -6496,6 +6496,36 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
     return None
 
 
+def declared_type_is_dict(ann, dict_names=("Dict", "dict")) -> bool:
+    """Whether a DECLARED type annotation says the value is a DICT.
+
+    The one question `declared_type_kind` deliberately does not answer, and why
+    it cannot: on this path `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and
+    `Dict[String, Int]` are all ONE word pointing at a blob with an 8-byte count
+    header, so `declared_type_kind` maps every one of them to the bare list
+    prefix — correctly, for every question that asks "how wide is an element",
+    and wrongly for the one that asks "does a subscript with a string index mean
+    a key lookup". Two questions, two pieces of evidence, and the second was
+    missing: `d["a"]` on a `Dict[String, Int]` PARAMETER took the sequence
+    subscript, because nothing had ever said the base was a dict
+    (`bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`).
+
+    So this is deliberately NOT a wider `declared_type_kind`: that function's
+    table maps a type to a REPRESENTATION and every row in it is true for both
+    containers, while this one maps a type to a SPELLING of a subscript. Merging
+    them would have to make one of the two answers wrong.
+
+    `dict_names` is the caller's vocabulary (`formal.types.DICT_TYPE_NAMES`),
+    for the same reason every other shared table here takes it from the caller:
+    a name is a string, and the two backends must not answer this from two
+    private lists.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return False
+    base = annotation_base_name(ann)
+    return base is not None and base in dict_names
+
+
 def struct_field_kind(struct_def, name, int_names=(), string_names=(),
                       decls=None):
     """The kind `struct_def`'s field `name` HOLDS, or None when it does not say.
@@ -6816,6 +6846,71 @@ def type_index_refusal(index_kind, spelled_index: str) -> str | None:
         f"is what a tag is for")
 
 
+def unstated_base_string_index_refusal(base_is_dict: bool, base_kind,
+                                       index_kind, spelled_base: str,
+                                       spelled_index: str) -> str | None:
+    """Why a string index against a base whose SHAPE nothing states is not
+    lowered here, or None when it is.
+
+    THE RESIDUE OF THE PAIR THE SOURCE DOES NOT CHOOSE BETWEEN, and it is the
+    one thing in this section that turns a fault into a diagnostic. A string
+    index means one of two entirely different things on this path — a dict KEY
+    scan (`d["a"]`) or a byte offset into a `char *` (`s[0]`) — and which one it
+    is depends on the base's shape, not on the index. When the base's shape is
+    known, each case has its own path (`_is_dict_subscript` /
+    `_is_string_subscript`) and both work. When NOTHING states it, the emitter
+    falls back to "a blob", and the blob walk takes the key's interned ADDRESS
+    as an ELEMENT OFFSET.
+
+    Measured on this tree, both architectures, for the one spelling with no
+    evidence at all — a parameter:
+
+        def show(d) -> Int:
+            printf("%d|", d["a"])
+            return 0
+        show({"a": 1})
+
+        arm64   exit 1, nothing printed
+        x86-64  exit 1, nothing printed
+
+    The same program with `d: Dict[String, Int]` annotated answers `1|` on both,
+    because the annotation is the evidence; and `d = mk()` with a dict-returning
+    `mk` answers it too, because the callee is. What is left is the base no
+    source statement and no declaration describes — and a refusal is the honest
+    answer there, because the two readings are not variations on one answer:
+    one is a scan over pair slots and the other is `base + i`.
+
+    NOT refused, deliberately, because each of these is a real reading and
+    lowering it is right:
+
+      * a string base with an integer index (`s[0]`), a byte read;
+      * a string base with a string index — `string_index_refusal` owns that
+        one, and the message here would be a second spelling of one refusal;
+      * a base known to be a dict, whatever produced the key;
+      * an INTEGER index against a base of unstated shape, which is a blob
+        element read and has always been the default.
+
+    So the pair this refuses is exactly (index is a string, base is neither a
+    string nor a dict), which is the same narrowness the emitter's own dispatch
+    needs and not one case wider.
+    """
+    if base_is_dict or string_operand_is_string(base_kind):
+        return None
+    if not string_operand_is_string(index_kind):
+        return None
+    return (
+        f"`{spelled_base}[{spelled_index}]` cannot be lowered: the INDEX is a "
+        f"string and nothing in the source says what `{spelled_base}` holds. "
+        f"On this path a string index is either a dict KEY scan — `d[\"a\"]`, "
+        f"the value under the key — or a byte offset into a `char *` "
+        f"(`s[0]`), and which one it is comes from the BASE, which here is "
+        f"unstated. Measured on both backends: an unannotated parameter with a "
+        f"string subscript built, ran and exited 1 with nothing printed, "
+        f"because the fallback read the key's address as an element offset and "
+        f"the bounds check failed on it. Annotate the parameter, bind the "
+        f"container to a name, or read the value another way")
+
+
 def string_index_refusal(base_kind, index_kind,
                           spelled_index: str) -> str | None:
     """Why `s[i]` cannot be lowered when `i` is itself a string, or None.
@@ -6887,6 +6982,18 @@ def spelled(expr) -> str:
         # `46` names the node's type rather than the thing the reader is
         # looking at.
         return str(expr.value)
+    if isinstance(expr, F.SliceExpr):
+        # `a[1:3]`, not `SliceExpr`. A `del a[1:3]` target PARSES as a bare
+        # `SliceExpr` (the subscript is the target's own shape, not a
+        # `SubscriptExpr` with a slice index), so a refusal that quotes this
+        # node without spelling it named the parser's type and not the line —
+        # and a stepped-slice `del` is exactly the case that needs the bounds
+        # in the message.
+        bounds = [getattr(expr, part, None) for part in ("start", "stop")]
+        step = getattr(expr, "step", None)
+        if step is not None:
+            bounds.append(step)
+        return (f"{spelled(expr.obj)}[{':'.join(spelled(b) for b in bounds)}]")
     if isinstance(expr, F.SubscriptExpr):
         # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
         # whose spelling is both short and exact, and it is the shape a byte
@@ -6918,6 +7025,142 @@ def spelled(expr) -> str:
         return (f"{spelled(getattr(expr, 'left', None))} {expr.op} "
                 f"{spelled(getattr(expr, 'right', None))}")
     return type(expr).__name__
+
+
+def del_refusal(target, base_is_string: bool = False,
+                base_is_pointer: bool = False) -> str | None:
+    """Why this `del` target cannot be lowered here, or None when it can.
+
+    THE SHAPE-ASKED REFUSAL FOR `del`, and the one that closes a silent no-op
+    rather than a fault.
+    `bugs/FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64.md` measured it
+    on both architectures:
+
+        del lst[0]      arm64  exit 0, `3 10` — the list still has 3 elements
+        del lst[1:3]    arm64  exit 0, `4 10 20` — the slice is still there
+        del d["a"]      arm64  exit 0, `2 2` — the key is still there
+        del p[0]        arm64  exit 0, `9 20` — a POINTER, corrupted
+        all five         x86-64 refused the STATEMENT (`DelStmt` was not in the
+                         statement dispatch at all), so for `del` the two
+                         architectures disagreed about whether the program had
+                         an answer
+
+    The arm64 cause was one `continue`: the `SubscriptExpr` branch sat below
+    the `SliceExpr` branch's `continue`, so every subscript target fell off the
+    end of the loop body and emitted NO instructions — which is why the build
+    was green, the image ran, and nothing was removed. That is the one outcome
+    this backend may not produce, and it is why the four `del` lowering helpers
+    were dead code with no other caller: written, reviewed, and stranded behind
+    a line nobody read twice. Three of them were also wrong once reached, which
+    is what "dead code is not reviewed by running it" costs — the emitters'
+    own comment about the branch polarity is in `arm64_codegen.py`'s
+    `_emit_del_list_range`.
+
+    So `del` is asked HERE, once, in a vocabulary both backends lower:
+
+        name / member   a bare name or field — a no-op, and a documented one:
+                        there is no GC and an SRA slot has no storage to free
+        list_index      `del lst[i]` — shift left, count--
+        slice           `del lst[a:b]` — memmove the tail, count -= b-a
+        dict_key        `del d[k]` — shift-delete over the pair array
+        string_index    REFUSED — see below
+        pointer_base    REFUSED — see below
+        stepped_slice   REFUSED — see below
+        unnamed_base    REFUSED — see below
+        unsupported     REFUSED — anything else
+
+    The four refusals are the residue after the lowered shapes, and each one is
+    TRUE OF THE SHAPE on this path rather than a statement that the construct is
+    too new:
+
+    * `string_index` — a string here is a bare `char *` into static storage, so
+      `del s[0]` has no element to remove, no count to shift and nothing whose
+      address this path could hand a caller. The byte it would have "removed"
+      is a constant in `__TEXT`. Same question `string_index_refusal` asks of
+      the other end of the subscript, and it is refused here for the same
+      reason rather than lowered as a pointer decrement.
+    * `pointer_base` — a `Pointer[T]` has no count header and no length, so
+      there is nothing to shift the survivors into and nothing whose count to
+      decrement: `del p[0]` on a `malloc`'d buffer whose first word is `10`
+      printed `9 20`, because the first word was read as the COUNT and
+      decremented while the buffer's contents stayed put. A buffer is not a
+      list that forgot its length; it is a pointer, and the storage behind it
+      belongs to something else.
+    * `stepped_slice` — `del lst[0:4:2]` removes elements 0 and 2, and a
+      shift-left is not that; it is a compaction with holes. Emitting the
+      contiguous lowering would produce a list whose length is right and whose
+      contents are wrong, which is the same silent wrong answer as the no-op.
+    * `unnamed_base` — a base this path has no slot for: a call result, an
+      attribute chain rooted at one, a temporary. `del mk()[0]` says "remove an
+      element of a value that has nowhere to live", so the lowering would have
+      to invent the storage first.
+
+    `base_is_string` and `base_is_pointer` are the backend's own answers to
+    "what does this base hold" — `_is_string_subscript` and
+    `subscript_base_lowering`, the same two the READ path asks through
+    `_emit_subscript_addr`, so a base this function accepts is a base the read
+    path already lowers. The shape decides the refusal and the value decides
+    WHICH refusal.
+    """
+    if isinstance(target, (F.IdentExpr, F.MemberExpr)):
+        return None
+    if isinstance(target, F.SliceExpr):
+        if target.step is not None:
+            return _del_shape_refusal(
+                target, "stepped_slice",
+                "a `step` removes elements that are not adjacent "
+                "(`del lst[0:4:2]` removes elements 0 and 2), so the "
+                "contiguous shift-left this path would emit produces a list "
+                "of the right length and the wrong contents. There is no "
+                "sound lowering of it here, and a wrong list is worse than "
+                "no answer")
+        return None
+    if not isinstance(target, F.SubscriptExpr):
+        return _del_shape_refusal(
+            target, "unsupported",
+            f"it is a `{type(target).__name__}`, and `del` on this path "
+            "lowers a subscript target (a list index, a list slice or a dict "
+            "key) and treats a bare name or field as the no-op it is")
+    if base_is_pointer:
+        return _del_shape_refusal(
+            target, "pointer_base",
+            "the base is a POINTER, and a pointer here has no count header and "
+            "no length: there is nothing to shift the survivors into and "
+            "nothing whose count to come down, so the lowering this path would "
+            "emit decrements the first word of the buffer itself — measured on "
+            "both architectures, `del p[0]` on a `malloc`'d buffer holding 10 "
+            "printed 9. A buffer is not a list that forgot its length; use a "
+            "slice assignment, or clear the element yourself")
+    if base_is_string:
+        return _del_shape_refusal(
+            target, "string_index",
+            "the base is a string, and a string here is a bare `char *` into "
+            "static storage: there is no element to remove, no count to "
+            "shift and nothing whose address this path could hand a caller — "
+            "the byte would be a constant in `__TEXT`. A string is immutable "
+            "here, so `del s[0]` has nothing to do")
+    if getattr(target.index, "step", None) is not None:
+        return _del_shape_refusal(
+            target, "stepped_slice",
+            "a `step` removes elements that are not adjacent "
+            "(`del lst[0:4:2]` removes elements 0 and 2), so the contiguous "
+            "shift-left this path would emit produces a list of the right "
+            "length and the wrong contents. There is no sound lowering of it "
+            "here, and a wrong list is worse than no answer")
+    if not isinstance(getattr(target, "obj", None), (F.IdentExpr, F.MemberExpr)):
+        return _del_shape_refusal(
+            target, "unnamed_base",
+            "the base is not a name or a field this path has a slot for, and "
+            "`del` needs one: removing an element means writing a new count "
+            "into the blob the base names, so a value with nowhere to live "
+            "has nothing to write to. Bind the container to a name first")
+    return None
+
+
+def _del_shape_refusal(target, shape: str, why: str) -> str:
+    """The `del` refusal text for `shape`, quoted from the source spelling."""
+    return (f"`del {spelled(target)}` is not lowered on the formal path: "
+            f"{why}.")
 
 
 def string_has_static_storage() -> bool:
@@ -11500,7 +11743,8 @@ class ValueKinds:
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
-                 slot_key=None, declared_kind=None, ctor_field_value=None):
+                 slot_key=None, declared_kind=None, ctor_field_value=None,
+                 callee_is_dict=None, dict_names=("Dict", "dict")):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
@@ -11508,9 +11752,26 @@ class ValueKinds:
         self._declared_kind = declared_kind or (lambda expr: None)
         self._ctor_field_value = ctor_field_value or (
             lambda struct_name, call, field: None)
+        # The SIXTH hook, and the one the KIND axis cannot express: whether a
+        # call to a function of this module produces a DICT. A dict and a list
+        # are the same word pointing at the same blob header on this path, so
+        # `kind_of` answers "list prefix" for both and every other hook here is
+        # silent about the difference — while `d["a"]` reads a key out of one
+        # and an ELEMENT OFFSET out of the other. See `is_dict_value`.
+        self._callee_is_dict = callee_is_dict or (lambda name: False)
+        self._dict_names_vocab = frozenset(dict_names)
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
+        # The DICT-NESS axis, parallel to `locals`: `{name: True|False}` for the
+        # names this function's own statements bound to a dict (or to something
+        # that is not one), and `return_is_dict` below for the function's RETURN
+        # statements. Unanimity, like every other map in this class: a name two
+        # statements disagree about is not in here at all, so a caller reads
+        # None and keeps whatever it did before.
+        self._dict_names: dict = {}
+        self._dict_conflicts: set = set()
+        self._returns_dict: set = set()
         # Per name, the kinds the statements of this function bound it to BY
         # THE EXPRESSION'S OWN SHAPE — `kind_of` and nothing else, so no
         # "unclassified means a word, and a word is an integer" default ever
@@ -11555,6 +11816,13 @@ class ValueKinds:
             # a word is an integer here (see the note on kinds above).
             self.locals[pname] = (
                 STR_KIND if pann in self._string_names else INT_KIND)
+            # …and the dict axis, which the kind above cannot carry: a
+            # `Dict[String, Int]` parameter and a `List[Int]` one are the same
+            # kind here and opposite answers to `d["a"]`.  A parameter has no
+            # BINDING statement for the scan to see, so this annotation is the
+            # only evidence there is for it.
+            if declared_type_is_dict(pann, self._dict_names_vocab):
+                self._dict_names[pname] = True
         # Two passes: a name whose value is another name bound later resolves
         # on the second. A third would not help — the chain that needs it is
         # one the first pass already walked.
@@ -11568,6 +11836,12 @@ class ValueKinds:
         # word: the same default an unannotated parameter gets, and for the
         # same reason.
         self.return_kind = kinds.pop() if len(kinds) == 1 else INT_KIND
+        # …and the same rule on the dict axis: every `return` in this function
+        # has to say "a dict" for the function to produce one. One return that
+        # does not is enough to withhold the answer, because a function that
+        # returns a dict on one path and a list on another has no shape for
+        # `d["k"]` and guessing is the fault this axis exists to remove.
+        self.return_is_dict = self._returns_dict == {True}
 
     # ── scanning ───────────────────────────────────────────────────────
 
@@ -11593,6 +11867,26 @@ class ValueKinds:
         """Bind `name` to what `value` holds, defaulting an unclassified
         non-container value to a word (see the note on kinds)."""
         self._bind(name, self._value_kind(value), own=self._own_shape_of(value))
+        self._bind_dictness(name, self.is_dict_value(value))
+
+    def _bind_dictness(self, name, answer) -> None:
+        """Record what a statement says about `name` on the DICT axis.
+
+        Unanimity, and it is the only rule: two statements that disagree leave
+        the name out of `_dict_names` entirely, so `is_dict_value` answers None
+        and every caller falls back to what it did before. Recording `False` for
+        a non-dict binding is what makes that work — without it a name bound
+        first to a dict and then to a list would keep the dict answer, which is
+        the same trap `locals` avoids with `_conflicts`.
+        """
+        if name in self._conflicts or answer is None:
+            return
+        if name in self._dict_names:
+            if self._dict_names[name] is not bool(answer):
+                self._dict_names.pop(name, None)
+                self._dict_conflicts.add(name)
+            return
+        self._dict_names[name] = bool(answer)
 
     def _own_shape_of(self, value):
         """`kind_of(value)`, or None when that answer is a fallback.
@@ -11828,6 +12122,11 @@ class ValueKinds:
                     self._note_field_stores(t)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
+                # The dict half of the same statement. Recorded beside the kind
+                # rather than derived from it, because the kind cannot say it:
+                # a `return {"a": 1}` and a `return [1]` are the same kind here
+                # and opposite answers to `d["a"]`.
+                self._returns_dict.add(bool(self.is_dict_value(s.value)))
             elif isinstance(s, F.IfStmt):
                 self._scan(s.then_body)
                 for _c, body in (s.elifs or []):
@@ -11910,6 +12209,59 @@ class ValueKinds:
         return None
 
     # ── querying ───────────────────────────────────────────────────────
+
+    def is_dict_value(self, e):
+        """True when `e` evaluates to a DICT, False when it is a container of
+        some other kind, and None when this function's source does not say.
+
+        THE QUESTION `kind_of` CANNOT ASK**, and the reason is that on this path
+        a dict and a list are the same word: `_emit_dict` lays a dict out as
+        `[count][k0][v0][k1][v1]…` and `_emit_list` as `[count][e0][e1]…`, both
+        a count header followed by eight-byte slots, and `kind_of` answers
+        `list_kind(...)` for both. So the kind of a value cannot say which one
+        a subscript with a STRING index means, and the emitter's own
+        `_is_dict_subscript` had to keep a second, flow-sensitive map
+        (`_dict_vars`) beside the kind — a second answer to a question the
+        model already had most of the evidence for and nobody had asked it of.
+
+        The evidence, in the order it is used:
+
+          * `is_dict_expr` — a dict literal or a dict comprehension. The one
+            shape both spellings agree on.
+          * a NAME this function bound — from `_dict_names`, under the same
+            unanimity rule as `locals`: two statements that disagree leave the
+            name out entirely, so the caller keeps what it did before.
+          * a CALL to a function of this module — the `callee_is_dict` hook,
+            which is the backend's `_callee_kind` read on this axis, so a
+            recursion guard and a memo are already in place there.
+          * a PARAMETER annotated `Dict[…]` — its own annotation, which is the
+            same "the declaration is a fact about the value" rule
+            `declared_kind` already follows for the kind axis.
+
+        None for everything else, deliberately: an unstated shape is not a "not
+        a dict", and treating it as one is how `d["a"]` reached the sequence
+        path in the first place.
+        """
+        if e is None:
+            return None
+        if is_dict_expr(e):
+            return True
+        if isinstance(e, F.IdentExpr):
+            if e.name in self._dict_conflicts:
+                return None
+            return self._dict_names.get(e.name)
+        if isinstance(e, F.MemberExpr):
+            key = self._slot_key(e)
+            if key is not None and key in self._dict_conflicts:
+                return None
+            return self._dict_names.get(key) if key is not None else None
+        if isinstance(e, F.CallExpr):
+            callee = _flat_callee(e) or subscript_callee_name(e)
+            if callee is None:
+                return None
+            answer = self._callee_is_dict(callee)
+            return None if answer is None else bool(answer)
+        return None
 
     def own_shape_kind(self, name: str):
         """What a statement of THIS function bound `name` to, on the EVIDENCE

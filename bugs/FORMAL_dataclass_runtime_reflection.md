@@ -1,11 +1,20 @@
 # FORMAL_dataclass_runtime_reflection: `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag
 
 **Status: OPEN, and it is a property of the value model rather than a gap in
-the transform.** The `@dataclass` DECORATOR half is implemented and tested
-(`formal/dataclass_transform.py`, `test_dataclasses_formal.py`); this document
-is about the other half, the runtime reflection, which is what
+the transform — and the "next bounded action" below is now MEASURED, and its
+answer is the second branch.** The `@dataclass` DECORATOR half is implemented
+and tested (`formal/dataclass_transform.py`, `test_dataclasses_formal.py`);
+this document is about the other half, the runtime reflection, which is what
 `ownership_check.py` and `mojo/backend_gimple/cpp_core.py` actually call and
 which cannot be implemented on this target at all.
+
+**The measurement (2026-10-03, this tree): 0 of the 3 `dataclasses.fields(…)`
+sites have a statically known receiver type, and all 3
+`getattr(node, f.name)` sites inherit that** — `KNOWN: 0 POLYMORPHIC: 6` by
+`tools/dataclass_reflection_sites.py`. So the front-end transform the paragraph
+below weighs is NOT the shape these two files want — they want a type-carrying walker, and the
+backend wants nothing. The numbers, the method and what they decide are in
+§"The measurement the doc asked for", below.
 
 Found while writing the module for the formal backend (2026-09-29, the
 `module:dataclasses` claim). Every measurement below is from this tree.
@@ -135,6 +144,53 @@ that answers `fields(x)` for a known `x` and refuses it for an unknown one is
 days, and it is the same seam `formal/dataclass_transform.py` already occupies.
 If it is few, the files want a type-carrying walker instead and the backend
 wants nothing.
+
+## The measurement the doc asked for (2026-10-03)
+
+The "next bounded action" above, done — reading the two files' ASTs rather than
+their text, because a `grep` counts `getattr(gen, '_cpp_gen_self_struct', None)`
+on generator state, which is a different question and 95 of the ~97 `getattr`
+calls in `cpp_core.py`. The census is committed as a tool so the numbers below
+are re-derivable rather than re-typed:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label m -- \
+      python3 tools/dataclass_reflection_sites.py
+KNOWN: 0   POLYMORPHIC: 6
+```
+
+**`dataclasses.fields(…)` — three sites, none of them with a known receiver:**
+
+| file:line | the call | the receiver | who reaches the enclosing function |
+|---|---|---|---|
+| `ownership_check.py:321` | `for f in dataclasses.fields(node)` | `_walk_expr`'s FIRST PARAMETER | 28 call sites, **18 distinct argument shapes** (`node.obj`, `stmt.value`, `operand`, `tgt`, `a`, `v`, `item.expr`, lists and tuples of them …), over the 23 AST classes the file names in `isinstance` guards |
+| `ownership_check.py:587` | `for f in dataclasses.fields(stmt)` | `_check_stmt`'s first parameter | 1 call site, 1 shape — and that parameter is the STATEMENT walker, so "1 call site" means "every statement the file walks", not "one type" |
+| `mojo/backend_gimple/cpp_core.py:1320` | `for f in dataclasses.fields(node)` | `_cpp_rename_ident`'s first parameter | 3 call sites with 3 shapes (`v`, `c`, `elem_node`), reached through `_cpp_rename_ident_container`'s `is_dataclass(v)` test — so it is "whichever dataclass node was handed down" |
+
+**`getattr(node, f.name)` — three sites, one per `fields()` loop**, and none is
+answerable independently: the attribute name is the loop variable `f`, so
+removing `fields()` removes the answer with it. That is this document's "even a
+hypothetical `fields()` that returned the right names would be followed by a
+loop the backend cannot express", confirmed rather than restated.
+
+**One more fact that decides it faster than the counts do: NEITHER file
+declares the dataclasses it reflects over.** `ownership_check.py` declares one
+`@dataclass` of its own — `Diagnostic`, measured 4 fields — and never passes it
+to `fields()`; its `fields()` calls are about `fire_compiler`'s node classes,
+reached through `_is_node(x) = dataclasses.is_dataclass(x) and not isinstance(x,
+type)`. `cpp_core.py` declares none. So a front-end transform would have to
+enumerate the field layouts of a module this path already refuses to place
+(`fire_compiler` is `not-answerable/host-import`), for a walker that has no
+static type at any of its three sites.
+
+**What the answer is for.** It settles the question this section posed — "is
+this days of transform or a change to the two files" — in favour of the second:
+a type-carrying walker (an enum parameter, or a per-class dispatch table
+threaded through `_walk_expr` / `_check_stmt`) is a change to THOSE FILES, and
+after it a compile-time `fields(x)` would be answerable at three sites instead
+of none. Until then the three refusals by name (`fields`, `is_dataclass`,
+`replace`, and the `getattr`/`hasattr` spelling) are the honest answer, and they
+are what `formal/dataclass_transform.py` already does.
 
 ## What is deliberately NOT being done here
 

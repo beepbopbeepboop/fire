@@ -555,6 +555,108 @@ CASES = [
      "    v = bump()\n"
      "    sys.stdout.write(\"%d\" % v)\n"
      "    return 0\n"),
+    # ── `del` ───────────────────────────────────────────────────────────────
+    #
+    # THE SILENT NO-OP, and the two halves of it.  arm64 had four `del`
+    # lowering helpers and one `continue` in front of them, so `del lst[0]`
+    # built, ran, exited 0 and removed nothing — and x86-64 had no `DelStmt` in
+    # its statement dispatch at all, so the SAME source did not build there.
+    # One architecture quietly wrong, the other declining: the shape this file
+    # exists to end.
+    #
+    # Three shapes, one row each, because they are three different algorithms
+    # (shift-one, memmove-the-tail, shift-over-the-pairs) and a fix that
+    # repaired one of them and left the other two would pass a single row.
+    # The index is a NAME in the first two rows and a negative one in the
+    # third: the wrap is a separate branch in both backends from the element
+    # address it feeds, so "the index is 0" does not cover it.
+    ("del_list_index_computed",
+     "def main():\n"
+     "    var a = [10, 20, 30]\n"
+     "    var i = 0\n"
+     "    del a[i]\n"
+     "    printf(\"%d %d %d\", len(a), a[0], a[1])\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = [10, 20, 30]\n"
+     "    i = 0\n"
+     "    del a[i]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (len(a), a[0], a[1]))\n"
+     "    return 0\n"),
+    ("del_list_index_negative",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40]\n"
+     "    del a[-1]\n"
+     "    printf(\"%d %d %d\", len(a), a[0], a[2])\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = [10, 20, 30, 40]\n"
+     "    del a[-1]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (len(a), a[0], a[2]))\n"
+     "    return 0\n"),
+    # `a[1]` is the tail element, which is the whole point of the row: a
+    # memmove that only decremented the count would leave `a[1]` at 20 and
+    # print `2 10 20`, and reading `a[3]` here would be an out-of-range exit on
+    # both machines rather than a comparison.
+    ("del_list_slice",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40, 50]\n"
+     "    del a[1:4]\n"
+     "    printf(\"%d %d %d\", len(a), a[0], a[1])\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = [10, 20, 30, 40, 50]\n"
+     "    del a[1:4]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (len(a), a[0], a[1]))\n"
+     "    return 0\n"),
+    # A NEGATIVE lower bound and an OMITTED upper one, which between them are
+    # the whole of Python's bound normalization: the lower bound gains the
+    # count, the omitted upper bound IS the count, and the two clamps between
+    # them are where a `cset` polarity error turns `del a[-2:]` into
+    # `del a[-2:1]` — a list of the right length and the wrong contents.
+    ("del_list_slice_negative_start_open_stop",
+     "def main():\n"
+     "    var a = [10, 20, 30, 40]\n"
+     "    del a[-2:]\n"
+     "    printf(\"%d %d %d\", len(a), a[0], a[1])\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    a = [10, 20, 30, 40]\n"
+     "    del a[-2:]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (len(a), a[0], a[1]))\n"
+     "    return 0\n"),
+    ("del_dict_key",
+     "def main():\n"
+     "    var d = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
+     "    del d[\"b\"]\n"
+     "    printf(\"%d %d %d\", len(d), d[\"a\"], d[\"c\"])\n"
+     "    return 0\n",
+     "import sys\n\ndef main():\n"
+     "    d = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
+     "    del d[\"b\"]\n"
+     "    sys.stdout.write(\"%d %d %d\" % (len(d), d[\"a\"], d[\"c\"]))\n"
+     "    return 0\n"),
+    # THROUGH A FRAME SLOT, because the base is read by a different table than
+    # a local's: `h.xs` is an SRA slot, and a lowering that loaded the blob the
+    # way it loads a name would decrement the first word of the HOLDER.
+    ("del_through_a_frame_slot",
+     "struct Holder:\n"
+     "    var xs: List[Int]\n"
+     "def main():\n"
+     "    var h = Holder()\n"
+     "    h.xs = [1, 2, 3]\n"
+     "    del h.xs[0]\n"
+     "    printf(\"%d %d\", h.xs[0], h.xs[1])\n"
+     "    return 0\n",
+     "import sys\n\nclass Holder:\n"
+     "    def __init__(self):\n"
+     "        self.xs = []\n\n"
+     "def main():\n"
+     "    h = Holder()\n"
+     "    h.xs = [1, 2, 3]\n"
+     "    del h.xs[0]\n"
+     "    sys.stdout.write(\"%d %d\" % (h.xs[0], h.xs[1]))\n"
+     "    return 0\n"),
 ]
 
 
@@ -588,6 +690,33 @@ REFUSALS = [
     # It also says which spelling is left: `/=` `//=` `%=` `**=` were on this
     # list until the delegation that removed them, and `+= -= *= &= |= ^= <<=
     # >>=` never were.
+    # THE `del` RESIDUE, and the reason it is a REFUSAL rather than a widening.
+    # A `step` removes elements that are not adjacent (`del a[0:4:2]` removes
+    # elements 0 and 2), so the contiguous shift-left the path would emit
+    # produces a list of the right length and the wrong CONTENTS — which is the
+    # same silent wrong answer as the no-op this group was written for, reached
+    # by the other route. The needle is the word `step` and not the bounds,
+    # because the two backends' bounds are the source's own text and the word
+    # is the part a reader has to act on.
+    ("del_stepped_slice_refused_identically",
+     "def main():\n"
+     "    var a = [1, 2, 3, 4]\n"
+     "    del a[0:4:2]\n"
+     "    return 0\n",
+     "is not lowered on the formal path"),
+    # A POINTER base, for the same reason and with a measurement in it:
+    # `del p[0]` on a `malloc`'d buffer whose first word is 10 printed 9 on
+    # arm64, because the first word was read as the COUNT and decremented
+    # while the buffer's contents stayed put. There is no length to move
+    # anything within, so this is refused rather than lowered.
+    ("del_pointer_base_refused_identically",
+     "def main():\n"
+     "    var p: Pointer[Int] = malloc(64)\n"
+     "    p[0] = 10\n"
+     "    p[1] = 20\n"
+     "    del p[0]\n"
+     "    return 0\n",
+     "the base is a POINTER"),
     ("aug_matmul_refused_with_the_same_operator_list",
      "def main():\n"
      "    var m = Mat()\n"

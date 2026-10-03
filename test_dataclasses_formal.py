@@ -328,13 +328,27 @@ def main(n):
     return 0
 """
 
-# A class that declares its OWN `__eq__` is REFUSED, and this is its source —
-# see `OWN_EQ` in the refusal table below, and `own_eq_refusal` for the
-# measurement. The reason it is here rather than absent is that it is the case
-# most likely to be got wrong by silence: a transform that simply declines to
-# rewrite the comparison leaves `==` as an address compare, which is a wrong
-# answer produced without a word, and the source contains a method saying the
-# opposite.
+# A class that declares its OWN `__eq__` — `OWN_EQ` and `OWN_EQ_ONE_FIELD`
+# below, which are EXECUTED and compared with CPython, and the two
+# `OWN_EQ_*_OPERAND` sources that are REFUSED.
+#
+# It used to be refused outright, and the reason it is worth three rows now is
+# that the refusal was for the WRONG reason and then for a right one, and each
+# of the three states is a program whose answer changed:
+#
+#   * the original refusal said `==` never dispatches by name — true on
+#     2026-09-29, false since `formal/build.py`'s
+#     `_rewrite_eq_on_frame_receivers` (and its one-word half);
+#   * the second said this transform's field-wise desugar would replace the
+#     method — true of the TRANSFORM and already handled, since
+#     `rewrite_equality` skips a class with `own_eq`;
+#   * what was actually left was the operator dispatch's own scope, and it is
+#     not the class that is wrong, it is the COMPARISONS: two bare names of the
+#     same class are answered by the method, and every other spelling is not.
+#
+# So the class is accepted and the residue is refused, each residue naming the
+# comparison that cannot be lowered and why. A refusal that names a construct
+# nobody can change is worse than a wrong answer a reader can see.
 
 # Two DIFFERENT dataclass types compared. CPython's generated `__eq__` returns
 # NotImplemented for a different type, which falls back to identity, so this is
@@ -456,6 +470,98 @@ def main(n):
 # in whichever field sorted first), `Config(7, 3)` is the control that the
 # ordinary full positional fill still works, and `Config(height=3)` catches a
 # keyword matching the WRONG field.
+OWN_EQ = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def eq(a, b):
+    if a == b:
+        return 1
+    return 0
+
+def main(n):
+    a = Always(3, 4)
+    b = Always(9, 9)
+    printf("%d %d", eq(a, b), eq(a, a))
+    return 0
+"""
+
+# The ONE-FIELD half of the same thing, and a different path: a struct of one
+# field has no frame at all, so its value is a word and the dispatch reaches it
+# through the one-word table rather than the holder table.  The old
+# `FORMAL_eq_dispatch_on_a_frame_receiver.md` §1 is the measurement that the
+# frame-only version of this answer was 0 where CPython says 1.
+#
+# THE COMPARISON IS IN `main`, not behind a call, and that is deliberate rather
+# than convenient: a one-word class compared through a function BOUNDARY does
+# not dispatch, on this tree and on the one before it —
+# `bugs/FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary.md` is the
+# measurement, and it is a different construct from the one this file is about.
+# A row here would pin a program that answers 0, and a case whose expectation
+# is a known wrong answer teaches the next reader that 0 is the answer.
+OWN_EQ_ONE_FIELD = """
+from dataclasses import dataclass
+
+@dataclass
+class Tag:
+    v: int
+
+    def __eq__(self, other):
+        return True
+
+def main(n):
+    a = Tag(5)
+    b = Tag(6)
+    printf("%d %d", a == b, a == a)
+    return 0
+"""
+
+# The residue, and the two shapes that make it a residue: the operator's
+# dispatch lowers a comparison only when BOTH operands are bare names this image
+# can say are values of the same class.  `a == 5` is a word against a frame and
+# `Always(3, 4) == Always(9, 9)` compares two temporaries — neither can be
+# classified, and both would answer 0 through the address compare the dispatch
+# exists to replace.
+OWN_EQ_WORD_OPERAND = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def main(n):
+    a = Always(3, 4)
+    printf("%d", a == 5)
+    return 0
+"""
+
+OWN_EQ_CONSTRUCTION_OPERAND = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def main(n):
+    printf("%d", Always(3, 4) == Always(9, 9))
+    return 0
+"""
+
 PARTIAL_CONSTRUCTION = """
 from dataclasses import dataclass, field
 
@@ -491,6 +597,14 @@ EXEC_CASES = [
     ("a_dataclass_compared_with_a_word_is_false", MIXED_COMPARISON),
     ("equality_inside_a_method_compares_the_receiver", SELF_COMPARISON),
     ("a_string_field_compares_as_text", STRING_FIELD),
+    # A class with its OWN `__eq__` is EXECUTED, and the two answers are the
+    # whole point: `eq(a, b)` must reach the method (1, because the method
+    # returns True for anything) and so must `eq(a, a)` — a rewrite that
+    # short-circuited the identity case, or the field-wise desugar this
+    # transform declines to apply, would answer 0 for one of them.
+    ("a_user_declared_eq_reaches_the_method", OWN_EQ),
+    ("a_user_declared_eq_reaches_the_method_on_a_one_field_class",
+     OWN_EQ_ONE_FIELD),
 ]
 
 
@@ -679,29 +793,6 @@ def main(n):
     return h.fields()
 """
 
-# A `@dataclass` that declares its OWN `__eq__`. CPython KEEPS the user's in
-# preference to the generated one, so the class is legal and its meaning is
-# unambiguous — and it is still refused, because `==` on this path is one
-# flag-setting compare of two words and never dispatches by name. Measured: a
-# class with a user `__eq__` returning True gives `a == b` as 0 here and 1
-# under CPython, while `a.__eq__(b)` gives 1 under both. So accepting the class
-# would build an image that runs the comparison as an address compare and
-# prints a number the source's own method contradicts.
-OWN_EQ = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def main(n):
-    return 0
-"""
-
 REFUSE_CASES = [
     ("frozen_is_refused_with_its_reason", FROZEN,
      ["frozen=True", "no place to put that setter"]),
@@ -719,19 +810,17 @@ REFUSE_CASES = [
      ["whatever", "not ignored"]),
     ("kw_only_is_refused_with_its_reason", KW_ONLY,
      ["kw_only", "one construction shape here, not two"]),
-    # The needle MOVED, and the reason it moved is the point: the old one was
-    # "`==` … never dispatches by name", which was true when this case was
-    # written and is false since `==` began dispatching to a declared dunder for
-    # two bare names of the same struct (formal/build.py's
-    # `_rewrite_eq_on_frame_receivers`, and for a one-field struct too since
-    # 2026-10-02).  The refusal is still correct and now rests on this
-    # transform's OWN half — `rewrite_equality` would desugar `==` into a
-    # field-wise chain and silently replace the method the source wrote — which
-    # is what the second needle says.  A refusal whose stated reason has been
-    # fixed is a refusal nobody looks at again, so the case is pinned on the
-    # reason that still holds.
-    ("a_user_declared_eq_is_refused_not_silently_ignored", OWN_EQ,
-     ["__eq__", "FIELD-WISE chain"]),
+    # A user `__eq__` whose COMPARISONS are not the shape the dispatch lowers.
+    # The needle is the clause that says which shape, because "it is refused"
+    # is not the assertion — `OWN_EQ` is a user `__eq__` that is EXECUTED above,
+    # and this pair is what keeps the two from drifting into one answer. A
+    # refusal of the class would refuse `OWN_EQ` too, which computes exactly.
+    ("a_user_declared_eq_against_a_word_is_refused_by_the_shape",
+     OWN_EQ_WORD_OPERAND,
+     ["__eq__", "5 is not a plain name"]),
+    ("a_user_declared_eq_between_two_constructions_is_refused_by_the_shape",
+     OWN_EQ_CONSTRUCTION_OPERAND,
+     ["__eq__", "ADDRESSES"]),
     ("reflection_is_refused_by_name", REFLECTION_CALL,
      ["is_dataclass", "no type tag attached"]),
     ("the_fields_attribute_is_refused_by_name", REFLECTION_ATTRIBUTE,

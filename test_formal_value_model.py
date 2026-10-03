@@ -612,6 +612,59 @@ MODULE_GLOBAL_CASES = [
      "    printf(\"bump=%d read=%d\", bump(), rd())\n"
      "    return 0\n",
      "bump=6 read=6"),
+    # ── a dict that arrives from a CALL, and a string subscript over it ──
+    #
+    # `d["a"]` has two readings on this path and the INDEX chooses neither of
+    # them: a dict KEY scan or a byte offset into a `char *`, and which one it
+    # is comes from the BASE. Every container is one word with an 8-byte count
+    # header here, so the KIND of the base cannot say — which is why
+    # `_is_dict_subscript` is a separate question from `kind_of`, and why the
+    # three spellings below were three separate faults:
+    #
+    #   * `D = {"a": 1}` at module level  — worked (the slot's initializer)
+    #   * `D = mk()` at module level       — fixed 2026-10-02 (the callee's
+    #                                          declared return type)
+    #   * `d = mk()` as a LOCAL, and `def show(d: dict)` — BOTH exited 1 with
+    #     nothing printed, from a green build, on both architectures: the
+    #     binding held no dict literal for `_note_binding` to see, so the
+    #     subscript took the SEQUENCE path and read the key's interned ADDRESS
+    #     as an element offset.
+    #
+    # The two value cases are the two halves of that, and the second one is the
+    # row that says the fix is not annotation-only: an UNANNOTATED callee whose
+    # `return` states a dict literal has as much evidence as an annotated one.
+    ("a_dict_from_a_call_with_a_declared_return_type",
+     "def mk() -> dict:\n"
+     "    var d = {\"a\": 1}\n"
+     "    return d\n"
+     "\n"
+     "def main(n):\n"
+     "    var d = mk()\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n",
+     "1|"),
+    ("a_dict_from_an_unannotated_call_whose_return_states_one",
+     "def mk():\n"
+     "    var d = {\"a\": 1}\n"
+     "    return d\n"
+     "\n"
+     "def main(n):\n"
+     "    var d = mk()\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n",
+     "1|"),
+    # A PARAMETER, which is the spelling with no BINDING statement at all:
+    # `_note_binding` never sees it, so the annotation is the only evidence
+    # there is. This is the row `declared_type_is_dict` exists for.
+    ("a_dict_subscript_through_a_dict_annotated_parameter",
+     "def show(d: dict):\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    show({\"a\": 1})\n"
+     "    return 0\n",
+     "1|"),
 ]
 
 # (name, source, needle the refusal must contain)
@@ -958,6 +1011,25 @@ REFUSALS = [
      "    print(\"s:\", p.s)\n"
      "    return 0\n",
      "cannot tell whether MemberExpr"),
+    # A STRING INDEX AGAINST A BASE NOTHING DESCRIBES — the residue after the
+    # three value cases above, and the last spelling of one expression that
+    # used to be four faults.  It is here rather than left to exit 1 because
+    # what it did was WORSE than an exit: the emitter fell back to "a blob",
+    # the blob walk took the key's interned address as an ELEMENT offset, and
+    # the program printed whatever followed in __TEXT.  A refusal is the honest
+    # answer when the two readings are a scan over pair slots and `base + i`.
+    #
+    # The needle is the INDEX sentence rather than the message's opening, so a
+    # reworded preamble does not fail this and a reworded REASON does.
+    ("a_string_index_against_an_unstated_base_is_refused",
+     "def show(d):\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    show({\"a\": 1})\n"
+     "    return 0\n",
+     "the INDEX is a string and nothing in the source says what `d` holds"),
 ]
 
 
