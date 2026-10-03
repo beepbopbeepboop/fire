@@ -314,6 +314,17 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "stat": "test_formal_stat.py",
     "math": "test_formal_math.py",
     "shutil": "test_formal_shutil.py",
+    # `tempfile` is here on the same terms as the three above \u2014 a module that
+    # left HOST_MODELLED by being written \u2014 and it was MISSING, which is why
+    # this table's `== written_modules()` check was red on `master` with
+    # `sym-diff ['tempfile']` before `textwrap` was added beside it. The
+    # omission is recorded in
+    # `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`'s
+    # sibling reasoning rather than left as a second unexplained red: the
+    # check exists to catch a module written and forgotten, and
+    # `formal/hostmods/tempfile.mojo` has been written since 2026-10-03.
+    "tempfile": "test_formal_tempfile.py",
+    "textwrap": "test_formal_textwrap.py",
 }
 
 # A module this tree now provides that was NEVER in the host set, so it cannot

@@ -2955,6 +2955,14 @@ UNREGISTERED = {
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
+    # The same shape as the group above, and it is here rather than registered
+    # for the reason the group gives: `textwrap.dedent`/`indent` are built and
+    # RUN as images on BOTH architectures and compared with CPython's own
+    # `textwrap`, case for case. Measured 2026-10-03 on this branch: 5/5
+    # groups pass, 28 `dedent` + 132 `indent` (22 cases x 3 prefixes) + 254
+    # per-byte (`isspace` and `splitlines` over bytes 1..127) answers on each
+    # of two backends, ~0.1 GB peak.
+    'test_formal_textwrap.py': _FORMAL_SUITE_REASON,
     'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
     # NOT the reason above, and deliberately said so: this one is CHEAP.
     # Measured 2026-10-02 on the merge of work/merge-formal4, `python3

@@ -423,7 +423,33 @@ HOST_MODELLED = frozenset((
     #     name `Counter` is the approximation
     #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
     "collections",
-    "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
+    "heapq", "bisect", "csv", "difflib", "base64",
+    #   `textwrap`  — `formal/hostmods/textwrap.mojo`, `dedent` and `indent`
+    #     only, checked case for case against CPython's own `textwrap` by
+    #     `test_formal_textwrap.py` on both backends: a 28-case `dedent`
+    #     corpus built so that each case separates one rule from another (a
+    #     whitespace line REPLACED rather than trimmed, a tab against a space
+    #     at the same offset, 0x1C-0x1F which `isspace` is true of and
+    #     `splitlines` is not) and a 21-case `indent` corpus over three
+    #     prefixes, plus a sweep of all 127 non-NUL ASCII bytes through both
+    #     spellings. It is the module that made the OTHER two
+    #     measurements necessary rather than optional: `str.isspace()` and
+    #     `str.splitlines` are DIFFERENT byte sets and `dedent` splits on `\n`
+    #     alone while `indent` uses `splitlines`, so one shared line-walker
+    #     would have been a walker with a flag. `wrap`/`fill`/`shorten` are
+    #     absent and the module's own docstring says why \u2014 `wrap` is a
+    #     sequence and `fill` is its answer joined, and the only
+    #     transcription of the greedy fill in this tree
+    #     (`formal/hostmods/argparse.mojo`'s `_wrap_into`) is a function of a
+    #     help string at ONE width, so re-exporting it under this name would
+    #     be a second copy of it rather than this module's `fill`.
+    #
+    #     It is the row that bought 3 files: `test_runtime_diff.py`,
+    #     `test_interp_oracle.py` and `test_comptime_parity.py` each stopped
+    #     on `import textwrap` and on NOTHING ELSE, which is measurable only
+#     because `formal/hostmods/tempfile.mojo` landed first and unmasked
+    #     them — the b7 sweep's `--host` ranking does not list `textwrap` at
+    #     all, because in that run all three were still stopped by `tempfile`.
     "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     #   `shlex`  — a state machine over a string, the same shape as `re` and

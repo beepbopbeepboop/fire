@@ -100,6 +100,15 @@ ADMITTED_COUNTS = {
                                   # is no host fact left over to admit, which is
                                   # what the zero is measuring.
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
+    "textwrap": 0,                # every name it exports is arithmetic over
+                                  # bytes a string already is: dedent's margin
+                                  # is a lexicographic min/max walk and indent's
+                                  # is a splitlines scan, both compared against
+                                  # CPython's own over a corpus built so each
+                                  # rule is separable. There is no host fact
+                                  # left over to admit, which is what the zero
+                                  # is measuring — the same claim tempfile's
+                                  # zero makes, and for the same reason.
     "time": 0,
     "typing": 0,
 }
