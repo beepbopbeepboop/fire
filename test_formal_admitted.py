@@ -92,6 +92,13 @@ ADMITTED_COUNTS = {
     "struct": 0,
     "subprocess": 7,
     "sys": 0,
+    "tempfile": 0,                # every name it exports is a real call this
+                                  # image makes: gettempdir's candidates are
+                                  # read with os.getenv/isdir/access, mkdtemp's
+                                  # directory is a real mkdir(2) at 448 and its
+                                  # eight characters are arc4random_buf. There
+                                  # is no host fact left over to admit, which is
+                                  # what the zero is measuring.
     "threading": 3,               # Thread.start, Thread.join, Lock.acquire
     "time": 0,
     "typing": 0,

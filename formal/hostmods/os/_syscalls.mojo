@@ -556,6 +556,31 @@ def fs_access(p, mode) -> int:
     return access(p, mode)
 
 
+def fs_arc4random(buf, n) -> int:
+    """`arc4random_buf(buf, n)`: `n` random bytes into `buf`. Always 0.
+
+    The C library's own CSPRNG, and the only randomness a formal image has:
+    `arc4random(3)` is in libSystem, so this needs no library outside the one
+    this target links (`FORMAL.md` §1) and no `/dev/urandom` descriptor.
+
+    Here for `formal/hostmods/tempfile.mojo`, which is the one name in this
+    tree that needs a name nothing else has taken — `mkdtemp`'s eight
+    characters. The alternative that was measured and rejected is
+    `arc4random()`, which takes no arguments and returns the value directly: it
+    binds, and every one of five draws on this target came back under 2**32,
+    which is the signature of a 64-bit return read as 32 bits rather than of a
+    53-bit generator. Reading the bytes out of a buffer sidesteps the question
+    entirely, and `n` is a byte count this path can pass.
+
+    **0 rather than the call's own return value**, and that is deliberate: the C
+    function returns `void`, so there is nothing to hand back, and a wrapper
+    that returned whatever happened to be in the result register would be
+    reporting a number this tree cannot vouch for. Callers read the bytes.
+    """
+    arc4random_buf(buf, n)
+    return 0
+
+
 def fs_chdir(p) -> int:
     """`chdir(p)`: 0 on success, -1 on failure."""
     return chdir(p)
