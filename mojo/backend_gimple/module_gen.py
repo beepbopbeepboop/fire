@@ -56,6 +56,9 @@ from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWOR
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.module_shared import *  # noqa: F401,F403
+# `import *` skips underscore-prefixed names, and this one is the single
+# list the three dispatch-global sites below read (see its definition).
+from mojo.middle.module_shared import _DISPATCH_TABLE_GLOBAL_NAMES
 from mojo.middle.module_shared import (
     _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _UNKNOWN_FIELD_CTYPE, _as_boollit_node, _as_dict,
     _as_funcdef_node, _as_int, _as_intlit_node, _as_str, _as_structdef_node, _bytes_subclass_new_payload_name,
@@ -1349,8 +1352,11 @@ def _gmi_expr_provably_str(e) -> bool:
 # self-hosted compiled path (`'arr' in _dispatch_names`), declaring an
 # ordinary `arr = [1,2,3]` global as a bare `MojoList *` field (a
 # stage1-vs-stage2 parity break under MOJO_NO_SHIM=1, array_ops_jit.mojo).
-_DISPATCH_TABLE_NAMES = ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                         '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS')
+# The same ONE list the global-declaration and seed sites read
+# (module_shared's `_DISPATCH_TABLE_GLOBAL_NAMES`), so a name added there is
+# declared here too. These four used to be separate tuples in four files and
+# only agreed because nobody had moved a global yet.
+_DISPATCH_TABLE_NAMES = _DISPATCH_TABLE_GLOBAL_NAMES
 
 
 def _is_dispatch_name(_n) -> bool:
@@ -8410,9 +8416,11 @@ def gen_module_impl(self, stmts):
         self, _phase17_mod,
         stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
 
-    _EARLY_DISPATCH_DICTS = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                             '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
-    _EARLY_DISPATCH_SETS = {'_CMP_OPS'}
+    # From the ONE list in module_shared, not a hand-written copy: these three
+    # sites and `_selfhost_module_scalar_globals`'s skip all need the same set
+    # of names, and the copies drifted apart when the globals moved module.
+    _EARLY_DISPATCH_DICTS = set(_DISPATCH_TABLE_GLOBAL_NAMES)
+    _EARLY_DISPATCH_SETS = set()
     # Indexed iteration + `_as_str`, NOT `for _gn, _gt in ....items()`: the
     # self-hosted 2-tuple unpack boxes BOTH slots to int64_t, so `_gn in
     # self._global_c_decl_types` (plain-str keys) missed, `_gn in
@@ -9547,9 +9555,14 @@ def gen_module_impl(self, stmts):
             # value-correctness issue, and neither hoisting location fixed
             # it — plain lists + `==` sidestep the MojoSet/MojoDict
             # runtime entirely for this specific (tiny, cold) check.
-            _dispatch_dict_names = ['_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
-                                    '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT']
-            _dispatch_set_names = ['_CMP_OPS']
+            # Same ONE list (module_shared's), for the same reason: this copy
+            # was written before the globals moved out of gimple_codegen.py and
+            # had not been updated, so a `from mojo.middle.types import
+            # _TYPE_MAP` declared nothing and every read of it failed at C
+            # compile time. Declared as `MojoDict *` unless the name is a set,
+            # which the seeded cdecl type decides rather than a second list.
+            _dispatch_dict_names = list(_DISPATCH_TABLE_GLOBAL_NAMES)
+            _dispatch_set_names = []
             # `stmt.name_alias_strs` + `_fi_name`/`_fi_alias`, NOT
             # `stmt.names`/`alias[0]`/`alias[1]` — `FromImportStmt.names`
             # is `list[(str, str|None)]`, and its OWN dataclass docstring
@@ -9576,10 +9589,15 @@ def gen_module_impl(self, stmts):
                     _check_names.append(local_name)
                 for check_name in _check_names:
                     if check_name in _dispatch_dict_names and check_name not in _declared_globals:
-                        global_decls.append(f"MojoDict * {check_name};")
+                        # The SEEDED type wins over a hard-coded `MojoDict *`:
+                        # a frozenset global (`_C_KEYWORDS`, `_C_RESERVED_FUNCS`)
+                        # is a MojoSet, and declaring it `MojoDict *` makes every
+                        # `in` and every iteration go through dict lowering.
+                        _dct = self._global_var_types.get(check_name) or 'MojoDict *'
+                        global_decls.append(f"{_dct} {check_name};")
                         _declared_globals[check_name] = True
-                        self._global_c_decl_types[check_name] = 'MojoDict *'
-                        self._global_var_types[check_name] = 'MojoDict *'
+                        self._global_c_decl_types[check_name] = _dct
+                        self._global_var_types[check_name] = _dct
                     elif check_name in _dispatch_set_names and check_name not in _declared_globals:
                         global_decls.append(f"MojoSet * {check_name};")
                         _declared_globals[check_name] = True

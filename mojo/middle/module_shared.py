@@ -160,6 +160,28 @@ def _selfhost_parsed_modules(sd: str) -> list:
         _out.append((_f, _selfhost_parsed_source(_f)))
     return _out
 
+# The dispatch-table and type-table MODULE GLOBALS, with the C type each one
+# needs. ONE list, because three sites need this same fact and each used to
+# carry its own hand-written copy -- and the copies drifted the moment the
+# globals moved from `gimple_codegen.py` into `mojo/middle/types.py` under the
+# module split, which is how "struct _mojo_middle_types_toplev has no member
+# named '_TYPE_MAP'" happened.
+#
+# The VALUE is the C declaration type, which is the thing a consumer needs: the
+# cdecl the home module emits and the shim's accessor must agree on, and
+# `int64_t` for a boxed container that has no typed accessor.
+_DISPATCH_TABLE_GLOBAL_NAMES = (
+    '_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+    '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT',
+    '_C_KEYWORDS', '_C_RESERVED_FUNCS', '_FORCE_RENAME_RESERVED',
+    '_CPP_KEYWORD_FIELDS', '_C_PARAM_EXTRA_KEYWORDS',
+    '_CPP_CALLABLE_CTYPE', '_CPP_CALLABLE_CTYPE_1ARG',
+    '_PSEUDO_DUNDER_ATTRS', '_LIST_RETURNING_METHODS',
+    '_STR_RETURNING_METHODS', '_LIBM_FN_RETVALS', '_UNKNOWN_FIELD_CTYPE',
+    '_SCALAR_INT_TYPES', '_SCALAR_FLOAT_TYPES',
+    '_FIXED_ARRAY_ANN_RE', '_SELFHOST_EXTRA_FIELD_CACHE',
+)
+
 def _selfhost_module_scalar_globals(sd: str) -> dict:
     """`{global_name: (module_name, semantic_ctype, c_decl_ctype)}` for every
     top-level `NAME = <int|str|bool literal>` / `NAME = frozenset(...)` /
@@ -181,8 +203,17 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     # UNLESS it is one of gen_module_impl's hardcoded dispatch tables (which
     # get a bare `MojoDict *` / `MojoSet *` field). Skip those names so the
     # pre-seed can never disagree with the home's field/accessor type.
-    _dispatch_only = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_TYPE_MAP',
-                      '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
+    # Derived from the module that DEFINES them rather than written out here.
+    # This list used to name the globals of `gimple_codegen.py`, which is where
+    # they lived before the split into `mojo/middle/` + `mojo/backend_gimple/`;
+    # `_TYPE_MAP` moved to `types.py` and several others with it, so a
+    # hand-kept list silently stopped covering them and every consumer of a
+    # moved dispatch table then found no cdecl entry -- "struct
+    # _mojo_middle_types_toplev has no member named '_TYPE_MAP'".
+    #
+    # `_DISPATCH_TABLE_GLOBAL_NAMES` is the ONE list, and both this skip and
+    # `gen_module_impl`'s declaration sites read it.
+    _dispatch_only = set(_DISPATCH_TABLE_GLOBAL_NAMES)
     _out: dict = {}
     for _f, _stmts in _selfhost_parsed_modules(sd):
         _mod = _selfhost_module_name_for_path(sd, _f)
