@@ -2935,6 +2935,15 @@ UNREGISTERED = {
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # The same shape as the group above and CHEAP like `formal-hostmods-census`
+    # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
+    # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s
+    # wall. So by CLAUDE.md's cost rule it wants a REGISTRATION rather than
+    # an excuse, and it is listed here because this branch's subject is the
+    # sweep probe and the parity corpus, not the registry. Exact next step:
+    # `test('formal-list-splat', [PY, 'test_formal_list_splat.py'], ...)` in
+    # the `proofs` bucket beside `formal-x86`.
+    'test_formal_list_splat.py': _FORMAL_SUITE_REASON,
     'test_formal_math.py': _FORMAL_SUITE_REASON,
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
