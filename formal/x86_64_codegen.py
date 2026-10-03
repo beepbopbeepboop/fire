@@ -6902,6 +6902,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
+        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
+        # message, from the one shared pair (`model.callee_is_a_bound_value` /
+        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
+        # parameter is a call through a VALUE, and "a name this unit does not
+        # compile" cannot tell it from a C symbol, so the extern path emitted a
+        # call against a symbol spelled `func` and the bind audit reported a
+        # missing symbol instead of the construct that is missing.
+        if not is_extern_call and name not in self._functions \
+                and M.callee_is_a_bound_value(self._cur_fn, name):
+            raise CodegenError(M.callee_value_refusal(name, self._cur_fn))
         is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is a library of a DIFFERENT target, not
         # an external dependency of this one, and the source spells its ABI as
