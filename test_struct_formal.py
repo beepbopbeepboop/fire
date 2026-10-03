@@ -325,7 +325,7 @@ def test_calcsize_each_format(tmpdir):
 
 # ── 2. pack, byte for byte ───────────────────────────────────────────────────
 
-def _pack_program(fmt, values, n_slots):
+def _pack_program(fmt, values, n_slots=None):
     """A program that packs `values` and prints each resulting byte.
 
     The bytes come back out of the returned list one at a time, because a
@@ -334,21 +334,67 @@ def _pack_program(fmt, values, n_slots):
     refusal is a property of `print`, not of `struct`, and the binding is the
     documented way round it.
 
-    `n_slots` is how many arguments the call supplies. It is FIVE, not seven:
-    a signature has to fit the smaller of the two ABIs' integer argument
-    registers, and x86-64's SysV passes six (RDI/RSI/RDX/RCX/R8/R9) where
-    arm64's AAPCS passes eight — so `struct.pack` is `fmt` plus five values.
-    Getting that wrong is invisible on arm64 and is a refusal on x86-64, which
-    is why `test_the_module_builds_on_both_backends` exists.
+    `n_slots`, when given, is how many arguments the call SUPPLIES, padding
+    with zeros. It is None by default and used to be 5, because `pack`'s five
+    value slots were REQUIRED: the call had to write all five or the arity
+    check refused it at the CALL SITE, so every case here spelled
+    `pack("<I", 7, 0, 0, 0, 0)` for a format that names one value. That is not
+    a shape any caller writes — `formal/x86_64.py` has fifteen
+    `struct.pack("<i", x)` sites — and the padding hid the gap rather than
+    pinning it. The slots are DEFAULTED now (the same reason `pack_into`'s
+    are), so the default here is the natural `pack("<I", 7)`.
+
+    The signature is still six arguments WIDE, which is the part the width
+    matters for: a module compiled for BOTH backends has to fit the smaller of
+    their integer argument registers (x86-64's six, where arm64's AAPCS passes
+    eight). Getting that wrong is invisible on arm64 and is a refusal on
+    x86-64, which is why `test_the_module_builds_on_both_backends` exists.
+    `n_slots` remains available so a case can still pin the padded spelling.
     """
     args = ", ".join(str(v) for v in values)
-    if len(values) < n_slots:
+    if n_slots is not None and len(values) < n_slots:
         args += ", 0" * (n_slots - len(values))
     body = "\n".join(
         f"    x{i} = b[{i}]\n    print(x{i})"
         for i in range(struct.calcsize(fmt)))
     return ("from struct import pack\n\n"
             f"def main():\n    b = pack(\"{fmt}\", {args})\n{body}\n")
+
+
+def test_pack_omitted_value_slots_are_filled(tmpdir):
+    """A call that leaves value slots off is CPython's bytes, not a refusal.
+
+    The one shape `struct.pack` is actually called with, and the one this
+    module could not answer at all while the five slots were required: the
+    arity check runs at the CALL SITE, so `pack("<I", 7)` was refused with
+    "missing required argument 'v1'" before this body ever ran — and
+    `formal/x86_64.py`, `formal/macho.py` and `formal/arm64.py` are written
+    entirely in that shape, which is what put the whole of `formal/` behind a
+    single declaration.
+
+    Each case is one format and one value compared against CPython at the
+    natural arity and at two wider ones, so "a default fills the slot" and "the
+    value is not disturbed by the slots after it" are both assertions in the
+    same run rather than one of them being assumed.
+    """
+    cases = [
+        ("<I", [V_I1], 1),
+        ("<I", [V_I1], 2),
+        ("<I", [V_I1], 5),
+        ("<HH", [0x1111, 0x2222], 2),
+        ("<HH", [0x1111, 0x2222], 3),
+        ("<HH", [0x1111, 0x2222], 5),
+        ("<III", [V_I1, V_I2, V_I3], 3),
+        ("<III", [V_I1, V_I2, V_I3], 5),
+        ("<QQ", [V_Q1, V_Q2], 2),
+        ("<QQ", [V_Q1, V_Q2], 5),
+    ]
+    for i, (fmt, values, n_slots) in enumerate(cases):
+        expect_lines(tmpdir, f"packslots{i}",
+                     _pack_program(fmt, values, n_slots),
+                     list(struct.pack(fmt, *values)),
+                     f'pack("{fmt}", {values}) with {n_slots} argument(s) is '
+                     f"CPython's bytes")
 
 
 def test_pack_single_value_formats(tmpdir):
@@ -371,7 +417,7 @@ def test_pack_single_value_formats(tmpdir):
         ("<q", V_Q1), ("<q", V_NEG),
     ]
     for i, (fmt, value) in enumerate(cases):
-        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value], 5),
+        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value]),
                      list(struct.pack(fmt, value)),
                      f'pack("{fmt}", {value}) is CPython\'s bytes')
 
@@ -397,7 +443,7 @@ def test_pack_multi_value_formats(tmpdir):
         ("<HH", [0x1111, 0x2222]),
     ]
     for i, (fmt, values) in enumerate(cases):
-        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values, 5),
+        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values),
                      list(struct.pack(fmt, *values)),
                      f'pack("{fmt}", {values}) is CPython\'s bytes')
 
@@ -1020,6 +1066,7 @@ def main():
         test_calcsize_each_format,
         test_pack_single_value_formats,
         test_pack_multi_value_formats,
+        test_pack_omitted_value_slots_are_filled,
         test_pack_into_matches_cpython,
         test_pack_into_at_offset,
         test_unpack_from_round_trip,

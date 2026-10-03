@@ -179,11 +179,15 @@ theorem go_exit_within (code : Nat → UInt8) (ρ : Nat) :
 /-- **The state an export's run starts in.**  Named because four of the
     premises above and the theorem below all have to agree about it, and
     writing the record update out five times is how two of them come to
-    disagree. -/
+    disagree.
+
+    The link register is the export's OWN end, not the image's: with several
+    exports the image's end is past the last of them, so a body ending in a
+    return would land in another export's code.  See `DylibExport.exportEnd`. -/
 def startState (image : DylibImage) (export_ : DylibExport) (n : UInt64) : Arm64State :=
   { Arm64State.init n image.base with
       pc := export_.entry,
-      x30 := UInt64.ofNat (image.base + image.codeSize) }
+      x30 := UInt64.ofNat (DylibExport.exportEnd image export_) }
 
 /-- **The body of an export, as a `Block`.**
 
@@ -191,7 +195,15 @@ def startState (image : DylibImage) (export_ : DylibExport) (n : UInt64) : Arm64
     `BlockCert` already says "the machine runs it to that effect", so this is a
     new name over old types rather than a parallel mechanism. What it adds is
     the two facts that make an export's body the *finished* case: it starts at
-    the export's entry, and it ends AT the exit rather than short of it. -/
+    the export's entry, and it ends AT the exit rather than short of it.
+
+    `atExit` and `noEarly` are stated at the EXPORT's end, which is what makes
+    every field of this structure per-export.  They used to be stated at
+    `image.base + image.codeSize`, the image's end, so a `Block` for one export
+    of several could not end where `atExit` required and `runs_to_body` — the
+    only consumer of both — was unreachable for it.  For an image with one
+    export the two addresses are the same number, so nothing about that case
+    changes. -/
 structure ExportBody (image : DylibImage) (export_ : DylibExport) where
   /-- the body, as a straight-line block -/
   block : Refine.Block
@@ -199,7 +211,7 @@ structure ExportBody (image : DylibImage) (export_ : DylibExport) where
   entry : export_.entry = block.entry_pc
   /-- the certificate: the machine runs the body to the composed effect -/
   cert : Refine.BlockCert image.code block
-  /-- the body's effect ends at the image's exit
+  /-- the body's effect ends at the export's own end
 
       Stated for the export's *start state* rather than for every state whose
       `pc` is the entry, and the weaker form is the true one. A body ends by
@@ -210,11 +222,12 @@ structure ExportBody (image : DylibImage) (export_ : DylibExport) where
       that `startState` is exactly the state which sets `x30` to the exit, and
       which the caller actually starts from. -/
   atExit : ∀ n : UInt64,
-    (block.step (startState image export_ n)).pc = image.base + image.codeSize
+    (block.step (startState image export_ n)).pc
+      = DylibExport.exportEnd image export_
   /-- no intermediate state of the run is already at the exit -/
   noEarly : ∀ (n : UInt64) (u : Nat) (hu : u < block.pcs.length) (su : Arm64State),
     arm64_runs image.code u (startState image export_ n) = some su →
-    su.pc ≠ image.base + image.codeSize
+    su.pc ≠ DylibExport.exportEnd image export_
 
 /-- **AN EXPORT'S RESULT IS ITS BODY'S EFFECT.**  For every argument — and the
     argument is SYMBOLIC — the run succeeds and lands on the body's composed
@@ -241,9 +254,9 @@ theorem runs_to_body (image : DylibImage) (export_ : DylibExport)
       simp [DylibExport.exportFuel]
     omega
   have hmain : arm64_go_exit (startState image export_ n) image.code
-      (image.base + image.codeSize) (DylibExport.exportFuel image n)
+      (DylibExport.exportEnd image export_) (DylibExport.exportFuel image n)
       = some (b.block.step (startState image export_ n)) :=
-    go_exit_within image.code (image.base + image.codeSize) _
+    go_exit_within image.code (DylibExport.exportEnd image export_) _
       (startState image export_ n) (b.block.step (startState image export_ n)) ⟨
       b.block.pcs.length, hlen',
       b.cert.runs _ b.entry,
@@ -254,7 +267,7 @@ theorem runs_to_body (image : DylibImage) (export_ : DylibExport)
   -- `runProg` at the export's `Prog` IS that `go_exit`, by definition
   have hshape : Refine.runProg (Refine.dylibExportProg image export_) n
       = arm64_go_exit (startState image export_ n) image.code
-          (image.base + image.codeSize) (DylibExport.exportFuel image n) := rfl
+          (DylibExport.exportEnd image export_) (DylibExport.exportFuel image n) := rfl
   rw [hshape]
   exact hmain
 

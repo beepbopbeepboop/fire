@@ -401,9 +401,78 @@ def cmd_guard(a):
         while big and sum(b[0] for b in big) > total_kb:
             rss, pid, args = big.pop(0)
             kill(pid, "tree total over the %.0f GB budget" % a.total_gb, rss, args)
+        _guard_lean_time(roots, a, cwd_of, kill)
+        _guard_runaway(roots, a, cwd_of, kill)
         if a.once:
             return
         time.sleep(a.interval)
+
+
+def _ps_time(s):
+    """`ps` etime/time -> seconds. Formats: [[dd-]hh:]mm:ss, with a fractional seconds part on `time`."""
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1); days = int(d)
+    parts = [float(x) for x in s.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0.0)
+    return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def _guard_lean_time(roots, a, cwd_of, kill):
+    """Wall-clock and CPU upper bound on Lean 4 processes in OUR trees.
+
+    2026-10-02 the user killed ten `lean` processes, some with HUNDREDS of CPU-hours: a valid inductive proof
+    checks in seconds to minutes, so anything past these limits is a non-terminating elaboration (a `simp` /
+    `decide` / kernel reduction loop that `maxHeartbeats` does not meter), not a slow proof. CPU time is
+    counted across Lean's threads, so it grows faster than the wall clock. Applies to `lean` itself, not to
+    `lake`/shell wrappers, and only to processes whose cwd is inside a worker worktree or the integrator tree.
+    The same bounds belong in the code that launches Lean (formal/lean.py); this is the net under every
+    launcher that has not been taught them, including a worker's ad-hoc `lean` run."""
+    out = subprocess.run(["ps", "-axo", "pid=,etime=,time=,args="], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        f = line.split(None, 3)
+        if len(f) < 4 or not re.search(r"(^|/)lean( |$)", f[3].split(" -", 1)[0]):
+            continue
+        try:
+            wall, cpu = _ps_time(f[1]), _ps_time(f[2])
+        except ValueError:
+            continue
+        if wall < a.lean_wall_min * 60 and cpu < a.lean_cpu_min * 60:
+            continue
+        c = cwd_of(int(f[0]))
+        if any(c == x or c.startswith(x + os.sep) for x in roots):
+            kill(int(f[0]), "lean past its bound: %.0f min wall, %.0f min CPU (limits %g / %g)" % (
+                wall / 60, cpu / 60, a.lean_wall_min, a.lean_cpu_min), 0, f[3])
+
+
+def _guard_runaway(roots, a, cwd_of, kill):
+    """Wall-clock bound on a worker's compiler builds and test runs in OUR trees.
+
+    2026-10-02: twelve `fire.py build --formal ... std/python/bindings.mojo` processes, up to 1.6 DAYS old and
+    each burning ~55% of a core, plus two `test_formal_math.py` runs 10 hours old, were found left behind by
+    workers that had since finished: a non-terminating compile (bugs/FORMAL_bindings_mojo_build_never_terminates.md)
+    that nothing bounded. Any `fire.py build` / `test_*.py` / `formal_sweep.py` / probe script that is still
+    running after --runaway-min minutes (default 120; the longest legitimate one is the self-host build at ~25 min)
+    is killed. The gate and the integrator run through tools/suite.py (its own timeouts), so their processes are
+    named `suite.py`, not matched here."""
+    out = subprocess.run(["ps", "-axo", "pid=,etime=,args="], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        f = line.split(None, 2)
+        if len(f) < 3 or "control.py" in f[2] or "opencode" in f[2] or "suite.py" in f[2]:
+            continue
+        if not re.search(r"Python\S*\s.*(fire\.py build|/test_\w+\.py|\btest_\w+\.py|formal_sweep\.py|\.tmp/\S+\.py)", f[2]) \
+                and not re.search(r"^(\S*python\S*)\s+(\S*fire\.py build|\S*test_\w+\.py|\S*formal_sweep\.py|\.tmp/\S+\.py)", f[2]):
+            continue
+        try:
+            wall = _ps_time(f[1])
+        except ValueError:
+            continue
+        if wall < a.runaway_min * 60:
+            continue
+        c = cwd_of(int(f[0]))
+        if any(c == x or c.startswith(x + os.sep) for x in roots):
+            kill(int(f[0]), "runaway: %.0f min wall (limit %g)" % (wall / 60, a.runaway_min), 0, f[2])
 
 
 def cmd_memtrim(a):
@@ -582,7 +651,11 @@ def main():
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
-    s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_guard)
+    s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
+    s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")
+    s.add_argument("--lean-cpu-min", type=float, default=90, help="... or this many CPU minutes (all threads)")
+    s.add_argument("--runaway-min", type=float, default=120, help="kill a fire.py build / test_*.py / sweep / probe in our trees past this many wall minutes")
+    s.set_defaults(f=cmd_guard)
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")

@@ -648,7 +648,13 @@ def dylibExportProg (image : DylibImage) (export_ : DylibExport) : Prog :=
     code := image.code
     base := image.base
     entry := export_.entry
-    exit := image.base + image.codeSize
+    -- The export's OWN end, which is also where `runProg` puts the link
+    -- register (`Refine.runProg` reads `p.exit` for both).  The image's end
+    -- was used here, which for a multi-export image runs the export past its
+    -- own last instruction and into the next export's code -- so the run, and
+    -- therefore `export_result_spec`, was about a different function than the
+    -- one the export names.  See `DylibExport.exportEnd`.
+    exit := DylibExport.exportEnd image export_
     -- The SAME fuel `DylibExport.runExport` uses, deliberately: `Total` is
     -- stated over `runExport` and a contract over `runProg`, and if the two
     -- disagreed then the two claims would be about different runs and the

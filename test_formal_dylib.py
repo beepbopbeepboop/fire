@@ -28,6 +28,7 @@ Invoked via `make check-formal-dylib` or directly:
 """
 import argparse
 import ctypes
+import itertools
 import json
 import os
 import platform
@@ -72,6 +73,22 @@ SAMPLE_B = """\
 def neg(n):
   return 0 - n
 """
+
+
+REC = "@@"
+RUN_TIMEOUT = 300
+
+
+class Failure(Exception):
+    """The exception `build_and_run` raises.
+
+    Distinct from `TestFailure` below on purpose: `TestFailure` is a FAILED
+    ASSERTION about this file's subject and the suite counts it, while `Failure`
+    is this file refusing to produce an answer at all — a build that failed, an
+    image that crashed, a record count that does not line up. A caller of
+    `build_and_run` converts it into whatever its own harness reports, and
+    conflating the two would make a build failure look like a wrong answer.
+    """
 
 
 class TestFailure(Exception):
@@ -261,6 +278,117 @@ def call_exported(path, symbol, *args):
     return fn(*args)
 
 
+BACKENDS = ("arm64", "x86_64")
+
+
+def host_machine():
+    """`True` when this host can BUILD a formal image at all.
+
+    arm64 is the only architecture `fire.py build --formal` emits by default and
+    the only one every other formal suite in the tree assumes, so a host that is
+    neither arm64 nor aarch64 skips those suites rather than failing them. This
+    is the shared spelling of that rule, because three hostmod test files now ask
+    it and three copies of it would be three places to keep true.
+    """
+    return platform.machine() in ("arm64", "aarch64")
+
+
+def rosetta():
+    """`True` when this host can also RUN an x86-64 image.
+
+    Rosetta 2 exists on Apple Silicon and nowhere else, so the x86-64 half of a
+    hostmod suite is skipped on any other host — with the reason printed, which
+    is the half that matters, because a silent skip reads as a pass. The reason
+    is a string here rather than a bare `False` so no caller can skip without
+    saying why.
+    """
+    if host_machine():
+        return True, ""
+    return False, (f"host is {platform.machine()}; an x86-64 image needs "
+                   f"Rosetta 2, which only Apple Silicon has")
+
+
+def build_and_run(src, name, tmpdir, compare, backends=None, cross=None,
+                  env=None, cwd=None):
+    """Build `src` on every backend, run it, and hand `compare(arch, records)` each.
+
+    The two-architecture machinery for a `formal/hostmods` suite, in ONE place,
+    because the second copy of it is a second thing to keep true:
+
+      * `compare(arch, records)` is called once per architecture and raises on a
+        disagreement, so no group can accidentally run on one architecture — and
+        it is told WHICH one, so a message can name it.
+      * the records of the two architectures are then compared with EACH OTHER,
+        so a module that lowers differently on the two is caught even when both
+        answers happen to agree with CPython on the corpus at hand. `cross` is an
+        optional filter for that comparison, for the one case where two
+        architectures cannot be compared (a float-valued `printf` operand, where
+        x86-64 reads `XMM0`; see
+        `bugs/FORMAL_x86_64_a_float_printf_operand_reads_XMM0.md`).
+
+    Records are the `@@`-separated fields of the image's stdout. `@@` is the
+    record terminator every hostmod test in this tree uses, and it is here for a
+    reason that does not expire: a separator this suite can read back WITHOUT
+    asking whether the image decoded the literal, two bytes that a real newline
+    cannot collide with. A suite that went on to depend on the decoder's answer
+    would be a suite whose reader has to know it.
+
+    This is the comment the other hostmod suites in the family follow, so it is
+    the one whose wording has to be right for a reader who arrives in one of
+    them.
+
+    `cwd` is where the image RUNS, and it defaults to `tmpdir` because a hostmod
+    suite that puts a program anywhere but its own scratch directory is asking
+    for a test that depends on the repository's contents. It is a parameter
+    because `test_formal_shutil.py` runs inside the tree it is mutating, and
+    that tree is per-group: `rmtree` and `move` destroy theirs, so the second
+    architecture cannot run in the directory the first one emptied.
+
+    Returns the first architecture's records.
+    """
+    if backends is None:
+        backends = BACKENDS
+    got = {}
+    for arch in backends:
+        path = os.path.join(tmpdir, name + ".mojo")
+        with open(path, "w") as f:
+            f.write(src)
+        out = os.path.join(tmpdir, name + "." + arch)
+        r = run_fire(["build", "--formal", "--no-prove", "--backend=" + arch,
+                      "-o", out, path], env=env)
+        if r.returncode != 0 or not os.path.isfile(out):
+            raise Failure(f"[{arch}] build failed: "
+                          f"{(r.stderr or r.stdout or '').strip()[-400:]}")
+        argv = ["arch", "-x86_64", out] if arch == "x86_64" else [out]
+        p = subprocess.run(argv, capture_output=True, timeout=RUN_TIMEOUT,
+                           cwd=cwd or tmpdir)
+        if p.returncode != 0:
+            raise Failure(
+                f"[{arch}] image exited {p.returncode}: "
+                f"{p.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+        recs = [rec for rec in p.stdout.decode("latin-1").split(REC) if rec]
+        compare(arch, recs)
+        got[arch] = recs
+    if len(got) == 2:
+        a, b = backends
+        keep = cross or (lambda recs: recs)
+        ra, rb = keep(got[a]), keep(got[b])
+        if len(ra) != len(rb):
+            raise Failure(f"{a} reported {len(ra)} records and {b} reported "
+                          f"{len(rb)}, so the two architectures are not even "
+                          f"running the same program")
+        diff = [(x, y) for x, y in zip(ra, rb) if x != y]
+        if diff:
+            raise Failure(
+                f"{len(diff)} of {len(ra)} records differ between {a} and {b}. "
+                f"A host module is pure work over values the model already "
+                f"represents, so a disagreement here is a two-architecture "
+                f"lowering bug with nothing in the module to blame. First "
+                f"three:\n      " +
+                "\n      ".join(f"{a} {x!r}, {b} {y!r}" for x, y in diff[:3]))
+    return got[backends[0]]
+
+
 # ── the tests ───────────────────────────────────────────────────────────────
 
 def test_dylib_structure_and_exports(tmpdir, shared):
@@ -286,10 +414,41 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     check(text["initprot"] == VM_PROT_READ | VM_PROT_EXECUTE,
           f"__TEXT initprot {text['initprot']:#x} is not r-x")
     check(text["vmaddr"] % 0x1000 == 0, "__TEXT vmaddr is not page aligned")
-    check(linkedit["vmaddr"] == text["vmaddr"] + text["vmsize"],
-          "__LINKEDIT does not start where __TEXT ends")
     check(linkedit["vmaddr"] % 0x1000 == 0,
           "__LINKEDIT vmaddr is not page aligned")
+    # No two segments may OVERLAP, in memory or in the file, and the link edit
+    # must sit above the code.
+    #
+    # This replaced "⟨LINKEDIT starts where __TEXT ends⟩", which was not an
+    # invariant but a coincidence: it held for as long as an image had no data
+    # segment, and it stopped holding the moment every image got one
+    # (`formal/model.py`'s `STACK_FLOOR_BUDGET_BYTES`). The data segment is
+    # mapped at a FIXED address well above the image's slide — `__DATA` is
+    # `GLOBALS_VM`, not "the next page" — so the three segments are neither
+    # contiguous nor in file order, and a contiguity assertion would be
+    # asserting the coincidence again on the next change. What the loader
+    # actually requires is disjoint ranges, and that is what is checked: two
+    # segments sharing an address is memory corruption, which is the failure
+    # this whole file's segment checks exist to catch.
+    segs = info["segments"]
+    for a, b in itertools.combinations(sorted(segs), 2):
+        sa, sb = segs[a], segs[b]
+        vm_overlap = (sa["vmaddr"] < sb["vmaddr"] + sb["vmsize"]
+                      and sb["vmaddr"] < sa["vmaddr"] + sa["vmsize"])
+        check(not vm_overlap,
+              f"segments {a} [{sa['vmaddr']:#x}, "
+              f"{sa['vmaddr'] + sa['vmsize']:#x}) and {b} "
+              f"[{sb['vmaddr']:#x}, {sb['vmaddr'] + sb['vmsize']:#x}) overlap "
+              f"in memory, so the loader maps them over each other")
+        f_overlap = (sa["fileoff"] < sb["fileoff"] + sb["filesize"]
+                     and sb["fileoff"] < sa["fileoff"] + sa["filesize"])
+        check(not f_overlap,
+              f"segments {a} and {b} overlap in the FILE "
+              f"({a} [{sa['fileoff']}, {sa['fileoff'] + sa['filesize']}) vs "
+              f"{b} [{sb['fileoff']}, {sb['fileoff'] + sb['filesize']})")
+    check(linkedit["vmaddr"] >= text["vmaddr"] + text["vmsize"],
+          f"__LINKEDIT at {linkedit['vmaddr']:#x} is not above __TEXT, which "
+          f"ends at {text['vmaddr'] + text['vmsize']:#x}")
 
     dataoff, datasize = info["commands"]["LC_DYLD_EXPORTS_TRIE"]
     check(linkedit["fileoff"] <= dataoff
@@ -447,29 +606,75 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         text = f.read()
     check("DylibImage" in text and "dylib_export_0_triple" in text,
           "generated dylib proof does not mention the exported function")
-    # The generated file no longer admits NOTHING, and that is the point.
+    # The generated file admits nothing, and that is the point.
     # [3]'s IR-3-to-2-dylib-stubs.md replaced three `sorry`s-over-false-claims
     # with two NAMED obligations -- `_semantics_total` (the run terminates for
     # every argument) and `_spec` (the export matches its specification) -- so
     # that the caller's theorem is proved and sorry-free.  Grepping for "no
     # sorry anywhere" would therefore be red for the right reason, and silencing
-    # it would be wrong.  So the obligation SET is pinned instead: a THIRD
-    # obligation appearing is a regression, and one closing stays green.  Same
-    # asymmetry the library check below already had, applied to the half that
-    # moved out of lib/ and into this file.
+    # it would be wrong.
+    #
+    # What changed on 2026-10-03 is that an export whose spec `_dylib_spec_lean`
+    # CAN derive no longer emits a `_spec` obligation at all: its contract is
+    # emitted PROVED (`hreg`, `agrees_of_body`) and `bv_decide` checks the
+    # machine against the source.  So the set is pinned per export as
+    # "terminates, and EITHER a proved contract OR a named `_spec`
+    # obligation" -- never equality against a fixed set, which cannot tell
+    # "no obligation because it is PROVED" from "no obligation because the
+    # emitter forgot", and treats those two as the same observation.  That
+    # distinction is `FORMAL_dylib_export_loops_and_frame_bounds.md` §`OPUS-2`, and
+    # the asymmetry is now checked in the direction that matters.
     import re as _re
-    # The WHOLE theorem name is captured, suffix included: capturing the ident
-    # and comparing against ident+suffix is off by the suffix, which is how the
-    # first version of this check reported an obligation set that looked right
-    # and matched nothing.
-    obligations = set(_re.findall(r"theorem (\w+_semantics_total)\b", text))
-    obligations |= set(_re.findall(r"theorem (\w+_spec)\b", text))
-    # one `_semantics_total` and one `_spec` per export, named by its ident
     idents = set(_re.findall(r"^def (dylib_export_\w+) : DylibExport :=", text, _re.M))
-    expected = {f"{i}_semantics_total" for i in idents} | {f"{i}_spec" for i in idents}
-    check(obligations == expected,
-          f"generated dylib proof has obligation set {sorted(obligations)}, "
-          f"expected exactly {sorted(expected)}")
+    check(idents, "the generated proof names no export at all")
+    for ident in sorted(idents):
+        check(_re.search(rf"theorem {ident}_semantics_total\b", text),
+              f"{ident} has no `_semantics_total` theorem: every export gets "
+              f"one, proved or named")
+        proved = (f"Contracts.agrees_of_body dylib_image {ident} bodyI" in text)
+        named = bool(_re.search(rf"theorem {ident}_spec\b", text))
+        # The emitter's THREE states for an export's contract, and the
+        # difference between the last two is the whole point: "no claim, and it
+        # says so" is honest, and "no claim, and it does not" is the emitter
+        # having forgotten the export.  `NO SPEC DERIVED for <ident>` is the
+        # marker the first one carries.
+        declined = f"NO SPEC DERIVED for {ident}" in text
+        check(proved != named,
+              f"{ident} has "
+              + ("both a proved contract and a named `_spec` obligation"
+                 if proved and named else
+                 "neither a proved contract nor a named `_spec` obligation, and "
+                 "no `NO SPEC DERIVED` marker either -- the emitter dropped the "
+                 "export's claim about its own result without saying why"))
+        check(proved or named or declined,
+              f"{ident} has no contract claim and no reason for having none")
+    # NO obligation may be stated against a GUESSED spec.  This is the shape
+    # `formal/admitted.py`'s `OPUS-9` rule is about and the one this file
+    # emitted until 2026-10-03: `export_result_spec … (fun n => n) := by sorry`,
+    # i.e. a `sorry` over the claim that EVERY dylib export computes the
+    # identity.  That is false for every export in the tree except the ones
+    # that do -- `export_result dylib_image triple 7 = 21`, `add1 7 = 8` -- and
+    # the generated file states it without checking it, because a `Block` for a
+    # body with a branch is never emitted and so Lean never sees the claim.
+    check("(fun n => n) := by\n  sorry" not in text
+          and "(fun n => n)) := by\n  sorry" not in text,
+          "the generated proof states an obligation against a GUESSED identity "
+          "spec -- a `sorry` over a false claim, which is worse than no "
+          "obligation at all")
+    # ... and the proved contract must be sorry-free, in its own namespace.
+    # A `sorry` anywhere in the contract namespace is exactly the shape
+    # `formal/admitted.py` counts, and a per-export grep is the only thing that
+    # can see it: the census below reports a FILE total, which cannot say which
+    # export admitted one.
+    for ident in sorted(idents):
+        if f"namespace {ident}_contract" not in text:
+            continue
+        ns = _re.search(rf"namespace {ident}_contract\n(.*?)\nend {ident}_contract",
+                        text, _re.S)
+        check(ns is not None,
+              f"{ident}'s contract namespace is missing from the generated file")
+        check("sorry" not in ns.group(1),
+              f"{ident}'s proved contract contains a `sorry`")
     # `triple` is acyclic and call-free, so its termination is PROVED by the
     # CFG walk rather than left as the obligation above.  Pinned so a
     # regression to the `sorry` fallback is a failure, not a quiet extra hole.
@@ -478,7 +683,14 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
           "triple's termination is no longer proved by the CFG walk")
     # The caller's theorem must stay PROVED and sorry-free: it is the whole
     # reason the obligations are named rather than the contract being admitted.
-    check(":=\n  Refine.dylib_export_contract_of_spec" in text,
+    # The caller's theorem must be DERIVED from the export's spec obligation
+    # and be sorry-free: that is the whole reason the obligation is named
+    # rather than the contract admitted.  Two routes, and both are named
+    # here because which one fires depends on whether the emitter could derive
+    # a spec from the source -- `caller_uses_contract` off the PROVED
+    # contract, `dylib_export_contract_of_spec` off the named `_spec`.
+    check("Contracts.caller_uses_contract dylib_image " in text
+          or ":=\n  Refine.dylib_export_contract_of_spec" in text,
           "the caller's contract is no longer derived from the spec")
     check("dylib_export_contract_stub" not in text,
           "the deleted identity-claim stub is still emitted")
@@ -532,6 +744,353 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     check(ok, f"lean rejected the generated dylib proof: {detail[-400:]}")
     check(call_exported_by_name(out, "triple", 14) == 42,
           "triple(14) did not return 42")
+
+
+def test_a_wrong_spec_is_rejected_not_believed(tmpdir, shared):
+    """The contract has teeth: the wrong spec is a PROOF FAILURE.
+
+    A generated proof that merely elaborates says nothing, and the shape this
+    guards against is specific and has already happened in this very file: a
+    `sorry` over a FALSE claim, and a contract whose composed effect ran the
+    machine's steps more than once (`n * 243` where the machine computes
+    `n * 3` — `formal/arm64_proof_gen.py`, 2026-10-03).  Both elaborate.  Only
+    a wrong spec RUN THROUGH LEAN tells the two apart, so this is the
+    `OPUS-9` check ("state the predicate at a concrete instance and see
+    whether it survives") applied to the one obligation the emitter used to
+    admit: the export's agreement with its spec.
+
+    Three Lean runs, and the first is a control — the same bytes with the
+    RIGHT spec must check, so a red on the other two is the spec and not the
+    proof.  Reuses the dylib the case above already built (`--no-prove`, so no
+    code generation happens twice), so the cost is three Lean runs and nothing
+    else.
+    """
+    from formal.lean import find_lean
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (proof part of the dylib path)")
+        return
+    src = os.path.join(tmpdir, "teeth.mojo")
+    with open(src, "w") as f:
+        f.write("def triple(n):\n  return n * 3\n")
+    out = os.path.join(tmpdir, "teeth.dylib")
+    # `prove=False` for the dylib and `--no-prove` on the line, because the
+    # proof is written by hand below from the same code.
+    build_dylib(tmpdir, [src], "teeth.dylib")
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    from formal.lean import check_proof
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "triple", 14) == 42,
+          "the control dylib does not compute 42, so this test says nothing")
+
+    def with_spec(spec: str) -> str:
+        path = os.path.join(tmpdir, f"teeth_{abs(hash(spec)) % 10 ** 8}.lean")
+        with open(path, "w") as f:
+            f.write(generate_dylib_proof(built["code"], built["info"],
+                                         built["exports"], {"triple": spec}))
+        return path
+
+    ok, detail = check_proof(with_spec("(fun n => (n * (3 : UInt64)))"),
+                             repo_root=root)
+    check(ok, f"the CONTROL proof (the right spec) was rejected, so the two "
+              f"rejections below would prove nothing: {detail[-300:]}")
+    for label, spec in [("a wrong multiplier", "(fun n => (n * (5 : UInt64)))"),
+                        ("the identity", "(fun n => n)"),
+                        ("the negation", "(fun n => (0 : UInt64) - n)")]:
+        ok, detail = check_proof(with_spec(spec), repo_root=root)
+        check(not ok,
+              f"lean ACCEPTED a contract claiming triple computes {label} — the "
+              f"per-export contract is not being checked against the machine, "
+              f"so it is an admitted claim wearing a proof's clothes")
+        check("counterexample" in detail or "unsolved goals" in detail,
+              f"the {label} spec was rejected for the wrong reason, so this "
+              f"test is not measuring what it claims: {detail[-300:]}")
+
+
+def test_several_exports_and_no_derivable_spec(tmpdir, shared):
+    """A MULTI-EXPORT dylib gets a PROVED contract per export, and one export
+    whose spec cannot be derived gets nothing claimed about it.
+
+    Every other case in this file is a ONE-export dylib.  The other two shapes
+    went untested, and both were broken for the whole history of this file
+    without anything noticing:
+
+    * **several exports.**  `Contracts.ExportBody`'s `atExit` used to be stated
+      at `image.base + image.codeSize` — the IMAGE's exit — so a `Block` for one
+      export of several could not end where it must, and every export of a
+      multi-export dylib got a NAMED `sorry` instead of a contract.  The emitter
+      used to build a `Block` over the WHOLE image's addresses anyway, and the
+      result did not elaborate.  The fix is on both sides of the boundary:
+      `DylibExport.exportEnd` gives an export its own end (which is also what
+      `runExport` and `startState` now halt at, and the address an export's own
+      `ret` returns to), and the emitter's block is `pcs` over `[entry, func_end)`
+      with the image-wide `dylib_sr_` lemmas indexed from there.  So this case
+      now requires `Contracts.agrees_of_body` for each derivable export.
+    * **no derivable spec.** The fallback obligation was stated against
+      `(fun n => n)`: a `sorry` over the claim that every dylib export computes
+      the identity, which is false (`add1 7 = 8`) and which Lean never sees,
+      because there is no `Block` to check it against.
+
+    What it also checks, and what keeps the first half honest: **zero admitted
+    holes** for this image (both contracts proved, not named), and a WRONG spec
+    for one export of a multi-export image is a proof FAILURE.  A contract that
+    merely elaborates says nothing — three of the four defects fixed in this
+    emitter on 2026-10-03 were things only a `lean` run finds (`instance` on a
+    non-class, `interval_cases`, `body.step` one step short of the block it
+    certifies) — and a per-export block at a per-export exit is exactly the
+    shape that could quietly prove a statement about the wrong addresses.
+    """
+    import re as _re
+    from formal.lean import find_lean
+    root = HERE
+    src = os.path.join(tmpdir, "several.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(n):\n  return n + 1\n\n\n"
+                "def mul2(n):\n  return n * 2\n\n\n"
+                "def pick(n):\n  if n > 3:\n    return 1\n  return 0\n")
+    out = os.path.join(tmpdir, "several.dylib")
+    build_dylib(tmpdir, [src], "several.dylib")
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "add1", 41) == 42
+          and call_exported_by_name(out, "mul2", 21) == 42,
+          "the dylib does not compute what the specs will claim, so the "
+          "obligations below would be false and this test would be measuring "
+          "the wrong thing")
+    # The exit each contract is about is the EXPORT's own end, which is the next
+    # export's entry -- so the two contracts are about different addresses and
+    # neither is about the image's.
+    entries = sorted(e["entry"] for e in built["exports"])
+    base = built["info"]["base_addr"]
+    path = os.path.join(tmpdir, "several_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(
+            built["code"], built["info"], built["exports"],
+            {"add1": "(fun n => (n + (1 : UInt64)))",
+             "mul2": "(fun n => (n * (2 : UInt64)))"}))
+    text = open(path).read()
+    check("(fun n => n) := by\n  sorry" not in text,
+          "the generated proof still states an obligation against a guessed "
+          "identity spec")
+    # Two exports have a derived spec, so each gets a PROVED contract naming
+    # the spec derived from its own source.  A named `_spec` obligation is the
+    # shape this case used to require and must not come back.
+    for i, (ident, spec) in enumerate(
+            [("dylib_export_0_add1", "n + (1 : UInt64)"),
+             ("dylib_export_1_mul2", "n * (2 : UInt64)")]):
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
+              f"{ident}'s contract is not proved: a dylib with several exports "
+              f"still gets a named obligation instead, which is the defect this "
+              f"case exists to keep fixed")
+        check(_re.search(rf"theorem {ident}_spec\b", text) is None,
+              f"{ident} has a PROVED contract and also a named obligation, so "
+              f"one of the two is not what it claims")
+        check(spec in text,
+              f"{ident}'s contract does not name the spec derived from its "
+              f"source ({spec}): the contract is about something else")
+        check(_re.search(rf"theorem {ident}_contract\b|theorem caller\b", text),
+              f"{ident} has a contract but no caller's theorem derived from "
+              f"it, so a caller has nothing to consume")
+        # `exportEnd_here` is what says the exit is this export's end, and it is
+        # proved by `native_decide` over the image's export table -- so it is a
+        # check that the emitter's extent and the library's fold agree.
+        end = entries[i + 1] if i + 1 < len(entries) else base + len(built["code"])
+        check(f"DylibExport.exportEnd dylib_image {ident} = {end}" in text,
+              f"{ident}'s contract is not stated at its OWN end ({end}), so it "
+              f"is about the image's exit or another export's code")
+    # `pick`'s body is not a single `return` of arithmetic over its parameter,
+    # so no spec is derivable and the emitter must SAY that rather than assert
+    # something.  `_dylib_spec_lean` used to count top-level returns and derive
+    # one ARM's spec — `(fun n => 0)` — for a body with a branch, which is
+    # false for `n = 7` and which Lean never checks.
+    pick = _re.search(r"def (dylib_export_\w*pick) : DylibExport :=", text)
+    check(pick is not None, "the branching export is not in the generated proof")
+    check(f"NO SPEC DERIVED for {pick.group(1)}" in text,
+          "the branching export has no spec and no marker saying so, so its "
+          "absence of a contract is indistinguishable from the emitter having "
+          "forgotten it")
+    check(not _re.search(rf"theorem {pick.group(1)}_spec\b", text),
+          "the branching export was given a contract obligation anyway")
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof_cached
+    ok, detail, _, n_sorries = check_proof_cached(path, repo_root=root)
+    check(ok, f"lean rejected the proof of a {len(built['exports'])}-export "
+              f"dylib: {detail[-400:]}")
+    # Zero holes, and not merely "the file checked": a NAMED obligation also
+    # checks, and this image used to consist of two of them.  The count is
+    # Lean's own elaboration report rather than a grep for the word, so an
+    # unreached `all_goals … sorry` fallback cannot keep the figure up.
+    check(n_sorries == 0,
+          f"the {len(built['exports'])}-export proof admits {n_sorries} hole(s); "
+          f"every export with a derived spec should have a PROVED contract")
+
+
+def test_an_export_that_binds_a_local_still_gets_a_proved_contract(tmpdir, shared):
+    """The ceiling on proved contracts was SPEC DERIVATION, and it was wider
+    than the proof layer behind it.
+
+    `_dylib_spec_lean` required the body to be EXACTLY one `return` of
+    arithmetic over the parameter.  Measured over six one-`return` bodies,
+    `var m = n * 3` then `return m` is 17 instructions of straight-line code
+    that `_dylib_contract_proof` emits a complete `Block` and `BlockCert` for --
+    and it got NO contract, because the statement list had two entries.  So the
+    binding constraint was never `Refine.Block`: it was this function, and an
+    export that reads its argument into a local before computing with it (most
+    of them) was silently outside it.
+
+    The widened derivation accepts a chain of bindings to FRESH names ending in
+    the `return`, and refuses a name bound twice -- which is what makes the
+    substitution let-elimination rather than an interpretation of reassignment.
+    All three claims are checked here, and the first two by Lean:
+
+      * `one_local` and `two_locals` get PROVED contracts, and the proof checks
+        clean with no hole (`bv_decide` against the machine, so a derivation
+        that was subtly wrong would be a build failure rather than a claim);
+      * `rebound` -- `var m = n * 3` then `m = m + 1` -- gets NO spec and no
+        contract claim of any kind.  The `ifexp`/`and` shapes beside it in the
+        measurement also get nothing, for a different reason (their code
+        contains an `and` the machine model does not step), and this case does
+        not pretend otherwise: what it pins is that widening the derivation did
+        not widen it past a reassignment.
+    """
+    import re as _re
+    from formal.lean import find_lean
+    from formal.build import parse_module
+    from formal.arm64_proof_gen import _dylib_spec_lean, generate_dylib_proof
+    root = HERE
+    src = os.path.join(tmpdir, "locals.mojo")
+    with open(src, "w") as f:
+        f.write("def one_local(n):\n  var m = n * 3\n  return m\n\n\n"
+                "def two_locals(n):\n  var m = n * 3\n"
+                "  var k = m + 1\n  return k\n\n\n"
+                "def rebound(n):\n  var m = n * 3\n  m = m + 1\n  return m\n")
+    out = os.path.join(tmpdir, "locals.dylib")
+    from formal.build import compile_formal_dylib
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "one_local", 14) == 42
+          and call_exported_by_name(out, "two_locals", 14) == 43
+          and call_exported_by_name(out, "rebound", 14) == 43,
+          "the dylib does not compute the values the specs will claim, so the "
+          "obligations below would be false and this test would be measuring "
+          "the wrong thing")
+    # The derivation itself, before any Lean: what each body yields, and that
+    # the inlined value is the one the source computes (no leftover name, no
+    # `n` standing for a local).
+    specs = {fn.name: _dylib_spec_lean(fn) for fn in parse_module(
+        open(src).read())}
+    check(specs.get("one_local") == "(fun n => (n * (3 : UInt64)))",
+          f"one_local's spec is {specs.get('one_local')!r}, not the inlined "
+          f"value of its one binding")
+    check(specs.get("two_locals") == "(fun n => ((n * (3 : UInt64)) + (1 : UInt64)))",
+          f"two_locals' spec is {specs.get('two_locals')!r}: a chain of "
+          f"bindings must inline, not chain `let`s the block layer cannot read")
+    check(specs.get("rebound") is None,
+          f"a name bound twice got the spec {specs.get('rebound')!r}: the "
+          f"inlining assumes a fresh binding, and that assumption is the whole "
+          f"soundness argument")
+    specs = {k: v for k, v in specs.items() if v is not None}
+    path = os.path.join(tmpdir, "locals_proof.lean")
+    with open(path, "w") as f:
+        f.write(generate_dylib_proof(built["code"], built["info"],
+                                     built["exports"], specs))
+    text = open(path).read()
+    for name in ("one_local", "two_locals"):
+        ident = ("dylib_export_%d_%s"
+                 % ([e["name"] for e in built["exports"]].index(name), name))
+        check(_re.search(rf"Contracts\.agrees_of_body dylib_image {ident} bodyI",
+                         text),
+              f"{name}'s contract is not proved, so widening the derivation "
+              f"did not reach the proof layer")
+    check(not _re.search(r"rebound\b.*_spec\b", text, _re.S)
+          or "agrees_of_body dylib_image dylib_export_2_rebound" not in text,
+          "the rebound export was given a contract anyway")
+    check("dylib_export_2_rebound" in text
+          and "NO SPEC DERIVED for dylib_export_2_rebound" in text,
+          "the rebound export is not marked as having no spec, so its silence "
+          "is indistinguishable from the emitter having forgotten it")
+    if not find_lean(root):
+        print("    SKIP: no lean found (the emitted file is not typechecked)")
+        return
+    from formal.lean import check_proof_cached
+    ok, detail, _, n = check_proof_cached(path, repo_root=root)
+    check(ok, f"lean rejected the proof of a dylib whose exports bind locals: "
+              f"{detail[-400:]}")
+    check(n == 0, f"the proof admits {n} hole(s); both contracts should be "
+                  f"proved, not named")
+
+
+def test_a_wrong_spec_on_a_multi_export_image_is_rejected(tmpdir, shared):
+    """The per-export contract has TEETH, for an export that is not the image.
+
+    `a wrong spec is rejected, not believed` does this for a one-export dylib,
+    where the export's block and the image's exit are the same address range.
+    That is the easy case: the contract is about everything in the image.  Here
+    the contract is about `[entry, func_end)` — a sub-range, with another
+    export's instructions after it — which is the case where a block built at
+    the wrong extent, or an `x30` at the image's end rather than the export's,
+    would still elaborate and would be a theorem about the wrong function.
+
+    A control first, for the same reason as the case above: the right specs must
+    check, so a red on the wrong one is the spec and not the proof.
+    """
+    from formal.lean import find_lean
+    root = HERE
+    if not find_lean(root):
+        print("    SKIP: no lean found (proof part of the dylib path)")
+        return
+    src = os.path.join(tmpdir, "teeth3.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(n):\n  return n + 1\n\n\n"
+                "def mul2(n):\n  return n * 2\n")
+    out = os.path.join(tmpdir, "teeth3.dylib")
+    from formal.build import compile_formal_dylib
+    from formal.arm64_proof_gen import generate_dylib_proof
+    from formal.lean import check_proof
+    built = compile_formal_dylib([src], output=out, prove=False)
+    check(call_exported_by_name(out, "add1", 41) == 42
+          and call_exported_by_name(out, "mul2", 21) == 42,
+          "the control dylib does not compute 42/42, so this test says nothing")
+
+    def with_specs(a: str, m: str) -> str:
+        path = os.path.join(
+            tmpdir, f"teeth3_{abs(hash((a, m))) % 10 ** 8}.lean")
+        with open(path, "w") as f:
+            f.write(generate_dylib_proof(built["code"], built["info"],
+                                         built["exports"],
+                                         {"add1": a, "mul2": m}))
+        return path
+
+    right = ("(fun n => (n + (1 : UInt64)))", "(fun n => (n * (2 : UInt64)))")
+    ok, detail = check_proof(with_specs(*right), repo_root=root)
+    check(ok, f"the CONTROL proof (the right specs) was rejected, so the "
+              f"rejections below would prove nothing: {detail[-300:]}")
+    # What a rejection looks like depends on where the wrongness shows up, and
+    # all three are `bv_decide` refusing the goal rather than a parse error:
+    # a SPURIOUS COUNTEREXAMPLE (the machine model reached and disagreed),
+    # UNSOLVED GOALS (a side condition could not be discharged at all), and "the
+    # original goal was reduced to False" (the fragment checker reduced it to
+    # `False` and said so).  The single-export case above only ever saw the
+    # first; a per-export block at a per-export exit can also produce the other
+    # two, and each is a refusal of the CLAIM.
+    rejected = ("counterexample", "unsolved goals", "reduced to False")
+    for label, a, m in [
+            ("add1's identity", "(fun n => n)", right[1]),
+            ("mul2's identity", right[0], "(fun n => n)"),
+            ("add1 doubling", "(fun n => (n * (2 : UInt64)))", right[1]),
+            ("both identities", "(fun n => n)", "(fun n => n)")]:
+        ok, detail = check_proof(with_specs(a, m), repo_root=root)
+        check(not ok,
+              f"lean ACCEPTED a multi-export contract with {label} — the "
+              f"per-export block is not being checked against the machine, so "
+              f"the exit it is stated at is not being checked either")
+        check(any(r in detail for r in rejected),
+              f"{label} was rejected for the wrong reason, so this test is "
+              f"not measuring what it claims: {detail[-300:]}")
 
 
 def test_overloads_do_not_collide(tmpdir, shared):
@@ -672,6 +1231,96 @@ def test_refusal_names_the_real_reason(tmpdir, shared):
         check("struct-only module has no free-function API" not in text,
               f"a module with {label} was refused with the shape-agnostic "
               f"wording, which is false for it: {text}")
+
+
+def test_a_proved_dylib_is_an_arm64_artifact_and_says_so(tmpdir, shared):
+    """`arch` is honoured for the CODE and refused for the PROOF, by name.
+
+    `a dylib is built for the requested arch` already pins that `arch` reaches
+    the code generator, for both architectures. What it does not reach is the
+    proof layer, and there the two used to disagree in the worst possible way:
+    `compile_formal_dylib(arch="x86_64", prove=True)` fed x86-64 machine code to
+    `formal/arm64_proof_gen.py`, which raised `KeyError 4294967948` out of
+    `_gen_run_cert` -- the generator decoding x86-64 words as arm64 and not
+    finding one. No refusal, no message, a raw traceback.
+
+    And on the command line it was worse than a crash: `--backend` is a GLOBAL
+    flag and `dylib --formal` never read it, so `fire.py dylib --formal
+    --backend=x86_64` built an **arm64** image and printed `Built:`. Both files
+    read `Mach-O 64-bit dynamically linked shared library arm64`. On a command
+    whose entire subject is a PER-EXPORT contract that is the silent-wrong-answer
+    shape: a reader measuring the x86-64 boundary would get an arm64 answer and
+    conclude "the same argument applies", which is exactly the hypothesis
+    `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §OPUS-6 says must be
+    measured rather than assumed.
+
+    So: the refusal has to be at the function (every caller goes through it, and
+    `formal/imports.py`'s `build_module_dylib` does), and the CLI's own check is
+    only there because its message is better. Both are exercised.
+    """
+    from formal.build import compile_formal_dylib, FormalBuildError
+    src = os.path.join(tmpdir, "archproof.mojo")
+    with open(src, "w") as f:
+        f.write("def triple(n):\n  return n * 3\n")
+
+    # The CODE for x86-64 builds and is an x86-64 image -- asserted on the
+    # Mach-O header, because "it built" is not the claim.
+    out = os.path.join(tmpdir, "archproof_x86.dylib")
+    r = compile_formal_dylib([src], output=out, prove=False, check=False,
+                             arch="x86_64")
+    check(not r.get("proof_path"),
+          "prove=False produced a proof path, so the refusal below would be "
+          "testing nothing")
+    with open(out, "rb") as f:
+        head = f.read(16)
+    check(struct.unpack_from("<I", head, 0)[0] == MH_MAGIC_64
+          and struct.unpack_from("<I", head, 4)[0] == CPU_TYPE_X86_64,
+          f"the x86_64 dylib is cputype "
+          f"{struct.unpack_from('<I', head, 4)[0]}, so this case is not testing "
+          f"what it claims: the point is that the CODE builds and the PROOF "
+          f"does not")
+
+    # The PROOF for x86-64 is refused, by name, and the message says which half
+    # is missing -- a reader who concluded "x86-64 dylibs are unsupported"
+    # would be wrong about the image.
+    try:
+        compile_formal_dylib([src], output=out + ".2", prove=True,
+                             check=False, arch="x86_64")
+        check(False, "arch=x86_64 with prove=True was accepted; the arm64 "
+                     "generator will be handed x86-64 machine code")
+    except FormalBuildError as e:
+        msg = str(e)
+        check("generate_dylib_proof" in msg and "DylibExport" in msg,
+              f"the refusal does not name the missing generator or the model "
+              f"it is stated over, so a reader has to find that out "
+              f"separately: {msg[:200]}")
+        check("prove=False" in msg,
+              f"the refusal does not say how to ASK for the x86-64 image that "
+              f"does build: {msg[:200]}")
+
+    # The CLI, which is where the silent arm64 answer was.
+    def cli(*args):
+        return subprocess.run([sys.executable, FIRE, *args],
+                              capture_output=True, text=True, timeout=600,
+                              cwd=HERE)
+    p = cli("dylib", "--formal", "--no-prove", "--backend=x86_64",
+            "-o", os.path.join(tmpdir, "cli_x86"), src)
+    check(p.returncode != 0,
+          "dylib --formal --backend=x86_64 exited 0, so it either built "
+          "something or the flag never reached the branch that refuses it")
+    check("Built:" not in p.stdout,
+          f"the CLI printed Built: for --backend=x86_64 -- stdout: "
+          f"{p.stdout[-300:]}")
+    check("generate_dylib_proof" in (p.stderr or ""),
+          f"the CLI's refusal does not name the missing generator: "
+          f"{p.stderr[-300:]}")
+    # And the plain path, which has no formal backend to select at all.
+    p = cli("dylib", "--backend=arm64", "-o", os.path.join(tmpdir, "cli_g"),
+            src)
+    check(p.returncode != 0,
+          "dylib --backend=arm64 (no --formal) exited 0: the gimple path "
+          "compiles for the HOST's architecture, so that request is right only "
+          "by coincidence on an arm64 host")
 
 
 def test_dylib_is_built_for_the_requested_arch(tmpdir, shared):
@@ -868,19 +1517,77 @@ def test_frame_params_are_published_not_empty(tmpdir, shared):
           f"contract must name P as a frame holder; published {contract!r}")
 
 
+def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):
+    """The check on the direction that used to be unchecked, both ways.
+
+    `_audit_bound_symbols` asks whether every name an image BINDS has a
+    provider, and it has asked it on both paths since it was factored out. The
+    other direction — a library whose MANIFEST advertises a symbol its export
+    trie does not contain — was never asked, and it is the one that reaches
+    another build: the consumer's bind audit reads the name out of the manifest,
+    so it is satisfied, the image links cleanly, and dyld fails at load. The
+    honest fix is the `nm`-style verification `build_stdlib_dylib.py` has for
+    the gimple path, reading the file back with an independent parser
+    (`formal/build.py`'s `_advertised_but_absent` over `macho_dylib_exports`)
+    rather than asking the writer.
+
+    Both directions are asserted here, and the negative one is manufactured by
+    ADDING an entry to a real export list — the shape of the defect is "the two
+    lists disagree", so the test has to make them disagree, and it cannot do
+    that by making the emitter drop code (that would need a codegen bug to
+    exist first, which is the whole reason the check is wanted).
+
+    The positive half is not decoration: this is the check every dylib build in
+    the tree now runs, so a library whose real exports are not all in its own
+    trie would fail this case on the shared fixture.
+    """
+    from formal import build as B
+    out = shared["dylib"]
+    exports = list(manifest_exports(out).values())
+    check(exports, "precondition: the shared dylib advertises something")
+    check(B._advertised_but_absent(out, exports) == [],
+          "a library advertises exports its own image does not define, and "
+          "the build did not notice")
+
+    fabricated = {"name": "not_emitted", "symbol": "libmath_not_emitted",
+                  "module": "libmath", "arity": 1, "kind": None,
+                  "signature": "not_emitted", "frame_params": []}
+    missing = B._advertised_but_absent(out, exports + [fabricated])
+    check(missing == ["libmath_not_emitted"],
+          f"the check reported {missing!r} for one advertised symbol the "
+          f"image does not define; it must name that one and only that one")
+    report = B._advertised_absent_report("libmath.mojo", missing)
+    check("libmath_not_emitted" in report,
+          f"the report does not name the symbol: {report}")
+    check("manifest" in report and "dyld" in report,
+          f"the report does not say which side is wrong: {report}")
+
+
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
+    ("the manifest offers nothing the image does not define",
+     test_the_manifest_offers_nothing_the_image_does_not_define),
     ("exported functions execute", test_exported_functions_execute),
     ("a symbol that prefixes another is still exported",
      test_a_symbol_that_prefixes_another_is_still_exported),
     ("--no-prove skips proof generation", test_no_prove_skips_proof),
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
+    ("a wrong spec is rejected, not believed",
+     test_a_wrong_spec_is_rejected_not_believed),
+    ("several exports, and one with no derivable spec",
+     test_several_exports_and_no_derivable_spec),
+    ("an export that binds a local still gets a proved contract",
+     test_an_export_that_binds_a_local_still_gets_a_proved_contract),
+    ("a wrong spec on a multi-export image is rejected",
+     test_a_wrong_spec_on_a_multi_export_image_is_rejected),
     ("overloads build and export once", test_overloads_do_not_collide),
     ("same name in two modules", test_same_name_in_two_modules),
     ("module with no public functions rejected", test_private_only_module_rejected),
     ("the refusal names the real reason", test_refusal_names_the_real_reason),
     ("a dylib is built for the requested arch",
      test_dylib_is_built_for_the_requested_arch),
+    ("a proved dylib is an arm64 artifact, and says so",
+     test_a_proved_dylib_is_an_arm64_artifact_and_says_so),
     ("executable links a dylib and runs", test_executable_links_a_dylib),
     ("dylib calls out to libSystem", test_dylib_calls_out_to_libSystem),
     ("a frame parameter's contract is published, not empty",

@@ -56,9 +56,10 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 300
 RUN_TIMEOUT = 60
 
-# The record terminator, for the reason `test_formal_os.py` gives: a Mojo string
-# literal's `\n` is not unescaped on this path, so a program here emits its
-# records back to back and this is what separates them.
+# The record terminator, for the reason `test_formal_os.py` gives: a separator
+# this suite can read back without asking whether the image decoded a literal,
+# so a program here emits its records back to back and this is what separates
+# them.
 REC = "@@"
 
 S_IFMT = 0o170000
@@ -84,9 +85,9 @@ class Case:
         that has to be refused rather than answered.
 
     Every program below ends its records with `@@` rather than a newline, for
-    the reason `test_formal_os.py` gives: a Mojo string literal's `\n` is not
-    unescaped on this path, so a formal image prints the two characters backslash and
-    `n` and a record-structured program has to choose its own terminator.
+    the reason `test_formal_os.py` gives: a separator this file can read back
+    without asking whether the image decoded a literal, `@@` being two bytes a
+    real newline cannot collide with.
     """
 
     def __init__(self, name, source, expect=None, oracle=None, refusal=None,

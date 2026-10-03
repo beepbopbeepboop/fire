@@ -263,17 +263,47 @@ def main(argv):
           M.returned_frame_convention_refusal('make', 2) == '',
           'a callee with room for the hidden word was refused')
 
-    # 7. The budget is SIX, and it is six because of x86-64 rather than
-    #    arm64.  Pinned because the number is a shared decision with a
-    #    one-machine reason behind it, and a reader who "fixes" it to eight
-    #    makes the two backends answer differently about one program.
-    check('the_budget_is_the_smaller_abi',
+    # 7. The budget is SIX, and it is six because of the HIDDEN WORD rather than
+    #    because of a callee's arity.  Both ABIs now put arguments past the
+    #    register file in the caller's frame (`_MAX_INCOMING_ARGS` in both
+    #    backends), so "the argument budget" is no longer six and reading this
+    #    row that way would be reading a number that stopped meaning what its
+    #    name says: what is six is the number of words the hidden block address
+    #    can travel in, because both backends read it by the REGISTER path and
+    #    neither has a stack convention for it.  Pinned because the number is a
+    #    shared decision with a one-machine reason behind it, and a reader who
+    #    "fixes" it to eight makes the two backends answer differently about one
+    #    program.
+    check('the_budget_is_the_smaller_register_file',
           M.returned_frame_convention_refusal('make', 6) != ''
           and M.returned_frame_convention_refusal('make', 5) == '',
-          'the hidden word needs a register, and x86-64 passes six')
+          'the hidden word needs an argument register, and x86-64 passes six')
     check('the_budget_matches_x86_64_argument_registers',
           M.RETURNED_FRAME_MAX_ARGS == 6,
           f'got {M.RETURNED_FRAME_MAX_ARGS}')
+    # …and it is a number of REGISTERS rather than of arguments, stated as a
+    # fact about both backends rather than as a comment.  Each emitter moves the
+    # hidden word home by naming the argument register it arrived in, and
+    # neither has a path that would find it in the caller's frame: the stack-area
+    # convention is `_load_home_from_stack`, and the hidden word does not go
+    # through it.  A future change that gives the hidden word a stack slot has to
+    # move these two lines AND `RETURNED_FRAME_MAX_ARGS` together, and this is
+    # what fails first if it moves one of them — the failure being a budget that
+    # quotes six while the backend is handing out twenty-four.
+    for backend, line in (
+            ('formal/arm64_codegen.py',
+             'self._load_home_from_reg(_SRET_LOCAL, sret_arg)'),
+            ('formal/x86_64_codegen.py',
+             'self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))')):
+        with open(os.path.join(HERE, backend)) as fh:
+            src = fh.read()
+        check(f'{os.path.basename(backend)}_reads_the_hidden_word_from_a_register',
+              line in src
+              and '_load_home_from_stack(_SRET_LOCAL' not in src,
+              'the hidden word is no longer read out of an argument register in '
+              'this backend, so RETURNED_FRAME_MAX_ARGS is no longer its budget '
+              'and this check — which exists to catch exactly that — has to '
+              'move with it')
 
     # 8. A call whose result is NOT bound to a name still needs a block, and
     #    this is the change from the landed version.  `return make()`,

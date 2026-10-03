@@ -377,7 +377,13 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     the CAS shortcuts them. Run codegen in a thread with a large stack and a high
     recursion limit so legitimate deep cascades complete instead of crashing the
     module into a source-fallback skip. (True non-convergence — instantiating with
-    symbolic type args — is prevented at the call site, not papered over here.)"""
+    symbolic type args — is prevented at the call site, not papered over here.)
+
+    Records the generic-struct elaborations that FAILED, in
+    `_LAST_DEGRADED` — cleared on entry, so it describes this call and only
+    this call. `compile_module_to_c_cached` reads it to decide whether the
+    result may be published; see there for why a module built that way must
+    not be."""
     import threading
     import monomorphize
     # Fresh elaborator state per module so a prior module's crash can't pollute
@@ -392,6 +398,7 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
             gen = GimpleGen(emit_entry_points=False, module_name=module_name)
             gen._current_filename = path
             box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
+            box['degraded'] = list(gen._generic_struct_elaboration_failures)
         except BaseException as e:   # propagate to the caller's thread
             box['err'] = e
 
@@ -406,7 +413,23 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     t.join()
     if 'err' in box:
         raise box['err']
+    _LAST_DEGRADED[:] = box.get('degraded') or []
     return box['c']
+
+
+# Why the LAST `compile_module_to_c` produced a different program from the one
+# its source says: one entry per generic struct that could not be elaborated,
+# as `Struct[Args] from <source>: <exception>`. Empty means the compile was
+# clean. Module-level because the codegen runs in a thread
+# (`compile_module_to_c`) and because the consumer
+# (`compile_module_to_c_cached`) is a different function from the producer;
+# it is written and read under one call, never accumulated.
+_LAST_DEGRADED: list = []
+
+
+def last_degradations() -> list:
+    """The `_LAST_DEGRADED` list, as a copy. Read this, do not clear it."""
+    return list(_LAST_DEGRADED)
 
 
 _stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
@@ -417,11 +440,50 @@ def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
 
     The key folds in the compiler fingerprint (a codegen change invalidates
     every cached .ci) and the stdlib fingerprint (a module's C depends on its
-    stdlib imports' signatures/layouts, so any stdlib edit invalidates too)."""
+    stdlib imports' signatures/layouts, so any stdlib edit invalidates too).
+
+    **A module built through a FAILED generic-struct elaboration is not
+    published.** That compile is not this module: the struct was lowered
+    against its un-elaborated template, so every one of its type parameters is
+    typed `int64_t` where the source says otherwise. Publishing it puts a
+    wrong artifact in a content-addressed store under the CURRENT compiler
+    fingerprint, which means every later run — a `make gate` on another
+    machine's checkout of the same commit, an hour later — replays the wrong
+    artifact instead of recompiling and getting it right. That is how
+    `test/iter/test_ref_iteration.mojo` reached a gate as an UNEXPECTED
+    `stdlib-syntax` failure (`request for member 'value' in something not a
+    structure or union`, at a line about iterators) an hour after the
+    transient that caused it was gone: the condition had ended and the
+    artifact had not.
+
+    So the miss path is spelled out here rather than delegated to
+    `cas.get_or_build_text`, whose contract is "build, then publish" with no
+    room for a build that must not be published. It is those six lines
+    duplicated, not a second cache: the same key, the same L1, the same
+    `cas.stats` accounting, in the same order.
+    """
     key = cas.stdlib_compile_key(src, path, module_name)
-    return cas.get_or_build_text(
-        key, '.ci', lambda: compile_module_to_c(src, path, module_name),
-        _stdlib_compile_cache)
+    if key in _stdlib_compile_cache:
+        return _stdlib_compile_cache[key]
+    cached = cas.lookup(key, '.ci')
+    if cached is not None:
+        cas.stats['hits'] += 1
+        with open(cached) as f:
+            text = f.read()
+    else:
+        cas.stats['misses'] += 1
+        text = compile_module_to_c(src, path, module_name)
+        degraded = last_degradations()
+        if degraded:
+            sys.stderr.write(
+                f"[compile_module_to_c_cached] {path}: {len(degraded)} generic "
+                f"struct elaboration(s) failed, so this module's C is NOT the "
+                f"program its source describes and it is NOT being cached:\n"
+                + ''.join(f'    {d}\n' for d in degraded))
+        else:
+            cas.publish(key, '.ci', text.encode('utf-8'))
+    _stdlib_compile_cache[key] = text
+    return text
 
 
 def _imported_sigs(src: str) -> list:

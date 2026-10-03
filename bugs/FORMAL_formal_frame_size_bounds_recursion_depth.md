@@ -1,14 +1,101 @@
 # FORMAL_formal_frame_size_bounds_recursion_depth: neither formal backend guards the stack, so recursion past a fixed frame size is a SEGFAULT and not a refusal
 
-**Status: OPEN, not fixed, and not mitigated at the backend. Re-measured
-2026-10-01 and the fix is now DERIVED — see §0, which corrects two claims in
-the "what the honest fix is" section below and names the two things that stand
-between the guard and landing.** Measured on both architectures 2026-09-29,
-while writing `formal/hostmods/re.mojo` (whose parser is recursive and
-therefore has to carry a `MAXDEPTH` cap precisely because of this). The cap in
-that module is a *workaround at the call site*; nothing in either backend stops
-a program from recursing past the ceiling, and nothing diagnoses it when it
-does.
+**Status: OPEN, not fixed. Step 1 of §0.2's order has LANDED (the `__DATA`
+segment is unconditional and carries a reserved stack-floor word), and the
+guard itself is blocked on something this document did not know: the arm64
+machine model cannot read SP into a general register, so the guard's own
+comparison has no step for it. Both are measured below, and the model half is
+filed as `bugs/FORMAL_arm64_model_reads_register_31_as_zero.md`.** Re-measured
+2026-10-02 on this tree, and the defect reproduces exactly as §0 records it:
+
+```
+arm64    deep(59) exit 0   deep(61) exit 0   deep(62) SIGSEGV (exit -11)
+x86-64   deep(450) exit 0                   deep(500) SIGSEGV (exit -11)
+ulimit -s 8176 KiB, RLIMIT_STACK 8372224
+```
+
+**What landed (`formal/model.py`, `formal/build.py`, `test_formal_globals.py`):**
+`build_data_image` now lays out two reserved words after the slot table — the
+initializer flag it always had, and a new STACK FLOOR at
+`GlobalDataImage.stack_floor_offset` — for a module with no globals as well as
+one with them, so `__DATA` is emitted unconditionally in both containers and
+every image has a word a floor can live in. The floor reads ZERO: nothing
+writes it yet. `model.STACK_FLOOR_BUDGET_BYTES` is the policy number the writer
+will use (7.5 MiB) with the arithmetic and the failure mode in its comment.
+The new case `reserved_words_exist_in_an_image_with_no_globals` builds
+`deep` — the reproducer, which declares no global — on both backends and reads
+the segment out of the image: the `__DATA` is at the address the codegen
+computes slot addresses against, both words are at the offsets the MODEL says
+(`init_flag_offset` and `.stack_floor_offset`, read from `build_data_image` and
+not written into the test), and both are zero.
+
+**And a correction to §0.2's central claim, because it would have sent whoever
+lands this to the wrong decision.** It says an unset floor is catastrophic —
+"an unset floor makes `cmp sp, x16` compare against zero, which every prologue
+fails, so every image that has one exits at its first call". It does not. The
+compare is `cmp sp, x16` with `b.lo`, which is the UNSIGNED lower branch, and
+SP is never below zero, so an unset (zero) floor can never trip it: the guard is
+silent, which is exactly today's behaviour. The zero floor is therefore the safe
+starting state and needs no initialization order, and the argument for storing
+the floor lazily (`initialization_is_lazy`) is about *accuracy*, not safety.
+
+**Why the guard is not in this commit.** The obstacle is not where the floor
+word lives — §0.2 measured three answers to that and every one of them is
+workable, its own preferred answer (a word in `__DATA`, filled lazily) is what
+step 1 has just made possible. The obstacle is that the guard cannot be
+*expressed*. `lib/ProofLib.lean`'s `arm64_reg` returns 0 for index 31
+(`lib/ProofLib.lean:1252-1260`): register 31 is XZR in this model, full stop,
+and the `if rn = 31 then s.sp else …` spelling exists only in the handful of
+ADDRESSING and ADD/SUB-immediate forms that need it. The guard's `cmp sp, x16`
+is `SUBS XZR, X31, X16` — the shifted-register form at
+`lib/ProofLib.lean:1490-1493`, which reads `arm64_reg rn s`. So the model's
+step for the guard's own comparison computes `0 - x16`, and a proof generated
+over it would be a proof about a different instruction. That is not a
+generator bug to work around later: it is the machine model being unable to say
+what the machine does, and every proof in this tree is checked against it.
+
+x86-64 has no such gap (`lib/X86.lean:76-82`: index 4 IS `s.rsp`), which is why
+this is an arm64-only blocker — and why fixing only x86-64 would produce exactly
+the two-backend split this document is about, with one machine refusing and one
+machine dying.
+
+**The exact next step**, in the order §0.2 gives and with step 1 done:
+
+2. Make register 31 SP-aware in the shifted-register forms
+   (`arm64_reg_sp i s := if i = 31 then s.sp else arm64_reg i s`), and
+   generalize the `arm64_step_*_reg` lemmas that state `arm64_reg rn s` to it.
+   This touches `lib/ProofLib.lean` and `formal/arm64_proof_gen.py`'s step
+   table, and it is a PROOF-side change: it needs the `prooflib` step and the
+   proof-checking suites (`formal`, `formal-x86`, `formal-x86-model`, …), which
+   are currently `disabled=` behind
+   `bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md`. **That is the
+   real dependency of this bug: the guard cannot be landed soundly while the
+   tests that would catch a wrong model step are switched off.**
+3. The floor STORE in the executable's entry stub (`SP - BUDGET` into
+   `stack_floor_offset`), and the same store lazily in the dylib path, keyed on
+   the word being zero — which, per the correction above, is safe to read as
+   "not stored yet".
+4. The compare, in both backends: `cmp sp, floor; b.lo <trap>` after the frame
+   subtraction, with the trap arm `movz x0, <status>; movz x16, 1; svc #0x80`.
+   A new exit status beside `SHIFT_TRAP_STATUS`
+   (`formal/model.py:2208`), and the two backends must agree on it — the
+   existing division and shift traps are the precedent and the pattern to copy.
+
+A test that recurses to `deep(1000)` and requires a STATUS rather than a signal
+belongs in the suite beside this, and it belongs in `test_formal_run.py` rather
+than in a host module, because the host module that found this worked around it
+rather than reporting it. Note what it will cost: at 7.5 MiB the budget allows
+58 arm64 frames where 61 work today, which is the explicit trade in
+`STACK_FLOOR_BUDGET_BYTES` and the reason the number is a named constant with
+its arithmetic in it rather than a literal in two emitters.
+
+Measured for this change: `test_formal_globals.py` PASS=37 FAIL=0 (36 existing
+plus the new layout case, both backends), `test_formal_run.py` PASS=475
+FAIL=0, `test_formal_dylib.py` PASS=13 with the one pre-existing Lean-bound
+failure (`lean exceeded 1500s CPU … killed, and this is NOT a verdict on the
+proof`), `test_formal_x86_64_dylib.py` PASS=9 FAIL=0, and both architectures'
+ELF images build with the unconditional data segment.
+
 
 ## §0 Re-measured, and what the fix actually needs (2026-10-01)
 

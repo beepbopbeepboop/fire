@@ -762,14 +762,19 @@ def check_dataclass_classes(classes: dict) -> None:
         for m in M.struct_methods(st):
             if getattr(m, "name", None) == "__post_init__":
                 raise CodegenError(post_init_refusal(name))
-            if getattr(m, "name", None) == "__eq__":
-                # Checked here rather than declined in `rewrite_equality`,
-                # because a refusal has to be a fact about the FILE and
-                # `rewrite_equality` cannot see a class the program never
-                # compares — so a class with a user `__eq__` would be accepted
-                # and then be wrong the first time it was used. See
-                # `own_eq_refusal` for the measurement.
-                raise CodegenError(own_eq_refusal(name))
+            # A class with its own `__eq__` is NOT refused here any more, and
+            # what replaced the refusal is a question about the COMPARISONS in
+            # the file rather than about the class: `rewrite_equality` already
+            # declined to desugar one (it skips `info["own_eq"]`), so the
+            # operator's own dispatch owns the comparison, and the only shapes
+            # that can still be wrong are the ones the dispatch does not lower.
+            # `formal/build.py`'s `_check_own_eq_dispatch` asks that, with the
+            # holder tables it has already published, and refuses through
+            # `own_eq_refusal` when a comparison names the class and no dispatch
+            # answers it. Refusing the CLASS is what this stopped doing, because
+            # it refused a program that computes exactly: `Point(3, 4) ==
+            # Point(3, 4)` with a `__eq__` that returns True is 1 on this path
+            # and 1 in CPython.
         for f in M.struct_fields(st):
             ann = getattr(f, "type_ann", None)
             if isinstance(ann, str) and "InitVar" in ann:
@@ -1021,49 +1026,48 @@ def bound_module_names(stmts: list) -> set:
     return out
 
 
-def own_eq_refusal(name: str) -> str:
-    """The refusal for a `@dataclass` that declares its OWN `__eq__`.
+def own_eq_refusal(name: str, comparison: str, why: str) -> str:
+    """The refusal for a COMPARISON of a `@dataclass` that brings its own
+    `__eq__`, in a shape the operator's dispatch does not lower.
 
     CPython keeps the user's `__eq__` in preference to the generated one
     (measured: with `@dataclass class T` defining `__eq__`, `T(1) == T(2)` is
     True where the generated one would say False), so the class is LEGAL and
-    its meaning is unambiguous. It is refused anyway, and the reason is a
-    measurement rather than a policy:
+    its meaning is unambiguous, and this transform now ACCEPTS it — it declines
+    to desugar the comparison (`rewrite_equality` skips `info["own_eq"]`) and
+    hands the operator to `formal/build.py`'s `_rewrite_eq_on_frame_receivers`.
 
-        class Plain:            # no decorator at all
-            x: int
-            y: int
-            def __eq__(self, other): return True
-        def eq(a, b):
-            if a == b: return 1
-            return 0
-        # arm64:  eq(p, q) == 0        CPython: 1
-        # arm64:  p.__eq__(q) == 1     CPython: 1
+    What that rewrite lowers is a shape and not a promise: both operands must
+    be bare NAMES this image can say are values of the same struct. Every
+    comparison that is not that shape would fall back to the word compare the
+    rewrite exists to replace — the address compare, which for a class whose
+    `__eq__` says True answers 0 where CPython answers 1 — so the shapes are
+    REFUSED, by name and with the comparison quoted, rather than left to answer
+    wrongly. `s == 5`, `s == None`, `Point(3, 4) == p` and a chain with a call
+    in an operand are the four the corpus writes.
 
-    `==` on this path is ONE flag-setting compare of two words
-    (formal/arm64_codegen.py's `_emit_binop`) and never dispatches by name, so
-    the user's `__eq__` is reachable only as an explicit `p.__eq__(q)` — which
-    is the second line, and it is right. Accepting the class would therefore
-    produce an image that runs `eq(p, q)` as an address compare and prints 0
-    where the source's own method says 1: a wrong answer, silently, from a
-    program that did nothing unusual. The same is true of a `__repr__`, and
-    `repr` is a worse one because printing a struct receiver SEGFAULTS today
-    (measured) rather than merely answering wrongly.
+    THE HISTORY, because the scope looks arbitrary without it and is not:
 
-    So: refused, with the repair named. This is the one place where the
-    transform declines a class CPython accepts, and it declines it because the
-    capability that would make it right — a comparison that dispatches to a
-    method — does not exist here, not because the class is unusual."""
-    return (f"{name} declares its own __eq__, which CPython keeps in "
-            f"preference to the generated one (so the class is legal and its "
-            f"meaning is unambiguous). It is refused because `==` on this path "
-            f"is one flag-setting compare of two words and never dispatches by "
-            f"name: measured, a class with a user __eq__ that returns True "
-            f"gives `a == b` as 0 here and 1 under CPython, while an explicit "
-            f"`a.__eq__(b)` gives 1 under both. So accepting {name} would build "
-            f"an image that runs the comparison as an address compare and "
-            f"prints a number the method in the source contradicts — silently, "
-            f"from a program that did nothing unusual. Call the method "
-            f"explicitly (`x == y` becomes `x.__eq__(y)`), or drop the method "
-            f"and let the field-wise comparison this transform generates "
-            f"answer it")
+    * 2026-09-29: the class was refused, and the stated reason was measured —
+      `==` did not dispatch by name at all on this path, so accepting the class
+      would have meant building an image that runs the comparison as an address
+      compare. That reason was FIXED (the dispatch landed,
+      `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`), and a refusal
+      whose stated reason has been fixed is a refusal nobody looks at again.
+    * the transform's own half then became the stated reason: `rewrite_equality`
+      DESUGARS `==` into a field-wise chain, which would silently replace the
+      method the source wrote. That half needed no new analysis — it already
+      skips a class with `own_eq`, so the class is accepted and the DESUGARING
+      is what is skipped.
+    * and what is left is this: the residue the dispatch does not reach.
+
+    The `__repr__` half is unaffected and still necessary: printing a struct
+    receiver SEGFAULTS today (measured) rather than merely answering wrongly."""
+    return (f"{name} declares its own __eq__, which CPython keeps in preference "
+            f"to the generated one, and this transform leaves the comparison to "
+            f"the operator's dispatch rather than desugaring it into a "
+            f"field-wise chain. But `{comparison}` is not a shape that dispatch "
+            f"lowers, so nothing here would answer it except the word compare "
+            f"the dispatch exists to replace: {why}. Bind the class's value to a "
+            f"name on both sides of the comparison, or call the method "
+            f"explicitly (`__eq__`), which is right today")

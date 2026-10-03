@@ -1,5 +1,16 @@
 # FORMAL_sweep_work_map_2026-09-30_r2: the formal backend's coverage, re-measured on current master, ranked by TERMINAL cause
 
+> **CURRENCY, re-read 2026-10-01. This is a SNAPSHOT of one commit, not a
+> current measurement, and its numbers do not describe this tree** — 90+ commits
+> of finished formal work have landed since `f378280d`, on this branch and on
+> the branches it is merged from. This session was explicitly not permitted to
+> run a sweep, so nothing here has been re-measured and no count below should be
+> quoted as current. What survives is what does not decay: the per-cause RANKS as
+> a picture of where the refusals were, §6's unexplained entries, and the three
+> reasons the headline did not move — which are the part a reader planning work
+> actually needs, and which are about the shape of the tree rather than about
+> its numbers. A fresh sweep is the only way to re-date this file.
+
 **Measured 2026-09-30 19:21 PDT on `f378280d` (master), arm64, the tool's default
 scope** (this repo + `../modular/mojo/stdlib/std`).
 
@@ -307,9 +318,20 @@ r1: 3 files with `json.decoder.JSONDecodeError`, always
 `std/gpu/compute/arch/mma_apple.mojo`, `mojo/middle/stmts_shared.py`,
 `test_arm64_emission.py`. Now: **1**, `test_imports.py`. A rotating set points at
 the runner rather than at any source file — consistent with hypothesis 2 in
-`FORMAL_sweep_tool_json_decode_error.md` (the child was killed or truncated, and
-an empty stdout is what `char 0` looks like). That doc is updated with this
-measurement and stays open.
+here (the child was killed or truncated, and
+an empty stdout is what `char 0` looks like).
+
+**That row is now CLOSED, and hypothesis 2 was not it.** The mechanism was
+measured on 2026-10-01: `formal/build.py` and `formal/imports.py` rewrote
+`<dylib>.manifest.json` **in place**, `open(path, "w")` truncates at the open,
+and a reader in the 0.21 ms window before the first byte gets an empty file —
+while `json.JSONDecodeError` is not an `OSError`, so none of the `except OSError`
+around those reads caught it. 357 of 882 concurrent reads of a real 11,668-byte
+manifest saw the 0-byte file. Every writer now goes through
+`_write_json_atomic` (private temp, `fsync`, `os.replace`) and
+`update_dylib_manifest` is the single read-modify-write all four of them share;
+`test_formal_manifest_atomic.py` is the test. The one-sweep-per-architecture
+`flock` is a second, independent guard.
 
 ### 6.3 The scope grew by 9 files, all in this repo
 

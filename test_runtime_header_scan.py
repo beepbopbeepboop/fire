@@ -267,16 +267,7 @@ def test_every_declaration_is_seen():
     #       as bool-valued and read the flag off it; the pair that arrived sets
     #       the value's kind at the store, which is what stops one bool value
     #       from poisoning its neighbours' repr.
-    # Read off the call on the merged header: 541.
-    # A sibling branch's header grew by SEVEN instead, for the SAME fix in its
-    # own spelling: `MOJO_ORD_INCOMPARABLE`, `mojo_value_order`,
-    # `mojo_list_order`, `mojo_set_order`, `mojo_dict_order`,
-    # `mojo_value_order_op`, and an operator-less `mojo_list_cmp` /
-    # `mojo_set_cmp`. None of those names is in this header -- the ordering
-    # entry points here are the three-way `mojo_*_cmp` plus `mojo_cmp_fold`,
-    # with `op` threaded down -- so this is not 539 and not 541 + 7. One
-    # implementation of a fix is one set of names, and the runtime file records
-    # which spelling won and why.
+
     # 541 -> 543 (2026-10-02, `bugs3-codegen-5-r2`), for the container ELEMENT
     # repr: `mojo_list_set_elem_repr` (what the codegen emits on every
     # list/tuple literal whose element type is a registered struct) and
@@ -287,19 +278,51 @@ def test_every_declaration_is_seen():
     # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
     # given an int RAISING a catchable TypeError, and that is a different
     # answer to the same question `codegen-3-r2`'s `_stringify_value`
-    # lowering already answers correctly — CPython prints `5` for
+    # lowering already answers correctly -- CPython prints `5` for
     # `Dialog(5)` because a parameter annotation there is documentation, not
     # a cast, so refusing is a divergence from the oracle and stringifying is
     # not. One fix, one spelling: the runtime function went with the lowering
     # it was written for, and its ledger line with it.
     #
+    # 543 -> 544 (merging master into the bugs3 tree): `mojo_char_at_str`, from
+    # 5ba5a8aa ("a character is an immortal table entry, not a malloc per
+    # character") -- the commit that fixed the char-scan leak. It added one
+    # declaration line to fire_runtime.h and did not bump this ladder, so
+    # `rthdrscan` went red in the same commit. Which is the whole argument for
+    # reading this number off the call rather than trusting the commit that
+    # changed the header: the commit that adds a declaration is exactly the
+    # commit that has to remember to. It arrived on the OTHER side of this
+    # merge and was never on this one, so 544 is this side's 543 plus that one
+    # name -- read off `reflect.collect_runtime_exports_h` on the merged header
+    # (544), not added up from the two sides.
+    #
+    # A sibling branch's header grew by SEVEN instead, for the SAME ordering fix
+    # in its own spelling: `MOJO_ORD_INCOMPARABLE`, `mojo_value_order`,
+    # `mojo_list_order`, `mojo_set_order`, `mojo_dict_order`,
+    # `mojo_value_order_op`, and an operator-less `mojo_list_cmp` /
+    # `mojo_set_cmp`. None of those names is in this header -- the ordering
+    # entry points here are the three-way `mojo_*_cmp` plus `mojo_cmp_fold`,
+    # with `op` threaded down -- so it is not counted twice. One implementation
+    # of a fix is one set of names, and the runtime file records which spelling
+    # won and why.
+    #
+    # `py_tokenize_named` is deliberately NOT an entry, and two separate merges
+    # have now settled that rather than adding one. It is not in
+    # `_NO_OVERLOAD_MANGLE` (only `py_tokenize` is), so a generated call would
+    # reach it under a mangled name and a bare-name declaration here could never
+    # be that call's prototype -- and nothing calls it from generated code at
+    # all, its callers being Python (formal/build.py, the lexing tests), which
+    # take the prototype from the definition. Declaring it would put a fact in
+    # this header that nothing checks and nothing could use. See the header's own
+    # comment.
+    #
     # Every entry here is read off the CALL, never added up, and the count is
     # read off the merged header rather than being any one branch's total plus
     # its own new names: two branches that each added names did not each add
     # them to THIS header. That is the whole reason this list is a ledger and
-    # not a formula — a name in the header that no line accounts for is the
+    # not a formula -- a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 543),
+    for header, want in (('fire_runtime.h', 544),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

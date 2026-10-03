@@ -24,7 +24,18 @@ protecting, and they are not the same thing:
    into "other". The samples below are real messages, abbreviated at clause
    boundaries, and each asserts the family it must land in.
 
-3. **A count that reads like a gap and is not one.** The cause table in
+3. **A marker for a message the backend can no longer produce is rot with a
+   sample attached to it.** The family "a module whose API is its top-level
+   statements, imported by another" and its sample were removed on
+   2026-10-03 with the dylib-module-body row it keyed on (§6 of
+   `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md`, whose doc was deleted with
+   the fix): both object writers emit a load-time initializer, so the refusal
+   that named it no longer exists and a sample of a message nothing produces is
+   a sample that can only rot. A family is removed when its message stops being
+   reachable, and the test that says so is this file's list — the absence of a
+   row is the only record that the message is gone.
+
+4. **A count that reads like a gap and is not one.** The cause table in
    `tools/formal_sweep_causes.py` ranks by what a fix would have to CHANGE, and
    prints `FILES BLOCKED` with an explicit warning that it is an upper bound.
    For a cause whose refusal is about a MODULE's boundary rather than a
@@ -104,9 +115,25 @@ SAMPLES = [
     # the old fixed word called an attribute, false of every `__mlir_type`
     # binding in the stdlib including `std/sys/info.mojo`'s `_TargetType`, the
     # module that heads this family.
+    #
+    # The OPERATION sample is quoted from the message that REPLACED one fixed
+    # sentence for all 104 dialect operations: `mlir_dialect_op_refusal` names
+    # the operation and what it denotes rather than asserting that "an MLIR
+    # operation has no representation in a 64-bit word", which was false of the
+    # elementwise arithmetic subset. It is a separate row rather than a variant
+    # because the family here is about SHAPE and the three operation wordings
+    # share it — and because the old wording is still live for a caller with no
+    # operation in hand, which is the fourth sample.
     ("MLIR construct",
-     "materialize: __mlir_op is an MLIR dialect construct. This path has no "
-     "MLIR: it lowers a Mojo program to a Mach-O image"),
+     "materialize: `pop.add` is a dialect OPERATION applied ELEMENTWISE, so "
+     "whether it denotes one 64-bit word"),
+    # The PREFIX wording, which is what a call site that knows only the
+    # `__mlir_` name says. Kept because it is still reachable and still a true
+    # statement about what is missing for the family, and because a sample that
+    # quotes only the classified wordings would let the prefix row rot silently.
+    ("MLIR construct",
+     "materialize: __mlir_op is an MLIR dialect construct: this path has no "
+     "MLIR, so it lowers a Mojo program to a Mach-O image"),
     ("MLIR construct",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
      "MLIR attribute template: __mlir_attr[`#kgen.param_list.size<:`,"),
@@ -229,6 +256,28 @@ CAUSE_SAMPLES = [
      "the module-level comptime binding '_dtype_to_llvm_type_f8' is initialized "
      "from an MLIR type template: __mlir_type.`i8` names an MLIR TYPE, not a "
      "value"),
+    # The OPERATION wording, which replaced the one fixed sentence that named
+    # the `__mlir_` PREFIX. `formal/model.py`'s `mlir_dialect_op_refusal` now
+    # classifies the operation by what it DENOTES — an effect, an elementwise
+    # arithmetic result, or a value needing a fact this path lacks — so three
+    # different messages carry this clause and each needs its own sample for the
+    # reason the type spelling above does: `classify_message` sees only the
+    # message, so one sample is one proof its marker matches.
+    #
+    # The first is the EFFECT (`std/sys/debug.mojo:20`, verbatim), the second is
+    # ELEMENTWISE arithmetic (`std/simd.mojo:1082`), and the third is a value
+    # that cannot be GUARDED without its bracketed predicate (`std/simd.mojo:
+    # 1546`). All three are quoted from the live text, so a later reword of any
+    # of them fails this row rather than silently emptying the cause.
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "_select_register_value: `pop.add` is a dialect OPERATION applied "
+     "ELEMENTWISE, so whether it denotes one 64-bit word"),
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "debugtrap: `llvm.intr.debugtrap` is a dialect OPERATION and denotes NO "
+     "VALUE: it is an EFFECT"),
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "eq: `pop.cmp` is a dialect OPERATION whose value could be a word on this "
+     "path, but it cannot be GUARDED here"),
     ("inlined_assembly (a gimple-C runtime construct)",
      "inlined_assembly: 'NoneType' has no home: this module declares no "
      "module-level name by that spelling"),
@@ -245,6 +294,34 @@ CAUSE_SAMPLES = [
     ("a module-global name has no storage",
      "encode_sxtb_wd_wn: '_SXT_BASES' is bound at module level, and this path "
      "has no module-global storage for it"),
+    # A `try` handler arm with a body. This is the refusal that appeared for 5
+    # files when the dylib-module-body row was closed, and it is CORRECT by
+    # design — `formal` has no unwinder, so an arm's body cannot be in the image
+    # and dropping it silently would be a wrong-but-exit-0 answer. It is in the
+    # taxonomy because "refused on purpose" and "nobody has looked" are
+    # different answers, and `other refusal` cannot tell them apart.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     "memslot.py: line 407: `ValueError` as e is a handler arm with a body "
+     "this path cannot put in the image, so it is refused rather than "
+     "dropped: `formal` has no exception unwinder, so no edge runs from a "
+     "raise site into an arm"),
+    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
+    # than from a sweep log, because the shape it refuses did not exist as a
+    # distinct message until a module body was recognised as the module's own
+    # writer — before that, a name whose value a call computes and a name read
+    # before its slot was filled were the same refusal, and this sample would
+    # have been indistinguishable from the row above.
+    ("a module global the module BODY fills, read before it fills it",
+     "read_g: 'G' is one of the module-global slots in this image's `__DATA`, "
+     "and it has no static initializer: the value is computed by the module's "
+     "own top-level statements, which this path compiles into the synthetic "
+     "function the startup stub enters. That function is the entry, so nothing "
+     "runs before its first statement — but this read is reached before the "
+     "store of 'G' completes, so the load would read the zero an unwritten slot "
+     "gives. The module body calls something at its statement 1, before it "
+     "reaches the assignment at statement 2 that fills 'G'. Move the assignment "
+     "above the first top-level statement that calls anything. Make the value a "
+     "literal and the build folds it at every read instead"),
     ("a module-level name of ANOTHER module is not exported as a word",
      "main: 'sys' is imported from `sys`, and it is a module-level name of "
      "another module. This path compiles an import into a dylib"),
@@ -342,17 +419,35 @@ CAUSE_SAMPLES = [
     ("a method on a multi-field struct where a descriptor is meant",
      "writer.write_string() is a method on a Writer — a multi-field struct, so "
      "on this path the receiver is the ADDRESS of a frame"),
-    # TWO samples, one cause: this row is the register-argument count and both
-    # architectures word it from the same f-string with their own constant
-    # interpolated (`_ABI_ARG_REGS` = 8, `len(ARG_REGS)` = 6), so a table that
-    # only knew the arm64 number read 57 x86-64 files as unclassified. Both
-    # wordings are real messages from the 2026-10-01 r2 logs, one per arch.
+    # FOUR samples for one cause, because the message has been reworded once and
+    # a classifier that only knows the current wording stops seeing every sweep
+    # log ever taken — which is the failure this file exists to catch, in the
+    # direction that actually happens.
+    #
+    # The first two are the REGISTER-count wording, both real messages from the
+    # 2026-10-01 r2 logs, one per architecture: both backends build the sentence
+    # from one f-string with their own constant (`_ABI_ARG_REGS` = 8,
+    # `len(ARG_REGS)` = 6), so a table that only knew the arm64 number read 57
+    # x86-64 files as unclassified.
+    #
+    # The last two are the FRAME-BUDGET wording that replaced it on 2026-10-02,
+    # when both ABIs grew their stack-argument convention: the ceiling is now 24
+    # on both machines and the register counts are the REGISTER half of a split.
+    # Keeping the old two is not sentiment — the dated work-map tables in
+    # `bugs/` are written against logs that carry the old wording, and a sweep
+    # re-read tomorrow has to classify them the same way.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      "_build_segment_64: 9 parameters exceeds the 8 the formal arm64 ABI "
      "passes in registers"),
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
      "b2_g: 7 parameters exceeds the 6 the formal x86-64 ABI passes in "
      "registers"),
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     "_build_segment_64: 25 parameters exceeds the 24 the formal arm64 ABI "
+     "passes (8 in registers and 16 on the stack)"),
+    ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
+     "wide: 25 arguments exceeds the 24 the formal x86-64 ABI passes "
+     "(6 in registers and 18 on the stack)"),
     # The two x86-64-only refusals. They are the two files whose message DIFFERS
     # between architectures on an otherwise class-identical sweep
     # (`bugs/FORMAL_known_limits.md` §6.5), and they are here because the doc
@@ -430,9 +525,6 @@ CAUSE_SAMPLES = [
      "constructing ModuleSpecGenerator with arguments is a call to a "
      "user-defined `__init__` whose body this path does not inline: a read of "
      "'self' in the right-hand side"),
-    ("a module whose API is its top-level statements, imported by another",
-     "ab_filelist.py: line 12: this module's API is its top-level statements "
-     "(AssignStmt, IfStmt), and a library has no entry point to run them"),
     ("a local read before its first assignment",
      "load: 'f' is read at line 22 before anything in this function stores "
      "it, and CPython raises UnboundLocalError for that program"),
@@ -593,6 +685,89 @@ def check_cause_table(failures):
                 "call — and a merge would hide which one a file is blocked by")
 
 
+def _no_def_callee_arm_checks(failures):
+    """EVERY arm of `frame_undefined_callee_refusal` keeps the clause, and every
+    arm classifies as the one family in BOTH tables.
+
+    The row this rests on is `bugs/FORMAL_callee_no_def_ceiling_zero.md`: the
+    fifth branch of `frame_receiver_escape_refusal` used to be one sentence over
+    five different facts, four of them false of the program in front of the
+    reader, and splitting it into one arm per fact meant the arms had to stay
+    distinguishable. They are told apart by their tail; what keeps them in the
+    SAME family is the clause they all open with.
+
+    That clause is load-bearing and nothing tested it. Two taxonomies key on the
+    exact substring — `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    `tools/formal_sweep_causes.py`'s `callee has no definition on this path` —
+    and the message itself begins `a X receiver is passed to …`, which is the
+    `receiver passed as an argument` family's own opening. So an arm that
+    reworded its opening would fall into whichever family matches next, with a
+    wrong number in a table a planner acts on and no test failing. It already
+    happened: the first version of the split had four arms that did not keep it.
+
+    So this asks the question at the SOURCE rather than at a sample: one callee
+    per arm, taken from the arm's own condition, and three assertions each --
+    the clause is there, the family is the same in both tables, and the texts are
+    pairwise DISTINCT (a shared text would be the pre-split defect returning, and
+    it would pass the first two assertions).
+
+    The arms, and the fact that selects each: a compile-time reflection
+    intrinsic, a builtin with no implementation (`UNIMPLEMENTED_BUILTINS`, added
+    after the document's five), a compile-time parameter, a name bound by a
+    `from … import …`, a name reachable only through a star import, and nothing
+    at all. `struct_names` is passed for all six because a frame receiver is what
+    makes the sentence about a receiver at all.
+    """
+    sys.path.insert(0, HERE)
+    from formal.model import frame_undefined_callee_refusal
+    clause = "which is a name with no definition in hand"
+    family = "callee has no definition on this path"
+    arms = [
+        ("reflection intrinsic", "__get_mvalue_as_litref", {}),
+        ("unimplemented builtin", "getattr", {}),
+        ("compile-time parameter", "Fn",
+         {"comptime_param_of": "drive"}),
+        ("imported free function", "_b64encode",
+         {"imported_from": "._b64encode"}),
+        ("star import", "assert_true",
+         {"star_imported_from": "lib"}),
+        ("genuinely unbound", "mojo_print", {}),
+    ]
+    texts = {}
+    for label, callee, kwargs in arms:
+        msg = frame_undefined_callee_refusal(callee, ["P"], **kwargs)
+        if msg is None:
+            failures.append(
+                f"the {label} arm returned None for {callee!r}; the caller "
+                "cannot distinguish 'this construct is fine' from 'this arm is "
+                "unreachable'")
+            continue
+        texts[label] = msg
+        if clause not in msg:
+            failures.append(
+                f"the {label} arm does not carry {clause!r}. Two taxonomies key "
+                f"on that substring and the message begins 'a X receiver is "
+                f"passed to …', which is the receiver family's own opening, so "
+                f"this arm's files would be counted as receiver problems: "
+                f"{msg[:120]}")
+        for tool, got in (("formal_sweep", S._refusal_family(msg)),
+                          ("formal_sweep_causes", C.classify_message(msg))):
+            if got != family:
+                failures.append(
+                    f"{tool} classifies the {label} arm as {got!r}, not "
+                    f"{family!r}")
+    seen = {}
+    for label, msg in texts.items():
+        for other, prev in seen.items():
+            if msg == prev:
+                failures.append(
+                    f"the {label} arm and the {other} arm emit the SAME text, "
+                    "so the split that gives each its own reason has collapsed "
+                    "back to one sentence over two facts")
+        seen[label] = msg
+    return len(arms) * 3 + len(texts) - len(set(texts.values()))
+
+
 def main() -> int:
     failures = []
     checks = len(SAMPLES) + 3
@@ -648,6 +823,9 @@ def main() -> int:
     # …and the `uses:` column's own audit, which counts its checks into the
     # same total rather than printing a second tally.
     checks += _uses_column_checks(failures)
+    # …and the six-arm census of `frame_undefined_callee_refusal`, whose clause
+    # both tables key on and which nothing tested.
+    checks += _no_def_callee_arm_checks(failures)
     print(f"\nrefusal taxonomy: {'PASS' if not failures else 'FAIL'} "
           f"({checks - len(failures)}/{checks} checks, "
           f"{len(set(names))} families, {len(C.CAUSES)} causes)")

@@ -228,6 +228,95 @@ PARSERS = [
         cases=[["-vq"], ["-v=1"], ["-vx"], ["-v", "-j", "4"], ["-j4"],
                ["-n-3"], ["-3"], ["-v", "--", "-q"], ["-jq", "4"]],
     ),
+    # ── the three places help text is FOLDED ─────────────────────────────────
+    #
+    # `bugs/FORMAL_argparse_help_wrapping_not_implemented.md`: the layout was
+    # reproduced and nothing was folded, so a help string past the column came
+    # out on one line and a usage line past the width came out on one line. These
+    # three parsers are the shapes that reach each of the three algorithms, which
+    # are three and not one: the help column and the description are
+    # `textwrap.wrap` (at `max(width - help_position, 11)` and at the full width),
+    # and the usage line is `_format_usage`'s own fold over PARTS, which never
+    # splits one and is therefore not `textwrap` at all.
+    #
+    # Every help string here avoids `;` and `|`, which are this module's spec's
+    # record and field separators — a help string containing one is truncated at
+    # it, which CPython allows and this representation cannot hold
+    # (`bugs/FORMAL_argparse_spec_separators_in_a_help_string.md`) — and every
+    # description avoids `"` and `\`, which the generated program embeds
+    # verbatim.
+    dict(
+        name="wrapentry",
+        prog="demo",
+        desc=("A description long enough that CPython folds it onto a second "
+              "line at the 78 columns this target knows, since a terminal "
+              "cannot be asked for here and nothing shorter will do."),
+        args=[
+            # Wrapped at the help column, with the break landing mid-sentence.
+            (["-j", "--jobs"], dict(type=int, default=8,
+                                    help="the number of workers to run in "
+                                         "parallel, and more than the core "
+                                         "count is usually slower")),
+            # A HYPHENATED word: `textwrap` breaks after the hyphen, which is a
+            # different rule from the one that fills a line.
+            (["--no-cache"], dict(action="store_false",
+                                  help="turn the cache off. --no-cache is "
+                                       "hyphenated and this help text is long "
+                                       "enough to fold twice")),
+            # One word longer than the column, which is broken mid-word.
+            (["-x"], dict(action="store_true",
+                          help="supercalifragilisticexpialidocious-and-then-"
+                               "some is one run of characters")),
+            (["--opt"], dict(choices=["alpha", "beta"], default="alpha",
+                             help="short")),
+            # A TAB in the help text. It becomes ONE space, because
+            # `HelpFormatter._split_lines` substitutes whitespace before
+            # `textwrap` runs — so `expandtabs` never sees it, and the fold lands
+            # where a space's would.
+            (["-t"], dict(action="store_true",
+                          help="a tab\there and the help goes on for long "
+                               "enough to need folding at the column")),
+            # `strip()`: `_split_lines` strips, so a padded help string prints
+            # without its padding.
+            (["-a"], dict(action="store_true", help="  padded  ")),
+            # `action.help.strip()`: a help text of nothing but spaces takes the
+            # NO-HELP branch, so the entry is the invocation and nothing else.
+            (["-b"], dict(action="store_true", help="   ")),
+        ],
+        cases=[["--help"]],
+    ),
+    dict(
+        # A usage line past the width, with a SHORT prog: the prog shares the
+        # first line with the optionals and the positionals are folded after
+        # them.
+        name="usagefold",
+        prog="demo",
+        desc="",
+        args=[
+            (["--input-directory"], dict(default="in")),
+            (["--output-directory"], dict(default="out")),
+            (["--jobs"], dict(type=int, default=1)),
+            (["--keep-going"], dict(action="store_true")),
+            (["--verbose"], dict(action="count", default=0)),
+            (["--dry-run"], dict(action="store_true")),
+            (["paths"], dict(nargs="*")),
+        ],
+        cases=[["--help"]],
+    ),
+    dict(
+        # The same fold with a LONG prog (past `0.75 * width`), which is the
+        # other branch: the prog gets a line of its own.
+        name="longprog",
+        prog="a-program-name-long-enough-to-need-a-usage-line-of-its-own",
+        desc="",
+        args=[
+            (["--input-directory"], dict(default="in")),
+            (["--output-directory"], dict(default="out")),
+            (["--keep-going"], dict(action="store_true")),
+            (["paths"], dict(nargs="*")),
+        ],
+        cases=[["--help"]],
+    ),
     dict(
         # `metavar`, an explicit `dest`, and help text on a positional: the
         # three ways the usage line and the help listing can disagree about
@@ -658,17 +747,21 @@ def test_the_module_builds_on_its_own(tmp, _shared):
     subject is a comparison inside `_lookup` — a module none of the 36 had
     anything to do with.
 
-    So: the module as a translation unit, with nothing importing it, on the
-    default backend (arm64, which is the target the corpus above is run on).
+        So: the module as a translation unit, with nothing importing it, on the
+        default backend (arm64, which is the target the corpus above is run on).
 
-    Not asserted for x86_64, and that is a real gap rather than a shrug: on that
-    backend the build stops earlier, in `os/_syscalls.mojo`'s own dylib
-    ("main executable failed strict validation"), before argparse's body is
-    reached, so nothing here has measured whether this module lowers on that
-    backend at all. The whole per-module, per-backend table is in
-    bugs/FORMAL_x86_64_hostmods_that_do_not_build.md, with the two reasons x86-64
-    has fewer of them than arm64 — and asserting it here would turn a red about
-    one module into a red about two.
+        x86-64 is not asserted HERE and does not need to be: the per-module,
+        per-backend table is `test_formal_hostmods_census.py`, which builds all
+        sixteen host modules on both backends and is where a row about one
+        module belongs — so a red about this module's arm64 build and a red
+        about this module's x86-64 build stay two different failures with two
+        different subjects.  (This docstring used to say x86-64 was not
+        measured because the build "stops earlier, in `os/_syscalls.mojo`'s own
+        dylib ('main executable failed strict validation')".  That was true when
+        it was written and is no longer: the dylib emitter's defect is fixed,
+        every module in the table builds on x86-64 but two, and argparse is one
+        of the fourteen that do.)
+
 
     The build is a cold one: this file points GMOJO_HOME at a private CAS per
     process, so a dylib published by an earlier run cannot answer for this

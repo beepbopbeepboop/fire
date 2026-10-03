@@ -38,12 +38,33 @@ and compares. Between them: this one says "no form is unmodelled", that one says
 is caught only by this one; a form that is modelled but wrong is caught only by
 the other.
 
+## And the step lemmas, which coverage above cannot see
+
+The samples answer "can the model step this?". They say nothing about whether
+the per-instruction lemmas the proof chain is built from can be APPLIED, and
+that is a separate failure with a separate history: `x86_step_setcc_r8` carried
+`¬ ((0x80 : UInt8) ≤ op2)` when every `setcc` opcode byte is at least 0x90, so
+its hypotheses were contradictory — which still compiles, still typechecks
+against the model, and still proves its goal, and simply cannot be applied to
+anything. 26 examples' worth of `setcc` sat there with a green suite, and
+nothing short of writing the check down would have found it.
+
+So `step_lemmas()` lists each lemma with an encoding the encoder really
+produces, and this test makes Lean check that every one of the lemma's
+hypotheses is satisfiable there, by `native_decide` on each. A failure prints
+the hypothesis that did not close, by line, rather than a file name.
+
+`movsx r64, r8` is checked at all three register shapes the corpus emits,
+because a generalisation that covered only the shape it was written from would
+pass a one-shape check.
+
 Run: python3 formal/x86_64_model_coverage_test.py
-Exit: 0 iff every emittable form steps.
+Exit: 0 iff every emittable form steps and every listed lemma is applicable at
+a real encoding.
 """
 
 import os
-import subprocess
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,6 +77,16 @@ R = X.Reg
 BASE = 0x1000
 """Where samples are placed. Any address works — the model addresses the code
 function absolutely — but a round one makes a failure readable."""
+
+#: Bounds for the two Lean runs this file makes (see `formal/lean.py` for the
+#: policy and the measurements behind it). These are bigger than a proof check
+#: because they are: 151 `native_decide` goals over every emittable encoding in
+#: one file, and then a `decide` per hypothesis for every step lemma. Both used
+#: to be a bare `subprocess.run(..., timeout=3600)` — a WALL bound only, on the
+#: two runs in this tree most likely to spin, since a lemma whose hypotheses
+#: are unsatisfiable reduces forever inside `decide`.
+COVERAGE_WALL_S = 3600.0
+COVERAGE_CPU_S = 3600.0
 
 
 def _reg_pairs():
@@ -176,6 +207,432 @@ def samples():
     return out
 
 
+class Lemma:
+    """One step lemma, and the encoding the backend really emits for it.
+
+    This is the second half of the coverage question, and it exists because
+    "the file builds" is the wrong signal for a step lemma.  A lemma whose
+    hypotheses are contradictory compiles, typechecks against the model, proves
+    its goal, and can never be applied to anything — `x86_step_setcc_r8` carried
+    `¬ ((0x80 : UInt8) ≤ op2)` when every `setcc` opcode byte is at least 0x90,
+    and 26 examples' worth of `setcc` were in that state with a green suite.  So
+    a lemma is covered only when a real encoding satisfies all of it, and the
+    question worth asking about a new lemma is not "does it compile" but "can it
+    be applied".
+
+    What this does NOT check is the conclusion, and that is a decision rather
+    than an omission.  Lean already checked it: `lib/X86.lean` compiling IS the
+    conclusion being proved, so a `native_decide` of it here would be the same
+    fact asked twice.  What compiling cannot tell you is applicability, which
+    is exactly the half that was wrong.  (`Option X86State` has no `Decidable`
+    instance anyway — `X86State.mem` is a `Nat → UInt8`, so the successor
+    cannot be compared by evaluation at all, which is why the existing lemmas
+    state whole successors and prove them by `simp`.)
+
+    `hyp` is the lemma's own hypothesis list, concretised: each term is over
+    `s` (the initial state) and `code` (the byte function), which the harness
+    binds.
+    """
+
+    __slots__ = ("lemma", "label", "enc", "hyp")
+
+    def __init__(self, lemma, label, enc, hyp):
+        self.lemma, self.label, self.enc = lemma, label, bytes(enc)
+        self.hyp = list(hyp)
+
+
+def _rex_mod3_hyps(addr, rex, modrm, opcode, two_byte_op=False, reg=None,
+                   digit=None, dst=None, mode=3):
+    """The hypotheses a `REX.W <opcode> /r` mod=3 step lemma shares.
+
+    Every form below is `REX`-prefixed, `REX.W`, and has a register operand, so
+    the first eight of its hypotheses are the same eight bytes read four ways and
+    the rest is whatever the form's own fields are.  Consolidating them here is
+    what makes a form's entry below a transcription of its lemma's statement and
+    not a fourth derivation of where a ModRM byte comes from.
+
+    `reg` and `rm` are resolved by the caller and passed in, so this stays a
+    transcription: two of the forms below carry a destination the caller read out
+    of the REX, and recomputing it here would be a second source of truth for
+    the field sense (`dst` is the DESTINATION, which is the `reg` field, and
+    `rm` is the SOURCE -- the opposite of what the field names suggest).
+
+    `digit` is for the shift forms, where the ModRM `reg` field names the
+    OPERATION rather than a register; pass it instead of `reg` there.
+
+    `two_byte_op` is the `0F` escape, and it is not a detail: with a REX byte at
+    `m` the opcode moves to `m + 1` and the ModRM to `m + 2`, so an escape's
+    `code (m + 2)` is the SECOND OPCODE rather than the ModRM.  That is the same
+    off-by-one that made `imul` read its source register out of `0xaf &&& 7`
+    (B19), and here it is the difference between a check that holds and one that
+    does not.
+
+    The `(x : UInt8).toNat` ascription is not decoration, twice over.  Lean
+    reads `192.toNat` as a malformed decimal — a PARSE error, and in a check
+    file a parse error is a check that did not run — and `(192).toNat` parses but
+    elaborates `192` as a `Nat`, which has no `toNat` field, so the hypothesis
+    is an elaboration error instead.  The ascription is what makes it the same
+    expression the lemma states about a `UInt8` ModRM byte.
+    """
+    b = "(%d : UInt8).toNat" % modrm
+    hyp = ["s.rip = %d" % addr, "code %d = %d" % (addr, rex)]
+    if two_byte_op:
+        hyp += ["code %d = %d" % (addr + 1, 0x0f),
+                "code %d = %d" % (addr + 2, opcode),
+                "code %d = %d" % (addr + 3, modrm)]
+    else:
+        hyp += ["code %d = %d" % (addr + 1, opcode),
+                "code %d = %d" % (addr + 2, modrm)]
+    hyp += [
+        "x86_is_rex %d = true" % rex,
+        "x86_rex_w %d = true" % rex,
+        "%s >>> 6 = %d" % (b, mode),
+    ]
+    if digit is not None:
+        hyp.append("(%s >>> 3) &&& 7 = %d" % (b, digit))
+    if reg is not None:
+        hyp.append("(%s >>> 3) &&& 7 = %d" % (b, reg))
+    hyp.append("%s &&& 7 = %d" % (b, modrm & 7))
+    if dst is not None:
+        hyp.append("%d + x86_rex_r %d = %d" % (reg, rex, dst))
+    return hyp
+
+
+def _rex_mem_hyps(addr, rex, modrm, opcode, mode, rm_ne, dst=None, sib=False):
+    """Hypotheses for a `REX.W <opcode> /r` MEMORY form, concretised.
+
+    The memory forms carry what the register ones do not: the ModRM `mod` is the
+    addressing mode rather than always 3, and the exclusions on the rm field are
+    hypotheses -- `rm ≠ 4` for "no SIB byte follows", and `rm ≠ 5` as well at
+    mod=0, where rm=5 is RIP-relative rather than `[rbp]`.  Leaving either out is
+    a statement about a different instruction: without the first the
+    displacement is read from the wrong byte, without the second a
+    position-independent load is claimed to be `mov [rbp]`.
+
+    `mode` is a PARAMETER rather than something read back out of the encoding,
+    because the check's whole job is to notice when a row's lemma and a row's
+    encoding disagree -- which is exactly what `lea r11, [rbx+64]` did: 64 fits
+    in a signed byte, so the encoder emitted a disp8 and the disp32 lemma's
+    `mod = 2` hypothesis did not hold.
+
+    `dst` is the CONCRETE destination register for the forms whose successor is
+    a register WRITE -- every `mov r64, [...]` and every `lea` -- and it is
+    emitted together with the `dst < 16` that `x86_set_reg` is a `match` on, so
+    both halves of what the load's hypothesis list actually says are checked.
+    Passing it is what makes this a transcription of the LEMMA's statement: both
+    hypotheses were absent here before, so a load whose destination index was
+    computed wrongly would have satisfied every hypothesis in this list and
+    proved nothing about where the value lands.
+
+    `sib` adds the two facts a SIB operand carries and a `[rbp + disp]` one does
+    not: the SIB byte itself, which sits BETWEEN the ModRM and the displacement
+    (so the displacement is at `m + 4` and not `m + 3`), and `REX.B = 0`, which is
+    what makes the SIB's base field `4` mean RSP rather than R12.  Neither is
+    derivable from the other three byte facts, so a row for a SIB form without
+    them would check the wrong displacement offset.
+    """
+    hyps = _rex_mod3_hyps(addr, rex, modrm, opcode,
+                          reg=(modrm >> 3) & 7, mode=mode, dst=dst)
+    if sib:
+        hyps.append("code %d = %d" % (addr + 3, 0x24))
+    if dst is not None:
+        hyps.append("%d < 16" % dst)
+    if sib:
+        hyps.append("x86_rex_b %d = 0" % rex)
+    for r in rm_ne:
+        hyps.append("%d ≠ %d" % (modrm & 7, r))
+    return hyps
+
+
+def step_lemmas():
+    """Every step lemma this test holds to the applicability check above."""
+    R = X.Reg
+    out = []
+    # `movsx r64, r8`.  All THREE register shapes the corpus emits, because that
+    # is the whole argument for the lemma being general rather than a second
+    # concrete `movsx rax, al`: a generalisation that covered only the shape it
+    # was written from would pass a one-shape check.
+    for dst, src in ((R.RAX, R.RAX), (R.RBX, R.RBX), (R.R10, R.R11)):
+        enc = X.encode_movsx_r64_r8(dst, src)
+        rex, modrm = enc[0], enc[3]
+        reg, rm = (modrm >> 3) & 7, modrm & 7
+        d = reg + (8 if rex & 4 else 0)
+        out.append(Lemma(
+            "x86_step_movsx_r64_r8",
+            "movsx %s, %s" % (dst.name, src.name),
+            enc,
+            _rex_mod3_hyps(BASE + 16 * len(out), rex, modrm, 0xbe,
+                           two_byte_op=True, reg=reg, dst=d)))
+    # The three logic ALU forms, at register pairs that exercise BOTH REX
+    # extension bits and neither.  The corpus only ever emits `4c 2?/0?/3? d8`
+    # -- `and rax, rbx` and nothing else -- so a check written from the corpus
+    # would pass a lemma that is wrong for R12/R15, which is the trap B7 is
+    # about and the reason these are stated generally in the first place.
+    for name, enc_fn, opcode in (("and", X.encode_and_r64_r64, 0x21),
+                                 ("or", X.encode_or_r64_r64, 0x09),
+                                 ("xor", X.encode_xor_r64_r64, 0x31)):
+        for dst, src in _reg_pairs():
+            enc = enc_fn(dst, src)
+            out.append(Lemma(
+                "x86_step_%s_rr" % name,
+                "%s %s, %s" % (name, dst.name, src.name),
+                enc,
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
+                               reg=(enc[2] >> 3) & 7)))
+    # The immediate shifts.  `sar` is digit 7 and is the model's arithmetic-shift
+    # FALLTHROUGH rather than a third named arm, so it is checked at a count
+    # past 63 as well as inside it: the clamp to 64 is what makes `sar x, 200`
+    # mean `sar x, 64` and a lemma that needed a `n < 64` hypothesis would fail
+    # there, which is the one thing this check can catch that compiling cannot.
+    for name, op, digit in (("shl", "<<", 4), ("shr", ">>", 5),
+                            ("sar", ">>signed", 7)):
+        for reg, n in ((R.RAX, 3), (R.R11, 200)):
+            enc = X.encode_shift_r64_imm8(op, reg, n)
+            out.append(Lemma(
+                "x86_step_%s_imm8" % name,
+                "%s %s, %d" % (name, reg.name, n),
+                enc,
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], 0xc1,
+                               digit=digit)))
+    # The digit-immediate ALU forms, at both widths and at a negative immediate
+    # as well as a positive one.  `83`'s sign extension from ONE byte is the
+    # thing worth pinning: a lemma stated over the decoded Python integer rather
+    # than over `UInt8.toInt` would disagree with the model for every negative
+    # `cmp`, and 0xff decoding as -1 is exactly the case.
+    for name, enc_fn, opcode, digit, args in (
+            ("add", X.encode_add_r64_imm32, 0x81, 0, ((R.RAX, 1000), (R.R9, -7))),
+            ("and", X.encode_and_r64_imm32, 0x81, 4, ((R.RBX, -1), (R.R11, 255))),
+            ("cmp", X.encode_cmp_r64_imm8, 0x83, 7, ((R.RAX, 0), (R.R11, -3)))):
+        for reg, imm in args:
+            enc = enc_fn(reg, imm)
+            out.append(Lemma(
+                "x86_step_%s_ri%d" % (name, 8 if opcode == 0x83 else 32),
+                "%s %s, %d" % (name, reg.name, imm),
+                enc,
+                _rex_mod3_hyps(BASE + 16 * len(out), enc[0], enc[2], opcode,
+                               digit=digit)))
+    # The memory-operand `mov`/`lea` shapes, at every mode the corpus uses and at
+    # both a negative and a positive displacement.  `wide_recv`'s frame lives at
+    # `rbp - 0x410`, so a lemma that read the disp32 UNSIGNED would put every
+    # frame store about 4 GB away -- and satisfy every hypothesis this check
+    # makes, because the exclusion it tests is about the rm field and not about
+    # the sign of the displacement.  The mode is read back out of the encoding
+    # rather than written down here, so a row cannot disagree with the encoder.
+    # `cqo`: no operand and no ModRM, so it does not go through the shared
+    # hypothesis helper at all.  `encode_cqo` is the only producer and there is
+    # nothing to vary but the REX byte, which is fixed at 0x48.
+    cqo = X.encode_cqo()
+    out.append(Lemma(
+        "x86_step_cqo", "cqo", cqo,
+        ["s.rip = %d" % (BASE + 16 * len(out)),
+         "code %d = %d" % (BASE + 16 * len(out), cqo[0]),
+         "code %d = %d" % (BASE + 16 * len(out) + 1, cqo[1]),
+         "x86_is_rex %d = true" % cqo[0],
+         "x86_rex_w %d = true" % cqo[0]]))
+    for lemma, label, enc, dst, sib in _memory_samples():
+        # `rm ≠ 4` is the "no SIB byte follows" exclusion, so a SIB row is the one
+        # shape where it must NOT be asserted -- rm=4 is what SELECTS the SIB.
+        # Asserting it anyway gives `4 ≠ 4`, and this check is what said so:
+        # "hypothesis 12 `4 ≠ 4` does not hold at 48 89 44 24 08 -- the lemma is
+        # vacuous there", which named the row and the bytes.  A vacuous
+        # hypothesis is worse than a missing one: the lemma would still prove.
+        out.append(Lemma(
+            lemma, label, enc,
+            _rex_mem_hyps(BASE + 16 * len(out), enc[0], enc[2], enc[1],
+                          (enc[2] >> 6) & 3, () if sib else (4,), dst, sib)))
+    return out
+
+
+def _memory_samples():
+    """`(lemma, label, encoding, dst, sib)` for the memory-operand shapes, both
+    directions.
+
+    Read back out of the encoder rather than spelled as byte strings, because a
+    hand-written encoding here is a third place for a typo to live and the only
+    thing the check needs from it is that it is a real one.
+
+    `dst` is the concrete destination for the forms whose successor writes a
+    register, and `None` for the stores, which have none; `sib` marks the rows
+    whose encoding carries a SIB byte.  Both are read off the row rather than
+    derived, because they are transcriptions of what the LEMMA says and a
+    derived one is the fourth derivation this file exists to avoid.
+    """
+    R = X.Reg
+
+    def load(lemma, label, enc, sib=False):
+        """A memory form whose successor WRITES a register, so its lemma takes the
+        concrete destination -- read out of the encoding here, which is where the
+        check is supposed to get its facts from.  `sib` marks the rows whose
+        encoding carries a SIB byte."""
+        return (lemma, label, enc, ((enc[2] >> 3) & 7) + (8 if enc[0] & 4 else 0),
+                sib)
+
+    def store(lemma, label, enc):
+        """A memory form whose successor writes MEMORY, so its lemma has no `dst`
+        at all and passing one would be a hypothesis the lemma does not have."""
+        return (lemma, label, enc, None, False)
+
+    def sib_store(lemma, label, enc):
+        """A store through a SIB operand: `Reg.RSP` as the base is what makes the
+        encoder emit one, so these rows are read back out of that path rather
+        than spelled."""
+        return (lemma, label, enc, None, True)
+
+    def sib_load(lemma, label, enc):
+        """A LOAD through a SIB operand — `load` with the SIB byte marked, so the
+        check adds the two facts a SIB encoding carries and a `[rbp+disp]` one
+        does not: the SIB byte itself at `m + 3`, and `REX.B = 0`."""
+        return load(lemma, label, enc, sib=True)
+
+    return [
+        # The two SIB forms with NO displacement, load and store.
+        #
+        # These are the pair this list carried NO ROW for, and that omission is
+        # the whole reason a statement pinned to `0x48`/`rax` could sit here
+        # unchallenged: `x86_step_mov_rax_sib_rsp` said "every SIB operand the
+        # backend emits has this shape", which is a fact about the SIB BYTE and
+        # not about the instruction — `_pop_slot(Reg.R11)` emits `4c 8b 1c 24`.
+        # Applied by form name, that was proved as `48 8b 04 24`, its byte
+        # hypotheses were false, and the generator's side-condition guard
+        # admitted them instead of reporting them: `augassign` read
+        # `terminates: proved, 1 sorry` about a chain with a step that is not
+        # the one the machine runs.
+        #
+        # So both rows come in pairs, REX.R clear and set, because `rex` bit 4 is
+        # exactly what moves the named register out of r0-r7 and into r8-r15 and
+        # the generalisation is about `reg + x86_rex_r rex` covering both.  A
+        # third load row at r15 is the top of the register file, which is where
+        # an off-by-one in the REX extension would show.
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov rax, [rsp]",
+                 X.encode_mov_r64_rm64(R.RAX, R.RSP, 0)),
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov r11, [rsp]",
+                 X.encode_mov_r64_rm64(R.R11, R.RSP, 0)),
+        sib_load("x86_step_mov_rm64_sib_rsp", "mov r15, [rsp]",
+                 X.encode_mov_r64_rm64(R.R15, R.RSP, 0)),
+        sib_store("x86_step_mov_mem_sib_rsp", "mov [rsp], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 0, R.RAX)),
+        sib_store("x86_step_mov_mem_sib_rsp", "mov [rsp], r12",
+                  X.encode_mov_rm64_r64(R.RSP, 0, R.R12)),
+        load("x86_step_mov_rm64_mem_disp8", "mov rax, [rbp+8]",
+             X.encode_mov_r64_rm64(R.RAX, R.RBP, 8)),
+        load("x86_step_mov_rm64_mem_disp8", "mov r12, [rbp-8]",
+             X.encode_mov_r64_rm64(R.R12, R.RBP, -8)),
+        load("x86_step_mov_rm64_mem_nodisp", "mov r8, [rbx]",
+             X.encode_mov_r64_rm64(R.R8, R.RBX, 0)),
+        store("x86_step_mov_mem_disp8", "mov [rbp+8], rax",
+              X.encode_mov_rm64_r64(R.RBP, 8, R.RAX)),
+        store("x86_step_mov_mem_disp8", "mov [rbx+8], r12",
+              X.encode_mov_rm64_r64(R.RBX, 8, R.R12)),
+        store("x86_step_mov_mem_nodisp", "mov [rdx], r11",
+              X.encode_mov_rm64_r64(R.RDX, 0, R.R11)),
+        store("x86_step_mov_mem_disp32", "mov [rbp-0x410], rax",
+              X.encode_mov_rm64_r64(R.RBP, -0x410, R.RAX)),
+        store("x86_step_mov_mem_disp32", "mov [rbx+4096], r9",
+              X.encode_mov_rm64_r64(R.RBX, 4096, R.R9)),
+        load("x86_step_lea_rm64_disp32", "lea rax, [rbp-0x410]",
+             X.encode_lea_r64_rm64(R.RAX, R.RBP, -0x410)),
+        # 64 would encode as a disp8 -- `_rm_disp` picks the narrowest form --
+        # and this row is here to pin the disp32 one.
+        load("x86_step_lea_rm64_disp32", "lea r11, [rbx+4096]",
+             X.encode_lea_r64_rm64(R.R11, R.RBX, 4096)),
+        # The disp32 LOAD, which is what a stack argument past the twentieth
+        # encodes to: `_load_home_from_stack` reads `mov r11, [rbp + 16 + 8k]`
+        # and `16 + 8k` crosses 127 at k = 14, so argument index 20 is the first
+        # one with a four-byte displacement.  128 is therefore the SMALLEST
+        # displacement that reaches this encoding, and a row at 120 would be a
+        # disp8 row wearing this lemma's name -- the `lea r11, [rbx+64]` trap in
+        # the one place it has not happened yet.
+        load("x86_step_mov_rm64_mem_disp32", "mov r11, [rbp+128]",
+             X.encode_mov_r64_rm64(R.R11, R.RBP, 128)),
+        # And the negative side, because the displacement is SIGNED: a lemma
+        # that read its four bytes unsigned would put a `mov r11, [rbp-0x410]`
+        # about 4 GB away, and every other hypothesis in this list would still
+        # hold, because the sign of the displacement is not one of them.
+        load("x86_step_mov_rm64_mem_disp32", "mov r11, [rbp-0x410]",
+             X.encode_mov_r64_rm64(R.R11, R.RBP, -0x410)),
+        # The two SIB stores a call site emits for every argument past the
+        # register file.  `[rsp + disp]` has NO non-SIB encoding (at mod=0 rm=5 is
+        # RIP-relative), so these are not a variant of the `mov_rm64_r64_disp8`
+        # rows above but a different instruction, and the whole
+        # stack-argument convention on the CALLER side is made of them.  128 is
+        # the first displacement that needs four bytes, for the same reason the
+        # load above is at 128: `_rm_disp` picks the narrowest form, and a row at
+        # 120 would be a disp8 row wearing the disp32 lemma's name.
+        sib_store("x86_step_mov_mem_sib_disp8", "mov [rsp+8], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 8, R.RAX)),
+        sib_store("x86_step_mov_mem_sib_disp32", "mov [rsp+128], rax",
+                  X.encode_mov_rm64_r64(R.RSP, 128, R.RAX)),
+        # And with a high source register, which is the `4c` prefix the two
+        # lemmas are general over -- `x86_step_mov_mem_sib_rsp` pins `0x48`, and a
+        # row at `0x48` only would leave every argument the compiler keeps in
+        # r8..r15 unchecked.
+        sib_store("x86_step_mov_mem_sib_disp8", "mov [rsp+8], r12",
+                  X.encode_mov_rm64_r64(R.RSP, 8, R.R12)),
+    ]
+
+
+def lemma_lean_source(lems):
+    """`(text, checks)` — the applicability file, and where each check landed.
+
+    `checks` is `(first_line, last_line, label, why)` per `example`, and the
+    caller attributes a Lean diagnostic by LINE rather than by matching the
+    emitted text back.  Two things went wrong the other way and both are worth
+    writing down:
+
+      * an `example (s := ls_0) : …` binder does NOT bind.  `s` stays a free
+        variable and `native_decide` rejects the goal ("Expected type must not
+        contain free variables"), so every check errored — and a version that
+        matched the emitted `example` line back found none of them, because an
+        error means Lean printed the line instead.  A check that cannot fail is
+        worse than no check: it is green.  `let` inside the type works, and is
+        what is emitted.
+      * the error lands on the `native_decide` line, one below the statement,
+        and on the statement line when the failure is elaboration.  So each
+        check records a RANGE and the caller attributes by range.
+
+    Every statement is therefore self-contained:
+    `example : (let s := ls_0; let code := lcode_0; <term>) := by native_decide`.
+    """
+    out = ["import X86", ""]
+    checks = []
+    for i, lem in enumerate(lems):
+        m = BASE + i * 16
+        items = ", ".join("0x%02x" % b for b in lem.enc)
+        out.append("def lcode_%d (code : Nat) : UInt8 :=" % i)
+        out.append("  if code < %d then 0 else ([%s].getD (code - %d) 0)"
+                   % (m, items, m))
+        out.append("def ls_%d : X86State := X86State.init 10 %d" % (i, m))
+    for i, lem in enumerate(lems):
+        bind = "example : (let s := ls_%d; let code := lcode_%d; %%s) := by" % (i, i)
+        for j, h in enumerate(lem.hyp):
+            out.append("/-- %s, hypothesis %d: `%s` -/" % (lem.label, j + 1, h))
+            first = len(out) + 1
+            checks.append((first, first + 1, lem.label,
+                           "hypothesis %d `%s` does not hold at %s — the lemma "
+                           "is vacuous there"
+                           % (j + 1, h, lem.enc.hex(" "))))
+            out.append(bind % h)
+            out.append("  native_decide")
+    return "\n".join(out) + "\n", checks
+
+
+_LEAN_LOC = re.compile(r"^(\S+):(\d+):\d+: error: ", re.M)
+
+
+def lemma_check_failures(out, checks, filename):
+    """The `checks` ranges Lean reported an error in, in file order.
+
+    The file name is compared rather than assumed, because Lean prints the path
+    it was given and a caller elsewhere in this file passes an absolute one.
+    """
+    at = set()
+    for m in _LEAN_LOC.finditer(out):
+        if m.group(1) == filename:
+            at.add(int(m.group(2)))
+    return [(label, why, sorted(n for n in at if lo <= n <= hi))
+            for lo, hi, label, why in checks if any(lo <= n <= hi for n in at)]
+
+
 def lean_source(samps):
     out = ["import X86", "",
            "/-- Each sample sits at its own address so a failure names the form. -/",
@@ -230,8 +687,14 @@ def main():
     with open(src, "w") as f:
         f.write(lean_source(samps))
     env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
-    cp = subprocess.run([lean, os.path.basename(src)], cwd=workdir, env=env,
-                        capture_output=True, text=True, timeout=3600)
+    cp = L.run_lean(lean, [os.path.basename(src)], cwd=workdir, env=env,
+                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+    if cp.exceeded:
+        print("FAIL: " + cp.exceeded)
+        print("  coverage is UNMEASURED, not clean: a run that stopped early "
+              "has no encoding after the point it stopped, and reporting those "
+              "as 'the model steps them' is a green that means nothing.")
+        return 1
     text = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
@@ -249,7 +712,38 @@ def main():
         print("\nThe backend can emit these, so every program using one would "
               "stop mid-run in the model — and a stopped run reads as result 0 "
               "rather than as a failure.")
-    return 1 if unstepped else 0
+    rc = 1 if unstepped else 0
+
+    # The step lemmas, at real encodings.  A lemma the model can never be asked
+    # about is the failure mode coverage above cannot see: `x86_step` answers
+    # for every byte the encoder produces, and a lemma whose hypotheses no such
+    # byte satisfies is a lemma that proves its goal about nothing.
+    lems = step_lemmas()
+    ltext, checks = lemma_lean_source(lems)
+    lname = "StepLemmas.lean"
+    with open(os.path.join(workdir, lname), "w") as f:
+        f.write(ltext)
+    cp = L.run_lean(lean, [lname], cwd=workdir, env=env,
+                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+    if cp.exceeded:
+        print("\nFAIL: " + cp.exceeded)
+        print("  lemma applicability is UNMEASURED, not satisfied: a lemma "
+              "whose `decide` never finished is exactly the unsatisfiable-"
+              "hypothesis case this half exists to find, and reporting it as "
+              "'every hypothesis satisfiable' would hide the finding.")
+        return 1
+    bad = lemma_check_failures(cp.stdout + cp.stderr, checks, lname)
+    print("\nstep-lemma applicability: %d lemma(s) at %d real encoding(s), %d "
+          "hypotheses — %s"
+          % (len({l.lemma for l in lems}), len(lems), len(checks),
+             "every hypothesis satisfiable" if not bad
+             else "%d of %d FAILED" % (len(bad), len(checks))))
+    for label, why, where in bad:
+        print("  %-20s %s" % (label, why))
+        print("      Lean reported it on line(s) %s of %s" % (where, lname))
+    if bad:
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":

@@ -107,14 +107,24 @@ _HOSTMODS_ROOT = os.path.join(_REPO_ROOT, "formal", "hostmods")
 # not a behaviour change: every one of these refuses the build exactly as
 # before, and the union is asserted to equal what the single list used to hold.
 HOST_UNREACHABLE = frozenset((
+    # `subprocess`, `threading`, `concurrent`, `concurrent.futures` and `ctypes`
+    # were here until 2026-10-02 and are now in HOST_ADMITTED below, because each
+    # has a `formal/hostmods/` model.  A name LEAVES this set by being WRITTEN,
+    # for the reason the HOST_MODELLED comment states: an entry left behind is a
+    # claim that is false once the module that answers it is in the tree, and this
+    # one is worse than false -- it feeds `host_module_tier`, so the sweep's reach
+    # line would go on reporting these as "needs a host process this image does
+    # not have" for a file that now builds.  The capability is still missing; what
+    # changed is that the module answers anyway, under a declared contract.
+    #
     # A second process.
-    "subprocess",
     # A thread, and a proved model of one.
-    "threading", "concurrent", "concurrent.futures", "asyncio",
+    "asyncio",
     # A socket.
     "socket", "urllib", "http",
-    # A dynamic loader for foreign code, or an embedded CPython.
-    "ctypes", "importlib", "importlib.util", "importlib.machinery",
+    # A dynamic loader for foreign code, or an embedded CPython.  `ctypes` moved
+    # to HOST_ADMITTED with the rest; what is left here is the embedded CPython.
+    "importlib", "importlib.util", "importlib.machinery",
     # The interpreter's own frames, allocation set, or shutdown path. There is
     # no interpreter here to ask, and on this path a value is one 64-bit word,
     # so there is nothing for `gc` to track and no bytecode for `dis` to
@@ -122,8 +132,13 @@ HOST_UNREACHABLE = frozenset((
     "traceback", "gc", "atexit", "signal", "warnings", "dis",
     # Process-wide reporting machinery, which is a host object by construction.
     "logging", "unittest", "unittest.mock",
-    # A terminal, or a writable filesystem this target does not get.
-    "getpass", "webbrowser", "tempfile", "shutil",
+    # A terminal. `tempfile` is here for the `TMPDIR`-derived half of that
+    # sentence rather than the terminal half, and `shutil` WAS here too — under
+    # "a writable filesystem this target does not get", which was FALSE and is
+    # now `formal/hostmods/shutil.mojo`; `get_terminal_size` is the half that
+    # survived the removal and is absent in that module with the reason at its
+    # own definition.
+    "getpass", "webbrowser", "tempfile",
     # A library outside libSystem, so linking it would contradict the premise
     # that a formal image links libSystem and nothing else.
     "zlib", "gzip", "locale",
@@ -182,7 +197,25 @@ HOST_MODELLED = frozenset((
     #     answer is written at the top of the file: `platform()` itself is one
     #     call away and blocked on `architecture()`, which needs `file(1)`, and
     #     `processor()`/`libc_ver()` are subprocesses and a readable file.
-    "errno", "stat", "select",
+    #   `stat`  — `formal/hostmods/stat.mojo`, the MODE VOCABULARY and nothing
+    #     else: every `S_I*` / `S_IF*` / `ST_*` constant, `S_IFMT`, `S_IMODE`,
+    #     the seven `S_IS*` predicates this platform compiles, and `filemode`,
+    #     each checked name by name against CPython's own `stat` by
+    #     `test_formal_stat.py` over an EXHAUSTIVE mode corpus — every one of
+    #     the 4096 permission combinations and every type CPython's `filemode`
+    #     table has a row for. It is the only host module with no dependency on
+    #     the C library and none on `os`, because CPython's `stat` is the
+    #     VOCABULARY for reading `os.stat`'s answer and holds no syscall of its
+    #     own; the syscall and its byte-wise field reader are
+    #     `formal/hostmods/os/_syscalls.mojo`'s (`fs_stat_field64`,
+    #     `fs_stat_mode`) and are deliberately NOT re-exported here, so there is
+    #     one reader of `struct stat` in this tree. What it cannot answer is at
+    #     the top of that file: `S_ISDOOR` / `S_ISPORT` / `S_ISWHT` are
+    #     compiled out of CPython on this platform and answering "no" would be a
+    #     plausible wrong answer about a whiteout, and Darwin's
+    #     `ST_BIRTHTIME` / `ST_BLOCKS` / `ST_BLKSIZE` have no CPython name to
+    #     be checked against.
+    "errno", "select",
     #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
     #     checked read for read against CPython's own `PurePosixPath` by
     #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
@@ -210,8 +243,9 @@ HOST_MODELLED = frozenset((
     #     positions and counts compared against CPython's own `tokenize` by
     #     `test_ast_formal.py`. What it cannot do is build a tree, because a
     #     value on this path is one 64-bit word and a node is not one: the
-    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
-    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
+    #     subset, the 38 pinned ways `parse` differs from CPython's verdict and the
+    #     three stream divergences are in `formal/hostmods/ast.mojo`'s own
+    #     docstring, under "WHAT parse(src) DOES NOT MEAN".
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -286,13 +320,116 @@ HOST_MODELLED = frozenset((
     #     measurement — the annotation shapes build and run, and a name used as
     #     a VALUE is still refused, so the erasure is not a promise the module
     #     makes.
+    #   `enum`  — `formal/hostmods/enum.mojo`, checked accessor for accessor
+    #     against CPython's own `enum` by `test_formal_core_hostmods.py`, on both
+    #     backends. The module is ONE function (`Enum`) and the interesting part
+    #     is why: an enum member on this path is a CLASS-LEVEL CONSTANT and the
+    #     base is erased, so `class Reg(Enum): RAX = 0` reads `Reg.RAX` as `0`
+    #     with no `enum.mojo` in the tree at all. What the module buys is that
+    #     the import RESOLVES — `type_system.py` and `formal/x86_64.py` each
+    #     `from enum import Enum` on their first line, and without it both are
+    #     refused for a statement that is not wrong. What is NOT the module's is
+    #     `.value` and `.name`: those are attribute reads on a class constant and
+    #     are answered in `formal/model.py` (`enum_member_accessor`) and
+    #     `formal/build.py` (`_enum_member_sites`), because `.value` on a member
+    #     was silently reading 0 where CPython reads the member's value —
+    #     `formal/x86_64.py` does its register arithmetic through it.
+    #   `contextlib`  — `formal/hostmods/contextlib.mojo`, ONE function
+    #     (`nullcontext`), checked against CPython's own for both arities by
+    #     `test_formal_core_hostmods.py` on both backends. It is the one name in
+    #     CPython's `contextlib` whose meaning is fully carried by `with EXPR as
+    #     TARGET` on this path, which binds the target to the expression. The
+    #     neighbours are absent for the reason the module's docstring measures:
+    #     `suppress` needs an exception, `redirect_stdout` needs a stream,
+    #     `contextmanager` is a decorator (silently DROPPED, so it would build
+    #     and do nothing) and `closing` would bind correctly and then silently
+    #     never close anything — the one shape a mirror of CPython must not ship.
+    #   `math`  — `formal/hostmods/math.mojo`, the SEVEN functions in CPython's
+    #     `math` that answer an INTEGER (`gcd` / `lcm` / `isqrt` / `factorial`
+    #     / `comb` / `perm` / `prod`), plus the IEEE-754 bit patterns of the
+    #     five float constants, checked name by name against CPython's own
+    #     `math` by `test_formal_math.py`. Everything else in CPython's `math`
+    #     takes and answers a `float`, and that is not a missing libc call:
+    #     libSystem has every one of them, and a `double` does not travel in an
+    #     integer register on either ABI (arm64 `d0`, SysV x86-64 `XMM0`), so
+    #     calling `sqrt(x)` here would hand the C library a garbage bit pattern
+    #     and return a plausible wrong answer. `floor`/`ceil`/`trunc`/`round`/
+    #     `fabs` are absent for that reason and not because their integer case
+    #     is hard: for an integral argument each of them answers the argument,
+    #     and a `floor` that returns its argument is `copy.copy`. What the
+    #     module cannot answer is at the top of that file: a binomial
+    #     coefficient or a factorial above 64 bits is -1 rather than a wrapped
+    #     number, which is a status because there are no exceptions here
+    #     (FORMAL.md phase 7).
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "math", "random", "decimal", "fractions",
-    "numbers", "array", "operator", "functools", "itertools", "collections",
+    "random", "decimal", "fractions",
+    "numbers", "array", "operator", "functools", "itertools",
+    #   `collections`  — NO `formal/hostmods/` module, and the entry says why in
+    #     the form a reader acts on: `HOST_MODULE_ADVICE` below is what the
+    #     REFUSAL prints, which is where a person moving one of the five files
+    #     that stop here will actually be. CPython's `collections` is one
+    #     module-level function and eight classes, and the measurement is that
+    #     neither half is a module.
+    #
+    #     `namedtuple` is a TYPE FACTORY, and a type is not a value on this
+    #     path: there is no word that denotes one, so a class it builds cannot
+    #     be returned from a module function or bound to a module-level name.
+    #     The want behind the five call sites is not that though — measured, five
+    #     of the six uses spell a compile-time-KNOWN record, which this target
+    #     can express, as a `struct`. The capability and the measurement are
+    #     `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`,
+    #     which also owns `copy.deepcopy` because the two are one missing thing.
+    #
+    #     The eight classes are containers, and the `os.listdir` BLOB route
+    #     serves exactly one of their operations and no more: a caller CAN
+    #     subscript-assign into a blob a hostmod returned (measured — a
+    #     `malloc`'d `Int64` array, `counts[2] = 5`, `counts[2]` answers 5), so
+    #     `counts[opcode] += 1` works. It is not `Counter`, for three measured
+    #     reasons: word 0 of a blob is its LENGTH, so a key of 0 reads the
+    #     count instead of counting; a `Counter` inserts on a miss with a
+    #     default while a blob has no dispatch, so the caller must pre-size and
+    #     pre-test and the source spells neither; and `most_common`/`items`/
+    #     `keys`/iteration/`+=`/`|` are method calls and operators on a value,
+    #     which needs a type this image can see. Shipping the blob under the
+    #     name `Counter` is the approximation
+    #     `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md` declined to ship.
+    "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
-    "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
+    "codecs", "copy", "abc", "types", "queue",
     "weakref", "pprint", "reprlib", "pickle",
+    #   `shlex`  — a state machine over a string, the same shape as `re` and
+    #     `fnmatch`, which are written. `split`, `quote` and `join` are pure
+    #     computation over bytes a value already is; the streaming `shlex.shlex`
+    #     reader is a GENERATOR over `readline`, which is the `fnmatch.iglob`
+    #     shape, so it is not in reach by the same argument. It is here because
+    #     it is a standard-library module, and a name in NEITHER tier made
+    #     `unresolvable_import_error` say "not a stdlib or sibling module" —
+    #     a false statement about the target, and the one diagnostic in this
+    #     family that misidentifies what kind of thing the name is.
+    "shlex",
+    #   `shutil`  — `formal/hostmods/shutil.mojo`, checked against CPython's own
+    #     `shutil` on a real filesystem by `test_formal_shutil.py`: `copyfile`
+    #     over a source larger than its own copy buffer, `copy`/`copy2`'s
+    #     one observable difference (the mode and not the time, and both),
+    #     `copymode`, `copystat`, `move`, `rmtree`, `copytree` and `which` over
+    #     a `PATH` corpus chosen for its branches. It was in `HOST_UNREACHABLE`,
+    #     not here, so its removal is a REVERSAL of a permanent-fact claim and
+    #     the reason is worth stating: that claim said "a writable filesystem
+    #     this target does not get", and `formal/hostmods/os/__init__.mojo` has
+    #     had `mkdir`, `makedirs`, `remove`, `rmdir`, `rename`, `replace` and
+    #     `chmod` for a while — `test_formal_os.py` runs 75 filesystem
+    #     operations against the real filesystem — so the filesystem half was
+    #     false and only the TERMINAL half is not. What it adds to make the copy
+    #     possible is `fopen`/`fwrite`/`fread`/`fclose` and `utimes` in
+    #     `formal/hostmods/os/_syscalls.mojo`, because this path lowers `open`
+    #     itself and refuses the C library's three-argument spelling of it.
+    #     What it cannot answer is at the top of that file: `disk_usage` is a
+    #     three-tuple (`bugs/FORMAL_time_struct_shaped_answers.md`),
+    #     `get_terminal_size` is the terminal that IS unavailable, `move` has no
+    #     cross-device fallback because `errno` cannot be bound
+    #     (`__error` has a leading underscore), and the archives are a library
+    #     with a struct layout nobody in the sweep asks for.
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
@@ -311,6 +448,89 @@ HOST_MODELLED = frozenset((
     "inspect",
 ))
 
+# The THIRD tier, and it exists because the other two could not say what is now
+# true of five modules.
+#
+# `HOST_MODELLED` says "a Mojo-side implementation could in principle provide
+# this, and has not yet" -- a gap with an owner.  `HOST_UNREACHABLE` says "this
+# needs an object a freestanding image does not have" -- a fact about the target,
+# permanent.  Both are FALSE of `subprocess` since its `formal/hostmods/` model
+# landed: the module is written, so it is not a gap, and the second process is
+# still missing, so it is not modelled either.  What it is, and what neither tier
+# had a word for, is a module that ANSWERS under a DECLARED CONTRACT -- its API
+# shape is computed and checked against CPython, and its host-dependent answers are
+# each a named claim of trust, emitted into the generated Lean as a `sorry` that
+# `formal/lean.py`'s census counts and printed by `fire.py` as a `trust:` line.
+#
+# So the tier is not a bookkeeping convenience.  A reader asking "can a person
+# write `subprocess` for this backend?" used to get "no", which sends them away
+# from a file that now builds; and a reader asking "what does this build trust?"
+# got no answer at all, because there was no category to ask in.
+#
+# Membership rule: a name is here IFF it has a `formal/hostmods/` source, exactly
+# as `HOST_MODELLED`'s rule is "a name LEAVES here by being WRITTEN".  It is the
+# same rule with the opposite arrow, and `test_formal_admitted.py` asserts the
+# partition -- both that every admitted name has a model and that every hostmod
+# declaring a contract is in this tier -- so a module cannot be written and
+# forgotten, which is the failure mode a hand-maintained tier always has.
+HOST_ADMITTED = frozenset((
+    # A second process: `run`, `call`, `check_call`, `check_output`, `getoutput`,
+    # `getstatusoutput`, `Popen.wait` -- seven contracts, and everything decidable
+    # about the arguments is decided rather than admitted.
+    "subprocess",
+    # A dynamic loader for foreign code.  The type table and the buffer helpers
+    # are pure; `CDLL` and a call through the handle are the two contracts.
+    "ctypes",
+    # A thread.  `Future`'s five states and the lock's bit are arithmetic; the
+    # pool and the thread are the contracts.
+    "concurrent", "concurrent.futures", "threading",
+    # `fcntl` WAS here — eleven constants and one admitted `flock` — and left on
+    # 2026-10-02, because it no longer needs an admission:
+    # `formal/hostmods/fcntl.mojo` is the real `flock(2)` over the real
+    # filesystem, measured (a take/retake/release sequence, and a SECOND
+    # descriptor of the same file refused, because a `flock` is per open file
+    # description) by `test_formal_fcntl.py` on both backends. An admitted
+    # contract is for a host fact this tree cannot answer; a lock it can take
+    # and release is not one. See the module's own docstring, which also
+    # records that **macOS's `flock` and `F_SETLK` share a lock space**, the
+    # opposite of Linux.
+))
+
+# A name in HOST_ADMITTED whose `formal/hostmods/` source has gone, and a hostmod
+# that declares a contract without its module being in the tier.  Both are
+# reported rather than corrected: the first would be a claim this table cannot
+# keep true by itself, and the second would be a proof resting on a contract the
+# tier does not admit to.  `test_formal_admitted.py` asserts this is empty.
+def _admitted_tier_conflicts() -> list:
+    import os
+    root = _HOSTMODS_ROOT
+    if not os.path.isdir(root):
+        return ["formal/hostmods/ does not exist"]
+    bad = []
+    have = set()
+    for dirpath, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith(".mojo"):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, name), root)
+            parts = rel.split(os.sep)
+            if parts[-1] == "__init__.mojo":
+                parts = parts[:-1]
+            else:
+                parts[-1] = parts[-1][:-len(".mojo")]
+            have.add(".".join(parts))
+    for n in sorted(HOST_ADMITTED):
+        if n not in have:
+            bad.append(f"{n} is in HOST_ADMITTED but has no formal/hostmods source")
+    from formal import admitted as _admitted
+    for c in _admitted.all_contracts():
+        if c.module.split(".")[0] not in HOST_ADMITTED:
+            bad.append(f"{c.module} declares an admitted contract but is not in "
+                       f"HOST_ADMITTED")
+    return bad
+
+
 # Everything the build treats as a host module. The union, deliberately: the
 # predicate the BUILD consults must not change behaviour, and this is the one
 # place that says so.
@@ -326,7 +546,30 @@ HOST_MODELLED = frozenset((
 # files they imported "not a stdlib or sibling module", which is a statement
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
+# `fcntl` WAS IN NEITHER TIER, which is why its note is here and not in one of
+# them: the sweep classified `import fcntl` as `not-answerable/host-import`
+# because no `fcntl.mojo` existed for the resolver to find, not because a set
+# said so — and `_is_host_module` returns False for it, so the refusal a caller
+# got was "not a stdlib or sibling module, and no such file exists", the same
+# message any unresolvable import gets. `formal/hostmods/fcntl.mojo` is
+# `flock(2)` and the whole of CPython's integer surface — 30 constants, each
+# read out of CPython's own `fcntl` by `test_formal_fcntl.py`, and the lock
+# itself over a take/retake/release sequence including the case a POSIX
+# record-lock implementation gets wrong (a SECOND descriptor of the same file
+# is refused, because a `flock` is per open file description). Worth saying
+# plainly: **it moves ZERO files to PASS**, since all three files that want
+# `fcntl` also want `subprocess` and move to that instead — the same accounting
+# `bugs/FORMAL_platform_reachable_row_measured.md` §2 records for `platform`.
+# What is absent is at the top of that file, and one absence is a SPELLING
+# rather than a fact about the target: the third argument of `fcntl(2)` does not
+# arrive, so `getfd`/`setfd`/`getfl`/`setfl` would be a `setfd` that reports
+# success and changes nothing —
+# `bugs/FORMAL_a_variadic_call_drops_its_third_argument.md`. A second measured
+# fact worth keeping: **macOS's `flock` and `F_SETLK` SHARE a lock space**, the
+# opposite of Linux, so a reader who assumes Linux gets this backwards.
+
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
+HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED
 
 
 # A module the formal FRONT END implements at COMPILE TIME, so the import is
@@ -388,7 +631,7 @@ def is_frontend_provided(name: str) -> bool:
 
 
 def host_module_tier(name: str) -> str:
-    """`'modelled'`, `'unreachable'`, or `''` for a name that is not a host module.
+    """`'modelled'`, `'admitted'`, `'unreachable'`, or `''` for no such name.
 
     The accessor that makes the split usable. A coverage report can then say
     "this file is out of reach because it needs a second process" — a fact
@@ -397,15 +640,26 @@ def host_module_tier(name: str) -> str:
     owner. Before this existed both were one bucket, and the bucket's own
     description asserted the stronger of the two claims about all of them.
 
+    `'admitted'` is the third answer, for a module that has a
+    `formal/hostmods/` source AND declares `@admitted` contracts for the
+    operations whose answer is an external fact -- see `HOST_ADMITTED`.  It is
+    tested after `unreachable` and before `modelled` because a name in two tiers
+    is a bug the partition check reports, and the order only decides what such a
+    bug looks like.
+
     `unreachable` is tested first, so a name in both tiers would resolve to the
     permanent answer; the partition is asserted to be disjoint by the test
-    suite, and `_host_tier_conflicts` reports any overlap on demand.
+    suite, and `_host_tier_conflicts` reports any overlap on demand, with
+    `_admitted_tier_conflicts` doing the same for the admitted half plus its
+    "has a source" rule.
     """
     if not name:
         return ""
     top = name.split(".")[0]
     if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
         return "unreachable"
+    if top in HOST_ADMITTED or name in HOST_ADMITTED:
+        return "admitted"
     if top in HOST_MODELLED or name in HOST_MODELLED:
         return "modelled"
     return ""
@@ -423,7 +677,53 @@ def _host_tier_conflicts() -> list:
 
 
 def _is_host_module(name: str) -> bool:
+    """Whether this name is a HOST MODULE this path refuses for want of source.
+
+    NOT "is this a name in CPython's standard library" — that is
+    `is_cpython_stdlib`, and the two are different questions with different
+    consumers. This one is `resolve_module_path`'s pass 2 and the tier tables'
+    own membership test, so it answers "is this one of the names we have
+    CLASSIFIED", and a classified name includes every module with a
+    `formal/hostmods/` source, which is why `math`, `stat`, `shutil`, `fcntl`
+    and `platform` all answer False here and are pinned False by their own
+    suites: they are built here, so nothing refuses them.
+    """
     return name in HOST_MODULES or name.split(".")[0] in HOST_MODULES
+
+
+def is_cpython_stdlib(name: str) -> bool:
+    """Whether `name` names a module of the HOST's standard library.
+
+    **CPython's own list is the authority**, `sys.stdlib_module_names` (3.10+),
+    with the hand-maintained tiers as a second opinion rather than the first.
+    The tiers are a CLAIM about the target — "does implementing this need an
+    object a freestanding image that links libSystem and nothing else does not
+    have" — and a claim is the wrong thing to answer "is `binascii` part of the
+    standard library". That question has an oracle, and using a hand-kept list
+    for it made this build say, of a module CPython ships:
+
+        build: a.mojo imports 'binascii', which is not a stdlib or sibling
+        module, and no such file exists
+
+    which is false about the target in a message nobody wrote a rule for, and
+    which sent 36 sweep rows to be filed as unresolved imports rather than as
+    the host-import rows they are (measured, and recorded in
+    `tools/formal_sweep.py`'s own `_is_cpython_stdlib`, which grew a second
+    authority to compensate — two readers of one fact, which is how they come to
+    disagree; this function is the one, and that copy now calls it).
+
+    Matched on the TOP component, like `_is_host_module` and `host_module_tier`,
+    so `os.path` and `os` answer alike. The interpreter's table is read through
+    `getattr` and a missing one answers False, which is the direction that keeps
+    a Python older than 3.10 behaving as it did rather than raising.
+    """
+    if not name:
+        return False
+    top = name.split(".")[0]
+    if name in HOST_MODULES or top in HOST_MODULES:
+        return True
+    names = getattr(sys, "stdlib_module_names", None)
+    return bool(names) and top in names
 
 
 # Modules whose import is a DECLARATION to the reader rather than a
@@ -458,6 +758,67 @@ def _manifest_path(dylib_path: str) -> str:
     return dylib_manifest_path(dylib_path)
 
 
+def admitted_contracts(source_path: str) -> list:
+    """Every ADMITTED CONTRACT this file's build reaches, transitively.
+
+    A `formal/admitted.py` `Contract` per `@admitted(...)` in any module of the
+    file's import CLOSURE — the same closure `import_closure_digest` walks, with
+    the same `imported_modules` / `resolve_module_path` pair and the same
+    `relative_to` / `project_root`, so the two cannot disagree about what this
+    file builds against.
+
+    TRANSITIVE is the load-bearing word and it is why this is not a lookup of the
+    entry file's own imports.  `formal/build.py`'s `_resolve_imports` compiles
+    every module in the closure into a dylib and links it, so a file that never
+    names `subprocess` still links a library whose `run` is an admitted
+    contract; a per-file `trust:` line that only looked at the entry file would
+    under-report for exactly the files with the deepest closures, which is where
+    the trust is hardest to see.
+
+    The whole MODULE's contracts are reported for a module that is reached, not
+    only the ones the calling file calls.  That is a deliberate over-report and
+    the reason for it is that the narrower answer needs a call-graph walk across
+    dylib boundaries, and the failure mode of getting it wrong is a `trust:`
+    line that omits a contract the image's link line carries.  A contract listed
+    for a call nobody makes costs a reader one line; one missing costs them the
+    whole point of the line.  `formal/admitted.py`'s module docstring states the
+    same rule where the contracts themselves are declared.
+
+    A file that reaches none returns `[]`, which is what every caller tests for
+    and what keeps the common case free.
+    """
+    from formal import admitted as _admitted
+    hostmod_paths = {os.path.abspath(full)
+                     for _rel, full in _admitted.hostmod_files()}
+    seen_paths = set()
+    out = {}
+    queue = [os.path.abspath(source_path)]
+    while queue:
+        path = queue.pop(0)
+        if path in seen_paths:
+            continue                      # cycle, or a diamond: one visit
+        seen_paths.add(path)
+        for st in module_statements(path):
+            if not isinstance(st, F.ImportStmt):
+                continue
+            names = [st.module]
+            for mod, _alias in (st.extra or []):
+                names.append(mod)
+            for m in names:
+                if not isinstance(m, str) or not m:
+                    continue
+                dep = resolve_module_path(m, relative_to=path,
+                                          project_root=source_path)
+                if dep is None:
+                    continue
+                if os.path.abspath(dep) not in seen_paths:
+                    queue.append(os.path.abspath(dep))
+        if path in hostmod_paths:
+            for c in _admitted.contracts_in_file(path):
+                out[c.qualified] = c
+    return [out[k] for k in sorted(out)]
+
+
 def import_closure_digest(source_path: str, _seen=None) -> str:
     """A digest of every SOURCE this file's build reads besides itself.
 
@@ -475,9 +836,9 @@ def import_closure_digest(source_path: str, _seen=None) -> str:
     Measured on `tools/formal_sweep.py`: a fix to `formal/hostmods/re.mojo`
     left the next run reporting `cas: 4 hit` and "verdict history: unchanged: 4"
     for four files that now build
-    (`bugs/FORMAL_cas_verdict_key_ignores_the_hostmod_sources_it_compiles.md`,
-    and the import-closure half of
-    `bugs/FORMAL_sweep_cache_ignores_imports.md`).
+    (`cas.formal_build_key`'s `imports` clause is where this digest is folded
+    in, and `test_formal_sweep_cache_key.py` is what pins that it moves the
+    key).
 
     It walks with the SAME two functions the build walks with —
     `imported_modules` for what a statement list imports and
@@ -808,6 +1169,45 @@ def linked_module_paths(linked: list) -> list:
     return out
 
 
+def linked_struct_owners(linked: list) -> dict:
+    """`{struct name: [{"library", "module", "signature"}, …]}` off the link line.
+
+    The complement of `linked_module_paths`, and it answers with NO source at
+    all: a library advertises a struct's METHODS (`kind: "method"` entries, one
+    per `add`/`__len__`/`__init__`) whether or not the file it was built from
+    is still readable, and the struct's NAME is in every one of them. So a
+    manifest alone can say "this image links a library that has `Bag`", which is
+    the fact a build-pass refusal needs when the declaration itself is missing
+    (`check_construction_shapes`'s `undeclared_linked_struct_refusal` arm).
+
+    The struct name is the `signature` up to its last `.`, because that is what
+    `_formal_exports` writes there — `f"{struct}.{method}"`, so `Bag.__len__`
+    and `My_Bag.add` both yield the struct and neither yields a fragment of it.
+    Deriving it from `name.split("_")[0]` instead would turn `My_Bag` into `My`,
+    which is a different type; that is why there is one rule and not two
+    spellings to choose between.
+
+    Entries are deduped per library, because a struct with four methods would
+    otherwise contribute four near-identical rows to a message and the reader
+    would read the repetition as four libraries. Link order is kept."""
+    out: dict = {}
+    for lib in linked or []:
+        library = lib.get("install_name") or lib.get("path") or ""
+        module = lib.get("module") or ""
+        seen = set()
+        for entry in (lib.get("exports") or []):
+            if entry.get("kind") != "method":
+                continue
+            signature = entry.get("signature") or ""
+            struct, dot, _method = signature.rpartition(".")
+            if not dot or not struct or struct in seen:
+                continue
+            seen.add(struct)
+            out.setdefault(struct, []).append(
+                {"library": library, "module": module, "signature": signature})
+    return out
+
+
 def module_struct_defs(path: str, project_root: str = None) -> list:
     """The `StructDef`s the module at `path` declares, following its re-exports.
 
@@ -828,6 +1228,14 @@ def module_struct_defs(path: str, project_root: str = None) -> list:
         for st in mod_stmts:
             name = getattr(st, "name", None)
             if isinstance(st, F.StructDef) and name not in seen:
+                # The same attach `imported_struct_defs` does, and for the same
+                # reason — see that function's docstring. It is here as well as
+                # there because a LINKED LIBRARY reaches its declarations
+                # through this function and never through the import walk, so
+                # attaching only in `imported_struct_defs` would leave every
+                # struct behind a `--link-dylib` exactly as unclassified as the
+                # ones behind an import were.
+                _attach_declared_census(st, p)
                 seen.add(name)
                 out.append(st)
         for st in mod_stmts:
@@ -1117,6 +1525,83 @@ def resolve_module_path(module_name: str, relative_to: str = None,
     return None
 
 
+# What to DO about a host module, for the names where measurement has already
+# answered it.  Published here rather than written into the message at each site
+# because the message is generated: one wording for one cause is what keeps a
+# cause from being filed under two headings, and the advice has to travel with
+# the SAME generated string or it will be true of the one call site somebody
+# edited.
+#
+# It is a table and not a comment because a comment is read by the next person
+# editing `formal/` and a refusal is read by the person whose file does not
+# build.  `HOST_MODELLED`'s entries are the former; this is the latter, and it
+# exists because the gap it fills is measured: every file that stops on one of
+# these names stops on the module, never reaching the call, so a message that
+# only names the module leaves the reader with nothing to act on and the fix is
+# a bug doc one reader has to find.
+#
+# A name LEAVES by being WRITTEN, the same rule `HOST_MODELLED` follows: the
+# advice must name what the file CAN do, never what it cannot, and an entry left
+# behind after a module exists would be the advice to reimplement it.  So an
+# entry here is a CLAIM that the module still has no source, and
+# `host_module_advice_is_honest` is the check that says so.
+#
+# This is also the cheapest real deliverable in
+# `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`, and it is a
+# MESSAGE, not a module: that document measured five files in this repository's
+# own tooling blocked on `import collections`, and without a line saying what to
+# write instead the refusal reads as "this target cannot do records" — which is
+# what the next person files the next bug document about.  The `collections` entry
+# is the worked example: a COMPILE-TIME-KNOWN record with readable fields is a
+# `struct` (`formal/hostmods/struct.mojo` exists, and a struct's fields are words
+# in a frame), while a type built AT RUN TIME has no answer at all, because
+# there is no word that denotes a type on this path.  Both halves are stated so
+# nobody has to discover the second one by building.
+HOST_MODULE_ADVICE = {
+    "collections":
+        "the record the callers here want is a STRUCT: declare it with its "
+        "fields, and read them as fields. Its only module-level name is "
+        "`namedtuple`, which builds a TYPE at run time, and there is no word on "
+        "this path that denotes a type (doc/ABI.md, Generics), so "
+        "`namedtuple(\"Census\", \"ok detail …\")` asks for something that cannot "
+        "be lowered even in principle — which is why \"write a struct instead\" is "
+        "a complete answer for a record whose fields the compiler can see and is "
+        "NOT an answer for one it cannot. Measured: five files in this "
+        "repository's own tooling import it (`formal/lean.py`'s `Census`, "
+        "`formal/model.py`'s `InitShape`, `tools/formal_sweep.py`'s three). "
+        "`Counter` is a dict rather than a record, so it is the other question: "
+        "see bugs/FORMAL_listdir_no_run_time_sequence.md",
+    "copy":
+        "a field-wise copy of a type the COMPILER KNOWS at the call site is a "
+        "struct construction: build a new one and assign the fields. A copy "
+        "chosen at run time, over a graph whose shape the build cannot see, has "
+        "no answer here — the same missing thing as a type built at run time",
+    "functools":
+        "the higher-order functions are a callable this path has no "
+        "representation for; the arithmetic they wrap is ordinary code and can "
+        "be written out",
+}
+
+# Three entries, and three is the right size for a mechanism that must not become
+# a dumping ground: an entry is worth a row only when the answer is MEASURED and
+# the alternative is a spelling the reader can write today.  `math`, `argparse`
+# and `contextlib` are the other candidates and none qualifies yet — their files
+# answer, so the reader is not stuck.
+
+
+def host_module_advice(name: str) -> str:
+    """The `name`'s next step, or `''` when there is no measured one.
+
+    `name` is matched on its TOP component, like `_is_host_module` and
+    `host_module_tier`, so an advice written for a package names every module
+    under it — which is what a reader of `collections.abc` wants and what a
+    per-spelling table would get wrong by omission."""
+    if not name:
+        return ""
+    return HOST_MODULE_ADVICE.get(name) \
+        or HOST_MODULE_ADVICE.get(name.split(".")[0], "")
+
+
 def unresolvable_import_error(source_path: str, module_name: str) -> str:
     """The one wording for "this import names nothing this backend can build".
 
@@ -1135,6 +1620,7 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     # out before anything asks — so that the set of answers this function can
     # give is the set `resolve_module_path` can return, and a future caller
     # that bypasses the filter says the right thing.
+    advice = ""
     if is_frontend_provided(module_name):
         kind = ("provided by this backend's front end as a compile-time "
                 "transform, so there is no source to compile and nothing for "
@@ -1142,10 +1628,77 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     elif _is_host_module(module_name):
         kind = ("a host module (CPython standard library), which has no Mojo "
                 "source for this backend to compile")
+    elif is_cpython_stdlib(module_name):
+        # The one sentence that used to be FALSE about the target.  CPython
+        # ships `binascii`, `cmath`, `getopt`, `html`, `tomllib` and 217 other
+        # names this table does not classify, and each of them was reported as
+        # "not a stdlib or sibling module, and no such file exists" — a
+        # statement about the TARGET that the interpreter's own
+        # `sys.stdlib_module_names` denies.
+        #
+        # It is worded apart from the classified case on purpose, because the
+        # two differ in something a reader acts on: a name in a tier has an
+        # owner and a next step (`host_module_advice` below, and
+        # `host_module_tier` for a coverage report), and a name in NO tier has
+        # neither — `bugs/FORMAL_stdlib_module_names_are_not_classified.md` is
+        # the queue for the 222, and it records that ZERO of them is imported by
+        # any file in this repository or the stdlib, which is what makes the
+        # classification a bounded piece of work rather than a coverage
+        # emergency. So this says what is true (it is the host's library, there
+        # is no source here) and claims nothing about which tier it belongs to.
+        kind = ("a CPython standard-library module, which has no Mojo source "
+                "in this tree and no tier in `formal/imports.py` saying whether "
+                "implementing it would need an object this target does not "
+                "have — so nothing here can say whether it is reachable")
     else:
         kind = "not a stdlib or sibling module, and no such file exists"
-    return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
-            f"is {kind}")
+    advice = host_module_advice(module_name)
+    out = (f"{os.path.basename(source_path)} imports {module_name!r}, which "
+           f"is {kind}")
+    # The next step, when there is a measured one, as its own sentence.  It is
+    # appended rather than folded into `kind` so that `kind` stays the three
+    # reasons the resolver can produce and a caller matching on it — a
+    # classifier, the sweep's `_FRAME_ESCAPES` family, a test — keeps seeing
+    # the one string it was written against.
+    return f"{out}; {advice}" if advice else out
+
+
+def unresolvable_import_errors(source_path: str, module_names) -> str:
+    """The same sentence for a file with SEVERAL unresolvable imports, one line each.
+
+    **One sentence per module, sorted, and every module named**, which is what
+    makes the diagnostic a property of the FILE rather than of the order its
+    imports happen to be written in. One-at-a-time was the only shape here for
+    years, and its measurement is
+    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: a file importing
+    `subprocess`, `tempfile` and `glob` was refused for whichever came first in
+    its statement list, so which module the diagnostic — and any census built
+    from it — named changed when an unrelated import was added anywhere in the
+    file. Fixing `subprocess` moved the file from "refused for `subprocess`" to
+    "refused for `tempfile`", and a per-module breakdown drawn from those names
+    measured a different thing before and after a change that moved no file.
+
+    The SORT is what makes it order-independent, and the per-module lines are
+    what makes it complete: a reader who has three modules to remove is told
+    about three, and `tools/formal_sweep.py` can classify a file by the whole
+    set instead of by whichever name it happened to parse last.
+
+    One module still gets `unresolvable_import_error`'s single sentence verbatim,
+    because that is the wording every needle in the tree — a `refuse:` case, a
+    message a test asserts on, a chain the sweep peels — is written against, and
+    "several" must not cost the single case its wording.
+    """
+    mods = sorted(set(module_names))
+    if len(mods) == 1:
+        return unresolvable_import_error(source_path, mods[0])
+    lines = "\n".join(f"  {unresolvable_import_error(source_path, m)}"
+                      for m in mods)
+    return (f"{os.path.basename(source_path)} imports {len(mods)} modules "
+            f"this backend cannot build, and every one of them is named here "
+            f"rather than only the first: fixing one moves the file to the "
+            f"next, and a diagnostic that reports one blocker at a time is a "
+            f"diagnostic that has to be re-run to discover the rest\n"
+            f"{lines}")
 
 
 def imported_struct_defs(source_path: str, stmts: list,
@@ -1176,7 +1729,42 @@ def imported_struct_defs(source_path: str, stmts: list,
 
     Transitive, and cycle-safe: a package that re-exports from a sibling that
     re-exports back terminates on the visited set, and a struct is collected
-    once however many paths reach it."""
+    once however many paths reach it.
+
+    **The census is attached to each struct by the module that DECLARES it**,
+    and that is what makes a `comptime` class member of an IMPORTED module a
+    constant here: before, nothing attached it, so `_split_declaration` returned
+    None and every class-level name stayed a field.
+    `module_statements` caches one parse per file per content, so
+    the statements a declaration came from are in hand here; before this,
+    nothing called `formal.model.attach_field_evidence` on an IMPORTED module's
+    structs, so `struct_field_evidence` was None, `_split_declaration` returned
+    None, and every class-level name stayed a field. A `comptime IS_FLAT = True`
+    in an imported module was therefore reported as a field the struct does not
+    have — which is the in-file refusal `formal/build.py`'s
+    `_rewrite_class_constants` exists to prevent, reached through the module
+    boundary instead of around it.
+
+    Attached from the DEFINING module's statements rather than the importer's,
+    and that direction is the whole of the soundness argument: the evidence is
+    "what does this unit write into a field", so the unit that has to answer is
+    the one that declares the struct. Attaching the importer's census instead
+    would let a file that happens to write `x.a` demote `a` in a class it does
+    not declare, which is `attach_field_evidence`'s own docstring's reason for
+    putting the evidence ON the struct rather than passing it down.
+
+    Attached for EVERY struct the walk collects, including ones it reached
+    through a re-export, and before `seen` filters by name — a struct already
+    collected keeps the evidence its own module gave it, so the answer does not
+    depend on which path reached it first.
+
+    **What this does NOT settle**, and the doc is explicit that it cannot be
+    settled here: the census is what decides a struct's WIDTH, so attaching it
+    to imported modules re-measures every imported struct in the tree at once,
+    and a width decides whether a receiver is a value or a frame address. Only
+    a sweep says whether that is a net gain, and a sweep is not a light
+    worker's to run.
+    """
     out, seen = [], set()
     for mod in imported_modules(stmts):
         path = resolve_module_path(mod, relative_to=source_path,
@@ -1184,10 +1772,42 @@ def imported_struct_defs(source_path: str, stmts: list,
         if path is None:
             continue
         for st in module_struct_defs(path, project_root or source_path):
-            if st.name not in seen:
-                seen.add(st.name)
-                out.append(st)
+            if st.name in seen:
+                continue
+            # The DEFINING module's statements, not this file's: `path` is the
+            # module the walk reached, and `module_statements` is the same
+            # cached parse the walk itself read the struct out of, so the
+            # evidence and the declaration cannot come from different versions
+            # of the file. `visited` is the walk's own set, so a struct reached
+            # twice is attached once.
+            _attach_declared_census(st, path)
+            seen.add(st.name)
+            out.append(st)
     return out
+
+
+def _attach_declared_census(struct_def, declaring_path: str) -> None:
+    """`attach_field_evidence` for one struct, from ITS OWN module.
+
+    Split out of `imported_struct_defs` because it has to be callable from
+    `module_struct_defs` too — that is the function a LINKED LIBRARY reaches,
+    and a library's declarations come through it rather than through the
+    import walk. Two call sites attaching the same evidence is one rule with two
+    callers, which is the point; a second implementation here would be a second
+    thing that could disagree about what a class-level name is.
+
+    A struct with evidence already attached is left alone, so an inner
+    `attach_field_evidence` (from `formal/build.py`'s `parse_module`, which runs
+    when the module is compiled as the ENTRY) is not overwritten by an importer's
+    view — and two modules' evidence for one struct is not a thing that can
+    happen anyway, since the walk is keyed by declaring path.
+    """
+    if getattr(struct_def, "_field_evidence", None) is not None:
+        return
+    from formal import model as M
+    M.attach_field_evidence([struct_def],
+                            M.unit_field_evidence(
+                                module_statements(declaring_path)))
 
 
 def declared_kinds(path: str) -> dict:
@@ -1642,7 +2262,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     if os.path.abspath(source_path) in _stack:
         return None            # cycle: the caller links us, we link them
 
-    from formal.build import compile_formal_dylib, FormalBuildError
+    from formal.build import (compile_formal_dylib, default_format,
+                              FormalBuildError)
     from formal.arm64_codegen import CodegenError
 
     # This module's own identity, which is also what a RELATIVE import of
@@ -1743,6 +2364,19 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # copy of it.
     prefix = _model.abi_module_name(module_identity)
     out = module_dylib_path(out_dir, module_identity, source_path, arch)
+    # The CONTAINER is `default_format(arch)` (see the `compile_formal_dylib`
+    # call below), not a hardcoded `fmt="macho"`. It used to be hardcoded, which
+    # meant a Linux host built Mach-O module libraries that no ELF loader can
+    # open: the module was compiled, audited (its symbols are `provided`, so
+    # `_audit_bound_symbols` passes) and then put NOWHERE, and the program died
+    # at load with an unresolved symbol for a function its own source imports --
+    # a finding the symbol audit could not see, because the audit asks "does
+    # something on this link line DECLARE this name" and the question that
+    # mattered was "will the loader OPEN this library". Both emitters exist now
+    # (`formal.macho_linker.build_macho_dylib` and `formal.elf.build_elf_dylib`)
+    # and both are handed the same export table, so the container is the host's
+    # and nothing else. The PATH is `module_dylib_path`'s answer for the same
+    # reason -- one naming rule, read rather than recomputed.
     # Serialise the write to this exact path.
     #
     # The digests above already separate two builds whose source OR compiler
@@ -1770,7 +2404,8 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
             result = compile_formal_dylib(
                 [source_path], output=out, prove=False, check=False,
                 module_prefixes={source_path: prefix},
-                link_dylibs=dep_dylibs, arch=arch, fmt="macho",
+                link_dylibs=dep_dylibs, arch=arch,
+                fmt=default_format(arch),
                 reexports=_qualified_reexports(
                     reexported_names(
                         stmts, {m: declared_kinds(p) for m, p in depends}),

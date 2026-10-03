@@ -1,5 +1,55 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status (2026-10-02, the `sweep6:module-state` round): the MODULE-BODY WRITER
+landed, and §(1)'s row below is CORRECTED — it is no longer "three unrelated
+shapes, all unchanged", and two of the three now lower and print correctly on
+both architectures.** `G = compute()` at file level has a `__DATA` slot and the
+module's own top-level statements fill it, because the body IS the entry
+(`entry_function` rule 1) and the writer and the reader are different functions.
+That is item 1 of "the exact next step" and it is DONE. What landed with it, and
+what is left, in "Re-measured 2026-10-02 (sweep6)" below — read that next; it is
+a measurement and everything before it is the history the document grew.
+
+**The two shape questions a use site asks about a slot are now ONE function.**
+`global_slot_kind` (what does the name HOLD, including the element kind) and
+`global_slot_is_dict` (is it a dict, which no kind can say) both read
+`GlobalSlot.kind` / `.is_dict`, computed once in `_body_store_shape` from the
+callee's declared return type. Before this round `global_slot_is_dict` re-decided
+from `init`, and for a body-filled slot `init` is `("unknown", None)` — so
+`D = mk()` read `D["a"]` as a SEQUENCE subscript and the image exited 1 on both
+architectures from a green build, with CPython answering 1. One row of
+`test_formal_globals.py` is that fault, one is the LIST control that fails if the
+dict answer over-claims, one is the element kind (`print(L[0])`, refused where the
+identical local spelling was `list:int` all along) and one pins the gate that
+keeps the element kind from being guessed.
+
+**What did NOT move, and is not storage:** `frozenset` is not lowered (the store
+lands and the LINK audit refuses the dangling call, which is a better diagnostic
+than the storage refusal it replaced); `__file__` has no source on this path, the
+same shape as `argv` in §(4); a callee that declares nothing claims nothing, so a
+dict that arrives from an unannotated call is still emitted as a sequence
+subscript — and that one is NOT module state, so it is filed where it belongs as
+`FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+
+**Status (2026-10-02, the `sweep5:module-state` round): TWO MORE FIXES LANDED,
+and the three things a slot cannot be are all still the remainder — nothing
+below is superseded except where the new section says so.** The value model
+could not classify two more expressions a use site has to decide about, and
+`print()` is where a program meets both: a container's ELEMENT kind
+(`print(d["a"])`, `print(L[0])`) and a constructed struct's FIELD kind
+(`print(p.x)`). Both are facts the source states and the kind table did not
+carry, and both are now answered from the evidence the emitters themselves use
+— the container literal that filled the slot, and the `init_body_stores` call
+that fills a field's. **`array_ops_jit.mojo` and `class_jit.mojo`, the two files
+`tools/formal_sweep_causes.py` filed under "print() cannot classify the
+argument's type", now build and run on BOTH architectures with answers
+byte-identical to CPython.** The three refusals this document is actually about
+— a call-computed global, `sys.argv`, and the export rule behind `sys.exit` —
+are re-measured below, unchanged, with one correction to what this document
+said about the last of them. Read "Re-measured 2026-10-02" next; everything
+under it is a measurement and the rest of the file is the design history it
+grew out of.
+
 **Status: the storage half LANDED (2026-09-30, the `construct:module-global-storage`
 claim); the rest is OPEN, and it is a property of the VALUE MODEL rather than a
 gap in any one emitter. What is left is not "nowhere to put a module global" —
@@ -53,9 +103,12 @@ Two consequences, and they are separate, so they are measured separately:
 2. **A value cannot cross a dylib boundary at all unless it is one 64-bit
    word.** A list or a tuple is a blob carved out of the caller's frame, so
    handing one to another module hands over a frame address that is dead on
-   return. — **still true, and it is the honest remainder**: a slot fixes where a
-   value LIVES, not how it is NAMED across a boundary, and a dylib publishes
-   functions and folded constants rather than writable words.
+   return. — **still true for a WRITABLE word, and no longer true for a
+   container**: a returned `[3, 14, 0]` now crosses and reads by subscript on
+   both architectures (see (3) below), because it is `malloc`'d rather than
+   frame-resident. What remains true is what this clause is really about: a
+   slot fixes where a value LIVES, not how it is NAMED across a boundary, and a
+   dylib publishes functions and folded constants rather than writable words.
 
 ## Measured
 
@@ -156,18 +209,56 @@ Fixed in the same commit; all three store kinds are pinned, and the store's
 TARGET is still left alone (`mod.K = 5` writes another module's state, and
 substituting it would trade a refused store for a dropped one).
 
-**(3) A tuple cannot cross a dylib boundary — and the failure is a
-use-after-frame, not a refusal.** A module returning `(3, 14, 0)`, printed by the
-importer:
+**(3) A container crossing a dylib boundary — WAS a use-after-frame, printed as
+a number; FIXED (2026-10-01).** A module returning `(3, 14, 0)`, printed by the
+importer, used to give:
 
 ```
-3
 print(tupm.vi())   ->   6159887712
 ```
 
-That is the frame address, printed as a number. The same program does not even
-build when the call is in the same unit (`print() cannot tell whether IdentExpr
-is a string or a number`).
+That is the frame address, printed as a number. The same program did not even
+build when the call was in the same unit (`print() cannot tell whether
+IdentExpr is a string or a number`).
+
+**Measured again on this tree, both architectures:**
+
+```
+# tupr.mojo
+def triple() -> List[Int]:
+    return [3, 14, 0]
+
+# tr.mojo
+from tupr import triple
+def main() -> Int:
+    var t = triple()
+    printf("%d %d %d\n", t[0], t[1], t[2])
+    return 0
+
+arm64   3 14 0     x86_64  3 14 0     CPython  3 14 0
+```
+
+So this is no longer a silent wrong answer, and it is the item on this list
+that was the most dangerous to leave: a frame address printed as a plausible
+number is indistinguishable from a computation, so every downstream read of it
+was wrong rather than absent.
+
+**What is still missing is narrower than the item claimed, and the narrowing
+is measured:** a `malloc`'d blob crosses and reads by SUBSCRIPT, but `len()` of
+one does not, because the path has no KIND that says "this word is a heap
+allocation with a run-time length":
+
+```
+printf("%d\n", len(t))
+    -> len() of a value classified as 'int', and an integer has no length:
+       there is no count to read at offset 0, and the word there is the
+       integer itself
+```
+
+That is item (1) of "What is still missing" below, unchanged, and it is the
+`BLOB_KIND` annotation channel `dylib_export_return_kind` already reads for
+`char *`. The representation is not the gap — the subscript works, so the blob
+and its count-word are read correctly — the KIND is.
 
 **(4) `sys.argv` additionally has no SOURCE on this path.** The entry stub
 (`ARM64Codegen.compile`, and `X86_64Codegen`'s twin) loads the test input into
@@ -183,6 +274,267 @@ self.asm.emit_label_rel(first_func_name, here_offset=-4)
 `argc`/`argv` arrive in X0/X1 from the kernel's start and are overwritten before
 the first statement runs. So even with storage there would be nothing to read:
 the command line is gone, not merely unreachable.
+
+## Re-measured 2026-10-02 (the `sweep6:module-state` round)
+
+Every shape below was rebuilt on this tree, on **both** architectures, with the
+message quoted rather than re-derived. Each is a module-level binding read by a
+function, which is the whole of the row: what the `__DATA` slot does with the
+value the module's own top level computes.
+
+    # §(1)'s three shapes, verbatim from the files the sweep filed under this row
+
+    ELF_MAGIC = b"\x7fELF"                       # formal/elf.py:28
+      printf("%s|", ELF_MAGIC)   ->  arm64 \x7fELF|   x86_64 \x7fELF|
+      len(ELF_MAGIC)             ->  still refused, and now for a value-model
+                                     reason (a bytes literal has no KIND; see below)
+
+    TYPES = frozenset({'float', 'half'})         # mojo/middle/metal_ops.py:66
+      len(TYPES)                 ->  refused
+      "float" in TYPES           ->  refused at the LINK audit: "the image would
+                                     bind 1 symbol(s) that nothing provides:
+                                     frozenset"
+
+    REPO = os.path.dirname(HERE)                 # tools/bootstrap_verify.py:31
+      printf("%s|", REPO)        ->  arm64 /a|   x86_64 /a|
+
+So **two of §(1)'s three shapes lower and print the right answer**, and the third
+is refused for a reason that has nothing to do with storage. The row's own reading
+was right and is now sharper than it was: they were never "three files about
+module storage".
+
+### What each shape needed, and what it still needs
+
+* **a BYTES literal at module level now works**, which the row listed as needing
+  "a BYTES value model". It did not: a bytes literal is a `char *` to interned
+  bytes on this path exactly as a string is (`b"hi"` bound to a local has always
+  worked), and what was missing was a WRITER — the same writer item 1 needed. What
+  remains is narrower and is a different question: `len()` of one is refused,
+  because `ValueKinds` classifies a bytes literal as a word and no kind says "this
+  `char *` has a count that is not a strlen". `struct.pack("<4s", …)` is the other
+  consumer and is still refused earlier, at `struct` having no home.
+* **a call into ANOTHER module's dylib now works** — `REPO = os.path.dirname(HERE)`
+  prints `/a`. `_body_store_shape` claims nothing about its KIND (it asks only of a
+  bare-name callee, deliberately), and that costs nothing: the store is the same
+  store and the read is a `char *` load. The dependency `bootstrap_verify.py` is
+  blocked by is `__file__`, which has no source here — §(4)'s shape, not storage's.
+* **`frozenset` is not lowered**, and now says so. The store lands; the call is
+  emitted; the LINK audit catches the dangling symbol and refuses with a message
+  that names it. That is strictly better than the refusal it replaced, and it is
+  a missing builtin rather than a missing value model.
+
+### The module-body writer, and the two things it made necessary
+
+`G = compute()` is a STORE, not an initializer the linker can lay out, and the
+writer is the module's own top level — which this path compiles into the
+synthetic `__module_body__` and makes the entry. Measured hazard, and the reason
+this is not "delete the refusal": a slot is eight bytes of zeros until the body
+stores into it, and **zero is an answer a program can print**. So
+`model.module_slot_readable_in` refuses a read reached before the store, and it
+can do that without a whole-program analysis because the module body is the entry
+— a read from another function needs the store above the body's first call, and
+the store's own value runs before the store completes (`G = compute()` where
+`compute` reads `G` is the same hazard one statement higher, which is why it is a
+transitive closure and not a direct-callee check). A call through a value rather
+than a name is opaque and reaches everything.
+
+Three rows in `test_formal_globals.py` and two in `test_formal_run.py` pin the
+answers, and the analysis that decides them is two closures of one call graph
+rather than "the first call in the body": the first call is almost always the
+store of ANOTHER computed global, so refusing every reader below it would refuse
+`NUMS = make()` followed by `NAME = greet()` with both read from `main`.
+
+### What is still open, in the order the sweep reaches it
+
+1. **`sys.argv`'s SOURCE** — §(4), and not a compiler problem: `test_input` is
+   loaded into X0 and the kernel's `argc`/`argv` are gone before the first
+   statement. It also has to clear the crossing `sys` being a dylib, which is
+   item 2.
+2. **An EXPORTED SLOT** — a writable global another module reads. `doc/ABI.md`'s
+   export rule publishes functions and folded constants, and `_emit_global_init`'s
+   measurement says a `__DATA` data symbol is not honoured by this target's dyld,
+   so it has to be reached by an imported FUNCTION. Unmeasured, and an ABI change.
+3. **`__file__`**, measured this round: `'__file__' has no home`. The same shape as
+   (1) — a source that does not exist on this path — and the reason
+   `tools/bootstrap_verify.py` and `test_runtime_header_scan.py` still do not reach
+   their own globals.
+4. **A callee that declares nothing**, which is a value-model row rather than
+   this one: `D = mk()` with an unannotated `mk` is still emitted as a sequence
+   subscript. Filed as
+   `FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`,
+   because it is the same fault for a local and for a parameter and this document
+   is not where a reader of a local's fault should be sent.
+
+## Re-measured 2026-10-02 (the `sweep5:module-state` round)
+
+**SUPERSEDED IN PART by "Re-measured 2026-10-02 (the `sweep6:module-state`
+round)" above, which is the current reading of the three shapes in (1) below: two
+of the three now lower and print correctly, and the third is refused for a reason
+that is not storage.** This section is kept as the measurement it was — every
+number in it was true of the tree it was taken on — and nothing in it should be
+read as a statement about the tree as it stands.
+
+The sweep that produced this round's ranking was taken at ~04:17 on 2026-10-02,
+**before** the formal3/formal4 batches landed, so everything below was
+re-verified on the tree as it stands, with the message quoted rather than
+re-derived, and on **both** architectures. `python3 tools/formal_sweep_causes.py
+<log>` files this round's four causes as 11 files; the ranking is unchanged by
+what landed, and this is the whole census for the four:
+
+| row | files | state on this tree, both architectures |
+|---|---|---|
+| a module-global name has no storage | 3 | **unchanged**, each a different shape — see (1) below |
+| a module's ATTRIBUTE read as a value, across a dylib boundary | 3 | **unchanged** — `sys.argv`, §(4) |
+| a linked module exports no such name | 1 (2 refusals) | **unchanged**, and one claim in this file about it is now MEASURED WRONG — see (3) |
+| `print()` cannot classify the argument's type | 2 | **FIXED, 2 of 2 passing** — see "What landed" below |
+
+### (1) the storage row is three unrelated shapes, and none of them is "no storage" any more
+
+`formal/elf.py`, `mojo/middle/metal_ops.py` and `tools/bootstrap_verify.py`,
+each still refused with the same sentence (`'ELF_MAGIC' / '_MSL_FLOAT_TYPES' /
+'REPO' is bound at module level, and this path has no module-global storage for
+it`). **That sentence is now false in a third way it was not false in when it was
+written**, and the three names are three different remainders rather than one
+family:
+
+* `ELF_MAGIC = b"\x7fELF"` — a BYTES literal. Not a call and not a container:
+  `_static_initializer` deliberately refuses to call one a string
+  (`not getattr(value, "is_bytes", 0)`) and `_static_word` refuses it as a
+  container element, because a bytes literal is a numeric buffer rather than
+  text and this path has no `char[4]`. The repair is a BYTES value model, and
+  `formal/elf.py` also wants it for `struct.pack("<4s…")`, so it is one piece
+  of work serving both.
+* `_MSL_FLOAT_TYPES = frozenset({'float', 'half'})` — a call into a BUILTIN
+  (`frozenset`), and `frozenset` is not lowered at all. A slot is the easy half
+  and it is already here: what is missing is both an initializer (the module's
+  top level running before the read) and a `frozenset` that exists.
+* `REPO = os.path.dirname(HERE)` — a call into ANOTHER MODULE's dylib. Even a
+  perfectly folded slot cannot hold it, because the answer comes from a library
+  this image links rather than from this module's own statements. This one is
+  also the `os` host module's subject, which is a different claim.
+
+So the honest reading of the row is the one this file already reached in 2026-09-30
+and which has now been confirmed a third time: **these three files are not three
+files about module storage.** They are one about a bytes value, one about a
+builtin, and one about a dependency — and `tools/formal_sweep.py`'s "a file's
+terminal cause is the FIRST refusal" means each has more behind it.
+
+### (2) `sys.argv`, re-verified: the refusal is unchanged and the SOURCE is still gone
+
+`t_argv.mojo`, `tools/ci_line.py`, `tools/detach.py`, all three still refused at
+`sys.argv` with the reworded diagnostic, all three on both architectures, and
+all three still with no storage behind them: this is §(4) plus the two other
+remainders, and the entry-stub measurement in §(4) is still what it was —
+`test_input` is loaded into X0 and the kernel's `argc`/`argv` are gone before
+the first statement runs.
+
+**The row's ceiling has not moved and cannot move by compiler work**, which is
+the measurement that decides the next step and is unchanged from 2026-10-01:
+none of the uses is a compile-time fact, and `argv`'s source does not exist on
+this path. What has NOT been measured, and is the first thing whoever takes this
+should measure, is whether items 2 and 3 of "the exact next step" compose:
+an exported slot reached by an imported FUNCTION, and a command line that
+survives the entry stub. The obstacle item 3 has to clear first is not storage
+but the crossing: the `argc`/`argv` words are in the EXECUTABLE's image at
+entry, and `sys` is a dylib, so `sys` cannot read them from there — no data
+symbol is importable (`_emit_global_init`'s measurement), which is why the doc
+puts an imported FUNCTION in the design. Nothing here has been built, and it is
+an ABI change plus a stub change plus a value model for a returned blob's count
+and element width, so it is a project and not a commit.
+
+### (3) `sys.exit`: this file's explanation of it was wrong, and the correction is measured
+
+The `sys.exit` row of both tables below says the cause is that
+`doc/ABI.md`'s export rule does not advertise a C library symbol. **That is
+half the cause, and the half that is not there does not matter for a name
+published this way.** Measured:
+
+```
+exit in reflect._CLIB_SYMS:        True
+exit in reflect._NO_MANGLE_FUNCS:  False
+reflect._func_export_csym("exit", sig, "")   ->  mojo_exit_9f63a2
+reflect._func_export_csym("exit", sig, "sys") ->  sys_mojo_exit_9f63a2
+reflect.export_exclusions(sys.mojo)["exit"]  ->  (the module does not declare it)
+```
+
+Three facts, and together they change the next step:
+
+1. `formal/hostmods/sys.mojo` does not define `exit` at all — its own module
+   docstring says so, on purpose, citing `FORMAL_known_limits.md` §1.1. So
+   `t1.mojo`'s refusal is first a MISSING FUNCTION, not an exclusion.
+2. `exit` would be advertised as **`sys_mojo_exit_9f63a2`**, not `exit`:
+   `_func_export_csym` qualifies every free function by its module prefix, and
+   `exit` is not in `_NO_MANGLE_FUNCS` (`reflect.py:23`), so it is not exempt.
+3. Therefore the hazard `_CLIB_SYMS`'s own comment documents — "an importer's
+   `exit()` would bind the system's, silently" — **does not apply to a
+   qualified symbol**, and the caller here is not a bare `exit()`: it is
+   `sys.exit(3)`, which `model.dylib_module_reference` resolves by MODULE
+   IDENTITY (`dylib_export_lookup(by_name, by_module, …)`), so it cannot reach
+   any other library's `exit` whatever that library is called.
+
+**The next step is therefore narrower than this file said, and it is NOT this
+worker's to take**: the repair is one rule in `reflect.export_exclusions` —
+exclude a C-library name only when the symbol it would be published under is
+unqualified — plus a definition of `exit` in `sys.mojo` that does the honest
+thing (`write_stderr` then the C library's own `exit`, or libSystem's `exit`
+directly, which is what CPython's `sys.exit` ends up doing). Both halves are in
+`reflect.py`, which builds the export table for **the gimple dylib as well as
+the formal one**, so changing it changes what every dylib in the project
+publishes and owes a full `make gate` — out of scope for a
+`formal`-only claim, and reported here rather than taken.
+
+### What landed: the two kinds `print()` could not get, and the two files that were blocked on them
+
+Both are the same defect as this document's subject and not this document's
+subject: **a use site that must decide before emitting had no way to ask what a
+value holds, and the answer existed in the source the whole time.** `print()` is
+the consumer that surfaces it because it is the one builtin with to choose
+between two renderings before it emits anything.
+
+* **A container's ELEMENT kind.** `model.container_literal_elem_kind`, asked of
+  the literal that filled the slot — by `ValueKinds.kind_of` for a local and by
+  `global_slot_kind` for a module global's `__DATA` initializer, so the two
+  spellings cannot disagree. A DICT was the gap: it classified as a bare
+  `LIST_PREFIX` where a list classified as `list:<elem>`, so `list_elem_kind`
+  had nothing to hand a subscript.
+* **A constructed struct's FIELD kind**, read off `model.struct_ctor_field_value`,
+  which asks `init_body_stores` — the one function that decides what `S(a, b)`
+  stores where — so the kind is read off the very expression the image
+  evaluates into the slot. This is the case `class_jit.mojo` is: an
+  UNANNOTATED two-field class, where the declaration is not merely gated by
+  `struct_field_kind`'s "`S()` does not run `__init__`" rule but simply absent.
+
+Measured, both architectures, on the two files the sweep filed under this row:
+
+| file | before | after | and CPython says |
+|---|---|---|---|
+| `array_ops_jit.mojo` | `print() cannot tell whether SubscriptExpr is a string or a number` | **built and ran** | `Sum: 15 / Length: 5 / Value of a: 10` |
+| `class_jit.mojo` | `print() cannot tell whether MemberExpr is a string or a number` | **built and ran** | `Point: 3 4` |
+
+Four gates on the field kind, each a refusal and each pinned in
+`test_formal_value_model.py` (which builds BOTH architectures and requires the
+identical message, the only instrument that can see a defect the two backends
+share): a store to the field after the construction retracts the claim —
+**measured as a SIGSEGV, exit 139, on both architectures, from a green build**,
+`%s` walking bytes at address 5 — an argument that is one of this function's own
+unannotated parameters claims nothing, a method other than `__init__` writing
+the field claims nothing, and two constructions that disagree claim nothing.
+`test_formal_value_model.py` is 32/32 with them, `test_formal_run.py` 622/622,
+`test_formal_globals.py` 20/20.
+
+### And the stale row this file's owner had to decide
+
+A `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+doc (now deleted, with this section as its record) noted that `test_formal_run.py`'s
+`a_mutated_module_global_is_refused` still
+asserted a refusal the backend stopped owing when `formal-module-globals` gave a
+written module-level name a `__DATA` slot — red on `master`, and that document
+named this file's owner as the one who has to decide. Decided here, option 1 of
+the two it offered: **the program is right, so the row asserts the number.**
+`G = 5` with `global G; G = G + 1`, read back twice, is **exit 12 on both
+backends**, which is CPython's (`G` goes 5 → 6, both reads see 6). The row is
+now `a_mutated_module_global_is_read_back_from_its_slot`, and the TEST doc is
+deleted with it.
 
 ## WHAT LANDED: option A, the `__DATA` block for module state
 
@@ -277,13 +629,28 @@ behind a dependency.**
 
 ### What is left, and it is three things a slot cannot be
 
-1. **A value computed before the program runs.** `NOEXTERN_GLOBALS_ENTRYOFF`,
-   `_MSL_FLOAT_TYPES`, `RUNTIME`: a module-level binding whose value is a call's
-   result. A slot needs a value at build time and there is none, and a function
-   writing the name later does not help — the name's value before that write is
-   still the call's. The repair is running the module's top-level statements, or
-   folding the call at compile time: `FORMAL_toplevel_statements_dropped.md` and
-   the comptime story. Refused by name, as `"computed"`.
+**TWO OF THE THREE ARE DONE** (the `sweep6:module-state` round, 2026-10-02):
+item 1 below landed, and so did the first half of the doc's own §(2), because a
+call-computed value in ANOTHER image is a store like any other — what cannot
+cross is a WRITABLE word, which is item 2's actual subject and is untouched. What
+is genuinely left is item 3 (`sys.argv`'s source, plus `__file__` measured to be
+the same shape) and item 2's exported slot. The list is kept as written, with each
+entry marked, because the two repairs are not the ones this section predicted and
+that is worth seeing.
+
+1. **A value computed before the program runs.** **DONE (the `sweep6:module-state`
+   round), and by a different repair than the two named below**: the module's
+   top-level statements DO run — they are the synthetic `__module_body__` the
+   startup stub enters — so the name has no STATIC initializer but it has a
+   module-level statement that computes it, and the store lands in the slot.
+   `NOEXTERN_GLOBALS_ENTRYOFF` and `REPO = os.path.dirname(HERE)` are measured
+   working on both architectures. Folding the call at compile time was never
+   needed and would have been the wrong answer: the value is a function of the
+   program, not of the build. `NOEXTERN_GLOBALS_ENTRYOFF` is what a body-filled
+   slot looks like when the callee is a bare name with an `-> Int`, and `RUNTIME =
+   os.path.join(HERE, "runtime")` is what it looks like when the callee is
+   another image's. `FORMAL_toplevel_statements_dropped.md` is where the
+   semantics live.
 2. **A value that lives in ANOTHER module's dylib.** A slot in THIS image cannot
    hold another image's state; what a cross-module global needs is the other
    module's slot exported as a symbol, and `doc/ABI.md`'s export rule publishes
@@ -298,6 +665,11 @@ behind a dependency.**
    be nothing in it. `sys.executable` is the same shape with a smaller gap —
    libSystem's `_NSGetExecutablePath` writes into a CALLER-SUPPLIED buffer, so
    what is missing is a place to put a path, and that IS this document's subject.
+   **`__file__` is this entry, measured 2026-10-02:** `'__file__' has no home`, on
+   both architectures, and it is what keeps `tools/bootstrap_verify.py` and
+   `test_runtime_header_scan.py` from reaching their own globals — both spell it
+   `os.path.dirname(os.path.abspath(__file__))`, so the whole expression is
+   unavailable rather than half of it.
 
 Two smaller remainders, both honest refusals rather than wrong answers, both
 named by `static_initializer_refusal_reason`: a container element that is itself
@@ -460,6 +832,15 @@ asymmetry `model.dylib_module_reference` removed.
 
 ## The exact next step, for whoever takes it
 
+**Read "Re-measured 2026-10-02" first**: it re-verifies all four of the sweep's
+rows on the current tree on both architectures, records the two fixes that
+landed since this section was written (a container's element kind and a
+constructed field's kind, `print()`'s two refusals — neither of which is any of
+the three items below), and CORRECTS item 3's sibling: the `sys.exit` row's
+stated cause is half the cause, and the other half is a missing function in
+`sys.mojo` rather than an ABI rule, with the rule's own documented hazard
+measured not to reach a module-qualified symbol.
+
 **A is DONE** — see "WHAT LANDED". What follows is B, and then the three things
 A could not reach, which are the actual next steps and are all value-model work
 shared by the two backends and the Lean proof.
@@ -478,15 +859,19 @@ for a value that never changes.
 
 The three remainders, in the order the sweep reaches them:
 
-1. **A module-level sequence that RUNS.** `NOEXTERN_GLOBALS_ENTRYOFF =
-   executable_entry_offset(…)` and `_MSL_FLOAT_TYPES = frozenset({…})` want the
-   module's top level to execute before anything reads the name. The machinery
-   is `model.module_body` plus `entry_function` — the body already IS the entry —
-   so what is missing is that the entry's stores land in the SLOTS rather than in
-   its own frame, and that a body which runs cannot be the entry when the program
-   declares a `main`. Both are this document's subject and both are bigger than
-   one commit; `FORMAL_toplevel_statements_dropped.md` is where the semantics
-   live.
+1. **A module-level sequence that RUNS.** **DONE (the `sweep6:module-state`
+   round)** — the entry's stores land in the SLOTS, and the order facts that
+   decide whether a read is premature are two closures of the body's call graph.
+   The second half is still open and is a different question: **a body which runs
+   cannot be the entry when the program declares a `main`.** This is CPython's own
+   rule (the body calls `main` only if the source says so), so it is not a
+   semantic defect — but it means a repository file with module-level statements,
+   a `def main`, and no module-level call to it builds green and computes nothing,
+   and the sweep's `ok` is a verdict about the BUILD. `NOEXTERN_GLOBALS_ENTRYOFF =
+   executable_entry_offset(…)` is now a slot the body fills (measured this round);
+   `_MSL_FLOAT_TYPES = frozenset({…})` is refused at the link audit because
+   `frozenset` is not lowered. `FORMAL_toplevel_statements_dropped.md` is where the
+   semantics live.
 2. **An exported slot.** A writable module global that another module reads needs
    its `__DATA` word published as a symbol, and `doc/ABI.md`'s export rule
    publishes functions and folded constants. Cost: a symbol kind, a relocation
@@ -496,7 +881,11 @@ The three remainders, in the order the sweep reaches them:
    in the proof.
 3. **A command line.** `sys.argv` needs the kernel's `argc`/`argv` to survive
    the entry stub, which is a change to the stub and to the test-input
-   convention, not to storage. (4) above is the measurement.
+   convention, not to storage. (4) above is the measurement. **And it has to
+   clear a crossing this item does not mention**: the `argc`/`argv` words are in
+   the EXECUTABLE's image at entry and `sys` is a dylib, so item 2's
+   "reached by an imported FUNCTION" is a prerequisite rather than an
+   alternative. Nothing has been built; the composition is unmeasured.
 
 The option NOT recommended, unchanged: a `sys.argv` that returns a fabricated
 one-element list, or a `sys.stderr` that is a struct wrapping the integer 2.

@@ -3025,22 +3025,55 @@ UNREGISTERED = {
     # table's own comment is where a reader looks for what these have in
     # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
+    'test_formal_admitted.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
+    'test_formal_fcntl.py': _FORMAL_SUITE_REASON,
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
+    # The same shape as the group above and CHEAP like `formal-hostmods-census`
+    # below: measured 2026-10-03, `python3 test_formal_list_splat.py` is 5
+    # cases x 2 backends = 10 builds plus one CPython oracle each, ~7 s
+    # wall. So by CLAUDE.md's cost rule it wants a REGISTRATION rather than
+    # an excuse, and it is listed here because this branch's subject is the
+    # sweep probe and the parity corpus, not the registry. Exact next step:
+    # `test('formal-list-splat', [PY, 'test_formal_list_splat.py'], ...)` in
+    # the `proofs` bucket beside `formal-x86`.
+    'test_formal_list_splat.py': _FORMAL_SUITE_REASON,
+    'test_formal_math.py': _FORMAL_SUITE_REASON,
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
     'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
+    'test_formal_shutil.py': _FORMAL_SUITE_REASON,
     'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
+    'test_formal_stat.py': _FORMAL_SUITE_REASON,
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
     'test_formal_trait_module.py': _FORMAL_SUITE_REASON,
     'test_formal_type_application.py': _FORMAL_SUITE_REASON,
     'test_formal_x86_64_parity.py': _FORMAL_SUITE_REASON,
+    # NOT the reason above, and deliberately said so: this one is CHEAP.
+    # Measured 2026-10-02 on the merge of work/merge-formal4, `python3
+    # tools/memslot.py --gb 8 -- python3 test_formal_hostmods_census.py`:
+    # **17.5 s wall, 0.1 GB peak, 16 modules x 2 backends, 4/4 properties** —
+    # which is the same cost class as `formal-globals` above (registered) and
+    # `formal-ast` (in `check`), so by the cost rule in CLAUDE.md it wants a
+    # REGISTRATION, not an excuse: nothing here is over 4 GB or over a few
+    # minutes. It is listed rather than registered because this merge is not
+    # where a registry row is added — the file arrived with work/merge-formal4
+    # and the row belongs to whoever registers it. Exact next step: `test(
+    # 'formal-hostmods-census', [PY, 'test_formal_hostmods_census.py'],
+    # mem='tiny', deps=['preflight'], extra=['test_formal_hostmods_census.py',
+    # 'formal'] + FORMAL_BUILD_INPUTS, desc='every formal/hostmods module
+    # builds as a program on both backends, and x86-64 is a subset of arm64')`.
+    'test_formal_hostmods_census.py': 'The host-module census: every '
+        '`formal/hostmods` module built as a program on BOTH backends, asserting '
+        'that x86-64 is a SUBSET of arm64 — the one divergence a per-backend '
+        'test cannot see. Cheap (17.5 s, 0.1 GB measured) and green (4/4), so '
+        'it wants registering rather than listing; the row is spelled out above.',
 
     # ── the encoders, differentially, against the platform assembler ──
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
@@ -3075,7 +3108,7 @@ UNREGISTERED = {
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
         'template, and that the answer is the same on both backends: seven '
         'cases, each asserted to refuse on BOTH architectures with the same '
-        'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
+        'sentence (formal/build.py`s `first_mlir` pre-pass). Build-only, but '
         'twice per case, because a backend that answers differently about one '
         'construct is the defect this file exists for.',
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '

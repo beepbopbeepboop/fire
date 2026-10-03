@@ -372,6 +372,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
+| `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
 | `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`) | `mod.NAME` on both backends | 1 of 18 checks; `proofs` |
 | the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
 

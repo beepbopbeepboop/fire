@@ -29,7 +29,7 @@ from formal.arm64_codegen import var_register_map, _SCRATCH
 from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           used_narrow_types, lean_trunc_defs, lean_trunc_name,
-                          parse_type_name, _range_args)
+                          parse_type_name, _range_args, uses_typed_model)
 
 # Fallback leaf word for structured value-flow obligations the generator
 # cannot yet close automatically.  It is assembled from two halves because a
@@ -64,6 +64,7 @@ WhileStmt = F.WhileStmt
 ForStmt = F.ForStmt
 Assign = F.AssignStmt
 AugAssign = F.AugAssignStmt
+VarDecl = F.VarDecl
 ExprStmt = F.ExprStmt
 Pass = F.PassStmt
 Break = F.BreakStmt
@@ -96,9 +97,18 @@ def _if_expand(st):
 
 
 def _target_name(assign_like) -> str:
-    """Name of an Assign/AugAssign target (fire target is an expression)."""
-    t = assign_like.target
-    return t.name if isinstance(t, F.IdentExpr) else str(t)
+    """Name of an Assign/AugAssign/VarDecl target.
+
+    The three differ in shape and not in meaning: `Assign` and `AugAssign` hold
+    a `target` EXPRESSION, `VarDecl` holds a bare `name`, and all three are the
+    statement that binds one name in the semantic model's environment. One
+    reader for the three is the whole of why `var a = 1` and `a = 1` produce the
+    same model rather than one of them producing zero — see `_stmts_go`.
+    """
+    t = getattr(assign_like, "target", None)
+    if t is not None:
+        return t.name if isinstance(t, F.IdentExpr) else str(t)
+    return assign_like.name
 
 
 def _range_args_of(for_stmt) -> list:
@@ -321,6 +331,24 @@ def _range_bounds(rargs: list):
     raise ValueError(f"range() takes 1-3 arguments, got {len(rargs)}")
 
 
+class _Scope(dict):
+    """The model generator's name scope, carrying the ADMITTED contracts.
+
+    A `dict` subclass rather than a second parameter threaded through
+    `_call_go`, `_expr_go`, `_cmp_go`, `_truth_go` and their callers, because
+    `scope` is ALREADY the one piece of context every one of those takes, and
+    adding a second to a dozen signatures would be a change spread over a
+    dozen call sites for a value that is present in almost none of them.
+    `admitted` is empty on every program that reaches no admitted contract, so
+    every existing path behaves exactly as it did — which is what keeps the
+    cached proofs in `~/.gmojo` describing the same files.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.admitted = {}
+
+
 def _call_go(e, param: str, env: dict, scope, render) -> str:
     """The model term for a call expression `f(a, b, …)`.
 
@@ -338,23 +366,55 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
     a `f_go` that was never defined — a Lean error about an unknown
     identifier, hundreds of lines downstream of the call that caused it.
 
-    A callee with no model is **refused**, not guessed at.  An extern's return
-    value is not a term this model can invent, and inventing one is precisely
-    the fabrication the model exists to avoid; a refusal costs this program a
-    proof and buys it a correct one.
+    A callee with no model is **refused**, not guessed at — UNLESS it is an
+    admitted contract, in which case the contract IS its model and is named in
+    the term.  Those are the two cases `formal/admitted.py` exists to tell
+    apart.  Refusing is right for an extern: an extern's return value is not a
+    term this model can invent, and inventing one is precisely the fabrication
+    the model exists to avoid.  It is wrong for a callee whose return value is
+    a declared external contract, because the declaration is already the
+    answer: rendering the call as an application of the `sorry`-proved
+    `admitted_<module>_<name>` makes the model's value the contract's, which is
+    what the proof then says about the machine — and leaves the trust named,
+    counted and locatable instead of turning a program with a declared
+    dependency into one with no proof at all.
     """
     sym = _call_name(e)
-    if scope is None or sym not in scope:
-        raise NotImplementedError(
-            f"model: call to `{sym or '?'}` has no model in this image (an "
-            f"extern, or a function this generator emits no `_go` for); "
-            f"refusing rather than inventing its return value")
-    # SPACE-separated, not comma-separated: Lean reads `(f_go a, b)` as the PAIR
-    # `(f_go a, b)`, so a comma here silently gives the model the wrong TYPE for
-    # every multi-argument call -- and the programs that have one are refused
-    # before Lean is reached, so nothing downstream would have said so.
-    args = " ".join(render(a, param, env) for a in e.args)
-    return f"({sym}_go{'' if not args else ' ' + args})"
+    if scope is not None and sym in scope:
+        args = " ".join(render(a, param, env) for a in e.args)
+        # SPACE-separated, not comma-separated: Lean reads `(f_go a, b)` as the
+        # PAIR `(f_go a, b)`, so a comma here silently gives the model the wrong
+        # TYPE for every multi-argument call -- and the programs that have one
+        # are refused before Lean is reached, so nothing downstream would have
+        # said so.
+        return f"({sym}_go{'' if not args else ' ' + args})"
+    admitted = getattr(scope, "admitted", None) or {}
+    lean = admitted.get(sym)
+    if lean:
+        # ONE argument, and a call with any other number is refused rather than
+        # padded.  The arity is not a free choice: `MojoExpr.call` in
+        # `lib/ProofLib.lean` carries a single `UInt64` argument, so the AST
+        # layer of this same proof can only evaluate a call with one, and an
+        # admission applied to two arguments here and one there would make
+        # `eval_eq_mojo` — the statement that the two layers are the same
+        # function — false rather than merely unproved.  A hostmod's admitted
+        # operations are therefore written with ONE parameter (see
+        # `formal/hostmods/subprocess.mojo`), and a call that disagrees says so
+        # here, where the reader can see which call it was.
+        if len(e.args) != 1:
+            raise NotImplementedError(
+                f"model: `{sym}` is an ADMITTED contract and is declared over "
+                f"ONE word — the argument is the request, and a value on this "
+                f"path is one 64-bit word — but this call passes "
+                f"{len(e.args)}. Split the call so the admitted operation takes "
+                f"the request alone; the contract cannot be applied to a shape "
+                f"the model cannot carry, and applying it to the first "
+                f"argument alone would silently drop the rest.")
+        return f"({lean} {render(e.args[0], param, env)})"
+    raise NotImplementedError(
+        f"model: call to `{sym or '?'}` has no model in this image (an "
+        f"extern, or a function this generator emits no `_go` for); "
+        f"refusing rather than inventing its return value")
 
 
 def _cmp_go(e, param: str, env: dict, vtypes: dict, call_types: dict,
@@ -491,9 +551,32 @@ def _pow_model(l: str, r: str, e) -> str:
 
 def _expr_go(e, param: str, env: dict, vtypes: dict = None,
              call_types: dict = None, scope=None) -> str:
-    """Translate a Mojo expression to a Lean UInt64 term for the model."""
+    """Translate a Mojo expression to a Lean UInt64 term for the model.
+
+    **Every fall-through refuses**, and that is the whole contract.  This used
+    to end in `return "(0 : UInt64)"` for an expression form it did not
+    recognise and to answer `env.get(e.name, "(0 : UInt64)")` for a NAME the
+    environment does not bind — so "the model cannot say what this is" became
+    "the model says it is zero", and a program whose model was zero for every
+    input emitted a universal theorem about zero that Lean accepted, because
+    the generator could find a closing tactic.  `_no_value_model` (a field read,
+    a subscript) and `_call_go` (a callee with no model) already refuse; these
+    two are the same rule for the two shapes those two cannot see.
+
+    The direction is deliberate and is the one the rest of this file takes: a
+    stated gap costs a program its proof, and a fabricated model costs it a
+    proof of something FALSE.  Both callers behave — `x86_64_proof_gen.py`
+    catches the refusal and emits its documented `NOTE:`, and the arm64 caller
+    propagates it — so "refuse" and "documented gap" are the same outcome here
+    and neither is a build failure.
+    """
     if isinstance(e, Var):
-        return env.get(e.name, "(0 : UInt64)")
+        if e.name in env:
+            return env[e.name]
+        raise NotImplementedError(
+            f"model: `{e.name}` is read here and this generator binds it to "
+            f"nothing (the model's environment is {sorted(env)}); answering 0 "
+            f"would be a statement about the source rather than a model of it")
     if isinstance(e, Int):
         return _uint64_lit(e.value)
     if isinstance(e, Bool):
@@ -555,13 +638,20 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
                     else f"({_truth_go(e.left, param, env, vtypes, call_types, scope)} {j} "
                          f"{_truth_go(e.right, param, env, vtypes, call_types, scope)})")
             return f"(if {body} then (1 : UInt64) else (0 : UInt64))"
-        return "(0 : UInt64)"
+        raise NotImplementedError(
+            f"model: the operator `{e.op!r}` has no meaning this model can "
+            f"render; answering 0 would be a statement about the source "
+            f"rather than a model of it")
     if isinstance(e, Call):
         return _call_go(e, param, env, scope, _expr_go)
     if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
         _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
                         else "list subscript")
-    return "(0 : UInt64)"
+    raise NotImplementedError(
+        f"model: a {type(e).__name__} has no value in the semantic model (a "
+        f"`UInt64 → UInt64` function over the source's arithmetic); refusing "
+        f"rather than modelling it as 0, which would be a false statement "
+        f"about the source")
 
 
 def _expr_bool_go(e, param: str, env: dict, scope=None) -> str:
@@ -618,6 +708,27 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         env[_target_name(st)] = _expr_go(_bin, param, env, vtypes, call_types, scope)
         return _stmts_go(rest, param, env, fname, loop_counter, helpers,
                          vtypes, call_types, scope)
+    if isinstance(st, VarDecl):
+        # `var a = 1` IS `a = 1` for a `UInt64 → UInt64` model: the keyword
+        # spells a fresh local, and a local is exactly what the environment
+        # already is.  This used to fall off the end of the chain, and the end
+        # of the chain was `return "(0 : UInt64)"` — so the declaration was read
+        # as a statement whose value is 0, and because `_stmts_go` is a FOLD the
+        # 0 is what the rest of the function was then evaluated from.  A
+        # `return 2` after `var a = 1` failed as hard as `return a`, which is
+        # what showed it was the declaration and not the read.
+        #
+        # The alternative was a refusal, and it was the worse answer: the model
+        # can state this exactly, so refusing would be refusing a construct it
+        # has.  `bug:FORMAL_lean_model_call_semantics.md`'s territory is already
+        # the "the model must be RIGHT, not merely present" position, and a
+        # `var a = 1` the model reads as 0 is the false model `_no_value_model`
+        # exists to stop.
+        env = dict(env)
+        env[_target_name(st)] = _expr_go(st.value, param, env, vtypes,
+                                         call_types, scope)
+        return _stmts_go(rest, param, env, fname, loop_counter, helpers,
+                         vtypes, call_types, scope)
     if isinstance(st, (ForStmt, Break, Continue)):
         raise NotImplementedError(
             f"model: {type(st).__name__} needs the generic loop contract")
@@ -654,7 +765,12 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
             f"  (if {cond} then {helper} ({updated}) else {rest_term})"
         )
         return f"({helper} {env.get(param, '(0 : UInt64)')})"
-    return "(0 : UInt64)"
+    raise NotImplementedError(
+        f"model: a {type(st).__name__} has no translation in the semantic "
+        f"model (a `UInt64 → UInt64` function over the source's statements); "
+        f"refusing rather than modelling it as 0, which would be a false "
+        f"statement about the source — `_no_value_model`'s reasoning, applied "
+        f"to a statement")
 
 
 # --- Typed (fixed-width int) semantic model -----------------------------------
@@ -811,6 +927,27 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         env[_target_name(st)] = _expr_go_t(_b, param, env, vtypes, call_types, scope)
         return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
                            loop_counter, helpers)
+    if isinstance(st, VarDecl):
+        # The typed twin of `_stmts_go`'s `VarDecl` arm, and the same statement:
+        # a fresh local bound in the environment, with the value carried at the
+        # local's DECLARED type's 64-bit representation (`_t_wrap`), which is
+        # what makes `var a: Int8 = 3` model as the sign-extended 3 the machine
+        # keeps rather than as the bare word.
+        #
+        # The type comes from `vtypes` and not from `st.type_ann`, because
+        # `formal.types.function_var_types` is the one reader of that question —
+        # it walks `VarDecl` itself, reads the annotation through
+        # `parse_type_name` and falls back to inferring from the value — so a
+        # second read of the annotation here is a second answer waiting to
+        # disagree. An absent name is the default type, which is the same
+        # "an absent answer IS the answer" rule the pointer value model states.
+        env = dict(env)
+        name = _target_name(st)
+        env[name] = _t_wrap(
+            _expr_go_t(st.value, param, env, vtypes, call_types, scope),
+            vtypes.get(name) or DEFAULT_INT_TYPE)
+        return _stmts_go_t(rest, param, env, fname, vtypes, call_types,
+                           loop_counter, helpers)
     if isinstance(st, IfStmt):
         _c0, _tb0, _eb0 = _if_expand(st)
         cond = _expr_bool_go_t(_c0, param, env, vtypes, call_types, scope)
@@ -819,7 +956,13 @@ def _stmts_go_t(stmts, param: str, env: dict, fname: str, vtypes: dict,
         e = _stmts_go_t(_eb0 + rest, param, env, fname, vtypes,
                         call_types, loop_counter, helpers)
         return f"(if {cond} then {t} else {e})"
-    raise NotImplementedError("typed model: while loops not yet supported")
+    if isinstance(st, WhileStmt):
+        raise NotImplementedError(
+            "typed model: while loops not yet supported")
+    raise NotImplementedError(
+        f"typed model: a {type(st).__name__} has no translation; refusing "
+        f"rather than modelling it as 0, which would be a false statement "
+        f"about the source")
 
 
 def _collect_conds_t(fn, param: str, env: dict, vtypes: dict,
@@ -1415,8 +1558,14 @@ def _go_defs_for(prog, fn, tc: dict) -> list:
     fns = {g.name: g for g in (getattr(prog, "functions", None) or [])}
     if fn is not None:
         fns.setdefault(fn.name, fn)
-    scope = {n: g for n, g in fns.items()
-             if n in set(_reachable(fns, fn.name if fn else ""))}
+    scope = _Scope({n: g for n, g in fns.items()
+                    if n in set(_reachable(fns, fn.name if fn else ""))})
+    # The admitted contracts, keyed by the SPELLING a call site uses.  Read off
+    # `prog` because `formal/build.py` already resolved them through
+    # `formal/imports.py`'s `import_bindings` — the same binding the emitted call
+    # uses, so the model cannot substitute one contract for the callee the code
+    # actually calls.
+    scope.admitted = dict(getattr(prog, "admitted_calls", None) or {})
     tc = dict(tc or {})
     tc["fns"] = scope
     out = []
@@ -1532,6 +1681,19 @@ def _stmts_ast(stmts) -> list:
             parts.append(f'MojoStmt.assign "{_target_name(st)}" '
                          f'(MojoExpr.binop "{_lean_op(st.op.rstrip(chr(61)))}" (MojoExpr.var "{_target_name(st)}") '
                          f'({_expr_ast(st.value)}))')
+        elif isinstance(st, VarDecl):
+            # The same desugar, for the same reason: `MojoStmt` has no
+            # declaration form and it should not grow one. The AST exists to
+            # CROSS-CHECK the model, and a `var a = 1` is a binding the AST's
+            # `MojoStmt.assign` already states exactly — `var a: Int = 1` differs
+            # only in a type the model also has to carry in the value rather than
+            # in the store. What is NOT acceptable is what this used to do,
+            # which was to fall off the end of the `elif` chain and be silently
+            # NOT APPENDED: the generated `ast` then had one statement where the
+            # source had two, and the cross-check compared a model of a
+            # different program against itself and found nothing.
+            parts.append(f'MojoStmt.assign "{_target_name(st)}" '
+                         f'({_expr_ast(st.value)})')
         elif isinstance(st, ExprStmt):
             parts.append(f"MojoStmt.exprstmt ({_expr_ast(st.value)})")
         elif isinstance(st, WhileStmt):
@@ -1544,6 +1706,19 @@ def _stmts_ast(stmts) -> list:
             raise NotImplementedError(
                 f"ast model: {type(st).__name__} needs the generic loop "
                 "contract (MojoStmt has no loop-else/break/for forms)")
+        else:
+            # The fallback that was missing, and it is the one that made the
+            # `VarDecl` omission a wrong ANSWER rather than an unfinished one:
+            # this chain had no `else`, so a statement form it did not name was
+            # simply not appended and the generated `ast` was a model of a
+            # SHORTER program. The `ast` is what the value-flow proofs
+            # cross-check the semantic model against, so a statement that
+            # vanishes from it removes the cross-check for that statement and
+            # reports nothing.
+            raise NotImplementedError(
+                f"ast model: a {type(st).__name__} has no MojoStmt form; "
+                f"refusing rather than dropping it, because an `ast` that is "
+                f"missing a statement is a model of a different program")
     return parts
 
 
@@ -6431,7 +6606,9 @@ def _gen_code_defs(name: str, code: bytes, base: int, test_input: int) -> str:
     )
 
 
-def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entry: int) -> str:
+def _gen_runs_test(name: str, code: bytes, base: int, test_input: int,
+                   func_entry: int, admitted_model: bool = False,
+                   admitted_names: list = None) -> str:
     """Concrete machine-verified test of a fully-modelled compiled binary.
 
     Appends a RET sentinel after the code and executes the whole program
@@ -6444,13 +6621,27 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entr
     exit_addr = base + len(code)
     init = (f"{{ (Arm64State.init {test_input} {base}) "
             f"with x30 := UInt64.ofNat {exit_addr} }}")
+    _tac = _decide_or_admit(admitted_model)
+    # The admission note goes on the FIRST block only, and every docstring here
+    # keeps HEAD's text when there is nothing to admit.  Both halves are the same
+    # requirement: a file that reaches no admitted contract must generate a
+    # byte-identical proof, which is what says this change is inert everywhere it
+    # does not apply.  Repeating the note on all five blocks would put five
+    # copies of a paragraph in every generated proof that does admit something.
+    _first_note = ("" if not admitted_model
+                   else "\n    " + _admitted_model_note(admitted_names or [])
+                   + " -/")
+    _rest_note = "" if admitted_model else " -/"
     blocks = [
+        f"/-- Concrete verification: running the compiled binary on input "
+        f"{test_input} leaves mojo {test_input} in x0.{_first_note}"
+        if admitted_model else
         f"/-- Concrete verification: running the compiled binary on input "
         f"{test_input} leaves mojo {test_input} in x0. -/\n"
         f"theorem {name}_runs_test :\n"
         f"  run_result_exit {init} {name}_code {exit_addr} 200000 "
         f"= mojo {test_input} := by\n"
-        f"  native_decide"
+        f"{_tac}"
     ]
     for v in [0, 1, 2, 5]:
         if v == test_input:
@@ -6458,17 +6649,20 @@ def _gen_runs_test(name: str, code: bytes, base: int, test_input: int, func_entr
         ventry = (f"{{ (Arm64State.init {v} {func_entry}) "
                   f"with x30 := UInt64.ofNat {exit_addr} }}")
         blocks.append(
-            f"/-- Concrete verification for input {v}, run from the function entry. -/\n"
+            f"/-- Concrete verification for input {v}, run from the function "
+            f"entry.{_rest_note}\n"
             f"theorem {name}_runs_{v} :\n"
             f"  run_result_exit {ventry} {name}_code {exit_addr} 200000 "
             f"= mojo {v} := by\n"
-            f"  native_decide"
+            f"{_tac}"
         )
     return "\n\n".join(blocks)
 
 
 def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
-                     extern_calls: list, externs: list, fn) -> tuple:
+                     extern_calls: list, externs: list, fn,
+                     admitted_model: bool = False,
+                     admitted_names: list = None) -> tuple:
     """Structured verification for programs that call extern symbols.
 
     The execution is split at each extern call site:
@@ -6601,8 +6795,13 @@ def _gen_extern_test(name: str, code: bytes, base: int, test_input: int,
                 f"  run_result_exit {{ {name}_pre_{len(extern_calls) - 1} "
                 f"with pc := {last_bl + 4} }} "
                 f"{name}_code {exit_addr} 200000 = mojo {test_input} := by\n"
-                f"  native_decide"
+                f"{_decide_or_admit(admitted_model)}"
             )
+            if admitted_model:
+                blocks[-1] = blocks[-1].replace(
+                    "   which is why the name says what this one is for. -/",
+                    "   which is why the name says what this one is for.\n"
+                    f"   {_admitted_model_note(admitted_names or [])} -/")
     return "\n\n".join(blocks), "\n\n".join(step_blocks)
 
 
@@ -6888,6 +7087,156 @@ def check_step_conds(lean_path=None):
             % (len(missing), _fmt(missing), len(extra), _fmt(extra)))
 
 
+def _decide_or_admit(admitted_model: bool) -> str:
+    """`"  native_decide"` or `"  sorry"`, for a theorem whose value is the MODEL.
+
+    One function, because the choice is the same decision in four places and the
+    reason it is a decision at all is that `native_decide` EXECUTES the model:
+    when the model's value reaches an admitted contract, evaluating it walks into
+    `sorryAx`, and Lean answers
+
+        cannot evaluate code because 'admitted_subprocess_run' uses 'sorry'
+
+    which is not a proof failure but a refusal to evaluate.  So a theorem that
+    depends on the trust has to be ADMITTED rather than decided, and saying so
+    in the file is the honest outcome: the theorem is exactly as true as the
+    contract it rests on, and the census now counts it.
+
+    The alternative — leaving `native_decide` and letting the build fail — makes
+    every file that uses an admitted contract unbuildable with proofs on, which
+    would mean the admission is declared and then never usable.  The other
+    alternative, keeping `native_decide` and hoping the axiom is inhabited, is
+    the one this exists to prevent: it is a proof that would be reporting
+    agreement it never checked.
+    """
+    return "  sorry" if admitted_model else "  native_decide"
+
+
+def _admitted_model_note(contracts: list) -> str:
+    """The `/-- … -/` line that says WHY a theorem is admitted, and by what."""
+    names = ", ".join(f"`{c}`" for c in contracts)
+    return (f"GIVEN the admitted host contract(s) {names} above: this is a "
+            f"claim of TRUST, not a proof.  The model's value at this call is "
+            f"the contract's, so the statement cannot be decided by executing "
+            f"the model, and it is admitted rather than checked.  Everything "
+            f"else in this file keeps its normal proof.")
+
+
+def _call_func_lean(func_name: str, admitted: dict = None,
+                    wrap: bool = True) -> str:
+    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
+
+    ONE function for what five call sites used to spell out.  They agreed
+    because they were copies, and a copy that has to be edited in five places
+    when the function it builds gains a case is a copy that will be edited in
+    four of them: `formal/x86_64_proof_gen.py` had a sixth, and `eval_eq_mojo`,
+    `eval_eq_mojo_0` and `eval_eq_mojo_test` are three statements that must
+    agree about what a call MEANS or they disagree about whether the AST model
+    and the source model are the same function.
+
+    The ADMITTED cases are the reason this is factored rather than pasted.  An
+    admitted callee's value is its contract, so `evalFunc` has to evaluate such
+    a call by the contract and not by `0` — `MojoExpr.call` in `lib/ProofLib.lean`
+    falls through to `callFunc` for a name it does not know, and a `0` there
+    would make `eval_eq_mojo` a claim that the model's value is zero.  So each
+    admitted spelling gets its own branch, in the order `formal/build.py` gave
+    them.
+
+    `admitted` maps the spelling a call site uses to the contract's Lean name;
+    it is the same `prog.admitted_calls` the `_go` model uses, so both layers of
+    the proof resolve one call to one contract.
+    """
+    if not admitted:
+        # The spelling each of the six call sites used to write out, byte for
+        # byte, chosen by `wrap`.  A change that is supposed to be
+        # behaviour-preserving has to be byte-identical on a program that reaches
+        # no admitted contract, and this is the whole of it: the alternative
+        # would re-wrap part of every generated proof in the tree and invalidate
+        # every verdict in `~/.gmojo` for a whitespace change.  `wrap=False` is
+        # the one site that had it on one line (`fib`'s tree-recursion `hunf`);
+        # measured against HEAD over all 43 files in `formal/examples/`, both
+        # arms are needed to make all of them identical.
+        return ((f'(fun name arg =>\n'
+                 f'    if name = "{func_name}" then mojo arg else 0)') if wrap else
+                (f'(fun name arg => if name = "{func_name}" then mojo arg else 0)'))
+    arms = "\n  ".join(
+        f'if name = "{spelling}" then {lean} arg else'
+        for spelling, lean in sorted(admitted.items()) if lean)
+    return (f'(fun name arg =>\n  {arms}\n'
+            f'  if name = "{func_name}" then mojo arg else 0)')
+
+
+def _admitted_lean(admitted) -> str:
+    """The Lean block carrying a program's ADMITTED HOST CONTRACTS.
+
+    THE ONE IMPLEMENTATION, and `formal/x86_64_proof_gen.py` calls this rather
+    than writing its own: two copies of "how a claim of trust is written into a
+    generated proof" is exactly the pair that agrees until the day it does not,
+    and the disagreement would be one backend emitting an `axiom` the other does
+    not, which the census cannot see because it only counts what Lean reports.
+
+    The contracts arrive as the plain dicts `formal/build.py`'s
+    `_admitted_summary` produces — `{name, assumes, lean_name, source, line}` —
+    rather than as `formal/admitted.py` `Contract` objects, because the value
+    crosses a process boundary here (the sweep reads a stored verdict; the proof
+    generator is a later run).  `_admitted_lean` therefore renders from the dict
+    and calls `formal/admitted.py` for the SHAPE of the text, so the declaration
+    text and the docstring text have one author.
+
+    Empty for a file that reaches none, and empty is not an omission: a proof
+    with no admission must be byte-identical to what it was before this existed,
+    or every cached verdict in `~/.gmojo` would be measuring a different file.
+    """
+    if not admitted:
+        return ""
+    from formal import admitted as A
+
+    class _C:
+        __slots__ = ("module", "name", "assumes", "source", "line")
+
+        def __init__(self, d):
+            mod, _, fn = str(d.get("name", "?")).partition(".")
+            self.module = mod
+            self.name = fn or mod
+            self.assumes = d.get("assumes") or ""
+            self.source = d.get("source") or "?"
+            self.line = d.get("line") or 0
+
+        @property
+        def qualified(self):
+            return f"{self.module}.{self.name}" if self.name != self.module \
+                else self.module
+
+        @property
+        def lean_name(self):
+            return A.Contract(self.module, self.name, self.assumes,
+                              self.source, self.line).lean_name
+
+        def docstring(self):
+            return A.Contract(self.module, self.name, self.assumes,
+                              self.source, self.line).docstring()
+
+    contracts = [_C(d) for d in admitted]
+    # A contract whose assumption grew past what the scope rule allows is
+    # REFUSED here rather than emitted, and the refusal names the text.  A `sorry`
+    # over a claim about the host's BEHAVIOUR is not a narrower admission than a
+    # `sorry` over a claim about its answer; it is a different and much larger
+    # claim wearing the same marker, and emitting it silently would put that
+    # claim into every proof generated from here on.
+    for c in contracts:
+        why = A.contract_text_is_scoped(A.Contract(c.module, c.name, c.assumes,
+                                                  c.source, c.line))
+        if why:
+            raise NotImplementedError(f"admitted contract: {why}")
+    clash = A.contract_texts_are_unique(
+        [A.Contract(c.module, c.name, c.assumes, c.source, c.line)
+         for c in contracts])
+    if clash:
+        raise NotImplementedError(f"admitted contract: {clash}")
+    return "\n" + A.lean_trust_header(contracts) + "\n\n" + \
+        A.lean_declarations(contracts) + "\n"
+
+
 def generate_arm64_proof(prog, code, info) -> str:
     """Generate a Lean 4 proof file for an ARM64-compiled program."""
     check_step_conds()
@@ -6895,6 +7244,21 @@ def generate_arm64_proof(prog, code, info) -> str:
     base_addr = info["base_addr"]
     test_input = info.get("test_input", 10)
     code = code or b""
+
+    # The ADMITTED HOST CONTRACTS this program rests on, from `prog`.  See
+    # `formal/admitted.py` for what an admitted contract is and why it is a
+    # `sorry` rather than an `axiom`.  Read off `prog` rather than recomputed
+    # from the source, because `formal/build.py` is the one place that already
+    # walked the import closure — a second walk here would be free to resolve a
+    # different closure than the one the build linked against, and the proof
+    # would then carry admissions for modules the image does not link and none
+    # for modules it does.
+    admitted = list(getattr(prog, "admitted", None) or [])
+    admitted_section = _admitted_lean(admitted)
+    # The `callFunc` the AST layer is given, which has to know the admitted
+    # spellings as well as the proved function — see `_call_func_lean`.
+    _admitted_calls_map = dict(getattr(prog, "admitted_calls", None) or {})
+    _cf_text = _call_func_lean(func_name, _admitted_calls_map)
 
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
@@ -6907,16 +7271,34 @@ def generate_arm64_proof(prog, code, info) -> str:
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
 
-    # Typed (fixed-width int) context.  A function is "typed" when any variable
-    # or the return type is not the default UInt64 (Int64 counts: signed cmps).
+    # Which of those this program ACTUALLY calls, walked with `_callees_of` —
+    # the same walk that builds the `_go` dependency graph, so it cannot call a
+    # name the model does not also try to resolve.  `admitted_model` is what
+    # makes the value-dependent theorems admitted rather than decided, and it is
+    # deliberately about CALLS rather than about the contracts being present: a
+    # file that imports `subprocess` and never calls it links a library with six
+    # contracts in it and its own proof is decidable, so admitting its theorems
+    # would over-report by exactly the files that trusted least.
+    _allfns = {g.name: g for g in (getattr(prog, "functions", None) or [])}
+    if fn is not None:
+        _allfns.setdefault(fn.name, fn)
+    _called = set()
+    for _n in _reachable(_allfns, fn.name if fn else ""):
+        _called.update(_callees_of(_allfns[_n]))
+    _admitted_used_names = sorted(
+        c["name"] for k, c in
+        ((k, c) for c in admitted for k in (c.get("name"),))
+        if k and any(sp == k or sp == k.split(".")[-1] for sp in _called))
+    _admitted_model = bool(_admitted_used_names)
+
+    # Typed (fixed-width int) context.  The decision is `types.uses_typed_model`
+    # and its own docstring is the reasoning; it used to be five lines spelled
+    # here and five more in `x86_64_proof_gen.py`, which is two chances for the
+    # two architectures to prove different programs.
     call_types = {g.name: resolve(parse_type_name(g.return_type) or DEFAULT_INT_TYPE)
                   for g in prog.functions}
     vtypes = function_var_types(fn, call_types)
-    _all_t = list(vtypes.values())
-    _rt = resolve(parse_type_name(getattr(fn, "return_type", None)))
-    if _rt != DEFAULT_INT_TYPE:
-        _all_t.append(_rt)
-    is_typed = any(t != DEFAULT_INT_TYPE for t in _all_t)
+    is_typed = uses_typed_model(fn, call_types)
     tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types}
     # The fixed-width truncator helpers (t8u/t8s/.../t32s) and the
     # SXTW-after-SXTB/SXTH idempotency lemmas live in ProofLib (single source of
@@ -6970,9 +7352,13 @@ def generate_arm64_proof(prog, code, info) -> str:
         # tree recursion (`fib`): `mojo` is the structural model, so the AST
         # evaluation unfolds to the same `n<=1 / n-1 / n-2` recurrence and
         # `fib_model_lt2`/`_ge2` close it directly (no induction needed).
-        _cf = (f"fun name arg => if name = \"{func_name}\" then mojo arg else 0")
+        _cf = _call_func_lean(func_name, _admitted_calls_map, wrap=False)
+        # This site writes its own parentheses around the callFunc, so the
+        # one-line arm must not carry a second pair -- otherwise `fib`'s proof
+        # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
+        _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf}) n =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) n =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
             f"    simp only [ast, evalFunc, evalBody, evalBodyEnv, evalExpr]\n"
             f"    by_cases h : n ≤ (1 : UInt64) <;> simp [h]\n"
@@ -7044,8 +7430,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast (fun name arg =>\n"
-            f"    if name = \"{func_name}\" then mojo arg else 0) n = mojo n := by\n"
+            f"  evalFunc ast {_cf_text} n = mojo n := by\n"
             f"  {eval_eq_mojo_proof}"
         )
     if _range_loop_pattern(fn) is not None:
@@ -7060,12 +7445,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     externs = list(getattr(prog, "externs", []) or [])
     step_tests = ""
     if extern_calls:
-        run_test, step_tests = _gen_extern_test(func_name, code, base_addr,
-                                                test_input, extern_calls,
-                                                externs, fn)
+        run_test, step_tests = _gen_extern_test(
+            func_name, code, base_addr, test_input, extern_calls, externs, fn,
+            admitted_model=_admitted_model,
+            admitted_names=_admitted_used_names)
     elif not externs:
         run_test = _gen_runs_test(func_name, code, base_addr, test_input,
-                                  info["labels"].get(func_name, base_addr))
+                                  info["labels"].get(func_name, base_addr),
+                                  admitted_model=_admitted_model,
+                                  admitted_names=_admitted_used_names)
     else:
         # externs declared but no call sites recorded (codegen gap): admit
         exit_addr = base_addr + len(code)
@@ -7094,24 +7482,30 @@ def generate_arm64_proof(prog, code, info) -> str:
     # no-return fall-through, and it skips while loops entirely, so those
     # programs would not satisfy the equality).
     eval_test_block = ""
+    _tac_eval = _decide_or_admit(_admitted_model)
     if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
         eval_tests = []
+        if _admitted_model:
+            # A `/- -/` block and NOT a docstring: the section header in the
+            # template already carries one docstring on the declaration that
+            # follows, and Lean takes one docstring per declaration -- a second
+            # is a parse error at the token, naming no docstrings.
+            eval_tests.append(
+                f"/- {_admitted_model_note(_admitted_used_names)} -/\n")
         for v in [0, 1, 2, 5, test_input]:
             if v == test_input:
                 continue
             eval_tests.append(
                 f"theorem eval_eq_mojo_{v} :\n"
-                f"  evalFunc ast (fun name arg =>\n"
-                f"    if name = \"{func_name}\" then mojo arg else 0) "
+                f"  evalFunc ast {_cf_text} "
                 f"(UInt64.ofNat {v}) = mojo (UInt64.ofNat {v}) := by\n"
-                f"  native_decide"
+                f"{_tac_eval}"
             )
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
-            f"  evalFunc ast (fun name arg =>\n"
-            f"    if name = \"{func_name}\" then mojo arg else 0) "
+            f"  evalFunc ast {_cf_text} "
             f"(UInt64.ofNat {test_input}) = mojo (UInt64.ofNat {test_input}) := by\n"
-            f"  native_decide"
+            f"{_tac_eval}"
         )
         eval_test_block = "\n\n".join(eval_tests)
 
@@ -7229,7 +7623,7 @@ set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000
 set_option linter.unusedSimpArgs false
 set_option linter.unusedVariables false
-{trunc_defs_section}
+{trunc_defs_section}{admitted_section}
 /-- Mojo semantics: direct Lean model of the source code. -/
 {go_defs}
 
@@ -8071,6 +8465,24 @@ def _lean_export_id(name: str) -> str:
 _EXPORT_FUEL_BASE = 200000
 
 
+def _export_extent(exports: list, entry: int, base: int, code_size: int) -> int:
+    """The end of one export's OWN code: the next export's entry, or the end of
+    the image for the last one.
+
+    This is `DylibExport.exportEnd` (`lib/ProofLib.lean`), computed in Python
+    because the emitter needs it as a literal and the library needs it as a
+    fold over the export table it is given.  The two are the same rule, and the
+    library's version is what the emitted `exportEnd_here` proves, so a drift
+    between them is a file that does not typecheck rather than a proof about a
+    different address.  It is written ONCE here: three callers want it (the
+    total proof's CFG frame, the contract's block, and nothing else), and three
+    spellings of "the next export's entry, or the image's end" are three
+    readings that agree until the day one of them is edited.
+    """
+    later = sorted(e["entry"] for e in exports if e["entry"] > entry)
+    return later[0] if later else base + code_size
+
+
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
                        exports: list) -> str:
     """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
@@ -8091,8 +8503,7 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     arbitrary state's arbitrary `x30` -- so the census was counting two holes
     that no proof could ever fill.
     """
-    later = sorted(e["entry"] for e in exports if e["entry"] > entry)
-    func_end = later[0] if later else base + len(code)
+    func_end = _export_extent(exports, entry, base, len(code))
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
@@ -8103,6 +8514,15 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
             fn=None, tw_extra="DylibExport.exportFuel",
             tc={"typed": False, "vtypes": {}, "call_types": {}},
             cond_branches=set(), code_name="dylib_code", sr_name="dylib",
+            # The halt address AND the initial link register, both the EXPORT's
+            # own end rather than the image's -- which is what `runExport` now
+            # uses (`DylibExport.exportEnd`).  The walk's CFG is already
+            # `[entry, func_end)`, so the default (`base + len(code)`) was
+            # inconsistent with it for every export but the last: the emitted
+            # theorem was about a run that continued into the next export, and
+            # `total_of_halts` rejected it as a type mismatch.  For a one-export
+            # image the two are the same number, so that case is unchanged.
+            exit_at=func_end,
             frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
             no_change=True, halt_only=True, fuel=_EXPORT_FUEL_BASE,
             # The fuel is emitted in its ARITHMETIC form, `BASE + PATH * n`, not
@@ -8167,14 +8587,48 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
 _DYLIB_SPEC_BINOPS = {"+": "+", "-": "-", "*": "*",
                       "/": "UInt64.div", "%": "UInt64.mod"}
 
+# How much Lean source a derived spec may be before the derivation gives up.
+# Substitution is let-elimination, so a chain of bindings COPIES each bound
+# expression into every use: a 30-binding body that binds one word from the
+# previous is exponential in the source and lands in `bv_decide` as a term too
+# large to decide.  A bound is the honest response, and it is checked rather
+# than felt -- a body past it returns None, which is "no claim", not a wrong one.
+_DYLIB_SPEC_MAX_CHARS = 20000
+
 
 def _dylib_spec_lean(fn) -> str:
     """A closed-form spec for a word-shaped export, derived from its SOURCE.
 
-    Returns Lean source for `fun n => <expr>`, or None when the body is not a
-    single `return` of pure arithmetic over the parameter. That fallback is the
-    point: an export whose spec cannot be derived must stay a NAMED `sorry`
-    obligation, not acquire a contract that was guessed.
+    Returns Lean source for `fun n => <expr>`, or None when the body is not
+    STRAIGHT-LINE arithmetic over the parameter. That fallback is the point: an
+    export whose spec cannot be derived must acquire NO contract claim at all,
+    because the only spec available without one is `fun n => n` and that is
+    false for every export in the tree which is not the identity.
+
+    **The body may be a chain of bindings and a final `return`, and each binding
+    must be to a FRESH name.**  It used to require the body to be EXACTLY one
+    `return`, which was narrower than the proof layer behind it: measured over
+    six one-`return` bodies, `var m = n * 3` then `return m` is 17 instructions
+    of straight-line code that `_dylib_contract_proof` emits a full `Block` and
+    `BlockCert` for, and it got NO contract because the statement list had two
+    entries.  So the ceiling on proved contracts was this function, not the Lean
+    layer -- and an export that reads its argument into a local before computing
+    with it, which is most of them, was silently outside it.
+
+    Freshness is what makes the substitution sound: with no name bound twice,
+    every use of a local has the one value its binding gave it, so inlining is
+    let-elimination rather than an interpretation of reassignment. A second
+    binding of the same name, or any statement kind that is not a binding or
+    the final `return`, returns None.
+
+    **The statement LIST is what is checked**, not the returns found in it.  It
+    used to be `len(rets) == 1` over the top-level statements, which silently
+    derived one ARM's spec for a body with branches: `def pick(n): if n > 3:
+    return 1 else: return 0` has one top-level `return`, so the spec came out
+    `(fun n => 0)` -- false for `n = 7`, and checked against nothing, because
+    there is no `Block` for a body with a branch and the contract is refused
+    before Lean ever sees it. A spec is a claim about the source, so a body the
+    emitter read only part of is worse than no spec.
 
     Only the shapes the ABI's word-shaped entry points actually have are
     handled, and an unrecognised node yields None rather than a partial
@@ -8195,9 +8649,14 @@ def _dylib_spec_lean(fn) -> str:
     if not isinstance(pname, str) or not pname:
         return None
     body = list(getattr(fn, "body", None) or [])
-    rets = [b for b in body if type(b).__name__ == "ReturnStmt"]
-    if len(rets) != 1:
+    if not body or type(body[-1]).__name__ != "ReturnStmt":
         return None
+
+    # `env` is the ONLY reading of "what this name holds": the parameter, and
+    # the locals bound so far.  It is threaded through `go` rather than
+    # substituted afterwards, so a local used inside a later binding resolves
+    # the same way it does at run time.
+    env = {pname: "n"}
 
     def go(node):
         kind = type(node).__name__
@@ -8213,7 +8672,7 @@ def _dylib_spec_lean(fn) -> str:
                     return None
             return f"({v} : UInt64)"
         if kind == "IdentExpr":
-            return "n" if getattr(node, "name", None) == pname else None
+            return env.get(getattr(node, "name", None))
         if kind == "UnaryOp":
             op = getattr(node, "op", None)
             if op not in ("-", "+", "~"):
@@ -8234,46 +8693,97 @@ def _dylib_spec_lean(fn) -> str:
             return f"({a} {sym} {b})"
         return None
 
-    expr = go(getattr(rets[0], "value", None))
+    for stmt in body[:-1]:
+        kind = type(stmt).__name__
+        if kind == "VarDecl":
+            target = getattr(stmt, "name", None)
+        elif kind == "AssignStmt":
+            lhs = getattr(stmt, "target", None)
+            target = (getattr(lhs, "name", None)
+                      if type(lhs).__name__ == "IdentExpr" else None)
+        else:
+            return None
+        if not isinstance(target, str) or not target:
+            return None
+        if target in env:
+            # A second binding of the same name: not a fresh local, and the
+            # value a use of it has is the one in force at THAT point, which a
+            # single substitution does not model.  Refuse rather than guess.
+            return None
+        value = go(getattr(stmt, "value", None))
+        if value is None:
+            return None
+        env[target] = value
+
+    expr = go(getattr(body[-1], "value", None))
     if expr is None:
         return None
-    return f"(fun n => {expr})"
+    out = f"(fun n => {expr})"
+    if len(out) > _DYLIB_SPEC_MAX_CHARS:
+        return None
+    return out
 
 
 def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
-                          spec: str) -> str:
+                          spec: str, func_end: int) -> str:
     """Emit a PROVED per-export contract for one dylib export.
 
     `spec` is Lean source for `fun n => <expr>`, from `_dylib_spec_lean`.
-    Three parts, deliberately not fused into one opaque term:
+    `func_end` is the end of THIS export's own code — the next export's entry,
+    or the image's end for the last one, which is `DylibExport.exportEnd`.  Four
+    parts, deliberately not fused into one opaque term:
 
       * the body's composed effect, as a `Block` plus a `BlockCert` -- a chain
         of `m` one-step rewrites, each applying the `dylib_sr_i` lemma the
         generator ALREADY emits, with the running `pc` pinned to instruction
         `i`'s address;
-      * the two facts that make it the export's body -- it ends at the image's
+      * the two facts that make it the export's body -- it ends at the export's
         exit, and no intermediate state is already there;
       * `hreg`, the machine agreeing with the source-derived spec.
 
-    The composition is by NAMED `def`s, one per step. Substituting the
-    accumulated effect into the next step's conclusion grows EXPONENTIALLY --
-    measured at 981 MB of Lean source for a 15-instruction body, which does not
-    terminate -- and naming each step keeps it linear at a couple of KB.
+    The composition is by NAMED `def`s, one per step, and each `st_i` is a
+    function of ONE state (`S_{i+1}` feeds it the running state). Substituting
+    the accumulated effect into the next step's conclusion grows EXPONENTIALLY
+    -- measured at 981 MB of Lean source for a 15-instruction body, which does
+    not terminate -- and composing it inside `st_i` was wrong as well as
+    explosive: every step then ran once per earlier step again.
 
     `atExit` needs `x30` to survive the frame, because a body ends by returning
     and a return jumps to `x30`. That is `hx30`, and `bv_decide` gets it from
     the same bitvector computation that gets `hreg`.
 
-    Returns "" if the code has an instruction the model cannot name, so the
-    caller keeps the obligation rather than emitting something unchecked.
+    **The block is the export's OWN extent, `[entry, func_end)`.**  It used to be
+    the whole image's, and `Contracts.ExportBody`'s `atExit` was stated at the
+    IMAGE's end to match -- which is why a dylib with more than one export could
+    never have a proved per-export contract: the block a `BlockCert` is about
+    was not a block the export could run. `DylibExport.exportEnd` is now the
+    exit for both `startState`'s `x30` and `runProg`, so `func_end` is the
+    address every one of these facts is about, and the two can no longer
+    disagree. What is left is a body with a branch anywhere but at its end:
+    `Refine.Block.step` is one function of one state, which a conditional branch
+    does not have.
+
+    Returns "" in that case, so the caller keeps the obligation rather than
+    emitting something unchecked.
     """
+    # This export's own words, and where they sit in the IMAGE's word numbering.
+    # The per-instruction lemmas are indexed by the image-wide word number, so a
+    # block for the second export of several reads `dylib_sr_k0 …` and the
+    # offset is the reason `k0` is computed rather than assumed to be 0.
+    k0 = (entry - base) // 4
+    m = (func_end - entry) // 4
+    if m < 2 or entry + m * 4 != func_end or (entry - base) % 4:
+        return ""
     words = [int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)]
-    m = len(words)
-    if m < 2:
+    if k0 + m > len(words):
         return ""
-    pcs = [base + i * 4 for i in range(m)]
-    exit_pat = "(dylib_image.base + dylib_image.codeSize)"
+    words = words[k0:k0 + m]
+    # The block's own address list: the export's, and the only addresses any
+    # premise below is about. `Contracts.noEarly`'s `u < pcs.length` is what
+    # makes these the addresses a caller can reason about.
+    pcs = [entry + i * 4 for i in range(m)]
+    exit_pc = func_end
     rhss = []
     for w in words:
         idx = _step_branch_index(w)
@@ -8284,133 +8794,336 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
             return ""
         rhss.append(rhs)
 
+    # `pc_writes[i]`: does step `i`'s model effect move the pc? `_step_rhs`
+    # writes the `pc` field exactly for the instructions that do. So every step
+    # but the last must be straight-line, and the last may additionally be the
+    # return that ends the body. A CONDITIONAL branch comes back from `_step_rhs`
+    # as an `if` (there is no `some <state>` to strip), and a `Refine.Block` is
+    # one function of one state, so there is nothing to emit for it at any
+    # position -- hence the separate check.
+    def _body_of(i):
+        rhs = rhss[i]
+        return rhs[len("some "):] if rhs.startswith("some ") else rhs
+    if any("if " in _body_of(i) for i in range(m)):
+        return ""
+    pc_writes = ["pc :=" in _body_of(i) for i in range(m)]
+    if any(pc_writes[:m - 1]):
+        return ""
+    # at most one `if` may survive in the composed effect, at the last step
+    assert sum(pc_writes) <= 1
+
     out = [f"namespace {ident}_contract\n",
            f"def start (n : UInt64) : Arm64State :=\n"
            f"  Contracts.startState dylib_image {ident} n\n",
+           # THE EXIT, AS A FACT RATHER THAN A FOLD TO UNFOLD.  Every premise of
+           # `Contracts.ExportBody` below is stated at `DylibExport.exportEnd`,
+           # which is a fold over the image's export table, and `bv_decide`
+           # cannot unfold a fold -- it abstracts what it cannot see and answers
+           # with a spurious counterexample.  So the table is folded ONCE, here,
+           # by a proof: `native_decide` over a literal export list, and if the
+           # fold ever said something other than this export's own end, the file
+           # would not typecheck instead of quietly proving something about a
+           # different address.
+           f"theorem exportEnd_here :\n"
+           f"    DylibExport.exportEnd dylib_image {ident} = {exit_pc} := by\n"
+           f"  native_decide\n",
            # `S0` is named rather than left to `autoImplicit`: an undefined `S0`
            # elaborates as a free VARIABLE of function type, so `S0 s` would be
            # an arbitrary function applied to the start state and every `hpc0`
            # would be a statement about it. It is the identity.
            "def S0 (s : Arm64State) : Arm64State := s"]
 
-    # The raw effect of each step, named `st_i`.  `_step_rhs` returns the model's
+    # THE RAW EFFECT OF ONE STEP, named `st_i`.  `_step_rhs` returns the model's
     # `some <state>` RESULT, so the `some` is stripped: `st_i` is the state, not
-    # the option.  The substitution is PARENTHESISED -- `s.sp` has to become
-    # `(st0 s).sp`, and bare `st0 s` there parses as `st0` applied to `s.sp` and
-    # silently elaborates to the wrong thing.
+    # the option.  Nothing else is substituted into it -- `st_i` is a function of
+    # ONE state, and the composition below is what feeds it the running state.
+    #
+    # The substitution that used to be here (`s` -> `st{i-1} s`) was a bug with
+    # no symptom in the file, because the two declarations were never checked
+    # against each other: `S{i+1}` applies `st{i}` to `S{i} s`, so `st{i}`
+    # composing itself made every step run once per earlier step again.  On
+    # `triple` the MUL ran five times and the contract said `n * 243` while the
+    # machine computed `n * 3` -- a `sorry` over a FALSE claim, which is what
+    # `formal/admitted.py`'s `OPUS-9` rule is about.
     for i, rhs in enumerate(rhss):
         body = rhs[len("some "):] if rhs.startswith("some ") else rhs
-        prev = "s" if i == 0 else f"st{i - 1} s"
-        out.append(f"def st{i} (s : Arm64State) : Arm64State :=\n  "
-                   + re.sub(r"(?<![\w.])s(?![\w])", f"({prev})", body))
+        out.append(f"def st{i} (s : Arm64State) : Arm64State :=\n  {body}")
 
-    # the RUNNER's chain, named `S_i`: `arm64_runs` recurses on the BUMPED
-    # state when a step leaves pc alone, so the composed effect is NOT the raw
-    # `st_i` chain. Omitting the bump is the bug the golden's shape exposes.
+    # THE RUNNER'S CHAIN, named `S_i`.  `arm64_runs` advances the pc only when
+    # the step left it alone, and for every step of a straight-line body the
+    # model KNOWS that statically: `_step_rhs` mentions `pc` exactly when the
+    # instruction moves the pc.  So the runner's `if` is emitted resolved for
+    # every such step, and the whole composed effect is a straight-line term.
+    #
+    # That resolution is what makes this terminate.  A fourteen-fold nest of
+    # `if <pc of the whole composed state> = <pc of the whole composed state>
+    # then ... else ...` is a case split per level, and `bv_decide`'s own
+    # normalisation of it is what did not terminate: measured at 177.1 s CPU in
+    # 79.9 s of wall before `RLIMIT_CPU` fired, and then at 79.7 s wall /
+    # 296 s CPU even with `bv_decide` replaced by `sorry` (which made
+    # `noEarly`'s blocks the next cost centre), with `maxHeartbeats`,
+    # `maxSteps` and `maxRecDepth` all measured FAILING to fire.  The numbers
+    # and the two cost centres are in `FORMAL.md` §12 and
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1.
+    #
+    # The two forms are the same function: for a step whose effect is
+    # `{s with sp := v}`, `(st_i s).pc = s.pc` holds by `rfl`, which is the
+    # hypothesis `runs_cons_seq` wants.
+    #
+    # The LAST step may move the pc to something the emitter cannot compute --
+    # a `ret` jumps to `x30` -- and there the runner's `if` is kept, because
+    # `BlockCert` quantifies over EVERY state at the entry and pinning the
+    # composed `pc` to the exit would be a claim about the argument rather than
+    # about the machine.  It is one `if`, and `_ret_ne` decides it for the start
+    # state (which is the only state the value theorems are about).
     for i in range(m):
         prev = "s" if i == 0 else f"S{i} s"
-        out.append(f"def S{i + 1} (s : Arm64State) : Arm64State :=\n"
-                   f"  let t := st{i} ({prev})\n"
-                   f"  if t.pc = ({prev}).pc then "
-                   f"{{ t with pc := ({prev}).pc + 4 }} else t")
+        if pc_writes[i]:
+            out.append(f"def S{i + 1} (s : Arm64State) : Arm64State :=\n"
+                       f"  let t := st{i} ({prev})\n"
+                       f"  if t.pc = ({prev}).pc then "
+                       f"{{ t with pc := ({prev}).pc + 4 }} else t")
+        else:
+            out.append(f"def S{i + 1} (s : Arm64State) : Arm64State :=\n"
+                       f"  {{ st{i} ({prev}) with pc := ({prev}).pc + 4 }}")
 
     out.append(f"def body : Refine.Block :=\n"
                f"  {{ entry_pc := {entry}, pcs := {pcs}, "
-               f"step := fun s => S{m - 1} s }}")
+               f"step := fun s => S{m} s }}")
 
-    # THE UNFOLD SET.  `bv_decide` and `omega` can only see bitvector/arithmetic
-    # structure that is already unfolded; left folded, `S{m-1} (start n)` is an
-    # opaque `Arm64State` term and `bv_decide` reports a SPURIOUS counterexample
-    # ("abstracted the following unsupported expressions as opaque variables:
-    # [arm64_reg 0 (S14 (start n))]") rather than failing.  Same for the `if`
-    # inside each `S` step, which reaches `omega` in `noEarly` as an
-    # unevaluated `if` and yields a counterexample with a free metavariable.
+    # THE UNFOLD SET, and the reason it has to be this long.  `bv_decide` and
+    # `omega` can only see bitvector/arithmetic structure that is already
+    # unfolded; left folded, `S{m} (start n)` is an opaque `Arm64State` term and
+    # `bv_decide` reports a SPURIOUS counterexample ("abstracted the following
+    # unsupported expressions as opaque variables: [arm64_reg 0 (S15 (start n))]")
+    # rather than failing.
     #
-    # This is not a new idea: `arm64_proof_gen.py` already documents the trap
-    # and answers it, at the `_tw_defs` comment -- "unfolded before bv_decide in
-    # the branch-condition proofs, so the sign-extension of the free param is
-    # concrete rather than opaque (otherwise bv_decide reports spurious
-    # counterexamples)" -- and every other value site uses the same
-    # `arm64_reg, arm64_set_reg, _VSP` idiom.  The contract emitter was the one
-    # place that emitted a raw `intro n; bv_decide` and so missed it.
+    # Two of these entries are what make the MEMORY round trip decidable rather
+    # than merely unfoldable, and that is not cosmetic.  `start` reduces to
+    # `Arm64State.init`, whose `sp` is the LITERAL `0xfffffffffffffff0`; with it
+    # still folded the whole store/load chain is a nest of `mem_write_u64` over
+    # one opaque function, and `bv_decide` abstracts the chain as a single opaque
+    # variable and answers with a counterexample.  With `dylib_image` and the
+    # export unfolded too, every frame address is a ground `Nat`, so the
+    # disjointness side conditions of `mem_read_after_write_u64_ne` are
+    # DECIDABLE and `_MEM` below discharges them.  That is the same two-step
+    # shape the main (non-dylib) path already uses -- `simp +decide only
+    # [qS…, Arm64State.init, …]` then `simp [mem_read_after_write_u64,
+    # mem_read_after_write_u64_ne, mem_read_two_writes_same]` -- reused rather
+    # than re-invented here.
     _UNF = ", ".join(
         [f"S{k}" for k in range(m, 0, -1)]
         + [f"st{j}" for j in range(m)]
-        + ["start", "body", "arm64_reg", "arm64_set_reg", _VALUE_SIMP])
+        + ["start", f"{ident}", "dylib_image", "Contracts.startState",
+           "Arm64State.init", "arm64_reg", "arm64_set_reg", _VALUE_SIMP])
+    # The frame round trip, peeled by the library's own read-after-write lemmas.
+    # Listed in one place because a second spelling of "peel the stores" here
+    # would be a second thing to keep in step with `lib/ProofLib.lean`.
+    _MEM = ("mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+            "mem_read_two_writes_same, mem_read_two_writes_adjacent, "
+            "mem_read_two_writes")
 
-    # the value, and x30, checked against the machine
+    # THE PC DISCIPLINE, one lemma per step and no unfolding of the chain.
+    # This is the whole of what `noEarly` needs, and it replaces fifteen
+    # `simp only [S15 …, st0 …]` blocks that each re-unfolded the composed
+    # state -- the second cost centre `FORMAL_dylib_export_loops_and_frame_bounds.md`
+    # §`OPUS-3` suspected and this measures: the whole contract region does not
+    # finish at a 300 s CPU bound with them, and does with these.
     out.append(
-        f"/-- THE SPEC, checked against the machine: the result register is the\n"
-        f"    source-derived spec.  `bv_decide` discharges the prologue/epilogue\n"
-        f"    frame's memory round trip as well, because every value is a\n"
-        f"    `UInt64` -- there is no address arithmetic to do by hand. -/\n"
-        f"theorem hreg : ∀ n : UInt64,\n"
-        f"    arm64_reg 0 (S{m - 1} (start n)) = {spec} n := by\n"
-        f"  intro n\n  simp only [{_UNF}]\n  bv_decide")
-    out.append(
-        f"/-- `x30` survives the frame, which is what makes the return land on\n"
-        f"    the exit rather than somewhere else. -/\n"
-        f"theorem hx30 : ∀ n : UInt64,\n"
-        f"    arm64_reg 30 (S{m - 2} (start n)) = UInt64.ofNat {exit_pat} := by\n"
-        f"  intro n\n  simp only [{_UNF}]\n  bv_decide")
+        f"/-- The zero-step run, named so `noEarly`'s `u = 0` case has one. -/\n"
+        f"theorem runsTo0 (s : Arm64State) :\n"
+        f"    arm64_runs dylib_code 0 s = some (S0 s) :=\n"
+        f"  runs_zero dylib_code s")
+    for k in range(1, m + 1 if not pc_writes[m - 1] else m):
+        step = [f"  simp only [S{k}]",
+                f"  have hprev : (S{k - 1} s).pc = {entry} + {4 * (k - 1)} :=",
+                f"    S{k - 1}_pc s hpc" if k > 1 else "    hpc",
+                "  omega"]
+        out.append(
+            f"/-- After {k} straight-line steps the `pc` is instruction {k}'s\n"
+            f"    address.  Proved from the step's OWN definition -- a record\n"
+            f"    update on `sp` leaves `pc` alone -- so nothing is unfolded\n"
+            f"    here and the cost is one `omega`. -/\n"
+            f"theorem S{k}_pc (s : Arm64State) (hpc : s.pc = {entry}) :\n"
+            f"    (S{k} s).pc = {entry} + {4 * k} := by\n"
+            + "\n".join(step))
 
-    # the pc discipline: after k steps the pc is instruction k's address
-    for k in range(1, m):
-        names = [f"S{k}"] + [f"st{j}" for j in range(k)][::-1] + [f"S{k - 1}"]
-        out.append(f"theorem S{k}_pc (s : Arm64State) (hpc : s.pc = {entry}) :\n"
-                   f"    (S{k} s).pc = {entry} + {4 * k} := by\n"
-                   f"  simp [{', '.join(names)}]; omega")
-
-    # runsTo k: the first k steps, for every argument
+    # runsTo k: the first k steps, for every argument.  Each link is the
+    # library's own `runs_cons_seq` / `runs_cons_jump`, so the runner's `pc`
+    # bump is discharged by `rfl` (the step's effect does not mention `pc`) and
+    # nothing is unfolded.
     for k in range(1, m + 1):
         L = [f"theorem runsTo{k} (s : Arm64State) (hpc : s.pc = {entry}) :",
              f"    arm64_runs dylib_code {k} s = some (S{k} s) := by",
              f"  have hpc0 : (S0 s).pc = {entry} := hpc"]
-        # Every step's `pc` comes from the top-level `S{i}_pc` lemma rather than
-        # being re-proved per chain -- 15 chains for a 15-instruction body would
-        # otherwise repeat the same `simp; omega` 15 times.
         for i in range(1, k):
             L.append(f"  have hpc{i} : (S{i} s).pc = {entry} + {4 * i} := "
                      f"S{i}_pc s hpc")
         for i in range(k):
             prev = "s" if i == 0 else f"S{i} s"
             L += [f"  have hs{i} : arm64_runs dylib_code {k - i} ({prev})"
-                  f" = arm64_runs dylib_code {k - i - 1} (S{i + 1} s) := by",
-                  f"    show arm64_runs dylib_code {k - i} ({prev}) = _",
-                  f"    rw [dylib_sr_{i} ({prev}) hpc{i}]",
-                  "    rfl"]
+                  f" = arm64_runs dylib_code {k - i - 1} (S{i + 1} s) := by"]
+            if pc_writes[i]:
+                # `S{i+1}` IS the runner's `if`, so the step lemma alone makes
+                # the two sides the same term: `rfl`, not a case split.  The
+                # `simp only [arm64_runs]` is there to iota-reduce the runner's
+                # `match` on `arm64_step`, which a rewrite cannot see into.
+                # `dylib_sr_{k0 + i}`, not `dylib_sr_{i}`: the per-instruction
+                # lemmas are numbered over the IMAGE's words, and this block is
+                # the export's own range.  `hpc{i}` is at `entry + 4i`, which is
+                # the same address as `base + 4(k0 + i)`, so the lemma's own
+                # `s.pc = …` premise is satisfied by the literal.
+                L += [f"    simp only [arm64_runs, "
+                      f"dylib_sr_{k0 + i} ({prev}) hpc{i}]",
+                      "    rfl"]
+            else:
+                # The library's own runner equation, with `hseq` discharged by
+                # `rfl`: a step whose effect is a record update on `sp` (or an
+                # `arm64_set_reg`) does not mention `pc` at all, so the two
+                # sides of the bump condition are the same term.
+                L += [f"    exact runs_cons_seq ({prev}) (st{i} ({prev})) "
+                      f"dylib_code {k - i - 1}",
+                      f"      (dylib_sr_{k0 + i} ({prev}) hpc{i}) (by rfl)"]
         L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
+        L.append("  rfl")
         out.append("\n".join(L))
 
-    out.append(f"instance : Refine.BlockCert dylib_code body where\n"
-               f"  runs := by\n"
-               f"    intro st hpc\n"
-               f"    show arm64_runs dylib_code {m} st = some (body.step st)\n"
-               f"    rw [body, runsTo{m} st hpc]")
+    # `Refine.BlockCert` is a `structure … : Prop`, not a class, so this is a
+    # `def` and not an `instance` -- `cert := inferInstance` below is what used
+    # to need it, and inferring an instance of a non-class is what made the
+    # whole block unelaborable.
+    out.append(f"theorem bodyCert : Refine.BlockCert dylib_code body :=\n"
+               f"  {{ runs := by\n"
+               f"      intro st hpc\n"
+               f"      show arm64_runs dylib_code {m} st = some (body.step st)\n"
+               f"      rw [body, runsTo{m} st hpc] }}")
 
-    # the two facts that make it the export's BODY
+    # THE RETURN DOES NOT FALL THROUGH TO THE NEXT INSTRUCTION.  The one `if`
+    # the composed effect keeps is the runner's own pc bump at the last step,
+    # and this decides it: the start state's `x30` is the exit, which is four
+    # bytes past the last block address and therefore not the pc the return is
+    # standing on.  Both sides are literals, so `decide` is the whole proof.
+    # THE VALUE, AND `x30`, checked against the machine.
+    #
+    # `hreg`'s subject is `S{m} (start n)`, which is `body.step` and what
+    # `Contracts.agrees_of_body` asks for.  It does NOT need the runner's `if`
+    # decided: both of its branches update only `pc`, and `arm64_reg_pc` says a
+    # register read is the same either way.  So the one `if` the composed
+    # effect keeps is projected through here and never reaches `bv_decide`.
+    pre = (f"  simp only [S{m}, arm64_reg_pc]\n" if pc_writes[m - 1] else "")
+    # The exit, resolved BEFORE the big unfold and as its own step.  It cannot
+    # go in the `_UNF` set: `simp` simplifies a rewrite rule's own arguments
+    # first, so with `dylib_image` and the export's name in the same set the
+    # `exportEnd` term is already a literal structure by the time
+    # `exportEnd_here` is offered, and the lemma silently stops matching --
+    # measured as `bv_decide` reporting a spurious counterexample that names the
+    # unresolved fold.  Two steps, `simp` then `rw`, so the rewrite sees the
+    # term `exportEnd_here` is about before either is unfolded.
+    exit_step = (f"  simp only [start, Contracts.startState]\n"
+                 f"  rw [exportEnd_here]\n")
+    out.append(
+        f"/-- THE SPEC, checked against the machine: the result register is the\n"
+        f"    source-derived spec.  `bv_decide` discharges the prologue/epilogue\n"
+        f"    frame's memory round trip as well, because every value is a\n"
+        f"    `UInt64` -- there is no address arithmetic to do by hand. -/\n"
+        f"theorem hreg : ∀ n : UInt64,\n"
+        f"    arm64_reg 0 (S{m} (start n)) = {spec} n := by\n"
+        f"  intro n\n" + pre + exit_step +
+        f"  simp only [{_UNF}]\n"
+        f"  simp (disch := decide) [{_MEM}]\n"
+        f"  all_goals bv_decide")
+    out.append(
+        f"/-- `x30` survives the frame, which is what makes the return land on\n"
+        f"    the exit rather than somewhere else.  Stated at `S{m - 1}`, the\n"
+        f"    state the return is standing on: that chain is the straight-line\n"
+        f"    part, so there is no `if` in it to decide. -/\n"
+        f"theorem hx30 : ∀ n : UInt64,\n"
+        f"    (S{m - 1} (start n)).x30 = UInt64.ofNat {exit_pc} := by\n"
+        f"  intro n\n" + exit_step +
+        f"  simp only [{_UNF}]\n"
+        f"  simp (disch := decide) [{_MEM}]\n"
+        f"  all_goals bv_decide")
+
+    if pc_writes[m - 1]:
+        out.append(
+            f"/-- The `ret` at the end of the body really is a jump: `x30` is\n"
+            f"    the exit, and the exit is not the address the return stands\n"
+            f"    on.  Stated for the START state, which is the only state\n"
+            f"    `atExit` is about -- `body.step` itself keeps the runner's `if`,\n"
+            f"    because `BlockCert` quantifies over every state at the entry\n"
+            f"    and pinning the composed `pc` to the exit would be a claim\n"
+            f"    about the argument rather than about the machine. -/\n"
+            f"theorem ret_ne (n : UInt64) :\n"
+            f"    (st{m - 1} (S{m - 1} (start n))).pc\n"
+            f"      ≠ (S{m - 1} (start n)).pc := by\n"
+            f"  rw [S{m - 1}_pc (start n) rfl]\n"
+            f"  have hx : (S{m - 1} (start n)).x30 = UInt64.ofNat {exit_pc} :=\n"
+            f"    hx30 n\n"
+            f"  simp only [st{m - 1}, hx, UInt64.toNat_ofNat]\n"
+            f"  decide")
+
+    # The two facts that make it the export's BODY.  Both are stated at
+    # `DylibExport.exportEnd`, so `exportEnd_here` turns the goal into the
+    # literal the rest of the proof is about before `show` is asked to compare.
+    if pc_writes[m - 1]:
+        at_exit = (
+            f"  atExit := by\n"
+            f"    intro n\n"
+            f"    have hx : (S{m - 1} (start n)).x30 = "
+            f"UInt64.ofNat {exit_pc} := hx30 n\n"
+            f"    simp only [exportEnd_here]\n"
+            f"    show (S{m} (start n)).pc = {exit_pc}\n"
+            f"    simp only [S{m}]\n"
+            f"    rw [if_neg (ret_ne n)]\n"
+            f"    simp only [st{m - 1}, hx, UInt64.toNat_ofNat]\n"
+            f"    decide")
+    else:
+        at_exit = (
+            f"  atExit := by\n"
+            f"    intro n\n"
+            f"    simp only [exportEnd_here]\n"
+            f"    show (S{m} (start n)).pc = {exit_pc}\n"
+            f"    rw [S{m}_pc (start n) rfl]\n"
+            f"    decide")
+    # `noEarly`: no state reachable in fewer than `m` steps is already at the
+    # exit.  The `pc` is only known per LITERAL number of steps -- the library
+    # has one step lemma per address, not one per value -- so the `u` is split
+    # into its `m` cases here.  `by_cases`, not `interval_cases`: that tactic
+    # is `Mathlib`'s and this toolchain has no `Mathlib` (measured: `import
+    # Mathlib.Tactic` is "unknown module prefix", and there is no
+    # `Std.Tactic.IntervalCases`), so the name the emitter used was a tactic
+    # that did not exist and the obligation it was proving never elaborated.
+    branches = []
+    for u in range(m):
+        step = [f"    by_cases h{u} : u = {u}",
+                f"    · subst h{u}",
+                f"      rw [runsTo{u} (start n) rfl] at hrun"
+                if u else "      rw [runsTo0 (start n)] at hrun",
+                "      injection hrun with h",
+                f"      rw [\u2190 h" + (f", S{u}_pc (start n) rfl]" if u else "]")]
+        if u == 0:
+            step.append(f"      simp only [S0, start, {ident}, dylib_image, "
+                        f"Contracts.startState, Arm64State.init]")
+        step.append("      decide")
+        branches.append("\n".join(step))
+    branches.append("    · omega")
     out.append(
         f"def bodyI : Contracts.ExportBody dylib_image {ident} where\n"
         f"  block := body\n"
         f"  entry := rfl\n"
-        f"  cert := inferInstance\n"
-        f"  atExit := by\n"
-        f"    intro n\n"
-        f"    have hx : S{m - 2} (start n).x30 = UInt64.ofNat {exit_pat} := hx30 n\n"
-        f"    show (S{m - 1} (start n)).pc = {exit_pat}\n"
-        f"    have hpc : (S{m - 1} (start n)).pc = "
-        f"S{m - 2} (start n).x30.toNat := rfl\n"
-        f"    rw [hpc, UInt64.toNat_ofNat hx]\n"
+        f"  cert := bodyCert\n"
+        + at_exit + "\n"
         f"  noEarly := by\n"
         f"    intro n u hu su hrun\n"
         f"    have hu' : u < {m} := by simpa [body] using hu\n"
-        f"    interval_cases u\n"
-        + "\n".join(
-            f"    · rw [runsTo{u} (start n) rfl] at hrun\n"
-            f"      injection hrun with h\n"
-            f"      rw [h" + (f", S{u}_pc (start n) rfl]" if u else "]")
-            + f"\n      simp only [{_UNF}]\n      omega"
-            for u in range(m)))
+        f"    simp only [exportEnd_here]\n"
+        f"    show su.pc ≠ {exit_pc}\n"
+        # `Contracts.ExportBody` states this over `image.code` and
+        # `startState image export_`; the lemmas above are over `dylib_code`
+        # and `start`, which are the same two terms.  One `have` bridges them
+        # instead of fifteen rewrites of the hypothesis.
+        f"    have hrun : arm64_runs dylib_code u (start n) = some su := hrun\n"
+        + "\n".join(branches))
 
     # THE CONTRACT, and the caller
     out.append(
@@ -8476,33 +9189,94 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list,
         # is `_semantics_total` only, for an export with a loop or a call --
         # see `_dylib_total_proof`.
         #
-        # `_spec` is no longer among them, for an export whose spec
-        # `_dylib_spec_lean` can derive from its source: the contract is
-        # emitted PROVED, with `bv_decide` checking the machine against the
-        # source-derived spec.  An export whose body is not a single `return`
-        # of pure arithmetic over its parameter gets NO spec, and then the
-        # named `sorry` obligation is emitted exactly as before.  That
-        # asymmetry is deliberate: a spec is a claim about the source, and
-        # guessing one would turn an honest hole into a build failure or, worse,
-        # into a contract nobody checked.
+        # `_spec` is among them only for an export that HAS a spec.  An export
+        # whose spec `_dylib_spec_lean` derives from its source gets the
+        # contract PROVED, with `bv_decide` checking the machine against it; if
+        # the contract cannot be emitted (its body is not straight-line, so it
+        # is not one function of one state) the SAME spec becomes a named
+        # `sorry` obligation -- open, and true.  An export whose spec cannot be
+        # derived gets NO contract claim at all, because the only spec
+        # available without one is `fun n => n`, which is false for every export
+        # in the tree that is not the identity.  That asymmetry is deliberate:
+        # a spec is a claim about the source, and guessing one turns an honest
+        # absence into a believed falsehood.
         spec = specs.get(export["name"])
-        contract = _dylib_contract_proof(ident, base, export["entry"], code,
-                                         spec) if spec else ""
-        if not contract:
+        entry = export["entry"]
+        # The export's own extent, `DylibExport.exportEnd`: the contract's
+        # `Block` is `pcs` over that range AND the address its `atExit` and
+        # `noEarly` are stated at, so it has to be told.
+        func_end = _export_extent(exports, entry, base, len(code))
+        contract = (_dylib_contract_proof(ident, base, entry, code, spec,
+                                         func_end) if spec else "")
+        if not contract and spec:
+            # A spec WAS derived from the source and the contract still could
+            # not be emitted -- its body is not straight-line, so
+            # `Refine.Block.step` (one function of one state) has nothing to
+            # say about it.  The obligation is then stated against THAT spec,
+            # which is a true claim left open.
+            #
+            # It used to be stated against `(fun n => n)` here and in the
+            # no-spec case alike, which is a `sorry` over a FALSE claim --
+            # `export_result dylib_image add1 7 = 8`, and the whole reason
+            # [3]'s `dylib_export_contract_stub` was deleted.  Naming the
+            # derived spec costs nothing and is the difference between an open
+            # obligation and a believed falsehood.
             contract = (
-                f"/-- OBLIGATION, not proved: this export agrees with its\n"
-                f"    specification.  Its body is not a closed-form arithmetic\n"
-                f"    function of the argument, so no spec could be derived from\n"
-                f"    the source and none is guessed. -/\n"
+                f"/-- OBLIGATION, not proved: this export agrees with the\n"
+                f"    specification derived from its source.  The contract could\n"
+                f"    not be emitted -- a body with a branch is not one function\n"
+                f"    of one state, so it is not a `Refine.Block` -- so the\n"
+                f"    claim is left open rather than proved.  The spec is the\n"
+                f"    source's own; none is guessed. -/\n"
                 f"theorem {ident}_spec :\n"
-                f"    Refine.export_result_spec dylib_image {ident} (fun n => n) := by\n"
+                f"    Refine.export_result_spec dylib_image {ident} {spec} := by\n"
                 f"  sorry\n\n"
                 f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
                 f"    spec, the caller's contract follows. -/\n"
                 f"theorem {ident}_contract (n : UInt64) :\n"
-                f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
+                f"    Refine.DylibExportContract {ident}_prog {spec} n :=\n"
                 f"  Refine.dylib_export_contract_of_spec dylib_image {ident} "
-                f"(fun n => n)\n    {ident}_spec n")
+                f"{spec}\n    {ident}_spec n")
+        elif not contract:
+            # NO spec could be derived from the source.  There is then nothing
+            # honest to assert about the export's RESULT, and the emitter does
+            # not guess one: `export_result_spec image export_ spec` says the
+            # run leaves `spec n` in `x0`, and with `spec` unknown the only
+            # `(fun n => n)` available is a guess -- which is false for every
+            # export in the tree except the ones that compute the identity.
+            #
+            # So NO contract theorem is emitted for this export at all, rather
+            # than a named `sorry` over a falsehood.  What it still gets is the
+            # `Functional` half above, which is a real fact about a real run
+            # and does not mention a spec; and `formal/lean.py`'s census
+            # reports one FEWER `sorry`, which is the correct direction: a hole
+            # nobody filled is not an obligation, it is an absence, and the
+            # census counts obligations.
+            #
+            # This is the one asymmetry in the emitter, and it is deliberate:
+            # a spec is a claim about the source, and guessing one turns an
+            # honest absence into a build failure or, worse, into a contract
+            # nobody checked.
+            #
+            # The marker line is not decoration: it is how a reader -- and
+            # `test_formal_dylib.py` -- tells "the emitter decided no claim is
+            # honest here" from "the emitter forgot this export".  The
+            # alternative, a `def ... : Prop` holding the false claim, is
+            # worse on both counts: it is a vacuous declaration, which
+            # `vacuous_declarations` is built to report, and it still states
+            # the falsehood.
+            contract = (
+                f"/- NO SPEC DERIVED for {ident}, and so NO contract is claimed\n"
+                f"   for it: its body is not a single `return` of pure arithmetic\n"
+                f"   over its parameter, so `_dylib_spec_lean` cannot derive one\n"
+                f"   and the emitter does not guess.  A named `sorry` here would be\n"
+                f"   a `sorry` over a FALSE claim -- the only spec available without\n"
+                f"   one is `fun n => n`, and this export's result is whatever the\n"
+                f"   machine computed (`export_result dylib_image {ident} 7`).\n"
+                f"   Its termination is still an obligation above, and its result\n"
+                f"   is still the value the machine produced\n"
+                f"   (`{ident}_semantics_functional`, and\n"
+                f"   `Refine.export_result_run`). -/")
 
         proofs.append(
             f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"

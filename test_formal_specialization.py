@@ -264,6 +264,24 @@ def test_a_cross_module_specialization_is_refused(tmpdir):
     all: a module exporting only the generic is refused earlier, by the export
     rule, with an equally true message about there being no boundary symbol.
     That refusal is real and is not what this case is about.
+
+    **WHICH of the two refusals answers `widen[3](5)` changed under this case,
+    and the answer is the export rule rather than the brackets — so this case
+    now pins the export rule.** `formal/build.py::_bracketed_export_gap` asks
+    the export rule FIRST for a bracketed callee whose base name is imported
+    and whose module's library on the link line does not publish it, and the
+    bracketed scan falls through to `specialization_call_refusal` when it does
+    publish it (`c245c138`, which measured `plain[3](5)` keeping the brackets'
+    own sentence and did not update this needle). A generic template is not
+    exported by that rule at all — it is one symbol per instantiation and the
+    module exports no instantiation — so `widen` is NOT published and the
+    export rule is the sentence that is true of it. This case therefore pins
+    `plain`'s half's twin: the second half, a base name the module does not
+    publish, and `plain[3](5)` — the base name it does — is
+    `test_a_cross_module_specialization_of_a_published_name_says_brackets`
+    below. Between them both arms of `_bracketed_export_gap` are pinned, which
+    is what the split is for; this case used to pin the second arm twice and
+    the first arm not at all.
     """
     root = os.path.join(tmpdir, "crossmodule")
     os.makedirs(root)
@@ -273,9 +291,45 @@ def test_a_cross_module_specialization_is_refused(tmpdir):
     text = text_of(result)
     check("widen" in text,
           f"the refusal does not name the callee: {text.strip()[-300:]}")
+    check("does not export it" in text or "does not publish" in text,
+          f"a specialization of a name the module does not EXPORT is refused "
+          f"for something other than the export rule, which is the fact that "
+          f"decides it: {text.strip()[-300:]}")
+    check("doc/ABI.md" in text or "export rule" in text,
+          f"the refusal does not name the rule that keeps the name off the "
+          f"boundary: {text.strip()[-300:]}")
+
+
+def test_a_cross_module_specialization_of_a_published_name_says_brackets(tmpdir):
+    """The other half of the split: a base name the module DOES publish.
+
+    `plain[3](5)`, and it is the case `_bracketed_export_gap` deliberately
+    leaves to `specialization_call_refusal`: `plain` is exported perfectly
+    well, so there IS a symbol for the call to bind and the only reason it has
+    no callee is the brackets — which are the generic's comptime parameters,
+    ordinary leading arguments the call site would have to evaluate and pass,
+    and there is no declaration in hand to decide that against. Told the
+    export rule instead, the reader goes looking for a missing symbol in a
+    library that has one, which is the wrong errand and the expensive one.
+
+    This row is here because the case above stopped pinning it. It was the
+    only assertion of the brackets' own sentence for a cross-module
+    specialization, and `_bracketed_export_gap` was measured on exactly this
+    program and reported as keeping it while the needle stayed pointed at the
+    generic — so a change that sent BOTH halves to the export rule would have
+    passed the suite.
+    """
+    root = os.path.join(tmpdir, "crossmodule_published")
+    os.makedirs(root)
+    write_tree(root, {"lib.mojo": PLAIN_LIB, "prog.mojo": SUBSCRIPTED_CALL})
+    result = build(root, expect_ok=False)
+    text = text_of(result)
+    check("plain" in text,
+          f"the refusal does not name the callee: {text.strip()[-300:]}")
     check("brackets cannot be bound" in text,
-          f"a cross-module specialization is refused for something other than "
-          f"the brackets: {text.strip()[-300:]}")
+          f"a bracketed callee the module DOES publish is refused by the "
+          f"export rule rather than by the brackets, which are the only "
+          f"thing wrong with it: {text.strip()[-300:]}")
     check("monomorph" in text or "instantiation is the boundary symbol" in text,
           f"the refusal does not say WHY a cross-module instantiation has no "
           f"callee here: {text.strip()[-300:]}")
@@ -371,6 +425,93 @@ def test_an_external_call_template_is_not_refused_as_a_specialization(tmpdir):
               f"value did not reach the program")
 
 
+# ── 5. a function used as a VALUE, which is what the bracket case needs first ──
+
+# The shape `std/algorithm/backend/tile.mojo` is refused for: a callee that is a
+# PARAMETER, so the brackets are a specialization of a function TYPE and the
+# callee itself is a word. Reduced to the part that is about this path rather
+# than about brackets: passing a function as an argument.
+FUNCTION_AS_VALUE = """\
+def plain(v: Int32) -> Int32:
+    return v + 100
+
+def call_it(f, x: Int32) -> Int32:
+    return f(x)
+
+def main() -> Int32:
+    return call_it(plain, 5)
+"""
+
+
+def test_a_function_read_as_a_value_is_refused_by_name(tmpdir):
+    """A function is not a word here, and the refusal has to say THAT.
+
+    Before this the same program was refused by the emitter's placement
+    fallback: `'plain' has no home: the register allocator collected no home
+    for it, so the emitter and the allocation walk disagree about this
+    function's locals` — a true statement about this pass, and a useless one,
+    because it sends the reader to look for a register-allocation bug in a
+    program whose real problem is a construct this path does not have. Same
+    shape as `external_call` used as a value, which `external_call_value_refusal`
+    already names.
+
+    It is also the answer to the question `std/algorithm/backend/tile.mojo`
+    raises. That call is `workgroup_function[tile_size](offset)` where
+    `workgroup_function` is a parameter, so the refusal a reader meets first
+    is about the BRACKETS — and the wall behind it is that the callee is a
+    value at all, which is what this case pins. Pinned on both architectures:
+    the two backends each have their own copy of the placement fallback, and
+    either one losing the check is a different diagnostic for one construct.
+    """
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"fnvalue_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(FUNCTION_AS_VALUE)
+        text = text_of(build(root, expect_ok=False, arch=arch))
+        check("plain" in text,
+              f"[{arch}] the refusal does not name the name the reader wrote: "
+              f"{text.strip()[-300:]}")
+        check("read as a VALUE" in text,
+              f"[{arch}] the refusal is still a placement symptom rather than "
+              f"the construct: {text.strip()[-300:]}")
+        check("no value of a function" in text,
+              f"[{arch}] the refusal does not say what is missing, which is "
+              f"the fact that makes it actionable: {text.strip()[-300:]}")
+        check("has no home" not in text,
+              f"[{arch}] the register-allocator sentence is back: "
+              f"{text.strip()[-300:]}")
+
+
+def test_a_local_shadowing_a_function_is_still_read_as_the_local(tmpdir):
+    """The negative guard: the check must not fire on a name the function binds.
+
+    `placed` in `formal/build.py` deliberately contains every function name of
+    the image, because that is what lets a specialization's root and a bracketed
+    callee through as callees; the function-value pre-pass subtracts those names
+    and asks about the rest. A parameter or a local that SHADOWS a module-level
+    function is the local, and shadowing is ordinary Mojo — so this is the case
+    that would break if the pre-pass asked about the name alone.
+    """
+    src = ("def plain(v: Int32) -> Int32:\n"
+           "    return v + 100\n"
+           "\n"
+           "def main() -> Int32:\n"
+           "    var plain = 7\n"
+           "    return plain + 1\n")
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"shadow_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(src)
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 8,
+              f"[{arch}] a local shadowing a function exited {code} "
+              f"(printed {out.strip()[:80]!r}), so the shadowing local was "
+              f"refused or read as something else")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -380,12 +521,18 @@ TESTS = [
      test_a_subscript_of_an_imported_value_is_refused),
     ("a cross-module specialization is refused by name",
      test_a_cross_module_specialization_is_refused),
+    ("a cross-module specialization of a PUBLISHED name says brackets",
+     test_a_cross_module_specialization_of_a_published_name_says_brackets),
     ("both architectures refuse it identically",
      test_both_architectures_refuse_the_same_construct_the_same_way),
     ("a local specialization lowers and matches CPython",
      test_a_local_specialization_runs_and_matches_cpython),
     ("an external_call template is not refused as a specialization",
      test_an_external_call_template_is_not_refused_as_a_specialization),
+    ("a function read as a value is refused by name",
+     test_a_function_read_as_a_value_is_refused_by_name),
+    ("a local shadowing a function is still the local",
+     test_a_local_shadowing_a_function_is_still_read_as_the_local),
 ]
 
 

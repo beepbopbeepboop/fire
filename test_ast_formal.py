@@ -29,8 +29,10 @@ file states what `f"{x}"` tokenizes to; it asks.
 module accepts, because what it implements is the lexical and block-structure
 half of the grammar and not the expression half. Those are listed in `PINNED`
 with the verdict this module gives, and they are ASSERTED, not skipped: a
-change in either direction is a change worth looking at. The list is the one
-`bugs/FORMAL_ast_module_subset.md` prints, with the same reasons.
+change in either direction is a change worth looking at. What each group of
+them is, and the three corpus files this module accepts and CPython refuses,
+are in `formal/hostmods/ast.mojo`'s own docstring under "WHAT parse(src) DOES
+NOT MEAN".
 
 Groups: `stream`, `verdict`, `windows`, `names`. With no argument, all four.
 """
@@ -198,8 +200,8 @@ _add(
 )
 
 # The PINNED cases: CPython refuses, this module accepts, because what it
-# implements is the lexical half. The reason is the same one each time and the
-# list is the one in `bugs/FORMAL_ast_module_subset.md`.
+# implements is the lexical half. The reason is the same one each time, and
+# what each group of them is is in `formal/hostmods/ast.mojo`'s docstring.
 _pin(
     # the expression grammar, which `tokenize` does not check either
     ("x = 1..2\n", 1), ("x = 1j2\n", 1), ("x <> 1\n", 1), ("x = ,1\n", 1),
@@ -232,12 +234,15 @@ CASES = list(VERDICTS.items())
 
 # ── the Mojo side ─────────────────────────────────────────────────────────
 #
-# A string literal on this path is interned VERBATIM and its delimiters are
-# syntax: the value of a triple-quoted literal is its content, and a backslash
-# is stored as written but is still an escape to the compiler's lexer, so a
-# literal holding a backslash can swallow the rest of the file. All three are
-# measured, and they are why a source goes in as a chain of joins with the
-# quote runs and the awkward bytes built at RUN time instead of as one literal.
+# A string literal's delimiters are syntax: the value of a triple-quoted
+# literal is its content, and a backslash is still an escape to the compiler's
+# LEXER even though the escapes in the VALUE are decoded as CPython decodes
+# them (`fire_compiler.decode_c_escapes`), so a literal holding a backslash
+# before a quote can swallow the rest of the file
+# (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+# Both facts are measured, and they are why a source goes in as a chain of joins
+# with the quote runs and the awkward bytes built at RUN time instead of as one
+# literal.
 DQ1, SQ1, BSL = '"', "'", "\\"
 DQ3, SQ3 = DQ1 * 3, SQ1 * 3
 

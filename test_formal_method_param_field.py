@@ -2,7 +2,7 @@
 """A METHOD PARAMETER'S FIELD, established by its DECLARED TYPE and nothing
 else: build the image, run it, and compare with CPython.
 
-`bugs/FORMAL_method_param_field_access.md` is the finding.  A method's other
+A method's other
 parameters were never seeded as frame holders, so `other.start` in
 
     struct Slice(Equatable):
@@ -694,6 +694,155 @@ CASES = [
      None, None, None,
      "passes a Q frame from make_q()"),
 
+    # ── a struct-typed FIELD, initialised from a constructor ARGUMENT ─────────
+    #
+    # `bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`, shape 1.
+    # The refusal and the workaround its own message names, as ONE pair, because
+    # the message makes a promise to the reader — "Assign the field after
+    # `Box(…)`, which is the same program" — and a promise nobody checks is how a
+    # refusal sends readers after a non-bug, which is the failure mode this
+    # whole family documents itself as existing to prevent. If the workaround
+    # regressed, the refusal would still be refusing and the advice would still
+    # be wrong.
+    #
+    # The refusal is the lifetime half, and the pair says which half: the two
+    # programs differ in ONE thing — where the frame comes from. `Box(o)` stores
+    # the CALLER's frame through the object, and a frame parameter outlives
+    # whatever the constructor does with it, so nothing at the store can say the
+    # two lifetimes agree. The working form stores a frame the CALLEE created
+    # (`mk`'s own block, returned), which the caller owns for the whole
+    # expression.
+    #
+    # Both spellings of the same source are given, so neither case can pass by
+    # agreeing with a wrong expectation — and the transcriptions are oracles,
+    # not tables.
+    #
+    # **WHICH refusal answers `Box(o)`, and why the needle is the receiver's.**
+    # It was `constructing Box with argument 'o' as field 'inner'` — the
+    # construction-argument rule — when this row was written, and it is still
+    # the sentence for every OTHER holder. `Box` here has exactly ONE field, so
+    # `_rewrite_self_fields` collapses `self.inner` onto `self`; and
+    # `model.one_word_sole_field_frame` (7632c881, on master before this merge)
+    # withdrew `_collect_receiver_rebinds`'s one-field exemption for exactly
+    # these owners, because `self = o` overwrites the frame address the caller
+    # still holds. That rule now pre-empts the construction one, so this row
+    # pins the receiver refusal. BOTH are true of the program and neither builds
+    # it; which one SHOULD answer a CONSTRUCTOR's store is open, and
+    # `bugs/FORMAL_a_one_word_frame_holder_constructor_is_answered_by_the_
+    # receiver_rule.md` carries the measurement and the next step. The refusal
+    # and its promise are still what this row is for — the pair below is the
+    # half that has to keep working — and the second program here is the
+    # workaround the first refusal names, whether that is this message or the
+    # other one.
+    ("refuse_a_struct_field_initialised_from_a_constructor_argument",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self, o: Opt):\n"
+     "        self.inner = o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var o = Opt()\n"
+     "    o.v = 41\n"
+     "    o.has = 1\n"
+     "    var b = Box(o)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self, o):\n"
+     "        self.inner = o\n"
+     "\n"
+     "o = Opt()\n"
+     "o.v = 41\n"
+     "o.has = 1\n"
+     "b = Box(o)\n"
+     "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
+     None, None,
+     "self is assigned o in Box___init__"),
+    ("a_struct_field_assigned_after_construction_is_the_same_program",
+     "struct Opt:\n"
+     "    var v: Int\n"
+     "    var has: Int\n"
+     "\n"
+     "struct Box:\n"
+     "    var inner: Opt\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def mk(v: Int) -> Opt:\n"
+     "    var o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b = Box()\n"
+     "    b.inner = mk(41)\n"
+     "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
+     "    return 0\n",
+     "class Opt:\n"
+     "    def __init__(self):\n"
+     "        self.v = 0\n"
+     "        self.has = 0\n"
+     "\n"
+     "class Box:\n"
+     "    def __init__(self):\n"
+     "        self.inner = Opt()\n"
+     "\n"
+     "def mk(v):\n"
+     "    o = Opt()\n"
+     "    o.v = v\n"
+     "    o.has = 1\n"
+     "    return o\n"
+     "\n"
+     "b = Box()\n"
+     "b.inner = mk(41)\n"
+     "print(\"v=%d h=%d\" % (b.inner.v, b.inner.has), end=\"\")\n",
+     0, "v=41 h=1", None),
+    # The boundary the pair above turns on, as its own case: a ONE-FIELD struct
+    # is a WORD and not a frame, so the same constructor shape BUILDS. Without
+    # this the pair would read as "a struct field from an argument is refused",
+    # which is false, and the next reader would file the false version.
+    ("a_one_field_struct_field_from_an_argument_is_a_word_not_a_frame",
+     "struct Word:\n"
+     "    var only: Int\n"
+     "\n"
+     "struct BoxW:\n"
+     "    var inner: Word\n"
+     "\n"
+     "    def __init__(out self, w: Word):\n"
+     "        self.inner = w\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Word()\n"
+     "    w.only = 42\n"
+     "    var b = BoxW(w)\n"
+     "    printf(\"only=%d\", b.inner.only)\n"
+     "    return 0\n",
+     "class Word:\n"
+     "    def __init__(self):\n"
+     "        self.only = 0\n"
+     "\n"
+     "class BoxW:\n"
+     "    def __init__(self, w):\n"
+     "        self.inner = w\n"
+     "\n"
+     "w = Word()\n"
+     "w.only = 42\n"
+     "b = BoxW(w)\n"
+     "print(\"only=%d\" % b.inner.only, end=\"\")\n",
+     0, "only=42", None),
+
     # ── a `@staticmethod` gets NO receiver, on either side of a call ──────────
     #
     # `bugs/FORMAL_staticmethod_is_compiled_as_an_instance_method.md`. Two
@@ -848,6 +997,80 @@ CASES = [
      "k.n = 41\n"
      "raise SystemExit(k.total())\n",
      42, None, None),
+
+    # ── A FREE FUNCTION WHOSE NAME IS ALSO A METHOD'S ────────────────────────
+    #
+    # `_prepare_functions` builds TWO method→struct maps and hands each of them
+    # to a different pass.  `owners` (build.py:8840) is `{bare method name:
+    # struct NAME}`, because `_rewrite_method_calls` dispatches `recv.m(...)` by
+    # name alone and needs a NAME.  `method_owners` (build.py:8890) is `{lifted
+    # function name: struct}`, because the passes that ask "which struct's
+    # LAYOUT is this body written against" need the StructDef itself.
+    #
+    # `_frame_receivers` is the second kind of consumer — its parameter is
+    # documented as `{function name: struct}` and both its uses read `.name` off
+    # the VALUE — and it was being handed the first map.  The lookup only ever
+    # HIT when a free function shares a name with some visible struct's method,
+    # and then `_overridden_comptime_names` got a `str` where it wanted a
+    # struct:
+    #
+    #   AttributeError: 'str' object has no attribute 'name'
+    #     formal/build.py:6465 in _overridden_comptime_names
+    #       st.name
+    #     formal/build.py:6255 in publish
+    #     formal/build.py:6232 in _constant_read_sites
+    #
+    # Measured on `std/builtin/reversed.mojo`, which the sweep classified
+    # `backend-crash` — the one class that means a bug in the compiler's own
+    # plumbing rather than a finding about the source, and the only one that is
+    # never cached.  `reversed.mojo` declares seven module-level `reversed`
+    # functions and imports a host module whose structs have a `reversed`
+    # method.
+    #
+    # Both halves of the shape are here: `get` must HOLD A FRAME (`p` is a
+    # two-field struct, so its receiver is a frame address and `_frame_receivers`
+    # rewrites the class-constant read sites of exactly the functions the holder
+    # fixpoint found), and the module-level `get` must SHARE ITS NAME with
+    # `Pair.get` — which is what makes the wrong map's bare-name key hit.
+    # Without the name collision the lookup missed and the census was silently
+    # empty, which is the quieter half of the same bug.
+    ("free_function_named_like_a_method_does_not_crash_the_build",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "def get(n: Int) -> Int:\n"
+     "    var p = Pair()\n"
+     "    p.a = 1\n"
+     "    p.b = 2\n"
+     "    return p.a + p.b + n\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var q = Pair()\n"
+     "    q.a = 3\n"
+     "    q.b = 4\n"
+     '    printf("v=%d", get(5) + q.get())\n'
+     "    return 0\n",
+     "class Pair:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "    def get(self):\n"
+     "        return self.a * 10 + self.b\n"
+     "def get(n):\n"
+     "    p = Pair()\n"
+     "    p.a = 1\n"
+     "    p.b = 2\n"
+     "    return p.a + p.b + n\n"
+     "import sys\n"
+     "q = Pair()\n"
+     "q.a = 3\n"
+     "q.b = 4\n"
+     'sys.stdout.write("v=%d" % (get(5) + q.get()))\n',
+     0, "v=42", None),
 ]
 
 

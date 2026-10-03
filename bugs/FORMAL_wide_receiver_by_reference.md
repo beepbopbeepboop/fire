@@ -1753,3 +1753,102 @@ behind a documented permanent limit. The 1 is the bug the lift-without-an-
 implementation would have shipped, which is the whole argument for measuring
 with the fix rather than by lifting the check.
 
+
+## Round 4: a CHAIN of nested frames — the read was one hop and the store put every level in the outer block
+
+The layout has been recursive since wave 3 (`struct_frame_block_bytes`,
+`struct_block_children`, `MAX_NESTED_FRAME_DEPTH = 4`), but nothing could
+REACH a second level, and there were three separate reasons, each of which had
+to be fixed before a three-level chain ran at all. All three are measured on
+both architectures.
+
+**The read side followed exactly one hop, however long the chain.** `formal/
+build.py`'s `_frame_receivers` computed `outer_field = parts[-2]`, so
+`o.n0.n1.leaf` was resolved as if it were `o.n0.leaf`: a refusal that is false
+about the file ("`n1` is not a field of the holder's struct" — true of the
+outer struct, false of the file, because `n0`'s declared type types it one
+level down), or a load from the wrong slot. `_frame_nested_slots` then held ONE
+slot per chain, so even a chain the analysis had accepted could only be loaded
+once. It is now a walk: every field between the holder and the last one is
+resolved level by level through the same `_typed_nested_frame` predicate, each
+hop's slot is kept, and the value is the TUPLE of slots — so the emitter's load
+loop and the analysis's walk cannot disagree about which load is which. A hop
+with no slot to load is its own message (`model.nested_frame_hop_unplaced`),
+because it says something different from the two-level refusal: the field is
+agreed to be a nested FRAME and the LAYOUT has no index for it, which adding an
+annotation does not fix.
+
+**The store side put every level's address in the OUTER block.** Both backends
+wrote a nested frame's address into `site[1] + 8·slot` — the site being
+constructed — at every level. At one level that is correct by accident; at a
+second it overwrites the outer frame's own first-level address in slot 1 with
+the inner one, so the first read returns a pointer into the middle of a block.
+Nothing measured it, because a second level could not be reached from a read
+either. The fix is the reason `struct_block_children` now returns FIVE
+elements: the fifth is the offset of the block that DECLARES the field, so the
+address goes into its parent's slot array at every depth, in the constructor
+(`_emit_frame_nested_addresses`) and in the returned-frame COPY
+(`_emit_frame_copy`) alike.
+
+**`_emit_nested_frame_init` unpacked four elements out of a three-element
+list.** Both backends walked `struct_nested_frame_fields`, which does not carry
+an offset, and read one anyway. It raised only for a struct whose OWN
+typed-nested field exists — a second level, unreachable from a read, so no test
+reached it. Both now walk `struct_block_children`, which is the list that
+carries the offsets, computed from the same `struct_frame_bytes` arithmetic the
+reserved block's SIZE comes from.
+
+**And the bound itself was not enforced.** `struct_frame_block_bytes` returned
+the object's own bytes when `depth` ran out and DROPPED the frames below the
+cut, so the reservation came back short by exactly those frames, the blob
+cursor started inside one of them, and the program took a SIGSEGV with no
+diagnostic naming the file — measured at six nested levels on both backends,
+where the same source built and ran correctly at five.
+`MAX_NESTED_FRAME_DEPTH`'s own docstring claimed the bound "is checked in
+`struct_nested_frame_fields` and the refusal names the cycle"; nothing checked
+it anywhere. It is enforced now, in the function that computes the reservation,
+so a declaration CYCLE — the case the bound was written for — is a refusal too.
+
+Measured, both architectures, each level given a DISTINCT value so a lowering
+that put two frames at one address could not pass by printing one number twice:
+
+| levels | hops | before | after |
+|---|---|---|---|
+| 1 | 0 | ran | ran |
+| 2 | 1 | ran | ran |
+| 3 | 2 | refused falsely, or read the wrong slot | ran, all three levels distinct |
+| 4 | 3 | refused falsely | ran |
+| 5 | 4 | refused falsely | ran — this is `MAX_NESTED_FRAME_DEPTH` |
+| 6 | 5 | **SIGSEGV**, no diagnostic | refused, naming the field below the cut |
+| `A{var b: B}` / `B{var a: A}` | — | **SIGSEGV**, no diagnostic | refused, naming the cycle |
+
+Tests: five rows in `test_formal_x86_64_parity.py` — the three-level chain, the
+same chain HANDED TO A CALLEE (the `_emit_frame_copy` half, which the first row
+never exercises), the chain AT the bound, and the two refusals. Measured
+before the change at 0/5 and after at 5/5, with the pre-change failures being
+the pre-existing `ValueError: not enough values to unpack (expected 4, got 3)`
+for the chains and a built binary for both refusals. Full parity 25/25;
+`test_formal_run.py` 656/0; `test_formal_read_before_store.py` 130/0;
+`test_refusal_taxonomy.py` 167/167; `test_formal_value_model.py` 32/0.
+
+**Still not done, and stated so rather than left to be found.** A METHOD CALL
+on a nested receiver (`o.n.put(v)`) is still refused by name, on both
+backends, because neither backend lowers a method call on a value — the
+refusal says so and lists the methods that ARE lowered. That is the next wave
+and it is not this one: the frames are now placed and reachable at every level
+the bound allows, which is the precondition it needed.
+
+**And this did not move the RETURNED-frame failures, which were already red.**
+`test_formal_returned_frame.py` is 22/13, `test_formal_receiver_position.py`
+13/3 and `test_formal_specialization.py` 6/1 both before and after this change,
+with the same test names in all three lists — measured by reverting the four
+source files and re-running, not by reading the totals. Two of the thirteen do
+name a different backend, and both are nested-frame cases:
+`returned_frame_carries_its_nested_frame` and
+`a_nested_frame_inside_the_returned_block_is_reachable` used to be reported
+failing on x86-64 and are now reported on arm64, because arm64 now gets past
+the layout and read wall this round fixed and reaches the pre-existing
+returned-frame fault underneath it. Neither number changed, so this is not a
+regression and not a fix; it is the returned-frame convention
+(`bugs/FORMAL_returned_frame_caller_owned_block.md`) being the next thing in
+the chain, and these two rows are where it will show up first.

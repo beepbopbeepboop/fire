@@ -91,13 +91,80 @@ def fold_arith(op: str, left: int, right: int):
     operator it uses is also valid on pointers). The annotations say what the
     caller has already established. Only called once both operands are
     narrowed to numbers, so the folding matches Python's exactly, bools
-    included (`True + True` is 2 either way)."""
+    included (`True + True` is 2 either way).
+
+    `//` is here because the RUNTIME already lowers it on every compiled path
+    (arm64 UDIV/SDIV through `_emit_div_shift_pow`, x86-64 IDIV through
+    `_emit_div_mod`, and both spell it as integer division — the same
+    instruction sequence `/` gets), and because the reference interpreter
+    folds it (`myinterpreter.py`'s binary-op table: `elif op == '//': return
+    left // right`). Its absence here was a three-way divergence for one
+    source: `comptime c = 7 // 2` printed `3` under `python3 fire.py run`,
+    ran at RUNTIME as `3` when the same `//` sat outside the `comptime`, and
+    was REFUSED by every compiled backend as "does not fold to a compile-time
+    constant". A folder that declines an operator the same build emits for it
+    is not being conservative, it is answering a different question from the
+    one it is asked.
+
+    The DIVISION-BY-ZERO guard is the other half of the same repair and was
+    already missing for `/`: `left // right` with a literal-zero divisor raised
+    out of here, out of `eval_const`, and out of the backend — measured, and it
+    is a CRASH rather than a refusal, which is the worst of the three answers
+    because a crash has no message to act on:
+
+        $ python3 fire.py build --formal --no-prove -o t t.mojo   # comptime c = 1 / 0
+        build: division by zero
+        ZeroDivisionError: division by zero
+
+    Returning None is what every other unanswerable shape here returns, and
+    the caller turns it into `comptime_fold_refusal` — the honest answer,
+    naming the construct. `formal/arm64_codegen.py`'s runtime division traps
+    the same case at RUN time (`_emit_div_shift_pow`'s div0 arm exits with
+    `SHIFT_TRAP_STATUS`), so folding it is not what decides whether the
+    program divides by zero; only whether the BUILD does."""
     if op == '+':   return left + right
     if op == '-':   return left - right
     if op == '*':   return left * right
-    if op == '/':   return left // right
+    if op in ('/', '//'):
+        if right == 0:
+            return None
+        return left // right
     if op == 'and': return left and right
     if op == 'or':  return left or right
+    return None
+
+
+# The unary operators `fold_unary_sign` knows, as a membership set so a caller
+# can ask the question without doing the arithmetic on an operator it does not
+# have. `formal/model.py`'s `_FOLD_UNARY` is the same three keys spelled as a
+# table of the folds themselves; see `fold_unary_sign`.
+FOLD_UNARY_OPS = ('-', '+', '~')
+
+
+def fold_unary_sign(op: str, value: int):
+    """Apply the unary SIGN operator `op` to a folded integer, or None.
+
+    The unary half of `fold_arith`'s rule, and a plain if/elif chain rather than
+    a dict of lambdas for the reason `compare_op` is one (self-hosting
+    gimple_codegen.py could not link a dict-of-lambdas at self-host link time).
+
+    `+` and `~` are here because every backend's RUNTIME already lowers them and
+    no compile-time folder did: `comptime c = +3` and `comptime c = ~3` were both
+    REFUSED while the emitted code for the same expression is a pass-through
+    (`+`) and one MVN/NOT (`~`), so the folder and the code generator answered
+    different questions about the same line. `~n` is exact for every integer and
+    CPython agrees on the value (`~3` is `-4`).
+
+    This table and `formal/model.py`'s `_FOLD_UNARY` are ONE rule in two
+    places, the same way `fold_arith` and `_FOLD_BINOPS` are, and for the same
+    reason: the first decides what a function's own `comptime NAME = …` binds,
+    the second what a module-level or class-level one binds, and
+    `comptime_fold_refusal`'s text speaks for both ("an expression of literals
+    and other `comptime` names"). `not` is NOT here — it is a bool-valued
+    operator rather than a sign, and it is in `eval_const` alone."""
+    if op == '-': return -value
+    if op == '+': return value
+    if op == '~': return ~value
     return None
 
 
@@ -135,9 +202,10 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, StringLiteral): return node.value
     if isinstance(node, IdentExpr):
         return bindings.get(node.name)
-    if isinstance(node, UnaryOp) and node.op == '-':
+    if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const(node.operand, bindings, platform)
-        return -v if isinstance(v, (int, bool)) and not isinstance(v, str) else None
+        return fold_unary_sign(node.op, v) if isinstance(v, (int, bool)) \
+            and not isinstance(v, str) else None
     if isinstance(node, UnaryOp) and node.op == 'not':
         v = eval_const(node.operand, bindings, platform)
         return not v if isinstance(v, (bool, int)) else None
@@ -198,9 +266,9 @@ def eval_const_int(node, bindings: dict, call_hook=None):
     simply does not fold calls."""
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, BoolLiteral): return int(node.value)
-    if isinstance(node, UnaryOp) and node.op == '-':
+    if isinstance(node, UnaryOp) and node.op in FOLD_UNARY_OPS:
         v = eval_const_int(node.operand, bindings, call_hook)
-        return -v if v is not None else None
+        return None if v is None else fold_unary_sign(node.op, v)
     if isinstance(node, BinaryOp):
         l = eval_const_int(node.left, bindings, call_hook)
         r = eval_const_int(node.right, bindings, call_hook)
@@ -279,6 +347,29 @@ def specialization_name(func):
     return None
 
 
+def keyword_bracket_args(attrs, ct_params: list) -> dict:
+    """The `f[a, b=…]` bracket's keyword half, as {ct-param name: expr}.
+
+    `SubscriptExpr` keeps the two halves of a bracket apart: POSITIONAL items in
+    `index`, KEYWORD items in `attrs` as `(name, expr)` pairs (fire_compiler,
+    `_parse_postfix`'s "keyword-style bracket" arm). A keyword half is only
+    honoured for a name `ct_params` actually declares, for the reason
+    `specialization_args` gives for over-supplied brackets: the declaration is
+    a LOSSY record, so an unrecognised name is far more often a parser gap (an
+    MLIR op attribute, a `//`-separated runtime type parameter) than a mistake
+    in the source. `name is None` is the parser's own record of an item it
+    could not name, and is skipped for the same reason."""
+    if not attrs:
+        return {}
+    declared = {p for p in ct_params if isinstance(p, str)}
+    out = {}
+    for pair in attrs:
+        name, expr = pair
+        if isinstance(name, str) and name in declared:
+            out[name] = expr
+    return out
+
+
 def specialization_args(call, ct_params: list) -> list:
     """The argument expressions binding `ct_params` at this call site.
 
@@ -286,6 +377,15 @@ def specialization_args(call, ct_params: list) -> list:
     rule the interpreter applies (`_parse_generic_params_capture`'s docstring:
     "enough for the interpreter to bind a call-site subscript (`f[Int32]()`) to
     names by position").
+
+    `f[a, b=…](x)` names the keyword half BY NAME (`keyword_bracket_args`), and
+    the positional items fill the parameters the keyword half did not claim, in
+    declaration order. That is the shape the stdlib writes a defaulted comptime
+    parameter in (`def _write_to[*, is_repr: Bool](…)`, called
+    `_write_to[is_repr=True](w)`), and reading only `index` for it bound the
+    named parameter to 0 — the same word an unsupplied one gets, so the
+    parameter was invisible rather than missing and the program computed a
+    number the source never wrote.
 
     Anything the bracket does not supply binds to 0: these paths have no type
     inference to deduce a comptime parameter from the runtime arguments, and 0
@@ -304,6 +404,21 @@ def specialization_args(call, ct_params: list) -> list:
     idx = call.func.index
     supplied = list(idx.elements) if isinstance(idx, (_fc.TupleExpr,
                                                       _fc.ListExpr)) else [idx]
+    by_name = keyword_bracket_args(getattr(call.func, 'attrs', None), ct_params)
+    if by_name:
+        # The keyword items are NOT in `index` (that is the whole of the
+        # parser's split), so nothing has to be taken out of `supplied`; the
+        # parameters a keyword claimed are simply not filled positionally.
+        unbound = list(supplied)
+        bound = []
+        for name in ct_params:
+            if isinstance(name, str) and name in by_name:
+                bound.append(by_name[name])
+            elif unbound:
+                bound.append(unbound.pop(0))
+            else:
+                bound.append(_fc.IntLiteral(value=0))
+        return bound
     if len(supplied) < len(ct_params):
         supplied = supplied + [_fc.IntLiteral(value=0)
                                for _ in range(len(ct_params) - len(supplied))]

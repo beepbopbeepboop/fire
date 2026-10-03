@@ -324,11 +324,10 @@ int64_t __mojo_tuple_box_8(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e
  * matching that name's own C type, so each per-branch unpack is correct
  * regardless of which yield site produced the value -- the reason plain
  * box-without-tags would silently miscompile. */
-#define MOJO_TAG_INT    0
-#define MOJO_TAG_STR    1
-#define MOJO_TAG_DOUBLE 2
-#define MOJO_TAG_LIST   3
-#define MOJO_TAG_NONE   4
+/* The tag values live in fire_coro.h now, beside the accessors that hand one
+   back, so a caller reading `mojo_tagged_tag_dyn`'s answer has the vocabulary
+   in the same declaration.  They were #defined here, which meant the only place
+   that said what a tag means was a .c file nothing includes. */
 
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);

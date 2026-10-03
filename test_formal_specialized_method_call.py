@@ -367,6 +367,318 @@ DIFF_CASES = [
      "    return 0\n"
      "\n"
      "main()\n"),
+
+    # **THE KEYWORD HALF OF THE BRACKET**, `c.show[scale=2](3)`.  This was a
+    # SILENT WRONG ANSWER, and the two cases below are the fix's whole
+    # assertion: the parser keeps a bracket's keyword items in
+    # `SubscriptExpr.attrs` and its positional items in `.index`, and
+    # `comptime_eval.specialization_args` read only `.index` — so `scale` bound
+    # to 0, the same word an unsupplied parameter gets, and the image printed
+    # **403** where CPython prints **423**.  It exited 0 and computed a number
+    # the source never wrote, which is why it survived as long as it did.
+    #
+    # `[*, scale: Int]` is the stdlib's own spelling for a defaulted comptime
+    # parameter (`std/collections/optional.mojo`'s `_write_to[*, is_repr:
+    # Bool]`, `std/collections/list.mojo`'s `_write_self_to[*, is_repr: Bool]`),
+    # so this case is the shape two real files are written in.
+    #
+    # The weights say which binding is wrong: `value` 400, `scale` 20, `n` 3.
+    # A binder that ignored `attrs` gives 403; one that bound by the wrong name
+    # or the wrong position gives a third number.  It cannot fail loudly.
+    ("keyword_comptime_parameter_is_bound_by_name",
+     "struct Cell:\n"
+     "    var value: Int\n"
+     "    var pad: Int\n"
+     "    def show[*, scale: Int](self, n: Int) -> Int:\n"
+     "        return self.value * 100 + scale * 10 + n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.value = 4\n"
+     "    c.pad = 1\n"
+     '    printf("v=%d", c.show[scale=2](3))\n'
+     "    return 0\n",
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self.value = 4\n"
+     "        self.pad = 1\n\n"
+     "    def show(self, scale, n):\n"
+     "        return self.value * 100 + scale * 10 + n\n"
+     "\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     '    print("v=%d" % c.show(2, 3), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # **TWO KEYWORD PARAMETERS, SUPPLIED IN THE OPPOSITE ORDER** —
+    # `c.mix[by=7, T=3]()`.  This is what makes the first case's fix a NAME
+    # binding rather than "the second item of the bracket": a binder that took
+    # the keyword items positionally would give `T=7, by=3` and answer **1073**
+    # instead of **1037**, and one that ignored `attrs` gives 1000.  Neither is
+    # a crash, which is why the split has to be pinned and not assumed.
+    #
+    # Written keyword-FIRST deliberately.  `c.mix[3, by=7]()` — the more natural
+    # reading order — goes through the parser's OTHER bracket arm, which keeps
+    # the keyword's VALUE in `.index` and discards its name, so it happens to
+    # bind correctly by position and cannot tell the two rules apart.  That
+    # parser asymmetry is recorded, not relied on.
+    ("keyword_comptime_parameters_bind_by_name_not_by_bracket_order",
+     "struct Cell:\n"
+     "    var v: Int\n"
+     "    var w: Int\n"
+     "    def mix[T: Int, *, by: Int](self) -> Int:\n"
+     "        return self.v * 1000 + T * 10 + by\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.v = 1\n"
+     "    c.w = 2\n"
+     '    printf("v=%d", c.mix[by=7, T=3]())\n'
+     "    return 0\n",
+     "class Cell:\n"
+     "    def __init__(self):\n"
+     "        self.v = 1\n"
+     "        self.w = 2\n\n"
+     "    def mix(self, T, by):\n"
+     "        return self.v * 1000 + T * 10 + by\n"
+     "\n"
+     "def main():\n"
+     "    c = Cell()\n"
+     '    print("v=%d" % c.mix(3, 7), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # **GUARD** — the same keyword spelling on a FREE function, with no
+    # receiver anywhere, so the answer does not depend on the method lift at
+    # all.  `mojo/middle/comptime.py` is shared by three compiled paths (the
+    # gimple compiled path, arm64, x86-64), which is why the fix lives in the
+    # ONE reader rather than in a backend; this is the case that says the
+    # reader is the one that changed.  The answer is 110, and a reader that
+    # dropped the keyword gives 7 — the `type` weight is there because a body
+    # that never READS the parameter cannot tell a dropped binding from any
+    # other, which is how the defect stayed invisible for so long.
+    ("GUARD_keyword_comptime_parameter_on_a_free_function",
+     "def widen[*, type: Int](x: Int, y: Int) -> Int:\n"
+     "    return type * 100 + x + y\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     '    printf("v=%d", widen[type=1](3, 7))\n'
+     "    return 0\n",
+     "def widen(type, x, y):\n"
+     "    return type * 100 + x + y\n"
+     "\n"
+     "def main():\n"
+     '    print("v=%d" % widen(1, 3, 7), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+    # ── a receiver that is a FIELD: `recv.f.m(a)`, dispatched by `f`'s
+    #    declared type rather than by the spelling of `m` ──────────────────
+    #
+    # THE SAME RECOGNITION, one hop further from the name.  `_method_call_target`
+    # requires the callee's receiver to be a plain `IdentExpr`, so
+    # `self._inner.write_to(writer)` was not recognised as a method call at all;
+    # `_rewrite_self_fields` then collapsed `self._inner` to `self` (correctly —
+    # `StridedSlice` has ONE field, so its receiver IS that field) and left
+    # `self.write_to(writer)`, a name TWO structs of this file declare and
+    # therefore a name nothing could lift.  What the refusal then said was false:
+    #
+    #     StridedSlice_emit_all: self.write_to is not a field of StridedSlice —
+    #     write_to is one of its METHODS …
+    #
+    # The source says neither.  It says `Slice.write_to`, on `self._inner`, which
+    # is declared `var _inner: Slice`.  Measured on
+    # `std/builtin/builtin_slice.mojo`\'s own `StridedSlice_write_to` — the file the
+    # 2026-10-02 x86-64 sweep of `std/builtin` + `std/collections` reported one
+    # level down for 7 of the 38 files it reached — with `write_to` spelled the
+    # same in both structs, exactly as it is there.
+    #
+    # `StridedSlice.write_to` returns 99 and is never called, so the only way to
+    # print 99 is a mis-dispatch: the case fails on the NUMBER, which a
+    # refusal-shaped expectation could not see.
+    ("field_receiver_method_call_dispatches_on_the_declared_type",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "    var end: Int\n"
+     "    var step: Int\n"
+     "\n"
+     "    def write_to(self, mut writer: Int) -> Int:\n"
+     '        printf("%d/%d/%d|", self.start, self.end, self.step)\n'
+     "        return 0\n"
+     "\n"
+     "struct StridedSlice:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def write_to(self, mut writer: Int) -> Int:\n"
+     "        return 99\n"
+     "\n"
+     "    def emit_all(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.write_to(writer)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = StridedSlice(Slice(1, 2, 3))\n"
+     '    printf("rc=%d", s.emit_all(0))\n'
+     "    return 0\n",
+     "class Slice:\n"
+     "    def __init__(self, start, end, step):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = step\n"
+     "\n"
+     "    def write_to(self, writer):\n"
+     '        print("%d/%d/%d|" % (self.start, self.end, self.step), end="")\n'
+     "        return 0\n"
+     "\n"
+     "class StridedSlice:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def write_to(self, writer):\n"
+     "        return 99\n"
+     "\n"
+     "    def emit_all(self, writer):\n"
+     "        return self._inner.write_to(writer)\n"
+     "\n"
+     "def main():\n"
+     "    s = StridedSlice(Slice(1, 2, 3))\n"
+     '    print("rc=%d" % s.emit_all(0), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # The SAME shape with the two methods spelled DIFFERENTLY, which is the
+    # control for the row above and says the fix is the dispatch rather than the
+    # collision: before it, this one got PAST the recogniser\'s reach and died in
+    # the emitter instead ("self.emit_slice() is a method call on a value … the
+    # receiver is a name on this path"), so both spellings were refused and only
+    # the WORDING differed.  It must now compute the same thing, and the one-word
+    # struct alias must not have quietly turned `Slice.emit_slice` into
+    # `StridedSlice.emit_slice` — whose body would recurse.
+    ("field_receiver_method_call_with_distinct_names_agrees",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "    var end: Int\n"
+     "    var step: Int\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return self.start * 100 + self.end * 10 + self.step\n"
+     "\n"
+     "struct StridedSlice:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def emit_all(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.emit_slice(writer) * 2\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = StridedSlice(Slice(1, 2, 3))\n"
+     '    printf("v=%d", s.emit_all(0))\n'
+     "    return 0\n",
+     "class Slice:\n"
+     "    def __init__(self, start, end, step):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = step\n"
+     "\n"
+     "    def emit_slice(self, writer):\n"
+     "        return self.start * 100 + self.end * 10 + self.step\n"
+     "\n"
+     "class StridedSlice:\n"
+     "    def __init__(self, inner):\n"
+     "        self._inner = inner\n"
+     "\n"
+     "    def emit_all(self, writer):\n"
+     "        return self._inner.emit_slice(writer) * 2\n"
+     "\n"
+     "def main():\n"
+     "    s = StridedSlice(Slice(1, 2, 3))\n"
+     '    print("v=%d" % s.emit_all(0), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
+
+    # ── a FREE FUNCTION whose name is also a METHOD\'s ───────────────────────
+    #
+    # Method dispatch here is by NAME and nothing more, so `helper` being both a
+    # module-level function and a method of `Widget` is perfectly legal source,
+    # and `_method_owners` records the collision as data rather than as an error.
+    # That is the design.  What is not the design is the SECOND table reading the
+    # same collision and concluding that the free function IS a method: the frame
+    # pass asked its `{function name: struct}` table by the free function\'s own
+    # name, was handed the struct NAME it had just recorded, and passed a string
+    # on as if it were a struct.  `_frame_receivers` raised `AttributeError:
+    # 'str' object has no attribute 'name'` on any module where a
+    # FRAME-HOLDING free function shares its name with any method — this
+    # module\'s own or an imported struct\'s.
+    #
+    # Measured on `std/builtin/reversed.mojo`, which the 2026-10-02 x86-64 sweep
+    # classified `backend-crash` (`SIMD.reversed` is real — `std/simd.mojo:3475`
+    # — and the module declares a free `reversed`), so the file could not be
+    # classified at all rather than being refused for whatever its next problem
+    # was.  A crash is also the one class the sweep never replays from cache, so
+    # it is the most expensive verdict the tool can print.
+    #
+    # The case is EXECUTED, because the same substitution that crashed also fed a
+    # phantom struct to the `comptime` census: without the fix this function\'s
+    # class-level reads were answered as `Widget`\'s.  `Big` is in the image so
+    # that `helper` HOLDS A FRAME, which is the condition `_frame_receivers`\'s
+    # rewrite loop is gated on — a frame-free free function never reached the
+    # crash and would have made this case pass for the wrong reason.
+    ("free_function_sharing_a_method_name_is_not_a_method",
+     "struct Widget:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def helper(self) -> Int:\n"
+     "        return self.n + 1\n"
+     "\n"
+     "struct Big:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self, k: Int) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "def helper(x: Int) -> Int:\n"
+     "    var b = Big()\n"
+     "    b.a = x\n"
+     "    b.b = 2\n"
+     "    return b.get(0) + 7\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = Widget()\n"
+     "    w.n = n\n"
+     '    printf("v=%d", helper(n) + w.helper())\n'
+     "    return 0\n",
+     "class Widget:\n"
+     "    def __init__(self):\n"
+     "        self.n = 0\n"
+     "\n"
+     "    def helper(self):\n"
+     "        return self.n + 1\n"
+     "\n"
+     "class Big:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "\n"
+     "    def get(self, k):\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "def helper(x):\n"
+     "    b = Big()\n"
+     "    b.a = x\n"
+     "    b.b = 2\n"
+     "    return b.get(0) + 7\n"
+     "\n"
+     "def main():\n"
+     "    w = Widget()\n"
+     "    w.n = 10\n"
+     '    print("v=%d" % (helper(10) + w.helper()), end="")\n'
+     "    return 0\n"
+     "\n"
+     "main()\n"),
 ]
 
 # ── the refusals, which are the point of the two remaining families ─────────
@@ -377,6 +689,44 @@ DIFF_CASES = [
 # the false message above lost.  All of them fire in the shared build pass or in
 # `formal/model.py`, so each is required to refuse identically on BOTH backends.
 REFUSALS = [
+    # THE GUARD on the field-receiver dispatch, and the only observable thing
+    # about it: `FancySlice` DERIVES from `Slice` and declares the same method,
+    # so a field declared `Slice` may hold either, and the declared type names
+    # only the base.  Lifting to `Slice_emit_slice` would then run the BASE's
+    # body against a CHILD's frame — which builds, and computes the base's view
+    # of a value the source says is a child.  Measured: with
+    # `formal/build.py`'s `_receiver_field_types` guard removed, this program
+    # BUILDS on arm64.  With it, it refuses.
+    #
+    # The refusal is the pre-existing one and that is deliberate: withholding
+    # the entry puts the call back on the name-based path, where `emit_slice` is
+    # a name two structs declare and so has no owner to lift to.  The needle is
+    # therefore the EXISTING diagnosis rather than a new message, which is the
+    # honest outcome — this is a limit, and the fix's job was to stop it firing
+    # on programs it is not about.
+    ("refuse_a_field_receiver_whose_declared_type_has_a_derived_override",
+     "struct Slice:\n"
+     "    var start: Int\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return self.start\n"
+     "\n"
+     "struct FancySlice(Slice):\n"
+     "    var tag: Int\n"
+     "\n"
+     "    def emit_slice(self, mut writer: Int) -> Int:\n"
+     "        return 1000\n"
+     "\n"
+     "struct Box:\n"
+     "    var _inner: Slice\n"
+     "\n"
+     "    def go(self, mut writer: Int) -> Int:\n"
+     "        return self._inner.emit_slice(writer)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return 0\n",
+     "self.emit_slice() is a method call on a value"),
+
     # A GENUINE VALUE-POSITION METHOD REFERENCE — `checker.check_temporal_...`
     # passed as an ARGUMENT, not called.  This is the two remaining files of the
     # sweep's eight, and it is the case the false message was written for and is

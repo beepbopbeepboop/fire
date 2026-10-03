@@ -1,12 +1,22 @@
 # FORMAL_receiver_stored_in_a_field: a frame address in a struct field, and a parameter whose declared type no call site agrees with
 
-**Status: OPEN, NOT FIXED. Two constructs, both in the "other refusal" bucket
-until `fbaed39b` gave the bucket markers for them, and both unowned. They are
-one document because they were measured together and they are the two rows a
-planner would otherwise have to split by hand out of a 183-file bucket.**
+**Status: row A's RULE is landed (a delegating constructor is no longer
+refused, and the locally-built half still is); the 24 files are still blocked,
+by a DIFFERENT and more interesting rule, measured in §6. Row B is unmeasured
+here and now has a census that produces its list without a sweep (§7).**
 
-Named and measured by the `task:formal2-sweep-3` re-sweep of the `formal-batch3`
-tree, arm64 and x86-64, 630 files each (`bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`).
+Both constructs were in the "other refusal" bucket until `fbaed39b` gave the
+bucket markers for them, and both were unowned. They are one document because
+they were measured together and they are the two rows a planner would otherwise
+have to split by hand out of a 183-file bucket.
+
+**Re-measured 2026-10-02 on `work/formal8-10`, without a sweep, and ROW A's
+24 FILES ARE THE DELEGATING CONSTRUCTOR — 13 of the 14 sites are an
+`__init__` storing its own parameter, and none of them is a local.** §5 below
+has the census, the instrument, its one weakness, and the rule the measurement
+decides. Row B is untouched: its list needs a sweep, because the refusal
+compares call sites inside one image and a parse-and-walk instrument cannot
+answer it — §7 says what can be answered without one.
 
 | row | files blocked | in-file | both arches | source |
 |---|---|---|---|---|
@@ -15,6 +25,52 @@ tree, arm64 and x86-64, 630 files each (`bugs/FORMAL_sweep_work_map_2026-10-01_b
 
 Neither row is claimed. `python3 tools/control.py claims` shows no owner for
 either as of 2026-10-01; they are enqueued in the work map §7.
+
+## 0. What landed, 2026-10-03 (`work/formal10-4`): row A's rule, and why the
+## 24 files are still refused
+
+`formal/build.py`'s `_frame_field_store_is_sound` replaces the flat refusal with
+the rule §5's census selects, and the rule is about the VALUE, not the slot:
+
+> A field store of a frame address is sound when the frame ARRIVED — it is a
+> parameter of this method, so the CALLER reserved it and it cannot outlive
+> anything this function owns — **and** the slot is an ordinary word.
+
+Measured on both architectures, a delegating constructor across a module
+boundary now builds and computes the right number —
+`test_formal_run.py`'s `byref_delegating_constructor_stores_a_parameter_frame`,
+where `peek` reads `7` and `8` out of the frame the constructor stored, so a copy
+or a re-created block would answer 1 — and
+`byref_refuse_a_field_store_of_a_frame_built_here` pins the negative half
+(`var t = R()` in the method: that frame is built HERE, in this method's own
+scratch, and the slot may outlive the call).
+
+**And the 24 files are still blocked, which is the finding worth more than the
+rule.** A delegating constructor over a struct **of this module** is refused by
+`model.struct_nested_frame_fields`' PLACEMENT, not by the store:
+
+| the store is now allowed | what refuses the same program next |
+|---|---|
+| `self.src = <a parameter>`, field typed with an IMPORTED struct | nothing — it builds and runs (§0's case) |
+| `self.src = <a parameter>`, field typed with a struct of THIS module | `construction_nested_slot_refusal` at the construction site, and `_nested_frame_levels`'s `_REASSIGNED` arm at a read |
+| `self.f = <a parameter>`, field declared as a framed struct of this module | `constr_refuse_an_init_store_over_a_placed_nested_frame`'s own case, unchanged |
+
+The reason is that this module PLACES a frame in such a slot: the constructor
+reserves a block for it in the object's own block and stores that block's
+address, so a pointer stored over it leaves a word where every reader computes a
+frame base from it. That is a real hazard, and it is why the rule requires an
+ordinary word — `struct_nested_frame_fields` IS the placement decision, and a
+rule that ignored it would trade a loud refusal for a wrong answer.
+
+**So the blocker for the corpus is the PLACEMENT decision, and the next step is
+narrower than §3 assumed:** `struct_nested_frame_fields` does not look at what
+the constructor STORES. A field whose `__init__` stores a name rather than
+building a nested frame there is not a placed frame — it is a pointer slot — and
+teaching the placement that is one predicate over the constructor's own body.
+That predicate was already the subject of `FORMAL_struct_construction_shapes.md`
+(`git rm`'d 2026-10-03, when the construction family closed — its `constr_*`
+cases in `test_formal_run.py` stand in its place), which is why this doc stops
+here rather than reaching into it.
 
 ---
 
@@ -188,7 +244,8 @@ neither row's 24 or 13 is a promise:
   re-sweep the 24, and record where each lands. The `builtin_slice.mojo` row is
   the precedent for what to expect: 20 files that move onto
   `self.step.or_else() is an Optional unwrap`, which is a true fact about the
-  same line and is tracked in `FORMAL_struct_construction_shapes.md`. Expect a
+  same line and was tracked in `FORMAL_struct_construction_shapes.md` (`git rm`'d
+  2026-10-03 when the construction family closed). Expect a
   similar landing, and expect the ceiling to be well under 24.
 * **Row B, 13 files.** Cheaper and prior to any change: for each of the 13,
   check whether CPython raises on the same source. A file whose program is
@@ -209,4 +266,75 @@ $ python3 tools/memslot.py --gb 8 --label probe -- \
       python3 fire.py build --formal --no-prove .tmp/probe/d4.mojo      # row B
 $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3.txt    # both rows
 $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-b3.txt    # identical counts
+```
+## 5. Row A measured without a sweep: the shape is a DELEGATING CONSTRUCTOR
+
+§3 asks for the 24 to be lifted behind a guard and re-swept. A sweep is a
+30 s timeout per file over 630, and this question does not need one: the
+refusal fires in `_prepare_functions`' holder-use walk, so parse plus one
+method walk answers it — the same instrument
+`bugs/FORMAL_read_before_store_what_is_left.md` used, and for the same reason
+(a file refused for an import never reaches this check).
+
+    `recv.field = <a name that can hold a multi-field frame>`:
+      14 sites in 11 files   (this repository + the stdlib, 667 files)
+        13  the value is a PARAMETER of the method
+         1  the value is neither a parameter nor a local (myinterpreter.py:303)
+
+and **13 of the 14 are an `__init__`**:
+
+    std/builtin/builtin_slice.mojo:203   __init__   self._inner = other
+    std/collections/deque.mojo           __init__   self._deque = _deque
+    std/collections/dict.mojo            __init__   self._dict = _dict
+    std/collections/interval.mojo:392    __init__   self.interval = interval
+    std/collections/linked_list.mojo     __init__   self._list = _list
+    std/collections/list.mojo            __init__   self._list = _list
+    std/collections/span.mojo            __init__   self.src = src
+    std/memory/alloc.mojo:248            __init__   self._layout = _layout
+    std/python/_cpython.mojo             __init__   self.version = version
+    std/benchmark/bencher.mojo           __init__   self.metric = metric
+    (and one more, `std/python/python_object.mojo:76`)
+
+**That decides the question §3 called a lifetime analysis.** The hazard is a
+field outliving the frame it names; here BOTH sides are the CALLER's: the
+owner is the receiver, which arrived as this method's own parameter, and the
+value is another parameter of the same method. Neither frame belongs to the
+method that stores it, so neither dies at its `return`, and the store is sound.
+The rule the measurement selects is therefore decidable and short:
+
+> A field store of a frame address is sound when the field's owner and the
+> stored frame are both frame-bounded in the SAME function — which, for a
+> method, means both are parameters of it.
+
+**NOT FIXED HERE, and the reason is the verification rather than the rule.**
+Lifting the branch needs the holder set (`fn._frame_holders`), which exists
+only for a file that survives everything checked before it, and the payoff has
+to be measured by BUILDING the 11 files on both architectures — a sweep, which
+is the integrator's and not a light worker's. A narrower rule landed without
+those 11 builds would be a change to what the compiler accepts with no
+evidence behind it, which is the trade `FORMAL_read_before_store_what_is_left.md`
+warns about in the other direction.
+
+**The instrument's one weakness, stated because it decides how the 11 is
+read.** A name "holds a frame" here means it is a parameter annotated with a
+multi-field struct of its own file, or is assigned from a construction of one.
+The refusal's own evidence is the holder set, which is derived rather than
+syntactic, so **11 is an upper bound** and the real number is ≤ 11 — the same
+direction as the doc's 24, and for the same reason. A first cut of this census
+used "the name has a method called on it" and reported 52 sites in 19 files,
+of which 28 were a word (`.strip()` on a string is not a frame); that is
+recorded because it is the mistake a syntactic census of this shape invites,
+and the tightened filter is what makes the 13 readable. The instrument is
+`tools/formal_frame_field_census.py`, and both filters are named in its
+docstring so the next reader starts from the tightened one.
+
+Row B is unchanged and unmeasured here: `frame_declared_parameter_refusal`
+compares a parameter's annotation with what the CALL SITES in the same image
+pass, so its list is an image-level fact and no parse-and-walk instrument can
+produce it.
+
+```console
+$ python3 tools/formal_frame_field_census.py     # the census above; 14 sites in
+                                                # 11 files, 13 of them a
+                                                # delegating __init__
 ```

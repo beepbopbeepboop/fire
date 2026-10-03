@@ -371,6 +371,85 @@ now in three places — two emitters and this model set. A single published
 that is a change to both backends' call emitters and is not this construct's to
 make.
 
+### §5's table is BUILT (2026-10-01, `formal3-2-r2`)
+
+`model.EMITTER_BUILTINS` — `{name: emitter method suffix}` — is published, both
+emitters' dispatch chains read it through `model.emitter_lowers(name)`, and
+`FRAME_VARIADIC_BUILTIN_CALLS` is DERIVED from it rather than written beside it.
+So "which builtins does this backend compile" is one table, and the three places
+cannot drift because two of them no longer exist as separate text.
+
+`range` is the one name still spelled in each chain, because its emitter takes
+the ARGS LIST rather than the `CallExpr` — a property of the emitter, not of the
+builtin, so it lives in the table as the method name `_emit_range_list` rather
+than in a caller that would have to know it. `open` is not in the table: it is
+`BUILTIN_FUNCTIONS`'s `file_open`, because `open` is also a C library entry
+point and the two are genuinely different facts.
+
+Pinned two ways in `test_formal_run.py`. The end-to-end half is the case that
+already existed, `byref_refuse_print_of_a_frame`, whose refusal is the sentence
+this table exists to keep true. The consistency half is new,
+`check_emitter_builtin_agreement`, which reads both emitters' SOURCES and fails
+when any of three things is false: an emitter spells a builtin the table lacks;
+the table names an `_emit_*` method a file does not define; or `print` leaves
+`FRAME_VARIADIC_BUILTIN_CALLS`. All three verified by breaking each in turn — an
+added `name == "enumerate"` chain, a table entry naming `_emit_no_such_method`,
+and an emptied variadic set each produce exactly the corresponding failure and a
+clean tree produces none.
+
+The two backend suites that would catch a dispatch difference are green:
+`test_formal_x86_64_parity.py` 6/6, `test_formal_frame_len.py` 10/10 (the `len`
+dispatch), and a hand-built probe printing `len=3`, a `print`, and a `range`
+sum on BOTH architectures. Full `test_formal_run.py` 534 PASS / 1 FAIL, the one
+being the stale `a_mutated_module_global_is_refused` expectation this document's
+own last section names as `FORMAL_module_state_no_storage`'s.
+
+**This document stays**, which is a departure from the usual rule and the reason
+is worth recording: four other bug docs and two sweep work maps cite it, so
+deleting it would dangle references in files this task does not own — which is
+worse than a document that records a construct whose refusal is landed and whose
+ceiling is zero by design.
+
+**What is open, and where each piece went (2026-10-03).** This section used to
+point at "§4's TASK 2 (the loop-aware termination bound)" and "§A4 on the
+x86-64 side", and **neither section exists in this document** — the references
+were left behind by the rounds that rewrote it, so a reader following them found
+nothing. Both are answered elsewhere now, and the pointers are:
+
+* **The loop-aware termination bound.** A dylib export whose body loops still
+  gets a NAMED obligation rather than a proof of `Total`, because
+  `DylibExport.total_of_halts` consumes an acyclic, call-free CFG walk. Scoped
+  and measured (four exports classified by the method the frame-bounds document
+  prescribed) in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §5-§6. It
+  is a scheme extension — a ranking function or a fuel invariant — and it is
+  `formal/` work on the emitter side plus Lean work in the library, not a change
+  to the classifier this document is about.
+* **The x86-64 side.** Answered, and the answer was a defect rather than a data
+  point: `fire.py dylib --formal --backend=x86_64` built an **arm64** image
+  (`--backend` is a global flag the `dylib` command never read) and
+  `compile_formal_dylib(arch="x86_64", prove=True)` raised `KeyError` out of
+  the arm64 generator. Both are now refused by name. Recorded with the
+  measurement in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §3, and
+  pinned by `test_formal_dylib.py`'s `a proved dylib is an arm64 artifact, and
+  says so`.
+
+**And the clause every arm keeps now has a test.** §3 says the five arms all
+open with `which is a name with no definition in hand` and that this is
+load-bearing, because two taxonomies key on that exact substring while the
+message itself begins `a X receiver is passed to …` — the receiving family's own
+opening. It also records that the first version of the split had four arms that
+did **not** keep it. Nothing tested it, so the same edit could be made again
+silently. `test_refusal_taxonomy.py`'s `_no_def_callee_arm_checks` now asks the
+question at the source rather than at a sample: one callee per arm (there are
+**six** on this tree, not five — `UNIMPLEMENTED_BUILTINS` was added after this
+document was written), three assertions each — the clause is present, both
+tables classify the arm as `callee has no definition on this path`, and the
+texts are pairwise distinct, since a shared text is the pre-split defect
+returning and would pass the first two. Verified by breaking one arm's clause in
+process: it produces exactly the predicted failure, both tools moving that arm
+to `receiver passed as an argument` / `receiver passed to a call, position not
+stated`.
+
 ## 6. How to reproduce the measurement
 
 **The row's numbers** come from the sweep's own tooling, which is committed:

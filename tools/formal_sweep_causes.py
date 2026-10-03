@@ -175,11 +175,29 @@ CAUSES = (
     # (`std/_gpu/_utils.mojo`, `std/builtin/{_coroutine,enum_like,type_aliases}
     # .mojo`, `std/sys/info.mojo`), and the label already named `__mlir_type`,
     # so the row claimed a construct it could not see.
+    # A FIFTH wording, and the one that needs the most care: `formal/model.py`'s
+    # `mlir_dialect_op_refusal` used to answer every `__mlir_op` with ONE
+    # sentence, and it named the `__mlir_` PREFIX rather than the operation. It
+    # now classifies the OPERATION by what it denotes — an effect, an
+    # elementwise arithmetic result, or a value that needs a fact this path
+    # lacks — so four different messages carry the word "dialect OPERATION" and
+    # one carries the old prefix wording for a caller with no operation in hand.
+    #
+    # Both spellings are listed, because a marker is a CONTRACT WITH A MESSAGE
+    # THAT CAN BE REWORDED and breaking it is invisible from here: every cause
+    # keyed on the old wording silently drops to zero and its files fall into
+    # `other refusal`. `test_formal_sweep.py` asserts every marker matches a
+    # refusal the sweep actually produced, by building the message from
+    # `formal/`'s own text rather than from a copy in the test, so a reword that
+    # broke a marker fails a test rather than quietly moving a column — but only
+    # for a marker a sample exercises, which is why there is a sample per
+    # wording below rather than one for the row.
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      (("is initialized from an MLIR attribute template",),
       ("is initialized from an MLIR type template",),
       ("__mlir_attr[",),
-      ("__mlir_op is an MLIR dialect construct",))),
+      ("__mlir_op is an MLIR dialect construct",),
+      ("is a dialect OPERATION",))),
     ("inlined_assembly (a gimple-C runtime construct)",
      (("inlined_assembly:",),)),
     # ABOVE the broad `has no representation` cause below, and it has to be:
@@ -200,10 +218,12 @@ CAUSES = (
     # declares, because the refusal is about `builtin_slice`'s own line rather
     # than about the importing file. So this row is one value-model change
     # (Optional needs a niche, a discriminant or a tag word) whose OWN doc is
-    # `bugs/FORMAL_struct_construction_shapes.md`, and its measured landing is
-    # recorded there: the same line used to refuse with a FALSE reason
-    # ("constructing Slice with 3 argument(s)") and now refuses with a true
-    # one.
+    # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`. The FALSE-reason
+    # half of it was the construction family's, and that doc is deleted: the same
+    # line used to refuse with "constructing Slice with 3 argument(s)" — a
+    # three-field construction that the source never wrote, because `Slice` is a
+    # call to a declared `__init__` — and now refuses with a true one, so what is
+    # left here is the representation question alone.
     ("Optional unwrap: `None` and a value are one word, with no tag",
      (("is an Optional unwrap",),)),
     ("value with no representation on this path",
@@ -321,10 +341,12 @@ CAUSES = (
     # records for an earlier row and which no marker can express: the same
     # sentence is produced whether the name is missing (3 of the 5 — and for
     # those, CPython raises `AttributeError`, because nothing in the tree ever
-    # assigns the name) or present as a `comptime` class member the field
-    # census does not read (2 of the 5, correct Mojo that raises nothing, and
-    # `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md` has
-    # the measurement). So the label claims neither: the per-file split is in
+    # assigns the name) or present as a `comptime` class member (2 of the 5,
+    # correct Mojo that raises nothing). The census now reaches an IMPORTED
+    # module's classes (`formal/imports.py`'s `_attach_declared_census`), so
+    # what is left in that second arm is a member whose VALUE is not a literal
+    # — a true refusal about a value this path cannot materialise. So the label
+    # still claims neither: the per-file split is in
     # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.
@@ -404,22 +426,37 @@ CAUSES = (
      (("lowers to the C library's write(2)",),)),
     ("a method on a multi-field struct where a descriptor is meant",
      (("is a method on a Writer",),)),
-    # TWO wordings of ONE construct, and the second is the largest
-    # per-architecture difference in the whole sweep: 56 files on x86-64 and 0
-    # on arm64, all of them one ABI constant. `formal/arm64_codegen.py`
-    # interpolates `_ABI_ARG_REGS` (AAPCS64's x0..x7, so 8) and
-    # `formal/x86_64_codegen.py:865` interpolates `len(ARG_REGS)` (SysV's
-    # RDI..R9, so 6) into the SAME sentence — which is why this row's markers
-    # quote the ABI NAME and not the number: a table keyed on "exceeds the 8"
-    # cannot see a target that passes six, and reading a 56-file row as part of
-    # `other refusal` is how the previous map had to identify it by hand.
-    # Not a bug — it is the two ABIs. It is still the largest single-file
-    # difference between the backends and it is worth 51 files behind
-    # `re.mojo` alone (see `bugs/FORMAL_x86_64_hostmods_that_do_not_build.md`
-    # §Failure 2, and `formal2-x86-parity`, which holds the claim).
+    # TWO wordings of ONE construct, and it was the largest per-architecture
+    # difference in the whole sweep: 56 files on x86-64 and 0 on arm64, all of
+    # them one ABI constant.  The markers quote the ABI NAME and never the
+    # number, which is the property that matters here — a table keyed on
+    # "exceeds the 8" cannot see a target that passes six.
+    #
+    # **The ceiling in the NAME is a 2026-10-01 measurement and no longer
+    # fires.**  Both backends implement their ABI's stack-argument convention
+    # now (`_MAX_INCOMING_ARGS` = 24 in each, a FRAME bound: every parameter
+    # past the register file needs a home), so this sentence appears at
+    # twenty-five arguments on BOTH machines instead of at nine on arm64 and
+    # seven on x86-64, and the register counts it names are the REGISTER half
+    # of a split rather than the limit.  The name is left alone deliberately:
+    # it is the key every sweep log and every dated work-map table in
+    # `bugs/` is written against, and renaming it under the round's other
+    # sweeps would leave their tables naming a cause the tool no longer emits.
+    # The markers below are therefore the live ones — `the formal <arch> ABI
+    # passes`, with no `in registers` — which match BOTH wordings, so a sweep
+    # taken before the convention and one taken after it classify the same
+    # construct into the same row.  Dropping `in registers` is what makes the
+    # x86-64 half of that true: the new message ends `...(6 in registers and 18
+    # on the stack)`.
+    #
+    # What it cost while it was the register count, for the record: the host
+    # module `formal/hostmods/fnmatch.mojo` — `match_core(7)`, the one
+    # over-wide function left in `formal/hostmods` — and everything importing
+    # it, which is `pathlib` and then four files in `tools/`.
+    # `test_formal_hostmods_census.py` is the per-module, per-backend table.
     ("too many parameters for the register ABI (8 on arm64, 6 on x86-64)",
-     (("the formal arm64 ABI passes in registers",),
-      ("the formal x86-64 ABI passes in registers",))),
+     (("the formal arm64 ABI passes",),
+      ("the formal x86-64 ABI passes",))),
     # A NUMBER compared with a STRING. Not the `==` row further down: that one
     # is about a comparison between two values no call site classified, and
     # this one is about the OPERANDS being of kinds that cannot be compared
@@ -437,6 +474,41 @@ CAUSES = (
     # the program runs. 3 files (2 on x86-64), in-file on all of them.
     ("a module-global container has storage but no initializer",
      (("has no initializer",),)),
+    # The ORDER half of the same capability, and it is a separate cause because
+    # the two have different repairs. The row above is a name whose value the
+    # build cannot compute at all; this one is a name it CAN compute, in a
+    # `__DATA` slot the module's own top-level statements fill, read before that
+    # fill happens. Before the storage question existed the two were
+    # indistinguishable — one message for both — and giving the slot to every
+    # name the module body writes turned the second into its own refusal, which
+    # is what makes the distinction visible here rather than in the reader's
+    # head.
+    #
+    # Placed here, NEXT TO `a module-global container has storage but no
+    # initializer`, and keyed on a clause only this message carries. The two
+    # messages name the same thing — a `__DATA` slot with no value in it yet —
+    # and the sibling one says so with `has no initializer`; the marker here is
+    # the sentence about the MODULE BODY, which that one cannot contain. Keyed on
+    # the shared part instead, this row would swallow the sibling's files, which
+    # `test_refusal_taxonomy.py` caught by building both messages out of
+    # `formal/`'s own text and asking which cause each lands in.
+    ("a module global the module BODY fills, read before it fills it",
+     (("is one of the module-global slots in this image's",),
+      ("which this path compiles into the synthetic function the startup stub "
+       "enters",))),
+    # A `try`'s HANDLER ARM with a body, and the one row in this table whose
+    # refusal is CORRECT rather than a gap — so its number is a census, not a
+    # target. `formal` has no exception unwinder: a `raise` flushes the
+    # enclosing `finally` clauses and exits, so no edge runs from a raise site
+    # into an arm, and every statement in the arm would be missing from the
+    # program that runs. It is here because the dylib-module-body row's removal
+    # (2026-10-03) made 5 files report it for the first time and they landed in
+    # `other refusal`, which is the place a table like this exists to keep them
+    # out of: "refused on purpose" and "nobody has looked" are different
+    # answers for a reader deciding what to do next. Keyed on the clause only
+    # this message carries.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     (("is a handler arm with a body this path cannot put in the image",),)),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the
@@ -450,15 +522,6 @@ CAUSES = (
     # threaded through, which has no lowering here. 2 files, in-file.
     ("a constructor body that reads `self` is not inlined",
      (("whose body this path does not inline",),)),
-    # A module whose API IS its top-level statements, imported by another
-    # module: this path compiles an import into a dylib, and a dylib has no
-    # entry point to run a module body at load time, so the module would build,
-    # link, and do nothing — the silent no-op one level down from the
-    # executable path's own. Distinct from `module exports no public
-    # functions` (which is about what a dylib PUBLISHES): this is about
-    # whether it would RUN anything. 2 files + their importers on both arches.
-    ("a module whose API is its top-level statements, imported by another",
-     (("this module's API is its top-level statements",),)),
     # A local read before anything in the function stores it. `formal/build.py`
     # enforces this for module-global names and not for locals, which is what
     # `bugs/FORMAL_a_local_read_before_its_first_assignment.md` measures; 1

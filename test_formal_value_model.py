@@ -74,6 +74,26 @@ def cpython_source(source: str) -> str:
 #
 # ── the comparison dunders ──
 CASES = [
+    # A dict subscript's kind is THE KIND OF THE PAIR UNDER THAT KEY, and this
+    # is where a refusal became an answer. It used to be
+    # `a_dict_whose_values_disagree_is_refused` and the source is this one:
+    # `{"a": 10, "b": "text"}` states two kinds for the TABLE, and the old rule
+    # wanted them unanimous, so every subscript of it was unclassified.
+    #
+    # A subscript is a key scan and its answer is ONE element word, so
+    # unanimity is required over the pairs carrying that key and not over the
+    # whole table — and the source says exactly which word each key holds. So
+    # the program is answerable, CPython agrees, and the case is an ORACLE row
+    # (`expected` is what CPython prints for the same text) rather than a
+    # refusal: the old refusal was true about the old rule and false about the
+    # program. The two shapes the gate still refuses are in `REFUSALS`, and one
+    # of them is the same dict with one key spelled twice.
+    ("a_dict_subscript_is_the_kind_of_the_pair_under_that_key",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": \"text\", \"c\": [1, 2, 3]}\n"
+     "    print(\"v:\", d[\"a\"], \"w:\", d[\"b\"], \"n:\", len(d[\"c\"]))\n"
+     "    return 0\n",
+     "v: 10 w: text n: 3\n"),
     # THE REPRODUCER.  A class whose `__eq__` ignores its argument, compared
     # through the operator and through the explicit spelling, in one printf: the
     # two numbers are the same question asked twice and CPython makes them equal.
@@ -209,6 +229,96 @@ CASES = [
      "    printf(\"r=%d back=%d\", r, 1 if is_less(b, a) else 0)\n"
      "    return 7\n",
      "r=1 back=0"),
+    # ── what a SUBSCRIPT yields ──
+    #
+    # A container's ELEMENT kind is a fact the literal states and the use site
+    # was not asking.  `print()` is where it is first demanded, because `print`
+    # is the one builtin that must decide between two renderings before it emits
+    # anything, and refusing it was the visible half of a gap that also made
+    # `printf`'s classification and every other pre-emit decision unanswerable
+    # for the same expression.
+    #
+    # A DICT is the case that was missing, and the reason is visible in the kind
+    # table rather than in the emitter: a list literal classified as
+    # `list:<elem>` and a dict literal as a bare `list`, so `list_elem_kind` had
+    # nothing to hand a subscript of one and every use site had to refuse.
+    # Measured before the fix, on both architectures, for all three of these:
+    #
+    #     build: print() cannot tell whether SubscriptExpr is a string or a
+    #     number on the formal arm64 path
+    ("a_local_dict_element_prints",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": 20}\n"
+     "    print(\"v:\", d[\"a\"])\n"
+     "    return 0\n",
+     "v: 10\n"),
+    # The SAME literal at MODULE level, which is a different reader of it: the
+    # kind comes from the `__DATA` slot's initializer rather than from the
+    # function's flow.  One spelling working and the other refusing would make
+    # the answer depend on where a name was spelled, which is the one thing a
+    # value model exists to prevent.
+    ("a_module_global_dict_element_prints",
+     "D = {\"a\": 10, \"b\": 20}\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", D[\"a\"])\n"
+     "    return 0\n",
+     "v: 10\n"),
+    # And the STRING row, because the two kinds are what `print` is choosing
+    # between and a fix that only answered the integer one would have narrowed
+    # a refusal rather than removed it.  The element is a `char *` to interned
+    # bytes (`GlobalDataImage.string_cells`), so the `%s` conversion is the
+    # whole of what the word is.
+    ("a_module_global_list_of_strings_element_prints",
+     "L = [\"x\", \"y\"]\n"
+     "\n"
+     "def main(n):\n"
+     "    print(\"v:\", L[0])\n"
+     "    return 0\n",
+     "v: x\n"),
+    # ── what a CONSTRUCTION puts in a field ──
+    #
+    # The same shape of question as the two above, one level down: a field's
+    # kind, where the DECLARATION is usually silent.  `class_jit.mojo` is this
+    # case exactly — a two-field class whose fields are annotated nowhere, built
+    # from literals, and read through `print`.
+    #
+    # The evidence is the construction, because that is where the VALUE is: the
+    # store `init_body_stores` is going to perform is what the kind is read off,
+    # so the two cannot disagree.  `struct_field_kind`'s own gate — a kind is a
+    # claim about the VALUE in the slot, and `S()` leaves every slot at its
+    # class default — is right about `S()` and irrelevant about a frame this
+    # function built with arguments.  Measured before this, on both
+    # architectures: refused with "print() cannot tell whether MemberExpr is a
+    # string or a number".
+    ("a_constructed_field_prints",
+     "class Point:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Point(3, 4)\n"
+     "    print(\"p:\", p.x, p.y)\n"
+     "    return 0\n",
+     "p: 3 4\n"),
+    # AND THE STRING ROW, which is the dangerous direction and so the one that
+    # has to be in the oracle's file rather than only in a suite: a kind claimed
+    # for a field that holds a `char *` is what `%s` dereferences, so a wrong
+    # one here is a fault or an address printed as text rather than a wrong
+    # number.  Both fields in one `print` so the two conversions are in the same
+    # image and the integer half cannot be quietly rendering the string one.
+    ("a_constructed_string_field_prints",
+     "class Pair:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair(\"hi\", 7)\n"
+     "    print(\"p:\", p.s, p.n)\n"
+     "    return 0\n",
+     "p: hi 7\n"),
 ]
 
 # ── the tuple-store target shapes ──
@@ -222,6 +332,15 @@ CASES = [
 # whatever `_store_var` can store into — the same store, through the same
 # function, so a tuple unpack and a plain `h.x = v` cannot disagree about where a
 # field's value lands.
+#
+# The fourth shape is a SUBSCRIPT element (`a[0], b = 1, 2`), and it is the one
+# that is not a `_store_var` key at all: an element of a blob has no frame home to
+# name.  x86-64 refused it by node type (`got SubscriptExpr`) while arm64 routed
+# it to its own `_emit_subscript_store_reg`, so one machine answered the program
+# and the other declined it — and nothing in the suite exercised the shape, which
+# is why it survived every merge that touched either half of the table.  It is
+# now the same `("sub", el)` tag and the same store on both, so the tuple target's
+# out-of-range index also exits(1) on both.
 TUPLE_STORE_CASES = [
     # A receiver-relative field target OUTSIDE any constructor, which is the
     # reproducer the filing used and the shape `_store_var`'s frame-slot arm is
@@ -306,6 +425,57 @@ TUPLE_STORE_CASES = [
      "    printf(\"a=%d b=%d c=%d\", a, b, c)\n"
      "    return 0\n",
      "a=1 b=2 c=3"),
+    # A SUBSCRIPT element target, the FOURTH shape and the one this backend used
+    # to refuse by node type (`got SubscriptExpr`) while arm64 lowered it.  Two
+    # targets on purpose, and in this order: the subscript store computes an
+    # address through R10, which is the register this loop is walking the RHS
+    # blob with, so `b` — read from `R10 + 8` AFTER the subscript store — is the
+    # assertion that R10 survived it.  A version that stored the subscript
+    # element's ADDRESS (the value-clobbering bug `_emit_subscript_store_reg`
+    # exists for) still prints `a0=0`; a version that let the address
+    # computation take R10 prints `b` as something else entirely.
+    ("tuple_store_to_a_subscript_element_and_a_name",
+     "def main(n):\n"
+     "    var a = [0]\n"
+     "    var b = 0\n"
+     "    a[0], b = 1, 2\n"
+     "    printf(\"a0=%d b=%d\", a[0], b)\n"
+     "    return 0\n",
+     "a0=1 b=2"),
+    # Two subscript targets in ONE statement, out of order, with a plain name
+    # after them: the second store's address computation reads a second base and
+    # writes a second element, and the name after it is still read out of the
+    # same blob — so this pins that the target loop's bookkeeping is per-element
+    # and not per-statement, and that a swap is a swap (`a[1], a[0], b = 1, 2, 3`
+    # leaves the list REVERSED, which is what CPython's parallel assignment
+    # does and what a store that read the index first would not).
+    ("tuple_store_to_two_subscript_elements_out_of_order",
+     "def main(n):\n"
+     "    var a = [0, 0]\n"
+     "    var b = 0\n"
+     "    a[1], a[0], b = 1, 2, 3\n"
+     "    printf(\"a0=%d a1=%d b=%d\", a[0], a[1], b)\n"
+     "    return 0\n",
+     "a0=2 a1=1 b=3"),
+    # A subscript target INSIDE a nested group, with a CALL in the index.  Both
+    # halves are there for a reason: the group makes the outer unpack recurse,
+    # and the recursion is the arm that has to save R10 across code that can
+    # call — so this is the case that catches a bare `push %r10` there (RSP at 8
+    # mod 16 at the call, which `otool -tvV` shows and no callee measured here
+    # faulted on) as well as a store that loses either the value or the blob base.
+    ("tuple_store_subscript_target_inside_a_nested_group",
+     "def pick():\n"
+     "    return 1\n"
+     "def main(n):\n"
+     "    var a = [0, 0]\n"
+     "    var b = 0\n"
+     "    var c = 0\n"
+     "    var d = 0\n"
+     "    a[pick()], (b, c) = 7, (2, 3)\n"
+     "    d = 4\n"
+     "    printf(\"a0=%d a1=%d b=%d c=%d d=%d\", a[0], a[1], b, c, d)\n"
+     "    return 0\n",
+     "a0=0 a1=7 b=2 c=3 d=4"),
 ]
 
 # ── the GUARD for a refusal that is about a name, not about a construct ──
@@ -442,6 +612,59 @@ MODULE_GLOBAL_CASES = [
      "    printf(\"bump=%d read=%d\", bump(), rd())\n"
      "    return 0\n",
      "bump=6 read=6"),
+    # ── a dict that arrives from a CALL, and a string subscript over it ──
+    #
+    # `d["a"]` has two readings on this path and the INDEX chooses neither of
+    # them: a dict KEY scan or a byte offset into a `char *`, and which one it
+    # is comes from the BASE. Every container is one word with an 8-byte count
+    # header here, so the KIND of the base cannot say — which is why
+    # `_is_dict_subscript` is a separate question from `kind_of`, and why the
+    # three spellings below were three separate faults:
+    #
+    #   * `D = {"a": 1}` at module level  — worked (the slot's initializer)
+    #   * `D = mk()` at module level       — fixed 2026-10-02 (the callee's
+    #                                          declared return type)
+    #   * `d = mk()` as a LOCAL, and `def show(d: dict)` — BOTH exited 1 with
+    #     nothing printed, from a green build, on both architectures: the
+    #     binding held no dict literal for `_note_binding` to see, so the
+    #     subscript took the SEQUENCE path and read the key's interned ADDRESS
+    #     as an element offset.
+    #
+    # The two value cases are the two halves of that, and the second one is the
+    # row that says the fix is not annotation-only: an UNANNOTATED callee whose
+    # `return` states a dict literal has as much evidence as an annotated one.
+    ("a_dict_from_a_call_with_a_declared_return_type",
+     "def mk() -> dict:\n"
+     "    var d = {\"a\": 1}\n"
+     "    return d\n"
+     "\n"
+     "def main(n):\n"
+     "    var d = mk()\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n",
+     "1|"),
+    ("a_dict_from_an_unannotated_call_whose_return_states_one",
+     "def mk():\n"
+     "    var d = {\"a\": 1}\n"
+     "    return d\n"
+     "\n"
+     "def main(n):\n"
+     "    var d = mk()\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n",
+     "1|"),
+    # A PARAMETER, which is the spelling with no BINDING statement at all:
+    # `_note_binding` never sees it, so the annotation is the only evidence
+    # there is. This is the row `declared_type_is_dict` exists for.
+    ("a_dict_subscript_through_a_dict_annotated_parameter",
+     "def show(d: dict):\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    show({\"a\": 1})\n"
+     "    return 0\n",
+     "1|"),
 ]
 
 # (name, source, needle the refusal must contain)
@@ -455,6 +678,44 @@ MODULE_GLOBAL_CASES = [
 # asks the RIGHT operand's `__eq__` when the left one's returns NotImplemented,
 # and this path has no representation for NotImplemented to be returned as.
 REFUSALS = [
+    # THE GATE that `a_dict_subscript_is_the_kind_of_the_pair_under_that_key`
+    # earns by being answered: unanimity is over the pairs under ONE KEY, so a
+    # literal that spells the same key twice with values of two kinds has no
+    # answer. CPython keeps the LAST pair (`{"a": 1, "a": [2]}` makes `d["a"]` a
+    # list); this path cannot claim a kind for a word whose two writers
+    # disagree, which is the same refusal `own_shape_kind` makes for a local.
+    #
+    # The needle is the INTEGER row rather than the unclassified one, and that
+    # is worth saying because it is the fallback showing through: with no
+    # per-key answer the subscript falls back to the whole dict's element kind,
+    # which the pre-existing `_kind_of_elements` computes over every value and
+    # which does NOT see the nested list — so it reads "int" and the integer row
+    # is what refuses. A different sentence, the same refusal, and the shape
+    # that reaches it is one whose answer no reader could have had anyway.
+    ("a_dict_whose_one_key_holds_two_kinds_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": 1, \"a\": [2, 3]}\n"
+     "    print(\"n:\", len(d[\"a\"]))\n"
+     "    return 0\n",
+     "an integer has no length"),
+    # …and the two shapes the gate exists for. A dict subscript whose element
+    # word no store wrote is a count read from address 0, so a key the literal
+    # does not contain, and a key this path cannot COMPARE with the literal's,
+    # both stay refused. Measured in the field spelling of this as a build that
+    # ran and died with SIGSEGV — `struct_field_kind`'s docstring has it.
+    ("a_dict_subscript_of_a_key_the_literal_lacks_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": [1, 2]}\n"
+     "    print(\"n:\", len(d[\"b\"]))\n"
+     "    return 0\n",
+     "the source does not say what this operand holds"),
+    ("a_dict_subscript_of_a_name_key_is_refused",
+     "def main(n):\n"
+     "    var d = {\"a\": [1, 2]}\n"
+     "    var k = \"a\"\n"
+     "    print(\"n:\", len(d[k]))\n"
+     "    return 0\n",
+     "the source does not say what this operand holds"),
     ("one_name_two_candidate_structs_is_refused",
      "class A:\n"
      "    x: int\n"
@@ -586,6 +847,189 @@ REFUSALS = [
     # what it computes rather than for a refusal that stopped being the right
     # answer when `formal-module-globals` gave the name a real `__DATA` slot.
     # That comment, and the measurement behind the move, are on the case.
+    # AN ELEMENT OF AN INTEGER.  Every container lowering reads the blob's count
+    # from offset 0 of its base and then reads or writes at `base + 8 + 8k`, so
+    # for `a = 5` the element address is 13 and the image faults: measured on
+    # both architectures from a GREEN build, SIGSEGV, exit 139.  This is here
+    # and not only in `test_formal_run.py` because `run_refusal` builds BOTH
+    # architectures and requires the identical message from each, and for this
+    # refusal "identical on both" is the whole assertion — the defect is SHARED
+    # by the two backends, so a two-architecture comparison cannot see it.
+    ("an_element_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    a[0] = 1\n"
+     "    printf(\"a=%d\", a)\n"
+     "    return 0\n",
+     "asks for a container element"),
+    # `%s` OF AN INTEGER, and the same argument for putting it here: the
+    # defect is SHARED by the two backends, so only a refusal that is required
+    # to read identically from each can see it.  `%s` is the one printf
+    # conversion that dereferences its argument — every other one renders the
+    # word — so `a = 5; printf("[%s]", a)` walked bytes at address 5 looking
+    # for a NUL.  Measured on both architectures from a GREEN build: nothing
+    # printed, SIGSEGV, exit 139.  The evidence is the same
+    # `ValueKinds.own_shape_kind` the container-element refusal above asks,
+    # which is why one predicate answers both.
+    ("a_percent_s_of_an_integer_is_refused",
+     "def main(n):\n"
+     "    var a = 5\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "conversion in printf's format string reads"),
+    # `%s` OF A ONE-FIELD STRUCT, the same fault through the one shape that has
+    # no frame for a frame check to refuse. `P(7)` binds a word that IS `P`'s
+    # only field, so `%s` walked bytes at address 7: SIGSEGV, exit 139, on both
+    # architectures from a green build. The needle is the DECLARATION the
+    # refusal quotes rather than the generic clause, because the evidence here
+    # is a declaration and not a statement — `model.one_word_value_text_evidence`
+    # — and a needle the two evidences share would let one of them regress into
+    # the other's message.
+    ("a_percent_s_of_a_one_field_struct_is_refused",
+     "struct One:\n"
+     "    var x: Int\n"
+     "\n"
+     "def main(n):\n"
+     "    var c = One(7)\n"
+     "    printf(\"[%s]\", c)\n"
+     "    return 0\n",
+     "struct of ONE field has no frame at all"),
+    # ORDERING A FRAME ADDRESS, and the reason a wrong BRANCH belongs in the
+    # oracle's file rather than only in the suite:  `x < y` on two multi-field
+    # structs reached the flag-setting compare of two ADDRESSES, so which way it
+    # went was decided by where the allocator put them.  Measured on both
+    # architectures for two objects holding EQUAL field values: `lt=1 gt=0
+    # le=1 ge=0`.  Both backends agreed, so a two-architecture comparison
+    # cannot see it and only a CPython oracle can — CPython raises
+    # `TypeError: '<' not supported between instances`, which is the answer
+    # this path now gives as a build error.
+    ("ordering_a_frame_address_is_refused",
+     "class Pair:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, a, b):\n"
+     "        self.x = a\n"
+     "        self.y = b\n"
+     "    def __eq__(self, other):\n"
+     "        return self.x == other.x and self.y == other.y\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = Pair(1, 2)\n"
+     "    var q = Pair(1, 2)\n"
+     "    printf(\"lt=%d\", 1 if p < q else 0)\n"
+     "    return 0\n",
+     "orders the ADDRESS of a Pair FRAME"),
+    # A DICT WHOSE VALUES DISAGREE, and the case is here rather than only in
+    # the passing ones because it is the SAFETY PROPERTY of the element kind
+    # they carry: `{"a": 10, "b": "text"}` states two kinds, and a kind table
+    # that picked either one would print an interned address as a number or a
+    # number as text — the failure mode the whole element-kind work is arranged
+    # to prevent.  `run_refusal` is the instrument for the rows below, because a
+    # defect in that table would be SHARED by the two backends (they read one
+    # table) and so cannot be seen by requiring them to agree.
+    # ── the four gates on a field kind read off a construction ──
+    #
+    # Each of these is a case where claiming a kind from `p = S(args)` would be
+    # a claim the source does not support, and each is a REFUSAL rather than a
+    # number because the wrong answer is a fault: `run_refusal` builds BOTH
+    # architectures and requires the identical message from each, and that is
+    # the only instrument that can see a defect both backends share.
+    #
+    # The one that is not theoretical is the first.  The construction says what
+    # went into the slot WHEN THE OBJECT WAS BUILT, and a statement after it in
+    # the same function puts something else there; measured on both
+    # architectures from a GREEN build, with the classification claiming a
+    # string and the store making it the integer 5:
+    #
+    #     p = P("hi", 7)
+    #     p.s = 5
+    #     print("s:", p.s)        ->  SIGSEGV, exit 139
+    #
+    # which is the same fault `a_percent_s_of_an_integer_is_refused` exists to
+    # keep out, reached through a field rather than through a name.
+    ("a_field_written_after_its_construction_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = P(\"hi\", 7)\n"
+     "    p.s = 5\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # The argument is one of this function's own unannotated PARAMETERS: a word
+    # arriving from a caller, which this model calls an integer everywhere else
+    # but which says nothing about what `p.s` holds, and the two hops from the
+    # caller to a struct field are exactly where a "a word is an integer"
+    # default becomes a wrong number rather than a harmless one.
+    ("a_field_built_from_an_unannotated_parameter_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(q):\n"
+     "    var p = P(q, 7)\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # A METHOD writes the field, so the constructor's argument is a statement
+    # about the past.  `ValueKinds` is flow-INsensitive by construction, so
+    # without this gate `p.s` would answer the same everywhere in the function
+    # including after the setter ran.
+    ("a_field_written_by_another_method_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "    def set_s(self, v):\n"
+     "        self.s = v\n"
+     "\n"
+     "def main(n):\n"
+     "    var p = P(\"hi\", 7)\n"
+     "    p.set_s(\"bye\")\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # TWO constructions that disagree, on two arms of the same `if`.  Flow
+    # insensitivity is what makes this the right question: one name, one slot,
+    # two stated kinds, so the slot is undecided rather than whichever arm the
+    # reader happened to look at first.
+    ("a_field_whose_constructions_disagree_is_refused",
+     "class P:\n"
+     "    def __init__(self, s, n):\n"
+     "        self.s = s\n"
+     "        self.n = n\n"
+     "\n"
+     "def main(k):\n"
+     "    if k:\n"
+     "        var p = P(\"hi\", 7)\n"
+     "    else:\n"
+     "        var p = P(3, 7)\n"
+     "    print(\"s:\", p.s)\n"
+     "    return 0\n",
+     "cannot tell whether MemberExpr"),
+    # A STRING INDEX AGAINST A BASE NOTHING DESCRIBES — the residue after the
+    # three value cases above, and the last spelling of one expression that
+    # used to be four faults.  It is here rather than left to exit 1 because
+    # what it did was WORSE than an exit: the emitter fell back to "a blob",
+    # the blob walk took the key's interned address as an ELEMENT offset, and
+    # the program printed whatever followed in __TEXT.  A refusal is the honest
+    # answer when the two readings are a scan over pair slots and `base + i`.
+    #
+    # The needle is the INDEX sentence rather than the message's opening, so a
+    # reworded preamble does not fail this and a reworded REASON does.
+    ("a_string_index_against_an_unstated_base_is_refused",
+     "def show(d):\n"
+     "    printf(\"%d|\", d[\"a\"])\n"
+     "    return 0\n"
+     "\n"
+     "def main(n):\n"
+     "    show({\"a\": 1})\n"
+     "    return 0\n",
+     "the INDEX is a string and nothing in the source says what `d` holds"),
 ]
 
 

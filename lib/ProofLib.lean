@@ -4923,6 +4923,66 @@ namespace DylibExport
 def offset (image : DylibImage) (export_ : DylibExport) : Nat :=
   export_.entry - image.base
 
+/-- The fold `exportEnd` performs, over an explicit list.  Split out so the
+    induction below is over a LIST it can abstract, rather than over
+    `image.exports` inside a structure it cannot. -/
+def exportEndAux (base codeSize entry : Nat) : List DylibExport → Nat :=
+  fun l => l.foldl
+    (fun best e => if entry < e.entry ∧ e.entry < best then e.entry else best)
+    (base + codeSize)
+
+/-- **The end of an export's OWN code**: the next export's entry address, or the
+    end of the image for the last one.
+
+    **Derived from the export table, not a field.**  Two readers of "where does
+    this export stop" would be a pair that agrees until the day it does not, and
+    the second one would be the generator computing a per-function extent that
+    the library's `Contracts` namespace then has to be told about.  The export
+    table is already in `DylibImage`, so this is a fold over it, and the
+    generator's own per-export extent (`_export_extent` in
+    `formal/arm64_proof_gen.py`) is the same rule computed in Python — which is
+    the one place the two can disagree, and there it is visible: the generated
+    proof states this number as a `native_decide`d `exportEnd_here`, so a drift
+    is a file that does not typecheck.
+
+    This is what an export's run stops at, and what its link register holds.  It
+    used to be `image.base + image.codeSize` in both places, which is right for
+    an image with ONE export and wrong for every other: the return at the end of
+    the first of several exports then lands past the last export of the image,
+    so the run keeps executing code that belongs to somebody else, and the
+    block a per-export contract is about cannot end where the contract says the
+    body ends.  A `ret` returns to the CALLER's return address; with no caller
+    in the model, the address one past the export's own last instruction is the
+    return address a caller immediately after this call would have left, and it
+    is a fact about the export rather than about the image. -/
+def exportEnd (image : DylibImage) (export_ : DylibExport) : Nat :=
+  exportEndAux image.base image.codeSize export_.entry image.exports
+
+/-- **NO EXPORT AFTER THIS ONE, SO ITS END IS THE IMAGE'S END.**  This is what
+    makes the change above behaviour-preserving: for an image with one export —
+    every image in `test_formal_dylib.py` until the multi-export case arrived,
+    and every `DylibImage` in this file — `exportEnd` IS
+    `image.base + image.codeSize`, so `runExport`, `startState` and
+    `dylibExportProg` are the same terms they were, and the one-export proofs
+    that were proved before it are still the same theorems. -/
+theorem exportEndAux_of_le (base codeSize entry : Nat) :
+    ∀ (l : List DylibExport), (∀ e ∈ l, e.entry ≤ entry) →
+      exportEndAux base codeSize entry l = base + codeSize
+  | [], _ => rfl
+  | a :: t, h => by
+    have ha : a.entry ≤ entry := h a (by simp)
+    have ht : ∀ e ∈ t, e.entry ≤ entry := by
+      intro e he
+      exact h e (List.mem_cons_of_mem a he)
+    simp only [exportEndAux, List.foldl_cons]
+    rw [if_neg (by omega)]
+    exact exportEndAux_of_le base codeSize entry t ht
+
+theorem exportEnd_last (image : DylibImage) (export_ : DylibExport)
+    (h : ∀ e ∈ image.exports, e.entry ≤ export_.entry) :
+    exportEnd image export_ = image.base + image.codeSize :=
+  exportEndAux_of_le _ _ _ _ h
+
 /-- A dylib export's entry address lies inside the image's code, and so the
     model can EXECUTE it rather than merely call it.
 
@@ -4954,10 +5014,17 @@ theorem in_image_decide (image : DylibImage) (export_ : DylibExport) :
       (export_.entry ≥ image.base ∧ export_.entry - image.base < image.codeSize) :=
   Iff.rfl
 
-/-- **Running one export, from its entry, to the end of the image.**  This is
+/-- **Running one export, from its entry, to the end of its OWN code.**  This is
     the machine's own `arm64_go_exit` with the argument in `x0` and the link
-    register pointing at the image's end, so a `RET` inside the export returns
-    to the exit exactly as the architecture requires.
+    register pointing at the export's end (`exportEnd`), so a `RET` inside the
+    export returns there exactly as the architecture requires — the address a
+    caller sitting immediately after the call would have left in `x30`.
+
+    It used to be the IMAGE's end, `image.base + image.codeSize`, which is the
+    same number for an image with one export and a different one for an image
+    with several: the return at the end of the first export then landed past the
+    LAST export, so the run went on to execute another export's code.  See
+    `exportEnd`.
 
     The observable surface is one word, `x0`, because that is the whole ABI
     for a word-shaped return — which is also the ceiling FORMAL.md §2.2
@@ -4997,8 +5064,8 @@ def runExport (image : DylibImage) (export_ : DylibExport)
   arm64_exec_go_exit
     ({ Arm64State.init n image.base with
         pc := export_.entry,
-        x30 := UInt64.ofNat (image.base + image.codeSize) })
-    image.code (image.base + image.codeSize) (exportFuel image n)
+        x30 := UInt64.ofNat (exportEnd image export_) })
+    image.code (exportEnd image export_) (exportFuel image n)
 
 /-- **Totality: the export's run terminates.**  Kept as a clause of its own
     because without it the functional half would be satisfied by an export that

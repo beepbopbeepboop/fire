@@ -229,10 +229,13 @@ def getfilesystemencodeerrors() -> str:
 # unbuffered: what the function returns is the byte count `write(2)` reports,
 # or -1 if it failed.
 #
-# STRING ESCAPES ARE NOT INTERPRETED on this path, so a newline has to be a
-# real byte in the source, not a `\n` in a literal. That is a property of
-# string literals rather than of this module, and it is measured in
-# `test_formal_sys.py` so the limitation is pinned rather than discovered.
+# STRING ESCAPES ARE INTERPRETED on this path, as CPython interprets them:
+# `write_stderr("a\nb")` writes THREE bytes and returns 3, because the literal
+# is decoded before it reaches the image (one decoder, `fire_compiler.
+# decode_c_escapes`, for every engine). So `strlen(s)` below measures the
+# decoded text, which is what CPython's `write` measures too. Measured against
+# CPython in `test_formal_sys.py`, which is where the answer is pinned rather
+# than discovered.
 
 def write_stdout(s: str) -> int:
     """Write `s` to file descriptor 1. NOT CPython's `sys` - see the module

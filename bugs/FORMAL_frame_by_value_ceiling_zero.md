@@ -1,9 +1,12 @@
 # FORMAL_frame_by_value_ceiling_zero: rows 7 and 8 of the sweep map, measured — 0 of 26 files move, and the 7 that leave row 7 land in five other causes
 
-**Status: the ceiling is measured at 0, two sub-shapes are fixed
-(`origin_of`, commit `14a2e42d`; and the subscript argument list, commit
+**Status: the ceiling is measured at 0, three sub-shapes are fixed
+(`origin_of`, commit `14a2e42d`; the subscript argument list, commit
 `30e5e2e9`, which is the neighbouring gap this document used to file and
-which has been closed), one remaining limit is filed, and the rest of rows 7
+which has been closed; and `type_of`, the `missing builtin` the landing table
+below ends on, which is now named as the builtin it is rather than as a
+function this file failed to declare — see "The one diagnosis left in this
+table" at the end), one remaining limit is filed, and the rest of rows 7
 and 8 is not work.** RE-CHECKED 2026-10-01, and the ceiling still holds: of the
 seven row-7 files this document's landing table ends with, every one is now
 refused by a DEPENDENCY before its own body is reached — `tuple`,
@@ -282,3 +285,59 @@ work/formal-sweep-next:tools/formal_sweep_causes.py`), not on this tree, because
 it is the map author's file and not this session's. Re-deriving the table needs
 its sweep log; the two commands at the top of this document are the measurement,
 and each printed every file's verdict.
+
+## The one diagnosis left in this table, fixed (2026-10-02)
+
+The landing table's last row is `std/memory/unsafe_pointer.mojo`, and its
+"whose" column says: "`type_of` is a missing builtin, on any receiver". The
+sentence the sweep recorded for it is `a Pointer receiver is passed to
+type_of()`, which is `frame_undefined_callee_refusal`'s LAST arm — the one that
+says *"this module defines no FUNCTION of that name — a method declared here is
+reached as `recv.type_of(…)` … — and no `from … import …` in it binds the name
+either"*.
+
+For `type_of` that sentence is not true, and it is false in the direction that
+costs the reader most: it sends them to look for a missing `def` and a missing
+import, and `type_of` is a Python **builtin** — a name the language provides,
+so there is nothing to declare and nothing to import. Reproduced and measured
+on this tree (two fields, so the receiver is a frame address and the argument
+loop is reached at all; a one-field struct's receiver IS its field, so nothing
+is a frame there and the bind audit answers instead):
+
+```
+$ python3 fire.py build --formal --no-prove -o tof.aout tof.mojo     # type_of(self)
+build: a P receiver is passed to type_of(), which is a name with no definition
+in hand in this image: this module defines no FUNCTION of that name …
+```
+
+`formal/model.py` now has `UNIMPLEMENTED_BUILTINS` — `{name: why there is no
+answer here}` — as the sixth arm of that function, beside
+`COMPTIME_REFLECTION_INTRINSICS` and for the same reason (a name that is not a
+function of this image's making, so "this file declares no function of that
+name" cannot be the reason). `type_of` is on it on this document's
+measurement; `getattr`, `setattr`, `hasattr` and `delattr` are on it because
+`bugs/FORMAL_frame_receiver_handoff.md` records them reaching the same branch
+and says what naming them needs ("a table of what the backend DOES implement").
+One table, and it is the place to add to.
+
+Two things deliberately unchanged:
+
+* **The refusal, not the verdict.** A frame address handed to any of these is
+  unsound whichever way you read it — none of them has a compiled body to hand
+  an address to — so this changes a diagnostic and nothing else.
+* **The opening clause.** Every arm opens with "which is a name with no
+  definition in hand", and two taxonomies key on that exact substring
+  (`tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+  `tools/formal_sweep_causes.py`'s `callee has no definition on this path`). An
+  arm that reworded the opening would move every file it names out of the
+  family they are counted in, into whichever family matches next, with no test
+  failing. Measured after the split that introduced the other arms: 41 files,
+  all 41 still classified by both tools.
+
+Pinned both ways in `test_formal_run.py`'s `BYREF_REFUSALS`:
+`byref_refuse_type_of_names_the_builtin` and
+`byref_refuse_getattr_names_the_builtin`, one per family the table carries,
+each asserted on BOTH backends (a `refuse:` case refuses identically on arm64
+and x86-64), beside the two neighbouring arms they must not be confused with —
+`byref_refuse_invisible_callee` for a name that really could be declared here,
+and `byref_refuse_reflection_intrinsic` for a compiler intrinsic.

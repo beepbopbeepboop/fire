@@ -4396,6 +4396,36 @@ def _gen_stmt_WithStmt(gen, node):
                 or f"{_hsn}___exit__" in gen.func_return_types):
             has_exit = True
             break
+    # A GENERATOR context manager has no `__exit__` to find that way — its
+    # teardown is the final `resume()` + `destroy()` in `_with_emit_exits`,
+    # which the normal-exit emission below already calls. So this pre-scan
+    # used to read the generator arm as "no teardown", leave `has_exit`
+    # False, skip the whole setjmp region, and the teardown then existed ONLY
+    # on the fallthrough path: a body that raised propagated straight out with
+    # the generator still parked at its `yield`, so everything after the
+    # `yield` — which for `@contextlib.contextmanager` is the `finally` that
+    # releases the resource — never ran. Silent, and invisible from the
+    # program's own output (the body's work all happened).
+    #
+    # Measured on this tree, a `@contextmanager` whose `finally` prints:
+    #
+    #     with tracked("a"): print("body a"); raise ValueError
+    #
+    # compiled to `enter a / body a / caught / done` — Python's answer has
+    # `exit a` between `body a` and `caught`. The `bb_exc` block below
+    # already calls `_with_emit_exits` before `mojo_raise()`; it was simply
+    # never generated for this arm.
+    #
+    # The arm's own comment when it was added said the exceptional path was
+    # "deliberately not threaded through the setjmp machinery here", which was
+    # true when the alternative was emitting NO body code at all. It is not a
+    # reason to leave a resource unreleased now that the arm is what ordinary
+    # `@contextlib.contextmanager` code lowers to.
+    if not has_exit:
+        for _hgi in range(len(_gctx_bases)):
+            if _gctx_bases[_hgi] is not None:
+                has_exit = True
+                break
 
     if has_exit:
         # See _reset_func's own comment on `_func_used_setjmp` -- same

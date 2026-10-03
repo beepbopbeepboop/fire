@@ -12,7 +12,8 @@ the C/GIMPLE emission stack — same constraint as `mojo.middle.closures`.
 from __future__ import annotations
 
 from fire_compiler import (
-    AssignStmt, AugAssignStmt, Comprehension, ForStmt, GlobalStmt,
+    AssignStmt, AugAssignStmt, Comprehension, ComptimeForStmt,
+    ComptimeIfStmt, ForStmt, GlobalStmt,
     NonlocalStmt,
     IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
     VarDecl, WhileStmt, WithStmt, _as_str,
@@ -167,6 +168,46 @@ def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
                 _lbn_walk(bound, global_declared, node.else_body)
             for _, elif_body in (node.elifs or []):
                 _lbn_walk(bound, global_declared, elif_body)
+        elif isinstance(node, ComptimeIfStmt):
+            # A `comptime if` is a DISTINCT NODE (`fire_compiler.ComptimeIfStmt`),
+            # not an `IfStmt` with a flag, so the arm above never saw it — and a
+            # name bound in a comptime branch got no home at all. The symptom is
+            # a refusal that names the allocator rather than the construct:
+            #
+            #     pick: 'a' has no home: the register allocator collected no home
+            #     for it, so the emitter and the allocation walk disagree about
+            #     this function's locals
+            #
+            # measured 2026-10-02, arm64 and x86-64 identically, on
+            # `comptime if T == 1: var a = k + 1 ... else: var b = k + 2` and
+            # on `std/testing/prop/random.mojo`'s `Rng.rand_scalar`, whose
+            # `comptime if dtype == .bool: … elif dtype.is_integral():` arms
+            # declare `offset`, `a`, `b`, `diff` and `uint64`.
+            #
+            # The arms below are the `IfStmt` arm verbatim, because the two nodes
+            # have the same four fields (`condition`, `then_body`, `elifs` as
+            # `(condition, body)` PAIRS, `else_body`) and one implementation of
+            # a shape is the whole reason the shape is not re-derived per node
+            # type. Only ONE arm is emitted for a statically decidable condition
+            # (`formal/model.py`'s comptime decision), so a name bound in a dead
+            # arm is given a register nothing writes — which costs one callee-
+            # saved register, and is the same trade `formal/arm64_codegen.py`'s
+            # `_allocation_order` already makes for every unused local.
+            _lbn_compr_targets(bound, node.condition)
+            for _c, _b in (node.elifs or []):
+                _lbn_compr_targets(bound, _c)
+            _lbn_walk(bound, global_declared, node.then_body)
+            if node.else_body:
+                _lbn_walk(bound, global_declared, node.else_body)
+            for _, elif_body in (node.elifs or []):
+                _lbn_walk(bound, global_declared, elif_body)
+        elif isinstance(node, ComptimeForStmt):
+            # The same gap one loop deeper, and the same shape as the `ForStmt`
+            # arm: the loop's own target is a local, and a `VarDecl` in its body
+            # is a local. Both were invisible here, for the same reason as above.
+            bound.update(_lbn_target_names(node.target))
+            _lbn_compr_targets(bound, node.iterable)
+            _lbn_walk(bound, global_declared, node.body)
         elif isinstance(node, TryStmt):
             _lbn_walk(bound, global_declared, node.body)
             for h in (node.handlers or []):

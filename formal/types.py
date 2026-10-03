@@ -75,6 +75,23 @@ TYPE_NAMES = {
 # segfault with a plausible-looking format.
 STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
 
+# Annotations that name a DICT, and the third member of the same vocabulary
+# beside the two above. Kept here rather than in `model.py` because the same
+# discipline applies: a name that means "a string" and a name that means "a
+# dict" are the only two answers a use site can act on differently, and two
+# hand-kept lists are two lists that drift.
+#
+# Why a dict needs its OWN set when `model.BLOB_TYPE_CTORS` already names
+# `Dict`: the blob set answers "is this a container at all", which is what
+# `declared_type_kind`'s kind is, and a kind cannot say WHICH container —
+# `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are all one
+# word on this path and all classify as the bare list prefix. A SUBSCRIPT is
+# the one consumer that must tell them apart, because a pair blob indexed with
+# a key is a SCAN and a sequence's is an address computation, and asking one
+# for the other is a load from a nonsense address rather than a refusal. See
+# `model.global_slot_is_dict`, whose own docstring carries the measurement.
+DICT_TYPE_NAMES = frozenset({"Dict", "dict"})
+
 
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""
@@ -180,6 +197,62 @@ def _range_args(iterable):
             and iterable.func.name == "range"):
         return list(iterable.args)
     return None
+
+
+def uses_typed_model(fn: F.FunctionDef, call_types: dict = None) -> bool:
+    """Whether `fn`'s Lean model is the FIXED-WIDTH one rather than the
+    word-at-64-bits one.  THE decision, in one place, for both generators.
+
+    **WHAT THE FLAG IS FOR**, since it was a proxy for a long time and the
+    proxy's own docstring said so: the fixed-width model (`_expr_go_t` /
+    `_stmts_go_t`, with the `t8u`/`t8s`/… truncators) is the only one that
+    models a DECLARED width, so it is needed exactly when some type this
+    function declares or infers is not the default 64-bit signed word. That is
+    the whole question, and this function asks it.
+
+    **IT IS NOT VACUOUS, and it was thought to be for six months.**
+    `DEFAULT_INT_TYPE` became signed `IntType(64, True)` (`19bc0dd`), so every
+    name whose type is inferred from an `int` literal now RESOLVES to the
+    default — which made the old spelling `any(t != DEFAULT_INT_TYPE for t in
+    vtypes.values() ∪ {rt})` true for a function only if some type is narrower
+    or differently signed. That is not the same as true for nothing:
+    `n: UInt8` still resolves to `IntType(8, False)`, so a function that
+    declares one still gets the model that can prove things about it.
+
+    Measured over `formal/examples/` on this tree — 45 functions, and this is
+    what settled the question the flag's own docstring kept re-asking
+    (`bugs/FORMAL_default_int_type_typed_flag_collapse.md`, item 1):
+
+    | source | functions | `uses_typed_model` |
+    |---|---|---|
+    | no annotation at all | 38 | False |
+    | `-> Int` only (`ret42`, `subscript_var`, `wide_recv`) | 3 | False — `Int` IS the default type |
+    | `n: UInt8` / `Int8` and the return type (`n8`, `sgt8`, `sle8`, `ug8`) | 4 | **True** |
+
+    So the answer is True for exactly the four functions that declare a
+    non-default width, which is what the flag is FOR, and the alternative
+    spelling the same document proposed — "compute it from the presence of a
+    type ANNOTATION in the source" — would answer identically on every one of
+    the 45 (measured: 0 changes), because an unannotated name cannot
+    contribute a non-default type and a default-width annotation cannot either.
+    It is also the WEAKER rule: it would ignore an INFERRED non-default type,
+    which is the half that can move when `infer_expr` learns something. So the
+    annotation rule was not adopted, and this predicate is the flag's single
+    definition rather than five lines copied into each generator — two copies
+    of a decision is two chances for the two architectures to prove different
+    programs.
+
+    Forcing it True for everything (the same document's option (b)) was measured
+    and is not viable: `test_formal.py` went from 1.2 GB to a 32 GB kill across
+    37 processes, because the fixed-width model is the expensive one — which is
+    presumably why the flag exists.
+    """
+    call_types = call_types or {}
+    for t in function_var_types(fn, call_types).values():
+        if t != DEFAULT_INT_TYPE:
+            return True
+    return resolve(parse_type_name(getattr(fn, "return_type", None))) \
+        != DEFAULT_INT_TYPE
 
 
 def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:

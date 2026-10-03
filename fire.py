@@ -306,6 +306,48 @@ def _sorry_note(result) -> str:
             f"it is not a proof]")
 
 
+def _trust_note(result) -> str:
+    """The ADMITTED HOST CONTRACTS this build rests on, or "" when it rests on none.
+
+    The `sorry` count above says HOW MUCH is admitted; this says WHAT, which is
+    the part a reader cannot reconstruct.  `proof_sorries` is a number whose
+    meaning depends on the file, and the file is not printed: a build reporting
+    "3 declarations ADMITTED a sorry" could be three CFG leaves in this file's
+    own control flow or three `@admitted` contracts about a second process, and
+    those are not remotely the same claim.  So the names and their assumptions go
+    on the line.
+
+    Printed on its OWN line, after `Built:`, rather than appended to `Proof:`,
+    and that is not cosmetic.  `Proof:` is about the generated Lean file, and it
+    is printed only when proofs ran; the sweep builds with `--no-prove` and its
+    files still rest on these contracts, so a note attached to `Proof:` would
+    vanish for exactly the files whose classification depends on it.  It is also
+    why this reads `result["admitted"]`, which `formal/build.py` fills
+    unconditionally, rather than something computed here.
+
+    A contract whose summary carries an `error` — the closure walk failed, which
+    `formal/build.py`'s `_admitted_summary` catches rather than let a build
+    succeed with a note it could not write — is printed as the error it is.  The
+    alternative is an empty list, which reads as "this build trusts nothing
+    about the host", and that is precisely the claim that would be false.
+    """
+    admitted = result.get("admitted") or []
+    if not admitted:
+        return ""
+    lines = []
+    for c in admitted:
+        if c.get("error"):
+            lines.append(f"  {c.get('name')} — COULD NOT BE READ: {c['error']}")
+        elif c.get("assumes"):
+            lines.append(f"  {c['name']} — assumes of the host: {c['assumes']}")
+        else:
+            lines.append(f"  {c['name']} — (no assumption text; see "
+                         f"{c.get('source')}:{c.get('line')})")
+    head = (f"trust: {len(admitted)} admitted host contract(s) — a claim of "
+            f"trust, not a proof:")
+    return "\n".join([head] + lines)
+
+
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
     """The one formal executable path: `fire build --formal` and bare
@@ -333,6 +375,9 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         traceback.print_exc(file=sys.stderr)
         return 1
     print(f"Built: {result['path']}  [{result.get('backend', arch)}]")
+    trust = _trust_note(result)
+    if trust:
+        print(trust)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -1032,6 +1077,55 @@ def main():
             print(f"{_tool_name()} dylib: at least one .mojo file is required",
                   file=sys.stderr)
             sys.exit(1)
+        # `--backend` is a GLOBAL flag, extracted above, and this command never
+        # read it: `compile_formal_dylib` defaults to `arch="arm64"` and the
+        # proof generator is arm64-only, so `dylib --formal --backend=x86_64`
+        # built an ARM64 image and printed `Built:` -- measured 2026-10-03 on
+        # `def triple(n): return n * 3`, both files `Mach-O 64-bit dynamically
+        # linked shared library arm64`.  That is the silent-wrong-answer shape,
+        # and it is worse on this command than elsewhere because the whole
+        # subject is a PER-EXPORT contract: a reader measuring the x86-64
+        # boundary (bugs/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
+        # would get an arm64 answer and conclude "the same argument applies",
+        # which is precisely the hypothesis the document says must not be
+        # assumed.  So refuse it, and name what is missing.
+        if backend not in ('gimple', 'arm64'):
+            print(f"{_tool_name()} dylib --formal: {backend} has no per-export "
+                  f"contract, so there is nothing --formal could prove. Two "
+                  f"separate things, and keeping them apart is the point: the "
+                  f"IMAGE for {backend} builds (arch is honoured by the code "
+                  f"generator), while the CONTRACT is arm64-only -- its "
+                  f"emitter is formal/arm64_proof_gen.py "
+                  f"(generate_dylib_proof) and `DylibExport` in "
+                  f"lib/ProofLib.lean is stated over the arm64 machine "
+                  f"(arm64_go_exit, arm64_step, arm64_runs). So this is a "
+                  f"missing GENERATOR, not a missing request. For a "
+                  f"{backend} library without a contract, drop --formal: "
+                  f"`dylib --no-prove` is that. For the x86-64 PROGRAM path, "
+                  f"which does have a generator "
+                  f"(formal/x86_64_proof_gen.py), use "
+                  f"`build --formal --backend=x86_64`.",
+                  file=sys.stderr)
+            sys.exit(2)
+        if not formal and backend != 'gimple':
+            # The gimple path has no formal backend to select: it compiles
+            # through gcc for the HOST's architecture.  So `--backend=arm64`
+            # here is right by coincidence on an arm64 host and silently wrong
+            # on any other -- which is the same defect as the branch above,
+            # from the other side, and the same reason it has to be refused
+            # rather than ignored.  Measured: on this (arm64) host
+            # `dylib --backend=arm64` builds an arm64 image, so nothing fails
+            # here; on an x86-64 host the same command would build an x86-64
+            # image and say nothing.
+            print(f"{_tool_name()} dylib: this command has no "
+                  f"--backend. Without --formal it is the gimple/C path, which "
+                  f"compiles through gcc for this machine's architecture "
+                  f"({platform.machine()}), and the formal backends belong to "
+                  f"`build`. For an arm64 dylib WITH a per-export contract, "
+                  f"ask for `dylib --formal`, which is arm64-only and says so "
+                  f"if --backend names anything else.",
+                  file=sys.stderr)
+            sys.exit(2)
         if formal:
             _fb = _load_formal_build()
             try:

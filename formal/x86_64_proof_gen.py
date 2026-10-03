@@ -33,7 +33,7 @@ audit tooling in the toy project counts exactly these.
 """
 
 from formal.types import (DEFAULT_INT_TYPE, function_var_types, parse_type_name,
-                          resolve)
+                          resolve, uses_typed_model)
 
 # The file's own preamble, matching formal/arm64_proof_gen.py's: the deep
 # recursion is the model equations and `native_decide` runs, and the linter
@@ -205,7 +205,7 @@ def _ast_value(fn, func_name: str) -> str:
 
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
-                          go_lemmas: list = None) -> str:
+                          go_lemmas: list = None, admitted: dict = None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -243,10 +243,16 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
         proof = (f"{by_cases} simp_all +decide [{hs}, {simp_lems}, "
                  "u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]")
+    # `AP._call_func_lean` rather than a local spelling: this is the sixth copy
+    # of this `fun name arg => ...` and it has to be the same function the arm64
+    # generator builds, because `eval_eq_mojo` on both sides is the statement
+    # that the AST model and the source model agree — including about what an
+    # ADMITTED call means.
+    from formal import arm64_proof_gen as AP
+    _cf = AP._call_func_lean(func_name, admitted)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo (n : UInt64) :\n"
-            f"  evalFunc ast (fun name arg =>\n"
-            f"    if name = \"{func_name}\" then mojo arg else 0) n = mojo n := by\n"
+            f"  evalFunc ast {_cf} n = mojo n := by\n"
             f"  {proof}\n")
 
 
@@ -574,14 +580,22 @@ def generate_x86_64_proof(prog, code, info) -> str:
                                   or DEFAULT_INT_TYPE)
                   for g in functions}
     vtypes = function_var_types(fn, call_types)
-    all_t = list(vtypes.values())
-    rt = resolve(parse_type_name(getattr(fn, "return_type", None)))
-    if rt != DEFAULT_INT_TYPE:
-        all_t.append(rt)
-    typed = any(t != DEFAULT_INT_TYPE for t in all_t)
+    # The decision is `types.uses_typed_model`, shared with arm64's generator
+    # and carrying the reasoning for it.
+    typed = uses_typed_model(fn, call_types)
     tc = {"typed": typed, "vtypes": vtypes, "call_types": call_types}
 
     parts = [_PREAMBLE, _TRUST_HEADER]
+
+    # The ADMITTED HOST CONTRACTS this program rests on.  Rendered by
+    # `formal/arm64_proof_gen.py`'s `_admitted_lean` and not here, because there
+    # is one way this project writes a claim of trust into a generated proof and
+    # it is that function: two copies would be free to drift, and the drift would
+    # be one backend emitting something the census cannot count.
+    _admitted = list(getattr(prog, "admitted", None) or [])
+    if _admitted:
+        from formal import arm64_proof_gen as AP
+        parts.append(AP._admitted_lean(_admitted))
 
     # ── source semantics ────────────────────────────────────────────
     try:
@@ -664,7 +678,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
     else:
         try:
             section = _eval_eq_mojo_section(func_name, fn, typed,
-                                            go_lemma_names)
+                                            go_lemma_names, admitted=_admitted)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:

@@ -536,8 +536,75 @@ def test_unresolvable_import_is_a_clean_error(tmpdir, _shared):
           f"{text[-400:]}")
 
 
+def test_several_unresolvable_imports_are_all_named(tmpdir, _shared):
+    """Every blocker in one diagnostic, and the SAME set whatever the order.
+
+    `unresolvable_imports` above raises inside the loop that builds the modules,
+    so it reported whichever unresolvable import came first in the statement
+    list. The measurement is in
+    `bugs/FORMAL_admitted_contracts_sweep_measurement.md`: fixing
+    `subprocess` on eight files moved them from "refused for `subprocess`" to
+    "refused for `tempfile`", no file moved out of `not-answerable/host-import`,
+    and the per-module breakdown before and after measured two different things
+    — which is a diagnostic whose subject is the ORDER of a file's import lines.
+
+    Three assertions, because each of them is a different way the property can
+    come back:
+      * all three names are in the message (completeness — a reader with three
+        modules to remove is told about three);
+      * the message is the SAME for both orders (order-independence), which is
+        what makes a census drawn from it a measurement rather than a sample of
+        how the file is written;
+      * the resolvable import is NOT named as a blocker, so "all of them" cannot
+        be satisfied by listing every import the file has.
+
+    The single-module wording is pinned by the test above, and it is a separate
+    function rather than a branch inside this one: a `refuse:` case in
+    `test_formal_run.py`, a needle in `test_formal_sweep_truth.py` and the
+    chain the sweep peels are all written against that sentence, and "several"
+    must not cost the single case its wording.
+    """
+    root = os.path.join(tmpdir, "many")
+    os.makedirs(root)
+    orderings = {
+        "alpha": "import glob\nimport tempfile\nimport sys\n",
+        "omega": "import tempfile\nimport glob\n",
+    }
+    for tag, imports in orderings.items():
+        write_tree(root, {f"{tag}.mojo":
+                          imports + "def main():\n  return 1\n"})
+    fresh_cas()
+    texts = {}
+    for tag in orderings:
+        result, out = build(root, f"{tag}.aout", expect_ok=False)
+        check(result.returncode != 0,
+              f"{tag}: an unresolvable import must fail the build")
+        check(not os.path.isfile(out),
+              f"{tag}: an executable was written despite unresolved imports")
+        text = (result.stderr or "") + (result.stdout or "")
+        check("Traceback" not in text,
+              f"{tag}: an unresolved import should be a clean error:\n"
+              f"{text[-400:]}")
+        for mod in ("glob", "tempfile"):
+            check(mod in text,
+                  f"{tag}: the diagnostic names {mod!r} nowhere, so fixing it "
+                  f"only reveals the next one:\n{text[-400:]}")
+        check("'sys'" not in text,
+              f"{tag}: the message lists an import that RESOLVES "
+              f"(formal/hostmods/sys.mojo), so \"every blocker\" has become "
+              f"\"every import\":\n{text[-400:]}")
+        texts[tag] = text
+    # The two files differ only in the order of two import lines, so the
+    # sentences have to be identical once the file's own name is set aside.
+    same = texts["alpha"].replace("alpha", "F")
+    other = texts["omega"].replace("omega", "F")
+    check(same == other,
+          "the same file with its import lines in the other order produced a "
+          f"different diagnostic:\n  {same.strip()[-300:]}\n  "
+          f"{other.strip()[-300:]}")
+
+
 def test_no_import_needs_no_dylib(tmpdir, _shared):
-    """The common case must stay exactly as cheap as it was."""
     root = os.path.join(tmpdir, "solo")
     os.makedirs(root)
     write_tree(root, {"prog.mojo": "def main():\n  return 7\n"})
@@ -882,6 +949,204 @@ def test_host_module_still_refused_despite_same_named_sibling(tmpdir, _shared):
           f"{text[-300:]}")
 
 
+def test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo(tmpdir, _shared):
+    """`shlex` is a standard-library module, so the diagnostic says so.
+
+    `formal/imports.py`'s two tiers are how anything downstream says WHY a
+    file is out of reach — `host_module_tier` is what a coverage report asks —
+    and a name in NEITHER tier falls through to module RESOLUTION and is
+    reported "not a stdlib or sibling module, and no such file exists". For
+    `shlex` that sentence is false: it is a standard-library module, and it is
+    the one diagnostic in this family that misidentifies what kind of thing
+    the name is. A false statement about the TARGET, in a message nobody wrote
+    a rule for.
+
+    Which tier is a judgement and not a formality, so both halves are checked:
+    the tier decides the wording (`unresolvable_import_error` asks
+    `_is_host_module`, not which tier), so a name classified into the wrong
+    one gives a true sentence for the wrong reason. `shlex` is `modelled` and
+    not `unreachable` because it is pure computation over strings — a state
+    machine over a byte string, the same shape as `re` and `fnmatch`, both
+    written. The streaming `shlex.shlex` reader is a generator over
+    `readline`, which is the `fnmatch.iglob` shape and is not in reach by the
+    same argument; `split`/`quote`/`join` are.
+
+    The premise is asserted against CPython's own list rather than trusted:
+    the whole failure is a name that IS in the standard library being reported
+    as not one."""
+    import sys as _sys
+    import formal.imports as I
+    check("shlex" in _sys.stdlib_module_names,
+          "precondition: shlex is a CPython standard-library module, which is "
+          "the fact the diagnostic used to deny")
+    check("shlex" in I.HOST_MODELLED,
+          "shlex is not in HOST_MODELLED: it needs nothing a freestanding "
+          "image does not have, so calling it unreachable would be a "
+          "permanent-fact claim about the target and it is not one")
+    check(not I._host_tier_conflicts(),
+          "a name in two tiers is a partition bug: %s"
+          % I._host_tier_conflicts())
+    check(I.host_module_tier("shlex") == "modelled",
+          "host_module_tier('shlex') is %r, so a coverage report counts it as "
+          "neither tier" % I.host_module_tier("shlex"))
+    root = os.path.join(tmpdir, "shlex")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": "import shlex\ndef main():\n  return 1\n"})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    check(result.returncode != 0,
+          "a host-module import is still refused — this test is about the "
+          "WORDING, and a build that succeeded would be a different bug")
+    text = (result.stderr or "") + (result.stdout or "")
+    check("host module" in text,
+          "the refusal must name the real reason (a CPython host module): "
+          f"{text[-300:]}")
+    check("not a stdlib or sibling module" not in text,
+          "the refusal still calls a standard-library module something that "
+          f"does not exist: {text[-300:]}")
+
+
+def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
+    """The refusal's second half: what to write here instead, where the reader is.
+
+    `unresolvable_import_error`'s first half is a fact about the RESOLVER — no
+    Mojo source, no front-end provider — and it is the whole of what the message
+    used to say. Measured on this repository: five files in its own tooling are
+    blocked on `import collections`, four of them on
+    `collections.namedtuple("Census", "ok detail …")`
+    (`formal/lean.py:816`, `formal/model.py:13195`, `tools/formal_sweep.py`),
+    and the answer for a compile-time-known record with readable fields is a
+    `struct`. Without that sentence the refusal reads as "this target cannot do
+    records", and the next thing a reader does is file the next bug document
+    about `collections` — which is what
+    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+
+    **BOTH DIRECTIONS, because advice on every host module is the same noise in a
+    different place.** The second row is a host module with no entry: its
+    refusal must be exactly what it was, which is what stops this from growing
+    into a paragraph nobody reads.
+    """
+    root = os.path.join(tmpdir, "advice")
+    os.makedirs(root, exist_ok=True)
+    prog = os.path.join(root, "prog.mojo")
+    with open(prog, "w") as f:
+        f.write("from collections import namedtuple\n"
+                "def main() -> int:\n"
+                "    C = namedtuple(\"C\", \"a b\")\n"
+                "    return 0\n")
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"), prog], cwd=root)
+    check(result.returncode != 0,
+          "the host-module refusal did not fire, so this row is not testing "
+          "the message")
+    text = result.stderr + result.stdout
+    check("STRUCT" in text,
+          "the refusal does not say the record the callers want is a struct, "
+          f"which is the whole deliverable: {text[-400:]}")
+    check("doc/ABI.md" in text,
+          "the refusal does not say what is NOT possible (a type built at run "
+          f"time), so it reads as a blanket 'no': {text[-400:]}")
+
+    other = os.path.join(root, "other.mojo")
+    with open(other, "w") as f:
+        f.write("from itertools import chain\n"
+                "def main() -> int:\n"
+                "    return 0\n")
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "other.aout"), other], cwd=root)
+    text = result.stderr + result.stdout
+    check("host module" in text,
+          f"`itertools` lost its refusal: {text[-300:]}")
+    check("STRUCT" not in text,
+          "a host module with no entry in the advice table grew one, which "
+          f"makes every such refusal a paragraph: {text[-300:]}")
+
+
+def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
+    """222 names: CPython ships them, this table classifies none of them.
+
+    The same defect as the row above, one tier wider, and it was 222 names wide
+    rather than one because `shlex` was fixed by adding ONE tier entry while the
+    question it was really asking — "is this name in the standard library?" —
+    has an oracle: CPython's own `sys.stdlib_module_names`. Answering it from the
+    hand-kept tiers made the build say, of a module CPython ships:
+
+        build: a.mojo imports 'binascii', which is not a stdlib or sibling
+        module, and no such file exists
+
+    which is false about the target, and 36 sweep rows were filed as unresolved
+    imports rather than as the host-import rows they are. The wording now has
+    three arms and this is the middle one: a name in a tier says it is a host
+    module, a name CPython ships and no tier names says it is a standard-library
+    module with no tier and therefore no verdict, and a name CPython does not
+    ship is the only one that may be called unresolvable.
+
+    Both boundaries are checked, because a rule that answered "yes" for
+    everything would make the typo sentence unreachable and this suite's other
+    rows (`test_an_unresolvable_import_says_no_such_file_exists` and its
+    neighbours) would stop testing anything.
+    """
+    import sys as _sys
+    import formal.imports as I
+    unclassified = [n for n in sorted(_sys.stdlib_module_names)
+                    if not I.host_module_tier(n)]
+    check(len(unclassified) > 100,
+          "precondition: this test is about the names in NO tier, and there are "
+          f"only {len(unclassified)} of them now — if they have been "
+          "classified, this row is about nothing and should go")
+    for name in ("binascii", "cmath", "getopt", "html", "tomllib"):
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is a CPython standard-library module, "
+              "which is the fact the diagnostic used to deny")
+        check(I.is_cpython_stdlib(name),
+              f"is_cpython_stdlib({name!r}) is False: it is the host's own "
+              "library, and CPython's own table says so")
+        check(not I.host_module_tier(name),
+              f"{name} is expected to be in no tier — this row is about the "
+              "wording of an UNCLASSIFIED name, and if it has been classified "
+              "the row above is the one that applies")
+    check(I.is_cpython_stdlib("os.path"),
+          "a dotted name is matched on its TOP component, like "
+          "`_is_host_module` and `host_module_tier`")
+    check(not I.is_cpython_stdlib("not_a_module_anywhere"),
+          "a name CPython does not ship must not be called a standard-library "
+          "module, or the typo sentence becomes unreachable")
+    check(not I.is_cpython_stdlib(""),
+          "the empty name is not a module")
+    # A classified name that this tree BUILDS is still not a host module for
+    # `_is_host_module`'s purposes, which is the distinction the two predicates
+    # exist to keep: `math` is in CPython's table and has a `formal/hostmods/`
+    # source, so the build must not refuse it.
+    check(not I._is_host_module("math"),
+          "_is_host_module('math') became True: that predicate answers 'is this "
+          "one of the names we have classified as unbuildable', and `math` has "
+          "a source in formal/hostmods/ and is pinned False by "
+          "test_formal_math.py")
+    root = os.path.join(tmpdir, "unclassified")
+    os.makedirs(root)
+    write_tree(root, {"prog.mojo": "import binascii\ndef main():\n  return 1\n"})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    check(result.returncode != 0,
+          "an unclassified standard-library import is still refused — this "
+          "test is about the WORDING")
+    text = (result.stderr or "") + (result.stdout or "")
+    check("not a stdlib or sibling module" not in text,
+          "the refusal still calls a standard-library module something that "
+          f"does not exist: {text[-300:]}")
+    check("standard-library module" in text,
+          f"the refusal must say what the name IS: {text[-300:]}")
+    check("no tier" in text,
+          "and it must say that nothing here can say whether the module is "
+          f"reachable, which is the whole difference from a tiered name: "
+          f"{text[-300:]}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -902,6 +1167,95 @@ def test_mojo_source_beats_host_module(tmpdir, _shared):
           f"returned {code}, expected 42 — the local math.mojo lost to the "
           f"host-module list, so the program bound CPython's `math` instead: "
           f"{err}")
+
+
+# The NEXT STEP, for the host modules where measurement has already answered it.
+#
+# A refusal that names the module and stops is the shape this table exists to
+# end. The measurement behind it: every file that stops on one of these names
+# stops on the MODULE and never reaches the call, so the message is all the
+# reader has — five files in this repository stop on `collections`, and the one
+# next step for them ("the record you want is spelled at compile time, so
+# declare a `struct`") is not discoverable from the message that refused them.
+
+def test_a_host_module_refusal_carries_its_measured_next_step(tmpdir, _shared):
+    """`import collections` is refused, and the refusal says what to write.
+
+    Three things are pinned, and each is a way this could be a decoration: the
+    refusal still happens (a table that made the module resolvable would turn
+    this green for the wrong reason); the advice NAMES both the thing wanted and
+    the spelling that works (`namedtuple` and `struct`); and the message is one
+    sentence appended to the existing wording, so a classifier matching on
+    `unresolvable_import_error`'s own `kind` text is unaffected."""
+    import formal.imports as I
+    root = os.path.join(tmpdir, "collections")
+    os.makedirs(root)
+    write_tree(root, {
+        "prog.mojo": ("import collections\n"
+                      "def main(n):\n"
+                      "  return n\n"),
+    })
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    text = result.stderr + result.stdout
+    check(result.returncode != 0,
+          "a program importing `collections` BUILT — the advice table is not "
+          "allowed to make a host module resolvable, only to explain it")
+    check("host module" in text,
+          f"the refusal must still name the real reason: {text[-300:]}")
+    check("namedtuple" in text,
+          f"the refusal must name the name the file wants, or the reader has "
+          f"to find it themselves: {text[-300:]}")
+    check("struct" in text,
+          f"the refusal must name the spelling that WORKS on this target — a "
+          f"record is a `struct` — or it names a want and not an answer: "
+          f"{text[-300:]}")
+    # The base wording is preserved verbatim as the prefix, which is what makes
+    # the append safe for `formal_sweep.py`'s message families.
+    base = I.unresolvable_import_error("prog.mojo", "collections")
+    check(base.startswith("prog.mojo imports 'collections', which is a host "
+                          "module (CPython standard library), which has no Mojo "
+                          "source for this backend to compile"),
+          f"the generated wording changed shape, so anything matching on it "
+          f"moves: {base!r}")
+
+
+def test_host_module_advice_is_honest(tmpdir, _shared):
+    """Every advice entry is a CLAIM the module still has no source.
+
+    An entry left behind after someone writes `formal/hostmods/collections.mojo`
+    would be advice to reimplement a module that is sitting in the tree, which
+    is worse than no advice at all — and nothing else would notice, because the
+    entry is only read on a path the new module makes unreachable. So the claim
+    is checked here, against the tree, rather than trusted.
+
+    The other direction is checked in the same loop: an entry whose advice does
+    not name the thing the module is wanted FOR is a generic sentence, and a
+    generic sentence in a generated message is noise."""
+    import formal.imports as I
+    for name, advice in I.HOST_MODULE_ADVICE.items():
+        src = I.resolve_module_path(name, relative_to=os.path.join(HERE, "x"),
+                                    project_root=HERE)
+        check(src is None,
+              f"HOST_MODULE_ADVICE has an entry for {name!r} but it now "
+              f"resolves to {src!r} — a module source exists, so the advice is "
+              f"telling a reader to write what is already in the tree")
+        check(len(advice) > 40,
+              f"the advice for {name!r} is too short to be a next step: "
+              f"{advice!r}")
+    check("collections" in I.HOST_MODULE_ADVICE,
+          "the `collections` advice was deleted; the five files that stop there "
+          "are back to a message that names the module and nothing else")
+    # A dotted name asks for the same answer, which is the rule that makes a
+    # per-spelling table wrong by omission.
+    check(I.host_module_advice("collections.abc") ==
+          I.host_module_advice("collections"),
+          "a dotted host module did not get its package's advice")
+    check(I.host_module_advice("re") == "",
+          "`re` has no advice — it is answered by `formal/hostmods/re.mojo`, and "
+          "an entry there would be advice to reimplement a module that exists")
 
 
 
@@ -950,6 +1304,172 @@ def test_struct_method_across_modules(tmpdir, _shared):
     for e in manifest(dylib)["exports"]:
         check("_" + e["symbol"] in info["exports"],
               f"the trie is missing the method export {e['symbol']}")
+
+
+# A library that CONSTRUCTS its own struct.  `STRUCT_LIB` above declares one
+# and only ever constructs it in the IMPORTER, so nothing in it exercises the
+# library's own `Counter()` — and that omission is the whole of the gap this
+# case covers: a struct crosses the boundary as a LAYOUT, not as a symbol
+# (`reflect.emit_table_c` skips `SYM_TYPE` entries, so `_Counter` is never
+# defined anywhere), while the codegen recognises an `S(...)` constructor by
+# consulting the struct table it is HANDED.  On the dylib path that table was
+# not handed over, so a constructor in the library's own body fell through the
+# ordinary call path and became a BL against a symbol nothing defines, and the
+# build failed with "the library would bind 1 symbol(s) that nothing provides:
+# Counter" — a link-line diagnosis for a codegen omission, naming neither the
+# constructor nor the file.
+SELF_CTOR_LIB = """\
+struct Counter:
+  var n: Int
+  var tag: Int
+
+def make(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 1
+  return c.n + c.tag
+
+def make_static(n: Int) -> Int:
+  var c = Counter()
+  c.n = n
+  c.tag = 2
+  return c.n * 10 + c.tag
+"""
+
+
+def test_a_library_may_construct_its_own_struct(tmpdir, _shared):
+    """`Counter()` inside the LIBRARY, which is a different thing from
+    `Counter()` in the importer.
+
+    The answer is asserted rather than the build succeeding, because a library
+    that compiled the constructor to the WRONG value would link perfectly: the
+    two library functions are separate symbols, so `make` being wrong cannot
+    affect `make_static`, and only their sum pins both. Measured against
+    CPython's own reading of the same three functions, which gives `make(10)`
+    = 11, `make_static(10)` = 102 and the program 13.
+
+    The `Counter()` in the importer is already covered by
+    `test_struct_method_across_modules`; what is new here is the one INSIDE
+    `make`/`make_static`, in the library's own compilation."""
+    root = os.path.join(tmpdir, "selfctor")
+    os.makedirs(root)
+    write_tree(root, {
+        "clib.mojo": SELF_CTOR_LIB,
+        "cuser.mojo": ("from clib import make, make_static\n"
+                       "\n"
+                       "def main() -> Int:\n"
+                       "  return make(10) + make_static(10) - 100\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "cuser.aout")
+    code, err = run(out)
+    # 11 + 102 - 100 = 13, CPython's answer for the same three functions.
+    check(code == 13,
+          f"a library constructing its own struct returned {code}, expected 13 "
+          f"(make(10)=11 and make_static(10)=102); stderr: {err}. If this "
+          f"build refused with \"would bind 1 symbol(s) that nothing "
+          f"provides: Counter\", the library's struct declarations did not "
+          f"reach the emitter — a class crosses as a layout, so there is no "
+          f"`Counter` symbol for the dangling call to have found.")
+
+
+# A module that exports only a GENERIC, so the import has no symbol to bind.
+# `generic_funcs` is `reflect.collect_exports_src`'s own exclusion
+# (`re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', src)`), so the empty export set here
+# is the real rule and not a hand-built shape — `doc/ABI.md`'s Generics section
+# is explicit that a generic is not a single boundary symbol.
+GENERIC_LIB = """\
+def widen[T: Intable](v: T) -> T:
+  return v
+
+def helper(x: Int) -> Int:
+  return x + 1
+"""
+
+
+def test_an_imported_generic_is_refused_as_an_export_gap(tmpdir, _shared):
+    """A bare `widen(5)` must be refused naming the EXPORT RULE, and must not
+    reach the link audit.
+
+    Before, the bare spelling was exempted as a callee and emitted as a `BL`,
+    and the build failed with
+
+        the image would bind 1 symbol(s) that nothing provides: widen.
+        … Deciding which is a question for the assembler, and it is asked
+        nowhere in this backend
+
+    — a message about the LINK LINE for a fact the build already knew, and one
+    whose own text admits the question was never asked. The bare spelling is
+    the one a reader is most likely to have written, so it is the one that was
+    worst served.
+
+    The BRACKETED spelling is in the same case because it is the same call, and
+    it is asserted only to refuse and to stay off the link line: which of the
+    two messages it should carry is
+    `bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`'s
+    subject and its own claim, so this test does not decide it."""
+    root = os.path.join(tmpdir, "genericcallee")
+    os.makedirs(root)
+    write_tree(root, {
+        "glib.mojo": GENERIC_LIB,
+        "guser.mojo": ("from glib import widen\n"
+                       "\n"
+                       "def main() -> Int:\n"
+                       "  return widen(5)\n"),
+        "gbrack.mojo": ("from glib import widen\n"
+                        "\n"
+                        "def main() -> Int:\n"
+                        "  return widen[Int](5)\n"),
+    })
+    fresh_cas()
+    for program in ("guser", "gbrack"):
+        result = run_fire(["build", "--formal", "--no-prove",
+                           "-o", os.path.join(tmpdir, program + ".aout"),
+                           os.path.join(root, program + ".mojo")], cwd=root)
+        text = (result.stderr or "") + (result.stdout or "")
+        check(result.returncode != 0,
+              f"{program}.mojo BUILT: a call to a generic the exporting module "
+              f"keeps off the boundary cannot bind, so an image that compiled "
+              f"is an image with a dangling call in it")
+        check("binds 1 symbol(s) that nothing provides" not in text,
+              f"{program}.mojo reached the LINK AUDIT, which names the link "
+              f"line rather than the export rule that emptied it: "
+              f"{text.strip()[-400:]}")
+    # …and the BARE one, which is what this change is about, must name the rule.
+    result = run_fire(["build", "--formal", "--no-prove",
+                       "-o", os.path.join(tmpdir, "guser.aout"),
+                       os.path.join(root, "guser.mojo")], cwd=root)
+    text = (result.stderr or "") + (result.stdout or "")
+    check("does not export it" in text and "widen" in text,
+          f"a bare call to an imported generic must be refused as an export "
+          f"gap naming the name: {text.strip()[-400:]}")
+
+
+def test_a_bare_call_to_an_exported_name_still_binds(tmpdir, _shared):
+    """The control for the case above, and the guard on its scope.
+
+    `helper(5)` is a bare callee in the same position as `widen(5)`, in the same
+    module, differing only in that `helper` IS exported. The new refusal asks
+    "does any library on this link line publish this name", so a predicate that
+    had drifted to "is this name imported" — or that read the manifests a
+    second way and got a different answer than the emitter — would refuse a
+    program that works. It builds, RUNS, and returns 7 (= 5 + 1, plus the 1 the
+    program adds)."""
+    root = os.path.join(tmpdir, "genericctl")
+    os.makedirs(root)
+    write_tree(root, {
+        "glib.mojo": GENERIC_LIB,
+        "gctl.mojo": ("from glib import helper\n"
+                      "\n"
+                      "def main() -> Int:\n"
+                      "  return helper(5) + 1\n"),
+    })
+    fresh_cas()
+    _result, out = build(root, "gctl.aout")
+    code, err = run(out)
+    check(code == 7,
+          f"a bare call to an exported name returned {code}, expected 7; "
+          f"stderr: {err}")
 
 
 def test_one_word_struct_field_is_the_value(tmpdir, _shared):
@@ -1392,6 +1912,84 @@ def test_a_private_name_aliased_public_stays_unpublished(tmpdir, _shared):
     check("pub" in text,
           f"the refusal does not name the published spelling: "
           f"{text.strip()[-300:]}")
+
+
+def test_a_relative_import_keeps_private_declarations_out_of_the_trie(
+        tmpdir, _shared):
+    """`doc/ABI.md`'s privacy rule holds at the RELATIVE boundary too.
+
+    The claim this pins down was that a relative import's dylib mangles a
+    private name into its export table with the underscores intact, so the
+    image binds a symbol the library exports and a private function of one
+    module is callable from another. The underscorING is real — it is dyld's,
+    applied to every C symbol — and the rule is applied: a module reached
+    through `from ._helper import twice` exports `twice` and exports neither
+    `_hidden` nor `__secret`, which is the same answer a top-level module gets
+    for the same pair. So the leak is not there.
+
+    What is checked is the TRIE and not the manifest, and separately, because
+    the manifest is what the build believes it published and the trie is what
+    dyld will actually resolve: a name in the manifest and not in the trie is
+    an unbound bind, and a name in the trie and not in the manifest is the
+    leak. Reading it with `parse_macho` rather than with the writer's own
+    reader is `test_a_package_dylib_exports_nothing`'s reason: asking the
+    writer to read its own output is how a writer's bug becomes invisible.
+
+    The last check is the invariant the export table is read against, and it
+    is what makes "the name has an underscore in it" meaningless on its own:
+    a Mach-O export is `"_"` + the C symbol, every one, so the trie name is
+    never evidence about privacy and the bind name is the C symbol without
+    dyld's one underscore."""
+    root = os.path.join(tmpdir, "relprivacy")
+    os.makedirs(root)
+    write_tree(root, {
+        "relpkg/_helper.mojo": (
+            "def twice(a: Int) -> Int:\n  return a + a\n\n"
+            "def _hidden(a: Int) -> Int:\n  return a\n\n"
+            "def __secret(a: Int) -> Int:\n  return a - a\n"),
+        "relpkg/__init__.mojo": (
+            "from ._helper import twice\n\n"
+            "def main(n: Int) -> Int:\n  return twice(21)\n"),
+    })
+    fresh_cas()
+    # The package's `__init__.mojo` is the program, so the build names it
+    # directly — `build()` derives the source from the output's file name, and
+    # the entry point here is `relpkg/__init__.mojo`.
+    out = os.path.join(root, "prog.aout")
+    result = run_fire(["build", "--formal", "--no-prove", "-o", out,
+                       os.path.join(root, "relpkg", "__init__.mojo")],
+                      cwd=root)
+    check(result.returncode == 0,
+          f"the relative import did not build: "
+          f"{(result.stderr or result.stdout).strip()[-400:]}")
+    code, err = run(out)
+    check(code == 42,
+          f"the relative import did not run (returned {code}): {err}")
+    sub = module_dylib("relpkg__helper")
+    if not os.path.isfile(sub):
+        found = sorted(os.listdir(cas_imports()))
+        check(False, f"no library for the relative module at {sub}; the "
+                     f"directory holds {found}")
+        return
+    with open(sub, "rb") as f:
+        info = parse_macho(f.read())
+    trie = info["exports"]
+    published = [e["name"] for e in manifest(sub)["exports"]]
+    check("twice" in published,
+          f"the public function is not published: {published}")
+    for private in ("_hidden", "__secret"):
+        check(private not in published,
+              f"{private} is in the module's published exports: {published}")
+        check(not any(private in n for n in trie),
+              f"{private} reached the export trie as one of {sorted(trie)}")
+    for e in manifest(sub)["exports"]:
+        check("_" + e["symbol"] in trie,
+              f"the trie does not carry the C symbol {e['symbol']!r} for "
+              f"export {e['name']!r}, so the caller's bind has nothing to "
+              f"resolve to")
+        check(not e["symbol"].startswith("_"),
+              f"the published C symbol {e['symbol']!r} starts with an "
+              f"underscore, which doc/ABI.md's export rule excludes")
 
 
 def test_a_name_the_module_defines_wins_over_its_own_import(tmpdir, _shared):
@@ -2165,10 +2763,18 @@ TESTS = [
     ("a mutual import terminates and works", test_import_cycle_terminates),
     ("an unresolvable import is a clean error",
      test_unresolvable_import_is_a_clean_error),
+    ("every unresolvable import is named, whatever the order",
+     test_several_unresolvable_imports_are_all_named),
     ("a program with no imports builds no dylib",
      test_no_import_needs_no_dylib),
     ("a struct method is callable across modules",
      test_struct_method_across_modules),
+    ("a library may construct its own struct",
+     test_a_library_may_construct_its_own_struct),
+    ("an imported generic is refused as an export gap",
+     test_an_imported_generic_is_refused_as_an_export_gap),
+    ("a bare call to an exported name still binds",
+     test_a_bare_call_to_an_exported_name_still_binds),
     ("a one-word struct's field IS its value",
      test_one_word_struct_field_is_the_value),
     ("a struct too wide for one word is refused with the switch off",
@@ -2191,6 +2797,12 @@ TESTS = [
      test_a_relative_import_at_the_root_builds_one_library),
     ("a host module is refused despite a same-named sibling",
      test_host_module_still_refused_despite_same_named_sibling),
+    ("a standard-library module in no tier is not reported as a typo",
+     test_a_stdlib_module_in_no_tier_is_not_reported_as_a_typo),
+("a host-module refusal says what this target offers instead",
+     test_a_host_module_refusal_says_what_this_target_offers),
+    ("an unclassified CPython stdlib name is not called a typo",
+     test_an_unclassified_stdlib_name_is_not_called_a_typo),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",
@@ -2203,6 +2815,8 @@ TESTS = [
      test_aliased_reexport_runs_on_both_architectures),
     ("a private name aliased public stays unpublished",
      test_a_private_name_aliased_public_stays_unpublished),
+    ("a relative import keeps private declarations out of the trie",
+     test_a_relative_import_keeps_private_declarations_out_of_the_trie),
     ("a name the module defines wins over its own import",
      test_a_name_the_module_defines_wins_over_its_own_import),
     ("a module dylib matches the program's arch, both arches",
@@ -2217,6 +2831,10 @@ TESTS = [
      test_reexported_type_reaches_the_importer),
     ("a local Mojo module beats the host-module list",
      test_mojo_source_beats_host_module),
+    ("a host-module refusal carries its measured next step",
+     test_a_host_module_refusal_carries_its_measured_next_step),
+    ("every host-module advice entry is honest",
+     test_host_module_advice_is_honest),
     ("a module exporting only a generic template is refused",
      test_a_module_with_no_boundary_symbol_is_refused),
     ("a generic template is not exported under its base name",

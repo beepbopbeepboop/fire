@@ -1,7 +1,7 @@
 """The C library this module needs, and nothing else.
 
-Every call into libSystem that `os`, `os.path` and `platform` make is spelled
-here, once, and nowhere else. Three reasons, in the order they mattered while
+Every call into libSystem that `os`, `os.path`, `platform` and `shutil` make is
+spelled here, once, and nowhere else. Three reasons, in the order they mattered while
 writing it.
 
   `platform` is here for the same reason the other two are, and it is worth
@@ -28,6 +28,18 @@ writing it.
    question with a short, complete answer, and it is the answer in this file.
    Every name below was measured to bind on this target before it was relied
    on.
+
+   `shutil` is in the list because it is the one module in `formal/hostmods/`
+   that COPIES BYTES, and the stdio calls are how: `fopen`/`fwrite`/`fread`/
+   `fclose` rather than the three-argument `open`/`write`/`read`, because
+   `fs_open_ro` below says in so many words that this path lowers `open` itself
+   and refuses the C library's own spelling of it — there is no `open(p, flags,
+   mode)` to call. A `FILE *` is a POINTER, so it is a word, and `fopen` takes a
+   MODE STRING, which is the one thing this path does have a literal spelling
+   for. `fs_read`'s docstring says "this path has no `FILE`", which is about
+   the struct and not about the pointer and is worth keeping in mind when
+   reading the two against each other: there is no `FILE` to declare a field
+   on, and every `FILE *` is one word, which is all a descriptor needs to be.
 
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
@@ -353,9 +365,167 @@ def str_rstrip_len(s, m) -> int:
 
 
 def str_chr_from(s, i, c) -> str:
-    """Pointer to the first `c` at or after `s[i]`, or 0."""
+    """Pointer to the first `c` at or after `s[i]`, or 0.
+
+    **`c` IS A CHARACTER CODE AND NOT A STRING**, which the signature does not
+    say and which cost an afternoon the first time it was called from another
+    module: `strchr`'s second parameter is an `int`, so `str_chr_from(s, 0, "/")`
+    hands it a `char *` as a character and it finds nothing, EVER — every input
+    answers 0. The one caller in this tree, `os/path/__init__.mojo`'s
+    `normpath`, passes `SLASH = 47` for exactly this reason, and `47` next to
+    `str_chr_from` in that file is the documentation. This docstring is here so
+    that the next reader does not have to find it.
+
+    So the whole of `shutil`'s `PATH` splitting spells `":"` as 58 and `"/"` as
+    47, and `formal/hostmods/shutil.mojo`'s `_has_slash` says why at its own
+    definition.
+    """
     return strchr(s + i, c)
 
+
+# The bytes CPython's `str.strip()` removes, as the SET `strspn` wants. Module
+# level because `str_strip` is the only reader and the spelling is the part that
+# has to be right: it is CPython's whitespace set restricted to characters a
+# single byte can hold. `\x1c`-`\x1f` are in it because `Py_UNICODE_ISSPACE`
+# says they are, and `str.isspace()` says so on this host's CPython — measured,
+# `' \t\n\r\v\f\x1c\x1d\x1e\x1f\x85a\x85 \t'.strip()` is `'a'`. `\x85` (U+0085
+# NEL) is deliberately NOT here: in UTF-8 it is the two bytes `\xc2\x85`, and a
+# byte-wise `strspn` cannot see it. That is a RECORDED DIVERGENCE rather than an
+# omission, and no caller in this tree strips a string that can hold one — the
+# only `strip` is `platform`'s, over `uname(3)` fields.
+_STR_WS = " \t\n\r\v\f\x1c\x1d\x1e\x1f"
+
+
+def str_strip(s) -> str:
+    """A fresh copy of `s` with leading and trailing whitespace removed.
+
+    The caller owns the result, as it does for every allocating function in
+    this module — `str.strip()` returns a NEW string in CPython and this is the
+    same contract, not an interior pointer into `s`.
+
+    Why it is written out rather than taken from the C library: `strspn` is
+    already here for `str_at`/`str_lead`, so the two ends are two scans over a
+    set the caller cannot index (`str_at` takes a SET because `strspn` takes a
+    NUL-terminated one), and the alternative — `strcspn` against a negated set,
+    which libc has — is a second spelling of the same question in the same file.
+    The whitespace SET is `str_strip`'s own `_STR_WS`, stated there.
+    """
+    n = str_len(s)
+    i = 0
+    while i < n and str_at(s, i, _STR_WS) == 1:
+        i = i + 1
+    j = n
+    while j > i and str_at(s, j - 1, _STR_WS) == 1:
+        j = j - 1
+    return str_copy(str_alloc(j - i), s + i, j - i)
+
+
+def str_find(s, pat, from_i) -> int:
+    """Index of the first occurrence of `pat` at or after `s[from_i]`, or -1.
+
+    A scan, for the same reason `str_rfind` is one, and the second reason is
+    this path's own: `strstr` returns a POINTER and every caller here wants an
+    OFFSET, and turning one into the other is `p - s` on a bare `char *` — a
+    difference of two words this value model has no shape for. The trap is
+    easy to fall into and was: `str_len(p)` is not the offset, it is the length
+    of the SUFFIX from `p` to the NUL, so `str_len(strstr(s, "bc"))` for
+    `"abcabc"` is 5 and the difference from `str_len(s)` is -1. Measured, on an
+    image built before this docstring said it.
+
+    `strrstr` is absent on this target either (`str_rfind`'s docstring), so one
+    bounded compare at each offset answers both questions, and `memcmp` does
+    bind.
+
+    **An EMPTY `pat` answers `from_i`, which is CPython's `str.find` and not
+    what the scan above would give by accident.** A zero-length compare matches
+    at every offset, so the first one IS `from_i`; saying so is better than
+    leaving it to be rediscovered. `str_count` and `str_replace_all` are the
+    two callers and both refuse an empty needle explicitly, because for THEM
+    CPython's empty-needle rules differ and neither is a scan (see
+    `str_replace_all`)."""
+    n = str_len(s)
+    m = str_len(pat)
+    if m == 0:
+        return from_i
+    i = from_i
+    if i < 0:
+        i = 0
+    while i + m <= n:
+        if str_eq_n(s + i, pat, m) == 1:
+            return i
+        i = i + 1
+    return 0 - 1
+
+
+def str_count(s, pat) -> int:
+    """How many non-overlapping occurrences of `pat` are in `s`.
+
+    Its own pass rather than a `realloc` loop in `str_replace_all`, and the
+    reason is the same one `platform.mojo`'s `_int_value`/`_int_ok` pair gives:
+    a number that cannot be a sentinel and a buffer that has to be sized before
+    it is written are two questions, and one function that answers both has to
+    carry the reallocation with it. This target has `malloc` and no `realloc`
+    worth using through this path, so "count, then allocate once, then fill" is
+    the shape that needs no allocator at all.
+    """
+    n = str_len(s)
+    m = str_len(pat)
+    if m == 0:
+        return 0
+    hits = 0
+    i = 0
+    while i + m <= n:
+        at = str_find(s, pat, i)
+        if at < 0:
+            break
+        hits = hits + 1
+        i = at + m
+    return hits
+
+
+def str_replace_all(s, frm, to) -> str:
+    """A fresh copy of `s` with EVERY occurrence of `frm` replaced by `to`.
+
+    The caller owns the result. EVERY occurrence and not the first: CPython's
+    `str.replace` has no count argument, and the one caller
+    (`platform._platform`) replaces a SINGLE CHARACTER, so a first-only version
+    would be indistinguishable from this one there and wrong everywhere else.
+    That is also why it is a substring replace and not a word-boundary test —
+    `platform` drops the word `unknown` from the MIDDLE of a component as
+    readily as from the whole of one, which is CPython's own behaviour
+    (`platform._platform('unknown-x')` is `'-x'`).
+
+    Occurrences are NON-OVERLAPPING and counted left to right, which is
+    `str.replace`'s rule: `str_replace_all('aaa', 'aa', 'b')` is `'ba'`, and a
+    scan that restarted one byte after a match would say `'ab'`.
+
+    **A RECORDED DIVERGENCE, and it is CPython's `str.replace` that is odd
+    here**: `s.replace("", "x")` in CPython inserts `x` at every position
+    INCLUDING both ends, because an empty needle matches at every offset. That
+    rule is not implemented — an empty `frm` returns `s` unchanged, and
+    `str_find`/`str_count` say so rather than reporting a match at every index.
+    No caller passes one (every needle in this tree is a non-empty literal), and
+    the rule is not expressible as a left-to-right scan of non-overlapping
+    matches at all: at offset 0 the empty match would have to be taken and the
+    scan then restarted one byte later, forever."""
+    n = str_len(s)
+    if str_len(frm) == 0:
+        return str_dup(s)
+    hits = str_count(s, frm)
+    if hits == 0:
+        return str_dup(s)
+    out = str_alloc(n - hits * str_len(frm) + hits * str_len(to) + 1)
+    used = 0
+    i = 0
+    while 1:
+        at = str_find(s, frm, i)
+        if at < 0:
+            used = str_put(out, used, s + i, n - i)
+            break
+        used = str_put(out, used, s + i, at - i)
+        used = str_put(out, used, to, str_len(to))
+        i = at + str_len(frm)
+    return out
 
 
 def fs_cwd() -> str:
@@ -449,6 +619,155 @@ def fs_read(fd, buf, n) -> int:
     The caller loops.
     """
     return read(fd, buf, n)
+
+
+def fs_fopen(p, mode) -> int:
+    """`fopen(p, mode)`: a `FILE *`, or 0.
+
+    THE WRITING PATH, and it goes through the stdio calls rather than through
+    `open(2)` for the reason this file's header gives: `open` on this path is a
+    LOWERED BUILTIN that takes a mode string and refuses any other spelling, so
+    `O_WRONLY | O_CREAT | O_TRUNC` is not available even though libSystem has
+    the function that takes it. `fopen` takes the same information as the
+    spelling this path has, so "wb" here means exactly what `O_WRONLY |
+    O_CREAT | O_TRUNC, 0666` means — with the one difference that matters and is
+    CPython's own: `fopen`'s mode gives NO PERMISSIONS argument, so the file is
+    created with the umask's default (0644 with the usual umask 022), and
+    `shutil.copyfile` therefore produces the same mode CPython's
+    `shutil.copyfile` produces only because CPython also does not chmod. That
+    is measured by `test_formal_shutil.py`, which copies a file both ways and
+    compares the resulting `st_mode`.
+
+    The `FILE *` is carried as an `int`, which is the pointer value model and is
+    what every pointer here is (`fs_readdir`'s docstring says the same).
+    """
+    return fopen(p, mode)
+
+
+def fs_fwrite(f, buf, n) -> int:
+    """`fwrite(buf, 1, n, f)`: items written, which is `n` or fewer.
+
+    The size argument is `1` so the return value is a BYTE COUNT and compares
+    with what the caller asked for; `fwrite(buf, n, 1, f)` would return 0 or 1
+    and say nothing about a short write.
+    """
+    return fwrite(buf, 1, n, f)
+
+
+def fs_fread(f, buf, n) -> int:
+    """`fread(buf, 1, n, f)`: items read — bytes, 0 at end of file.
+
+    The complement of `fs_fwrite`, and the reason `shutil` needs it: `fs_read`
+    works on a bare DESCRIPTOR and this path cannot make a bare descriptor for
+    writing, so the copy loop reads and writes through stdio on both sides.
+    Reading and writing through different interfaces would work too, and would
+    be one function fewer — but it would leave the caller mixing a descriptor
+    and a `FILE *` for the same file, which is the kind of asymmetry that costs
+    an afternoon later.
+    """
+    return fread(buf, 1, n, f)
+
+
+def fs_fclose(f) -> int:
+    """`fclose(f)`: 0 on success. FlUSHES, which is the whole reason stdio is
+    used at all: a `FILE *`'s buffer reaches the filesystem at `fclose`, so a
+    copy that never closes leaves an empty destination and a zero exit status.
+    """
+    return fclose(f)
+
+
+def fs_utimes(p, asec, ausec, msec, musec) -> int:
+    """`utimes(p, {atime, mtime})`: 0 on success, -1 on failure.
+
+    THE `struct timeval` IS BUILT HERE AND NOT BY THE CALLER, because its
+    layout is the ABI's rather than the source's: two `{ time_t tv_sec;
+    suseconds_t tv_usec }`, eight bytes each on a 64-bit target, 32 bytes in
+    total, and a caller that assembled it would be writing four offsets it has
+    no way to check. Same rule as `struct stat` above, for the same reason, and
+    for the same reason the offsets are written out here rather than trusted:
+    the seconds fields are at 0 and 16 and the microsecond fields at 8 and 24.
+
+    `ausec` and `musec` are separate PARAMETERS rather than one nanosecond
+    number because `struct stat`'s time fields are nanoseconds
+    (`st_mtimespec.tv_nsec` at offset 56) while `timeval`'s are microseconds,
+    and a caller reading a stat and setting a timeval has to divide. Doing the
+    division in the caller is honest about where it happens; doing it here would
+    hide a rounding decision inside a wrapper.
+    """
+    var tv: Pointer[UInt8] = malloc(32)
+    memset(tv, 0, 32)
+    _put_time(tv, 0, asec, ausec)
+    _put_time(tv, 16, msec, musec)
+    var rc = utimes(p, tv)
+    free(tv)
+    return rc
+
+
+def _put_time(tv: Pointer[UInt8], at, sec, usec) -> int:
+    """Seconds at `tv + at` and microseconds at `tv + at + 8`, little-endian.
+
+    One byte at a time through `le64` for the reason every other reader in this
+    file is: the source declares no struct, so a load of the field's declared
+    width is what C does and a wider read would be a guess about alignment.
+    """
+    _put_le64(tv + at, sec)
+    _put_le64(tv + at + 8, usec)
+    return 0
+
+
+def _put_le64(tv: Pointer[UInt8], v) -> int:
+    """Little-endian 64-bit STORE of `v` at `tv`, byte by byte.
+
+    THE STORE COUNTERPART of `le64`, and it exists because this file had a
+    reader for every field it wanted and no writer for any of them. A caller
+    cannot write into a `struct` it does not declare any more than it can read
+    one, and this is the same constraint on the other side: `memset` a whole
+    buffer and then set two words in it. It is eight one-byte `memset`s, which
+    is what `le64`'s reader already costs.
+
+    `v >> 8` and `v >> 16` and so on are ARITHMETIC SHIFTS on a 64-bit word, so
+    the byte extracted is the one the platform's `little-endian` means. A
+    big-endian target would need `le64`'s reader mirrored here, and this file's
+    `be64` already says the same thing about its own reader.
+    """
+    memset(tv, v & 255, 1)
+    memset(tv + 1, (v >> 8) & 255, 1)
+    memset(tv + 2, (v >> 16) & 255, 1)
+    memset(tv + 3, (v >> 24) & 255, 1)
+    memset(tv + 4, (v >> 32) & 255, 1)
+    memset(tv + 5, (v >> 40) & 255, 1)
+    memset(tv + 6, (v >> 48) & 255, 1)
+    memset(tv + 7, (v >> 56) & 255, 1)
+    return 0
+
+
+def fs_flock(fd, operation) -> int:
+    """`flock(fd, operation)`: 0 on success, -1 on failure.
+
+    **HERE AND NOT IN `formal/hostmods/fcntl.mojo` BECAUSE OF THE NAME
+    COLLISION RULE AT THE TOP OF THIS FILE**, and it is the rule's first
+    example again: `flock` is a libc function AND the name `fcntl.mojo`'s API
+    wants, so a module that defined `def flock(fd, operation)` and called
+    `flock(fd, operation)` inside it would emit a call to ITSELF with the
+    wrong arity. `getcwd`, `chdir`, `remove` and `rename` are all in the same
+    position and are all wrapped here for the same reason.
+    """
+    return flock(fd, operation)
+
+
+def fs_fcntl(fd, cmd, arg) -> int:
+    """`fcntl(fd, cmd, arg)`: 0 on success, -1 on failure.
+
+    THREE FIXED ARGUMENTS AND NO FOURTH, which is `fcntl(2)`'s own shape once
+    the variadic tail is gone: the command is the second parameter and the
+    argument is the third, and `fcntl` is called with three arguments for every
+    command here. **The variadic ARGUMENT IS A POINTER for `F_SETLK` and
+    friends, and that is not spelt** — see `formal/hostmods/fcntl.mojo`'s
+    `lockf` docstring, which is where the consequence is written down. The
+    commands reachable through this wrapper are the ones whose argument is an
+    integer: `F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`.
+    """
+    return fcntl(fd, cmd, arg)
 
 
 def fs_mkdir(p, mode) -> int:

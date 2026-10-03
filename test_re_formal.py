@@ -313,14 +313,53 @@ def expected(pattern, subject, flags):
 
 
 def mojo_str(s):
-    """A Mojo string literal for `s`, with the two characters this needs.
+    r"""A Mojo string literal whose DECODED bytes are `s` — the INVERSE of
+    `fire_compiler.decode_c_escapes`.
 
-    A string literal on the formal path is interned VERBATIM and its escapes
-    are NOT unescaped, so nothing here is escaped: the pattern text a Python
-    raw string holds IS the bytes a Mojo literal must contain, which is why
-    `r"\\d+"` becomes `"\\d+"` and not `"\\\\d+"`. The one thing a literal
-    cannot carry is a real newline, so a subject with one is spelled as two
-    literals and a `memset`, which is what `os/__init__.mojo` calls linesep.
+    A string literal's body is decoded exactly once on the way in, and it is
+    CPython's decoder (`9023031b`, which gave the formal backends the shared
+    decoder): `\b` is a backspace, `\x41` is `A`, `\n` is a newline and `\\`
+    is one backslash. So the body that delivers the bytes `s` holds is `s`
+    with every backslash DOUBLED, and one doubling is what makes the byte that
+    arrives the byte the Python string holds: `r"\d+"` is written
+    `"\\\\d+"`, and `\\` is written `"\\\\\\\\"`.
+
+    **This used to be the other way round and 14 checks were red because of
+    it.** The premise it replaces said "a literal is interned VERBATIM and its
+    escapes are NOT unescaped"; that was true when written and stopped being
+    true when the decode landed. It was a wrong answer, not a refusal:
+    `\bfn\b` reached `re` as `<BS>fn<BS>`, so every `\b` in the corpus matched
+    nothing — a pattern that means a word boundary silently meant a control
+    character, in the one area this file exists to be right about, and fourteen
+    checks of the `formal-re` gate suite were red on a tree that had been green
+    when the suite was written. Measured on a built-and-run image, one program,
+    the three shapes the corpus uses (`\b`, `\\`, and a VERBOSE `#` comment
+    whose `\n` must stay two characters):
+
+        literal        len  bytes
+        "\b"            2  92 98      a word boundary
+        "\b"            1  8          a BACKSPACE, which is what this wrote
+        "\\"           2  92 92      an escaped backslash
+        "\\"           1  92         an incomplete atom, refused
+
+    So the doubling is not a spelling preference: without it the engine is
+    handed bytes the pattern never contained. `re.mojo` itself is right —
+    given the right bytes it answers every one of those cases as CPython does,
+    which is why `bugs/FORMAL_re_word_boundary_never_matches.md` is gone rather
+    than acted on. `test_mojo_str_round_trips_through_the_decoder` is what now
+    makes the un-doubled state impossible to reach again, and it costs no
+    build: it runs every string this file writes through the one decoder and
+    requires the exact bytes of the Python string back.
+
+    Two things are deliberately NOT doubled, because they are not escapes:
+
+    * a REAL newline or tab. Those arrive as real characters, which a literal
+      cannot carry, so they keep the `mk2`/`mk3` spelling below — two literals
+      and a `memset`, which is what `os/__init__.mojo` calls linesep.
+    * an UNRECOGNIZED escape, of which the corpus has many (`\d`, `\w`, `\s`,
+      `\(`, `\[`, `\*`). Doubling those is still right, and is what
+      `decode_c_escapes`'s "an unknown escape keeps its backslash" rule needs:
+      the doubled `\\d` decodes to `\d`, which is what the pattern means.
     """
     for ch, code in (("\n", 10), ("\t", 9)):
         if ch in s:
@@ -334,7 +373,38 @@ def mojo_str(s):
                                                 mojo_str(parts[1]), seps[1],
                                                 mojo_str(parts[2]))
     assert '"' not in s, s
-    return '"%s"' % s
+    return '"%s"' % s.replace("\\", "\\\\")
+
+
+# A `mojo_str` expression, read back the way the runtime builds it: the quoted
+# bodies and the byte values between them, in order.  A plain literal has one
+# body; `mk2`/`mk3` have two or three plus the separators a `memset` writes.
+# The `mk[23]\(` alternative is load-bearing: without it the `2` in `mk2` reads
+# as a separator byte and every two-part string comes back with a stray \x02 in
+# front of it.
+_MOJO_PIECE = re.compile(r'mk[23]\(|"((?:[^"\\]|\\.)*)"|(\d+)')
+
+
+def mojo_literal_bytes(expr):
+    """The bytes the runtime will hold for a `mojo_str` expression.
+
+    The literals go through `fire_compiler.decode_c_escapes` — THE decoder
+    every engine calls, and the one this file's encoder has to be the inverse
+    of — and a bare number between two literals is the separator `mk2`/`mk3`
+    write with `memset`, so `mk2("a", 10, "b")` reconstructs to `a` + newline
+    + `b`, which is the same three bytes the image gets.
+    """
+    import fire_compiler as _FC
+    out = bytearray()
+    pieces = list(_MOJO_PIECE.finditer(expr))
+    assert pieces, expr
+    for m in pieces:
+        if m.group(1) is not None:
+            out += _FC.decode_c_escapes(m.group(1)).encode(
+                "utf-8", "surrogateescape")
+        elif m.group(2) is not None:
+            out.append(int(m.group(2)))
+    return bytes(out)
 
 
 PRELUDE = '''MARK = 0 - 99
@@ -602,11 +672,12 @@ def test_the_corpus_against_cpython(tmpdir):
 def test_the_corpus_against_cpython_on_x86_64(tmpdir):
     """The same corpus, on the OTHER backend, run and compared the same way.
 
-    This is new coverage rather than a repeat: until `re.mojo` fit six integer
-    argument registers it could not be compiled for x86-64 AT ALL, so the
-    45 files that import it were refused with `sub: 7 parameters exceeds the 6
-    …` and nothing here ever looked at an x86-64 `re` image. A backend that
-    can now build the module can also get it wrong — the `sub` walk keeps its
+    This is new coverage rather than a repeat: `re.mojo` used to be seven
+    parameters wide at its widest and could not be compiled for x86-64 AT ALL,
+    so the 45 files that import it were refused with `sub: 7 parameters exceeds
+    the 6 …` and nothing here ever looked at an x86-64 `re` image. It is now
+    six wide and builds for both. A backend that can build the module can also
+    get it wrong — the `sub` walk keeps its
     output-buffer state in the arena rather than in parameters, which is a
     different program to the one arm64 lowers — so the answers are compared
     against CPython on this backend too, over the same 128 cases.
@@ -759,6 +830,51 @@ def test_unsupported_constructs_are_refused(tmpdir):
               (pat, why, want[0]), "got %s" % got)
 
 
+def test_mojo_str_round_trips_through_the_decoder(tmpdir=None):
+    """Every string this file writes survives the trip into a literal and back.
+
+    **The premise, made testable without a build.** `mojo_str` used to say "a
+    string literal is interned VERBATIM and its escapes are NOT unescaped",
+    which was true when it was written and stopped being true when
+    `fire_compiler.decode_c_escapes` became the one decoder every engine calls.
+    Fourteen checks in the `formal-re` gate suite were the consequence, and they
+    were the expensive kind of evidence to have to get: a whole corpus built
+    and run per backend to discover what one pure-Python function does to a
+    string. A pattern that means a word boundary reached `re` as a backspace,
+    in the one area a silent wrong answer is least affordable.
+
+    So the check is here instead: the expression `mojo_str` writes, run through
+    the one decoder, must give back the exact bytes of the Python string it was
+    given. It builds nothing and runs nothing, so it is red the moment the
+    encoder and the decoder disagree — which is the failure, stated in the one
+    place that causes it.
+
+    It covers every corpus pattern and subject, every refusal pattern, and the
+    DISCOVERED corpus patterns, whose values come out of `corpus_patterns` — so
+    that walk's decode and this round trip are checked against each other rather
+    than each being right by itself.
+    """
+    found, _dropped = corpus_patterns()
+    cases = []
+    for p, s, _f, _note in CASES:
+        cases.append(("the pattern of case %r" % p, p))
+        cases.append(("the subject of case %r" % p, s))
+    for pat, why in UNSUPPORTED:
+        cases.append(("the unsupported pattern %r (%s)" % (pat, why), pat))
+    for p in sorted(found):
+        cases.append(("the discovered corpus pattern %r" % p, p))
+    bad = []
+    for what, s in cases:
+        got = mojo_literal_bytes(mojo_str(s))
+        want = s.encode("utf-8", "surrogateescape")
+        if got != want:
+            bad.append("%s: %r arrives as %r" % (what, s, got))
+    check(not bad,
+          "every string this file writes reaches the image as the bytes the "
+          "oracle used (%d strings; offenders: %s)"
+          % (len(cases), "; ".join(bad[:3]) or "none"))
+
+
 def test_a_span_list_that_is_too_small_is_a_status_not_a_crash(tmpdir):
     """A caller's undersized list is reported, and the process survives.
 
@@ -841,8 +957,22 @@ def corpus_patterns():
     made explicit. What it must not be is SILENT, because a filter that quietly
     discards candidates is how a walk stops being a walk: hence `dropped`, and
     an assertion in the test that says how many were thrown away and why.
+
+    **The candidate is a literal's VALUE, not its source text**, and that is
+    load-bearing in both directions. The walk reads raw source, so a non-raw
+    literal arrives with its escapes still spelled (`"\\\\d"` is four characters
+    in the file and two in the string); compiling that as the pattern and then
+    handing the same text to `mojo_str` would ask the oracle one question and
+    the module another. So a candidate is decoded by the ONE decoder
+    (`fire_compiler.decode_c_escapes`) unless the prefix says `r`, which is
+    `fire_compiler.decoded_literal`'s own rule — and `mojo_str` then encodes it
+    again on the way into the generated program, so the byte that reaches `re`
+    is the byte CPython compiled. Every pattern the walk currently finds is a
+    raw string, so this changes nothing today; it is here because the walk is
+    DISCOVERED, and the day a non-raw pattern appears it must not be wrong.
     """
     import glob
+    import fire_compiler as _FC
     pat = re.compile(r"re\.(?:compile|search|match|fullmatch|split|sub|findall)"
                      r"\(\s*r?([rb]*)(['\"])(.*?)\2", re.S)
     out, dropped = {}, {}
@@ -856,7 +986,9 @@ def corpus_patterns():
         if "import re" not in text and "re.compile" not in text:
             continue
         for m in pat.finditer(text):
-            p = m.group(3)
+            prefix, p = m.group(1), m.group(3)
+            if "r" not in prefix:
+                p = _FC.decode_c_escapes(p)
             if len(p) > 8 and "{" in p and "\\w" in p:
                 where = os.path.basename(path)
                 try:
@@ -941,17 +1073,88 @@ def test_the_corpus_patterns_all_work(tmpdir):
                   "got %d, CPython %d" % (got[1], want.start()))
 
 
+def test_the_corpus_reaches_the_module_as_the_bytes_python_holds(tmpdir=None):
+    """`mojo_str` writes the INVERSE of the literal decoder, and this says so.
+
+    Every other comparison in this file is between what CPython computed and
+    what an image computed, and this is the one that says the two were asked
+    the SAME question: the pattern the module compiles is only the pattern
+    CPython compiled if the bytes that arrived are the bytes the Python
+    string holds, and a literal's body is decoded once on the way in. The
+    harness's spelling is part of the measurement, not a detail of it.
+
+    `fire_compiler.decode_c_escapes` is the decoder every engine in this tree
+    calls (CLAUDE.md: one implementation, not one per engine), so decoding
+    what `mojo_str` wrote is precisely what the image does to it — and that
+    makes the round trip decidable here, in microseconds, with no build. It
+    is not a synthetic check: the three shapes that failed are all in the
+    corpus (`\b` in five cases, `\\` in one, a VERBOSE `#` comment whose `\n`
+    has to stay two characters in one), and without this they arrive as a
+    backspace, an incomplete atom and a real newline respectively — measured,
+    with the byte tables in `mojo_str`'s docstring.
+
+    The set walked is every pattern and subject in `CASES` and `UNSUPPORTED`,
+    plus the shapes below that no case happens to hold: an empty string, one
+    backslash, an octal escape, a hex escape, and a real tab.
+    """
+    import fire_compiler as F
+
+    def round_trips(s):
+        """True when what `mojo_str` writes DECODES to exactly `s`."""
+        lit = mojo_str(s)
+        if lit.startswith('"'):
+            return F.decode_c_escapes(lit[1:-1]) == s
+        # `mk2`/`mk3`: two or three literals with a `memset` of the
+        # separator's byte code between them, so the pieces are checked
+        # individually and the separator read back out of its own argument.
+        pieces = re.findall(r'"([^"]*)"', lit)
+        seps = [int(x) for x in re.findall(r", (\d+),", lit)]
+        out = []
+        for i, piece in enumerate(pieces):
+            out.append(F.decode_c_escapes(piece))
+            if i < len(seps):
+                out.append(chr(seps[i]))
+        return "".join(out) == s
+
+    strings = set()
+    for pat, subj, _flags, _note in CASES:
+        strings.add(pat)
+        strings.add(subj)
+    for pat, _why in UNSUPPORTED:
+        strings.add(pat)
+    for extra in ("", "\\", "\\\\", "\\1", "\\101", "\\x41", "\t",
+                  "a\tb", "a\nb\nc", r"\bcat\b", "\\d+", "\\W+"):
+        strings.add(extra)
+    for s in sorted(strings):
+        check(round_trips(s),
+              "the bytes %r reaches the module as the bytes Python holds" % s,
+              "mojo_str wrote %s, which decodes to %r"
+              % (mojo_str(s),
+                 [F.decode_c_escapes(p) for p in
+                  (re.findall(r'"([^"]*)"', mojo_str(s)) or
+                   [mojo_str(s)[1:-1]])]))
+
+
 def test_no_signature_is_wider_than_the_smaller_abi(tmpdir=None):
     """No function in `re.mojo` takes more parameters than the SMALLER of the
-    two backends' integer argument register files passes.
+    two backends' integer argument register files passes — six.
 
-    The cheap pre-check for the thing that made this module x86-64-unbuildable
-    — `sub: 7 parameters exceeds the 6 the formal x86-64 ABI passes in
-    registers`, which cost the module itself and the 45 files that import it.
-    The x86-64 half of `test_the_module_builds_as_a_dylib_on_both_backends` is
-    the real check and it costs a whole module compile; this one parses and
-    costs nothing, so it says WHICH function is too wide instead of that a
-    build failed.
+    **That ceiling is no longer the ABI's, and the check is now narrower than
+    the rule on purpose.**  Both conventions put the arguments past the register
+    file in the caller's frame (`_MAX_INCOMING_ARGS` = 24 in each backend), so
+    `sub: 7 parameters` builds on x86-64 as it always did on arm64, and the
+    ceiling a module written today has to fit is twenty-four rather than six.
+    `re.mojo`'s widest signatures are six (`split`, `group_text`, `findall`,
+    `_term`, `_subwalk`, `_subfill`, `_run`, `_push`) because its functions were
+    NARROWED to fit six registers while there was no alternative; nothing needs
+    them wider now, and widening a host module's signatures back out is a
+    decision somebody should take rather than drift nobody notices.  So the check
+    stays at six and says why.
+
+    It is still the cheap pre-check it was written as.  The x86-64 half of
+    `test_the_module_builds_as_a_dylib_on_both_backends` is the real check and
+    it costs a whole module compile; this one parses and costs nothing, so it
+    says WHICH function is too wide instead of that a build failed.
 
     The ceiling is DERIVED from the two emitters rather than written down, for
     `test_struct_formal.py`'s reason: a hardcoded 6 would keep passing if either
@@ -1031,15 +1234,20 @@ def test_module_resolves_and_host_modelled_is_gone(tmpdir):
 def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
     """`re.mojo` compiles for arm64 AND x86-64.
 
-    The same question `test_struct_formal.py` asks, for the same reason: a
-    module compiled for BOTH backends has to fit the smaller of their integer
-    argument register files, and that is not discoverable from either backend
-    alone. It is a question about the widest signature in the file, and the
-    widest one used to be `sub`'s seven parameters — six of which the x86-64
-    ABI does not pass in registers — so this whole half of the test was
-    unreachable: the build raised the arity refusal before a container was ever
-    chosen, and the refusal was caught by the `except` arm below, which
-    accepted it. Nothing here had ever looked at an x86-64 `re` dylib.
+    The same question `test_struct_formal.py` asks, for the same reason, and it
+    used to have a premise that has since stopped being true: "a module compiled
+    for BOTH backends has to fit the smaller of their integer argument register
+    files" was right while neither ABI had a stack area, and both do now, so the
+    constraint is a shared frame budget rather than a register count. The check
+    is unaffected — it asserts the module builds for both — and it is now a
+    statement about something weaker than it was.
+
+    It is here because the widest signature in the file USED to be `sub`'s seven
+    parameters, six of which the x86-64 ABI did not pass in registers, so this
+    whole half of the test was unreachable: the build raised the arity refusal
+    before a container was ever chosen, and the refusal was caught by the
+    `except` arm below, which accepted it. Nothing here had ever looked at an
+    x86-64 `re` dylib, and `sub` has since been narrowed to six.
 
     The container is asserted against `default_format(arch)` and NOT hardcoded,
     for `test_struct_formal.py`'s reason and because this check used to carry
@@ -1128,7 +1336,9 @@ def main():
 
     tests = [
         test_module_resolves_and_host_modelled_is_gone,
+        test_the_corpus_reaches_the_module_as_the_bytes_python_holds,
         test_no_signature_is_wider_than_the_smaller_abi,
+        test_mojo_str_round_trips_through_the_decoder,
         test_the_module_builds_as_a_dylib_on_both_backends,
         test_the_corpus_against_cpython,
         test_the_corpus_against_cpython_on_x86_64,

@@ -138,6 +138,58 @@ now an OVERCOUNT by however many `with … as y:` bodies read `y`. That directio
 is safe — it means the true figure is lower — and it is one of the three things
 to redo before the 233 means anything.
 
+### A FIFTH artifact class, and it is not about a statement shape at all: an
+### EDGE the CFG has that the language does not (FIXED, 7633d9e4)
+
+The four classes above are all "a name is bound somewhere this scan did not
+count".  This one is the opposite: no binding is involved, and the analysis
+invents a PATH.
+
+`formal/model.py::_build_cfg` ended with
+
+```python
+entry = new([])
+entry.succs += run(body, [], [entry.index])
+```
+
+`run` returns the blocks that **fall off the end** of a run.  Inside the body
+that list is exactly what a caller needs — they are the join's predecessors. At
+the TOP level it has no use at all, because control leaves the function there,
+and attaching it to `entry.succs` invented an edge from the entry block to every
+block the function can end in.  The entry block's OUT set is `seed` and nothing
+else: the parameters the CALLER stores.  `_definitely_stored` intersects
+predecessors, so the entry's set erased everything the body had stored, and every
+read at the END of a function was reported.
+
+The shape that reached the corpus is a **trailing `for`**, because a loop's
+`latch` is a fall-through whenever the loop is the last statement — so every read
+of a loop target inside the body of a trailing loop was refused:
+
+```python
+def resolve_extern(self, target_addrs):
+    for sym_name, pos, instr_len, kind in self.extern_refs:
+        if sym_name not in target_addrs:      # refused: 'sym_name' at line 775
+            raise ValueError(...)
+```
+
+That is `formal/arm64.py`'s `Assembler.resolve_extern`, verbatim, and it is why
+`formal/arm64.py`, `formal/macho.py` and `formal/macho_linker.py` were all
+`codegen` / `codegen/dependency` behind one method.  The same edge also refused
+`if n: p = 1 else: p = 2` followed by a bare `sink(p)`, and `try`/`with` whose
+bodies all store followed by a bare read.
+
+**Why every existing case missed it: they all end in `return`.**  `return` has no
+successor, `run` returns `[]`, and there is no edge to invent.  The gap is
+invisible in a table of shapes precisely because the table is made of `return`s.
+
+**Why dropping it is the sound direction, and not a weakening:** the edge could
+only ever REMOVE a name from a set, so it could only ever invent a refusal and
+never miss one.  `test_formal_read_before_store.py` gained ten rows in the same
+direction, including the two that must STAY refused — a trailing loop's body
+store read after the loop (`range(0)` reaches the read) and a trailing `while`'s
+— so "this removed a false refusal" and "this did not weaken the rule" are
+pinned in the same file rather than one of them being argued.
+
 ## The sibling the filing did not mention: `global` and no storage
 
 ```
@@ -163,11 +215,10 @@ emitters treat `global` as a no-op and the assignment lands in a local:
 
 Four wrong numbers, two of them architecture-dependent, from a program whose
 every line is ordinary.  `model.mutated_module_global_refusal` reports it, in the
-same pass.  This is the `bugs/FORMAL_module_global_string_elements.md` family's
-"a module-level name the build cannot fold is a real mutable-or-computed global
-with nowhere to live, and is REFUSED BY NAME" — applied to the case where the
-name *is* foldable and the program nonetheless writes it, which is the same fact
-seen from the other side.
+same pass.  This is the "a module-level name the build cannot fold is a real
+mutable-or-computed global with nowhere to live, and is REFUSED BY NAME" family —
+applied to the case where the name *is* foldable and the program nonetheless
+writes it, which is the same fact seen from the other side.
 
 ## What still has to keep working, and is pinned
 
@@ -176,6 +227,83 @@ this path and must not be refused: the local gets its own home and the module's
 value is untouched, which is exactly what Python does.  Pinned as
 `a_local_may_shadow_a_module_global_and_the_module_keeps_its_value` —
 `s=99 r=5 g=5`, CPython's answer, on both architectures.
+
+## A SIXTH artifact class, and it is not a binding at all: a COMPREHENSION has
+## no scope here, so its target reads as an unstored local (FIXED, 2026-10-02)
+
+The five classes above are all "a name is bound somewhere this scan did not
+count". This one is the opposite shape twice over: the name IS bound, in a
+scope of its own, and counting it as a binding of the ENCLOSING function is what
+made the analysis wrong.
+
+```python
+G = 5
+
+def f(rows):
+    var out = [G for G in rows]     # the comprehension's own G
+    return G + out[0]               # the MODULE's G: CPython answers 6
+```
+
+REFUSED on both architectures, with a sentence that is false about CPython in the
+strongest available way — *the program runs*:
+
+    build: f: 'G' is read at line 5 before anything in this function stores it,
+    and CPython raises UnboundLocalError for that program
+
+**The cause is that `_names_bound_in` was answering two questions.** The register
+allocator's `bound_names_in_order` reports a comprehension's target — correctly,
+because the emitter gives that name a home — and `_names_bound_in` is the reader
+of "does this name shadow a module binding", which has a different answer: a
+comprehension is its own scope in Python 3, so its `for … in` target binds
+nothing in the enclosing body. Two readers now, and the split is the whole fix:
+
+* `_names_bound_in(fn)` — what the body WRITES. Unchanged, because
+  `placed |= _names_bound_in(fn)` needs the comprehension's target in it.
+* `_function_locals(fn)` — what SHADOWS a module binding:
+  `_names_bound_in(fn) - _comprehension_scoped_names(fn)` plus the parameters
+  back. Read by `_substitute_module_constants`, `_apply_imported_constant_sites`
+  and the `own` set of the read-before-store check.
+
+**Subtracting inside `_names_bound_in` instead is the mistake worth recording**,
+because it looked equivalent and broke ten cases: `test_formal_run.py`'s
+`compr_single`, `compr_nested`, `compr_nested3`, `compr_over_literal`,
+`compr_condition`, `compr_in_for`, `truthy_comprehension_guard` and three more
+all lost their loop variable's HOME and were refused with "a name in none of them
+is refused rather than read out of whatever register the allocator left
+behind". Placement and shadowing are different questions and they need different
+sets; that is the lesson, and it is measured rather than argued.
+
+**The second half is not optional, and it was masked rather than absent.**
+`_apply_module_constant_sites` reached inside a comprehension, so once the name
+stopped counting as a local the substitution would have rewritten the
+comprehension's ELEMENT — `[5 for G in rows]`, a different program. The
+generator targets now come off the site table for the comprehension's own
+subtree, which is what makes `[G for G in rows]` mean the loop variable and
+`[G for x in rows]` mean the constant: two programs, one name, and the
+difference is entirely in the target. Both are cases in
+`test_formal_globals.py` now, in both directions.
+
+**The interpreter has the same bug and is filed separately**, because it is a
+different file and a different risk:
+`bugs/INTERP_comprehension_has_no_scope_of_its_own.md`. `fire.py run` answers 3
+where CPython answers 6, and its `eval_Comprehension` docstring calls it "a
+known minor fidelity gap" — a `known` with no reproducer is the kind of note that
+outlives its reason.
+
+### The two candidates this section named, measured
+
+* **A `match` statement's capture pattern: NOT APPLICABLE on this front end.**
+  `fire_compiler.py::MatchStmt` is switch-style equality dispatch and its
+  docstring says so — "Deliberately not full PEP 634 … Real Python match
+  statements treat a bare lowercase name in a pattern as an irrefutable capture"
+  is explicitly declined, with ONE exception (an unbound bare name is treated as
+  a capture by `myinterpreter.py`, for a guard clause to have something to test).
+  So a capture is not a binding this scan can be blind to, because there is only
+  the one narrow exception and it binds nothing the enclosing function reads.
+* **A comprehension's `async for` target: NOT EXPRESSIBLE.**
+  `[x async for x in rows]` does not parse: `fire_compiler.py:5331`
+  `_expect("RBRACKET")` → `Expected RBRACKET got NAME('async')`. There is no such
+  target to count, which is a stronger answer than an exclusion would have been.
 
 ## Next step for the general rule, in the order it should be done
 

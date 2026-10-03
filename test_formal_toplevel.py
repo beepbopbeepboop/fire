@@ -64,11 +64,15 @@ What is asserted, in the order the fixes were made:
      `yield`, an `await`. Each of those is a different construct once the body
      is wrapped in a function, and each would otherwise build, run, and
      compute something other than what the file says.
-  8. **A module body on the DYLIB path is refused.** A library has no entry
-     point for any of it, and a module whose API is its top level used to
-     compile to a library that computes nothing at load time and is then
-     refused by `no_public_api_reason` for the wrong reason — "no public
-     functions", sent at a file that has exactly what it meant to write.
+  8. **A module body in a DYLIB RUNS, at load time.** A library has no `main`,
+     so a body compiled into one used to be a function nothing called — the
+     file built, linked, and did nothing, which is the silent no-op one level
+     down from the executable case and cost 16 files of this repository. Both
+     object writers now emit a load-time initializer pointing at the body, and
+     a body whose MEANING is file-level (`return`, `global`, `yield`,
+     `await`) is still refused — by the same code and the same words as the
+     executable path, so an imported module and a run one cannot answer
+     differently about one source file.
   9. **A module docstring, a file-level `pass`, and a module-level constant
      the folder can substitute are NOT body.** They are classified out in
      `model.module_body`; this pins the classification against the tree's
@@ -565,49 +569,132 @@ def test_file_level_await_is_refused(tmpdir, verbose):
         verbose)
 
 
-# ── 7. the dylib path: a library has no entry point for any of it ──────────
+# ── 7. the dylib path: a library's entry point is its load-time initializer ──
 #
-# A module whose API is its top-level statements used to compile to a
-# dylib that exported nothing, had no code to run the store, and was then
-# refused by `no_public_api_reason` for the wrong reason — "no public
-# functions", sent at a file that has exactly what it meant to write. The
-# refusal is now about the top-level statement, by name.
+# A module body used to be REFUSED on this path, for a reason that was true and
+# whose remedy was wrong: a library has no `main`, so a module whose top level
+# had statements in it compiled to a function nothing called — built, linked,
+# and silent. 16 files in this repository were refused for it, 15 of them for
+# having IMPORTED the offending module and for using nothing it declares.
+#
+# The remedy was an entry point, not a refusal: both object writers now emit
+# one — `__TEXT,__init_offsets` in a Mach-O library, `.init_array` in an ELF one
+# — pointing at the body wrapper, and dyld calls it after the library's
+# dependencies are loaded and before `main`, which is where CPython runs a
+# module body at import. The first case below is that claim, end to end, on both
+# architectures; the second is the refusal that SURVIVED, because a body the
+# path cannot lower is still refused, now by the same code and the same words the
+# executable path uses.
 
 DYLIB_PROGRAM = "from pkg import join\n\nexit(0)\n"
+# The body's EFFECT has to be observable from the program's own stdout, because
+# "the library has an initializer section" is a claim about the file and this is
+# a claim about the run. `printf` in the body's first position is what puts the
+# body's output BEFORE the program's: a load-time initializer that ran after
+# `main` would print the same bytes in the other order.
 DYLIB_MODULE_WITH_BODY = """\
 def _parts():
     return ["a", "b"]
 
 ALL = _parts()
+printf("body@")
+
 
 def join(a, b):
     return a + b
 """
 
+DYLIB_PROGRAM_WITH_BODY = """\
+from pkg import join
 
-def test_dylib_path_refuses_a_module_body(tmpdir, verbose):
-    """A module whose API is its top-level statements is refused BY NAME.
+def main(k):
+    printf("main=%d@@", join(1, 2))
+    return 0
+"""
 
-    End to end through the import mechanism, because the point is what a
-    caller linking the library sees: the chain carries the module's own
-    refusal, so the reader is sent to the file that has the statement rather
-    than to a `def` the file never meant to have."""
-    root = os.path.join(tmpdir, "dylibbody")
+
+def case_dylib_body_runs_at_load(name, module, program, expect_stdout,
+                                 tmpdir, verbose=False):
+    """Build an IMPORTING program on BOTH backends and check what it printed.
+
+    End to end through the import mechanism, because the point is what a caller
+    LINKING the library sees: the chain builds the module's own dylib, and the
+    program's stdout is the only place a load-time effect can show up.
+
+    Both backends build; only the native one is RUN, because an x86-64 image
+    needs Rosetta and this file's runner has no story about it (that is
+    `test_formal_x86_64_dylib.py`'s job, and it builds and inspects both
+    containers there)."""
+    ok = True
+    for backend in BACKENDS:
+        root = os.path.join(tmpdir, f"{name}.{backend}")
+        os.makedirs(os.path.join(root, "pkg"), exist_ok=True)
+        with open(os.path.join(root, "pkg", "__init__.mojo"), "w") as f:
+            f.write(module)
+        prog = os.path.join(root, "prog.mojo")
+        with open(prog, "w") as f:
+            f.write(program)
+        out = os.path.join(root, f"{name}.{backend}.aout")
+        r = build(prog, out, backend, cwd=root)
+        if r.returncode != 0:
+            ok &= check(False, f"{name} [{backend}] built",
+                        (r.stderr or r.stdout).strip()[-400:])
+            continue
+        if backend != NATIVE:
+            continue
+        code, text = run_binary(out)
+        ok &= check(text == expect_stdout, f"{name} [{backend}] stdout",
+                    f"got {text!r}, expected {expect_stdout!r}")
+        ok &= check(code == 0, f"{name} [{backend}] exit status",
+                    f"got {code}, expected 0")
+        if verbose:
+            print(f"      [{backend}] exit={code} stdout={text!r}")
+    return ok
+
+
+def test_a_dylib_runs_its_module_body_at_load_time(tmpdir, verbose):
+    """A module body in a LIBRARY runs when the library loads.
+
+    The statement this replaces asserted the opposite, and the reason is the
+    whole of the fix: a library has no `main` and no caller for a body, so
+    before the load-time initializer the body compiled to a function nothing
+    ran and the importing program printed only its own output."""
+    return case_dylib_body_runs_at_load(
+        "dylibbody", DYLIB_MODULE_WITH_BODY, DYLIB_PROGRAM_WITH_BODY,
+        "body@main=3@@", tmpdir, verbose)
+
+
+def test_dylib_path_still_refuses_a_body_that_cannot_run(tmpdir, verbose):
+    """A body whose MEANING is file-level is still refused, as a LIBRARY too.
+
+    `return` at file level returns from nothing: this path runs the top level as
+    the body of a synthetic function, so a `return` there returns from THAT
+    function rather than from a function the source wrote. The refusal is asked
+    for both paths from the same code (`_refuse_unlowerable_module_body`), so a
+    reader whose module is imported gets the same sentence as one that is run —
+    which is the property that replaced the old whole-body refusal, and the one
+    a per-path copy of this check would lose."""
+    root = os.path.join(tmpdir, "dylibreturn")
     os.makedirs(os.path.join(root, "pkg"), exist_ok=True)
     with open(os.path.join(root, "pkg", "__init__.mojo"), "w") as f:
-        f.write(DYLIB_MODULE_WITH_BODY)
+        f.write("printf(\"early@\")\nreturn 3\n\n\n"
+                "def join(a, b):\n    return a + b\n")
     with open(os.path.join(root, "prog.mojo"), "w") as f:
         f.write(DYLIB_PROGRAM)
-    r = build(os.path.join(root, "prog.mojo"),
-              os.path.join(tmpdir, "dylibbody.aout"), "arm64", cwd=root)
-    ok = check(r.returncode != 0, "a module body is refused on the dylib path",
-               "it BUILT: the library would compute nothing at load time")
-    text = r.stderr or r.stdout
-    ok &= check("a library has no entry point to run them" in text,
-                "the refusal names the construct",
-                f"{text.strip()[-300:]}")
-    if verbose and text:
-        print(f"      refused: {text.strip()[:200]}")
+    ok = True
+    for backend in BACKENDS:
+        out = os.path.join(root, f"prog.{backend}.aout")
+        r = build(os.path.join(root, "prog.mojo"), out, backend, cwd=root)
+        ok &= check(r.returncode != 0,
+                    f"a file-level `return` in an imported module's body is "
+                    f"refused [{backend}]",
+                    "it BUILT: the body would return from the initializer")
+        text = r.stderr or r.stdout
+        ok &= check("a `return` at file level returns from nothing" in text,
+                    f"the refusal names the construct [{backend}]",
+                    text.strip()[-300:])
+        if verbose and text:
+            print(f"      [{backend}] refused: {text.strip()[:200]}")
     return ok
 
 
@@ -625,11 +712,17 @@ T1 = "import sys\nsys.exit(3)\n"
 # array_ops_jit.mojo in this repository, in full. Before the fix this built
 # and printed NOTHING: `arr = …`, the `for` that sums it, and the three
 # `print`s that report the answer were all dropped, and the sweep counted the
-# file a pass. It is now refused — on `print` of a subscript, and on a `dict`
-# subscript — which is progress: the sweep is counting a construct it can name
-# instead of a file that does not run. Measured, not assumed: the whole shape
-# was tried and the terminal finding is the print, so the case asserts the
-# print and says so.
+# file a pass. It was then refused — on `print` of a subscript, and on a `dict`
+# subscript — and that refusal was this file's `body_next_finding` row for a
+# while.
+#
+# **It now BUILDS AND RUNS**, and the two things that made it run are both a
+# value model reading a fact the source states: a container literal's ELEMENT
+# kind (`model.container_literal_elem_kind`, which is what the dict subscript
+# needed) and a constructed frame's FIELD kind
+# (`model.struct_ctor_field_value`). Measured, both architectures, this exact
+# text, with CPython as the oracle: `Sum: 15 / Length: 5 / Value of a: 10`,
+# byte for byte.
 ARRAY_OPS = """\
 arr = [1, 2, 3, 4, 5]
 sum_val = 0
@@ -641,6 +734,20 @@ print("Length:", len(arr))
 
 d = {"a": 10, "b": 20}
 print("Value of a:", d["a"])
+"""
+
+# …and the NEXT construct the body cannot lower, which is what
+# `body_next_finding` now refuses on. Every statement above `n = 5` is one the
+# body lowers — the loop, the module-global int the loop accumulated into, both
+# container subscripts and the dict subscript — so the body demonstrably got
+# FURTHER rather than being refused earlier, which is the whole claim that row
+# makes. `len()` of an integer is a live gap with its own message and no
+# storage or representation question behind it (an integer has no length
+# whether the word is 5 or 0), so it will not be papered over by a later fix to
+# the element kind.
+BODY_THEN_LEN_OF_AN_INT = ARRAY_OPS + """
+n = 5
+print(len(n))
 """
 
 # `class_jit.mojo`'s shape — a struct construction with arguments, written in a
@@ -686,6 +793,31 @@ p = P(3)
 printf("x=%d y=%d", p.x, p.y)
 """
 
+# `class_jit.mojo`'s exact text — which is the same construction as the two
+# fixtures above with the ANNOTATIONS REMOVED, and that is the whole difference:
+# `model.struct_field_kind`'s gate is a claim about the VALUE in the slot and
+# reads the field's DECLARED type, so with no `x: Int` anywhere there was no
+# declaration to claim from at all and the read was unclassified.
+#
+# It is here, in the module-body file, rather than only in
+# `test_formal_value_model.py` because that is where the construction is written:
+# `class_jit.mojo` puts `p = Point(3, 4)` at top level, and a module body is the
+# entry, so this is a field read out of a frame the body itself built.
+#
+# `print`, not `printf`, because the refusal this replaces was `print()`'s —
+# `print` is the one builtin that must choose between two renderings before it
+# emits anything, so it is where an unclassifiable field first shows up, and a
+# lowering that guessed would print a frame address as a number.
+BODY_CONSTRUCTION_UNANNOTATED = """\
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+p = Point(3, 4)
+print("Point:", p.x, p.y)
+"""
+
 
 def test_t1_is_a_named_finding_not_a_pass(tmpdir, verbose):
     """`t1.mojo` refuses, naming why — it does not exit 0 in silence.
@@ -725,15 +857,50 @@ def test_t1_is_a_named_finding_not_a_pass(tmpdir, verbose):
 def test_a_module_body_reaches_its_next_real_finding(tmpdir, verbose):
     """A body that runs reaches the NEXT construct the backend cannot lower.
 
-    `array_ops_jit.mojo`'s shape: a loop and a subscript over a local list
-    inside a top-level body. Before the fix the whole body was dropped, so
-    the file passed. Now it is refused — on the `printf` of a subscript, a
-    real gap with its own message — which is progress rather than a
-    regression: the sweep is now counting a construct it can name instead of
-    a file that does not run."""
+    `array_ops_jit.mojo`'s shape: a loop and a subscript over a module-level
+    list inside a top-level body. Before the fix the whole body was dropped, so
+    the file passed. It was then refused — on the `print` of a subscript, a real
+    gap with its own message — which was progress rather than a regression: the
+    sweep was counting a construct it could name instead of a file that did not
+    run.
+
+    **Both of those refusals are gone**, so the fixture is `ARRAY_OPS` plus one
+    more statement and the row keeps its meaning: every statement above `n = 5`
+    lowers, and what the build stops at is the `len()` of an integer. Moving the
+    needle rather than deleting the row is the point — a row that asserted "this
+    file is refused" would have been satisfied by the file getting worse, which
+    is the direction this file exists to notice. `body_subscript_and_dict_run`
+    beside it pins the new answer, so the thing that moved is measured rather
+    than merely no longer red.
+
+    `len()` of an integer is chosen over the alternatives on purpose: it is a
+    representation fact (an integer has no length) rather than a storage one, so
+    the element-kind work that unblocked the statements above it cannot be
+    extended to reach this, and the row will keep saying something true."""
     return case_refused(
-        "body_next_finding", ARRAY_OPS,
-        "print() cannot tell whether", tmpdir, verbose)
+        "body_next_finding", BODY_THEN_LEN_OF_AN_INT,
+        "is len() of a value classified as 'int'", tmpdir, verbose)
+
+
+def test_a_module_body_subscript_and_dict_run(tmpdir, verbose):
+    """The `body_next_finding` fixture's own text now runs, and is RIGHT.
+
+    This file's discipline for a construct written in a module body: build the
+    image, EXECUTE it, and compare the answer against CPython. A refusal only
+    says the backend declined; a run says the number is right, and this one is
+    the anti-rot for the refusal the row above used to assert — so a regression
+    in either direction (the dict subscript stops lowering, or it lowers to the
+    wrong word) is a failure of THIS row rather than a change of which row is
+    red.
+
+    All three numbers are the program's own: the loop's sum, the container's
+    length, and the dict value under `"a"`. The dict one is the interesting
+    half — it is a pair-blob key SCAN, and a lowering that took the element path
+    would answer the wrong word with a plausible number, which is why the
+    expectation is CPython's output rather than a fixed `10`."""
+    return case_agrees_with_cpython(
+        "body_subscript_and_dict_run", ARRAY_OPS, tmpdir, verbose,
+        expect_stdout="Sum: 15\nLength: 5\nValue of a: 10\n", expect_exit=0)
 
 
 def test_a_module_body_construction_with_arguments_runs(tmpdir, verbose):
@@ -761,12 +928,12 @@ def test_a_module_body_construction_with_arguments_runs(tmpdir, verbose):
     is not the same word.
 
     **No escape in the format string, and that is deliberate rather than an
-    oversight**: string literals are stored unescaped on this path, so
-    `printf("%d\\n", …)` writes a literal backslash and an `n` — 3 bytes for
-    the answer `1`, not 2 — which `test_formal_sys.py:510`
-    (`test_string_escapes_are_not_interpreted`) pins as a property of the
-    representation. The expected stdout below is the representation, not a
-    bug in it, and CPython is not the oracle for a file that calls `printf`."""
+    oversight**: the expected stdout below is exactly the bytes the format asks
+    for, `"x=1 y=2"`, with no line ending — so the case states the
+    representation it is checking rather than inheriting one from a decoder.
+    (An escape would be decoded, as CPython decodes it; see
+    `test_formal_sys.py`'s `test_string_escapes_are_interpreted_as_cpython_does`.)
+    CPython is not the oracle for a file that calls `printf`."""
     return case_agrees_with_cpython(
         "body_construction_runs", BODY_CONSTRUCTION_RUNS, tmpdir, verbose,
         expect_stdout="x=1 y=2", expect_exit=0)
@@ -832,6 +999,32 @@ def test_a_module_body_construction_leaves_an_unassigned_field_at_its_default(
         tmpdir, verbose, expect_stdout="x=3 y=0", expect_exit=0)
 
 
+def test_a_module_body_construction_without_field_annotations_runs(tmpdir,
+                                                                   verbose):
+    """The same construction with NO annotations, read through `print`, runs.
+
+    The two fixtures above declare `x: Int` / `y: Int`; this one declares
+    nothing, and that is the difference the whole case is about. A field's kind
+    on this path comes from its DECLARED type, gated by a rule that is a claim
+    about the VALUE in the slot (`struct_field_kind`: `S()` does not run
+    `__init__`, so a fresh instance's slot holds the class-level default). With
+    no declaration there is nothing for that rule to read, so `print(p.x)` was
+    refused — `print() cannot tell whether MemberExpr is a string or a number`,
+    which is a refusal about a value the constructor had just put there.
+
+    It is now answered from the CONSTRUCTION instead
+    (`model.struct_ctor_field_value`, which asks `init_body_stores` — so the
+    kind is read off the expression the image evaluates into the slot), and it
+    is asked only when the declaration said nothing.
+
+    CPython is the oracle, so a lowering that read the wrong word of the frame
+    — which for a two-field struct means `x=4 y=3`, both plausible numbers —
+    is a failure of this row rather than a different number to re-pin."""
+    return case_agrees_with_cpython(
+        "body_construction_unannotated", BODY_CONSTRUCTION_UNANNOTATED,
+        tmpdir, verbose, expect_stdout="Point: 3 4\n", expect_exit=0)
+
+
 # ── the classifier itself, as a unit ───────────────────────────────────────
 #
 # `model.module_body` is the one place that decides what runs, and it is
@@ -862,6 +1055,29 @@ def test_module_body_classification(tmpdir, verbose):
         ("X = 5\n", []),                       # folds: substituted at reads
         ('X = "s"\n', []),                      # folds
         ("X = 5 + 2 * 3\n", []),                # folds: the folder's closure
+        # A FLOAT constant, which is the one literal that did not fold until the
+        # module-level folder grew an arm for it (`model.fold_module_value`).
+        # It is body-only-by-omission: both emitters lower a `FloatLiteral` with
+        # `int(expr.value)` ("formal is int-only; truncate toward zero") and
+        # `formal/types.py` types it `DEFAULT_INT_TYPE`, so the build KNEW the
+        # value and the folder declined to say so — `collect_module_symbols`
+        # recorded the name `rebound`, `module_body` declined the store, and a
+        # dylib was refused for having a body at all. Measured on this
+        # repository's own `tools/memslot.py`: four of its six body statements
+        # are float constants. So this row is the doc's item 3.
+        ("X = 96.0\n", []),
+        ("X = 0.5\n", []),                      # …including a fractional one:
+                                               # the word is 0, which is what a
+                                               # read of the literal itself is
+        # …but a float inside an EXPRESSION is NOT a folded constant, and
+        # folding it would be a wrong answer rather than a widening. The
+        # emitters compute `2.5 * 3` as `int(2.5) * 3` = 0, and a folder that
+        # said 7 would have the substitution put 7 at a read site where the
+        # same expression written there yields 0 — so the module-level folder
+        # truncates a LITERAL and nothing wider, exactly the node the emitters
+        # have a rule for. This row is what stops the next reader from adding
+        # the binary arm.
+        ("X = 2.5 * 3\n", ["AssignStmt"]),
         ("comptime X = 5\n", []),               # a compile-time binding
         ("exit(0)\n", ["ExprStmt"]),
         # A CONTAINER literal does not fold, so it is module STATE — and since
@@ -1002,11 +1218,14 @@ def main():
         test_file_level_global_is_refused,
         test_file_level_yield_is_refused,
         test_file_level_await_is_refused,
-        test_dylib_path_refuses_a_module_body,
+        test_a_dylib_runs_its_module_body_at_load_time,
+        test_dylib_path_still_refuses_a_body_that_cannot_run,
         test_t1_is_a_named_finding_not_a_pass,
         test_a_module_body_reaches_its_next_real_finding,
+        test_a_module_body_subscript_and_dict_run,
         test_a_module_body_construction_with_arguments_runs,
         test_a_module_body_construction_leaves_an_unassigned_field_at_its_default,
+        test_a_module_body_construction_without_field_annotations_runs,
         test_a_module_body_can_still_be_refused_by_the_ordinary_codegen,
         test_a_name_collision_with_the_body_function_is_refused,
         test_a_folded_constant_the_body_rebinds_keeps_its_store,

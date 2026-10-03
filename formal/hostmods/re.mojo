@@ -2134,9 +2134,13 @@ def sub(status, pattern: String, repl: String, subject: String,
 
     The template understands `\\1`..`\\9`, `\\g<1>`, `\\g<name>` and `\\\\`,
     which is what the corpus uses. It does NOT re-expand a general Python
-    string escape in the replacement, because a string literal on this path is
-    interned VERBATIM (`os/__init__.mojo`'s `linesep` is the measurement), so
-    a `\\n` the caller wrote is two characters and stays two characters.
+    string escape in the replacement: that is a property of the TEMPLATE, not
+    of the literal. (It used to be explained by "a string literal on this path
+    is interned VERBATIM", which stopped being true at `9023031b` — a literal
+    is decoded, in a module as well as in a program, on both architectures, see
+    `nl` below and the test it names. A `\\n` in a REPLACEMENT is not a
+    general escape for CPython's `re` either, so the behaviour is unchanged
+    while the reason for it is not.)
 
     **`status` IS NOT PRECEDED BY A CAPACITY, as it is in every other writer
     here, and that is a fact rather than an oversight.** `out` in `search` /
@@ -2419,11 +2423,17 @@ def ngroups(pattern: String) -> Int:
 def nl() -> Pointer[UInt8]:
     """A one-byte buffer holding a newline, for a caller building a subject.
 
-    A string literal on this path is interned verbatim and its escapes are NOT
-    unescaped, so a `\\n` written in a program is the two characters `\\` and
-    `n` — measured, and written down at `os/__init__.mojo`'s `linesep`. A
-    pattern can still MATCH a newline (`\\n` in a pattern is an escape and is
-    parsed as one); it is a subject that has to be BUILT to contain one.
+    A pattern can MATCH a newline (`\\n` in a pattern is an escape and is parsed
+    as one). The SUBJECT used to have to be built, because this comment used to
+    say a literal's escapes are not decoded on this path — they are, as of
+    `9023031b`, in a module as well as in a program on both architectures
+    (measured, and pinned by
+    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too`), so
+    `"\\n"` is a real newline and this helper is a convenience rather than a
+    necessity. It is kept because the corpus that uses it is being rewritten
+    against the decoded spelling (`bugs/FORMAL_re_corpus_mojo_str_assumes_
+    escapes_are_not_decoded.md`), and until that rewrite lands a subject built
+    this way and one written as a literal have to agree.
     """
     var p: Pointer[UInt8] = str_alloc(1)
     memset(p, 10, 1)

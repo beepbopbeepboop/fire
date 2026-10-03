@@ -127,7 +127,49 @@ CASES = [
      "    return 1\n",
      0, "null"),
 
+    # A NULLABLE POINTER return, which is what `std/os/env.mojo`'s `getenv` and
+    # `std/pwd/*.mojo`'s `getpwuid` declare: `OptionalPointer[…]` and
+    # `OpaquePointer[…]` are `std/memory/pointer.mojo`'s names for
+    # `Optional[Pointer[…]]`, so at a C BOUNDARY the register holds one address
+    # and the C ABI says a null pointer IS the absent answer. Both were refused
+    # — "this path has no value of that kind to put in the return register" —
+    # which is a claim about the WIDTH of a pointer, and false.
+    #
+    # It is one table of its own (`model.NULLABLE_POINTER_ALIASES`) and NOT three
+    # more entries in `POINTER_TYPE_CTORS`, because the two questions are
+    # different and only one of them has an answer here. As a value a MOJO
+    # function built, an `Optional`'s tag lives a second frame away from its
+    # one-word payload, so `if not ptr:` is not answerable from the word and
+    # `Some(null)` is not `None` — `bugs/FORMAL_stdlib_optional_needs_a_
+    # representation.md`, and the reason reading through one stays refused.
+    # `external_call_return_kind` asks the C ABI's question, so it is the one
+    # reader that may answer, and it is the only one that does.
+    #
+    # **The spelling here is deliberately argument-free, and that is a
+    # limitation rather than a style choice.** Every spelling a real source
+    # writes for these two aliases carries two or more type arguments
+    # (`OptionalPointer[UInt8, ImmUntrackedOrigin]`, `OpaquePointer[mut=False]`),
+    # and a multi-parameter generic application is currently refused EARLIER, as
+    # a subscript whose index is a tuple — which is
+    # `bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, owned
+    # by another lane, and the same wall `env_round_trip` below is sitting on. So
+    # this row pins the classification the moment that wall comes down, and until
+    # then it is the only spelling of a nullable pointer this path can be asked
+    # about at all. It is a real build-and-run row, not a unit test of the model:
+    # a misclassification would leave the register holding whatever was in it,
+    # which is a plausible non-zero answer rather than a failure.
+    ("opaque_pointer_return_is_one_word",
+     "def main() -> Int32:\n"
+     "    var p = external_call[\"getenv\", OpaquePointer](\"" + ABSENT + "\")\n"
+     "    if not p:\n"
+     "        print(\"null\")\n"
+     "        return 0\n"
+     "    print(\"not null\")\n"
+     "    return 1\n",
+     0, "null"),
+
     # ── 2. the C symbol is the C symbol, even when the image says otherwise ──
+
     # `env.mojo` declares Mojo functions called `getenv`, `setenv` and
     # `unsetenv` and calls the C symbols of the same names inside them. Before
     # the extern path was forced, the bare name was found in the image's own
@@ -186,6 +228,108 @@ CASES = [
      "    printf(\"ptr_null=%d\", 0 - 1 if p else 1)\n"
      "    return 0\n",
      0, "ptr_null=1"),
+
+    # ── 1b. `std/os/env.mojo` AS IT NOW READS ─────────────────────────────
+    #
+    # The stdlib renamed `_CPointer` to `OptionalPointer` (measured 2026-10-02:
+    # `new-modular`'s `std/` spells `_CPointer` nowhere), which is the same type
+    # under a name `POINTER_TYPE_CTORS` had never heard of — so the file that
+    # `env_round_trip` above transcribes was REFUSED again, with "this path has
+    # no value of that kind to put in the return register" about a one-word
+    # nullable address. Two facts about this case, and the second is why it is
+    # not the same case with a name swapped in:
+    #
+    #   1. the declared return type establishes the return REGISTER the same
+    #      way `_CPointer` did, so `if not ptr:` reads a null pointer and not an
+    #      integer — the null half is `env_getenv_null_is_a_null_pointer` again;
+    #   2. `ptr.value()` is `Optional.value()`, the UNWRAP, and NOT a load of
+    #      the first byte at that address. That is the half which was silently
+    #      WRONG before `model.nullable_pointer_unwrap` existed: measured, with
+    #      the previous spelling and nothing else changed,
+    #      `String(unsafe_from_utf8_ptr=ptr.value())` BUILDS, RUNS and dies of
+    #      SIGSEGV (exit 139) — the image builds a `char *` out of the byte 'h'
+    #      (104) and address 104 is not mapped. So a case that asserts only the
+    #      register shape would pass on the old lowering's first half and miss
+    #      the defect entirely; this one reads the string back, so it cannot.
+    #
+    # The expected value is `os.environ` in THIS process, the same reference
+    # `env_round_trip` uses — and the C library the image reads is the one that
+    # put it there.
+    ("env_round_trip_with_the_optional_pointer_spelling",
+     "def setenv(var name: String, var value: String,\n"
+     "           overwrite: Bool = True) -> Bool:\n"
+     "    var status = external_call[\"setenv\", Int32](\n"
+     "        name, value, Int32(1 if overwrite else 0))\n"
+     "    return status == 0\n"
+     "\n"
+     "def unsetenv(var name: String) -> Bool:\n"
+     "    return external_call[\"unsetenv\", c_int](name) == 0\n"
+     "\n"
+     "def getenv(var name: String, default: String = \"\") -> String:\n"
+     "    var ptr = external_call[\n"
+     "        \"getenv\", OptionalPointer[UInt8, ImmUntrackedOrigin]\n"
+     "    ](name)\n"
+     "    if not ptr:\n"
+     "        return default\n"
+     "    return String(unsafe_from_utf8_ptr=ptr.value())\n"
+     "\n"
+     "def main() -> Int32:\n"
+     f"    if not setenv(\"{VAR}\", \"hello\", True):\n"
+     "        return 1\n"
+     f"    printf(\"set=%s|\", getenv(\"{VAR}\"))\n"
+     f"    printf(\"absent=%s|\", getenv(\"{ABSENT}\", \"fallback\"))\n"
+     "    if not unsetenv(\"{}\"):\n".format(VAR) +
+     "        return 2\n"
+     f"    printf(\"after=%s|\", getenv(\"{VAR}\", \"gone\"))\n"
+     "    return 0\n",
+     0, "set=hello|absent=fallback|after=gone|"),
+
+    # The same round trip with the stdlib's OWN spelling of every argument —
+    # `name.as_c_string_span()` rather than the bare `name` the two cases above
+    # write, which is what `std/os/env.mojo:41,45,61,76` says. This is a
+    # separate assertion and not a variant of the case above, because the
+    # conversion is a DIFFERENT construct and it was refused for a different
+    # reason: `as_c_string_span()` builds a `CStringSpan`, and the value-method
+    # path had no lowering for it ("is a method call on a value, and this
+    # backend lowers only append, close, write … and the string methods").
+    #
+    # The lowering is the IDENTITY and not a guess: on this path a `String` IS
+    # its own address (a literal is NUL-terminated, so its address is its
+    # length), and `CStringSpan` is a ONE-FIELD struct whose only field is that
+    # pointer, whose value IS its field. So the conversion computes nothing, and
+    # a `char *` is what the C callee receives — which is the only way this case
+    # can pass: a wrong address here is `setenv` storing the variable under some
+    # other name and `getenv` reading back a value nobody set.
+    ("env_round_trip_with_the_stdlib_spelling_of_every_argument",
+     "def setenv(var name: String, var value: String,\n"
+     "           overwrite: Bool = True) -> Bool:\n"
+     "    var status = external_call[\"setenv\", Int32](\n"
+     "        name.as_c_string_span(), value.as_c_string_span(),\n"
+     "        Int32(1 if overwrite else 0))\n"
+     "    return status == 0\n"
+     "\n"
+     "def unsetenv(var name: String) -> Bool:\n"
+     "    return external_call[\"unsetenv\", c_int](\n"
+     "        name.as_c_string_span()) == 0\n"
+     "\n"
+     "def getenv(var name: String, default: String = \"\") -> String:\n"
+     "    var ptr = external_call[\n"
+     "        \"getenv\", OptionalPointer[UInt8, ImmUntrackedOrigin]\n"
+     "    ](name.as_c_string_span())\n"
+     "    if not ptr:\n"
+     "        return default\n"
+     "    return String(unsafe_from_utf8_ptr=ptr.value())\n"
+     "\n"
+     "def main() -> Int32:\n"
+     f"    if not setenv(\"{VAR}\", \"hello\", True):\n"
+     "        return 1\n"
+     f"    printf(\"set=%s|\", getenv(\"{VAR}\"))\n"
+     f"    printf(\"absent=%s|\", getenv(\"{ABSENT}\", \"fallback\"))\n"
+     "    if not unsetenv(\"{}\"):\n".format(VAR) +
+     "        return 2\n"
+     f"    printf(\"after=%s|\", getenv(\"{VAR}\", \"gone\"))\n"
+     "    return 0\n",
+     0, "set=hello|absent=fallback|after=gone|"),
 
     # ── 3. the declared return type, per kind ─────────────────────────────
     # A 64-bit signed integer is the whole register, so nothing is emitted;
@@ -327,6 +471,22 @@ REFUSALS = [
      "    j = 2\n"
      "    return a[i, j]\n",
      "is a subscript whose index is a tuple"),
+
+    # A `String` -> `char *` conversion on a receiver this path cannot establish
+    # to be a string. The needle is the CONVERSION's sentence and not the
+    # pointer-bounded one, which is the distinction: `as_c_string_span()` computes
+    # nothing (its answer IS the receiver's address), so a reader told "add it to
+    # the string table" would be sent to a table of methods that read the
+    # receiver's bytes. And the reason it must stay refused is that the identity
+    # is only true of a `char *` — on an integer it hands a C callee the integer.
+    ("refuse_a_c_string_conversion_of_a_word",
+     "def main(n: Int) -> Int:\n"
+     "    var k = 7\n"
+     "    var p = external_call[\"strlen\", Int64](\n"
+     "        k.as_c_string_span())\n"
+     "    printf(\"%d\", p)\n"
+     "    return 0\n",
+     "converts a string to a `char *`, and its receiver"),
 ]
 
 
@@ -410,6 +570,137 @@ def run_refusal(name, source, needle, tmpdir, verbose):
     return True, ""
 
 
+# ── the VARIADIC calling convention, checked against the platform ────────────
+#
+# On Apple arm64 a variadic argument is NOT passed in an argument register: the
+# caller reserves an area and the i-th unnamed argument goes at offset 8*(i-1)
+# from SP as it stands at the call. `formal/model.py`'s `VARIADIC_LIBC` is where
+# a callee is recorded as variadic and how many of its arguments are named, and
+# `arm64_codegen`'s `_emit_variadic_area` lays the area out from it.
+#
+# **A table is only as good as its last audit, and being wrong here is the worst
+# outcome on this path**: a callee that reads its third argument out of the area
+# and is called without one reads `[sp]` — whatever the caller had there — and
+# answers from it. No crash, no refusal, a plausible number. Measured, with
+# `fcntl` missing from the table: `fcntl(fd, F_SETFD, FD_CLOEXEC)` returned 0
+# (success) and changed nothing, and `fcntl(fd, F_GETFL)` reported 192 where
+# CPython reports 4. With `asprintf` recorded as having ONE named argument when
+# it has two, the emitter wrote the format POINTER into `[sp+0]` — the slot the
+# first variadic value is read from — and left the value itself in X2.
+#
+# So both directions are checked against the platform's own headers, read out of
+# clang's preprocessed output rather than out of a second copy of the answer:
+#
+#   * every symbol this path can reach that the headers declare `...`-variadic is
+#     in the table, with the header's named count — the direction that was
+#     broken (`fcntl`, `ioctl` absent; `asprintf` wrong);
+#   * every entry in the table IS `...`-variadic in those headers, with that
+#     count — the direction that catches an entry asserting a convention the
+#     callee does not have, which is how the `v*` family came to claim an
+#     unnamed area for a function whose last parameter is a `va_list`.
+#
+# The vocabulary is derived, not written down: `model.FRAME_C_VALUE_CALLS` is
+# the model's own list of C entry points this path reaches by bare name, and the
+# `external_call["sym", …]` literals are harvested from this repository's Mojo
+# and test sources. A new extern call to a variadic callee therefore fails here
+# rather than answering from `[sp]`.
+HEADERS = """
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/utsname.h>
+#include <sys/select.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/resource.h>
+#include <dirent.h>
+#include <signal.h>
+#include <syslog.h>
+#include <err.h>
+"""
+
+
+def _header_variadic_map():
+    """`({symbol: named counts}, {every declared symbol})`, or None.
+
+    Read out of `clang -E`, so both answers are the platform's and not a second
+    copy of the table's own. The second set is what makes the "is this entry
+    even variadic" direction checkable at all: the first map holds only the
+    symbols with a `...`, so absence from it is ambiguous between "not variadic"
+    and "not in these headers", and only the full set tells the two apart.
+
+    Returns None when clang is not available, which the caller turns into a
+    FAILURE naming the reason rather than a silent pass: a skipped check of the
+    one table whose wrong entries are silent wrong answers is the failure mode
+    this file exists to prevent.
+    """
+    import re
+    import shutil
+    import tempfile
+    clang = shutil.which("clang")
+    if clang is None:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "hdr.c")
+        with open(src, "w") as f:
+            f.write(HEADERS)
+        r = subprocess.run([clang, "-E", "-P", src], capture_output=True,
+                           text=True, timeout=120)
+        if r.returncode != 0:
+            return None
+        text = r.stdout
+    # A declaration wraps over lines, so the whitespace is collapsed before the
+    # declarator is matched; a parameter list containing `...` is the fact.
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"\s+", " ", text)
+    variadic, declared = {}, set()
+    for m in re.finditer(r"([A-Za-z_][A-Za-z_0-9]*)\s*\(([^(){}]*)\)", text):
+        name, params = m.group(1), m.group(2)
+        declared.add(name)
+        if "..." not in params:
+            continue
+        named = [x.strip() for x in params.split("...")[0].split(",")
+                 if x.strip() and x.strip() != "void"]
+        if named:
+            variadic.setdefault(name, set()).add(len(named))
+    return variadic, declared
+
+
+def _reachable_c_symbols():
+    """Every C symbol this repository can call, harvested rather than listed.
+
+    Two sources and no third: `model.FRAME_C_VALUE_CALLS`, which is the model's
+    own answer to "is this name a C library entry point this path reaches", and
+    the `external_call["sym", …]` literals in this repository's own sources,
+    which is where a new C call is written. Both are read, not maintained here,
+    so this cannot fall behind the code it is checking.
+    """
+    import glob
+    import re
+    import formal.model as M
+    names = set(M.FRAME_C_VALUE_CALLS) | set(M.VARIADIC_LIBC)
+    literal = re.compile(r'external_call\["([A-Za-z_][A-Za-z_0-9]*)"')
+    paths = glob.glob(os.path.join(HERE, "formal", "**", "*.mojo"),
+                      recursive=True)
+    paths += glob.glob(os.path.join(HERE, "test_formal_*.py"))
+    paths += glob.glob(os.path.join(HERE, "formal", "**", "*.py"),
+                       recursive=True)
+    for p in paths:
+        try:
+            with open(p, errors="replace") as f:
+                names.update(literal.findall(f.read()))
+        except OSError:
+            continue
+    return names
+
+
 # ── the model reader, without a build ──────────────────────────────────────
 #
 # `external_call_spec` is a decision three call sites and two architectures
@@ -439,6 +730,29 @@ def model_cases():
         got = spec(src)
         return None if got is None else got[2]
 
+    def deref_shape(src):
+        """`dereference_lowering`'s SHAPE for the `.value()` in `src`, or None.
+
+        The shape and not the width, because the two answers this needs to tell
+        apart are `load` and `identity` — a nullable pointer's `value()` is
+        `Optional.value()` (the unwrap, and the receiver IS the pointer) and a
+        plain pointer's is a load at the pointee's width. Both put a word in the
+        same register, so only the shape says which program was lowered.
+        """
+        stmts = B.parse_module(src, "<model_cases>")
+        for fn in B._extract_functions(stmts):
+            for node in M.iter_nodes(fn.body):
+                if isinstance(node, F.CallExpr) \
+                        and isinstance(node.func, F.MemberExpr) \
+                        and node.func.member in M.DEREFERENCE_TRY_NAMES:
+                    how, _why = M.dereference_lowering(fn, node.func.obj, {},
+                                                       {}, {})
+                    return None if how is None else how[0]
+        return None
+
+    def annotation_base_name_of(text):
+        return M.annotation_base_name(text)
+
     out = []
     # The corpus's own three shapes, with the return type each one declares.
     out.append(("spec_setenv_int32",
@@ -449,6 +763,42 @@ def model_cases():
                 spec('def f(s):\n    return external_call["getenv", '
                      '_CPointer[UInt8, UntrackedOrigin[mut=False]]](s)\n'),
                 ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # THE SAME C FUNCTION, SPELLED THE WAY `std/os/env.mojo:78` SPELLS IT NOW
+    # (measured 2026-10-02: `_CPointer` appears nowhere in `new-modular`'s
+    # `std/`), and the alias family around it.  Each of those names is
+    # `= Pointer[…]` or `= Optional[Pointer[…]]` in `memory/pointer.mojo:133-211`
+    # and is a `comptime` type ALIAS this path reads by NAME rather than
+    # resolving — a declared return type is a type EXPRESSION and the alias is a
+    # module-level `comptime` binding, so the name is the whole of the evidence.
+    # `getenv` returns `char *`, which is one word with 0 meaning None (the same
+    # answer `_CPointer` already gave for it), and `env.mojo`'s own `if not ptr:`
+    # is what reads it; `external_call_return_kind`'s own docstring says a
+    # pointer "is an address, so `word`, and it needs no pointee", so the return
+    # register is the address in every case.
+    for spelling in ("OptionalPointer[UInt8, ImmUntrackedOrigin]",
+                     "MutPointer[UInt8, MutUntrackedOrigin]",
+                     "ImmPointer[UInt8, ImmUntrackedOrigin]",
+                     "OpaquePointer[MutUntrackedOrigin]"):
+        out.append((f"return_kind_{annotation_base_name_of(spelling)}_is_a_word",
+                    M.external_call_return_kind(spelling),
+                    M.EXTERN_RETURN_WORD))
+    out.append(("spec_getenv_optional_pointer",
+                spec('def f(s):\n    return external_call["getenv", '
+                     'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'),
+                ("getenv", M.EXTERN_RETURN_WORD, None)))
+    # …and the LOAD half, which would be a WRONG ANSWER rather than a refusal if
+    # the alias's parameter order were read wrongly: the `//` in the alias
+    # declaration separates the keyword-only `mut` from the positional `T`, so
+    # the pointee is the first POSITIONAL type argument.  The four call sites in
+    # the tree agree, and the second and third spellings are
+    # `std/memory/memory.mojo:477` and `std/pwd/_linux.mojo:48`.
+    out.append(("optional_pointer_pointee_is_the_first_positional_arg",
+                M.pointee_args("OptionalPointer[UInt8, ImmUntrackedOrigin]"),
+                ["UInt8", "ImmUntrackedOrigin"]))
+    out.append(("optional_pointer_keyword_mut_is_not_the_pointee",
+                M.pointee_args("OptionalPointer[mut=True, NoneType, "
+                               "MutAnyOrigin]"),
+                ["NoneType", "MutAnyOrigin"]))
     out.append(("spec_void",
                 spec('def f():\n    external_call["abort", NoneType]()\n'),
                 ("abort", M.EXTERN_RETURN_VOID, None)))
@@ -491,6 +841,65 @@ def model_cases():
                 M.EXTERN_RETURN_WORD))
     out.append(("return_kind_unknown_is_none",
                 M.external_call_return_kind("Some[Thing]"), None))
+    # The `value()` half, which is a DIFFERENT question from the return register
+    # and the one that was silently wrong: a nullable pointer's `.value()` is
+    # `Optional.value()` — the unwrap, so the receiver IS the pointer — while a
+    # plain pointer's is a load at the pointee's width. Same spelling, same
+    # register, two different programs.
+    out.append(("value_on_a_nullable_pointer_is_the_unwrap",
+                deref_shape('def f(s):\n'
+                            '    var p = external_call["getenv", '
+                            'OptionalPointer[UInt8, ImmUntrackedOrigin]](s)\n'
+                            '    return p.value()\n'),
+                "identity"))
+    out.append(("value_on_a_plain_pointer_is_a_load",
+                deref_shape('def f(s):\n'
+                            '    var p = external_call["getenv", '
+                            'Pointer[UInt8]](s)\n'
+                            '    return p.value()\n'),
+                "load"))
+    # The variadic calling convention, in BOTH directions, against the platform's
+    # own headers. See the section comment above for why this is here and what
+    # each direction is protecting against; the short version is that a missing
+    # entry and a wrong entry are both a plausible wrong ANSWER, never a
+    # refusal, because the callee reads `[sp]`.
+    variadic, declared = _header_variadic_map() or (None, None)
+    if variadic is None:
+        no_clang = ("no clang on PATH: the variadic table cannot be checked "
+                    "against the platform's headers, and an unchecked table is "
+                    "the exact failure this case exists for")
+        out.append(("variadic_table_matches_the_platform_headers",
+                    no_clang, no_clang))
+        out.append(("variadic_table_covers_every_reachable_callee",
+                    no_clang, no_clang))
+    else:
+        # Direction 1: every entry IS a `...`-variadic callee, and says the
+        # right number of named arguments. `asprintf` was the wrong count (1 for
+        # 2) and the five `v*` entries were not variadic at all — both are in
+        # this direction, and both were silent wrong answers at a call site.
+        wrong = sorted(
+            f"{name}: the table says {M.VARIADIC_LIBC[name]} named, the "
+            f"headers say {sorted(variadic[name])}"
+            for name in sorted(set(M.VARIADIC_LIBC) & set(variadic))
+            if variadic[name] != {M.VARIADIC_LIBC[name]})
+        wrong += sorted(
+            f"{name}: the table claims a variadic tail and the headers "
+            f"declare no `...` for it"
+            for name in sorted(set(M.VARIADIC_LIBC) - set(variadic))
+            if name in declared)
+        out.append(("variadic_table_matches_the_platform_headers",
+                    wrong, []))
+        # Direction 2: every C symbol this path can reach that the platform
+        # declares variadic is IN the table. `fcntl` and `ioctl` were both
+        # missing, and both are names `FRAME_C_VALUE_CALLS` already listed as
+        # reachable — so the vocabulary was not the hard part and the table was
+        # the only thing that was out of date.
+        uncovered = sorted(
+            f"{name} ({sorted(variadic[name])} named, per the headers)"
+            for name in sorted(_reachable_c_symbols())
+            if name in variadic and name not in M.VARIADIC_LIBC)
+        out.append(("variadic_table_covers_every_reachable_callee",
+                    uncovered, []))
     return out
 
 
