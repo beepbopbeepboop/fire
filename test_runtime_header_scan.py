@@ -298,6 +298,17 @@ def test_every_declaration_is_seen():
     # (`mojo_dict_set_bytes_double` was in the header already). A new value
     # KIND needs a new setter; a value shape that already had one does not
     # get a second spelling of it.
+    # 545 -> 551 (2026-10-02, `bugs4-6-c`), for a STRUCT stored as a dict
+    # value: `mojo_dict_set_struct` / `mojo_dict_set_val_repr` /
+    # `mojo_dict_repr_val` and the pair `mojo_dict_set_bytes_struct` /
+    # `mojo_dict_set_bytes_other_struct` — six, taken from the call. The
+    # `other_struct` pair exists because the dict records ONE repr function
+    # (a property of the dict) while the tag is per SLOT, so a second struct
+    # type needs its own tag (`kind == 6`) rather than being handed the first
+    # type's repr; without it `{'a': p, 'b': q}` printed q's repr twice, which
+    # is a wild read and not merely a wrong string. Four of the six are
+    # `_bytes_` twins of the same shape as `mojo_dict_set_bytes_bool`, so the
+    # key DOMAIN keeps exactly one spelling per value shape.
     #
     # NOT 542 in between: `bugs3-codegen-1-r2` added
     # `mojo_require_str_arg`, the runtime half of a str-annotated parameter
@@ -315,7 +326,7 @@ def test_every_declaration_is_seen():
     # them to THIS header. That is the whole reason this list is a ledger and
     # not a formula — a name in the header that no line accounts for is the
     # only way this count can go wrong silently.
-    for header, want in (('fire_runtime.h', 545),
+    for header, want in (('fire_runtime.h', 551),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -4564,6 +4564,37 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
                        [('MojoDict *', dict_val), (key_ctype, key_val),
                         ('double', val)])
         return
+    # A STRUCT value is stored TAGGED and, with the repr function this compile
+    # emitted for that struct, recorded ON THE DICT — the same bargain
+    # `mojo_list_set_elem_repr` makes for a list, for the same reason: the
+    # value's static type is known here and is unrecoverable by the time
+    # anything walks the dict, because a struct-allocated value carries no
+    # runtime type tag for `_mojo_dispatch_repr` to find. Without it
+    # `print({'k': p})` rendered the generated field dump `P(x='a')` where
+    # CPython renders the user's `__repr__`.
+    #
+    # The dict records ONE function while the tag is per SLOT, so a dict
+    # holding two different struct types cannot have both rendered by it: the
+    # first struct recorded owns `kind == 5` and any other struct value is
+    # tagged `kind == 6` — "a struct this dict's repr does not describe" — and
+    # falls back to the generic dispatch. Tagging per slot is what keeps the
+    # answer from depending on store ORDER: the record is never cleared, so
+    # `d['p'] = p; d['n'] = 5` renders `{'p': R<a>, 'n': 5}` and
+    # `d['n'] = 5; d['p'] = p` renders the same, where clearing the record on
+    # the int would have made the first of those print a field dump.
+    _shim = gimple_exprtypes.struct_elem_repr_shim(gen, val_ctype)
+    if _shim:
+        _have = gen._dict_val_repr.get(dict_val, '')
+        if not _have:
+            gen._dict_val_repr[dict_val] = _shim
+            gen._emit_call('void', '', 'mojo_dict_set_val_repr',
+                           [('MojoDict *', dict_val),
+                            ('void *', gen._new_val('void *', _shim))])
+        _st = 'struct' if _have in ('', _shim) else 'other_struct'
+        gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _st,
+                       [('MojoDict *', dict_val), (key_ctype, key_val),
+                        (val_ctype, val)])
+        return
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
     gen._emit_call('void', '', 'mojo_dict_set_' + _bs + _suffix,

@@ -6389,6 +6389,94 @@ main()
 """, "[R<a>]\n(R<a>,)\n[R<a>, R<a>]\n[[R<a>]]\n[R<a>]\n[R<a>]\n"
        "[R<a>, R<a>]\n")
 
+    # The DICT half of the same question, which the list fix above left open:
+    # `print({'k': p})` printed the generated field dump `P(x='a')` where
+    # CPython prints the object's own `__repr__`. The dict's slots already
+    # carried a `kind`; what they did not carry was a way to render a struct
+    # VALUE, for the same reason the list needed `mojo_list_set_elem_repr` — a
+    # struct-allocated value has no runtime type tag for `_mojo_dispatch_repr`
+    # to find. So the dict records the same shim, per slot (`kind == 5`) and on
+    # the dict itself (`mojo_dict_set_val_repr`), and `mojo_dict_values` /
+    # `mojo_dict_items` carry it into the list they build, which is what makes
+    # `list(d.values())` and `d.items()` agree with `print(d)`.
+    #
+    # Against CPython, so neither of this path's remaining gaps can be quietly
+    # asserted here: what is pinned is the VALUE's repr in each place it
+    # appears, plus the shape a per-dict function has to get right — an int
+    # stored beside the struct (the tag is per slot, so both are right, and in
+    # EITHER store order). `print(d.values())` and `print(d.items())` are not in
+    # this program because both print the list without its `dict_values(...)` /
+    # `dict_items(...)` view wrapper; `list(d.values())` is the same value and
+    # does match.
+    test_gimple_matches_cpython("gimple_dict_value_repr_uses_the_struct_dunder", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+def shapes():
+    p = P("a")
+    d = {}
+    d['k'] = p
+    print(d)
+    print(repr(d))
+    print(list(d.values()))
+    print(dict(d))
+    e = d | {'z': 1}
+    print(e)
+    h = {}
+    h['p'] = p
+    h['n'] = 5
+    print(h)
+    m = {}
+    m['n'] = 5
+    m['p'] = p
+    print(m)
+
+shapes()
+""")
+
+    # The two shapes the CPython comparison above cannot carry, pinned as they
+    # are rather than as they should be, so that a change to either is a
+    # decision somebody makes:
+    #
+    #   `print(d.items())` prints `[('k', R<a>)]` where CPython wraps it in
+    #   `dict_items(...)` — the pairs are right, the VIEW type is missing. That
+    #   is the items() wrapper, not this fix.
+    #   `{'p': p, 'q': q}` prints `'p': R<a>` and `'q': Q(y='b')` — the dict
+    #   records ONE repr function and the tag is per slot, so the second
+    #   struct type is `kind == 6` and goes to the generic dispatch, which
+    #   gives the field dump. Handing it the recorded function instead would
+    #   print 'q' as `R<...>` by reading a `Q *` through `P`'s repr, which is
+    #   a wild read rather than a wrong string.
+    test_gimple_stdout("gimple_dict_value_repr_remaining_two_shapes", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+
+class Q:
+    def __init__(self, y):
+        self.y = y
+    def __repr__(self):
+        return "Q<" + self.y + ">"
+
+def shapes():
+    p = P("a")
+    q = Q("b")
+    d = {}
+    d['k'] = p
+    print(d.items())
+    g = {}
+    g['p'] = p
+    g['q'] = q
+    print(g)
+
+shapes()
+""", "[('k', R<a>)]\n{'p': R<a>, 'q': Q(y='b')}\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.

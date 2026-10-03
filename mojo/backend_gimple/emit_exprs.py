@@ -5128,7 +5128,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # field-less struct has nothing for a field dump to say anyway; its
     # `__repr__`, if it has one, goes unreached here exactly as it does for
     # every other container repr.
-    _elem_repr = _struct_elem_repr_shim(gen, elem)
+    _elem_repr = gimple_exprtypes.struct_elem_repr_shim(gen, elem)
     if _elem_repr:
         gen._emit_call('void', '', 'mojo_list_set_elem_repr',
                        [('MojoList *', t),
@@ -5142,31 +5142,13 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 # lowered type, which is the same int64_t every other integer has; everything
 # else is the shared element-type mapping (TypeLattice.slot_kind_byte), the
 # same one the sorters and the per-slot readers use.
-def _struct_elem_repr_shim(gen, elem_type: str) -> str:
-    """`_mojo_elem_repr_<Struct>` for a container element ctype, else ''.
-
-    The one decision behind `mojo_list_set_elem_repr`: is this element a
-    REGISTERED STRUCT this compile emitted a repr shim for? A shim exists for
-    every struct with at least one field (module_gen.reflect_structs emits it
-    beside `_mojo_repr_<Struct>` and forward-declares it), which is exactly
-    `struct_field_types[struct]` being non-empty — the same condition
-    `reflect_structs` itself filters on, restated rather than queried so this
-    needs no new cross-module table.
-
-    Returns the shim's NAME, which the caller hands to the runtime as a
-    function pointer; the runtime calls it with the slot's word. Empty string
-    for every other element type (int, str, bytes, a nested list, a dict), where
-    the runtime's own per-slot reader is already right — that is what makes
-    this a strict improvement and not a new dispatch to get wrong.
-    """
-    if not elem_type or not elem_type.endswith(' *'):
-        return ''
-    sn = elem_type[:-2].strip()
-    if not sn or not gimple_exprtypes._struct_name_of(elem_type):
-        return ''
-    if not gen.struct_field_types.get(sn):
-        return ''
-    return f'_mojo_elem_repr_{sn}'
+# The one decision behind `mojo_list_set_elem_repr` — is this element a
+# REGISTERED STRUCT this compile emitted a repr shim for? — is
+# `gimple_exprtypes.struct_elem_repr_shim`, in the middle tier beside the
+# other value-shape predicates, because a DICT asks the same question of
+# the same ctype for its own `kind == 5` slots
+# (`emit_dict_int_value_store`), and this copy is what the two would have
+# drifted apart through.
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
@@ -5436,7 +5418,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     _tshim = ''
     for _tsl in range(len(lowered)):
         _tct = _as_str(lowered[_tsl][1])
-        _tsh = _struct_elem_repr_shim(gen, _tct)
+        _tsh = gimple_exprtypes.struct_elem_repr_shim(gen, _tct)
         if not _tsh:
             continue
         if _tshim and _tsh != _tshim:

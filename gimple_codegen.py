@@ -2165,6 +2165,14 @@ class GimpleGen:
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
+        # Per dict C name, the `_mojo_elem_repr_<Struct>` shim its `kind == 5`
+        # slots are rendered with — or '' once that dict has been seen to hold
+        # values the one function cannot render (a second struct type, or a
+        # plain int). Recorded at the STORE, where the value's type is still
+        # readable, and read by the runtime at REPR time, where it is not: the
+        # same bargain `mojo_list_set_elem_repr` makes for a list, keyed by the
+        # same `_dict_val_types` beside it and with the same lifetime.
+        self._dict_val_repr: dict[str, str] = {}
         self._dict_nested_val_types: dict[str, str] = {}
         self._captures: dict[str, str] = {}
         # Phase 4 (same doc, same pattern): per-top-level-statement

@@ -1214,6 +1214,37 @@ def _struct_name_of(ctype: str) -> str:
         s = s[6:]
     return s.replace(' *', '').strip()
 
+def struct_elem_repr_shim(gen, ctype: str) -> str:
+    """`_mojo_elem_repr_<Struct>` for a CONTAINER-ELEMENT ctype, else ''.
+
+    The one decision behind `mojo_list_set_elem_repr` (a list or tuple) and
+    `mojo_dict_set_val_repr` (a dict, via its `kind == 5` slots): is this value
+    a REGISTERED STRUCT this compile emitted a repr shim for? A shim exists for
+    every reflected struct with at least one field (module_gen.reflect_structs
+    emits it beside `_mojo_repr_<Struct>` and forward-declares it), which is
+    exactly `struct_field_types[struct]` being non-empty — the same condition
+    `reflect_structs` itself filters on, restated rather than queried so this
+    needs no new cross-module table.
+
+    Returns the shim's NAME, which the caller hands to the runtime as a
+    function pointer; the runtime calls it with the slot's word. Empty string
+    for every other value type (int, str, bytes, a nested list, a dict), where
+    the runtime's own per-slot reader is already right — that is what makes
+    this a strict improvement and not a new dispatch to get wrong.
+
+    Lives here, in the middle tier, rather than in the backend module that
+    first needed it: the two containers ask the same question about the same
+    ctype, and a copy per container is how the two drifted before.
+    """
+    if not ctype or not ctype.endswith(' *'):
+        return ''
+    sn = ctype[:-2].strip()
+    if not sn or not _struct_name_of(ctype):
+        return ''
+    if not gen.struct_field_types.get(sn):
+        return ''
+    return f'_mojo_elem_repr_{sn}'
+
 def _struct_type_id(name: str) -> int:
     """Deterministic runtime type tag for a struct name — a pure function of
     the name, so the allocation site (which stamps this into the struct's
