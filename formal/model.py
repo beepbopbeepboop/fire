@@ -20075,8 +20075,10 @@ def struct_init_shapes(struct_def) -> list:
     `required` counts the parameters with no default, EXCLUDING the receiver:
     `out self` is where the object is written, not something the caller passes,
     and counting it would make every arity in this file off by one.  The
-    receiver is recognised by `struct_receivers`, so a class spelling it `this`
-    is read the same as one spelling it `self`.
+    receiver is recognised per METHOD and by `method_declares_receiver`, so a
+    class spelling it `this` is read the same as one spelling it `self` and an
+    `@implicit` converting constructor — whose first parameter is an ordinary
+    argument, not a receiver — keeps it.
 
     `params` is `[(name, default_expression)]` in DECLARATION ORDER with the
     receiver removed, and it is the binding order: positional argument `i` is
@@ -20096,17 +20098,43 @@ def struct_init_shapes(struct_def) -> list:
     and what the positional construction lowers.  With one, `S(...)` calls it.
     """
     out = []
-    receivers = struct_receivers(struct_def)
     for m in struct_methods(struct_def):
         if m.name != "__init__":
             continue
         defaults = getattr(m, "param_defaults", None) or {}
         has_default = getattr(m, "param_has_default", None) or {}
         kwonly = set(getattr(m, "kwonly", None) or ())
+        # The receiver of THIS method, not of the class. Two things were wrong
+        # with asking `struct_receivers`, which is a class-wide SET:
+        #
+        #   * it is built from `method_receiver_name`, which takes the first
+        #     parameter's name whatever it is called, so an `@implicit`
+        #     CONVERTING constructor — `@implicit def __init__(_value: Int) ->
+        #     Cell`, which has no receiver at all and whose first parameter is an
+        #     ordinary argument — contributed `_value` to the set, and the loop
+        #     below then skipped that argument as "the receiver". The shape
+        #     counted 0 required parameters and 0 names, so it became
+        #     indistinguishable from `def __init__(out self)` and a `Cell()`
+        #     was refused as AMBIGUOUS between two constructors with different
+        #     arities;
+        #   * a set has no owner, so one overload's receiver name exempts the
+        #     same-spelled ordinary parameter of a DIFFERENT overload.
+        #
+        # `method_declares_receiver` is the reader that asks the question
+        # properly — the parameter must be spelled as a receiver
+        # (`RECEIVER_PARAMETER_SPELLINGS`), which is the same rule
+        # `_rewrite_method_calls` already refuses anything outside of, so a
+        # receiver spelled some other way never reached this loop working in the
+        # first place. Asking it per method is also what `method_receiver_name`'s
+        # own docstring requires ("a caller that needs the receiver of the
+        # method it is looking at must not answer a slightly different
+        # question").
+        recv = (method_receiver_name(m)
+                if method_declares_receiver(m) else None)
         names, params, required, optional = [], [], 0, 0
         for p in (getattr(m, "params", None) or []):
             pname = p[0] if isinstance(p, (tuple, list)) else p
-            if pname in receivers:
+            if recv is not None and pname == recv:
                 continue
             names.append(pname)
             params.append((pname, defaults.get(pname)))

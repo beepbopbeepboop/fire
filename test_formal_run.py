@@ -6058,8 +6058,79 @@ BOTH_ARCH_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    return ping(5000)\n", 2, None),
+    # ONE NAME, TWO `__init__`s, only ONE of which has a receiver. Both halves of
+    # the defect this pins are about that collision, and each one alone leaves a
+    # different program refusing, which is why this is one row and not two.
+    #
+    # The source is `std/builtin/float_literal.mojo`'s own shape: an `@implicit`
+    # CONVERTING constructor is spelled with NO receiver parameter at all
+    # (`@implicit def __init__(_value: IntLiteral[_]) -> FloatLiteral[…]`), so
+    # its first parameter is an ordinary argument. Two defects followed from
+    # reading "first parameter" as "receiver":
+    #
+    #   * `struct_init_shapes` skipped `_value` as "the receiver" — it asked a
+    #     CLASS-WIDE set, and `struct_receivers` takes the first parameter's name
+    #     whatever it is called — so this overload counted ZERO required
+    #     parameters, `Cell()` was ambiguous against `__init__(out self)`, and
+    #     the message read "(0 required; 0 required)" for two constructors whose
+    #     arities are 0 and 1;
+    #   * `build._return_the_receiver` applied the mutating overload's write-back
+    #     entry to THIS one, because the entry is keyed by the lifted name and
+    #     `method_function_name` gives one name to every overload of one method.
+    #     It refused the file with "both changes its receiver and returns a
+    #     value" about a method that changes no receiver — measured on
+    #     `float_literal.mojo` before the fix, on both architectures.
+    #
+    # The answer is `7`, and what it pins is the ARITY READER: the zero-operand
+    # `__init__(out self)` is selected, which it could not be while the other
+    # overload counted zero required parameters too.
+    ("an_implicit_converting_init_next_to_a_mutating_one_is_not_a_mutator",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._value = 7\n"
+     "\n"
+     "    @implicit\n"
+     "    def __init__(_value: Int) -> Cell:\n"
+     "        return _value\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     0, "7"),
+    # …and the WRITE-BACK half, which the row above does not reach: `Cell()` is
+    # a CONSTRUCTION, whose `__init__` body is inlined at the call site, so `7`
+    # above is carried by the inline and says nothing about a mutator handing its
+    # receiver back. `bump` is a plain method call, which is the shape the
+    # write-back exists for, and 9 is `_value = 7` plus the `+ 2` — 7 is what a
+    # dropped write-back prints. This row is also the regression guard for the
+    # fix itself: the new guard in `build._return_the_receiver` returns early for
+    # a function that is not a mutator, and a guard that matched on the LIFTED
+    # name instead of on the function would silence this row's write-back along
+    # with the false refusal.
+    ("a_mutating_init_keeps_its_write_back_beside_a_converting_one",
+     "struct Cell:\n"
+     "    var _value: Int\n"
+     "\n"
+     "    def __init__(out self):\n"
+     "        self._value = 7\n"
+     "\n"
+     "    @implicit\n"
+     "    def __init__(_value: Int) -> Cell:\n"
+     "        return _value\n"
+     "\n"
+     "    def bump(out self, k: Int):\n"
+     "        self._value = self._value + k\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var c = Cell()\n"
+     "    c.bump(2)\n"
+     "    printf(\"%d\", c._value)\n"
+     "    return 0\n",
+     0, "9"),
 ]
-
 ASSIGNED_TYPE_REFUSALS = [
     # THE SHAPE THAT WAS REFUSED AND IS NOW THE POSITIVE CASE, and it is here
     # rather than deleted because it is the one the sweep named.
@@ -15494,6 +15565,7 @@ TYPE_APPLICATION_REFUSALS = [
      "    return 0\n",
      0, "n=0"),
 ]
+
 
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
