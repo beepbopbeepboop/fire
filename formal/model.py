@@ -8991,6 +8991,140 @@ def pointer_pointee(fn, expr, decls: dict, functions: dict = None):
                   "pointee is established")
 
 
+def _declared_annotations(fn) -> dict:
+    """`{name: {annotation, …}}` — every type this function DECLARES for a name.
+
+    The declarations only: a parameter's annotation and every `var x: T` in the
+    body.  A name bound by an assignment with no annotation is absent, and that
+    absence is the answer every consumer here wants — a width or an integer-ness
+    that no declaration states is not established, and this path refuses rather
+    than guesses (`bugs/FORMAL_known_limits.md`'s rule).
+
+    **Agree-or-refuse, not last-write-wins**, for the reason `_name_bindings`
+    gives: two declarations that name two different pointees are a
+    disagreement, and picking one is the silently-wrong answer.  So a name with
+    two annotations has two entries here and every reader that wants ONE answer
+    asks whether there is exactly one.
+
+    Cached on `fn` because the emitters ask it from `_emit_binop`, which is the
+    hottest site in both backends, and the answer cannot change: the AST is
+    fixed by the time any of them runs.
+    """
+    cached = getattr(fn, "_declared_annotations", None)
+    if cached is not None:
+        return cached
+    out = {}
+    for p in (list(getattr(fn, "params", None) or [])):
+        if isinstance(p, (tuple, list)) and len(p) > 1 and p[0] \
+                and isinstance(p[1], str):
+            out.setdefault(p[0], set()).add(p[1])
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.VarDecl) and node.name and node.type_ann:
+            out.setdefault(node.name, set()).add(node.type_ann)
+    fn._declared_annotations = out
+    return out
+
+
+def _only_declared(fn, name):
+    """The one annotation `fn` declares for `name`, or None (0 or 2 of them).
+
+    **Read, never popped.** The set is the cache `_declared_annotations`
+    publishes, and two callers asking the same question must get the same
+    answer: a `pop()` here left the second caller with an empty set, which is
+    the one way this table could say "nothing is declared" about a name the
+    function declares — and the two callers here are on opposite sides of one
+    answer (the emitter scales, the model accounts for the scaling), so the
+    second one to ask would have been the one to disagree.
+    """
+    anns = _declared_annotations(fn).get(name) or ()
+    return next(iter(anns)) if len(anns) == 1 else None
+
+
+def _is_integer_expression(fn, e, depth=0) -> bool:
+    """True when `e` is an INTEGER by a declaration or a literal — never by
+    inference.
+
+    The conservative direction, and it is the only one available: this path's
+    shared type reader (`formal.types.infer_expr`) answers a bare name with the
+    DEFAULT INTEGER TYPE, so it cannot tell `k` (an `Int`) from `q` (a pointer)
+    and using it here would scale `p + q`.  So a name counts only when the
+    function DECLARES it as one of `INT_TYPE_CTORS`, a literal counts because a
+    literal is its own value, and everything else — a call, a member read, a
+    subscript, an undeclared name — is not an integer as far as this question
+    is concerned.  A `p + k` whose `k` is undeclared is therefore NOT scaled,
+    and the dereference that reads it is refused rather than answered at the
+    wrong address, which is the same trade every other unestablished fact gets.
+    """
+    if depth > 8:
+        return False
+    if isinstance(e, (F.IntLiteral, F.BoolLiteral)):
+        return True
+    if isinstance(e, F.IdentExpr):
+        ann = _only_declared(fn, e.name)
+        return ann is not None and annotation_base_name(ann) in INT_TYPE_CTORS
+    if isinstance(e, F.UnaryOp):
+        return _is_integer_expression(fn, e.operand, depth + 1)
+    if isinstance(e, F.BinaryOp) and e.op in ("+", "-", "*", "%", "//"):
+        return (_is_integer_expression(fn, e.left, depth + 1)
+                and _is_integer_expression(fn, e.right, depth + 1))
+    return False
+
+
+def pointer_offset_scale(fn, e):
+    """The width an integer offset in `p ± k` must be scaled by, or None.
+
+    **THE ONE PREDICATE, and it is one because the two readers would otherwise
+    disagree in the direction that is a wrong answer rather than a refusal.**
+    Both backends' `_emit_binop` ask it what to multiply the offset by, and
+    `dereference_lowering`'s `_offset_scale` asks it whether the address it is
+    about to load through is already scaled.  If the emitters scaled and the
+    model did not know, the load is at the right address and the model thinks it
+    is at the wrong one and refuses a correct program; if the model allowed and
+    the emitters did not, `p + 1` loads eight bytes at `p+1` and reports them as
+    the SECOND element — which is the defect this function exists to make
+    impossible.
+
+    Four conditions, all of them about a DECLARATION:
+
+      * `p ± k` — an `Int`-width arithmetic operator with an integer offset.
+        Anything else (a call, a subscript, a container) is somebody else's
+        question;
+      * `p` is a NAME, and the ONE annotation this function declares for it
+        names a pointer type (`pointee_of_type_text`, the one reader of that
+        question) whose pointee width `POINTEE_WIDTHS` establishes and which is
+        not 1 — so there is something to scale BY;
+      * `k` is an integer by `_is_integer_expression`, so `p + p` (which both
+        backends intercept as a pointer difference before the ALU) and a
+        `p + <anything the model cannot type>` are not scaled;
+      * the name declares exactly one annotation.  Two is a disagreement and
+        this returns None, which is the refusing direction.
+
+    `None` for everything else, and the refusal that follows is
+    `_offset_scale`'s own: an offset this cannot account for is not answered at
+    a guessed address.  The measure behind the shape is the subscript path's,
+    which has scaled since before the pointer value model existed:
+    `formal/arm64_codegen.py`'s `p[i]` emits `movz X2, #width; mul X1, X1, X2`
+    before the add, and this is the `p + k` spelling of the same arithmetic.
+    """
+    if not isinstance(e, F.BinaryOp) or e.op not in ("+", "-"):
+        return None
+    left = e.left
+    if not isinstance(left, F.IdentExpr):
+        return None
+    ann = _only_declared(fn, left.name)
+    if ann is None:
+        return None
+    pointee, _why = pointee_of_type_text(ann)
+    if pointee is None:
+        return None
+    info = POINTEE_WIDTHS.get(pointee)
+    if info is None or info[0] == 1:
+        return None
+    if not _is_integer_expression(fn, e.right):
+        return None
+    return info[0]
+
+
 def _offset_scale(fn, expr, width, seen=()):
     """`(ok, why)` — is every integer offset in this address scaled by `width`?
 
@@ -9004,6 +9138,14 @@ def _offset_scale(fn, expr, width, seen=()):
     `p + 1` on an `Int64` pointee would load eight bytes at `p+1` and report
     them as the SECOND element.
 
+    **The ALU scales it now** (`pointer_offset_scale`, and the `movz`/`mul` pair
+    both `_emit_binop`s emit), so the `p ± k` arm below is no longer a refusal
+    for every width: it is a refusal for the offsets this path cannot ACCOUNT
+    for, which is the honest remainder and is a different list from the one this
+    function started with.  An offset the emitters scaled by exactly `width` is
+    answered, because the address and the load now agree by construction rather
+    than by the reader's care.
+
     So the check is here, at the point where the width is known, rather than
     being papered over in the emitter:
 
@@ -9013,7 +9155,10 @@ def _offset_scale(fn, expr, width, seen=()):
         `bitcast`/`rebind` (which changes the type without moving the address),
         because a function that returns `p + 1` hides its arithmetic from here.
         This is the honest limit and it is recorded, not worked around;
-      * an unscaled offset with `width != 1` — refused, naming the arithmetic.
+      * `p ± k` scaled by this width — answered, by `pointer_offset_scale`;
+      * `p ± k` the emitters did NOT scale — refused, and the refusal says which
+        of the two facts is missing rather than claiming the ALU adds a raw
+        integer, which stopped being true when the scale landed.
     """
     if width == 1:
         return (True, None)
@@ -9026,17 +9171,29 @@ def _offset_scale(fn, expr, width, seen=()):
                 return (False, why)
         return (True, None)
     if isinstance(expr, F.BinaryOp) and expr.op in ("+", "-"):
+        scaled = pointer_offset_scale(fn, expr)
+        if scaled == width:
+            return (True, None)
+        base = expr.left
+        named = base.name if isinstance(base, F.IdentExpr) else None
+        if named is None:
+            what = (f"{type(base).__name__} is not a NAME this path has a "
+                    f"declared pointee for")
+        else:
+            ann = _only_declared(fn, named)
+            what = (f"`{named}` is declared {ann!r}, which is not a pointer to "
+                    f"a {width}-byte element" if ann is not None else
+                    f"`{named}` is declared nothing, or two things that "
+                    f"disagree, so there is no pointee to scale by")
         return (False,
-                f"the address is `p {expr.op} k`, and this path adds the "
-                f"integer to the address WITHOUT scaling it by the pointee's "
-                f"size (measured: `q = p + 3` on a one-byte pointee gives "
-                f"`base + 3`, which is right only because the element is one "
-                f"byte). The pointee here is {width} bytes wide, so `p + 1` "
-                f"would read the SECOND element's address and load from it a "
-                f"word that is not the first element. Index with a scaled "
-                f"expression — `p + k * {width}` — until the ALU scales, which "
-                f"is the next step recorded in "
-                f"bugs/FORMAL_pointer_value_model.md")
+                f"the address is `p {expr.op} k` and the load is {width} bytes "
+                f"wide, so the two have to agree about the element size — and "
+                f"this path only scales an integer offset it can read a "
+                f"POINTER and an ELEMENT WIDTH off a declaration for: {what}. "
+                f"Scale it by hand (`p + k * {width}`), or declare the pointer "
+                f"and the offset (`p: Pointer[Int{width}]`, `k: Int`) so the "
+                f"arithmetic is one this path can do — see "
+                f"bugs/FORMAL_pointer_value_model.md §9")
     if isinstance(expr, F.CallExpr) and isinstance(expr.func, F.SubscriptExpr) \
             and isinstance(expr.func.obj, F.MemberExpr) \
             and expr.func.obj.member in ("bitcast", "rebind"):

@@ -10831,6 +10831,63 @@ POINTER_DEREF_CASES = [
      "    if read_field(h) == 65:\n"
      "        return 1\n"
      "    return 0\n", 1, None),
+    # `p + k` is ELEMENT arithmetic and the ALU now scales it, which is what
+    # these three cases exist for.  Before the scale, `p + 1` on a `Pointer[Int64]`
+    # was REFUSED rather than answered at the wrong address (`_offset_scale`'s
+    # own list), and the answer it now gives is the one `struct.unpack` gives
+    # over the same bytes: `q = p + 1` reads `b"IJKLMNOP"[0:8]` and NOT the eight
+    # bytes at `p+1`, which is what an unscaled add would have loaded (the first
+    # of which is 'B' — a plausible number that is the wrong element).
+    #
+    # Three offsets on one address, both widths, because the failure mode this
+    # replaces was silent in the direction that matters: a scale of 1 on an
+    # 8-byte element reads the SECOND element and reports it as the first, which
+    # no exit code distinguishes from a right answer.
+    ("deref_offset_scales_by_the_pointee_width",
+     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = p + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    if read_at(s, 0) != 5208208757389214273:      # struct.unpack('<q', b'ABCDEFGH')\n"
+     "        return 1\n"
+     "    if read_at(s, 1) != 5786930140093827657:      # …b'IJKLMNOP'\n"
+     "        return 2\n"
+     "    if read_at(s, 2) != 6365651522798441041:      # …b'QRSTUVWX'\n"
+     "        return 3\n"
+     "    return 0\n", 0, None),
+    ("deref_offset_scales_by_four_for_a_32_bit_pointee",
+     "def read_at(p: Pointer[Int32], k: Int) -> Int:\n"
+     "    var q = p + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    if read_at(s, 0) != 1145258561:              # struct.unpack('<i', b'ABCD')\n"
+     "        return 1\n"
+     "    if read_at(s, 1) != 1212630597:              # …b'EFGH'\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
+    # `p - k` is the same arithmetic backwards, and it is here because the scale
+    # is emitted at ONE place in `_emit_binop` for both operators and a
+    # one-sided fix is the shape that reads as finished.  The base pointer comes
+    # from a function that returns `Pointer[Int64]`, so this also pins that the
+    # scale composes across a call boundary: `mid` is `s + 8`, established by
+    # `at`'s own `p + k`, and reading one element back has to land on `s`.
+    ("deref_offset_backwards_scales_too",
+     "def at(p: Pointer[Int64], k: Int) -> Pointer[Int64]:\n"
+     "    var q = p + k\n"
+     "    return q\n"
+     "def read_back(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = p - k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    var mid = at(s, 1)\n"
+     "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
+     "        return 1\n"
+     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
 ]
 
 POINTER_DEREF_REFUSALS = [
@@ -10948,33 +11005,37 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return read_x(s)\n",
      "refuse:it is a word from the caller and its pointee is not recorded here", None),
-    # The OFFSET SCALE.  `p + k` on this path adds the raw integer, which is C
-    # for a one-byte pointee and wrong for every other one, so a `Pointer[Int64]`
-    # reached through arithmetic is refused rather than loaded at the wrong
-    # address.  This is the one refusal whose fix is a lowering rather than a
-    # model change, and it is recorded as the next step.
-    ("deref_refuse_unscaled_offset",
-     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+    # The OFFSET, and the one that is still refused: the ALU scales an integer
+    # offset it can read a POINTER and an ELEMENT WIDTH off a declaration for,
+    # and this program's `k` has no annotation, so there is nothing to say
+    # whether it is an `Int` at all.  That is the refusing direction and it is
+    # the whole of what `pointer_offset_scale`'s `_is_integer_expression` buys:
+    # a scaled offset the model cannot account for is a load at an address
+    # nothing in the image vouches for, which is the defect the refusal exists
+    # to stop.  The message names the missing declaration instead of claiming
+    # the ALU adds a raw integer, which stopped being true when the scale
+    # landed.  (`bugs/FORMAL_pointer_value_model.md` §9's first item, fixed.)
+    ("deref_refuse_offset_with_an_undeclared_offset",
+     "def read_at(p: Pointer[Int64], k) -> Int:\n"
      "    var q = p + k\n"
      "    return Int(q.value())\n"
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
      "    return read_at(s, 1)\n",
-     "refuse:WITHOUT scaling it by the pointee's size", None),
-    # The SAME arithmetic on a ONE-BYTE pointee is ANSWERED, and this is the
-    # guard for the refusal above: refusing the scale must refuse it because
-    # the element is 8 bytes, not because the program mentions `+`.  This case
-    # is a guard — it passes on the pre-change tree too, because there `value()`
-    # on any receiver was refused and this program would not have built.  It is
-    # listed here so that a future change which refuses ALL pointer arithmetic
-    # fails a case rather than passing quietly.
+     "refuse:is not a pointer to a 8-byte element", None),
+    # …and the same arithmetic on a ONE-BYTE pointee is ANSWERED, and this is the
+    # guard for the case above: the scale must not fire where it is the identity,
+    # because every `char *` in the corpus — `env.mojo`'s `getenv` result, every
+    # `String(unsafe_from_utf8_ptr=…)` — adds a raw byte offset and must keep
+    # doing so.  It is also the guard that a future change which scales EVERY
+    # pointer offset fails a case rather than passing quietly.
     ("deref_offset_on_a_one_byte_pointee_is_the_answer",
      "def read_at(p: Pointer[UInt8], k: Int) -> Int:\n"
      "    var q = p + k\n"
      "    return Int(q.value())\n"
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
-     "    if read_at(s, 3) == 68:\n"       # 'D'
+     "    if read_at(s, 3) == 68:       # 'D'\n"
      "        return 1\n"
      "    return 0\n", 1, None),
     # `value` on a receiver that is NOT a pointer and not established as one.

@@ -5077,7 +5077,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if op in _ALU_RR:
-            self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11)
+            # `p + k` on a POINTER is ELEMENT arithmetic: Mojo's
+            # `Pointer[T].__add__` moves `k` elements, so without the scale
+            # `p + 1` on a `Pointer[Int64]` reads the second element's address.
+            # `model.pointer_offset_scale` is the ONE predicate that says when,
+            # and `_offset_scale` makes the same call when the load asks whether
+            # the address is already scaled — so this backend, arm64's arm and
+            # the dereference that reads the result cannot disagree. A one-byte
+            # pointee is the identity scale and emits nothing, so every `char *`
+            # program is byte-identical to what it was.
+            self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11,
+                                 scale=M.pointer_offset_scale(self._cur_fn, e)
+                                 if op in ("+", "-") else None)
             if op in ("+", "-", "*"):
                 self._emit_trunc(common_type(self._ttype(e.left),
                                              self._ttype(e.right)))
@@ -5098,16 +5109,26 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(
             f"unsupported binary operator {op!r} on the formal x86-64 path")
 
-    def _emit_two_sided(self, left, right, alu, scratch: Reg) -> None:
+    def _emit_two_sided(self, left, right, alu, scratch: Reg,
+                        scale: int = None) -> None:
         """left OP right, both in RAX on exit.
 
         The left operand is pushed while the right one is evaluated because
         evaluating an expression clobbers RAX, and a nested call clobbers
-        every caller-saved register."""
+        every caller-saved register.
+
+        `scale` multiplies the RIGHT operand by an element width first, and it
+        is the pointer-arithmetic scale (`_emit_binop`'s own comment has the
+        measurement). It goes through `encode_imul_r64_r64_imm`, the same
+        encoder and the same imm8 form `p[i]` uses, so there is one signed
+        three-operand multiply in this backend rather than two spellings of it.
+        """
         self._emit_expr(left)
         self._push_slot(Reg.RAX)
         self._emit_expr(right)
         self.asm.emit(encode_mov_r64_r64(scratch, Reg.RAX))
+        if scale:
+            self.asm.emit(encode_imul_r64_r64_imm(scratch, scratch, scale))
         self._pop_slot(Reg.RAX)
         self.asm.emit(alu(Reg.RAX, scratch))
 
