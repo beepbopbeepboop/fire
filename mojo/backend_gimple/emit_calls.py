@@ -4417,7 +4417,27 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
         full_arg_pairs = arg_pairs
     if ret_type == 'void':
         return gen._void_call(fname_c, full_arg_pairs)
-    return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
+    t = gen._call_expr(ret_type, fname_c, full_arg_pairs)
+    # A lifted CLOSURE whose `return`s — or whose RETURNED LOCAL — produce
+    # containers of MORE THAN ONE kind has a box for its return slot, exactly
+    # as a free function does: `emit_stmts._gen_stmt_ReturnStmt` records it in
+    # `gen._multi_kind_return_funcs` under `gen.current_func_name`, and inside
+    # the closure's own body that IS the `lifted` name computed on this
+    # function's first line. Without this the caller reads the box as
+    # whichever kind `_actual_types` happened to record (whose default is
+    # `MojoList *`), so `print(consume(flag))` formats the box's own ADDRESS
+    # where CPython prints `{'a': 1}` — silent, exit 0.
+    #
+    # `_lower_named_call` has carried this marking since the free-function
+    # case was fixed; a closure call is the same statement about a different
+    # callee spelling, so it gets the same lines rather than the inference
+    # being re-derived here. Deliberately ONLY the boxed-container marking and
+    # not the `_return_elem_types`/`_actual_types` pair that precedes it there:
+    # an element type is meaningless across container kinds, which is why
+    # `_lower_named_call` declines to record one on this arm either.
+    if ret_type in ('int', 'int64_t') and lifted in gen._multi_kind_return_funcs:
+        gen._boxed_container_vals.add(t)
+    return ret_type, t
 
 
 def _ast_child_nodes(value, out: list) -> None:
@@ -6438,19 +6458,33 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         gen._elem_types[t] = gen._return_elem_types[fname_raw]
         if ret_type == 'MojoList *':
             gen._actual_types[t] = ret_type
-        elif ret_type in ('int', 'int64_t'):
-            if gen._multi_kind_return_funcs.get(fname_raw):
-                # The callee's `return`s produce containers of MORE THAN ONE
-                # kind, which is WHY its return slot is the box — so `MojoList *`
-                # here would be a guess, and a wrong one reads another
-                # container's memory. Record the box's kind as genuinely
-                # unknown instead: consumers dispatch on the runtime
-                # registries (`_repr_boxed_container`, `_coerce_to_list`'s
-                # opaque arm). An element type is also meaningless across
-                # kinds, so it is not recorded here.
-                gen._boxed_container_vals.add(t)
-            else:
-                gen._actual_types[t] = 'MojoList *'
+        elif ret_type in ('int', 'int64_t') \
+                and not gen._multi_kind_return_funcs.get(fname_raw):
+            gen._actual_types[t] = 'MojoList *'
+    # The `MojoList *` default just above is only correct for a callee that
+    # returns containers of ONE kind, and the statement "this callee's
+    # returns (or its returned local) disagree on kind" lives in
+    # `_multi_kind_return_funcs`, recorded by `emit_stmts`' return handler.
+    # When they do disagree, `MojoList *` here is a guess, and a wrong one
+    # reads another container's memory: `_mojo_repr_list` on a `MojoSet`'s
+    # slots is an out-of-bounds read past the set's slot array, i.e. a SEGV
+    # rather than a wrong answer. Record the kind as genuinely unknown
+    # instead, so consumers dispatch on the runtime registries
+    # (`_repr_boxed_container`, `_coerce_to_list`'s opaque arm). An element
+    # type is likewise meaningless across kinds and is not recorded.
+    #
+    # This is its OWN statement, deliberately NOT nested inside the
+    # `_return_elem_types` guard above. Nesting it there made the marking
+    # conditional on an UNRELATED fact — that the callee recorded a return
+    # ELEMENT type — so a multi-kind callee that returned a forwarded box
+    # (`def outer(flag): return consume(flag)`, whose returned temp is a
+    # call result and therefore carries no element type) was relabelled
+    # `MojoList *` anyway, and `print(outer(1))` printed the box's own
+    # decimal ADDRESS where CPython prints `{'a': 1}`. The two facts are
+    # independent: an element type is about a single-kind callee's slots,
+    # and this is about a callee that has none to give.
+    if ret_type in ('int', 'int64_t') and gen._multi_kind_return_funcs.get(fname_raw):
+        gen._boxed_container_vals.add(t)
     # A function that RETURNS a generator (`def mk(): return counter(3)`,
     # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
     # generator function's api on the call's result temp (Pass 1.3f-gen

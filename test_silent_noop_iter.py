@@ -367,6 +367,123 @@ def main():
 '''
 
 
+@case('multi_kind_local_in_a_closure_is_the_box_not_a_refusal')
+def _():
+    # `multi_kind_parameter_returned_is_the_box`, with the multi-kind local
+    # inside a LIFTED CLOSURE, which is a different answer from the same
+    # question and was refused rather than boxed.
+    #
+    # Two predicates decide "this name holds containers of more than one
+    # kind", and inside a closure only one of them can see the name:
+    # `resolve_shared._infer_local_var_types` records its verdict against
+    # bare `FunctionDef`s under every spelling it can derive, and a lifted
+    # closure's name is spelled `outer_consume` here — a spelling it never
+    # records. `emit_infra.mixed_container_locals` asks the question the
+    # other way, of `gen._cur_func_body`, which IS the closure's own body and
+    # so DOES find it. The declaration site gated its "trust ground truth"
+    # rules on the first predicate alone, so the box that the second one
+    # installed was pinned straight back to this assignment's own kind and
+    # the second store hit `_sce_simple_emit`'s container-kind guard: the
+    # file did not build at all.
+    #
+    # Real: `argparse`'s `_parse_known_args.consume_optional`, whose `args`
+    # is a dict literal in the ambiguous-option arm and a list in the other
+    # two — so the whole `argparse` module was dropped from an ordinary
+    # stdlib closure. See
+    # bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md.
+    #
+    # Both arms are printed and the DICT one comes FIRST, because which arm
+    # is seen first is what decides the pinned kind: a case that put the
+    # list first would have refused at the dict store instead and would pass
+    # for the wrong reason.
+    return '''def outer(flag):
+    def consume(i):
+        if i == 1:
+            args = {"option": "x", "matches": "y"}
+        elif i == 2:
+            args = ["x"]
+        else:
+            args = ["y", "x"]
+        return args
+
+    return consume(flag)
+
+
+def main():
+    print(outer(1))
+    print(outer(2))
+    print(outer(3))
+'''
+
+
+@case('a_boxed_container_survives_a_forwarding_hop')
+def _():
+    # `multi_kind_parameter_returned_is_the_box` again, one and two hops
+    # further out, because the box was recorded by the function that MADE it
+    # and dropped by every function it passed THROUGH.
+    #
+    # Two separate facts had to line up to lose it. The intermediate
+    # `forward` owns no multi-kind local of its own — it returns the closure
+    # call's own temp, which carries no element type — so the handler that
+    # records `_multi_kind_return_funcs` had nothing to match. And the call
+    # site then applied the `int64_t`-returning branch's default of
+    # "`_actual_types` says `MojoList *`", which reads a dict through
+    # `mojo_repr_list_ints`: another container's memory, out of bounds.
+    #
+    # Both hops are printed and both container kinds appear on each, because
+    # the property is that the box is still THERE at the far end, not that
+    # one particular kind survives. A fix that recorded the forward but not
+    # the outer would print the dict correctly and the list as an address.
+    return '''def outer(flag):
+    def consume(i):
+        if i == 1:
+            box = {"a": 1}
+        else:
+            box = [1, 2]
+        return box
+
+    def forward(i):
+        return consume(i)
+
+    return forward(flag)
+
+
+def main():
+    print(outer(1))
+    print(outer(2))
+'''
+
+
+@case('a_closure_returning_a_box_is_told_so_at_its_call_site')
+def _():
+    # The other half of the same hop, from the closure side: the call site's
+    # `_boxed_container_vals` marking existed only in `_lower_named_call`,
+    # so a lifted closure call did not get it. Same shape, same wrong answer
+    # — the box read as whichever kind `_actual_types` last recorded — and it
+    # is a separate omission rather than a consequence of the other two,
+    # which is why it is its own case: a fix at the free-function call site
+    # alone leaves this one printing decimal addresses.
+    #
+    # The closure is NOT multi-kind in its own returns here (it forwards),
+    # so this isolates the call-site marking from the return-recording.
+    return '''def outer(flag):
+    def consume(i):
+        return inner(i)
+
+    def inner(i):
+        if i == 1:
+            return {"a": 1}
+        return [1, 2]
+
+    return consume(flag)
+
+
+def main():
+    print(outer(1))
+    print(outer(2))
+'''
+
+
 @case('parameter_rebound_to_one_container_kind_is_not_multi_kind')
 def _():
     # A parameter that is REASSIGNED, always to the SAME container kind, is

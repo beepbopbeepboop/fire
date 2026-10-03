@@ -1045,7 +1045,41 @@ def _gen_stmt_AssignStmt(gen, node):
             # three steps of one decision, and an earlier attempt guarded only
             # the container one and was immediately undone by the
             # generalized-pointer one right below it.
-            _pin_to_ground_truth = tname not in ginf.multi_kind_locals(gen)
+            #
+            # It gates on BOTH halves of the box name, and the `_mixed` half
+            # is the one that was MISSING — so the box installed four lines
+            # above was installed and then immediately undid by this group,
+            # and the second store of a rebound name reached
+            # `_sce_simple_emit`'s container-kind chokepoint exactly as if
+            # neither rule existed. `multi_kind_locals` alone is not enough
+            # because it is a DIFFERENT predicate that does not always name
+            # the same names: it is the PRE-PASS's `_multi_kind_locals`
+            # verdict (`_infer_local_var_types` is handed bare `FunctionDef`s
+            # and records its answer under every spelling it can derive),
+            # while `_mixed` is THIS function's own walk of `_cur_func_body`.
+            # A name bound to two container kinds inside a LIFTED CLOSURE is
+            # found by the latter and missed by the former — measured, both
+            # consulted for one closure in the same run, `_mixed` naming the
+            # local and `multi_kind_locals` answering empty.
+            #
+            # The two are still not merged as PREDICATES, and this is not
+            # widening the box: a `_mixed` name is already boxed above, so
+            # adding it here changes nothing about WHICH names are boxed and
+            # only stops this group from taking one back out. (Widening
+            # `multi_kind_locals` into `_mixed` is the thing that would box
+            # names on evidence `_mixed` never had; that remains undone, and
+            # it is why `multi_kind_locals` — not `_mixed` — is what decides
+            # the box for a name only the pre-pass found.)
+            #
+            # Real, and the shape of `argparse`'s
+            # `_parse_known_args.consume_optional`: `args` is a dict literal in
+            # one arm and a list in two others, so the whole module is
+            # dropped from an ordinary stdlib closure with `cannot coerce
+            # MojoList * to MojoDict * (incompatible container kinds) ...
+            # value='_tN' dest='args'`. See
+            # bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md.
+            _pin_to_ground_truth = (tname not in ginf.multi_kind_locals(gen)
+                                    and not _mixed)
             # 'int' (bare) is the hallucination marker — no real answer. If the
             # value is actually a container pointer (e.g. a dict read whose value
             # type is a dict/list/set), trust ground truth so a later
@@ -1073,9 +1107,9 @@ def _gen_stmt_AssignStmt(gen, node):
             # holding two container kinds cannot be trusted for, and letting it
             # through here would undo the box.
             #
-            # The two are NOT the same predicate and are not merged here,
-            # because they answer from different evidence and each has its own
-            # real repro: `_mixed` is this function's own walk of
+            # The two predicates are NOT the same predicate and are not merged
+            # here, because they answer from different evidence and each has
+            # its own real repro: `_mixed` is this function's own walk of
             # `_cur_func_body` (a container kind disagreement, and it is what
             # decides the box), while `_pin_to_ground_truth` is the PRE-PASS's
             # `_infer_local_var_types` verdict, which also covers known struct
@@ -2209,14 +2243,15 @@ def _gen_stmt_ReturnStmt(gen, node):
                 if len(_seen) > 1:
                     gen._multi_kind_return_funcs[_fk] = True
         elif (_fk and gen.func_ret_type == 'int64_t'
-                and v in ginf.multi_kind_locals(gen)):
+                and (v in ginf.multi_kind_locals(gen)
+                     or v in ginf.mixed_container_locals(gen)
+                     or v in getattr(gen, '_boxed_container_vals', ()))):
             # The returned value is a LOCAL BOUND TO CONTAINERS OF MORE THAN
-            # ONE KIND (`ginf.multi_kind_locals`, see
-            # `resolve_shared._infer_local_var_types`), so it lowers to the
-            # box and the `vtype in (...)` arm above never sees a second
-            # kind: `def probe(box, kind): if kind == 1: box = [1, 2] else:
-            # box = {"a": 1}; return box` returned `box` on BOTH paths, so
-            # the disagreement lives in the local, not in the returns.
+            # ONE KIND, so it lowers to the box and the `vtype in (...)` arm
+            # above never sees a second kind: `def probe(box, kind): if kind
+            # == 1: box = [1, 2] else: box = {"a": 1}; return box` returned
+            # `box` on BOTH paths, so the disagreement lives in the local,
+            # not in the returns.
             #
             # The call site then took the `int64_t`-returning branch's
             # DEFAULT — `_actual_types[t] = 'MojoList *'` — and read the dict
@@ -2224,6 +2259,28 @@ def _gen_stmt_ReturnStmt(gen, node):
             # of bounds, printing `[0]` where CPython prints `{'a': 1}`. The
             # registry dispatch is the answer the caller has to be told
             # about, and this is the same fact from the callee's side.
+            #
+            # All THREE predicates name the value, and each is needed because
+            # each is the only one that sees a different way the disagreement
+            # arrives (the first two for the same reason the declaration
+            # site's gate consults both — see the comment on
+            # `_pin_to_ground_truth`: `mixed_container_locals` is this
+            # function's own `_cur_func_body` walk and is the only one of the
+            # two that finds a rebound local inside a LIFTED CLOSURE, whose
+            # name `resolve_shared._infer_local_var_types` never recorded
+            # under any spelling).
+            #
+            # `_boxed_container_vals` is the third and closes the remaining
+            # hole: a function that FORWARDS a box rather than owning one
+            # (`def outer(flag): return consume(flag)`) has no multi-kind
+            # local of its own for the first two to name — but its result is
+            # a container of unknown kind all the same, and it was relabelled
+            # `MojoList *` at the caller for exactly that reason. Without this
+            # the box is reported by the function that made it and dropped by
+            # every function it passes through, so a one-line forwarding hop
+            # is enough to lose it. A box the callee installs but does not
+            # report is worse than no box: it reads as a wrong answer at the
+            # call site instead of refusing at the store.
             gen._multi_kind_return_funcs[_fk] = True
         # Same for a multi-value return's PER-SLOT types: `return cfg, Model(cfg)`
         # is a heterogeneous tuple (two different struct pointers) whose
