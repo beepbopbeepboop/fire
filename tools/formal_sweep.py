@@ -287,13 +287,22 @@ name roots explicitly:
 
   python3 tools/formal_sweep.py -t 300 /path/to/mojo/stdlib
 
+`-t` is a bound PER POPULATION, which is the point of the two of them being
+different populations at all (see `Timeouts` for the measurements that put them
+apart): `-t SECONDS` is one bound for the whole run, `-t POP=SECONDS`
+is one population's, and a run that gives both gets a repo-root sweep and a
+stdlib sweep that are each measured at a bound that means something:
+
+  python3 tools/formal_sweep.py -t repo=600 -t stdlib=120
+
 The architecture is a cache-key input, not a global: `--arch` adds
 `--backend=<arch>` to the build flags, and those flags are what
 cas.formal_build_key folds in, so an arm64 verdict is never served for an
 x86_64 sweep (or the reverse).
 
 Usage:
-  python3 tools/formal_sweep.py [-j N] [-t SECONDS] [--arch x86_64] [paths...]
+  python3 tools/formal_sweep.py [-j N] [-t SECONDS | -t POP=SECONDS]
+                                [--arch x86_64] [paths...]
 """
 import argparse
 import collections
@@ -1563,6 +1572,165 @@ DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
 # stdlib modules, which is what the -t help text says.
 DEFAULT_TIMEOUT = 30
 
+# …and a timeout is a bound PER POPULATION, which is the half of the
+# `-t` argument that used to be missing.
+#
+# The two populations are separated by one measured fact, not by taste: a stdlib
+# module imports a few stdlib modules, while a repository-root `.py` imports the
+# repository's OTHER ROOT `.py` files, so one repo file's build is the SUM of its
+# import closure's builds
+# (measured on one tree: a 135-line repo file passes inside 30 s, a 185-line one
+# crashes inside 600 s, a 5 645-line one is still running at 5 400 s — all three
+# in the same run under one `-t`.)
+# What that measurement also rules out is a bound proportional to the closure:
+# four files that
+# cannot be told apart by line count — one that crashes inside 600 s, two that
+# pass inside 30 s, and two that no `-t` answers — share ONE import closure of
+# identical size, so a bound proportional to closure size cannot separate them
+# either. The population is the axis that can, which is why `-t` takes it and why
+# both defaults below are the same number: this is a knob, not a change of
+# behaviour, and a run that passes no `-t` still times out every file at 30 s.
+POPULATIONS = ("repo", "stdlib")
+
+
+class Timeouts:
+    """`-t`, resolved into a per-file bound.
+
+    One object rather than a number threaded through the run, because the
+    question it answers is PER FILE — "which population is this file in, and
+    what did the reader ask for in that population" — and a reader who has to
+    ask that question outside this class is reading a number that does not
+    exist. It also holds the stdlib root, so the population is decided once at
+    construction instead of by every caller that wants a bound.
+
+    `seconds` is a partial mapping and an absent population takes
+    `DEFAULT_TIMEOUT`: `-t repo=180` is a complete, sensible command, and
+    making the reader spell out the population they did not mean would be a
+    worse interface than the default it falls back to.
+    """
+
+    def __init__(self, seconds=None, stdlib_root=None):
+        self.seconds = {p: DEFAULT_TIMEOUT for p in POPULATIONS}
+        for pop, value in (seconds or {}).items():
+            if pop not in self.seconds:
+                raise ValueError(
+                    f"unknown timeout population {pop!r}; "
+                    f"known: {', '.join(POPULATIONS)}")
+            self.seconds[pop] = int(value)
+        self.stdlib_root = (os.path.abspath(stdlib_root)
+                            if stdlib_root else None)
+
+    def population(self, path):
+        """`stdlib` for a file under the stdlib root, `repo` for everything else.
+
+        A prefix test on the resolved root, and it is deliberately the ONLY
+        thing that decides this. The alternative — asking the resolver what the
+        file imports and calling a file with several swept imports "the other
+        population" — is the closure-proportional bound §2 measured and rejected:
+        `imports.py`, `monomorphize.py`, `reflect.py` and `gimple_codegen.py`
+        have the SAME closure of the same size and differ by a factor of twenty
+        in what a build of them costs, so a rule that reads the closure would
+        hand all four the same bound and be wrong about three of them.
+
+        `repo` is the fallback for everything the stdlib root does not contain,
+        which is the whole of an explicit-path sweep of this repository and the
+        whole of `--no-stdlib`. There is no third population and no guessing:
+        a file outside the stdlib tree is a repo file, and if that is wrong the
+        reader says so with `--stdlib` on a different root.
+        """
+        if not self.stdlib_root:
+            return "repo"
+        try:
+            inside = os.path.commonpath(
+                (os.path.abspath(path), self.stdlib_root)) == self.stdlib_root
+        except ValueError:          # different drives: not under the root
+            inside = False
+        return "stdlib" if inside else "repo"
+
+    def for_file(self, path):
+        """The bound for one file, in seconds."""
+        return self.seconds[self.population(path)]
+
+    def uniform(self):
+        """True when both populations share one number (what a bare `-t 90` means)."""
+        return len(set(self.seconds.values())) == 1
+
+    def describe(self):
+        """How the run's bounds read on the header line.
+
+        A bare number when the two agree, because that is what the run is
+        actually doing and a reader comparing this line with a previous run's
+        wants to see whether anything CHANGED.
+        """
+        if self.uniform():
+            return f"{self.seconds['repo']}s"
+        return " ".join(f"{pop}={self.seconds[pop]}s" for pop in POPULATIONS)
+
+    def retry_arg(self, pop):
+        """The `-t` argument that re-answers a file in `pop`, larger than the one that failed.
+
+        Twice the bound, or a minute more than it, whichever is larger: the
+        point is a NUMBER THAT IS NOT THE ONE THAT JUST FAILED, and a run that
+        used no `-t` at all still gets a usable one. A uniform run gets the
+        bare spelling, because suggesting `-t repo=90` at a reader who wrote
+        `-t 90` is noise; a per-population run gets the spelling that raises
+        THIS file's population and leaves the other one alone, which is the
+        reason the flag exists.
+        """
+        now = self.seconds[pop]
+        bigger = max(int(now or 0) * 2, int(now or 0) + 60)
+        return f"-t {bigger}" if self.uniform() else f"-t {pop}={bigger}"
+
+    def populations_with_seconds(self):
+        return {pop: self.seconds[pop] for pop in POPULATIONS}
+
+
+def _timeout_arg(text):
+    """One `-t` value: `SECONDS` for both populations, or `POPULATION=SECONDS`.
+
+    argparse `type=`, so the error a reader gets for a typo names the two
+    spellings that work rather than a traceback.
+    """
+    raw = str(text).strip()
+    if "=" not in raw:
+        try:
+            seconds = int(raw)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"-t {raw!r} is neither SECONDS nor POPULATION=SECONDS; "
+                f"populations are {', '.join(POPULATIONS)}")
+        return {pop: seconds for pop in POPULATIONS}
+    pop, _, raw_seconds = raw.partition("=")
+    pop = pop.strip()
+    if pop not in POPULATIONS:
+        raise argparse.ArgumentTypeError(
+            f"-t names population {pop!r}; known: {', '.join(POPULATIONS)}")
+    try:
+        seconds = int(raw_seconds.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"-t {pop}= needs a whole number of seconds, not {raw_seconds!r}; "
+            f"the populations are {', '.join(POPULATIONS)}")
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"-t {pop}={seconds} is not a bound: the build is killed at "
+            f"`subprocess`'s own deadline, so every file in that population "
+            f"would be reported `timeout` having built nothing. Omit -t for "
+            f"the default ({DEFAULT_TIMEOUT}s).")
+    return {pop: seconds}
+
+
+def merge_timeout_args(values):
+    """Fold repeated `-t` values into one mapping; a later value wins.
+
+    `-t 90 -t repo=600` is a reader changing their mind about one population,
+    and last-wins is what every other option in this tool does.
+    """
+    merged = {}
+    for value in values or ():
+        merged.update(value)
+    return merged
+
 
 # The stdlib subtrees swept when no paths are given. `std/` is the library
 # itself — the code a real program links against. The stdlib's own `test/`
@@ -2459,8 +2627,30 @@ def _run_build(path, out, flags, timeout, mem_gb):
                     wrapper_died)
 
 
-def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
+def _timeout_detail(timeout, population=None) -> str:
+    """The `tool` detail for a build that hit its bound.
+
+    One place, because the number and the population name are the same fact
+    split in two: the summary counts this string's cause and the per-file row
+    prints it, and a wording that named the population in one and not the other
+    would leave the summary unable to answer the question the row raised.
+    """
+    if population:
+        return f"timeout (> {timeout}s, {population} population)"
+    return f"timeout (> {timeout}s)"
+
+
+def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
     """Build one file and classify the outcome. See Verdict.
+
+    `timeout` is this FILE's bound in seconds, already resolved from `-t` by
+    `Timeouts.for_file` — the caller owns the population question and this
+    function owns none of it. `population` is that same file's name, and it
+    appears in the timeout row because the bound it hit is only half the fact:
+    a reader who sees `timeout (> 30s)` on `imports.py` cannot tell whether the
+    30 was the stdlib default or a repo-file bound they chose, and the two want
+    different next steps. It is optional so a caller with no `Timeouts` in hand
+    (a test harness, a one-file probe) gets the older wording.
 
     `cause` is non-None when the outcome is not one of the build's own
     diagnostics — a timeout, an unreadable file, an internal exception in the
@@ -2700,7 +2890,8 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
         # this machine's load, and caching it would pin the file here until
         # the key changed. It is a named class, not a silent skip, so a
         # too-small -t shows up in the report instead of shrinking coverage.
-        return verdict(False, f"timeout (> {timeout}s)", CAUSE_TIMEOUT, False)
+        return verdict(False, _timeout_detail(timeout, population),
+                       CAUSE_TIMEOUT, False)
     except Exception as e:
         # An exception in the sweep or the build driver is not a verdict about
         # the file, so it is CAUSE_TOOL_ERROR and lands in `tool`, not in the
@@ -2850,7 +3041,7 @@ CLASS_BLURB = {
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
     CLASS_TOOL: "no verdict reached, and therefore NO CLAIM either WAY about the "
-            "file: the build timed out (its answer is unknown at this -t, not "
+            "file: the build timed out (its answer is unknown at that -t, not "
             "absent), blew this tool's per-file memory ceiling, its wrapper "
             "died before reporting, was unreadable, or the sweep or build "
             "driver raised. The summary splits this bucket by cause, with each "
@@ -2859,8 +3050,12 @@ CLASS_BLURB = {
 
 
 # ── Running the pool, and surviving not finishing it ──────────────────────────
-def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
+def _stream_results(files, jobs, timeouts, flags, mem_gb, results) -> bool:
     """Classify every file, printing each as it lands. True if interrupted.
+
+    `timeouts` is a `Timeouts`, not a number: each file's bound is looked up in
+    the population that file belongs to, in the worker that is about to build
+    it, so no caller has to know which population a file is in.
 
     Prints, does not returns, because the printing is the point: an interrupted
     run has to leave the files it classified on the output, and the only way to
@@ -2927,7 +3122,8 @@ def _stream_results(files, jobs, timeout, flags, mem_gb, results) -> bool:
                 """
                 if stop.is_set():
                     return None
-                return run_one(path, timeout, flags, mem_gb)
+                return run_one(path, timeouts.for_file(path), flags, mem_gb,
+                               timeouts.population(path))
 
             futs = {ex.submit(build, p): p for p in files}
 
@@ -3014,13 +3210,12 @@ def _drain_in_flight(futs, collect) -> None:
         collect(fut)
 
 
-def _report_tool_causes(done, results, timeout, mem_gb, arch, emit,
+def _report_tool_causes(done, results, timeouts, mem_gb, arch, emit,
                         indent="  "):
     """The `tool` bucket, one line per CAUSE, each with its share of the scope.
 
     The bucket is "no verdict was reached", and lumping it into one sentence is
-    what made it read as a verdict: `bugs/FORMAL_sweep_default_timeout_hides_a_
-    crash_on_the_repos_own_files.md` measured a real backend crash
+    what made it read as a verdict: it hid a real backend crash
     (`AttributeError: 'str' object has no attribute 'name'`, the same defect
     `test_dataclasses_formal.py` was failing on) that never appeared in the
     ledger at all, because its file hit the default `-t 30` first and the tool
@@ -3045,6 +3240,15 @@ def _report_tool_causes(done, results, timeout, mem_gb, arch, emit,
     Counted from `results` by CAUSE, never by matching the detail text: the
     cause is a field the classifier set, and re-deriving it from the message it
     formatted would be the second implementation of the same question.
+
+    The timeout row is the one that is SPLIT BY POPULATION, because it is the
+    one cause whose answer is a number and the two populations do not want the
+    same one: measured on one tree, a 135-line repo file passes inside 30 s
+    while a 185-line one crashes inside 600 s and a 5 645-line one is still
+    running at 5 400 s, and all three live in the same run under one `-t`. One
+    retry command over both populations would either spend the big bound on the
+    stdlib or hide the repo files' cost, so each population gets the command
+    that raises ITS OWN bound and leaves the other where it was.
     """
     by_cause = collections.Counter(results[p].cause for p in done
                                    if results[p].cls == CLASS_TOOL)
@@ -3064,15 +3268,24 @@ def _report_tool_causes(done, results, timeout, mem_gb, arch, emit,
              f"({_pct(n, scope)} of the classified scope) — "
              f"{_CAUSE_BLURB[cause].format(mem_gb=f'{mem_gb:g}')}")
     if by_cause.get(CAUSE_TIMEOUT):
-        timed_out = [rel(p) for p in done if results[p].cause == CAUSE_TIMEOUT]
-        paths = " ".join(timed_out) if len(timed_out) <= 8 else ""
-        # Twice the bound, or a minute more than it, whichever is larger: the
-        # point is a NUMBER THAT IS NOT THE ONE THAT JUST FAILED, and a run
-        # that used no `-t` at all still gets a usable one.
-        bigger = max(int(timeout or 0) * 2, int(timeout or 0) + 60)
-        cmd = _RETRY_CMD.format(arch=arch, timeout=bigger, paths=paths)
-        emit(f"{indent}  re-answer them with a larger -t: {cmd}"
-             + ("" if paths else "  [the paths are the `timeout` rows above]"))
+        # Grouped by population, in POPULATIONS order rather than arrival order,
+        # so two runs of the same sweep print the same lines in the same places
+        # and a reader diffing them is not reading a reordering as a change.
+        by_pop = collections.defaultdict(list)
+        for p in done:
+            if results[p].cause == CAUSE_TIMEOUT:
+                by_pop[timeouts.population(p)].append(rel(p))
+        for pop in POPULATIONS:
+            timed_out = by_pop.get(pop) or []
+            if not timed_out:
+                continue
+            paths = " ".join(timed_out) if len(timed_out) <= 8 else ""
+            cmd = _RETRY_CMD.format(arch=arch, timeout=timeouts.retry_arg(pop),
+                                    paths=paths)
+            emit(f"{indent}  re-answer the {len(timed_out)} {pop} file(s) with "
+                 f"a larger -t: {cmd}"
+                 + ("" if paths else "  [the paths are the `timeout` rows "
+                                     "above]"))
     return True
 
 
@@ -3084,10 +3297,13 @@ def _pct(n, total):
 # each says what the run does NOT know — which is the whole point of the split.
 _CAUSE_BLURB = {
     CAUSE_TIMEOUT:
-        "the build did not finish inside -t, so what it WOULD have answered is "
-        "unknown at this -t. A file that turns out to crash says so in "
-        "`backend-crash` instead, and that is never cached, so it re-measures "
-        "every run; a file that is merely slow to build is the other reading",
+        "the build did not finish inside its population's -t — the bound is PER "
+        "POPULATION, because a repo-root file's build is the sum of its import "
+        "closure's and a stdlib module's is its own — so what it WOULD have "
+        "answered is unknown at that bound. A file that turns out to crash says "
+        "so in `backend-crash` instead, and that is never cached, so it "
+        "re-measures every run; a file that is merely slow to build is the "
+        "other reading",
     CAUSE_MEMORY:
         "killed at this tool's {mem_gb} GB per-file ceiling — a real cost "
         "finding about that file (see bugs/PERF_memory_over_4gb_is_a_bug.md), "
@@ -3105,11 +3321,15 @@ _CAUSE_BLURB = {
         "would otherwise have had",
 }
 
-_RETRY_CMD = ("python3 tools/formal_sweep.py --arch {arch} -t {timeout} "
+# `{timeout}` is the WHOLE `-t` argument, not a number: `Timeouts.retry_arg`
+# decides between the bare spelling (one bound for both populations) and
+# `-t <pop>=<seconds>`, and putting that decision here would be a second place
+# that has to know it.
+_RETRY_CMD = ("python3 tools/formal_sweep.py --arch {arch} {timeout} "
               "{paths}")
 
 
-def _report_partial(arch, files, results, timeout=0, mem_gb=0.0) -> None:
+def _report_partial(arch, files, results, timeouts=None, mem_gb=0.0) -> None:
     """Say what an interrupted run managed to classify, and publish it.
 
     The counts are over the files that were classified, NOT over `files`, and
@@ -3131,7 +3351,7 @@ def _report_partial(arch, files, results, timeout=0, mem_gb=0.0) -> None:
     for cls in CLASS_ORDER:
         if counts.get(cls):
             print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
-    _report_tool_causes(done, results, timeout, mem_gb, arch,
+    _report_tool_causes(done, results, timeouts or Timeouts(), mem_gb, arch,
                         emit=lambda s: print(s, file=sys.stderr))
     sys.stderr.flush()
     # Publish the partial ledger under a key that says PARTIAL, so it can never
@@ -3202,20 +3422,27 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"parallel workers (default {DEFAULT_JOBS})")
-    ap.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
-                    help="per-file build timeout in seconds "
-                         f"(default {DEFAULT_TIMEOUT}; raise it for the "
-                         "much larger stdlib modules, and for this repository's "
-                         "own root files, which are a different population: "
-                         "one of them imports the other, so its build is the "
-                         "sum of its closure's). A file that hits the bound is "
-                         "reported in the `tool` class — counted, printed, and "
-                         "in no rate — and it means THIS RUN SAYS NOTHING "
-                         "ABOUT THAT FILE, never that the file is not a "
-                         "finding: a build that would have CRASHED inside the "
-                         "bound is reported in `backend-crash` instead, and "
-                         "the summary's `tool` block names the timeout files "
-                         "and the command that answers them")
+    ap.add_argument("-t", "--timeout", action="append", metavar="SECONDS",
+                    type=_timeout_arg, default=None,
+                    help="per-file build timeout in seconds, PER POPULATION. "
+                         "A bare `-t 90` is 90s for both; `-t repo=600` is 600s "
+                         "for files under this repository and the default "
+                         f"({DEFAULT_TIMEOUT}s) for stdlib files, and `-t` may "
+                         "be repeated (a later value wins). The two "
+                         "populations are separated because one of them needs "
+                         "a different bound and the other must not pay for it: "
+                         "a repository-root `.py` imports the repository's "
+                         "other root `.py` files, so its build is the SUM of "
+                         "its import closure's, while a stdlib module's build "
+                         "is its own. A file that hits its bound is reported "
+                         "in the `tool` class — counted, printed, and in no "
+                         "rate — and it means THIS RUN SAYS NOTHING ABOUT "
+                         "THAT FILE, never that the file is not a finding: a "
+                         "build that would have CRASHED inside the bound is "
+                         "reported in `backend-crash` instead, and the "
+                         "summary's `tool` block names the timeout files, "
+                         "which population each is in, and the command that "
+                         "answers it")
     ap.add_argument("--arch", default="arm64",
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
@@ -3258,6 +3485,10 @@ def main():
     args = ap.parse_args()
     arch = "x86_64" if args.arch in ("x86-64", "amd64") else args.arch
     flags = build_flags(arch)
+    # The stdlib root is discovered ONCE, here, and handed to `Timeouts`: it is
+    # what decides a file's population, and a per-file rediscovery would be a
+    # per-file answer that could differ from the one the report used.
+    timeouts = Timeouts(merge_timeout_args(args.timeout), find_stdlib_path())
 
     unusable = interpreter_diagnosis()
     if unusable:
@@ -3338,7 +3569,7 @@ def main():
     # "killed at the 4 GB per-file ceiling" is only readable next to a header
     # that says the ceiling was 4 GB.
     print(f"Sweeping {len(files)} files through build --formal "
-          f"[{arch}] ({jobs} workers, {args.timeout}s timeout, "
+          f"[{arch}] ({jobs} workers, {timeouts.describe()} timeout, "
           + (f"{mem_gb:g} GB per-file ceiling..." if mem_gb > 0
              else "NO per-file memory ceiling...")
           + ")", file=sys.stderr)
@@ -3367,7 +3598,7 @@ def main():
     # the parts a reader diffs run-to-run are unchanged. Only the interleaving
     # of the per-file lines moves, and the ledger — not this list — is the
     # run-to-run diff (see LEDGER).
-    if _stream_results(files, jobs, args.timeout, flags, mem_gb, results):
+    if _stream_results(files, jobs, timeouts, flags, mem_gb, results):
         # An interrupted run is still a run: it publishes what it classified,
         # marked partial, so the next run's report_history has something to
         # compare against instead of calling itself the first classified run.
@@ -3375,7 +3606,7 @@ def main():
         # killed it" and "it found something" and "it never started" are three
         # different facts and a caller that has to tell them apart should not
         # have to read the log to do it.
-        _report_partial(arch, files, results, args.timeout, mem_gb)
+        _report_partial(arch, files, results, timeouts, mem_gb)
         sys.exit(3)
 
     # Every file gets exactly one class, and the classes sum to the file count
@@ -3620,7 +3851,7 @@ def main():
     # usual cause") is what let a file whose build CRASHES at 42 s read as a file
     # that is merely slow at the default `-t 30`: the crash never reached the
     # ledger and the count said nothing about which files were unknown.
-    _report_tool_causes(files, results, args.timeout, mem_gb, arch, print)
+    _report_tool_causes(files, results, timeouts, mem_gb, arch, print)
     foreign_arch = sum(1 for p in files
                        if results[p].cause == CAUSE_FOREIGN_ARCH)
     if foreign_arch:

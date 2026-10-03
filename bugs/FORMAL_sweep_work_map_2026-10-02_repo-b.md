@@ -63,8 +63,9 @@ the eight files were `tool`/timeout at `-t 30` and two of those are still
 `tool`/timeout at `-t 900`, so for repo files the sweep's own advice ("a too-
 small `-t` is the usual cause — raise it") is not enough; §4 has the numbers.
 The sweep process peaked at **0.3 GB** across 6 processes for the whole slice,
-so this is a CPU-bound slice and not a memory-bound one. Filed separately as
-`bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`.
+so this is a CPU-bound slice and not a memory-bound one. Filed separately, and
+that doc is now gone: the two populations are `tools/formal_sweep.py`'s
+`Timeouts` and its `-t repo=SECONDS` / `-t stdlib=SECONDS`.
 
 **The default `-t` also produced a MISCLASSIFICATION worth recording.**
 `imports.py` was `TOOL: timeout (> 30s)` in the first run and
@@ -97,8 +98,8 @@ columns differ on four of eight files and neither is a like-for-like
 comparison at the same `-t`.** That is stated rather than smoothed over: a
 slice swept at a too-small `-t` produces a *different set of classes*, not a
 noisier version of the same one, which is the reason §4 and
-`bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`
-both argue for a per-closure default rather than a bigger number.
+`tools/formal_sweep.py`'s `Timeouts` both argue for a per-POPULATION default
+rather than a bigger number.
 
 **The final tally is 1 + 2 + 0 + 4 + 0 + 1 = 8**, so the classes sum over the
 whole slice, with one file in `tool` and therefore in no rate.

@@ -4,9 +4,10 @@
 **Area:** `formal/model.py`'s per-struct helpers, read from `_prepare_functions`
 and from both emitters.
 
-Found while answering `bugs/FORMAL_sweep_default_timeout_hides_a_crash_on_the_repos_own_files.md`
-§3, which asked for "a profile" of the two repo-root files no `-t` answers
-(`gimple_codegen.py`, 5 645 lines; `myinterpreter.py`, 5 572). That section's
+Found while answering the sweep's §3 question — "a profile" of the two repo-root
+files no `-t` answers (`gimple_codegen.py`, 5 645 lines; `myinterpreter.py`,
+5 572) — which `tools/formal_sweep.py`'s `Timeouts` now carries the other half
+of, as `-t repo=SECONDS`. That question's
 hypothesis — "the AST-walk-per-pass shape in `formal/build.py` is the first
 thing to look at" — is **measured false below**, and the real shape is adjacent
 to it: it is the per-STRUCT tables, recomputed once per ASK rather than once per
