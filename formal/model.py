@@ -4499,6 +4499,117 @@ def specialization_call_refusal(name: str) -> str:
     )
 
 
+def callee_is_a_bound_value(fn, name: str) -> bool:
+    """True when `name` is a name `fn` binds, so it cannot be a symbol.
+
+    The question `is_extern = name not in self._functions` cannot ask, and the
+    gap it leaves is the one construct whose callee this build KNOWS it does not
+    have a symbol for: `func(i)` inside a function that received `func` as a
+    parameter. `func` is not a function of this unit, so the extern path takes
+    it — and the extern path's whole job is to emit a call to a symbol, so it
+    emitted a call to a symbol named after the parameter. The image was then
+    refused by the bind audit (`build.py::_audit_bound_symbols`) with a message
+    about a symbol nothing on the link line provides, which is true and says
+    nothing about the construct: measured on
+    `stdlib/std/algorithm/backend/cpu/map.mojo`, whose only statement is
+    `func(i)`, and which this classified as `not-answerable/unresolved-extern`
+    on both architectures rather than as the codegen gap it is.
+
+    A name a function BINDS is a value on this path — a register, a spill slot,
+    a receiver field's frame, a `__DATA` word — and a value is one 64-bit word,
+    so the callee it could hold would be a code address this build cannot
+    prove. That is a refusal about the representation, and it is asked at the
+    call site where the construct is, not four stages later by a link audit.
+
+    **The reader is the allocator's own, and that is the point.** Asking a
+    second walk "does this body bind this name" would be a second answer to a
+    question `_collect_var_names` has already answered for the register file,
+    and the two would disagree on exactly the shapes that disagree — a name
+    written only inside a branch that never runs, a comprehension's loop
+    variable — which is the false refusal `formal/build.py::_names_bound_in`
+    documents. So this asks `bound_names_in_order`, the walk both emitters
+    allocate from, and subtracts `global_names_bound_in` for the same reason
+    they do: a name declared `global` is not a local of the function, and
+    `global f; f()` really is a call to the module's function.
+
+    Returns False for a name `fn` does not bind, which is every ordinary case:
+    a callee is not a value, and this is a guard on the extern path rather than
+    a new question asked of every call."""
+    if not name or fn is None:
+        return False
+    params = [p[0] if isinstance(p, (list, tuple)) else getattr(p, "name", None)
+              for p in (getattr(fn, "params", None) or [])]
+    bound = {p for p in params if isinstance(p, str)}
+    try:
+        from mojo.middle.boundnames import bound_names_in_order
+        bound |= {n for n in bound_names_in_order(
+            getattr(fn, "body", None) or [], [])
+            if isinstance(n, str)}
+    except Exception:
+        # No answer from the allocator's walk means no answer here either: the
+        # refusal belongs to a name we have EVIDENCE is bound, and guessing
+        # would refuse a working program.
+        pass
+    bound -= global_names_bound_in(fn)
+    return name in bound
+
+
+def callee_value_refusal(name: str, fn, spelling: str = None) -> str:
+    """The refusal for calling a name the calling function binds.
+
+    ARCH-FREE, asked by BOTH backends from `_emit_call` beside
+    `specialization_call_refusal` and for the same reason: one construct, one
+    language implementation, one answer.
+
+    `name` is a parameter or a local of `fn` (`callee_is_a_bound_value` is the
+    reader that decides it), so the call is a call THROUGH A VALUE. This path
+    has no function values at all, and it has none for the same reason it has
+    no heap: a formal value is one 64-bit word with a home in a register, a
+    spill slot, a receiver's frame or a folded module constant, and the word a
+    function value would need is a code ADDRESS whose target this build cannot
+    establish — a closure would need an environment, and an environment is a
+    box. Passing a function in is refused too, and by a different check
+    (`check_module_symbols`: "'target' has no home"), which is the other half of
+    the same fact and worth pointing at: there is no spelling of this construct
+    that works, so the reader is not being sent from one refusal to another.
+
+    `spelling` is what the SOURCE wrote and `name` is what `_callee_symbol`
+    flattened it to, and they are two names in the message when they differ
+    because a refusal that names the base of `c.f` while the reader is looking
+    at `c.f` sends them to the wrong line for the same reason the `no home`
+    message does. `member_chain_text` is the reader for it, for the reason its
+    own docstring gives.
+
+    **The measured alternative is an image that cannot be loaded.** With the
+    extern path taking the call, `map(size, func)` emitted a branch against a
+    symbol spelled `func`, and the file built before the bind audit caught it —
+    which is one verdict (`not-answerable/unresolved-extern`, a fact about the
+    target) standing where another belongs (a codegen gap in this file, in the
+    coverage denominator). The advice is the same program with a
+    representation: take what the operation DOES rather than the operation, so
+    `apply(size, kind: Int)` with one arm per operation, or `apply(n, f)` where
+    `f` is a function of THIS unit and the call is named."""
+    where = getattr(fn, "name", None) or "this function"
+    subject = (f"`{name}`" if not spelling or spelling == name
+               else f"`{spelling}`, which flattens to the base name `{name}`,")
+    return (
+        f"{subject} is a call through a VALUE rather than through a function "
+        f"of this unit — `{name}` is a name {where} binds, a parameter or a "
+        f"local of it, and this path has no representation for a function "
+        f"value. A formal value is one 64-bit word with a home in a register, "
+        f"a spill slot, a receiver's frame or a folded module constant; the "
+        f"word a function value needs is a code address, and a closure needs "
+        f"an environment, which is a box this target has no allocator for. "
+        f"Passing one in is refused for the same reason (a function name read "
+        f"as a value has no home). Refused rather than emitted as a branch "
+        f"against a symbol named `{name}`, which is what this used to do: the "
+        f"image was written, and then the loader refused it. Take what the "
+        f"operation DOES rather than the operation — `apply(size, kind: Int)` "
+        f"with one arm per operation is the same program with a "
+        f"representation — or call a function of this unit by name"
+    )
+
+
 # The kind constants live HERE, above every table that names one, because the
 # string-method table below records what each method YIELDS and a table that
 # had to spell "str" as a literal to dodge a forward reference would be one

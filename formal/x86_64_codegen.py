@@ -604,6 +604,13 @@ class X86_64Codegen:
         self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
+        # Filled by `compile()`: a callable NAME -> the label a call to it
+        # lands on, and the per-definition labels it points at, which are not
+        # published in `info["labels"]`. arm64's `_entry_labels` is the same
+        # pair, for the reason `compile()` gives there.
+        self._entry_labels: dict = {}
+        self._internal_labels: set = set()
+        self._def_labels: list = []
         self._current_function = None
         # The FUNCTION NODE, not just its name — the pointer value model reads
         # a receiver's declared pointee from the function being emitted.  See
@@ -761,6 +768,31 @@ class X86_64Codegen:
             # and `yield` leaves its value in RAX (compile-only fidelity).
             self._functions[f.name] = f
 
+        # A NAME is not an ADDRESS, and this is arm64's rule read from the same
+        # shape: every DEFINITION gets an entry label of its own and the NAME is
+        # bound to the last of them below, once every body has been emitted.
+        # `self._functions[f.name] = f` above means an overloaded name — or a
+        # class whose two `__init__` overloads are renamed one — is ONE function
+        # in this image and a call reaches whichever body was registered last;
+        # that rule is deliberate and `test_formal_run.py`'s `overload_*_CASES`
+        # assert the answer the last body computes. What was not deliberate was
+        # reaching the assembler with `self.asm.label(f.name)`, which
+        # implemented the rule as a silent rebinding of one label — the defect
+        # `Assembler.label` refuses (fixed 2026-10-03 in 3656dc87). The
+        # reachable set is unchanged: a call still lands on the last body, at
+        # the same address.
+        self._entry_labels = {}          # callable NAME -> the label it lands on
+        self._internal_labels = set()    # per-definition labels, not published
+        self._def_labels = []            # per DEFINITION, in `functions` order
+        nth: dict = {}
+        for f in functions:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -779,8 +811,17 @@ class X86_64Codegen:
             self.asm.emit(encode_pop_r64(Reg.RBP))
             self.asm.emit(encode_ret())
 
-        for f in functions:
-            self._emit_function(f)
+        for f, label in zip(functions, self._def_labels):
+            self._emit_function(f, label)
+
+        # Every body is out, so a NAME can be bound to the one a call reaches.
+        # Before `resolve()`, so the startup `call` above and every `call` in a
+        # body are patched out of it, and with the per-definition labels kept
+        # out of `info["labels"]`, so a reader of that map sees one address per
+        # name — which is what `build.py`'s dylib export table and
+        # `x86_64_proof_gen.py` ask it for.
+        for name, label in self._entry_labels.items():
+            self.asm.labels[name] = self.asm.labels[label]
 
         # String literal data goes after the code: its label is what the
         # RIP-relative LEAs point at, so it has to exist before resolve().
@@ -800,7 +841,8 @@ class X86_64Codegen:
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
-            "labels": dict(self.asm.labels),
+            "labels": {n: a for n, a in self.asm.labels.items()
+                       if n not in self._internal_labels},
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -825,7 +867,7 @@ class X86_64Codegen:
 
     # ── functions ────────────────────────────────────────────────────
 
-    def _emit_function(self, f: F.FunctionDef) -> None:
+    def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         self._cur_fn = f
         # This function's LOCAL names, which is what decides whether a bare
@@ -833,7 +875,10 @@ class X86_64Codegen:
         # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_allocation_order(f))
-        self.asm.label(f.name)
+        # THIS DEFINITION's entry label, from the pre-pass in `compile()` —
+        # not `f.name`, which is the name a CALL uses and which a second
+        # definition of the same name shares.
+        self.asm.label(label if label is not None else f"{f.name}__def1")
 
         var_names = _allocation_order(f)
         # The RETURNED-FRAME convention, set up before the locals so the hidden
@@ -5944,6 +5989,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         self._emit_expr(bound(start, 0 if ascending else -1))
         self._push_slot(Reg.RAX)
+        fn = self.func_name
+        # The per-SLICE id, allocated before the first label below rather than
+        # after it: every other label this emitter defines carries a per-site
+        # counter (`assert{aid}`, `rok{rid}`, `bnds{bid}`, `sl{sid}`), and the
+        # three clamp labels used to be the exception — `f_s4a`/`_z`/`_c`, named
+        # after the REGISTER alone. `Assembler.label` keeps the LAST address for
+        # a name, so a second slice in the same function rebound the first
+        # slice's `jge` to the second's clamp block, which is a branch into the
+        # middle of another instruction sequence: the first slice's copy loop
+        # then ran with the second's `r8`/`r9`, and `xs[1:3]` followed by
+        # `xs[2:6]` either faulted or answered the wrong number silently
+        # (fixed 2026-10-03 in 68671a62).
+        self._if_counter += 1
+        sid = self._if_counter
         if stop is None and ascending:
             # `xs[3:]` runs to the END of the sequence, so the default stop
             # is the element count — a runtime value, not a literal. Using 0
@@ -5965,7 +6024,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         wrap = ([Reg.RCX] if not ascending and stop is None
                 else [Reg.RCX, Reg.RDX])
         for reg in wrap:
-            tag = f"{self.func_name}_s{reg.value}"
+            tag = f"{fn}_sl{sid}_c{reg.value}"
             self.asm.emit(encode_cmp_r64_imm8(reg, 0))
             self._emit_jcc(COND_GE, f"{tag}a")
             self.asm.emit(encode_add_r64_r64(reg, Reg.R8))
@@ -5982,9 +6041,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # copy loop needs and RCX does not have room for.
         self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RCX))
 
-        fn = self.func_name
-        self._if_counter += 1
-        sid = self._if_counter
         empty_label = f"{fn}_sl{sid}_empty"
         go_label = f"{fn}_sl{sid}_go"
         # count = ceil(|stop - start| / |step|) when the range runs the right
@@ -6921,6 +6977,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
+        # A CALLEE THIS FUNCTION BINDS — arm64's rule, its reason and its
+        # message, from the one shared pair (`model.callee_is_a_bound_value` /
+        # `model.callee_value_refusal`).  `func(i)` where `func` arrived as a
+        # parameter is a call through a VALUE, and "a name this unit does not
+        # compile" cannot tell it from a C symbol, so the extern path emitted a
+        # call against a symbol spelled `func` and the bind audit reported a
+        # missing symbol instead of the construct that is missing.
+        if not is_extern_call and name not in self._functions \
+                and M.callee_is_a_bound_value(self._cur_fn, name):
+            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
+            # flattens to `c`, and a refusal that names `c` sends the reader
+            # to the wrong line. `member_chain_text` prints both spellings.
+            raise CodegenError(M.callee_value_refusal(
+                name, self._cur_fn, M.member_chain_text(e.func)))
         is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is a library of a DIFFERENT target, not
         # an external dependency of this one, and the source spells its ABI as
@@ -7167,7 +7237,13 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         else:
             self.asm.emit(encode_call_rel32(0))
-            self.asm.emit_label_rel32(name, here_offset=-4)
+            # The NAME a call reaches, not the label this image happens to
+            # keep for it: `compile()` gives every definition its own entry
+            # label and `name` is the alias bound to the last of them after
+            # every body is out, so a caller emitted before the callee lands
+            # on the same address it always did.
+            self.asm.emit_label_rel32(self._entry_labels.get(name, name),
+                                      here_offset=-4)
         # The outgoing area is released HERE and not by the callee: SysV AMD64
         # is caller-cleanup, and this backend's own callee proves the point —
         # its epilogue is `leave; ret`, which restores RSP from RBP and so

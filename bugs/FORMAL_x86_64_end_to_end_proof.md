@@ -1,5 +1,64 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
+## Status (2026-10-03 — B26/B27: the return is followed, and the byte facts are computed)
+
+Two more of the same kind of bug, both found by making the prover handle a
+program larger than the corpus:
+
+**B26. The path tree stopped at the callee's `ret`, so every program with a call
+had no theorem at all.** `_tree` now gives a `ret` with a frame to return to the
+successor the matching `call` pushed and walks the caller's continuation. The
+step needs `s_k.rip`, which the model says is read out of the frame rather than
+stated, so the emitter introduces it as `hpop{k}` and rewrites the step with
+`rw [← hpop{k}]` — **backwards**, because the successor already carries the
+literal and the literal has to become `(mem_read_bytes …).toNat` again for
+`x86_step_ret`'s conclusion to match. **The step is still proved by the model**,
+which is the whole point of doing it this way round; B25's failure was a step
+proved as something the machine does not run, and this is the opposite
+arrangement. `hpop{k}` and, for a chain that crossed a frame, the closing `hrip`
+are admitted.
+
+**B27. Every hypothesis about the code handed `simp` the whole `all_bytes`.**
+`b0..b3`, the immediates and the displacements were `simp [read_i32_le, read_i8,
+hb]`, and `hb` is one conjunct per byte of the function — so one byte fact cost a
+`simplifier` pass proportional to the size of the program, five times per
+instruction. This is invisible at 45 examples and fatal at 164: measured on a
+24-argument call, `maxHeartbeats 4000000` was exhausted at `whnf` on step 19's
+`h_b1` and again on step 105's `h_disp`, and the file **died** both times, because
+a heartbeat timeout is not a tactic failure and the guard cannot admit its way out
+of one (B23's fourth point, and the first time it has been the *cause* rather
+than a footnote). `first | native_decide | simp [read_i32_le, read_i8, hb]`
+settles each one outright and keeps the simplifier as the fallback.
+
+| | 2026-10-02 | 2026-10-03 |
+|---|---|---|
+| `.tmp/w24np.mojo` — 24 arguments, 164 steps | `no tree: returns into a caller` | **`terminates: proved, 1 sorry`** (127 s, 5.0 GB) |
+| `formal/examples/wide_recv.mojo` | `no tree: returns into a caller` | **`terminates: proved, 1 sorry`** (34 s, 2.3 GB) |
+| `no finite tree` — the "returns into a caller" column | 1 | **0** |
+| `bitops`, `const2` (no-call controls) | `PROVED` | **`PROVED`, reports identical with and without B27** |
+
+**The 45-example sweep was NOT re-run** — this was a light pass and the sweep is
+a heavy run — so every row of the 2026-10-02 table below stands as written, and
+the one to check first is **`terminates proved with no sorry`, which must still
+read 32**: B26's code is unreachable for an image with no `call`, and B27's is a
+fallback-preserving change, and both facts are pinned Lean-free by
+`test_formal_sweep_truth.py::TestX86EndToEndEmitter`.
+
+**And the number the reader will want is not the number the report gives.** Lean
+reports "declaration uses `sorry`" once per DECLARATION, and
+`formal/lean.py::_census_from_output` de-duplicates by name, so a chain with four
+admitted `hpop`s reads as `proved, 1 sorry` exactly like a chain with one gap.
+That is the same conclusion this doc reached about `augassign` from the other
+end — a `sorry` is not a unit of missingness — and here it is a statement about
+the *census*, not about the proof: the holes are countable by NAME in the
+generated file, and nothing in the report counts them.
+
+**Still open, unchanged by this pass:** the ten loop examples, `group3:idiv`, and
+the value theorem's 12 open. The one entry this pass does close is the
+"returns into a caller" row of the table, and the separation fact behind the
+admitted `hpop` is written down exactly, with its measurement, in
+`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+
 ## Status (2026-10-02 — B24 closed; the last `terminates` sorry was a FALSE theorem, not missingness)
 
 | | 2026-09-26 | 2026-10-01 | 2026-10-02 |
@@ -698,8 +757,15 @@ there is 1 left.)*
   callee's `ret`, and the closing fact was `s40.rip = 0` where the machine pops
   4294967951. Nothing about a two-level separation statement will close a goal
   that is false. The symbol**ic**-address separation is still real work — it is
-  what the step after a `ret` needs once the tree follows the return — but it is
-  not what was wrong here.
+what the step after a `ret` needs once the tree follows the return — but it is
+   not what was wrong here.
+   **AND B26 (2026-10-03) has now built the tree that follows the return**, so
+   that "once the tree follows the return" is the present tense: `wide_recv`
+   reports `terminates: proved, 1 sorry`, and the separation this entry describes
+   is the admitted `hpop{k}` — whose goal is exactly the two-level statement above
+   and whose proof is measured at >1500 s of wall while the read address is
+   symbolic. The address has to be computed for it to close, which is the
+   remaining work and is written down in the companion doc.
 * `augassign` — a single admitted SIDE CONDITION on a `mov rax, [rsp]` step (the
   SIB form), not a `hrip`. `simp [read_i32_le, read_i8, hb]` reports `False`, so
   one of that instruction's byte facts is not in `all_bytes`. Worth ten minutes:
@@ -831,6 +897,19 @@ positive claim that is not true (a theorem that cannot be proved)?** The first i
 B1/B24 territory. The second means the TREE is wrong, and no amount of lemma
 work reaches it — `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
 is the same defect in a program too long to read by hand.
+
+**And there is a third shape, which B26/B27 found: the goal is TRUE, the
+attempt is unaffordable, and the report calls it a FAILURE.** That is what the
+24-argument program was — `simp [read_i32_le, read_i8, hb]` exhausting
+`maxHeartbeats` on step 19's byte fact, which killed the file rather than
+admitting it, so twenty minutes of Lean produced "FAIL" and nothing else. So the
+third question, after "is it `False`" and "is it true", is **can this attempt be
+paid for at all**, and the answer has to be structural rather than a budget:
+B27's answer is that a fact over `rc` at a literal address is computable and
+never needed the simplifier at all, and B26's is that a chain which crossed a
+frame takes the cheap route at its closing read rather than the affordable-looking
+one. A bound is the instrument; a heartbeat timeout is not catchable, so anything
+relying on the guard needs the goal to be small enough that the guard is reached.
 
 If you are adding a form: the four places that must agree are `_FORMS` (lemma,
 `takes_imm`, side conditions), `_SUCCS` (the successor shape), the branch in

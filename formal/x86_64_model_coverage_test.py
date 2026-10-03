@@ -681,21 +681,47 @@ def main():
             print("  " + u)
         return 1
 
-    workdir = os.path.join("/tmp", "x86_model_coverage")
-    os.makedirs(workdir, exist_ok=True)
-    src = os.path.join(workdir, "Coverage.lean")
-    with open(src, "w") as f:
-        f.write(lean_source(samps))
-    env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
-    cp = L.run_lean(lean, [os.path.basename(src)], cwd=workdir, env=env,
-                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
-    if cp.exceeded:
-        print("FAIL: " + cp.exceeded)
-        print("  coverage is UNMEASURED, not clean: a run that stopped early "
-              "has no encoding after the point it stopped, and reporting those "
-              "as 'the model steps them' is a green that means nothing.")
-        return 1
-    text = cp.stdout + cp.stderr
+    # A PRIVATE, self-removing directory, and ABSOLUTE paths handed to lean.
+    # This used to be a hard-coded /tmp/x86_model_coverage shared by every run
+    # of this script — see formal/lean.py::scratch_dir for what two concurrent
+    # runs of it do to the 151-goal file that name points at.
+    with L.scratch_dir("x86_model_coverage") as workdir:
+        src = os.path.join(workdir, "Coverage.lean")
+        with open(src, "w") as f:
+            f.write(lean_source(samps))
+        env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
+        cp = L.run_lean(lean, [src], cwd=workdir, env=env,
+                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+        if cp.exceeded:
+            print("FAIL: " + cp.exceeded)
+            print("  coverage is UNMEASURED, not clean: a run that stopped "
+                  "early has no encoding after the point it stopped, and "
+                  "reporting those as 'the model steps them' is a green that "
+                  "means nothing.")
+            return 1
+        text = cp.stdout + cp.stderr
+        # The step lemmas, at real encodings.  A lemma the model can never be
+        # asked about is the failure mode coverage above cannot see:
+        # `x86_step` answers for every byte the encoder produces, and a lemma
+        # whose hypotheses no such byte satisfies is a lemma that proves its
+        # goal about nothing.
+        lems = step_lemmas()
+        ltext, checks = lemma_lean_source(lems)
+        lname = "StepLemmas.lean"
+        lpath = os.path.join(workdir, lname)
+        with open(lpath, "w") as f:
+            f.write(ltext)
+        cp = L.run_lean(lean, [lpath], cwd=workdir, env=env,
+                        wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
+        if cp.exceeded:
+            print("\nFAIL: " + cp.exceeded)
+            print("  lemma applicability is UNMEASURED, not satisfied: a "
+                  "lemma whose `decide` never finished is exactly the "
+                  "unsatisfiable-hypothesis case this half exists to find, and "
+                  "reporting it as 'every hypothesis satisfiable' would hide "
+                  "the finding.")
+            return 1
+        lout = cp.stdout + cp.stderr
     unstepped = []
     for i, (form, label, enc) in enumerate(samps):
         if ("example : (x86_step (X86State.init 10 %d) code_%d" % (BASE + i * 16, i)) in text:
@@ -714,25 +740,7 @@ def main():
               "rather than as a failure.")
     rc = 1 if unstepped else 0
 
-    # The step lemmas, at real encodings.  A lemma the model can never be asked
-    # about is the failure mode coverage above cannot see: `x86_step` answers
-    # for every byte the encoder produces, and a lemma whose hypotheses no such
-    # byte satisfies is a lemma that proves its goal about nothing.
-    lems = step_lemmas()
-    ltext, checks = lemma_lean_source(lems)
-    lname = "StepLemmas.lean"
-    with open(os.path.join(workdir, lname), "w") as f:
-        f.write(ltext)
-    cp = L.run_lean(lean, [lname], cwd=workdir, env=env,
-                    wall_s=COVERAGE_WALL_S, cpu_s=COVERAGE_CPU_S)
-    if cp.exceeded:
-        print("\nFAIL: " + cp.exceeded)
-        print("  lemma applicability is UNMEASURED, not satisfied: a lemma "
-              "whose `decide` never finished is exactly the unsatisfiable-"
-              "hypothesis case this half exists to find, and reporting it as "
-              "'every hypothesis satisfiable' would hide the finding.")
-        return 1
-    bad = lemma_check_failures(cp.stdout + cp.stderr, checks, lname)
+    bad = lemma_check_failures(lout, checks, lname)
     print("\nstep-lemma applicability: %d lemma(s) at %d real encoding(s), %d "
           "hypotheses — %s"
           % (len({l.lemma for l in lems}), len(lems), len(checks),
