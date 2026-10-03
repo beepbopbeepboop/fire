@@ -18987,7 +18987,7 @@ def construction_dead_blob_refusal(name: str, field: str, arg,
 
 
 def construction_arg_dead_blob_refusal(name: str, field: str, arg,
-                                       rets=None):
+                                       rets=None, struct_def=None):
     """The refusal for `arg` if it is a callee's container, else None.
 
     ONE function rather than a predicate plus three `if refused:` sites at the
@@ -18999,8 +18999,15 @@ def construction_arg_dead_blob_refusal(name: str, field: str, arg,
     `rets` is `CalleeReturnTable` — the declared annotations plus the inferred
     reading — and a plain dict is accepted so that anything holding only the
     declared table keeps working with the declared-only answer.
+
+    `struct_def` is the struct being CONSTRUCTED, and it is what
+    `_callee_is_placed_frame` reads: the placed-frame callees are a fact about
+    the unit that declares the struct, attached to the struct by
+    `attach_placed_frame_callees`, and a caller that does not have it in hand
+    gets the conservative answer (the callee is not placed) — which is a refusal
+    rather than a wrong number.
     """
-    evidence = _callee_container_evidence(arg, rets)
+    evidence = _callee_container_evidence(arg, rets, struct_def)
     if evidence is None:
         return None
     return construction_dead_blob_refusal(name, field, arg, evidence)
@@ -19997,7 +20004,7 @@ def _init_store_value(struct_def, value, params, got: int, args, rets,
     if free is not None:
         return (None, free)
     refusal = construction_arg_dead_blob_refusal(
-        struct_def.name, "of this `__init__`", value, rets)
+        struct_def.name, "of this `__init__`", value, rets, struct_def)
     if refusal is not None:
         return (None, refusal)
     return (lifted, None)
@@ -20532,7 +20539,8 @@ def struct_construction_plan(struct_def, call, decls: dict,
         arg = bound[only]
         if arg is None:
             return ((CONSTRUCTION_DEFAULT,), None)
-        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets)
+        refusal = construction_arg_dead_blob_refusal(name, only, arg, rets,
+                                                     struct_def)
         if refusal is not None:
             return (None, refusal)
         src = _frame_source_structs(arg, candidates)
@@ -20548,7 +20556,8 @@ def struct_construction_plan(struct_def, call, decls: dict,
         if field in placed:
             return (None, construction_nested_slot_refusal(
                 name, field, arg, placed[field]))
-        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets)
+        refusal = construction_arg_dead_blob_refusal(name, field, arg, rets,
+                                                     struct_def)
         if refusal is not None:
             return (None, refusal)
         if arg is not None:
@@ -20729,7 +20738,7 @@ def _construction_field_bindings(struct_def, args, kwargs, slots, summary: str):
     return ({f: bound.get(f) for f in slots}, None)
 
 
-def _callee_container_evidence(arg, rets=None):
+def _callee_container_evidence(arg, rets=None, struct_def=None):
     """`"declared"`, `"inferred"` or None — WHICH evidence says `arg` is a blob.
 
     The decision half of `construction_arg_dead_blob_refusal`, split out because
@@ -20795,7 +20804,7 @@ def _callee_container_evidence(arg, rets=None):
     callee = call_callee_name(arg.func)
     if callee is None:
         return None
-    if _callee_is_placed_frame(callee):
+    if _callee_is_placed_frame(struct_def, callee):
         return None
     if return_type_is_blob((rets or {}).get(callee)):
         return "declared"
@@ -21047,7 +21056,7 @@ FRAME_FIELD_BLOB_PREMISE_B1 = \
 FRAME_FIELD_BLOB_PREMISE_B2 = "a struct that declares no __init__ has no body to run"
 
 
-def _is_container_value(value, containers: set) -> str:
+def _is_container_value(value, containers: set, struct_def=None) -> str:
     """A phrase for why `value` is a container, or "" if it is not one.
 
     A write into a frame slot is a blob write when the value put there is a
@@ -21062,12 +21071,12 @@ def _is_container_value(value, containers: set) -> str:
         exceptions and both are about a result whose lifetime is not the
         callee's activation.  A call to a framed struct of this unit is a placed
         frame address, one word, with a lifetime the frame layout governs; and a
-        call to a function of this module whose DECLARED return type is a plain
-        word (`_callee_returns_plain_word`, published per module by
-        `publish_plain_word_callees`) hands back a `malloc`'d buffer or a number
-        rather than a region of the callee's scratch — which is what
-        `self.name = mkdtemp(p)` inside a context manager's `__enter__` is, and
-        it was refused here until that arm existed;
+        call to a function of THIS unit whose DECLARED return type is a plain
+        word (`_callee_returns_plain_word`, answered from the set
+        `attach_plain_word_callees` puts on the struct) hands back a `malloc`'d
+        buffer or a number rather than a region of the callee's scratch — which
+        is what `self.name = mkdtemp(p)` inside a context manager's `__enter__`
+        is, and it was refused here until that arm existed;
       * a NAME this method is known to have bound to a container
         (`containers`) — one hop of propagation, which is what catches
         `tmp = [1, 2, 3]; self.items = tmp`;
@@ -21084,9 +21093,9 @@ def _is_container_value(value, containers: set) -> str:
         return "a container literal"
     if isinstance(value, F.CallExpr):
         callee = value.func.name if isinstance(value.func, F.IdentExpr) else None
-        if callee and _callee_is_placed_frame(callee):
+        if callee and _callee_is_placed_frame(struct_def, callee):
             return ""
-        if callee and _callee_returns_plain_word(callee):
+        if callee and _callee_returns_plain_word(struct_def, callee):
             # The callee is a function of THIS module and its declaration says
             # it returns a word. That settles the question premise (B1) asks,
             # because the hazard is specific: a container is a bump-allocated
@@ -21136,22 +21145,25 @@ def _container_binding_names(node, receivers, out: set) -> None:
         _container_binding_names(getattr(node, fname, None), receivers, out)
 
 
-def _container_write(node, receivers, found: list, containers: set) -> None:
+def _container_write(node, receivers, found: list, containers: set,
+                     struct_def=None) -> None:
     """Collect `(field, why)` for every container written through a receiver.
 
     The receiver set is `struct_receivers(st)`, so `this.x = [1]` in a class
     whose methods spell the receiver `this` is seen as readily as `self.x`.
+    `struct_def` is threaded down rather than published, because it is what the
+    unit-scoped callee answer needs (`attach_plain_word_callees`).
     """
     if isinstance(node, list):
         for x in node:
-            _container_write(x, receivers, found, containers)
+            _container_write(x, receivers, found, containers, struct_def)
         return
     if isinstance(node, F.FunctionDef):
         return
     if isinstance(node, F.AssignStmt) and isinstance(node.target, F.MemberExpr) \
             and isinstance(node.target.obj, F.IdentExpr) \
             and node.target.obj.name in receivers:
-        why = _is_container_value(node.value, containers)
+        why = _is_container_value(node.value, containers, struct_def)
         if why:
             found.append((node.target.member, why))
         return
@@ -21159,47 +21171,37 @@ def _container_write(node, receivers, found: list, containers: set) -> None:
         if fname in ("line", "col"):
             continue
         _container_write(getattr(node, fname, None), receivers, found,
-                         containers)
+                         containers, struct_def)
 
 
-_PLACED_FRAME_CALLEES = None
+def attach_plain_word_callees(struct_defs, names) -> None:
+    """Give every one of `struct_defs` this unit's plain-word callees, in place.
 
-# The callees of THIS module whose DECLARED return type is a plain word — a
-# string, an integer, a pointer — and so cannot hand back a bump-allocated blob.
-# Published for the same reason `_PLACED_FRAME_CALLEES` is: the container-write
-# scan is a node walk over one struct's methods with no unit in hand, and the
-# unit is the only thing that knows what a callee's declaration says. Cleared at
-# the same point, by the same call, because a stale table would answer about a
-# module this process is no longer compiling.
-_PLAIN_WORD_CALLEES = None
-
-
-def publish_plain_word_callees(names) -> None:
-    """Tell the container-write scan which callees of this module return a word.
-
-    The narrowing that premise (B1) needed and did not have: a method that
-    stores `mkdtemp(p)` into a frame field was refused because "a call this
-    path cannot see through might be" a container constructor, while
-    `mkdtemp`'s own declaration says it returns a `str` — and a `str` here is a
-    `malloc`'d buffer the caller owns for as long as it likes
-    (`formal/hostmods/os/_syscalls.mojo`, `str_alloc`), or an interned literal,
-    and never a region of the callee's reserved scratch. Storing one in a slot
-    the caller outlives is therefore exactly as safe as storing a number, and
-    the refusal was a true statement about an unstated possibility applied to a
-    program that had said what it meant.
-
-    Only functions of THIS module are in the table. A callee in another unit is
-    a call this path cannot see through whatever its source says, and the
-    conservative reading is the right one there: the whole premise is about a
-    value whose lifetime is the callee's activation, and across a dylib boundary
-    this build has the callee's declaration but not its allocation.
+    On the struct rather than published in a module global, for the reason
+    `attach_field_evidence` gives and MEASURED here: a module global is the LAST
+    writer's answer, and a build compiles other units NESTED. Published, the set
+    was whichever import compiled last — measured on
+    `formal/hostmods/tempfile.mojo`, where `__enter__`'s `self.name = mkdtemp(p)`
+    was checked against SHUTIL's callee list (tempfile imports shutil) and the
+    premise refusal came back, while the same file built fine when reached
+    through an importer that happened to publish in the other order. A fact
+    about one unit attached to that unit's own structs cannot be overwritten by
+    a nested build.
     """
-    global _PLAIN_WORD_CALLEES
-    _PLAIN_WORD_CALLEES = frozenset(names or ())
+    for st in struct_defs or []:
+        setattr(st, "_plain_word_callees", frozenset(names or ()))
 
 
-def _callee_returns_plain_word(callee: str) -> bool:
-    return bool(_PLAIN_WORD_CALLEES) and callee in _PLAIN_WORD_CALLEES
+def _callee_returns_plain_word(struct_def, callee: str) -> bool:
+    """Whether `callee` is one of THIS struct's unit's declared word-returning callees.
+
+    Only functions of the unit are in the set, and that is the conservative
+    direction rather than an omission: a callee in another unit is a call this
+    path cannot see through whatever its source says, and the whole premise is
+    about a value whose lifetime is the callee's activation — across a dylib
+    boundary this build has the callee's declaration but not its allocation.
+    """
+    return callee in (getattr(struct_def, "_plain_word_callees", None) or ())
 
 
 def plain_word_callee_names(functions, structs_by_name=None,
@@ -21226,7 +21228,7 @@ def plain_word_callee_names(functions, structs_by_name=None,
     return out
 
 
-def _callee_is_placed_frame(callee: str) -> bool:
+def _callee_is_placed_frame(struct_def, callee: str) -> bool:
     """Whether a call to `callee` yields a frame this path PLACED.
 
     True for a struct of the module being compiled whose receiver is a frame —
@@ -21234,26 +21236,28 @@ def _callee_is_placed_frame(callee: str) -> bool:
     inside its owner's block.  Both are one word with a lifetime the frame layout
     already governs, which is why a slot may hold them and may not hold a blob.
 
-    The table is a MODULE-level cache keyed on nothing but the compiled struct
-    names, because there is no unit to thread through and a container-write scan
-    runs per struct; it is cleared by the build pass at the point where it
-    publishes the set for a module (`publish_placed_frame_structs`), so a
-    second module in one process cannot read the first module's answer.
+    Attached to the struct rather than published in a module global, for the
+    reason `attach_plain_word_callees` gives and MEASURED on its sibling: a build
+    compiles imported units NESTED, so a published set was whichever import
+    compiled last.  The drift here is in the SAFE direction — a frame address
+    read as "not placed" is an extra refusal, never a wrong answer — which is
+    exactly why it went unnoticed and is why it is worth removing rather than
+    leaving beside the table that had it backwards.
     """
-    return bool(_PLACED_FRAME_CALLEES) and callee in _PLACED_FRAME_CALLEES
+    return callee in (getattr(struct_def, "_placed_frame_callees", None) or ())
 
 
-def publish_placed_frame_structs(names) -> None:
-    """Tell the container-write scan which callees this module places.
+def attach_placed_frame_callees(struct_defs, names) -> None:
+    """Give every one of `struct_defs` this unit's placed-frame callees, in place.
 
-    The one piece of unit knowledge `frame_field_premise` needs, and it is
-    published rather than threaded because the scan is a node walk with no unit
-    in hand — the same reason `attach_field_evidence` puts the evidence on the
-    struct instead of passing it down.  Called from `_prepare_functions`, which
-    is the single point where the compiled struct set is known.
+    The one piece of unit knowledge `frame_field_premise` needs, carried on the
+    struct for the reason `attach_field_evidence` gives: the consumer is a node
+    walk with no unit in hand, and a unit-scoped fact that lives in a global is
+    the last writer's answer.  Called from `_prepare_functions`, which is the
+    single point where the compiled struct set is known.
     """
-    global _PLACED_FRAME_CALLEES
-    _PLACED_FRAME_CALLEES = set(names or ())
+    for st in struct_defs or []:
+        setattr(st, "_placed_frame_callees", frozenset(names or ()))
 
 
 def struct_field_container_writes(struct_def) -> list:
@@ -21273,7 +21277,8 @@ def struct_field_container_writes(struct_def) -> list:
         containers: set = set()
         _container_binding_names(getattr(m, "body", None), receivers,
                                 containers)
-        _container_write(getattr(m, "body", None), receivers, found, containers)
+        _container_write(getattr(m, "body", None), receivers, found, containers,
+                         struct_def)
     return found
 
 
@@ -23052,7 +23057,7 @@ class GlobalSymbol:
 
 
 # Published by `publish_module_symbols`, for the same reason and with the same
-# shape as `publish_placed_frame_structs`: the consumer that needs it is a
+# shape as `attach_placed_frame_callees`: the consumer that needs it is a
 # node walk inside a backend with no unit in hand, and a module-level dict
 # threaded through every signature would be a second, driftable copy of the
 # same fact.

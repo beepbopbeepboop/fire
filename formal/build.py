@@ -1846,6 +1846,31 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     return module, functions, source, structs, slots
 
 
+def _own_structs(structs) -> list:
+    """The structs THIS unit declares, out of a list that also carries imports'.
+
+    `check_frame_field_blob_premises` asks a question about a struct's METHODS
+    and about the FUNCTIONS of the unit that declares it — whether a call stored
+    into a field returns a word — and the second half is only answerable for a
+    unit this build compiled. An imported declaration is a separate parse of the
+    other module's source (`formal/imports.py`'s `imported_struct_defs`), so its
+    struct carries no callee table and the check would answer "this call might be
+    a container constructor" about a program that says what it returns: measured,
+    every program importing `tempfile` was refused for `TemporaryDirectory` on
+    the strength of a table the module's own build had already applied. That is a
+    refusal the importer cannot fix and the declaring module does not make,
+    because every imported module is compiled in full into a dylib by
+    `_resolve_imports` and this same check runs there over that module's own
+    structs.
+
+    The marker is the attachment rather than a name set: `attach_plain_word_
+    callees` marks exactly the structs `_prepare_functions` was handed as this
+    unit's own, and a struct without it is an imported declaration.
+    """
+    return [st for st in (structs or ())
+            if hasattr(st, "_plain_word_callees")]
+
+
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
                      imported_module_names, link_line=None) -> None:
@@ -1908,7 +1933,7 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     M.publish_module_symbols(symbols)
     M.publish_global_slots(slots)
     by_name = {st.name: st for st in structs}
-    check_frame_field_blob_premises(structs)
+    check_frame_field_blob_premises(_own_structs(structs))
     check_frame_subscript_escapes(functions)
     # Late frame checks, each added by a later branch and each paid
     # for twice while this block was open-coded at both call sites — which is the
@@ -11515,7 +11540,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     M.refuse_module_level_mlir_templates(stmts)
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
-    # `attach_field_evidence` and `publish_placed_frame_structs` publish what
+    # `attach_field_evidence` and `attach_placed_frame_callees` carry what
     # they carry: the consumers are a per-function rewrite in this file and a
     # node walk inside a backend, and neither has the module statements in
     # hand.  Replaces, never merges — a dylib and its dependent are two units
@@ -11668,7 +11693,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # rather than threaded because the one consumer — the blob-in-a-field
     # premise check — is a node walk with no unit in hand, the same reason
     # `attach_field_evidence` puts the evidence on the struct.
-    M.publish_placed_frame_structs(
+    M.attach_placed_frame_callees(
+        [st for st in structs if id(st) in own],
         {st.name for st in structs_by_name.values()
          if M.struct_is_framed(st)}
         | {child.name for st in structs_by_name.values()
@@ -11676,14 +11702,20 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
                st, structs_by_name)})
     # …and the same premise's other half: a call to a function of THIS module
     # whose declaration says it returns a plain word cannot hand back a blob,
-    # so a method may store one in a frame field. Published beside the table
-    # above and cleared with it, for the same reason: the consumer is a node
-    # walk with no unit in hand. A context manager's `__enter__` is what needed
-    # it — `self.name = mkdtemp(p)` — and `bugs/FORMAL_tempfile_context_
-    # manager_needs_a_way_out_of_a_with.md` is the measurement.
-    M.publish_plain_word_callees(M.plain_word_callee_names(
-        functions, structs_by_name,
-        int_names=FT.TYPE_NAMES, string_names=FT.STRING_TYPE_NAMES))
+    # so a method may store one in a frame field. Attached to this unit's own
+    # structs rather than published in a module global, and the reason is
+    # measured: a build compiles imported units NESTED, so a published set was
+    # whichever import compiled last — `formal/hostmods/tempfile.mojo` was
+    # checked against SHUTIL's callee list and its `TemporaryDirectory` was
+    # refused, while the same file built through an importer that published in
+    # the other order. A context manager's `__enter__` is what needed this at
+    # all — `self.name = mkdtemp(p)` — and `formal/model.py`'s
+    # `attach_plain_word_callees` carries the measurement.
+    M.attach_plain_word_callees(
+        [st for st in structs if id(st) in own],
+        M.plain_word_callee_names(functions, structs_by_name,
+                                  int_names=FT.TYPE_NAMES,
+                                  string_names=FT.STRING_TYPE_NAMES))
     # A method declared with NO parameters takes no receiver. `def first():`
     # inside a class is a plain function that happens to be spelled like a
     # method, and prepending `Regs` to its call passes a NAME where a value is
