@@ -2048,7 +2048,30 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         sig_ret = gen._KNOWN_SIGS[fname][0]
         if sig_ret != ret_type:
             imported_ret = sig_ret
-    if not imported_ret and not is_libc:
+    if (not imported_ret and not is_libc
+            and fname not in gimple_codegen._SELFHOST_HARDCODED_FUNCS):
+        # ...but NOT over a self-host PINNED signature. `imported_symbols` is
+        # built from `module_loader`'s TEXT SCAN of the defining module, so
+        # for an UNANNOTATED `def` its `c_return_type` is the scanner's `int`
+        # default rather than an observation — and `_local_sibling_module_exports`
+        # deliberately skips exactly those (it can only refine a return type
+        # it can read off the source). `_SELFHOST_SIGS` is the pinned
+        # authority for the names it lists, `ret_type` above already came from
+        # it (`_lower_named_call` seeds from the same table), and letting the
+        # weaker guess win here is what emitted an `int64_t` call temp for a
+        # `MojoDict *`-returning function and left the assignment's own
+        # coercion as the only correctly-typed statement:
+        #
+        #     int64_t _t4980;
+        #     _t4980 = _compute_exc_descendants (all_struct_defs);
+        #     _t4981 = (int64_t)_t4980;
+        #     _t4979 = (MojoDict *)_t4981;
+        #
+        # — a hard "assignment to 'int64_t' from 'MojoDict *'" against a
+        # definition the same table declares `MojoDict *`. Same rule
+        # `_lower_named_call` applies to `ret_type` itself a few hundred lines
+        # up (emit_calls.py's `_SELFHOST_FUNC_RETURN_TYPES` fallback).
+        # See bugs/CODEGEN_compute_exc_descendants_call_site_return_temp_is_the_box.md.
         imported_ret = (gen.imported_symbols.get(fname) or {}).get('c_return_type')
     # Also check func_return_types (Mojo function return types) for same mismatch,
     # but skip if fname is a known C stdlib function (to avoid Mojo shadow overriding).
