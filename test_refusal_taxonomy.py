@@ -294,7 +294,18 @@ CAUSE_SAMPLES = [
     ("a module-global name has no storage",
      "encode_sxtb_wd_wn: '_SXT_BASES' is bound at module level, and this path "
      "has no module-global storage for it"),
-    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
+    # A `try` handler arm with a body. This is the refusal that appeared for 5
+    # files when the dylib-module-body row was closed, and it is CORRECT by
+    # design — `formal` has no unwinder, so an arm's body cannot be in the image
+    # and dropping it silently would be a wrong-but-exit-0 answer. It is in the
+    # taxonomy because "refused on purpose" and "nobody has looked" are
+    # different answers, and `other refusal` cannot tell them apart.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     "memslot.py: line 407: `ValueError` as e is a handler arm with a body "
+     "this path cannot put in the image, so it is refused rather than "
+     "dropped: `formal` has no exception unwinder, so no edge runs from a "
+     "raise site into an arm"),
+    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
     # than from a sweep log, because the shape it refuses did not exist as a
     # distinct message until a module body was recognised as the module's own
     # writer — before that, a name whose value a call computes and a name read

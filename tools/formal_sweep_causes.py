@@ -494,6 +494,19 @@ CAUSES = (
      (("is one of the module-global slots in this image's",),
       ("which this path compiles into the synthetic function the startup stub "
        "enters",))),
+    # A `try`'s HANDLER ARM with a body, and the one row in this table whose
+    # refusal is CORRECT rather than a gap — so its number is a census, not a
+    # target. `formal` has no exception unwinder: a `raise` flushes the
+    # enclosing `finally` clauses and exits, so no edge runs from a raise site
+    # into an arm, and every statement in the arm would be missing from the
+    # program that runs. It is here because the dylib-module-body row's removal
+    # (2026-10-03) made 5 files report it for the first time and they landed in
+    # `other refusal`, which is the place a table like this exists to keep them
+    # out of: "refused on purpose" and "nobody has looked" are different
+    # answers for a reader deciding what to do next. Keyed on the clause only
+    # this message carries.
+    ("a handler arm with a body (no unwinder to emit it into)",
+     (("is a handler arm with a body this path cannot put in the image",),)),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the
