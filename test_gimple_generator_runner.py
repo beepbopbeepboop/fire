@@ -2137,6 +2137,70 @@ def main():
         print(x)
 """, "42\n")
 
+    # A generator method INHERITED from a base class, called on the
+    # SUBCLASS -- the generator half of
+    # bugs/CODEGEN_compiled_path_gaps_round2.md's #1, whose `cls` /
+    # plain-`@classmethod` half closed on 2026-10-01.
+    #
+    # One unit per RECEIVER CLASS is the whole requirement, and both halves
+    # of it were broken in opposite directions:
+    #
+    # * the unit's `cls` is an opaque int64_t placeholder passed
+    #   positionally and never dereferenced -- every `cls.<...>` read
+    #   resolves BY NAME against the struct the unit was emitted for -- so
+    #   sharing the base's unit would iterate `Base.tag` where CPython
+    #   iterates `Child.tag`. That is why registering a subclass ALIAS
+    #   alone (the doc's "walk the base chain at the call site") was
+    #   explicitly not done there: it converts this program's loud
+    #   `mojo_unsupported_iter` into a silent `7, 4`.
+    # * with only the base registered, `Child.gen(4)` fell through to the
+    #   ordinary `Child_gen(...)` lowering -- a struct method gen_module's
+    #   Phase 2a deliberately never emits for a generator method -- so its
+    #   yields were dropped and the consuming `for` got a void value.
+    #
+    # `test_generator_matches_cpython`, not a hand-written string: the
+    # failure this must catch is precisely "agrees with itself and is
+    # wrong", and `Base.gen(4)` in the same program is the control that a
+    # fix which made the subclass read the BASE's value (or vice versa)
+    # cannot satisfy.
+    test_generator_matches_cpython("inherited_classmethod_generator_dispatches_per_class", """\
+class Base:
+    tag = 7
+
+    @classmethod
+    def gen(cls, n: Int):
+        yield cls.tag
+        yield n
+
+class Child(Base):
+    tag = 9
+
+def main():
+    for v in Base.gen(4):
+        print("B", v)
+    for v in Child.gen(4):
+        print("C", v)
+""", """\
+class Base:
+    tag = 7
+
+    @classmethod
+    def gen(cls, n):
+        yield cls.tag
+        yield n
+
+class Child(Base):
+    tag = 9
+
+def main():
+    for v in Base.gen(4):
+        print("B", v)
+    for v in Child.gen(4):
+        print("C", v)
+
+main()
+""")
+
     # `yield from sorted(<iterable>, key=lambda x: ...)` — a single-
     # parameter lambda passed directly as a `key=` call argument (not
     # assigned to a local first, unlike `generator_lambda_and_*_bound_

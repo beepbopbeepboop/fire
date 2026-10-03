@@ -7580,12 +7580,48 @@ def gen_module_impl(self, stmts):
             continue
         self._compile_nested_async_functions(s, _async_fns)
 
+    # A compiled generator METHOD gets one C++ coroutine unit PER RECEIVER
+    # CLASS, not per defining FunctionDef.
+    #
+    # `_merge_struct_inheritance` (gimple_codegen.py) gives every StructDef's
+    # `.methods` the fully-merged view, so a subclass's list holds the very
+    # SAME FunctionDef object its base's does. The unit's `cls` is an opaque
+    # int64_t placeholder that is passed positionally and NEVER dereferenced —
+    # every supported `cls.<...>` shape resolves purely BY NAME against the
+    # struct the unit was emitted for (`_gen_cpp_generator_unit`'s
+    # `_cls_refs_supported`) — so a subclass needs its OWN unit. Sharing the
+    # base's would read `_classattr_Base__tag` where CPython reads Child's,
+    # which is why this is a per-class unit and not just a lookup.
+    #
+    # Keying the work on `id(m)` — as this loop's predecessor did, popping
+    # `_generator_fns` as it went — therefore registered only the DEFINING
+    # class: `Child`'s turn never came, because its `id(m)` had already been
+    # popped. `Child.gen(4)` then fell through to the ordinary
+    # `Child_gen(...)` lowering, a struct method gen_module's Phase 2a
+    # deliberately never emits for a generator method, so its `yield`s were
+    # dropped on the floor and the consuming `for` got a void value and
+    # answered `mojo_unsupported_iter` at run time. Registering per
+    # (struct, method) closes both halves: `_supported_generator_methods` also
+    # suppresses that stub (both GIMPLE emission sites skip on membership —
+    # module_gen.py's Phase 2a), and the call site
+    # (emit_methods.py's `_lower_method_call`, whose class-level-receiver arm
+    # looks up `(func.obj.name, method)`) finds its unit.
+    #
+    # This also REPLACES two byte-identical loops that ran back to back with
+    # nothing between them — the second's only difference was a "(pass 2)"
+    # debug string, and with the work keyed on the pair rather than on
+    # `id(m)` a second identical pass could only ever find nothing new.
+    _gen_method_keys_done: set = set()
+    _gen_method_ids_done: set = set()
     for _sd in stmts:
         if not isinstance(_sd, StructDef):
             continue
         for m in _sd.methods:
             if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
                     and id(m) not in _async_fns):
+                continue
+            key = (_sd.name, m.name)
+            if key in _gen_method_keys_done:
                 continue
             if not _generator_quick_eligible(m):
                 continue
@@ -7598,7 +7634,8 @@ def gen_module_impl(self, stmts):
                             'eligible for C++ coroutine path, falling '
                             'back to honest refusal', e)
                 continue
-            key = (_sd.name, m.name)
+            _gen_method_keys_done.add(key)
+            _gen_method_ids_done.add(id(m))
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
@@ -7616,44 +7653,10 @@ def gen_module_impl(self, stmts):
                 self._func_param_defaults[f"{base}_start"] = [
                     (pn, dv) for pn, dv in _gen_dflts.items()]
             self._generator_cpp_units.append(cpp_text)
-            _generator_fns.pop(id(m), None)
-
-    for _sd in stmts:
-        if not isinstance(_sd, StructDef):
-            continue
-        for m in _sd.methods:
-            if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
-                    and id(m) not in _async_fns):
-                continue
-            if not _generator_quick_eligible(m):
-                continue
-            try:
-                cpp_text, value_ctype, base, param_ctypes = \
-                    self._gen_cpp_generator_unit(m, struct_name=_sd.name)
-            except _UnsupportedGeneratorShape as e:
-                self._cpp_refusal_reasons.setdefault(m.name, str(e))
-                _debug_note(f'generator method {_sd.name}.{m.name!r} not '
-                            'eligible (pass 2)', e)
-                continue
-            key = (_sd.name, m.name)
-            self._supported_generator_methods[key] = m
-            self._generator_method_api[key] = {
-                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                # Which SOURCE parameter, if any, is the receiver slot a
-                # caller must fill -- see mojo/middle/coro.py's identical
-                # key for why the registered `params` (bare ctype strings)
-                # cannot carry it. `m.params[0][0]` is the only place the
-                # name survives, so it is read here, at registration.
-                'receiver': (_cpp_method_receiver_name(m)),
-                'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
-            }
-            self.func_param_types[f"{base}_start"] = param_ctypes
-            _gen_dflts = getattr(m, 'param_defaults', None) or {}
-            if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = [
-                    (pn, dv) for pn, dv in _gen_dflts.items()]
-            self._generator_cpp_units.append(cpp_text)
-            _generator_fns.pop(id(m), None)
+    # The ids come out only here, after EVERY struct has had its turn. Popping
+    # inside the loop is precisely what stopped a subclass from being reached.
+    for _gm_done in _gen_method_ids_done:
+        _generator_fns.pop(_gm_done, None)
 
     if _gsrc:
         for _od in stmts:
