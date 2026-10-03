@@ -1696,6 +1696,29 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # until this case was added; the container literals below
             # already had an identical fix.
             cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+        elif isinstance(n.value, gimple_ctypes.FloatLiteral):
+            # A `double` local, which is the ONE scalar this map used to
+            # have no answer for at all — the docstring above calls scalars
+            # "not included, they are what the int64_t default is for" — and
+            # the int64_t default is a TRUNCATION for this one, not a box.
+            # Nothing downstream can recover it: `(int64_t)5.0` is `5`, and
+            # no table can tell that from a genuine 5, so a `double` that
+            # crosses an inference boundary loses its type with no recovery
+            # path, unlike every pointer-shaped value here (which `_to_int64`
+            # can re-derive through `_actual_types`).
+            #
+            # Measured shape (`def g(): q = 2.5; fn = lambda: q * 2; return
+            # fn()` prints `5` where CPython prints `5.0`): `q` read as
+            # int64_t, `q * 2` joined to int64_t, nothing recorded.
+            #
+            # Only `FloatLiteral` — the one RHS that is unambiguous evidence
+            # of `double` with no inference in between. A `double` from a
+            # call, an annotated `VarDecl`, or an arithmetic expression is
+            # NOT added, for the reason the docstring gives for every other
+            # exclusion: each would be a second, independently-drifting
+            # inference, and the conflict rule below is already the
+            # conservative answer for a name rebound to two kinds.
+            cand = 'double'
         else:
             t = _container_literal_ctype(n.value)
             if t:

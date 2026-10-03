@@ -1452,9 +1452,7 @@ nested()
     #
     # The int row is the control: `int64_t` is already the answer for an int,
     # so it must be unchanged by the fix that teaches the estimator to look
-    # through a lambda-bound local. The `double` flavour of the same defect is
-    # still open and is recorded with its cause in
-    # bugs/CODEGEN_lambda_call_boundary_loses_the_return_type.md.
+    # through a lambda-bound local.
     test_gimple_matches_cpython("gimple_inlined_lambda_string_return_keeps_its_type", """\
 def o2():
     s = 'ab'
@@ -1474,6 +1472,45 @@ def i1():
 print(o2())
 print(o3())
 print(i1())
+""")
+
+    # The `double` flavour of the same defect, and it is a different KIND of
+    # wrong: a `char *` truncated to `int64_t` is recoverable (the boxed-pointer
+    # convention round-trips the bits and `_get_actual_type` re-derives
+    # `char *`), a `double` is not — `(int64_t)5.0` is `5` and nothing left in
+    # the tables can tell that from a genuine 5. So the loss has to be
+    # prevented, which is what recording the `double` local in
+    # `_prebound_local_ctypes` does.
+    #
+    # The last row is the same fix WITHOUT the lambda, and it was broken too
+    # (printed `2`): the defect was never about the lambda boundary, only
+    # about a `double` local being invisible to inference. `float` is pinned
+    # here for the same reason `int` is pinned above — `q = 2.5` is a
+    # `FloatLiteral`, so `float` and `double` must agree.
+    test_gimple_matches_cpython("gimple_double_local_keeps_its_type_across_inference", """\
+def g():
+    q = 2.5
+    fn = lambda: q * 2
+    return fn()
+
+def h():
+    q = 2.5
+    fn = lambda: q
+    return fn()
+
+def j():
+    q = 2.5
+    return q
+
+def k():
+    q = 2.5
+    fn = lambda: q * 2.0
+    return fn()
+
+print(g())
+print(h())
+print(j())
+print(k())
 """)
 
     test_gimple_runtime_error("gimple_iterating_a_non_container_raises", """\
