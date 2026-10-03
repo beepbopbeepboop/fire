@@ -1077,9 +1077,9 @@ here checks in seconds to minutes, so those were non-terminating elaborations,
 and nothing would have stopped them: the launch sites that had a bound at all
 had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
 and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
-reduction, and `simp`'s congruence recursion — see
-`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`, where three
-separate budgets are measured failing to fire).
+reduction, and `simp`'s congruence recursion — three separate budgets measured
+FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
+in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 
 | what | bound | why that size |
 |---|---|---|
@@ -1120,8 +1120,7 @@ Both halves are now in, and the doc is deleted:
    state> = <pc of the whole composed state> then .. else ..`, and `bv_decide`'s
    internal normalisation of that nest is what does not terminate — a case split
    per level, in a `simp` the emitted file has no way to configure, with
-   `maxHeartbeats`, `maxSteps` and `maxRecDepth` all measured failing to fire
-   (`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`).
+   `maxHeartbeats`, `maxSteps` and `maxRecDepth` all measured failing to fire.
 
    The emitter already knows statically which steps move the pc — `_step_rhs`
    writes the `pc` field exactly when the instruction does — so it emits the

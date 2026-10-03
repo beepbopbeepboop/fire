@@ -585,7 +585,7 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     # obligation" -- never equality against a fixed set, which cannot tell
     # "no obligation because it is PROVED" from "no obligation because the
     # emitter forgot", and treats those two as the same observation.  That
-    # distinction is `FORMAL_OPUS_dylib_termination_handoff.md` §`OPUS-2`, and
+    # distinction is `FORMAL_dylib_export_loops_and_frame_bounds.md` §`OPUS-2`, and
     # the asymmetry is now checked in the direction that matters.
     import re as _re
     idents = set(_re.findall(r"^def (dylib_export_\w+) : DylibExport :=", text, _re.M))

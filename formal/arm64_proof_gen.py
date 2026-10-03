@@ -8656,13 +8656,18 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # instruction moves the pc.  So the runner's `if` is emitted resolved for
     # every such step, and the whole composed effect is a straight-line term.
     #
-    # That resolution is what makes this terminate (see
-    # `bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`): a
-    # fourteen-fold nest of `if <pc of the whole composed state> = <pc of the
-    # whole composed state> then ... else ...` is a case split per level, and
-    # `bv_decide`'s own normalisation of it is what did not terminate, with
-    # `maxHeartbeats`, `maxSteps` and `maxRecDepth` all measured failing to
-    # fire.  The two forms are the same function: for a step whose effect is
+    # That resolution is what makes this terminate.  A fourteen-fold nest of
+    # `if <pc of the whole composed state> = <pc of the whole composed state>
+    # then ... else ...` is a case split per level, and `bv_decide`'s own
+    # normalisation of it is what did not terminate: measured at 177.1 s CPU in
+    # 79.9 s of wall before `RLIMIT_CPU` fired, and then at 79.7 s wall /
+    # 296 s CPU even with `bv_decide` replaced by `sorry` (which made
+    # `noEarly`'s blocks the next cost centre), with `maxHeartbeats`,
+    # `maxSteps` and `maxRecDepth` all measured FAILING to fire.  The numbers
+    # and the two cost centres are in `FORMAL.md` §12 and
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1.
+    #
+    # The two forms are the same function: for a step whose effect is
     # `{s with sp := v}`, `(st_i s).pc = s.pc` holds by `rfl`, which is the
     # hypothesis `runs_cons_seq` wants.
     #
@@ -8722,7 +8727,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
     # THE PC DISCIPLINE, one lemma per step and no unfolding of the chain.
     # This is the whole of what `noEarly` needs, and it replaces fifteen
     # `simp only [S15 …, st0 …]` blocks that each re-unfolded the composed
-    # state -- the second cost centre `FORMAL_OPUS_dylib_termination_handoff.md`
+    # state -- the second cost centre `FORMAL_dylib_export_loops_and_frame_bounds.md`
     # §`OPUS-3` suspected and this measures: the whole contract region does not
     # finish at a 300 s CPU bound with them, and does with these.
     out.append(

@@ -1909,9 +1909,10 @@ test('prooflib', [PY, '-c',
 #   2. The looping obligation found.  It was the per-export dylib contract: a
 #      fourteen-fold nest of the runner's own `if pc = pc then .. else ..`
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
-#      normalisation cannot be configured out of
-#      (`bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`, three
-#      budgets measured failing to fire).  `formal/arm64_proof_gen.py` now
+#      normalisation cannot be configured out of, and three budgets were
+#      measured failing to fire (`FORMAL.md` §12,
+#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
 #      resolve.  Measured on the generated `triple` proof: 9.0 s wall /

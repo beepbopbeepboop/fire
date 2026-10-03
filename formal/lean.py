@@ -93,18 +93,21 @@ returns it in `LeanRun.exceeded` and every caller turns it into a message that
 names the bound it broke; it is NOT published to the verdict cache, because a
 breach is a fact about this machine at this moment (how loaded it was, how many
 proofs ran at once) rather than a property of the proof's bytes — caching it is
-how a red becomes permanent (`bugs/FORMAL_OPUS_dylib_termination_handoff.md`).
+how a red becomes permanent (`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`).
 And it is never silently `0` holes: a killed elaboration measured nothing, so
 the hole census reports UNMEASURED for it.
 
 The one thing this does NOT fix is a proof that needs more than the bound: it
 converts an unbounded hang into a loud, reproducible, one-line failure that says
-which bound was broken. What spins is a separate question, and the one measured
-case is `bugs/FORMAL_dylib_contract_bv_decide_does_not_terminate.md`: `bv_decide`
-on a 14-fold composed `Arm64State` normalises its own goal with a `simp` that
-`maxHeartbeats`, `maxSteps` and `maxRecDepth` all fail to meter — three
-measurements in that doc, which is why the bound here is the instrument and not
-another budget.
+which bound was broken. What spins is a separate question, and the one case ever
+MEASURED is now fixed rather than documented: `bv_decide` on a 14-fold composed
+`Arm64State` normalised its own goal with a `simp` -- the runner's `if pc = pc
+then .. else ..`, one per step, around the whole state -- which `maxHeartbeats`,
+`maxSteps` and `maxRecDepth` all failed to meter, three separate measurements.
+`FORMAL.md` §12 and `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 carry
+the numbers and the fix; the lesson for this module is the one that outlives it:
+a budget was the wrong instrument three times over, so the bound here is the
+instrument and the emitter owes the tree goals small enough to need it.
 """
 import collections
 import hashlib
@@ -1421,7 +1424,7 @@ def proof_census(proof_path: str, repo_root: str | None = None,
     # bound is a function of the MACHINE (how loaded, how many proofs at once),
     # so caching it turns one slow afternoon into a permanent red that no
     # re-run can clear — which is exactly what
-    # `bugs/FORMAL_OPUS_dylib_termination_handoff.md` records about a cached
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` records about a cached
     # timeout. So a breach is reported, never published, and its hole census is
     # UNMEASURED rather than the partial prefix the killed run managed to print.
     return census(False, detail, False, None, lib)

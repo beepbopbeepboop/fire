@@ -9,17 +9,20 @@ State at `96d5d8a`. My commits this thread: `c967b5d` (a claim I retracted),
 emitter, **committed deliberately broken**), `ca63039` (IR files brought into
 line with §11.5), `e0af987` (the loop-fuel change).
 
-## Status, 2026-10-02 (`formal3-2-r2-r2`): both TASKS are now owned by
-`FORMAL_OPUS_dylib_termination_handoff.md`, and one of them is partly LANDED
+## Status, 2026-10-03 (`formal9-dylib-termination-r2`): §3 is LANDED, §4 is OPEN
 
-**Read the sibling before starting either of these.** `bugs/FORMAL_OPUS_dylib_termination_handoff.md`
-is the same thread's later handoff for the same two subjects, it is a claimed
-item (`bug:FORMAL_OPUS_dylib_termination_handoff`), and it names the write set
-outright: **`lib/ProofLib.lean` and `formal/arm64_proof_gen.py`**. Those are
-where both of this document's remaining items live, so this document's remaining
-work is that worker's and not a second attempt at it. This one is kept because
-§5, §6 and §7 are the measurements and the traps and neither document restates
-them, and because the two together are one bug read at two dates.
+**Read the sibling before starting §4.** `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`
+owns the same two subjects, names the write set outright (**`lib/ProofLib.lean`
+and `formal/arm64_proof_gen.py`**), and has §1's row for §3 now CLOSED: the
+non-terminating dylib contract is fixed and `formal-dylib` is green, with the
+numbers. It used to be `FORMAL_OPUS_dylib_termination_handoff.md` and was
+renamed, because a handoff whose routed items are closed is not a queue entry
+and its author is gone. This one is kept because §5, §6 and §7 are the
+measurements and the traps and the sibling does not restate them.
+
+§4 (the loop-aware termination bound) is still that sibling's `OPUS-4` / `OPUS-5`
+and is untouched by the §3 fix. Its own §1 records that `OPUS-3`'s suspicion was
+right and understated: `noEarly`'s `simp only` blocks cost more than `hreg` did.
 
 | this doc's task | where it is now |
 |---|---|
