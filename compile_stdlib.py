@@ -199,16 +199,46 @@ EXPECTED_FAILURES = {
     # REASON beside its path, and a bare set could only ever satisfy the
     # membership tests. It was empty until now, so nothing had ever
     # exercised that.
+    # REMOVED 2026-10-03, with the artifact evidence rather than the syntax
+    # check: `test/iter/test_empty.mojo`, `test/iter/test_once.mojo` and
+    # `test/itertools/test_repeat.mojo` now compile, LINK and run. The
+    # iterator structs they need (`_Empty`, `_Once`, `_RepeatIterator`) are
+    # instantiated IN this translation unit by
+    # `mojo/backend_gimple/elab_intu.py` rather than declared `extern` beside a
+    # CAS object, because every one of them overloads `__iter__` on `var self`
+    # and on `ref self`, both overloads erase to `(Struct *)`, and so
+    # `_register_generic_struct` can register NEITHER and declines the struct —
+    # which is what typed the receiver as a boxed `int64_t` and left
+    # `next(it)` with nothing to dispatch on. Verified per file, after a real
+    # `gcc -c` (`nm -g` on the module's own object):
+    #
+    #   test_empty  T _empty_1_T_3_Int
+    #               T __Empty_1_T_3_Int___iter___0120be / _0120be_2
+    #               T __Empty_1_T_3_Int___next__ / T __Empty_1_T_3_Int_bounds
+    #   test_once   T _once_1_T_5_Int64
+    #               T __Once_1_T_5_Int64___next__, T __Once_1_T_5_Int64_bounds
+    #   test_repeat T _repeat_11_ElementType_5_Int64 and _6_String
+    #               T __RepeatIterator_11_ElementType_5_Int64___next__
+    #
+    # and a real `ld` of each module's C against `runtime/fire_runtime.c`
+    # leaves no undefined iterator symbol (the only stubs are `std.testing`'s
+    # `assert_equal`/`assert_raises`, which this driver does not compile), the
+    # binary exits 0. `once(10)` and `repeat(42, times=3)` needed no
+    # inference at all — the type argument is the literal's own exact Mojo
+    # type. The other 19 stay: they need either overload selection on a trait
+    # bound (`peekable`'s `Some[Iterable]` vs `Some[IterableOwned]`), a
+    # dependent return type through `Self.IteratorOwnedType`, or an overload
+    # OUTSIDE the iteration protocol (`_TakeWhileIterator.__init__`,
+    # `List.__getitem__`), which in-TU provably cannot yet carry. See
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
     'std/collections/string/iterators.mojo': _NEXT_ON_STRUCT,
     'std/itertools/itertools.mojo': _NEXT_ON_STRUCT,
     'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
     'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
     'test/collections/test_span.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_empty.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_enumerate.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_map.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_once.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_peek.mojo': _NEXT_ON_STRUCT,
     'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
@@ -216,7 +246,6 @@ EXPECTED_FAILURES = {
     'test/itertools/test_drop.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_repeat.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_take.mojo': _NEXT_ON_STRUCT,
     'test/itertools/test_take_while.mojo': _NEXT_ON_STRUCT,
     'test/python/test_python_object.mojo': _NEXT_ON_STRUCT,

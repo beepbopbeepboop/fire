@@ -1655,7 +1655,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # for-loop path resolves that, so this must too, or `next()` and
             # `for` would advance different objects.
             _ritr = gen._struct_method_csym(_rbase, '__iter__', '')
-            if _ritr in gen.func_return_types:
+            # An OVERLOADED `__iter__` is not callable under the bare name, so
+            # it cannot say which iterator type `__iter__` hands back — which is
+            # the same guard `emit_loops._gen_for_struct_iter` applies, for the
+            # same measured reason (see its comment). Keeping the receiver's own
+            # type is the correct answer for every `std/iter` iterator.
+            if (_ritr in gen.func_return_types
+                    and (_rbase, '__iter__') not in gen._ambiguous_struct_methods):
                 _rit = gen.func_return_types[_ritr]
                 _rnext_base = _struct_ptr_name(gen, _rit)
                 if _rnext_base:

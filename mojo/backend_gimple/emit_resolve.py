@@ -2468,6 +2468,22 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     source = gen._imported_generics.get(g)
     if not source:
         return None
+    # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
+    # unit is lowered as an ordinary local function call, so this must decline
+    # BEFORE it lowers a single argument (see the note below on why returning
+    # None after lowering would double-emit). Deliberately keyed on
+    # `(name, explicit type args)`, so it fires only where `elab_intu` proved
+    # the same instantiation — a bare `generic(<literals>)` call the pre-pass
+    # refused still takes the `.o` route unchanged.
+    _intu_arg = getattr(gen, '_intu_func_args', None) or {}
+    if explicit:
+        _ix = node.func.index
+        _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
+        _hit = _intu_arg.get((g, tuple(gen._type_expr_to_ann(e) for e in _el)))
+        if _hit:
+            return None
+    elif _intu_arg.get((g, ())):
+        return None
     # Lower args once; their C types drive inference (and the emitted call).
     # Append keyword-argument values after the positionals (they fill the
     # trailing params in order — e.g. `_async_execute[T](h, desired_worker_id=-1)`).
@@ -2721,6 +2737,20 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     struct used as a TYPE ARGUMENT to another generic (e.g. `alloc[
     MoveOnly[Int]]`) can also be resolved to a real struct, not just one
     used at a direct `Struct[Args](...)` construction call site."""
+    # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
+    # unit (`elab_intu`) needs no extern and no CAS object. Emitting either
+    # beside the real definition is exactly `error: conflicting types for
+    # '<name>'` — a definition with this codegen's real parameter types next
+    # to a declaration with the elaborator's erased ones — which is the
+    # regression that made the first in-TU attempt be reverted
+    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    # Keyed on `(base, args)` and NOT on "is this name already a struct here":
+    # the second test would also fire for a struct this module defines itself,
+    # which is a different situation with a different (unrelated) answer.
+    _intu = getattr(gen, '_intu_struct_args', None) or {}
+    _known = _intu.get((base_name, tuple(type_args)))
+    if _known:
+        return _known
     source = gen._imported_generic_structs.get(base_name)
     if not source:
         return None

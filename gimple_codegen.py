@@ -826,6 +826,20 @@ class GimpleGen:
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
         self._extra_no_mangle: set = set(no_mangle)
+        # (struct name, method name) pairs that are OVERLOADED in this compile —
+        # declared more than once on one struct. The UNSUFFIXED C symbol for
+        # such a pair is defined by NEITHER overload (each carries a hash of its
+        # real C parameter types: `__iter___0120be`, `__iter___0120be_2`), so a
+        # consumer that dispatches through the bare name has nothing to call.
+        # Published as its own registry rather than inferred from
+        # `func_return_types`, which cannot express it: the bare entry must
+        # STAY there for the forward-declaration emitter (removing it was
+        # measured — see mojo/backend_gimple/module_gen.py's registration loop).
+        # Read by `emit_loops._gen_for_struct_iter` and by
+        # `emit_calls._lower_call`'s `next(<struct>)` branch; both are the
+        # struct-protocol dispatch this project relies on, and both used to
+        # emit a call to a symbol nothing defines.
+        self._ambiguous_struct_methods: set = set()
         # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
         # for every top-level generator in THIS module that gen_module's
         # pre-pass found to match the narrow supported shape (see

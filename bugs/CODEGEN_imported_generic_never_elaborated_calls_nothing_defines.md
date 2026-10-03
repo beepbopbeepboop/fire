@@ -10,10 +10,41 @@ forward declaration for every imported name, called or not. The real figure is
 **96 sites / 51 names / 60 files** (108 before that session's fixes). See "What
 was wrong with the measurement" below — it is the most important section here.
 
-**2026-10-03: `monomorphize.mangle` is injective — the blocker the previous
-session named is gone. Nothing else moved, and that is the honest report.**
+**2026-10-03: `monomorphize.mangle` is injective AND in-TU instantiation landed
+— the census did not move (96 / 51 / 60), and one family of three went green.**
 
-### Landed 2026-10-03: `mangle` is a FUNCTION of the instantiation
+### Landed 2026-10-03 (2): in-TU instantiation, 3 of the 22, and what actually blocks the rest
+
+`mojo/backend_gimple/elab_intu.py` (new), one call site in
+`mojo/backend_gimple/module_gen.py`, two suppression hooks in
+`emit_resolve.py`, and `gen._ambiguous_struct_methods` (published in
+`gimple_codegen.py`, filled in `module_gen.py`, read by `emit_loops.py` and
+`emit_calls.py`). Full write-up, the per-file `nm -g` evidence, and the
+measured boundary of the feature are in
+`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`'s Status
+section. The three points this doc needs:
+
+- **`compile_stdlib.py` 588 / 22 / 0 → 591 / 19 / 0**, with
+  `test/iter/test_empty.mojo`, `test/iter/test_once.mojo` and
+  `test/itertools/test_repeat.mojo` removed from `EXPECTED_FAILURES`.
+- **The census is unchanged and CANNOT be, for this change.** It counts call
+  sites in files that COMPILE; these three did not compile before, so there was
+  no census row to remove. The census will move only when the remaining 19
+  compile, which needs the two things enumerated there: dependent return types
+  through `Self.<comptime member>`, and overload selection on a trait bound.
+- **The `conflicting types` story is settled, and it is NOT `mangle`.** That
+  failure is a definition with real parameter types beside a declaration with
+  the elaborator's erased ones, and it comes from the two routes BOTH claiming
+  one instantiation. Suppressing the `.o` route for anything the pre-pass
+  defines removes the second claim: **zero `conflicting types` across the
+  591-file sweep.** The blocker that is actually left is DIFFERENT and was
+  previously unmeasured — in-TU turns an erased struct into a REAL one, and
+  this codegen's real-struct machinery is incomplete (`[i] = v` on a now-real
+  container; an overloaded non-protocol method's call site still holding the
+  erased view). 11 files, itemised with the exact gcc message each way, in the
+  other doc.
+
+### Landed 2026-10-03 (1): `mangle` is a FUNCTION of the instantiation
 
 `mangle` was `'_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))`.
 Two independent defects, both measured over the same generated corpus of 1752
