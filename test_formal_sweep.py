@@ -1632,17 +1632,45 @@ class TestSweepLock(unittest.TestCase):
         # "Another sweep is running" is a worse message than "another sweep is
         # running, and here is its pid", and the pid is free: the lock is a
         # lockFILE, which is why it is not the ledger (that gets replaced).
+        #
+        # The claim is INSIDE the `_with_cas` redirect, and that is the whole
+        # content of the fix. Called with `lambda: None` and then claiming
+        # afterwards, the redirect has already been undone and the claim lands
+        # on the REAL `~/.gmojo/cas/formal-sweep-<arch>.lock` — a lock whose one
+        # job in the world is to stop two sweeps sharing a machine — so on a box
+        # where a sibling worker is sweeping, this test was red for a reason that
+        # has nothing to do with what it claims. Measured on the formal6 merge
+        # with 45 concurrent `formal_sweep` processes: `_claim_arch("arm64")`
+        # returned False against the default cas dir and the test reported it as
+        # a lock defect. What is under test here is the lock FILE'S CONTENTS,
+        # and a property of a file is decided against a file the test owns.
+        # `_assert_serialised` above is the model: it takes its body as the
+        # lambda, so its claims are all inside.
         import formal_sweep as mod
         with tempfile.TemporaryDirectory() as cas_dir:
-            self._with_cas(cas_dir, lambda: None)
-            self.assertTrue(mod._claim_arch("arm64", ["a.py"]))
-            with open(mod.sweep_lock_path("arm64")) as f:
-                body = f.read()
-        self.assertIn(str(os.getpid()), body)
-        self.assertIn("a.py", body)
+            body = {}
+
+            def claim():
+                self.assertTrue(mod._claim_arch("arm64", ["a.py"]))
+                with open(mod.sweep_lock_path("arm64")) as f:
+                    body["text"] = f.read()
+
+            self._with_cas(cas_dir, claim)
+        self.assertIn(str(os.getpid()), body["text"])
+        self.assertIn("a.py", body["text"])
 
     def _with_cas(self, cas_dir, body):
-        """Point cas.CAS_DIR at a temp dir for the duration of `body`."""
+        """Point cas.CAS_DIR at a temp dir for the duration of `body`.
+
+        It also drops whatever lock `body` took, and that is not tidiness.
+        `_HELD_LOCK` is module-level and deliberately never closed in
+        PRODUCTION — a real sweep holds its arch lock for the life of the
+        process — but here the process is a test run and `cas_dir` is about to
+        be deleted, so a claim left behind is an fd this file leaks and, on BSD
+        `flock`, a lock the process keeps holding. So the holder this call took
+        is closed on the way out, exactly like the one it inherited, and neither
+        is left in the module global.
+        """
         import formal_sweep as mod
         saved = mod.cas.CAS_DIR
         mod.cas.CAS_DIR = cas_dir
@@ -1652,8 +1680,9 @@ class TestSweepLock(unittest.TestCase):
             body()
         finally:
             mod.cas.CAS_DIR = saved
-            if saved_held is not None:
-                os.close(saved_held)
+            for fd in (saved_held, mod._HELD_LOCK):
+                if fd is not None:
+                    os.close(fd)
             mod._HELD_LOCK = None
 
 
