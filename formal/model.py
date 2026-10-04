@@ -6807,6 +6807,134 @@ def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
 STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
 
 
+# ── f-strings and t-strings: a LITERAL whose text is not its value ─────────
+#
+# `fire_compiler.py`'s placeholder scan (`replace_tstrings_with_placeholders`)
+# puts the WHOLE SOURCE TOKEN of an f-string or t-string into the string cache
+# under a `__MOJO_STR_n__` name, so the `StringLiteral` the parser hands on
+# carries `f"n={n}"` — prefix, quotes, braces and all — as its `value`. That is
+# a deliberate shape, and one consumer reads it: `myinterpreter.eval_StringLiteral`
+# sees the `f"` prefix, strips it and evaluates the `{...}` fields through the
+# interpreter's own expression machinery, which is why `fire.py run` answers
+# `n=7` where CPython answers `n=7`.
+#
+# The formal path decoded that value as TEXT, because `decoded_literal` is the
+# reader every engine uses and an f-string is a `StringLiteral` like any other.
+# So the interpolation was never evaluated and the program ran with the SOURCE
+# SPELLING as its value. Measured on both architectures, exit 0 in every case,
+# which is what makes this the class the whole backend's refusals exist for:
+#
+#     n = 7
+#     print(f"n={n}")       ->  f"n={n}"   (CPython: n=7)
+#     print(len(f"n={n}"))  ->  8           (CPython: 3)
+#     if f"n={n}" == "n=7"  ->  false       (CPython: true)
+#     print(f"{{lit}}")     ->  f"{{lit}}"  (CPython: {lit})
+#
+# The last one is the `{{` escape, so the wrong value is not even the same text
+# twice. Composition is what is missing, and it is the same missing BUFFER
+# `string_concat_refusal` above names: a string on this path is a bare
+# `char *` interned into read+execute `__TEXT`, so there is nowhere to lay down
+# `"n=" + decimal(n)` — not at compile time, because the field may be a runtime
+# value, and not at run time, because there is no heap. So this is a REFUSAL,
+# and it is asked over the whole module rather than at each use site, because
+# every use site is a different one (a `print` fragment, a comparison, a
+# subscript, a `len`, an intern) and a construct this path cannot represent
+# should be declined by name rather than answered by whichever reader happened
+# to see it first.
+#
+# Spelled as a SET of prefixes rather than as "starts with f" so a `t`-string,
+# an uppercase spelling and a triple-quoted body are all covered by the same
+# test and adding a spelling is one tuple entry.
+INTERPOLATED_LITERAL_PREFIXES = ('f"', "f'", 'F"', "F'", 't"', "t'", 'T"', "T'")
+
+
+def is_interpolated_literal(node) -> bool:
+    """Whether `node` is a `StringLiteral` whose text is an f-string/t-string.
+
+    False for anything that is not a literal, and false for an ordinary string
+    however it is spelled — the test is the PREFIX, because that is the whole of
+    what the parser preserved: an ordinary literal's `value` is its body and an
+    interpolated one's is its source token, and nothing else in the node
+    distinguishes them.
+
+    **And the prefix test cannot see an ordinary string whose TEXT begins with
+    one**, which is a property of the AST rather than of this function. It
+    takes exactly one spelling — the inner quote DIFFERENT from the outer one,
+    so nothing is escaped:
+
+        s = 'f"n"'      # value is f"n"  — read as an f-string
+        s = "f\\"n\\""  # value is f\"n\" — read as an ordinary string
+
+    and on that one spelling every engine in this tree is wrong or refuses:
+    `myinterpreter.eval_StringLiteral` and `gimple_codegen` print `n`, CPython
+    prints `f"n"`, and this predicate refuses. Filed with the three-way
+    measurement and the exact next step:
+    `bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`.
+    The fix belongs in the parser (a flag beside `is_raw`, set where the
+    t/f-string placeholder is built from the RAW token) and not in a reader of
+    the value.
+    """
+    return (isinstance(node, F.StringLiteral)
+            and isinstance(node.value, str)
+            and node.value.startswith(INTERPOLATED_LITERAL_PREFIXES))
+
+
+def interpolated_literal_refusal(node, where: str = "") -> str:
+    """Why an f-string/t-string literal is refused on this path.
+
+    `where` is the line the literal is on when the caller has it, so the
+    message can point at the source rather than at the construct: two f-strings
+    in one program are two refusals a reader has to tell apart.
+    """
+    spelled = node.value if isinstance(node, str) else getattr(node, "value", "")
+    # The article is spelled out rather than derived from the first letter:
+    # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
+    # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
+    # first three words are wrong is a message a reader stops reading.
+    kind = "an f-string" if spelled[:1] in ("f", "F") else "a t-string"
+    at = f" on line {where}" if where else ""
+    return (
+        f"{kind} literal{at} is refused on this path: its value is "
+        f"its INTERPOLATED text, and this path has no buffer to compose one "
+        f"in. The parser keeps the whole source token (`{spelled}`) as the "
+        f"literal's value, so what this build would have printed is the "
+        f"spelling: with `n = 7`, `print(f\"n={{n}}\")` printed "
+        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string "
+        f"here is a bare `char *` interned into read+execute __TEXT, so "
+        f"`\"n=\" + decimal(n)` has nowhere to be laid down at compile time "
+        f"(the field may be a runtime value) or at run time (there is no "
+        f"heap); this is the same missing buffer that keeps string "
+        f"concatenation and the length-dependent methods refused (see "
+        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
+        f"parts as separate operands, or build the text with `+` once that is "
+        f"lowered.")
+
+
+def refuse_interpolated_literals(stmts) -> None:
+    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+
+    Asked over the MODULE's statement list, once, by the one pipeline both
+    front ends go through (`formal/build.py:_prepare_functions`) — the same
+    place and for the same reason as `refuse_module_level_mlir_templates`: a
+    refusal asked from either backend's expression walk would be two copies of
+    one decision, and the executable and dylib paths would then be able to
+    answer differently about one source file.
+
+    `iter_nodes` is the shared walker, so a literal nested two levels down —
+    `print("x", f"v={v}")`, a `f` field inside a format spec, a comprehension's
+    element — is reached by the same walk the frame layout uses, and a node one
+    of them would miss is not missed here.
+
+    A module-level statement the walker does not descend into is not a hole:
+    `iter_nodes` recurses through dataclass fields, and a `FunctionDef`'s body
+    is one of them.
+    """
+    for node in iter_nodes(stmts):
+        if is_interpolated_literal(node):
+            raise CodegenError(interpolated_literal_refusal(
+                node, getattr(node, "line", "")))
+
+
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
 #
 # `string_concat_refusal` above is one operator out of a table, and the reason
