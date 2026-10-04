@@ -52,8 +52,8 @@ Three things are deliberately NOT harvested, and the count of each is printed:
   * a call with an argument the harvester cannot resolve (`+12`),
   * a `bytes` argument — CPython's tests deliberately run every path case twice,
     once as `str` and once as `bytes`, and a `bytes` object has NO representation
-    on this path at all (`formal/hostmods/struct.mojo`'s value-model section,
-    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`), so the `str`
+    on this path at all (`formal/hostmods/struct.mojo`'s value-model section, and
+    the bytearray/bytes-representation bug `formal25-2` holds), so the `str`
     half is the half a model can answer;
   * a call CPython's own suite asserts something about whose answer this process
     cannot reproduce — the `expanduser` cases depend on `HOME` and the test

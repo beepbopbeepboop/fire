@@ -3918,6 +3918,42 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                  method_owners.get(fn.name),
                                  _holder_bases(fn), enum_structs)
 
+    # A local bound to a HOLDER's nested-frame field holds that slot's ADDRESS,
+    # and the spelling that reads it afterwards (`t.v`) never mentions the holder
+    # it came from — so without this seeding the same program is answerable in
+    # one spelling and refused in the other.  `_nested_frame_bindings`'s
+    # docstring has the two spellings and the measurement; what is here is the
+    # POSITION, and both halves of it are load-bearing:
+    #
+    #   * after the fixpoint, because the decision asks `_nested_frame_levels`
+    #     over the BASE's candidates and `self.inner` is answerable while
+    #     `other.inner` is not — `other` is a parameter this image may only
+    #     reach with a frame address at one call site, and before the fixpoint
+    #     there is no answer to give it;
+    #   * before the per-function loop below, because that loop is what puts
+    #     `t.v` in `_frame_slots`, and it can only do so if `t` is already a
+    #     holder by the time it walks the read.  Seeding afterwards would
+    #     classify the name and leave the walk refusing it.
+    #
+    # It is seeded into the SAME two tables as every other holder rather than
+    # onto `fn` directly, because `_check_frame_escapes` (inside that loop),
+    # `_check_holder_agreements` and `_collect_holder_rebinds` all read those
+    # tables afterwards, and a holder they cannot see is a frame address handed
+    # back out of the function without any of them having been asked.
+    for fn in functions:
+        settled, reassigned = _nested_frame_bindings(
+            fn, hstruct[_fn_key(fn)], structs_by_name,
+            params_of.get(_fn_key(fn)) or ())
+        for name, st in settled.items():
+            if name in holders[_fn_key(fn)]:
+                continue
+            holders[_fn_key(fn)].add(name)
+            hstruct[_fn_key(fn)][name] = [st]
+        # Published on `fn` rather than kept in a local because the walk that
+        # raises on it is the one below, and it reads it per MemberExpr — the
+        # same reason `fn._frame_slots` is an attribute and not a local.
+        fn._nested_frame_reassigned = reassigned
+
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
     #
@@ -4046,6 +4082,14 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             # the hundreds that legitimately hold nothing.
             continue
         by_name = hstruct[_fn_key(fn)]
+        # The `_REASSIGNED` half of the local-copy seeding, read here because
+        # this walk is where a read through such a name is recognised as one.
+        # `getattr` rather than an attribute access because `_frame_receivers`
+        # publishes it on every function of the image, while this loop's own
+        # `continue` above means not every function reaches the walk — and a
+        # reader that raised on a stale table would be answering about a
+        # seeding this function never had.
+        reassigned = getattr(fn, "_nested_frame_reassigned", None) or {}
         call_recv = _call_receivers(fn)
         # `{"h.a": struct}` — the fields of a HOLDER in this function whose
         # agreed declared type is a framed struct of this module, so the slot
@@ -4085,7 +4129,29 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             if not isinstance(node, F.MemberExpr):
                 continue
             r = _root_ident(node)
-            if r is None or r[0] not in hs:
+            if r is None:
+                continue
+            if r[0] not in hs:
+                # A local copied out of a slot this compiler placed, whose frame
+                # a method of the owning struct REASSIGNS: the word is an address
+                # and the frame behind it belongs to whichever function ran that
+                # assignment, so there is no frame to place here.  The name is
+                # deliberately not in the holder table (it is not one), so without
+                # this the read falls through to the emitter and the reader is
+                # told `t` is unclassifiable — true, and naming a type inference
+                # rather than the lifetime question, which is the defect
+                # `DELEGATING_FIELD_ADVICE`'s own comment records having been
+                # written for.  The same fact through the chain the source spells
+                # is the `_REASSIGNED` arm of the value-position walk below, and
+                # both raise `_nested_frame_reassigned_refusal` so the two
+                # spellings of one refusal have one text.
+                copied = reassigned.get(r[0])
+                if copied is not None:
+                    slot, field, cands = copied
+                    raise CodegenError(
+                        _nested_frame_reassigned_refusal(
+                            _member_chain(node), slot, field, cands,
+                            structs_by_name))
                 continue
             base, depth = r
             cands = by_name.get(base) or []
@@ -4294,16 +4360,9 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         )
                     if why is _REASSIGNED:
                         raise CodegenError(
-                            f"{chain} reads through {base}.{outer_field}, which "
-                            f"is a "
-                            f"{M.annotation_base_name(_field_annotation(level, outer_field, structs_by_name))}"
-                            f" — a struct of this module whose receiver is a "
-                            f"frame — but a method of "
-                            f"{', '.join(sorted({st.name for st in level}))} "
-                            f"ASSIGNS it, so the word in the slot is a frame "
-                            f"belonging to whichever function ran the "
-                            f"assignment. {DELEGATING_FIELD_ADVICE}"
-                        )
+                            _nested_frame_reassigned_refusal(
+                                chain, f"{base}.{outer_field}", outer_field,
+                                level, structs_by_name))
                     if why is _UNPLACED:
                         # `model.nested_frame_hop_unplaced`, and not a second
                         # sentence for the same fact: this arm and the
@@ -7831,6 +7890,234 @@ def _constructor_bindings(fn, framed, functions=()) -> dict:
             if st not in got:
                 got.append(st)
     return out
+
+
+def _nested_frame_field_walk(value, by_name, structs_by_name):
+    """`(walked, level, stop, why)` for a BINDING's right-hand side, or None.
+
+    `value` is the right-hand side of a binding and `by_name` the function's
+    settled holder table, so the whole question is "does this read a slot this
+    compiler placed".  `_nested_frame_levels` is the asker because it is the one
+    the emitters' own load path is built from, and a second reader of the layout
+    is a second answer that agrees until the day it does not.
+
+    Every field of the chain is a HOP here, where the value-position arm in
+    `_frame_receivers` treats the last one as the field being read: `var t =
+    self.inner` binds the ADDRESS the slot holds, so `inner` is a hop to the
+    frame it addresses rather than a field of a frame.
+
+    `None` for anything `_root_ident` does not describe — a subscript, a call, a
+    bare name — and the walk itself otherwise, sentinels and all, because
+    `_REASSIGNED` is a decision the caller has to be able to TELL apart from the
+    three ways a chain can be untypable and it is not visible from a `None`.
+    """
+    if not isinstance(value, F.MemberExpr):
+        return None
+    root = _root_ident(value)
+    if root is None:
+        return None
+    cands = by_name.get(root[0]) or []
+    if not cands:
+        return None
+    fields = _member_chain(value).split(".")[1:]
+    return _nested_frame_levels(cands, fields, structs_by_name, None)
+
+
+def _nested_frame_reassigned_refusal(chain, slot, field, cands, decls):
+    """The `_REASSIGNED` sentence, and ONE copy of it.
+
+    A field declared as a framed struct of this module whose slot is written by
+    a method of its own struct: the word there IS an address, and the frame it
+    addresses belongs to whichever function ran that assignment, so the two
+    lifetimes are independent and the placed frame cannot be preferred.  Two
+    spellings reach it — the chain itself (`self.inner.v`) and a local copied
+    out of the slot (`var t = self.inner` then `t.v`) — and they are one refusal
+    about one fact, so they share a text: a second sentence here would be a
+    second thing for a reader to learn about the same refusal, which is what
+    `_frame_receivers`'s own `nested_frame_hop_unplaced` arm refuses to do.
+    """
+    return (f"{chain} reads through {slot}, which is a "
+            f"{M.annotation_base_name(_field_annotation(cands, field, decls))}"
+            f" — a struct of this module whose receiver is a frame — but a "
+            f"method of {', '.join(sorted({st.name for st in cands}))} ASSIGNS "
+            f"it, so the word in the slot is a frame belonging to whichever "
+            f"function ran the assignment. {DELEGATING_FIELD_ADVICE}")
+
+
+def _nested_frame_bindings(fn, by_name, structs_by_name, params=()):
+    """`(settled, reassigned)` for a local bound from a HOLDER's nested frame.
+
+    `settled` is `{name: struct}` — a local whose every binding copies the
+    ADDRESS of a frame this compiler placed.  `reassigned` is
+    `{name: (slot, field, candidates)}` for a local whose every binding copies
+    the address of a frame whose LIFETIME this analysis cannot vouch for, which
+    is why it is reported rather than seeded: the reader is told the real reason
+    instead of the emitter's "this path has no way to say what `t` holds", which
+    is true and names a type inference rather than the lifetime question that is
+    actually there.
+
+    `_constructor_bindings` one binding KIND wider, and the kind is the whole
+    content rather than a variation of it.  A construction RESERVES a block and
+    stores its own address into the name, so `x = A()` says where the frame is;
+    a nested-frame field read COPIES an address out of a slot somebody else
+    placed, so what the name holds is decided by the DECLARATION of that field
+    and by nothing about the name.  Both leave the name holding an address —
+    which is all `fn._frame_holders` asserts — and only the second needs a rule
+    of its own, because the spelling that reads the name afterwards never
+    mentions the holder the address came from:
+
+    ```
+    struct Opt:   var v: Int;  var has: Int
+    struct Box:   var pad: Int;  var inner: Opt
+        def get(out self) -> Int:
+            var t = self.inner            # a copy of the slot's address
+            return t.v * 10 + t.has      # "…'t.v' is a field access through
+                                         #  't', and this path has no way to say
+                                         #  what 't' holds" — measured, both
+                                         #  backends, before this
+    ```
+
+    while the SAME program spelled `self.inner.v * 10 + self.inner.has` builds
+    and answers 41 on both backends, because that spelling keeps the holder in
+    view.  Naming the same value in a local first is the only difference between
+    the two, and a refusal is the wrong answer for it.
+
+    **The decision is `_typed_nested_frame`, by way of `_nested_frame_levels`,
+    and routing this binding through the existing decision is the whole fix
+    rather than a detail of it.**  The slot's word is a frame address exactly
+    when the field's declared type names a framed struct of this module AND
+    nothing whose lifetime is independent writes the field: a method of the
+    owning struct assigning it makes the slot's frame belong to whichever
+    function ran that assignment, which `_typed_nested_frame` answers
+    `_REASSIGNED` for.  So a cheaper question of our own — "is `inner` declared
+    as a framed struct?" — would classify the binding in exactly the program
+    where the two lifetimes are independent, and the result is a build that
+    reads a frame which may already be dead: the failure
+    `FORMAL_one_field_holder_of_a_frame_is_not_a_holder` records for the
+    analogous receiver-seeding mistake.  A declared PARAMETER type settles the
+    layout at every call site, which is why the parameter arm can be a copy of
+    this one and this one cannot.
+
+    `params` is the function's own parameter names and is load-bearing rather
+    than a nicety: a parameter's word comes from the CALL SITE, so no binding in
+    this body can make it a frame address, and the sites are not visible here
+    (`_check_holder_agreements` is what sees them).
+
+    One struct per name and NOTHING for a name this cannot settle, which is the
+    opposite of `_constructor_bindings`' empty-list convention and deliberate:
+    a name in the holder table with no candidate is a plain word
+    (`by_name.get(base) or []` is the test the walk in `_frame_receivers`
+    makes), so returning one would send `t.v` down the ordinary value lowering
+    and read `t + 8·slot` out of a word that is not an address.  No entry means
+    today's refusal stands, which is the answer for a field this analysis cannot
+    type.
+    """
+    from mojo.middle.boundnames import _lbn_target_names
+    simple: dict = {}
+    elsewhere: set = set()
+    # ONE walk of the body answering two questions, because they are two
+    # answers about the same statements: which bindings are the plain
+    # `name = <expr>` shape this function classifies, and which bind a name
+    # through some OTHER form.  A name one of the second group also binds is
+    # left alone — the word it holds afterwards is not the word any of the
+    # classified bindings put there, and classifying it from those is how
+    # `var t = self.inner` followed by `for t in …` becomes a build that reads
+    # the loop counter's slot (measured: SIGSEGV on both backends, which is the
+    # `FORMAL_one_field_holder_of_a_frame_is_not_a_holder` failure wearing a
+    # different name).
+    #
+    # `elsewhere` enumerates the binding FORMS and asks the shared extractors
+    # what each one binds (`model.assignment_target_names`,
+    # `fire_compiler.for_target_names` through the one reader both backends'
+    # register allocator uses); it does not decide what a binding binds, so it
+    # is not a second copy of the name walk.  A form this list forgets is a
+    # name a classified binding is allowed to overrule, so the list is the
+    # binding-form inventory of `fire_compiler.py` rather than the shapes that
+    # happen to appear in this repository.
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.VarDecl):
+            simple.setdefault(node.name, []).append(node.value)
+        elif isinstance(node, F.AssignStmt):
+            if isinstance(node.target, F.IdentExpr):
+                simple.setdefault(node.target.name, []).append(node.value)
+            else:
+                # A tuple/list target, a subscript target, an attribute target.
+                elsewhere.update(M.assignment_target_names(node))
+        elif isinstance(node, F.AugAssignStmt):
+            elsewhere.update(M.assignment_target_names(node))
+        elif isinstance(node, F.MultiAssignStmt):
+            for one in (node.targets or ()):
+                elsewhere.update(M.assignment_target_names(one))
+        elif isinstance(node, F.ForStmt):
+            elsewhere.update(_lbn_target_names(node.target))
+        elif isinstance(node, F.WithStmt):
+            for item in (node.items or ()):
+                alias = getattr(item, "alias", None)
+                if isinstance(alias, F.IdentExpr):
+                    elsewhere.add(alias.name)
+                elif alias:
+                    elsewhere.add(str(alias))
+        elif isinstance(node, F.ExceptHandler):
+            if node.name:
+                elsewhere.add(node.name)
+        elif isinstance(node, F.Comprehension):
+            for gen in (node.generators or ()):
+                elsewhere.update(_lbn_target_names(getattr(gen, "target",
+                                                           None)))
+    settled: dict = {}
+    reassigned: dict = {}
+    # `table` is the caller's holder table plus what the rounds below have
+    # settled, and it is a COPY because the caller seeds `holders`/`hstruct`
+    # from the answer rather than having them changed under it.  A chain of
+    # local copies is ordinary — `var m = self.mid` then `var i = m.deep` — and
+    # one pass cannot answer the second binding, whose base is the first
+    # binding's NAME and is not a holder until this function has said so.  The
+    # bound is the number of names the body binds, which is finite and is the
+    # same argument `_HOLDER_FIXPOINT_ROUNDS` makes for the call-site fixpoint
+    # this one sits beside; `simple` is non-empty on every round that can grow,
+    # so the `+ 1` is the do-nothing round rather than an unentered loop.
+    table = dict(by_name)
+    for _round in range(len(simple) + 1):
+        grew = False
+        for name, values in simple.items():
+            if name in settled or name in elsewhere or name in params \
+                    or name in by_name:
+                continue
+            agreed = None
+            copies = []
+            for value in values:
+                walk = _nested_frame_field_walk(value, table, structs_by_name)
+                if walk is None:
+                    agreed = None
+                    break
+                walked, level, stop, why = walk
+                if stop is None:
+                    got = walked[-1][2]
+                    if agreed is not None and agreed.name != got.name:
+                        agreed = None
+                        break
+                    agreed = got
+                elif why is _REASSIGNED and agreed is None and not copies:
+                    copies.append((level, stop))
+                else:
+                    agreed = None
+                    break
+            if agreed is not None:
+                settled[name] = agreed
+                table[name] = [agreed]
+                grew = True
+            elif copies and len(copies) == len(values):
+                # Every binding stopped at the SAME `_REASSIGNED` level, which is
+                # the one case where declining silently would name the wrong
+                # problem.  A name with two bindings stopping at two different
+                # fields has no single fact to report, and today's refusal is the
+                # honest answer.
+                level, stop = copies[0]
+                reassigned[name] = (_member_chain(values[0]), stop,
+                                    list(level))
+        if not grew:
+            break
+    return settled, reassigned
 
 
 def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
