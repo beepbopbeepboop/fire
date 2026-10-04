@@ -22,7 +22,8 @@ single boundary layout either"), so every item below was already refused.
 
 **The construct.** `def keep(p: Pair[Int]) -> Int` , `var xs: List[Pair[Int]]`,
 a `Pair[Int]` field's annotation, a `Pair[Int]` in a `return_type`. The
-instantiation exists — `Pair_Int` is what the boundary symbol has to be — and
+instantiation exists — `Pair_1_T_3_Int` is what the boundary symbol has to be,
+because `monomorphize.mangle` is the one mangler and it is injective (§6) — and
 nothing looks for it, so the program is refused with
 `formal/model.py::specialization_call_refusal` at the constructor that has to
 bind it.
@@ -104,10 +105,11 @@ instantiation's type argument, so:
         var a = Pair[Colour]()      # refused
 
 **Why the conservative direction is right.** The instantiation is compiled into
-`lib`'s library, and `lib` does not declare `Colour`, so `Pair_Colour` would be a
-body whose field layout the defining module cannot compute. Accepting it would
-mean threading the layout across the boundary — which is a layout question, not
-a mangling one, and belongs with whoever grows the reflection table.
+`lib`'s library, and `lib` does not declare `Colour`, so `Pair_1_T_6_Colour`
+would be a body whose field layout the defining module cannot compute. Accepting
+it would mean threading the layout across the boundary — which is a layout
+question, not a mangling one, and belongs with whoever grows the reflection
+table.
 
 **What it costs.** `formal/model.py::struct_is_framed` counts FIELDS and does not
 read a declared type, which is why item §5 below is a wrong answer rather than a
@@ -150,23 +152,40 @@ test rather than a program.
 
 ## 6. The mangling spelling, and `doc/ABI.md`'s example
 
-`monomorphize.mangle` emits `Pair_Int`. `doc/ABI.md` §Generics illustrates
-`Generic__method__<mangled-type-args>`. They are different strings and the tree
-has one mangler, which is the correct number.
+**Corrected 2026-10-04** (`bugs/FORMAL_a_mangled_spelling_is_still_stated_as_Pair_Int_in_the_ABI_doc_and_the_scope_doc.md`,
+deleted with its fix). This section used to assert that `monomorphize.mangle`
+emits `Pair_Int`; it emits `Pair_1_T_3_Int`, and it has emitted that since the
+encoding was made injective — 1512 collisions over 1752 generated
+`(name, type_args)` pairs under the flat scheme, measured in
+`monomorphize.py::safe_suffix`'s docstring, and
+`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md` is the
+defect that motivated the change. Every spelling in `doc/ABI.md` §Generics and in
+this document now states the injective one and names `monomorphize.mangle` as
+where it is stated, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_the_mangler_produces`
+reads every `doc/` and `bugs/` file so a stale one cannot be written again — the
+`refuse_without:` class of defect, in prose: a document that names a repair the
+tree has already replaced sends a reader to build the thing that exists.
+
+`doc/ABI.md` §Generics illustrates `Generic__method__<mangled-type-args>`. That
+is illustrative and not wrong, and it is why the section says so explicitly;
+`Pair[Int]`'s real spelling is stated beside it. The tree has one mangler, which
+is the correct number, and the two documents that could each be read as mandating
+their own now agree.
 
 The choice was made by reuse rather than by decision: `monomorphize.mangle` is
 what `elaborate.Elaborator` puts in `info['symbol']` and what the compiled
 path's objects are named, so a second spelling would make the two backends'
-symbols disagree for one source — and nothing on either side would notice until a
-link failed. `doc/ABI.md` §Generics is the load-bearing citation for the
+symbols disagree for one source — and nothing on either side would notice until
+a link failed. `doc/ABI.md` §Generics is the load-bearing citation for the
 *decision* (a generic is not one symbol) and its illustration is illustrative;
 it has been amended in place to say so, which is the resolution the two
 sentences can have.
 
 **What would make it a decision rather than a deferral:** an ABI version bump
-plus a change to both spellings at once, with the CAS key folding the version —
-`cas.ABI_VERSION` is the mechanism and the gimple path already invalidates on it.
-Not worth doing for a spelling nothing consumes yet.
+plus a change to the spelling itself, with the CAS key folding the version —
+`cas.ABI_VERSION` is the mechanism and the gimple path already invalidates on
+it. Not worth doing for a spelling nothing consumes yet, and note that a change
+to the encoding is now a change to every cached artifact by construction.
 
 ---
 
@@ -217,8 +236,8 @@ sufficient.
   is `elaborate.check_conformance` reached from here.
 * **Instantiating a template from inside the template.** `Pair[T]` whose body
   says `Pair[T]()` is not a recursion here — `instantiate` substitutes text and
-  does not descend — and the result is correct, because `Pair_Int` is a struct
-  in the same module. Worth knowing rather than worth a guard.
+  does not descend — and the result is correct, because `Pair_1_T_3_Int` is a
+  struct in the same module. Worth knowing rather than worth a guard.
 * **Lean.** `DylibExport` is stated over arm64 machine code with (name, address)
   rows read from the manifest, and an instantiation adds rows of that shape. No
   instruction, no calling convention, no model change; `formal/dylib`'s proved

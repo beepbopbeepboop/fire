@@ -270,11 +270,11 @@ CAS.
 **Implemented, 2026-10-03, on the formal dylib path** (`formal/monomorph.py`).
 A module dylib is compiled for the instantiations its importers ask for, each as
 a CONCRETE declaration under the mangled name — `struct Pair[Int]` becomes
-`struct Pair_Int` — compiled into that module's own library and exported with
-that module's qualifier, so the boundary symbols are
-`<module>_Pair_Int` and `<module>_Pair_Int_<method>`. Everything the export rule
-already knew how to say is unchanged; what changed is that a module declaring
-only a template now HAS something to export, and
+`struct Pair_1_T_3_Int` — compiled into that module's own library and exported
+with that module's qualifier, so the boundary symbols are
+`<module>_Pair_1_T_3_Int` and `<module>_Pair_1_T_3_Int_<method>`. Everything the
+export rule already knew how to say is unchanged; what changed is that a module
+declaring only a template now HAS something to export, and
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either" no longer describes a module whose instantiations are
 known.
@@ -296,13 +296,25 @@ mode in each case is a program that builds and computes the wrong answer:
 * **A template is never exported under its base name.** One trie entry cannot be
   two instantiations.
 
-The mangling is `monomorphize.mangle` — `Pair_Int`, one underscore-joined
-suffix — which is what the compiled path's `Elaborator` computes and what its
-objects are named. That is the one place where this section's illustrative
-spelling (`Generic__method__<mangled-type-args>`) is not what is emitted, and it
-is spelled out here rather than left for a reader to discover: one mangling in
-the tree, two sections that could each be read as mandating their own, and a
-consumer that computed the other one would bind nothing.
+The mangling is `monomorphize.mangle`, and `Pair[Int]` is `Pair_1_T_3_Int` — not
+`Pair_Int`, and the difference is load-bearing: `mangle` is INJECTIVE, each
+argument emitted as `{len(name)}_{name}_{len(value)}_{value}` under the base
+name, so a name cannot be read back ambiguously and two instantiations cannot
+collide (`monomorphize.py`'s `mangle` and `_fields` state both, and
+`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md` is why
+the flat spelling was replaced). It is what the compiled path's `Elaborator`
+computes and what its objects are named.
+
+That is the one place where this section's illustrative spelling
+(`Generic__method__<mangled-type-args>`) is not what is emitted, and it is
+spelled out here rather than left for a reader to discover: one mangling in the
+tree, two sections that could each be read as mandating their own, and a
+consumer that computed the other one would bind nothing. **A document that
+states a mangled spelling states THIS one, and says where it comes from** — the
+stale spelling is a defect in the CONTRACT, not only in a test, so
+`test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_the_mangler_produces`
+reads every `doc/` and `bugs/` file and fails on any mangled spelling
+`monomorphize.mangle` does not produce.
 `bugs/FORMAL_generic_monomorph_scope.md` records what the mechanism does not yet
 cover.
 
@@ -326,7 +338,8 @@ Four things keep a library on an edge, and each is a binder the import statement
 does not enumerate: a bare `import m` (so `m.f(…)` is possible), `from m import *`
 (the export set is a fact about a library that does not exist yet), a `from m
 import …` inside a function body, and a **demanded instantiation** — that last
-one is why `Pair[Int]()` still builds the library that publishes `Pair_Int`.
+one is why `Pair[Int]()` still builds the library that publishes
+`Pair_1_T_3_Int`.
 
 A bare call to one of these names is still a refusal, and it is refused at the
 call: `widen(3)` names no instantiation, so no spelling of it has a callee.

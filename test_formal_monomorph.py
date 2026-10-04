@@ -764,6 +764,114 @@ def test_two_demand_sets_are_two_libraries(tmpdir):
                   f"{sorted(exports)}")
 
 
+def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
+    """No `doc/` or `bugs/` file may state a mangled spelling the mangler does
+    not produce.
+
+    The two cases above used to write `Pair_Int` out by hand, and both went
+    stale the moment `monomorphize.mangle` became injective — leaving
+    `doc/ABI.md` §Generics stating, in the one document a consumer reads to
+    learn what the boundary symbol is, a symbol no code produces. Deriving the
+    expected name in a TEST is not enough: a test stops at its own file, and
+    the sentence a reader reads was in a contract. So the invariant is checked
+    where the prose is.
+
+    `Pair[Int]` is the witness because it is the example every one of these
+    documents uses. The rule is deliberately narrow: it looks for a token that
+    LOOKS like this mangling (`Pair_` plus an alnum continuation) and requires
+    it to be a well-formed `_fields` encoding — `Pair` followed by one or more
+    `_{len}_{name}_{len}_{value}` fields, each declared length checked against
+    the segment it introduces. That is what `monomorphize._fields` emits and
+    what its docstring says is uniquely decodable ("the maximal digit run is a
+    count, the next `_` separates, and each count is followed by exactly that
+    many characters"), so the check is the mangler's own format read back rather
+    than a copy of it: `Pair_1_T_6_Colour` is a different instantiation and
+    passes, `Pair_Int` and `Pair_Colour` are the pre-injective shape and do not.
+    Asking "is this string a mangling of SOME instantiation" rather than "is it
+    the one for `Int`" is what lets a document use the mangler on any example.
+
+    **A paragraph that discusses the ENCODING may name the spelling the
+    encoding replaced**, because "it used to be `Pair_Int`" is the sentence that
+    tells a reader holding the old name what to look for. That exemption is
+    keyed on the word `injective` in the paragraph rather than on any list of
+    known-old spellings, so it cannot rot into "any stale spelling is fine" —
+    an example line does not say the encoding is injective, and the two
+    paragraphs that do are the ones about the change. The scan is per paragraph
+    rather than per line because prose wraps: the word and the spelling it
+    qualifies are routinely 80 columns apart.
+    """
+    import monomorphize
+    import re
+    problems: list = []
+
+    def decodes(token: str) -> bool:
+        """Whether `token` is `<name>` followed by `_fields`-shaped fields.
+
+        The decoder is `monomorphize._fields`' own description read back: at
+        each position a digit run is a length, an `_` separates, and exactly
+        that many characters must follow. Written out rather than imported
+        because there is nothing to import — `_fields` produces, it does not
+        parse — and because a test that re-implements the producer's format is
+        what makes the format a CONTRACT rather than an accident.
+        """
+        pos = token.find("_")
+        if pos < 0:
+            return False                      # no fields: `Pair` is its own name
+        i = pos + 1
+        fields = 0
+        while i < len(token):
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token) or token[i + count] != "_":
+                return False
+            i += 1 + count                    # the field's name
+            start = i
+            while i < len(token) and token[i].isdigit():
+                i += 1
+            if i == start or i >= len(token) or token[i] != "_":
+                return False
+            count = int(token[start:i])
+            i += 1
+            if i + count > len(token):
+                return False
+            i += count                        # the field's value
+            fields += 1
+        return fields > 0
+
+    pattern = re.compile(r"\bPair_[A-Za-z0-9_]*")
+    for root in ("doc", "bugs"):
+        base = os.path.join(HERE, root)
+        for dirpath, _dirs, files in os.walk(base):
+            for name in sorted(files):
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, HERE)
+                text = open(path, encoding="utf-8").read()
+                for para in re.split(r"\n\s*\n", text):
+                    if "injective" in para.lower():
+                        continue
+                    for token in pattern.findall(para):
+                        token = token.rstrip("_")
+                        if not decodes(token):
+                            line = text[:text.index(para)].count("\n") + 1
+                            problems.append(
+                                f"{rel}:{line} states {token!r}, which is not a "
+                                f"spelling monomorphize.mangle can produce — it "
+                                f"emits length-prefixed fields "
+                                f"(`Pair[Int]` is "
+                                f"{monomorphize.mangle('Pair', {'T': 'Int'})!r}"
+                                f"), and this one carries no lengths")
+    check(not problems,
+          "a document states a mangled spelling no code produces:\n  "
+          + "\n  ".join(problems))
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -787,6 +895,8 @@ TESTS = [
      test_a_value_typed_bracket_is_not_read_as_a_type),
     ("two demand sets are two libraries",
      test_two_demand_sets_are_two_libraries),
+    ("a stated mangled spelling is the one the mangler produces",
+     test_a_stated_mangled_spelling_is_the_one_the_mangler_produces),
 ]
 
 EXPECTED_FAILURES: dict = {}
