@@ -977,6 +977,101 @@ def gen():
     yield 2.5
 """, "all values must agree on one scalar type")
 
+    # A `*args`-style UNPACK at a call site is a hole for every parameter it
+    # could have supplied, and the call-site scan used to record it against
+    # positional index 0 alone: `gen(*args)` charged the untypable argument to
+    # `a` and never LOOKED at `b`, so `b` was neither resolved nor conflicted,
+    # `_ambiguous_yielded_params` (which reads only
+    # `_CALLSITE_PARAM_CONFLICTS`) let the generator through, and `b`'s value
+    # slot took the `int64_t` default — the string came out as the integer `0`,
+    # exit 0, no diagnostic. Measured on the registries, same source:
+    #
+    #     gen(*args)       _CALLSITE_PARAM_KINDS None   CONFLICTS {'a'}
+    #     gen(1, 'hello')  _CALLSITE_PARAM_KINDS {'a': 'i', 'b': 'p'}
+    #
+    # `a` being refused was right by ACCIDENT; `b` was invisible to both
+    # halves of the rule. A positional `*expr` at index `i` swallows the rest
+    # of the call's positional arguments, so every parameter from `i` to the
+    # last POSITIONAL one is a hole; it cannot supply a keyword-only
+    # parameter, and the message says so rather than over-refusing one.
+    # See bugs/CODEGEN_star_unpack_call_argument_poisons_only_one_parameter.md.
+    test_generator_refused("generator_star_unpack_call_argument_is_a_hole_for_every_parameter_it_could_fill", """\
+def gen(a, b):
+    yield b
+
+def main():
+    args = [1, 'hello']
+    for v in gen(*args):
+        print(v)
+main()
+""", "the static scan could not type at all")
+
+    # …and the `**expr` sibling, which can supply ANY parameter by name — so
+    # every unannotated parameter the call site does not bind by an explicit
+    # keyword is a hole, and the explicit keywords must be KEPT as real
+    # evidence for the parameters they do bind. Without the keep, this
+    # program's `known` (which IS typeable from `1`) would be refused too, and
+    # the fix would have been "refuse more" rather than "refuse the right
+    # ones". `Tools/c-analyzer/c_common/scriptutil.py`'s
+    # `iter_marks(groups=groups, **mark_kwargs)` is the real corpus shape.
+    test_generator_refused("generator_kwargs_spread_call_argument_is_a_hole_for_every_unbound_parameter", """\
+def gen(known, other):
+    yield other
+
+def main():
+    kw = {'other': 'hello'}
+    for v in gen(known=1, **kw):
+        print(v)
+main()
+""", "the static scan could not type at all")
+
+    # The CONTROL for both rows above, and the reason the fix is not "refuse
+    # every generator with an unannotated parameter": the same generator
+    # called with explicit, individually-typed arguments still resolves, and
+    # its string value still prints as the string. Asserted against CPython
+    # rather than a hand-written expectation, because `0` — the outcome the
+    # bug produced — is a value a fixed expectation could have been written to
+    # match after the fact.
+    test_generator_matches_cpython("generator_explicit_call_arguments_still_resolve", """\
+def gen(a, b):
+    yield b
+
+def main():
+    for v in gen(1, 'hello'):
+        print(v)
+main()
+""", """\
+def gen(a, b):
+    yield b
+
+def main():
+    for v in gen(1, 'hello'):
+        print(v)
+main()
+""")
+
+    # A `*spread` CANNOT supply a keyword-only parameter — real Python syntax
+    # puts everything after a bare `*` out of a positional unpack's reach — so
+    # a call that fills it by explicit keyword must keep resolving. This is the
+    # direction a careless version of the positional rule over-refuses.
+    test_generator_matches_cpython("generator_keyword_only_parameter_is_not_a_hole_from_a_positional_spread", """\
+def gen(a, *, tag='t'):
+    yield tag
+
+def main():
+    for v in gen(1, tag='hello'):
+        print(v)
+main()
+""", """\
+def gen(a, *, tag='t'):
+    yield tag
+
+def main():
+    for v in gen(1, tag='hello'):
+        print(v)
+main()
+""")
+
     # `_Bool` and int64_t share one 64-bit slot, so this one is NOT a
     # disagreement and must keep compiling: the check is on genuinely
     # incompatible kinds, not on "more than one kind". (It prints `1` for the
@@ -5042,15 +5137,23 @@ def main():
 main()
 """, "15\n")
 
-    # The two shapes `_lambda_shape_ok` still refuses, and the reason each is
-    # a refusal rather than a warning: both exit 0 with a plausible integer.
-    # Measured with CPython alongside — `lambda x=n, *a: x + a[0]` called
-    # `e(0, 5)` is 8 where CPython says 5, and `lambda x, y=n, z=10: x + y + z`
-    # called `e(4)` is 135 where CPython says 17 — so the test is that they do
-    # NOT compile, and the numbers are here so the next reader can check them
-    # rather than take them on trust.
-    # bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md.
-    test_generator_refused("generator_lambda_default_before_star_args_refused", """\
+    # The two shapes `_lambda_shape_ok` used to REFUSE, now measured CORRECT
+    # and asserted against CPython — the generator-body path, which is a
+    # separate lowering from the ordinary one these were also wrong on.
+    #
+    # They were refusals because both exited 0 with a plausible integer:
+    # `lambda x=n, *a: x + a[0]` called `e(0, 5)` printed 8 where CPython says
+    # 5, and `lambda x, y=n, z=10: x + y + z` called `e(4)` printed 135 where
+    # CPython says 17. `_lower_LambdaExpr` captured a declared default into the
+    # lifted function's ENV under the parameter's OWN name, so it and an
+    # argument at the call site named the same C slot and the env read won; and
+    # nothing filled in an argument the call site OMITTED, so `e(4)` passed one
+    # argument to a three-parameter C function. Fixed at both ends
+    # (`lambdareduce.params_supplied_at_calls` and
+    # `emit_calls._pad_lambda_defaults`); the numbers above are kept so the next
+    # reader can check the claim rather than take it on trust, and the guard is
+    # gone rather than left as a permanent lie.
+    test_generator_matches_cpython("generator_lambda_default_before_star_args", """\
 def gen(n):
     e = lambda x=n, *a: x + a[0]
     yield e(0, 5)
@@ -5060,9 +5163,19 @@ def main():
         print(v)
 
 main()
-""", "lambda")
+""", """\
+def gen(n):
+    e = lambda x=n, *a: x + a[0]
+    yield e(0, 5)
 
-    test_generator_refused("generator_lambda_with_two_defaults_refused", """\
+def main():
+    for v in gen(3):
+        print(v)
+
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_with_two_defaults", """\
 def gen(n):
     e = lambda x, y=n, z=10: x + y + z
     yield e(4)
@@ -5072,7 +5185,194 @@ def main():
         print(v)
 
 main()
-""", "lambda")
+""", """\
+def gen(n):
+    e = lambda x, y=n, z=10: x + y + z
+    yield e(4)
+
+def main():
+    for v in gen(3):
+        print(v)
+
+main()
+""")
+
+    # …and the whole table `_lambda_shape_ok`'s docstring now carries, on the
+    # generator path, in one program: every variadic shape and every
+    # default shape it has ever admitted, plus the two it had refused. One
+    # program rather than eleven so a shape that stops working is visible as a
+    # changed LINE rather than as a new red row.
+    test_generator_matches_cpython("generator_every_admitted_lambda_shape", """\
+def add(a, b):
+    return a + b
+
+def add3(a, b, c):
+    return a + b + c
+
+def addall(a):
+    return a[0] + a[1] + a[2]
+
+def g_var(n):
+    e = lambda *a: add(a[0], a[1])
+    yield e(4, 5)
+
+def g_varall(n):
+    e = lambda *a: addall(a)
+    yield e(1, 2, 3)
+
+def g_varargs(n):
+    e = lambda *args, **kwargs: add(n, args[0])
+    yield e(7)
+
+def g_varkw(n):
+    e = lambda **k: add(k["a"], 1)
+    yield e(a=6)
+
+def g_varkw2(n):
+    e = lambda *a, k=n: add(a[0], k)
+    yield e(4)
+
+def g_one(n):
+    e = lambda x=n: x + 1
+    yield e()
+
+def g_second(n):
+    e = lambda x, y=n: add(x, y)
+    yield e(4)
+
+def g_kwdefault(n):
+    e = lambda x, *, k=n: add(x, k)
+    yield e(4)
+
+def g_bare_kwonly(n):
+    e = lambda *, x=n: x + 1
+    yield e()
+
+def g_lead(n):
+    e = lambda f, *a: add(f, a[0])
+    yield e(4, 5)
+
+def g_dup(n):
+    e = lambda x, y=n, z=10: add3(x, y, z)
+    yield e(4)
+
+def g_dupfirst(n):
+    e = lambda x=n, *a: add(x, a[0])
+    yield e(0, 5)
+
+def main():
+    for v in g_var(3):
+        print(v)
+    for v in g_varall(3):
+        print(v)
+    for v in g_varargs(3):
+        print(v)
+    for v in g_varkw(0):
+        print(v)
+    for v in g_varkw2(3):
+        print(v)
+    for v in g_one(3):
+        print(v)
+    for v in g_second(3):
+        print(v)
+    for v in g_kwdefault(3):
+        print(v)
+    for v in g_bare_kwonly(3):
+        print(v)
+    for v in g_lead(3):
+        print(v)
+    for v in g_dup(3):
+        print(v)
+    for v in g_dupfirst(3):
+        print(v)
+
+main()
+""", """\
+def add(a, b):
+    return a + b
+
+def add3(a, b, c):
+    return a + b + c
+
+def addall(a):
+    return a[0] + a[1] + a[2]
+
+def g_var(n):
+    e = lambda *a: add(a[0], a[1])
+    yield e(4, 5)
+
+def g_varall(n):
+    e = lambda *a: addall(a)
+    yield e(1, 2, 3)
+
+def g_varargs(n):
+    e = lambda *args, **kwargs: add(n, args[0])
+    yield e(7)
+
+def g_varkw(n):
+    e = lambda **k: add(k["a"], 1)
+    yield e(a=6)
+
+def g_varkw2(n):
+    e = lambda *a, k=n: add(a[0], k)
+    yield e(4)
+
+def g_one(n):
+    e = lambda x=n: x + 1
+    yield e()
+
+def g_second(n):
+    e = lambda x, y=n: add(x, y)
+    yield e(4)
+
+def g_kwdefault(n):
+    e = lambda x, *, k=n: add(x, k)
+    yield e(4)
+
+def g_bare_kwonly(n):
+    e = lambda *, x=n: x + 1
+    yield e()
+
+def g_lead(n):
+    e = lambda f, *a: add(f, a[0])
+    yield e(4, 5)
+
+def g_dup(n):
+    e = lambda x, y=n, z=10: add3(x, y, z)
+    yield e(4)
+
+def g_dupfirst(n):
+    e = lambda x=n, *a: add(x, a[0])
+    yield e(0, 5)
+
+def main():
+    for v in g_var(3):
+        print(v)
+    for v in g_varall(3):
+        print(v)
+    for v in g_varargs(3):
+        print(v)
+    for v in g_varkw(0):
+        print(v)
+    for v in g_varkw2(3):
+        print(v)
+    for v in g_one(3):
+        print(v)
+    for v in g_second(3):
+        print(v)
+    for v in g_kwdefault(3):
+        print(v)
+    for v in g_bare_kwonly(3):
+        print(v)
+    for v in g_lead(3):
+        print(v)
+    for v in g_dup(3):
+        print(v)
+    for v in g_dupfirst(3):
+        print(v)
+
+main()
+""")
 
     # Five ordinary leading parameters before the `*args` is the backend's own
     # deliberate refusal (`_lower_LambdaExpr`): the runtime passes at most four

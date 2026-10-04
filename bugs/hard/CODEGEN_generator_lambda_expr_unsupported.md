@@ -38,16 +38,35 @@ for the refusals, one for `_lower_LambdaExpr`'s own five-leading-parameter
 limit, which is the outermost edge of the admitted set and is now asserted
 rather than assumed).
 
-### What is still refused, and why it is a refusal and not a warning
+### What is still refused — RESOLVED 2026-10-04, nothing is left
 
-Both remaining failures exit 0 with a plausible integer, which is why the guard
-refuses rather than lets the module through: `8` for `5` and `135` for `17` are
-indistinguishable from a right answer without CPython alongside. Their cause is
-named in `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md` — a lambda's
-defaults are stripped from its lifted signature (`_lower_LambdaExpr`'s
-`syn_params`, `(_pname, None)`), so they are substituted on the call side, and
-one substitution works while two do not. Fix that and delete both refusal
-clauses IN THE SAME COMMIT.
+**Both refusal clauses are deleted and both shapes are correct.** Nothing in
+this section is still refused; it is kept because the measurement is the reason
+the guard is gone, and because "a boundary nobody asserts is a boundary that
+moves silently" is why the replacement cases exist.
+
+The two failures were `8` for `5` and `135` for `17` — exit 0 with a plausible
+integer, which is why they were refused rather than warned about. Their cause
+was one mechanism in two directions: `_lower_LambdaExpr` captured a declared
+default into the lifted function's ENV under the parameter's OWN name (so it
+and an argument at the call site named the same C slot and the env read won),
+and nothing filled in an argument the call site OMITTED. Fixed by
+`lambdareduce.params_supplied_at_calls` (never capture a parameter a call site
+supplies) and `emit_calls._pad_lambda_defaults` (pad the omitted ones from the
+lambda's own declaration, at the one chokepoint every callable-value call
+reaches). The env stays for a KEYWORD-ONLY parameter's default, which is the
+only way it can travel at all, and which is why the two halves had to land
+together.
+
+Re-measured on the generator path (the A3 stack-switch lowering, where this
+guard lives), every shape against CPython: `lambda *a`, `lambda *args,
+**kwargs`, `lambda *a, k=n`, `lambda f, *a`, `lambda **k`, `lambda *, x=n`,
+`lambda x=n`, `lambda x, y=n`, `lambda x, *, k=n`, `lambda x=n, *a`, and
+`lambda x, y=n, z=10` — all right. The table is
+`mojo/middle/coro.py`'s `_lambda_shape_ok` docstring, and the cases are
+`generator_lambda_default_before_star_args`,
+`generator_lambda_with_two_defaults` and
+`generator_every_admitted_lambda_shape` in `test_gimple_generator_runner.py`.
 
 **This is the doc's occurrence #2** — `Tools/c-analyzer/c_common/fsutil.py`'s
 `get_files = lambda *a, **k: _walk(*a, walk=_files, **k)` — so the "Still

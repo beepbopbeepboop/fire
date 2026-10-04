@@ -759,7 +759,9 @@ def _lambda_shape_ok(lam: N.LambdaExpr) -> bool:
     (`emit_calls._pad_lambda_defaults`). Neither half could be verified here
     alone: the env half is also wrong for a keyword-only parameter, which only
     the ENV can carry, so the two halves had to land together. Their doc was
-    `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`, deleted with the fix.
+    the commit whose subject line is "A lambda's declared defaults reach the
+    call, and the two refusals are gone"; the measurement table is the one
+    above and the reasoning is in the commit message.
 
     One reading of the parameter list is load-bearing here. The parser DROPS a
     bare `*` (the keyword-only marker), so `lambda *, x=n: ...` reaches this

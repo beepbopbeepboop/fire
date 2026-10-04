@@ -5055,7 +5055,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     #     lambda x=n, *a: x + a[0]   e(0, 5)   CPython 5   compiled 8   (n + n)
     #     lambda x, y=n, z=10: ...    e(4)      CPython 17  compiled 135
     #
-    # which is `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`. The
+    # recorded in the commit "A lambda's declared defaults reach the call,
+    # and the two refusals are gone". The
     # `lambda e, self=self:` idiom this loop exists for is untouched by the
     # guard: its parameter is never supplied — that is what the idiom means
     # — so the capture stands and the env still carries the outer value.

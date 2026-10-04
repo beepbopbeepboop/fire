@@ -334,7 +334,9 @@ def params_supplied_at_calls(gen, node) -> set:
 
     Measured: `lambda x=n, *a: x + a[0]` called `e(0, 5)` printed `8` where
     CPython prints `5` — `n + n`, i.e. `0` was dropped and the default used
-    instead. See `bugs/CODEGEN_two_lambda_defaults_are_mis_packed.md`.
+    instead. That fix, and the call-side padding it needed, landed together in
+    the commit "A lambda's declared defaults reach the call, and the two
+    refusals are gone".
     """
     body = getattr(gen, '_cur_func_body', None)
     local = bound_local_name(gen, node)
