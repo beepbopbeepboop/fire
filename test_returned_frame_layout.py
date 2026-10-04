@@ -243,6 +243,18 @@ def main(argv):
     #    that makes a returned frame correct on both or wrong on both. This
     #    asserts it structurally: both backends call the shared function and
     #    neither computes its own offsets.
+    #
+    #    The pinned name is `struct_constructor_site_bytes`, not
+    #    `struct_frame_block_bytes`, and the difference is the point rather than
+    #    a rename: the emitters need the bytes ONE SITE reserves, which is not
+    #    the struct's block — a one-field struct whose sole field holds a frame
+    #    reserves the nested block alone, because there is no object, the value
+    #    IS the nested frame's address. `struct_constructor_site_bytes` is the
+    #    one reader that answers that (it is the function
+    #    `struct_constructor_sites` advances its own layout cursor by), so
+    #    pinning it keeps the property this case is about — one site can never
+    #    be reserved one amount and laid out another — instead of pinning a
+    #    name the consolidation deliberately stopped calling.
     for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
                            ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
         path = os.path.join(HERE, backend)
@@ -250,7 +262,7 @@ def main(argv):
             src = fh.read()
         check(f'{os.path.basename(backend)}_shares_the_frame_layout',
               'M.struct_constructor_sites' in src
-              and 'M.struct_frame_block_bytes' in src,
+              and 'M.struct_constructor_site_bytes' in src,
               'this backend does not read the shared frame layout')
 
     # 6. The convention refusal, which is the decision this whole item turns
