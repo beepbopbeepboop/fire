@@ -1,4 +1,4 @@
-# FORMAL_subprocess_row_measured_b7: the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on `FORMAL_host_import_row_5_measured.md`
+# FORMAL_subprocess_row_measured_b7: the `subprocess` host-import row, re-measured over all 143 importing files — and the correction it forces on the `-5` sweep's ranking
 
 **Claim** `sweep12:hostmods-subprocess`. Written 2026-10-03 on
 `work/formal12-hostmods-subprocess`, after the model landed its measured call
@@ -53,8 +53,9 @@ is 79, and 103 of the 143 also import `tempfile`, which is why fixing
 
 ## 3. The correction
 
-`bugs/FORMAL_host_import_row_5_measured.md` §`subprocess` gives this row a
-value of 0 and this mechanism:
+The `-5` sweep's host-import ranking (the `formal8-7-r2` claim, whose doc was
+deleted 2026-10-04 with its last module) gives this row a value of 0 and this
+mechanism:
 
 > **a keyword argument to a host module is REFUSED** … So **no `subprocess`
 > module written in `formal/hostmods/` could be called by any of the 30 files**,
@@ -136,8 +137,7 @@ Measured over the 128 files in this repository that import it, **44 use ONLY
 `mkdtemp`/`mkstemp`/`gettempdir`** and no unreachable name, so writing the
 reachable half moves 44 files off `not-answerable/host-import` into the
 answerable denominator, where they are counted as `codegen` findings rather than
-as target facts. That is the `platform` row's arithmetic
-(`bugs/FORMAL_platform_reachable_row_measured.md` §2) and the ceiling for a
+as target facts. That is the `platform` row's arithmetic — thirty files, and the ceiling for a
 `host-import` row to **PASS** is 0 either way: none of those 44 is a small
 program.
 

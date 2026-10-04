@@ -476,6 +476,11 @@ class TestClassifier(unittest.TestCase):
         x86-64 `proof-emitted` is that generator's documented degradation, and
         listing it as a disagreement would be crying wolf on 29 of 78 items.
         """
+        # The `cached` field is the ninth: `Verdict` grew one when the CAS was
+        # added (a verdict served from the cache ran nothing, and a report that
+        # cannot say so reads a re-run as a measurement).  Every cell below is
+        # built by hand rather than by running anything, so they are all
+        # `cached=False` — which is what a fresh run produces.
         V = B.Verdict
         results = [
             V("x.py:1:f", "arm64", "codegen-refused",

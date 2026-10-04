@@ -64,27 +64,28 @@ DEFAULT_PATHS = [
 def _returns_a_value(fn) -> bool:
     """Whether `fn`'s body has a `return` WITH a value, at any depth.
 
-    A nested definition is a different frame with its own returns, so the walk
-    stops at one — the same rule `formal/model.py`'s "Read before store" walk
-    uses for the same reason (a nested `def`'s locals are not this function's).
+    A DELEGATION, and it is one because the rule now decides whether a build is
+    refused: `formal/model.py::fn_returns_a_value` is the reader the
+    `returnless_value_refusal` asks, and a census that kept a private copy of the
+    question would be free to disagree with the refusal about what it measures —
+    which is precisely the defect this instrument's own header complains about in
+    §0's name-keyed census. Two rules, one implementation, and the docstring
+    there carries the reasoning (a nested definition is a different frame; depth
+    rather than control flow, because `if c: return 1` with a fall-through end
+    still has no value on the other path).
     """
-    def scan(stmts) -> bool:
-        for st in stmts or []:
-            kind = type(st).__name__
-            if kind == "ReturnStmt":
-                if getattr(st, "value", None) is not None:
-                    return True
-                continue
-            if kind in ("FunctionDef", "StructDef", "TraitDef",
-                        "LambdaExpr"):
-                continue
-            for name in getattr(st, "__dataclass_fields__", ()) or ():
-                child = getattr(st, name, None)
-                if isinstance(child, list) and scan(child):
-                    return True
-        return False
+    return M.fn_returns_a_value(fn)
 
-    return scan(getattr(fn, "body", None) or [])
+
+def _declares_a_return(fn) -> bool:
+    """Whether `fn` states a return type — `M.fn_declares_a_return`, likewise.
+
+    The doc's rule is "no value-returning `return` AND no declared return type",
+    and the second half is what keeps `def quiet(n) -> Int: w = 1; return 0`
+    (which agrees with CPython) out of the list: it states a type, so this path
+    has said what it means even where the value is not what CPython's is.
+    """
+    return M.fn_declares_a_return(fn)
 
 
 def _def_line(fn) -> int:
@@ -102,20 +103,6 @@ def _def_line(fn) -> int:
         if getattr(node, "line", 0):
             return node.line
     return 0
-
-
-def _declares_a_return(fn) -> bool:
-    """Whether `fn` states a return type. `-> None` is not a return type here.
-
-    The doc's rule is "no value-returning `return` AND no declared return type",
-    and the second half is what keeps `def quiet(n) -> Int: w = 1; return 0`
-    (which agrees with CPython) out of the list: it states a type, so this path
-    has said what it means even where the value is not what CPython's is.
-    """
-    rt = getattr(fn, "return_type", None)
-    if not isinstance(rt, str):
-        return rt is not None
-    return rt.strip() not in ("", "None")
 
 
 def _callee_name(call):

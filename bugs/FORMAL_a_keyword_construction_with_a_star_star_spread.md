@@ -1,12 +1,73 @@
 # FORMAL_a_keyword_construction_with_a_star_star_spread: `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword
 
 **Status: PARTIAL — the false half is fixed and the real blocker is now
-measured.** Found 2026-10-03 while clearing the single-file causes in
+measured, twice. Re-measured 2026-10-04 (`work/formal23-1`): over this
+repository, `formal/hostmods/` and 252 stdlib files the corpus holds THREE `**`
+spreads and not one of them is a dict literal or a local bound to one — so the
+key-set half of "The exact next step" below has NO witness in the corpus, and
+every one of the three is a `**`-PARAMETER, which `FORMAL_a_variadic_parameter_
+read_has_no_abi.md` owns. The doc's own witness file, `formal/x86_64_decode.py`,
+is no longer refused here at all: it is now refused EARLIER, at an f-string
+literal on line 133 (`bugs/FORMAL_an_f_string_literal_is_refused_and_is_the_first_
+refusal_in_x86_64_decode.md`), and it holds 13 f-strings of which five are
+`insn()` call sites — so "the source stops spreading" is no longer a one-file
+mechanical change but a chain, and the variadic ABI is the only blocker left.**
+Found 2026-10-03 while clearing the single-file causes in
 `bugs/FORMAL_sweep_work_map_2026-10-02_b7.md` §3.2. **The refusal itself is still
 CORRECT** — what changed is that the sentence it used to produce was false about
 the source, that a spread of a dict LITERAL is now answered rather than refused,
 and that the gap that remains is NOT the one this doc's §"The exact next step"
 thought. See "What landed" at the end, which is the part to read first.
+
+## 0b. §"The exact next step" re-measured: the key-set half has no witness (2026-10-04)
+
+**What was run.** A parse-and-walk over the same scope §1 used, counting every
+`**` spread and asking, of each, whether its operand is a dict literal, a local
+whose every binding in the function is such a literal, or neither. It reuses
+`tools/formal_template_call_census.py`'s scope walk and `formal/model.py`'s
+`iter_nodes_with_parent`, so it is the same corpus the other censuses count.
+
+| `**` spreads in 379 files | sites |
+|---|---:|
+| of a dict LITERAL (already answered, "What landed" item 2) | **0** |
+| of a local only ever bound a dict literal (item 2 of "The exact next step") | **0** |
+| of anything else | **3** |
+
+and the three, verbatim: `std/python/bindings.mojo:1681`, `:1722` and
+`std/python/python_object.mojo:1296`, each a `**`-parameter spread in a CPython
+bindings shim.
+
+**What that changes.** Option 2 of "The exact next step" — "track a spread's key
+set when it is a literal, directly or through a local that is only ever bound
+such a literal" — has **no call site in the corpus to answer**. It is not
+wrong; it is unmeasured, and this repository's rule about unmeasured work
+(`bugs/` is a queue, and a row nobody has looked at is the bucket
+`tools/formal_sweep_causes.py` exists to empty) is that it should not be the next
+thing built. What §"What landed" item 4 already concluded is therefore now the
+ONLY remaining step rather than one of two: **the variadic ABI**, so a `**kwargs`
+parameter becomes something a callee can read, which is
+`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md` and is claimed.
+
+**And the doc's own witness has moved, which is the other half.** §"Why it is in
+no list" says this refusal "will appear in the next sweep of that file, at one
+file" — and `formal/x86_64_decode.py` is now refused at an earlier construct, so
+it will not:
+
+```console
+$ for A in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label t -- \
+      python3 fire.py build --formal --no-prove --backend=$A \
+      -o .tmp/xd.bin formal/x86_64_decode.py; done
+build: an f-string literal on line 133 is refused on this path: its value is its
+INTERPOLATED text, and this path has no buffer to compose one in. …
+```
+
+That file has **13** f-strings, eight inside `raise DecodeError(...)` and five
+inside the `insn()` helper's arguments — and those five are `**kw` FORWARDING
+call sites, so rewriting them lands on this doc's blocker next rather than past
+it. Option 1 of "The exact next step" ("the source stops spreading, minutes, one
+file") is therefore a chain of unrelated value-model refusals before it reaches
+the one this doc is about, and its own text already says why it is not the fix to
+lead with ("it makes the source worse to read").
 
 ## What landed (2026-10-03, `formal/model.py`)
 

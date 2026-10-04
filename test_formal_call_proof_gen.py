@@ -991,6 +991,157 @@ class TestBitTestBranches(unittest.TestCase):
                     f"{pc + delta}, not {G._branch_target(words, pc)}")
 
 
+class TestNestedConditionFactSharing(unittest.TestCase):
+    """The `hprior_*` value-flow facts are emitted ONCE per (path, block).
+
+    A nested `if` needs, at each conditional branch, one fact per prior block on
+    its path per variable in its condition: "the register carrying `n` still
+    holds `n` in the state block `pb` left behind". The STATEMENT does not
+    depend on which block is asking — `s_{pb}` is the state this path leaves
+    block `pb` in and the register is the function's allocation — so two blocks
+    on one path asking the same question were re-deriving a fact already in
+    scope, each of them by unfolding a block's whole composed state.
+
+    The emission was `branches x prior-blocks-on-the-path x variables x PATHS`,
+    and the paths are the multiplier: at four conditional branches the four
+    programs below carried 48 / 144 / 384 / 960 facts, growing x3.0, x2.67 and
+    x2.5 per branch, against a distinct-statement count of 6 / 8 / 10 / 12.
+    With the memo it is 24 / 48 / 96 / 192 — x2.0 per branch, which is the
+    number of PATHS and therefore the part that is not re-derivation.
+
+    **Sharing is per path and never across one, because `s_{pb}` is rebound per
+    path**: `hsid_{pb}` is emitted once per visit, measured 1 / 2 / 4 / 8 / 16
+    times for blocks 0 / 2 / 4 / 6 / 8 of the three-branch program. A fact about
+    `s_8` proved on one path is about that path's `s_8` and means nothing on
+    another, so the memo is a per-block copy of `ctx` and the first check below
+    is what keeps it that way — it is the one that fails if a later change shares
+    the memo between siblings, which is the mistake this shape invites.
+    """
+
+    #: The doc's programs: N conditions that touch DISJOINT bits of `n`, which
+    #: is the case where the facts are most obviously the same question asked
+    #: again, and the only shape in which they are.
+    CONDS = ("    if n & 8:\n        x = x + 1\n",
+             "    if not (n & 4):\n        x = x + 2\n",
+             "    if 16 & n:\n        x = x + 4\n",
+             "    if n & 32:\n        x = x + 8\n")
+
+    def _proof(self, tmp, k):
+        src = "def f(n):\n    x = 0\n" + "".join(self.CONDS[:k]) + "    return x\n"
+        path, err = _generate(tmp, src, f"nested{k}")
+        self.assertIsNone(err, f"the generator refused a {k}-condition program: {err}")
+        with open(path) as fh:
+            return fh.read()
+
+    @staticmethod
+    def _hprior_scopes(proof):
+        """`[(scope_id, statement)]` for every `hprior_*` DEFINITION.
+
+        A `·` bullet is a goal of the `by_cases` above it and sits at that
+        `by_cases`'s own column, so it opens a scope at its own column and its
+        content — one level deeper — lives inside. That is what makes two bullets
+        at the same column SIBLINGS, which is the whole property: a fact proved
+        under one is not in scope under the other.
+        """
+        out = []
+        stack = [(-1, 0)]
+        counter = 0
+        for raw in proof.split("\n"):
+            if not raw.strip():
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            st = raw.strip()
+            while len(stack) > 1 and indent <= stack[-1][0]:
+                stack.pop()
+            if st == "\u00b7" or st.startswith("\u00b7 "):
+                counter += 1
+                stack.append([indent, counter])
+                continue
+            m = re.match(r"have (hprior_\S+) : (.*?) := by$", st)
+            if m:
+                # The id is the BULLET COUNTERS, not the indents: two sibling
+                # bullets have the same indent chain and are different scopes,
+                # which is exactly the distinction this test is about.
+                out.append((tuple(c for _i, c in stack), m.group(2)))
+        return out
+
+    def test_every_fact_is_proved_once_per_scope_and_in_scope(self):
+        tmp = tempfile.mkdtemp(prefix="hprior_scope_")
+        try:
+            for k in (2, 3, 4):
+                proof = self._proof(tmp, k)
+                facts = self._hprior_scopes(proof)
+                self.assertTrue(facts, f"a {k}-condition program emitted no "
+                                       f"`hprior_*` fact at all")
+                seen = {}
+                for scope, stmt in facts:
+                    self.assertNotIn(
+                        (scope, stmt), seen,
+                        f"{k} conditions: `{stmt}` is proved twice in one "
+                        f"scope (first at {seen.get((scope, stmt))}), so the "
+                        f"memo is not doing its job — every one of these is a "
+                        f"`simp only` over a block's whole composed state")
+                    seen[(scope, stmt)] = True
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_fact_is_used_outside_the_scope_that_proved_it(self):
+        tmp = tempfile.mkdtemp(prefix="hprior_use_")
+        try:
+            for k in (2, 3, 4):
+                proof = self._proof(tmp, k)
+                stack = [(-1, set())]
+                undefined = []
+                for ln, raw in enumerate(proof.split("\n"), 1):
+                    if not raw.strip():
+                        continue
+                    indent = len(raw) - len(raw.lstrip())
+                    st = raw.strip()
+                    while len(stack) > 1 and indent <= stack[-1][0]:
+                        stack.pop()
+                    if st == "\u00b7" or st.startswith("\u00b7 "):
+                        stack.append([indent, set()])
+                        continue
+                    m = re.match(r"have (hprior_\S+) :", st)
+                    if m:
+                        stack[-1][1].add(m.group(1))
+                        continue
+                    for name in re.findall(r"\bhprior_[A-Za-z0-9_]+", raw):
+                        if not any(name in sc for _i, sc in stack):
+                            undefined.append(f"line {ln}: {name}")
+                self.assertEqual(
+                    undefined, [],
+                    f"{k} conditions: a fact is USED where it was not proved, "
+                    f"which is what a memo shared between two sibling branches "
+                    f"looks like: " + ", ".join(undefined[:5]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_the_fact_count_grows_with_the_paths_and_not_with_the_branches(self):
+        tmp = tempfile.mkdtemp(prefix="hprior_growth_")
+        try:
+            counts = {}
+            for k in (2, 3, 4):
+                proof = self._proof(tmp, k)
+                counts[k] = proof.count("have hprior_")
+            self.assertTrue(all(counts[k] > 0 for k in counts), counts)
+            # x2 per condition, which is the path count. The pre-memo growth was
+            # x2.0 / x2.67 / x2.5 measured over the same four programs, so a
+            # bound of 2.2 is below the old one and above the new one — and it
+            # is a bound rather than a count because the exact number moves with
+            # the block layout, while the growth rate is the thing that was wrong.
+            for k in (3, 4):
+                ratio = counts[k] / counts[k - 1]
+                self.assertLessEqual(
+                    ratio, 2.2,
+                    f"{k - 1} -> {k} conditions grew the facts by x{ratio:.2f} "
+                    f"({counts[k - 1]} -> {counts[k]}); the per-path memo makes "
+                    f"this x2 (the number of paths) and anything above 2.2 is "
+                    f"the exponential back")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestCallProofs(unittest.TestCase):
     """Compile the programs and read what came out."""
 
@@ -2714,6 +2865,51 @@ class TestCfgLeafCensus(unittest.TestCase):
              "dec-while-back-edge-decrement", "loop-cond-step",
              "walk-terminal"} - reached, set(),
             "the corpus slice no longer reaches the leaves it was chosen for")
+
+    def test_the_cbz_leaf_peels_the_frame_reads_before_it_admits(self):
+        """The `runs-cbz-condition` leaf's peel is emitted BEFORE the leaf, and
+        it is the whole of what that leaf can be reduced to.
+
+        A branch whose tested register came from a `LDR` has a condition the
+        value flow -- which is over registers -- cannot decide, because the
+        address is an `adrp`/`add` expression nothing in the fold touches. The
+        peel (`mem_read_after_write_u64` and its `_ne` sibling, with `decide` as
+        the discharge) is what turns that into a fact about one `mem_read_u64`
+        at a literal address, and it has to come after the value-flow lines and
+        before the leaf: emitted after the leaf it is dead text, and emitted
+        before `rw [hsr]` it has no chain to unfold.
+
+        The residual it leaves is `mem_read_u64 (four frame stores) A = 0`,
+        which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
+        place that says memory is zero, and the universal theorem's `st` is a
+        free state. So this test pins the REDUCTION and not a pass, and the doc
+        that says so is `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`.
+        """
+        import formal.arm64_proof_gen as G
+        corpus = os.path.join(HERE, "formal", "examples")
+        with tempfile.TemporaryDirectory(prefix="cfg-leaf-") as tmp:
+            r = _generate_dir(tmp, os.path.join(corpus, "count.mojo"),
+                              "count", os.path.join(tmp, "count.aout"))
+            with open(r["proof_path"]) as fh:
+                lines = fh.read().splitlines()
+        site = "runs-cbz-condition"
+        tagged = [i for i, l in enumerate(lines)
+                  if G.CFG_LEAF_TAG in l and site in l]
+        self.assertTrue(tagged, f"count reached no {site} leaf at all")
+        peel = "mem_read_after_write_u64_ne"
+        for i in tagged:
+            window = lines[max(0, i - 4):i]
+            self.assertTrue(
+                any(peel in w for w in window),
+                f"line {i + 1}: a tagged leaf with no memory peel in the four "
+                f"lines before it, so the obligation it admits is the "
+                f"un-reduced one: {lines[i].strip()[:90]}")
+        # and the peel is where the ADDRESS becomes a literal, which is the
+        # whole difference between a goal a reader can check and an `adrp`
+        # expression. One occurrence is enough to pin the spelling.
+        self.assertTrue(any(peel in l for l in lines),
+                        "the peel disappeared from the generated proof "
+                        "entirely")
 
     def test_removing_the_fallback_leaves_no_admission_on_a_tagged_line(self):
         """`no_admission_fallback` is the instrument; this is its own contract.

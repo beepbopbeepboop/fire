@@ -354,8 +354,8 @@ def group_resolve(tmpdir, verbose):
     `html` was in NEITHER tier on 2026-10-03, which made
     `unresolvable_import_error` say "not a stdlib or sibling module, and no
     such file exists" to `tools/md2html.py` — a false statement about a name
-    CPython ships. That is the sentence
-    `bugs/FORMAL_host_import_row_ranked_by_module_2026-10-03.md` §3 measured, and
+    CPython ships. That sentence was measured and classified on 2026-10-03 —
+    six stdlib modules were in neither tier, and `html` was one of them — and
     the classification it led to is what this module now answers.
     """
     check(os.path.isfile(HTML_MODULE),

@@ -502,6 +502,88 @@ corpus it is 37 of 60 programs, against 0 of 60 for the default `plain` mix —
 carries the measurement and why closing it is three layers deep rather than a
 ten-line arm.
 
+## 0.7 Round 2 RE-MEASURED on a tree three merges later: the largest cause in the
+## corpus is now an f-string literal, and it moved 7 items OUT of the proof layer
+
+**Same 78 functions, same flags, phase A again** (`--no-check`, so nothing below
+is a Lean verdict and `proof-emitted` still means "a proof was written and nobody
+asked"). The only thing that differs from §0.6 is the tree, so every number here
+is a before/after over one ledger pair rather than a second sample:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label pb2 -- \
+    python3 -u tools/formal_proof_breadth.py --no-check --arch both -j 4 -t 400 \
+      --repo 60 --examples 45 --example-offset 1 --admit-returns \
+      --exclude-seen bugs/sweeps/proof_breadth_2026-10-03.jsonl \
+      --ledger bugs/sweeps/proof_breadth_2026-10-05_round2-phaseA-remeasured.jsonl
+156/156 verdicts in 1s; peak 0.1 GB
+```
+
+**The key is `path:name` and NOT `path:lineno:name`, and this run is what makes
+that a measurement rather than a convention: 66 of the 156 verdicts changed line
+number alone**, and keying on the line number reports 66 items as gone and 66 as
+new, which is how a before/after turns into noise. Keyed as §0.6.1 says, three
+items left the sample and three entered (`_entry_binders`→`_step_branch_index`,
+`list_kind`→`cfg_leaf_sites`, `factorial_source`→`held_env` — the round-robin
+re-picks because the files changed).
+
+| verdicts | arm64 §0.6 | arm64 now | x86-64 §0.6 | x86-64 now |
+|---|---:|---:|---:|---:|
+| `proof-emitted` | 17 | **17** | 46 | **38** |
+| `proof-refused` | **29** | **21** | 0 | **0** |
+| `codegen-refused` | 32 | **40** | 32 | **40** |
+
+### The new top row, and it is a string-COMPOSITION capability
+
+| items (both arches) | §0.6's rank | cause | whose |
+|---|---|---|---|
+| **18** | — (it was 0) | **an f-string/t-string literal**: "its value is its INTERPOLATED text, and this path has no buffer to compose one in" | `FORMAL_string_value_model`'s buffer question (`formal16-7`) |
+| 11 | 15 | arm64 `universal theorem: the call at 0x… targets 0x…, a second function in the same image` | `FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_image.md` |
+| 10 | 12 | the link audit: `prog.mojo: the image would bind N symbol(s) that nothing provides` | `FORMAL_an_unlowered_callee_is_refused_by_a_link_audit.md` |
+| 8 | 8 | `` `ctype == 'MojoDict *'` compares a NUMBER with a string `` | string value model |
+| 6 | 6 | `'%'` is refused when the left operand is a string | string value model |
+
+**Why it appeared, and the two timestamps are the whole explanation.**
+`9b40c019` ("an f-string literal is REFUSED, not printed as its own spelling")
+has an author date of 2026-10-03 23:08 and reached `master` through `0e850824`
+at **2026-10-04 04:06**; §0.6's ledger header says `2026-10-04 01:08:58`. The
+refusal was not in the tree when that ledger was written, so this is not a
+corpus that grew f-strings — `test_formal_debug_assert.py`, one of the items that
+moved into the row, last changed on 2026-10-01 and has carried `f"FAIL  {what}"`
+since.
+
+### 14 verdicts left the proof layer, and that is the direction this document
+### argues for throughout
+
+Seven items, on both architectures, went from *reaching the proof layer* to
+`codegen-refused` on this row — `formal/arm64_proof_gen.py:_uint64_lit`,
+`formal/model.py:frame_return_mixed_refusal`, `formal/model.py:int_parse_trap_message`,
+`test_formal_stat.py:n`, `test_gimple_async_runner.py:_recv_one_mojo_src`,
+`test_sqlite3_runtime.py:step`, `tools/formal_sweep.py:_timeout_detail` — which on
+arm64 is 7 out of `proof-refused` (the universal theorem was in front) and on
+x86-64 is 7 out of `proof-emitted`. **So `codegen-refused` went UP by 16 and both
+proof-layer columns went DOWN, and the honest reading is that the class count
+moved the right way:**
+
+* **arm64's 29 → 21 is one layer of queue.** The universal-theorem row is still
+  there and still #2; the f-string refusal was inserted IN FRONT of it for these
+  seven, which is `FILES BLOCKED IS AN UPPER BOUND` arriving as a planner's trap
+  one more time — a fix in front moves an item to the next refusal with the
+  count unchanged.
+* **x86-64's 46 → 38 is eight programs that were building a proof about a wrong
+  model.** `9b40c019`'s own measurement is the reason: `print(f"n={n}")` printed
+  `f"n={n}"`, `len(f"n={n}")` was 8 where CPython says 3, and
+  `f"n={n}" == "n=7"` was false where CPython says true — on both architectures,
+  **exit status 0**. An item that reaches the proof layer over a program whose
+  value is its own source text is not coverage; it is the soundness cell §0.5
+  exists to look for, and it was green because nobody ran the image. This census
+  counted it as `proof-emitted` because that is all phase A can see.
+
+**What is left in this census's own lane, stated as a row rather than a plan:**
+the arm64 universal theorem (11 items) and the Lean half of this round, which is
+still not measured and still needs the integrator's budget (§0.3). Everything
+else at the top is a value model with its own doc and its own claim.
+
 ## 0.6 Round 2: 78 functions that share NONE of round 1's, and what stops each
 
 **This is phase A only, and the Lean-dependent classes of §2 are therefore NOT

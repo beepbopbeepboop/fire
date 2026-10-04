@@ -52,6 +52,8 @@ import subprocess
 import sys
 import tempfile
 
+import fire_compiler as F
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 180
@@ -403,6 +405,87 @@ CASES = [
      "    print(\"v:\", a, b)\n"
      "    return 0\n",
      "v: 5 6\n"),
+    # The CONSERVATIVE DIRECTION of the return-less refusal, and the row that
+    # says the evidence is about a NAME and not about a function: `v` is bound to
+    # a call that produces no value and then to a number, so it holds the number
+    # and CPython prints 5. First-wins would have kept the earlier claim and
+    # refused a program CPython runs, which is the failure the rest of this file's
+    # kind tables are built to avoid — one binding statement is a retraction, and
+    # a retraction always wins.
+    ("a_local_rebound_after_a_return_less_call_prints_its_own_value",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main(n):\n"
+     "    v = g(1, 2)\n"
+     "    v = 5\n"
+     "    print(\"v:\", v)\n"
+     "    return 0\n",
+     "v: 5\n"),
+]
+
+# ── the rule the return-less refusal is decided by, asked directly ──
+#
+# `model.function_returns_a_value` is the ONE reader of "does a call to this
+# produce a value", both emitters ask it through `_callee_returns_value`, and
+# `tools/formal_returnless_census.py` asks the same function — so every rule that
+# decides whether a build is refused lives in one place, and it is pinned here as
+# a call rather than as a build.
+#
+# It is a unit table because its interesting rows are ones no image can show: a
+# generator's value cannot be printed (`print(gen())` is an address on both
+# sides), a generator cannot be ITERATED on this path yet — `for c in gen()`
+# SIGSEGVs on arm64, measured with the refusal's reader neutered, so it is not
+# this row's business — and a function that returns a value on one path prints
+# differently depending on the path. A build-and-run row for any of those would
+# be pinning something other than the rule. Each row is
+# `(name, source, the function to ask about, expected)`.
+MODEL_RULES = [
+    ("a_return_less_function_returns_nothing",
+     "def g(a, b):\n"
+     "    w = 1\n", "g", False),
+    # A `return None` is not a value here — it is `void` at the ABI
+    # (`doc/ABI.md`'s scalar table), which is `declared_returns_a_value`'s own
+    # rule and the reason `-> None` is in that table at all.
+    ("a_function_declared_none_returns_nothing",
+     "def g(a) -> None:\n"
+     "    w = 1\n", "g", False),
+    # …and a DECLARED type of any other spelling is the source saying a value is
+    # coming, which keeps `def quiet(n) -> Int: w = 1; return 0` out of the
+    # refusal. Measured over this repository, `formal/hostmods/` and 252 stdlib
+    # files, that half of the rule is exactly ONE observation site
+    # (`scripts/stage2_mojo_interpreter.mojo`'s `stage2_compile`, which declares
+    # `-> AnyType`), so it costs one known row.
+    ("a_declared_return_type_is_a_value_coming",
+     "def g(a) -> Int:\n"
+     "    w = 1\n", "g", True),
+    # A `yield`'s value is the GENERATOR OBJECT, so a generator is not a function
+    # that returns nothing: reading one as return-less would refuse every
+    # `for x in f(y)` in the corpus.
+    # `test_formal_returnless_census.py`'s
+    # `a_generator_is_not_a_function_that_returns_nothing` pins the same rule
+    # through the census's use of this reader.
+    ("a_generator_returns_a_value",
+     "def g():\n"
+     "    yield 4\n", "g", True),
+    # A NESTED definition is a different frame with its own returns, so its
+    # `return` is not this function's. Without this row the reader would say a
+    # closure that returns nothing returns a value, and the refusal would never
+    # fire for one.
+    ("a_nested_defs_return_is_not_this_functions",
+     "def g():\n"
+     "    def h():\n"
+     "        return 1\n"
+     "    w = 1\n", "g", False),
+    # …and the DEPTH-not-control-flow rule, which is a limitation rather than a
+    # choice: CPython returns `None` on the path that falls off the end and this
+    # path has no word for it there either, but the function plainly intends a
+    # value and a declared return type usually says so. Pinned so that widening
+    # the rule later is a visible change to this row rather than a silent one.
+    ("a_return_on_one_path_only_still_reads_as_returning",
+     "def g(n):\n"
+     "    if n:\n"
+     "        return 1\n", "g", True),
 ]
 
 # ── the tuple-store target shapes ──
@@ -1510,6 +1593,42 @@ REFUSALS = [
      "    print(\"v:\", a)\n"
      "    return 0\n",
      "cannot tell whether IdentExpr"),
+    # A CALL THAT PRODUCES NO VALUE, printed. CPython evaluates `g(1, 2)` to
+    # `None` and prints `None`; a value on this path is one 64-bit word and the
+    # epilogue writes no return register, so the image printed `0` — measured on
+    # BOTH architectures from this same text, and `0` is not even stable: a call
+    # before it that returned 77 does not survive, so the word is whatever the
+    # callee's last instruction left behind.
+    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # yields_None.md`, whose §0a corpus census is what made this affordable: the
+    # refusal is asked at the one position where a value this path cannot carry
+    # becomes TEXT, and that position holds ZERO call sites over this repository,
+    # `formal/hostmods/` and 252 stdlib files.)
+    #
+    # The needle is the clause that names the CALLEE, so a reworded preamble does
+    # not fail this row and a refusal that stopped naming the construct does.
+    ("a_printed_call_of_a_return_less_function_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    print(g(1, 2))\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
+    # The same through a LOCAL, which is the shape the first row cannot see: the
+    # print's operand is a name, and what makes the name's word not a value is a
+    # binding two lines up. It needs `ValueKinds`' no-value evidence rather than
+    # a test on the operand, and a fix that only recognised the direct call would
+    # build this one and print the leftover word.
+    ("a_printed_local_bound_to_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    v = g(1, 2)\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
 ]
 
 
@@ -1588,6 +1707,32 @@ def run_fixed_case(name, source, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+def run_model_rule(name, source, fn_name, want, verbose):
+    """Ask `model.function_returns_a_value` about one definition, no build.
+
+    The reader is what both emitters' `_callee_returns_value` and the return-less
+    census call, so a row here is a row about the DECISION rather than about an
+    image — which is the only way three of these six rules can be pinned at all.
+    The function is looked up BY NAME rather than taken as the first definition,
+    so a source may carry a helper above the one under test.
+    """
+    import formal.model as M
+    from formal.build import parse_module
+    stmts = parse_module(source, filename=name + ".mojo")
+    fns = {getattr(st, "name", None): st for st in stmts
+           if isinstance(st, F.FunctionDef)}
+    fn = fns.get(fn_name)
+    if fn is None:
+        return False, f"no `def {fn_name}` in the case's own source"
+    got = M.function_returns_a_value(fn)
+    if got is not want:
+        return False, (f"function_returns_a_value({fn_name}) answered {got} "
+                       f"where the row says {want}")
+    if verbose:
+        print(f"      {fn_name}: returns a value = {got}")
+    return True, ""
+
+
 def run_refusal(name, source, needle, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -1625,7 +1770,8 @@ def main():
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, False) for c in MODULE_GLOBAL_CASES]
                   + [(c, "fixed") for c in FIXED_CASES]
-                  + [(c, True) for c in REFUSALS])
+                  + [(c, True) for c in REFUSALS]
+                  + [(c, "model") for c in MODEL_RULES])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -1637,7 +1783,10 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         for entry, kind in selected:
             try:
-                if kind == "fixed":
+                if kind == "model":
+                    ok, detail = run_model_rule(entry[0], entry[1], entry[2],
+                                                entry[3], args.verbose)
+                elif kind == "fixed":
                     ok, detail = run_fixed_case(entry[0], entry[1], entry[2],
                                                 tmpdir, args.verbose)
                 elif kind:

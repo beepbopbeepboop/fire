@@ -11,9 +11,12 @@ part: this slice has no unowned row left in it, and §4 says which claim each
 of the remaining walls belongs to, so the next worker on any of them starts
 from the wall rather than from a re-measurement.
 
-**This is round 2, and round 1's doc is `FORMAL_std_builtin_math_slice_2026-10-03.md`**
-(`formal19-4`'s claim), which covered six of these eight directories and is not
-duplicated here. The differences that matter:
+**This is round 2.** Round 1 covered six of these eight directories and has been
+deleted with its fixes (`std/{builtin,math,bit,random,format,utils}`, two root
+causes fixed with cases in `test_formal_run.py`, and every remaining wall
+attributed to a claim); its numbers are superseded by
+`FORMAL_sweep_work_map_2026-10-04_b10.md`, which sweeps the whole corpus. The
+differences that matter:
 
 * `sys/` (15 files) and `time/` (2) were **not** in round 1's scope at all, so
   every number about them below is new;
@@ -144,7 +147,7 @@ no in-file row is fixed here except §5's.
 | **4** | `std/ffi` | `dealloc` | `formal19-1` |
 | 3 each | `builtin/variadics`, `builtin/constrained`, `format/_utils`, `std/memory` | the same two callees | `formal19-1` |
 | 2 each | `std/hashlib/hasher`, `std/traits`, `sys/.defines`, `builtin/device_passable` | the same | `formal19-1` |
-| **1** | `utils/_select.mojo` | every declaration is private (`_select_register_value`), so the export trie is empty | the private-import row: **147 library files** across the stdlib, measured by round 1 §6. The export rule is `FORMAL_dylib_export_audit_adds_a_second_underscore` / `FORMAL_per_export_contracts` (`formal13-5`/`formal13-3`) |
+| **1** | `utils/_select.mojo` | every declaration is private (`_select_register_value`), so the export trie is empty | the private-import row: **147 library files** across the stdlib, measured by round 1 §6. The export rule is `FORMAL_dylib_export_audit_adds_a_second_underscore` and `FORMAL_builtin_slice_optional_field_is_a_frame_holder` (`formal13-5`/`formal13-3`) |
 | **1** | `time/time.mojo` | `CompilationTarget` — a module-level name of ANOTHER module, not exported as a word | `FORMAL_type_name_as_value` (`formal16-8`) |
 
 **The largest dependency row in this slice (15 files) is two constants-only

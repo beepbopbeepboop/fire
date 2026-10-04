@@ -557,6 +557,16 @@ CAUSE_SAMPLES = [
     ("print() cannot classify the argument's type",
      "print() cannot tell whether SubscriptExpr is a string or a number on "
      "this path"),
+    # The OTHER `print` refusal, whose question is different: the kind is known
+    # (a word, and a word prints as a number) and the word is not a value at all.
+    # Cut from `formal/model.py::returnless_value_refusal`'s own f-string rather
+    # than from a sweep log, for the reason `…_b10.md` §5.1 gives — a log is an
+    # artifact and this row must fail on a reword of the sentence it classifies
+    # rather than reading as a cause that blocks nothing.
+    ("a printed value that is not a value: the callee returns nothing",
+     "print() is asked to render the value of g(…), and g returns nothing: "
+     "CPython evaluates that call to `None` and prints `None`, and a value on "
+     "this path is one 64-bit word with no way to say `no value`"),
     # A REAL message, not a constructed one: `test_llm/dumb_gemm.mojo` is
     # `[0.0] * (m * k)` three times over, and it is the file whose
     # "print() cannot classify" row this replaced. Pinned here so a rewording
@@ -1458,6 +1468,70 @@ def _host_rank_checks(failures):
               f"with no stdlib source, so the only honest answer is None — a "
               f"count computed from a list of names written here would be a "
               f"number nobody can check against anything")
+    # The `zlib` row is the ranking's own example module, and on 2026-10-04 it
+    # was measured EMPTY: the three files it blocked (`gimple_codegen.py`,
+    # `mojo/middle/types.py`, `mojo/middle/coro.py`) each carried a DEAD
+    # `import zlib`, and not one of them read a name out of it. Those imports
+    # were the whole row — the formal backend builds a dylib for every module
+    # in a file's eager import closure, so one dead import in one file is 27
+    # files of `not-answerable/host-import` — and the ranking's own verdict,
+    # "a project: DEFLATE is arithmetic over bytes", was answering a question
+    # no file in the corpus asked.
+    #
+    # So the two facts are checked separately, because they have different
+    # repairs and a single "no zlib" assertion would not say which one a
+    # future `import zlib` is:
+    #
+    #   * a file that READS `zlib.<name>` means the row is live, and the repair
+    #     is a model (`formal/hostmods/zlib.mojo`) or the removal of the use;
+    #   * a file that IMPORTS it and reads nothing means the import itself is
+    #     the row, and the repair is to delete it — which is what
+    #     `gimple_codegen.py` stopping on `importlib` instead is.
+    #
+    # The scope is `formal_sweep.find_source_files` — the sweep's OWN file list,
+    # not a second walk — and the read is an AST `Attribute` on the bound name,
+    # so a mention in a comment or a docstring cannot pass for a use.
+    import ast
+    readers, dead = [], []
+    for path in S.find_source_files([]):
+        if not path.endswith(".py"):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                tree = ast.parse(fh.read())
+        except SyntaxError as exc:                        # noqa: BLE001
+            check(False, f"{S.rel(path)} does not parse, so the zlib row "
+                         f"cannot be measured over it: {exc}")
+            continue
+        bound = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "zlib":
+                        bound[alias.asname or alias.name] = node.lineno
+        if not bound:
+            continue
+        used = {node.value.id for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)}
+        where = f"{S.rel(path)}:{min(bound.values())}"
+        (readers if used & set(bound) else dead).append(where)
+    check(not readers,
+          "these files import `zlib` and READ a name out of it, so the "
+          "host-import row is live: " + ", ".join(readers) + "\n"
+          "    `zlib` is in formal/imports.py's HOST_UNREACHABLE, so every "
+          "file behind one of them is `not-answerable/host-import` for it. "
+          "Either the use is removable, or the row needs "
+          "formal/hostmods/zlib.mojo and the ranking's verdict for it.")
+    check(not dead,
+          "these files import `zlib` and read NOTHING from it, so the import "
+          "IS the row: " + ", ".join(dead) + "\n"
+          "    The formal backend builds a dylib for every module in a file's "
+          "eager import closure, so one dead import blocks that file and "
+          "every file behind it, and it blocks them on a module nothing asks "
+          "for. Delete the import — that is the whole fix, and it is how "
+          "`gimple_codegen.py` came to stop on `importlib` instead.")
+
     d = rows.get(_HOST_UNTIERED_NAME)
     if d is not None:
         try:

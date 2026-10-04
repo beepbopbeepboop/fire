@@ -6,7 +6,7 @@ value-model decision, and it is the last thing between the `builtin_slice` row
 and 13 files.** Its own dependency chain has since moved TWICE and is now
 blocked one layer EARLIER than either revision of it below says: see
 "Re-measured 2026-10-03" at the end, whose first arrow is a frame-identity
-question in somebody else's area (`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md`).
+question in somebody else's area (a one-word struct whose only field is a nested frame, whose `__init__` was read as returning a frame — the doc that filed it was deleted with the fix, and its subject is now `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`).
 Read that section first if you are picking this up; the two below it are
 history and both name an arrow that is no longer the first one.
 
@@ -289,8 +289,12 @@ third revision of that chain and the second time the first arrow has been a
 frame or boundary question rather than a value-model one. **Measure the first
 refusal before starting any of it**, which is what this section exists for.
 
-The new arrow is filed, with a 15-line reproducer and the four-step chain, as
-`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md`. It is a
+The new arrow was filed, with a 15-line reproducer and the four-step chain, as a
+doc about a one-word struct whose only field is a nested frame; that doc has
+since been deleted with its fix, so the arrow is named here by its symptom
+instead: a receiver write-back whose receiver is a nested frame was classified as
+a RETURNED FRAME, which refused a library whose only frame was the caller's own
+object. It is a
 frame-identity question (a receiver writeback that hands back the address it was
 given) in the frame/export boundary, and it is worth more than this row: it is
 the first blocking fact of 20+ files in `bugs/sweeps/sweep-x86-6.txt`, every one
@@ -304,9 +308,8 @@ number this document has twice recorded wrongly by estimating it.
 ## Re-measured 2026-10-03 (`work/formal13-6`): the first arrow is UNCHANGED, so
 ## option 2 still cannot be started, and the reason it cannot is worth naming
 
-`bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` says to measure
-the first refusal before starting anything here, and the answer is that it has
-not moved. arm64 and x86-64, byte-identical:
+That arrow says to measure the first refusal before starting anything here, and
+the answer is that it has not moved. arm64 and x86-64, byte-identical:
 
 ```
 build: builtin_slice.mojo imports 'std.format._utils', which cannot be built

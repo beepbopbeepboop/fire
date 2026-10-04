@@ -4171,9 +4171,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                 f"constructor placed. Those two lifetimes are "
                                 f"independent, which is the whole reason the "
                                 f"placed frame is preferred, so it is not "
-                                f"available here. Assign the field to a name and "
-                                f"call the method on the name, which is the same "
-                                f"program with a lifetime this analysis can see"
+                                f"available here. {DELEGATING_FIELD_ADVICE}"
                             )
                         if nested is None:
                             # Agreed, and the agreed type is provably NOT a
@@ -4304,9 +4302,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                             f"{', '.join(sorted({st.name for st in level}))} "
                             f"ASSIGNS it, so the word in the slot is a frame "
                             f"belonging to whichever function ran the "
-                            f"assignment. Assign the field to a name and read "
-                            f"through the name, which is the same program with a "
-                            f"lifetime this analysis can see"
+                            f"assignment. {DELEGATING_FIELD_ADVICE}"
                         )
                     if why is _UNPLACED:
                         # `model.nested_frame_hop_unplaced`, and not a second
@@ -6187,6 +6183,54 @@ _REASSIGNED = object()
 # different words.
 _UNPLACED = object()
 
+# What a `_REASSIGNED` refusal tells the reader to write instead, as ONE string
+# because both sites that raise it made the reader the SAME promise and the
+# promise was false on both architectures.
+#
+# **Measured, both backends, on this tree (2026-10-04).** The two advices this
+# replaces, and what the programs they name actually do:
+#
+#   * "Assign the field to a name and read through the name" — `var t =
+#     self.inner; t.v` is refused with `field_access_refusal`: "'t.v' is a field
+#     access through 't', and this path has no way to say what 't' holds". A
+#     local bound to a nested frame FIELD READ is not classified as a frame
+#     address, which is a separate gap from this one and is what the reader
+#     lands on instead of a working program.
+#   * "Assign the field to a name and call the method on the name" — `var t =
+#     self.inner; t.get()` is refused with the value-method-call refusal: "the
+#     receiver is a name on this path, and 'get' is not one of those methods of
+#     those receivers".
+#
+# So both sent the reader to a spelling this path refuses, which is the failure
+# mode this family of diagnostics documents itself as existing to prevent — "a
+# message that asserts a mechanism which is not operating sends the reader after
+# a non-bug", and more pointedly a PROMISE nobody checks.
+#
+# The advice below is measured to work: `struct Box { var pad: Int; var inner:
+# Opt; def __init__(out self, o: Opt): self.inner = o; def get(out self) ->
+# Int: return self.inner.v * 10 + self.inner.has }` with `Box(mk(4))` builds
+# and prints CPython's `41` on arm64 AND on x86-64. It is the DELEGATING field —
+# `model.init_stores_a_parameter_struct`, the predicate `_typed_nested_frame`
+# already exempts a few lines above the refusal — and the reason it is sound is
+# the one that predicate's own comment makes: the only assignment is
+# `__init__`'s and its argument is the CALLER's, so the frame in the slot and the
+# frame the caller is reached through die together. A method that is not
+# `__init__` assigning the field is exactly the case with two independent
+# lifetimes, which is the refusal.
+#
+# What it does NOT claim: that a non-constructor assigner becomes answerable, or
+# that the read-through-a-local spelling works. Both are separate gaps, named
+# here so the next reader of either of them knows they were measured rather than
+# assumed.
+DELEGATING_FIELD_ADVICE = (
+    "Assign the field in __init__ from a parameter of __init__ and read it "
+    "through the field, which is the same program with a lifetime this "
+    "analysis can see: a constructor's argument is the frame the CALLER "
+    "reached, so the two die together, while a method that assigns the field "
+    "puts in a frame belonging to whichever function ran the assignment and "
+    "nothing here says the two lifetimes agree"
+)
+
 
 def _field_annotation(cands, name, decls=None):
     """The type of `name` as a candidate spells it, for a message.
@@ -7030,9 +7074,12 @@ _RETURN_UNSOUND = "unsound"
 # appended return and therefore no return to tag). Nothing sets the tag, so both
 # readers returned the empty set on every function and the two sites that
 # consulted them had no producer left to classify.
-# `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` §"Read this
-# before merging `work/formal13-5`" says exactly that — drop them rather than
-# reconcile them — and this is that.
+# The doc that filed this said exactly that — drop the tag's readers rather than
+# reconcile them — and it was deleted with the fix, so this comment is the
+# citation: its subject (a one-word struct whose only field is a nested frame,
+# refused as a dylib because its `__init__` was read as returning a frame) is
+# now the by-reference write-back above and the two assertions in
+# `test_formal_dylib.py`.
 
 
 def _returned_frame_construction(fn, value, callee, structs_by_name, fns):
@@ -7132,41 +7179,31 @@ A value is frame-valued in three ways, and they are the three the holder
     is a plain word that IS the field and is already covered by the first case.
 
 
-    **…and a third way that is not one of them: a RECEIVER WRITE-BACK.**
-    `_return_the_receiver` appends `return <receiver>` to every exit of a
-    one-field mutator, because a one-word struct's receiver IS its field and a
-    store to the callee's copy of that word has to come back.  That text is
-    indistinguishable from `return p` for a local that holds a frame — and when
-    the receiver is a frame ADDRESS and the body did not rebind it, it is not a
-    frame return at all: the function was handed the block and hands the same
-    block back, so there is nothing for a caller to reserve.  The
-    returned-frame convention is about a callee that BUILDS a block in a block
-    the CALLER reserved, and by construction a write-back does not.
+    **…and a case that is not a receiver question at all any more: a one-word
+    struct whose ONLY field is a nested frame.**  Its value on this path is that
+    frame's ADDRESS, so `self` is the address of a one-word cell rather than the
+    cell, and the constructor that WRITES THROUGH (`self.inner.a = a`) writes the
+    caller's own bytes while the one that ASSIGNS (`self.inner = Inner(a, b)`,
+    which `_rewrite_self_fields` collapses onto `self`) binds a frame the CALLEE
+    built in its own prologue.  The first is not a frame return and the second is
+    — and both were once the same text here, because `_return_the_receiver`
+    appended `return <receiver>` to the first and this function could not tell the
+    two apart.  Neither is a question for THIS function any more: the receiver is
+    handed over BY REFERENCE and written back through the caller's own storage
+    (`_take_the_receiver_by_reference`), so there is no appended return to read,
+    and the assigning shape is caught where the boundary is, by
+    `_collect_one_field_receiver_rebinds` →
+    `receiver_writeback_frame_library_refusal`.
 
-    So the write-back returns carry a tag (`_return_the_receiver` puts it there,
-    because it is the only place that knows which returns it made), and a tagged
-    return is counted only when the receiver was REBOUND in this body.  The test
-    for that is made here, after `_rewrite_self_fields` has collapsed
-    `self.<field> = v` onto `self` — which is what makes it the honest question
-    to ask, and the reason it cannot be asked in `_return_the_receiver` itself:
-    at that point a store THROUGH the receiver and a REBINDING of it are
-    different text and the same fact.
-
-    Measured, on the refusal this removes: `struct Inner: var a: Int; var b:
-    Int` / `struct Box1: var inner: Inner` with
-
-        def __init__(out self, a: Int, b: Int):
-            self.inner.a = a
-            self.inner.b = b
-
-    builds as a program on both architectures and was REFUSED as a dylib with
-    "`Box1___init__` returns a frame address, so it cannot be compiled into a
-    dylib" — on a function whose only frame is the caller's own object.  The
-    constructor that ASSIGNS a frame to its own one word
-    (`self.inner = Inner(a, b)`, which the rewrite makes a rebinding) is a real
-    frame return and is still refused; that is the other half of
-    `bugs/FORMAL_one_word_ctor_of_a_nested_frame_is_unexportable.md` and it is
-    right there.
+    The pair is pinned from both sides and neither side is this function:
+    `test_formal_dylib.py`'s `a receiver write-back is not a returned frame`
+    asserts that the write-through constructor IS exported with a `frame_params`
+    contract naming `Inner` and that the assigning one is refused, and
+    `test_formal_run.py`'s `constr_refuse_a_one_word_ctor_that_assigns_a_nested_
+    frame` pins the PROGRAM half — where the obstacle is a different one (the
+    constructor body is inlined at the construction site and has no prologue to
+    put a frame in), which is why the two are separate assertions rather than one
+    and why neither of them can stand in for the other.
 
     `returns_by_name` is the JOIN (`_returns_frame_by_name`), not the
     per-function table: the second case asks about a CALLEE, and a callee is
@@ -9172,9 +9209,12 @@ def _take_the_receiver_by_reference(fn, wb) -> None:
     `IntLiteral` and has no `self` at all. `model.receiver_writeback_name` is
     asked of THIS function rather than of the entry, which is what makes the
     guard able to fire; keeping it first is what keeps the refusals true.
-    `FORMAL_std_builtin_math_slice_2026-10-03.md` §2.1 has the measurements and
-    the generalisation — an entry in a table keyed by a lifted name is not
-    evidence about the function it is looked up on.
+    The measurements and the generalisation — an entry in a table keyed by a
+    LIFTED name is not evidence about the function it is looked up on, and this
+    guard is what makes the reader ask of the FUNCTION — are at `5f7d7c54`
+    (`formal14-std-builtin-math`), whose doc was deleted with the fix. The cases
+    are `an_implicit_converting_init_next_to_a_mutating_one_is_not_a_mutator` and
+    `a_mutating_init_keeps_its_write_back_beside_a_converting_one`.
     """
     recv = M.receiver_writeback_name(fn)
     if recv is None:

@@ -6179,6 +6179,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         for _key in ("lets", "flow_hsid", "flow_defs",
                      "flow_blocks", "conds", "branch_srcs"):
             ctx[_key] = list(ctx.get(_key, []))
+        # The `hprior` memo is a dict rather than one of the lists above, and it
+        # is copied for the same reason they are: a fact proved in ONE branch of
+        # the walk is not in scope in a sibling, because `s_{pb}` is REBOUND per
+        # path (`hsid_{pb}` is emitted once per visit — measured 1/2/4/8/16 times
+        # for blocks 0/2/4/6/8 of a three-condition program). Sharing is
+        # therefore along a path and never across one, and that is the most
+        # that is sound without changing what `s_{pb}` is.
+        ctx["hprior_memo"] = dict(ctx.get("hprior_memo", {}))
         EXIT = ctx.get("exit", exit_pc)
         is_contract = ctx.get("is_contract", False)
         exit_cond = "by omega"
@@ -6894,8 +6902,29 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                             _ctr = (_rli[1], _rli[2])
                         for _pb in _prior_blocks:
                             _pb_defs = list(run_info[_pb][4])
+                            # ONE fact per (block, register, value) per PATH, and
+                            # the name does not carry `bi`. The statement depends
+                            # on neither: `s_{pb}` is the state this path leaves
+                            # block `_pb` in and `_var_regs[_v]` is the function's
+                            # allocation, so two blocks on one path asking the
+                            # same question were re-deriving a fact already in
+                            # scope. The name loses `bi` because the memo makes
+                            # it unique per path, and the counter's own suffix
+                            # gains a `c_` so a variable literally called `ctr`
+                            # cannot collide with it (which the old name allowed
+                            # only because `bi` differed).
+                            _memo = ctx["hprior_memo"]
+                            # `_hpriors` is appended AFTER the fact's own
+                            # `simp only`, never before: a `have`'s own name is
+                            # not in scope inside its proof, and `simp only`
+                            # naming a local that is not there is an unknown
+                            # identifier rather than a no-op.
                             for _v in _vars:
-                                _hp = f"hprior_{bi}_{_pb}_{_v}"
+                                _hp = f"hprior_{_pb}_{_v}"
+                                if (_pb, _var_regs[_v], _v) in _memo:
+                                    _hpriors.append(_hp)
+                                    continue
+                                _memo[(_pb, _var_regs[_v], _v)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_v]} = {_v} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
                                 A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
@@ -6905,7 +6934,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _hpriors.append(_hp)
                             if _ctr is not None:
                                 _cv, _crhs = _ctr
-                                _hp = f"hprior_{bi}_{_pb}_ctr"
+                                _hp = f"hprior_c_{_pb}_ctr"
+                                if (_pb, _var_regs[_cv], _crhs) in _memo:
+                                    _hpriors.append(_hp)
+                                    continue
+                                _memo[(_pb, _var_regs[_cv], _crhs)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_cv]} = {_crhs} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
                                 A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
@@ -7647,6 +7680,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  all_goals try (simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}])")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
+                # A branch whose tested register was LOADED FROM MEMORY is the
+                # one this leaf cannot decide from the value flow, because the
+                # value flow is over REGISTERS and the load's address is an
+                # `adrp`/`add` expression the fold never touches.  Peeling the
+                # frame stores off the read is what decides it, and the side
+                # condition each peel needs is an inequality between two closed
+                # `Nat`s — the address and a frame slot — so `decide` is the
+                # discharge and no hypothesis is needed.
+                #
+                # It is emitted for EVERY branch here rather than only for a
+                # recognised one, because recognising it means decoding the
+                # load's address back out of the instruction stream and
+                # `_cbz_reg_const` (the reader that could) deliberately stops at
+                # the `LDR`.  `try`, so a branch the previous lines closed costs
+                # nothing, and `simp (disch := decide)` rather than `simp only`,
+                # so the `if` the model leaves is decided rather than merely
+                # unfolded.
+                A(f"{IND}  all_goals try (simp (disch := decide) "
+                  f"[mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                  f"mem_read_two_writes_same])")
+                A(f"{IND}  all_goals try native_decide")
                 _cfg_leaf(A, IND + "  ", "runs-cbz-condition",
                           "all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {tgt_state} := by")

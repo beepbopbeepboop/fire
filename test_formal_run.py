@@ -109,13 +109,21 @@ CASES = [
     # are rewritten to CPython's answers in the same commit as the fix — which is
     # also the check that it landed.
     #
-    # The `/` in the first row is the SEPARATE, already-documented limit: there
-    # is no float on this path, so `/` truncates and `-7 / 2` answers `-3` where
-    # CPython answers `-3.5` (`FORMAL.md` §6 Phase 7).  It is left as it is on
-    # purpose rather than "fixed" here, because making `/` floor would make it
-    # agree with `//` and disagree with CPython in a NEW place.
+    # `/` is the SEPARATE, already-documented limit -- there is no float on this
+    # path, so `/` truncates and `-7 / 2` answers `-3` where CPython answers
+    # `-3.5` (`FORMAL.md` §6 Phase 7) -- and it is pinned by its own row below,
+    # `neg_slash_still_truncates`, rather than sharing this one.  It is left
+    # truncating on purpose rather than "fixed" here, because making `/` floor
+    # would make it agree with `//` and disagree with CPython in a NEW place.
     ("neg_div_rem",
      "def main(n):\n    a = 0 - 7\n    if a // 2 == 0 - 4 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
+    # …and `/` beside it, which is the OTHER half of what the row above used to
+    # pin and is a different answer: `-7 / 2` is `-3`, not the `-4` the same
+    # operands give through `//`.  One row cannot hold both, because they are
+    # two decisions (`model.division_floors` answers False for `/` on purpose),
+    # and a row that asserted the pair would fail on either one alone.
+    ("neg_slash_still_truncates",
+     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
     ("neg_mod",
      "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 2:\n        return 1\n    return 0\n", 1, None),
     # Controls.
@@ -7542,6 +7550,43 @@ BOTH_ARCH_CASES = [
      "    var b: UInt32 = 5\n"
      "    printf(\"%d %d\", a // b, a % b)\n"
      "    return 0\n", 0, "3 2"),
+    # ── …and the WHOLE sign matrix in ONE program, both architectures ──────
+    #
+    # The six rows above are one program each, because each of them was FOUND by
+    # something specific: the exact multiple of a negative divisor by a
+    # `--mix signed` sweep, the unsigned control by reading `division_floors`.
+    # This one is the complement, and it is here for the two values none of the
+    # six can reach: `1 // 2` is the FIRST thing that breaks if the correction's
+    # condition is written as `sKey a = sKey b` (`sKey` is an involution, so that
+    # is `a = b`, and `1 // 2` answers `-1`), and every row is in ONE program so
+    # a truncating `//` and a correct `%` cannot disagree inside it -- a partial
+    # fix cannot pass half of it.
+    #
+    # `//` FLOORS and `%` takes the sign of the DIVISOR; `SDIV`/`IDIV` truncate
+    # and take the sign of the DIVIDEND. The two therefore disagree exactly when
+    # the operands' signs differ, and before the correction these rows were -3,
+    # -3, -4, -1, 1, -1, 1, 0 where CPython says -3, -4, -4, 2, -2, -1, 1, 1.
+    # Every expected value below is CPython 3.14's, computed rather than typed,
+    # and the whole corpus is in ONE program so that one build per architecture
+    # answers all sixteen rows -- a truncating `//` and a correct `%` cannot
+    # disagree inside this program, so a partial fix cannot pass half of it.
+    #
+    # The first eight lines are the sign matrix (both orders of both signs, plus
+    # the two exact divisions), and the last two are the idiom no amount of
+    # reading the spec finds: `x % 2 == 1` is the standard ODD test and it
+    # answered 0 for every negative odd x, which is a wrong answer from correct-
+    # looking code rather than an exotic one. `1 // 2` is here for the same
+    # reason and is the FIRST thing that breaks if the correction's condition is
+    # written as `sKey a = sKey b` (which is `a = b`, so it would answer -1).
+    ("both_arch_floor_division_and_modulo_agree_with_cpython",
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", 0 - 7 // 2, 7 // (0 - 2), (0 - 8) // 2, 7 // 2)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) % 3, 7 % (0 - 3), (0 - 7) % (0 - 3), 7 % 3)\n"
+     "    printf(\" %d %d\", 1 if (0 - 7) % 2 == 1 else 0, 1 if (0 - 8) % 2 == 0 else 0)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) // (0 - 2), 1 // 2, (0 - 1) // (0 - 2), (0 - 6) // 4)\n"
+     "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
+     "    return 0\n", 0,
+     "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -10985,6 +11030,43 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
      None),
+    # (7a) The SAME construction stored DIRECTLY into the one field, on a struct
+    # whose ONLY field is a nested frame — the shape a deleted bug doc was filed
+    # about, and the PROGRAM half of the pair `test_formal_dylib.py`'s `a
+    # receiver write-back is not a returned frame` refuses at a module
+    # boundary.  Both halves are here because they are two different questions
+    # with two different fixes, and a reader who has only one of them tends to
+    # assume the other one is the same refusal:
+    #
+    #   * in a PROGRAM the obstacle is the INLINE.  `Box1(20, 22)` is a call to a
+    #     declared `__init__`, this path inlines that body at the construction
+    #     site, and the body builds a frame the inlined copy has no prologue
+    #     site to put it in — `init_body_stores`, the same rule as (7).
+    #   * at a MODULE BOUNDARY the obstacle is the LIFETIME.  The constructor is
+    #     never inlined anywhere, and the frame it hands back is one it built in
+    #     its own prologue, so an importer that reserves the block the contract
+    #     describes reads a dead one.
+    #
+    # The needle is (7)'s, on purpose: the two programs differ by one field, one
+    # nesting level and where they run, and a reader who lands here should be
+    # sent to the same sentence rather than to a fourth one.
+    ("constr_refuse_a_one_word_ctor_that_assigns_a_nested_frame",
+     "struct In1b:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Box1b:\n"
+     "    var inner: In1b\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.inner = In1b(a, b)\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Box1b(1, 2)\n"
+     "    return x.inner.a\n",
+     "refuse:whose body this path does not inline: `In1b(…)`, a construction of "
+     "a struct whose receiver is a frame",
+     None),
 # (8) The SAME construction into a field DECLARED with that struct's type, and
     # **this one used to be a refusal and is now the row that says why it is
     # not** (`model.init_stores_a_parameter_struct`, 2026-10-03).
@@ -11451,28 +11533,113 @@ CONSTRUCTION_REFUSALS = [
      "    var e = DType(1, 2)\n"
      "    return 0\n",
      "refuse:constructing DType has no representation on this path", None),
-    # `bytearray`/`bytes` are the one pair in that list whose refusal is NOT
-    # "cannot be conjured out of one word", and the generic sentence is false
-    # about them: the blob layout is one this path already lays out (`[]` is it),
-    # a bytes LITERAL already builds one, and `len(b"abc")` answers 3. What is
-    # undecided is the ELEMENT WIDTH, so the message has to say that — and
-    # `bytes(3)` with an argument has to keep saying it too, because an
-    # argument does not make the width any more decided.
+    # `bytes` is the one byte-sequence name still refused, and the refusal says
+    # WHY in terms of what this path can build: a `bytes` value here is the
+    # interned `char *` a bytes LITERAL is (`len(b"abc")` answers 3 off
+    # `strlen`, `b"abc"[i]` is one byte at offset `i`), while a constructor has
+    # to build a counted region — a blob — and `bytes(n)` needs one whose SIZE
+    # is a runtime value. The element width is no longer the undecided part:
+    # `bytearray` is that blob with a one-byte element, and the four cases
+    # below build and run on both backends. `bytes` with an argument keeps its
+    # own refusal, and the needle is the clause about the MUTABLE blob, because
+    # that is the sentence that tells the reader what to write instead.
     #
-    # Before this, all four spellings reached the bind audit as a dangling
-    # extern named `bytearray`/`bytes` and the build failed with a message about
-    # a SYMBOL, which is a fact about the link line and not about the type the
-    # reader wrote. `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
-    ("constr_refuse_bytearray_by_name",
+    # Before the width decision, all four spellings reached the bind audit as a
+    # dangling extern named `bytearray`/`bytes` and the build failed with a
+    # message about a SYMBOL, which is a fact about the link line and not about
+    # the type the reader wrote.
+    ("constr_refuse_bytes_by_name",
      "def main(n: Int) -> Int:\n"
-     "    var b = bytearray()\n"
+     "    var b = bytes()\n"
      "    return 0\n",
-     "refuse:the element width is the undecided part", None),
+     "refuse:constructing bytes is refused on this path", None),
     ("constr_refuse_bytes_with_an_argument_by_name",
      "def main(n: Int) -> Int:\n"
      "    var b = bytes(3)\n"
      "    return 0\n",
-     "refuse:constructing bytes is refused on this path", None),
+     "refuse:The MUTABLE byte blob is `bytearray`", None),
+    # ── `bytearray`: a BLOB with a one-byte element, on both backends ──────
+    #
+    # Every answer below is CPython's, read off this process:
+    #   bytearray(4) → len 4;  b[0]=65, b[1]=66 → 65 66 0 0
+    #   bytearray()  → len 0
+    #   for c over [97,98,99] → 97+98+99 = 294;  98 in b True, 100 in b False
+    #   b[-1] = 122 → b[2] == 122
+    #   bytearray() + two appends → len 2, b[0]=65, b[1]=66
+    #
+    # The load-bearing halves are the ones a WORD-slot blob would get wrong.
+    # With eight-byte elements and a byte-count header, `b[1]` reads the low
+    # byte of element 1 and answers 0 where CPython says 98 — which is the
+    # "option 1" the bug doc measured and rejected, and the reason the stride
+    # comes from the value's KIND (`model.blob_elem_stride`) and not from the
+    # constant it used to be.
+    ("constr_bytearray_of_a_constant_size_is_a_counted_blob",
+     "def main() -> int:\n"
+     "    var b = bytearray(4)\n"
+     "    printf(\"len=%d\", len(b))\n"
+     "    return 0\n",
+     0, "len=4"),
+    ("constr_bytearray_sized_elements_read_and_write_one_byte_each",
+     "def main() -> int:\n"
+     "    var b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    printf(\"b=%d %d %d %d\", b[0], b[1], b[2], b[3])\n"
+     "    return 0\n",
+     0, "b=65 66 0 0"),
+    ("constr_empty_bytearray_has_length_zero",
+     "def main() -> int:\n"
+     "    var b = bytearray()\n"
+     "    printf(\"len=%d\", len(b))\n"
+     "    return 0\n",
+     0, "len=0"),
+    ("constr_bytearray_a_negative_index_counts_from_the_end",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[-1] = 122\n"
+     "    printf(\"b=%d %d %d\", b[0], b[1], b[2])\n"
+     "    return 0\n",
+     0, "b=0 0 122"),
+    ("constr_bytearray_iterates_yielding_bytes_not_words",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[0] = 97\n"
+     "    b[1] = 98\n"
+     "    b[2] = 99\n"
+     "    var total = 0\n"
+     "    for c in b:\n"
+     "        total += c\n"
+     "    printf(\"sum=%d\", total)\n"
+     "    return 0\n",
+     0, "sum=294"),
+    ("constr_bytearray_membership_reads_bytes",
+     "def main() -> int:\n"
+     "    var b = bytearray(3)\n"
+     "    b[0] = 97\n"
+     "    b[1] = 98\n"
+     "    printf(\"a=%d b=%d\", 98 in b, 100 in b)\n"
+     "    return 0\n",
+     0, "a=1 b=0"),
+    ("constr_bytearray_appends_grow_the_constructor_built_blob",
+     "def main() -> int:\n"
+     "    var b = bytearray()\n"
+     "    b.append(65)\n"
+     "    b.append(66)\n"
+     "    printf(\"len=%d %d %d\", len(b), b[0], b[1])\n"
+     "    return 0\n",
+     0, "len=2 65 66"),
+    # The refusal a constructor-built blob cannot answer, and it is the same
+    # one `List()` has always had: the room an append needs has to be known when
+    # the blob is BUILT, and a `n` this compiler cannot read is not known then.
+    # The needle is the constructor's name because that is what makes the two
+    # byte-sequence spellings disagree on purpose.
+    ("constr_bytearray_of_a_computed_size_is_refused_by_name",
+     "def main(n: Int) -> int:\n"
+     "    var b = bytearray(n)\n"
+     "    printf(\"%d\", len(b))\n"
+     "    return 0\n",
+     "refuse:a blob that has to HOLD 1 element(s) needs a frame reservation",
+     None),
     # ── INHERITANCE: the fields a class has because a BASE declares them ────
     #
     # `formal/model.py`'s `attach_inherited_fields` merges a declared base's
@@ -11534,6 +11701,32 @@ CONSTRUCTION_REFUSALS = [
      "        pass\n"
      "    return 0\n",
      "refuse:derives from 'Widget', which this image does not declare", None),
+    # (3a) The NEGATIVE half of (3), and it is what keeps (3) from being a
+    # blanket rule. `ValueError` is an UNRESOLVED base by exactly the test that
+    # makes `Widget` one — nothing in this image declares it — and it must still
+    # construct, because every class CPython's `builtins` defines as an
+    # exception has exactly one instance field (`args`, filled by
+    # `BaseException.__new__` from the caller's arguments), so
+    # `raise ValueError("x")` is a legal one-argument construction of a class
+    # whose body is a docstring. That is `model.builtin_base_fields`'s answer,
+    # consulted before the unresolved-base question; a repair that read "an
+    # unresolved base means no fields" would take every `raise ValueError(…)` in
+    # the corpus with it and nothing else in this file would say so.
+    #
+    # Same program as (3) with `Widget` replaced and the construction made
+    # directly, which is the point twice over: the two differ by one name and
+    # must not come to the same verdict, and what is pinned here is the ARITY
+    # path (the subject of (3)) rather than what a raised exception does at run
+    # time — `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_
+    # then_dies.md` is that separate subject, measured.
+    ("constr_an_unresolved_BUILTIN_base_still_constructs",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def main(n):\n"
+     "    var e = MyErr(\"the message\")\n"
+     "    print(\"built\")\n"
+     "    return 0\n", 0, "built"),
     # (4) What the merge CANNOT do, and the reason this is a refusal and not a
     # gap in the merge: a method is compiled against the layout of the class
     # that DECLARES it, and a call site carries no receiver type to check with,
@@ -13732,16 +13925,75 @@ POINTER_DEREF_REFUSALS = [
      "    if ru(t) != 4294967295:\n"
      "        return 2\n"
      "    return 0\n", 0, None),
-    # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
-    # untyped direction, and it is the 14-of-47 `unsafe_value` case — a pointer
-    # that crossed a call boundary and lost its pointee on the way.
+        # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
+    # untyped direction, and it was the 14-of-47 `unsafe_value` case — a pointer
+    # that crossed a call boundary and lost its pointee on the way.  It is now
+    # the case the image has NOTHING to say about: `read_x` has no call site in
+    # this unit at all, which is what an exported function looks like from inside
+    # the library that defines it and is the one shape no amount of walking this
+    # image can answer.  The two cases below are the other two shapes, and they
+    # are separate cases because a reader who hits one of them has a different
+    # fix from a reader who hits this one.
     ("deref_refuse_undeclared_receiver",
      "def read_x(p) -> Int:\n"
      "    return Int(p.value())\n"
      "def main(n: Int) -> Int:\n"
      "    var s = \"ABCDEFGH\"\n"
-     "    return read_x(s)\n",
+     "    return 0\n",
      "refuse:it is a word from the caller and its pointee is not recorded here", None),
+    # …and the ANSWERED half: the same unannotated parameter, reached only with
+    # arguments this image establishes, is now loaded at the pointee's width.  The
+    # value is the same word `deref_four_widths_at_one_address` reads with an
+    # ANNOTATION, so this case is the measure of the fix: 5208208757389214273 is
+    # `struct.unpack('<q', b'ABCDEFGH')` and 65 is what a one-byte read of the
+    # same address would say, so a callee that loaded the wrong width would be
+    # caught rather than agreeing with itself.
+    #
+    # `through` is the second hop on purpose: the pointee travels `main`'s
+    # declared `Pointer[Int64]` into `read_x` through a parameter of its own that
+    # nothing declares either, so the chain is walked rather than one level, and
+    # a reader who takes `seen` for a loop guard can see it terminate here.
+    ("deref_call_site_pointee_of_an_unannotated_parameter",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def through(x) -> Int:\n"
+     "    return read_x(x)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    if through(q) != 5208208757389214273:  # struct.unpack('<q', b'ABCDEFGH')\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
+    # …and the first wrong answer this could have had: the same parameter reached
+    # with a `Pointer[UInt8]`.  One parameter has one pointee, the load's width is
+    # chosen per parameter, and one answer cannot serve both — so it is refused
+    # with both call sites named rather than compiled at whichever width was seen
+    # first.
+    ("deref_refuse_two_call_site_pointees",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q8: Pointer[Int64] = s\n"
+     "    var q1: Pointer[UInt8] = s\n"
+     "    return read_x(q8) + read_x(q1)\n",
+     "refuse:this image reaches it with two different pointees", None),
+    # …and the third shape, which is the one a reader is most likely to hit: the
+    # image reads one call site and cannot place another's argument.  A string
+    # literal is a bare `char *` here, and `POINTEES_REFUSED` says in as many
+    # words that a list is a BLOB — a frame whose FIRST word is its count — so a
+    # width taken from the sites that DO answer would be a guess about the one
+    # that does not, and a blob would answer with a length the source never
+    # wrote.  The refusal names the site it cannot read, because the reader
+    # standing at that call is the one who can fix it.
+    ("deref_refuse_a_call_site_the_image_cannot_place",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var q: Pointer[Int64] = s\n"
+     "    return read_x(q) + read_x(s)\n",
+     "refuse:this image cannot say what one of its call sites passes", None),
     # The OFFSET, and the one that is still refused: the ALU scales an integer
     # offset it can read a POINTER and an ELEMENT WIDTH off a declaration for,
     # and this program's `k` has no annotation, so there is nothing to say
