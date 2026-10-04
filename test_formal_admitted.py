@@ -112,6 +112,15 @@ ADMITTED_COUNTS = {
     "io": 0,
     "json": 0,
     "math": 0,
+    # `operator` is 0 because every name it exports is either the machine's own
+    # word arithmetic or a status this module computes: 27 functions over one
+    # 64-bit word, checked name by name against CPython's live `operator` by
+    # `test_formal_core_hostmods.py`'s `op` group on both backends. The three
+    # places CPython raises (a zero divisor, a zero modulus, a shift distance
+    # outside 0..63) answer -1 and are compared against CPython's exceptions
+    # rather than against CPython's values, which is what the group does with
+    # them. No host fact is left over to admit.
+    "operator": 0,
     "os": 0,
     "os._syscalls": 0,
     "os.path": 0,

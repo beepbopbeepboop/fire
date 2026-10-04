@@ -471,7 +471,19 @@ HOST_MODELLED = frozenset((
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
     "random", "decimal", "fractions",
-    "numbers", "array", "operator", "functools", "itertools",
+    #   `operator`  — LEFT on 2026-10-04 for `formal/hostmods/operator.mojo`:
+    #     the 27 names that take two WORDS and answer a word, which is the whole
+    #     of what a 64-bit value can compute. The three places CPython raises and
+    #     this cannot are -1 and are named as statuses at the three functions
+    #     (`floordiv`/`mod` by zero, a shift distance outside 0..63, a zero
+    #     modulus), on `math.mojo`'s own precedent for a factorial above 64 bits.
+    #     `truediv` is NOT among them and its absence is the load-bearing part:
+    #     it is a `float`, and `truediv(4, 2)` agreeing with CPython while
+    #     `truediv(7, 2)` did not is the error that only shows on the cases that
+    #     matter. `itemgetter` and its siblings want a first-class callable, and
+    #     the in-place family wants a name to write through — both refused on this
+    #     path, both named in the module.
+    "numbers", "array", "functools", "itertools",
     #   `collections`  — NO `formal/hostmods/` module, and the entry says why in
     #     the form a reader acts on: `HOST_MODULE_ADVICE` below is what the
     #     REFUSAL prints, which is where a person moving one of the five files
