@@ -20873,13 +20873,25 @@ def value_call_bracket_reading(fn, name: str, ann) -> str:
         `Int` is not a program, so the bracket cannot be the index and the
         program is wrong; refused rather than turned into a branch through a
         number;
-      * `Some[F]` / `Optional[F]`, or a bare `def[…](…) -> …` — an OPTIONAL of a
-        function, or the function type itself.  **Neither can be subscripted on
-        this path**, so the bracket cannot be an index and the only reading left
-        is the specialization.  That is
+      * `Some[F]` / `Optional[F]`, or the function type itself — an OPTIONAL of
+        a function, or the function.  **Neither can be subscripted on this
+        path**, so the bracket cannot be an index and the only reading left is
+        the specialization.  That is
         `std/algorithm/backend/tile.mojo`'s `workgroup_function:
         Some[Static1DTileUnitFunc]`, and it is a DEDUCTION from the annotation
         rather than a pattern match on the file;
+
+        the bare function type arrives here as the spelling `def ... -> R`,
+        because the parser does not keep a function-typed parameter's own
+        parameter list (`('f', 'def ... -> Int')` is what it hands this
+        reader).  **So the annotation cannot say how MANY brackets the
+        specialization has**, and nothing here checks: `f[2, 5](x)` and
+        `f[2](x)` are both "a specialization" as far as this decision goes, and
+        both pass what they were given as leading arguments.  That is the same
+        unagreed direction as everything else here, and it is the callee's own
+        parameter list that would have to disagree for it to be wrong — which is
+        a program whose two ends disagree, answered by passing what the call
+        site wrote;
       * anything else — an alias this build cannot resolve, a struct, an
         UNANNOTATED parameter — `""`, and the caller refuses.
 
@@ -20896,7 +20908,7 @@ def value_call_bracket_reading(fn, name: str, ann) -> str:
         return ""
     if base in POINTEE_WIDTHS or type_constructor_kind(base) is not None:
         return ""
-    if base in ("Some", "Optional"):
+    if base in ("Some", "Optional", "def"):
         return "specialization"
     # A struct of this module is not subscriptable either, but the emitter is
     # handed `structs` by each backend and this reader is not — so a struct

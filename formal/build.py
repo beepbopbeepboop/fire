@@ -11870,9 +11870,27 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             type_application = (isinstance(sub, F.SubscriptExpr)
                                 and id(root_ident) in bracket_callee_roots
                                 and M.empty_blob_constructor(root_ident.name))
+            # …and the FOURTH class, beside `type_application` and for the same
+            # reason: a bracket list that is a CALL's bracketed callee whose
+            # base is a name this function binds. `f[a, b](x)` through a
+            # function VALUE is a specialization with two comptime parameters,
+            # so its comma list is a parameter list and not a two-dimensional
+            # index — `std/algorithm/backend/tile.mojo`'s
+            # `workgroup_function[tile_size_x, tile_size_y](x, y)` is that call,
+            # and it was refused here with "a subscript whose index is a tuple"
+            # about a bracket this unit had already decided was a
+            # specialization's. `multi_index_refusal_for` cannot see the parent
+            # (it is handed the subscript), so the class is established here
+            # from the same `bracket_callee_roots` membership that establishes
+            # it is a CALLEE at all, and the shape it exempts is exactly the
+            # one the emitter lowers.
+            value_callee = (isinstance(sub, F.SubscriptExpr)
+                            and id(root_ident) in bracket_callee_roots
+                            and M.callee_is_a_bound_value(fn, root_ident.name))
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr) \
-                    and not type_application and id(sub) not in type_positions:
+                    and not type_application and not value_callee \
+                    and id(sub) not in type_positions:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions),
                                                 structs_by_name)
