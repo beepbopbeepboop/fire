@@ -2890,6 +2890,37 @@ test('formal-admitted', [PY, 'test_formal_admitted.py'], mem='tiny',
             # module. 14 contracts across 4 modules, 14 counted `sorry`.
             'formal'] + FORMAL_BUILD_INPUTS,
      desc='the ADMITTED host-contract ratchet, and everything not admitted')
+# Registered rather than excused, and the measurement is why (2026-10-04, one
+# at a time under `tools/memslot.py --gb 8`, arm64 host):
+#
+#   formal-field-walk   0.05 s, <0.05 GB   exit 0
+#   formal-glob        31.8 s,  0.1 GB    `PASS=6 FAIL=0 (backends: arm64, x86_64)`
+#
+# Both arrived with master's formal20 batches and were in neither a bucket nor
+# `UNREGISTERED`, which is what `test_suite.py`'s estate check reports — a FAIL
+# on a test that is in `check`, so the tree was red in the everyday loop. The
+# check asks for a declaration, and an excuse is the wrong one at this price:
+# `formal-field-walk` is the cheapest test in the formal tier and pins
+# `iter_statement_nodes` against the full walk, which is the difference between
+# a field this struct has and two real fields sharing one slot.
+#
+# `proofs` rather than `check` for `formal-glob` because of what it is ABOUT,
+# for `formal-tempfile`'s reason above: every group that builds an image builds
+# it on BOTH backends, and 31.8 s is a third of a minute of two machines per
+# gate. `formal-field-walk` builds nothing, so `check` is where it belongs —
+# and it is in `proofs` too, so the bucket is the whole formal picture.
+test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_field_walk.py', 'formal/model.py',
+            'formal/imports.py', 'formal/build.py',
+            'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
+     desc='iter_statement_nodes against the full walk, 61 statement shapes')
+test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_glob.py', 'test_formal_dylib.py',
+            'formal/hostmods/glob.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='glob: CPython\'s own glob, both backends, 6 groups')
 test('formal-fcntl', [PY, 'test_formal_fcntl.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_fcntl.py', 'test_formal_dylib.py',
@@ -3001,6 +3032,10 @@ BUCKETS = {
               'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
               'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
+              # Builds nothing and costs 0.05 s, so it belongs in the everyday
+              # loop; `formal-glob` is deliberately NOT here (31.8 s, two
+              # machines per group).
+              'formal-field-walk',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`
               # never executed either — and `suite-self-test` is where the
@@ -3132,6 +3167,10 @@ BUCKETS = {
                # run, so being in `check` too costs nothing.
                'formal-dataclasses', 'formal-module-attr',
                'formal-os-backing',
+               # …and the two that arrived with master's formal20 batches on
+               # 2026-10-04 unregistered, registered above with their
+               # measurement beside them.
+               'formal-field-walk', 'formal-glob',
                # …and the two that arrived with the formal3 batch and were in
                # NO bucket and NO `UNREGISTERED`, which is what the estate check
                # in `suite-self-test` was reporting — and it is a FAIL on a test

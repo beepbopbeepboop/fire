@@ -392,7 +392,7 @@ $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3.txt   # the row
 
 ## 8. Related
 
-* `bugs/FORMAL_receiver_stored_in_a_field.md` §2 — the sibling row this one was
+* `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` §2 — the sibling row this one was
   split out of, and the 7-line reproducer this construct's docstring still uses.
   **Its §2 claim that the base64 case is "a contradiction in the source" is
   wrong**, and §3 here is the measurement: `b64encode(input_bytes, result)` with

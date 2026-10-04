@@ -11,7 +11,7 @@ claim.
 
 `work/formal16-2` fixed the bit-test gap — an `if` on a bit test
 (`if n & 8:`) now lowers, emits a `TBZ`, and is provable — and deleted
-`bugs/FORMAL_arm64_bit_test_branch_is_not_provable.md` with its fix, which is
+`“An `if` whose condition is a BIT TEST cannot be PROVED”` with its fix, which is
 what this project's rule says to do with a fixed bug's doc.
 
 Two files it wrote in the preceding commits cited that doc, and its own last

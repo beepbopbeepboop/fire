@@ -4,7 +4,7 @@ own file — the list behind `model.frame_declared_parameter_refusal`.
 
     python3 tools/formal_declared_param_census.py
 
-`bugs/FORMAL_receiver_stored_in_a_field.md` §3 asks for this list and says it
+`“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` §3 asks for this list and says it
 "needs a sweep, because the refusal compares call sites inside one image and a
 parse-and-walk instrument cannot answer it". That is true of the SWEEP and
 false of the question: the sweep's unit is a FILE, and a file's image when built

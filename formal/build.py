@@ -6152,7 +6152,7 @@ def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
     # frame placed in the object's own block, which is why
     # `struct_nested_frame_fields` leaves it out and why the constructor reserves
     # nothing for it. Two questions, two answers, and the pair that used to
-    # deadlock on this shape is `bugs/FORMAL_receiver_stored_in_a_field.md`:
+    # deadlock on this shape is `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”`:
     # the placement made the delegating STORE unsound
     # (`_frame_field_store_is_sound`), and the store's soundness is what says the
     # slot is a pointer.

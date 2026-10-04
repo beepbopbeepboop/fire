@@ -23282,7 +23282,7 @@ def init_stores_a_parameter_struct(struct_def, name, decls: dict):
     over: the block is never filled, and the store that would fill it —
     `formal/build.py`'s `_frame_field_store_is_sound` — is right to refuse
     ("the slot belongs to the function that created THAT frame") because the slot
-    IS placed. That is the deadlock `bugs/FORMAL_receiver_stored_in_a_field.md`
+    IS placed. That is the deadlock `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”`
     measured: a DELEGATING constructor over a struct of this module is refused
     for a reason that only exists because of the placement, and the placement
     exists because of the declared type.
@@ -23988,7 +23988,7 @@ def struct_nested_frame_fields(struct_def, decls: dict, depth=None):
         block for it is what makes the delegating store unsound
         (`formal/build.py`'s `_frame_field_store_is_sound`, whose lifetime
         argument the placement was cancelling out).  It is the last reason
-        `bugs/FORMAL_receiver_stored_in_a_field.md`'s delegating row was still
+        `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”`'s delegating row was still
         refused, and the predicate is asked only AFTER the first three so it can
         only ever REMOVE a placement.
 

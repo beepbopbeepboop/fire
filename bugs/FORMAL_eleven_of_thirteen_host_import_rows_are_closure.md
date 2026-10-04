@@ -252,7 +252,7 @@ with the sweep's own argv:
 | `html` | `escape` | `tools/md2html.py` → `OSError` handler arm |
 
 Plus `os.path.realpath`'s own divergence, found on the way and filed as
-`bugs/FORMAL_os_path_realpath_keeps_a_double_slash_root.md`.
+`FORMAL_os_path_realpath_keeps_a_double_slash_root`.
 
 Every one of them moved onto a refusal about the FILE'S OWN SOURCE, which is the
 whole value of a module in that directory: the verdict does not change, the

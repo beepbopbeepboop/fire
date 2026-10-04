@@ -3,7 +3,7 @@
 **Area:** FORMAL (the arm64 proof generator's CFG walk). Found 2026-10-03 on
 `work/formal18-6`; measured, not fixed. It belongs to whoever holds
 `formal/arm64_proof_gen.py`'s walk, and it is **one arm away** from
-`bugs/FORMAL_wdiff_has_no_loop_contract.md`, which this branch fixed and deleted.
+`“`formal/examples/wdiff.mojo` has no loop contract on arm64”`, which this branch fixed and deleted.
 
 **Not new, and the prior observation is recorded.** `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
 §0.3 already measured this exact refusal against this exact tree:

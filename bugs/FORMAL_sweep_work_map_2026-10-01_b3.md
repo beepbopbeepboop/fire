@@ -76,7 +76,7 @@ Stage-5 dependency.
 | 28 | 28 | callee has no definition on this path | `FORMAL_callee_no_def_ceiling_zero.md`; the `formal-callee-no-def-2` claim is integrated |
 | 24 | 24 | receiver passed at argument position 0 | one construct, all in-file |
 | 24 | 15 | MLIR dialect construct (`__mlir_attr`/`__mlir_type`/`__mlir_op`) | `construct:mlir-hoist-and-comptime-receiver` (`formal2-mlir-comptime`) and `construct:mlir-and-gpu-globals`. The 15 in-file are work; the 9 behind `_assembly.mojo` name nothing it declares |
-| 22 † | 22 | receiver stored in a field of a struct that outlives it | **unowned.** `formal/build.py:4735`. Reproducer: `bugs/FORMAL_receiver_stored_in_a_field.md` |
+| 22 † | 22 | receiver stored in a field of a struct that outlives it | **unowned.** `formal/build.py:4735`. Reproducer: `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` |
 | 13 | 13 | a parameter's declared type contradicts every call site | **unowned.** `formal/model.py:7110` (`frame_declared_parameter_refusal`). Reproducer: same doc |
 | 9 | 9 | value with no representation on this path | one construct, all in-file |
 | 8 | 8 | frame address passed where a value is wanted | `FORMAL_wide_receiver_by_reference.md` |
@@ -232,7 +232,7 @@ writing), and both are enqueued with the measurement instruction attached:
 * `formal2-declared-param` — `construct:declared-param-vs-call-sites`, the
   13-file row.
 
-Both have `bugs/FORMAL_receiver_stored_in_a_field.md` with the reproducer and
+Both have `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` with the reproducer and
 the measured landing of each.
 ---
 

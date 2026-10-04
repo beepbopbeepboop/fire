@@ -5,7 +5,7 @@ pinned — case by case, on sources with known answers.
     python3 test_formal_declared_param_census.py [-v]
 
 `tools/formal_declared_param_census.py` is the instrument behind row B of
-`bugs/FORMAL_receiver_stored_in_a_field.md` and behind
+`“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` and behind
 `bugs/FORMAL_declared_parameter_against_its_call_sites.md`: it reads one `.mojo`
 file, finds the parameters whose declared type is a struct of that file, and
 reports the ones where EVERY call site in that file hands over something else —
@@ -31,7 +31,7 @@ the test, because they are the two the fix found and the reason to believe it:
                          function's OWN docstring says `var a: StaticTuple`
 
 Both are DECIDED, and both are stdlib declaration bugs rather than backend gaps,
-which is the answer `bugs/FORMAL_receiver_stored_in_a_field.md` §3 asks for. They
+which is the answer `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` §3 asks for. They
 are asserted as "decided, with this shape", not as a count over the corpus: a
 count goes stale the moment an unrelated header grows a function, and a stale
 count is the failure this file is arguing against.
