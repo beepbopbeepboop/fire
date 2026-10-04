@@ -77,8 +77,10 @@ EXPECTED_FAILURES = {
     # itself returns 0 where a negative counter must be returned unchanged.
     # So the obligation is genuinely unprovable, not merely unproved — which is
     # the honest shape for a known gap and why the fix is a model change, not a
-    # tactic.  Same root cause as the two new holes `sum_range` reports (its
-    # `loop_cond_flag` has the same unsigned `¬ (i < bound)` on the exit side).
+    # tactic.  The SAME unsigned exit-side comparison is what a range loop's
+    # `loop_cond_flag` cannot close: `sum_range` reports it as an admitted hole
+    # whenever its contract is reached, and is refused before then for a
+    # different reason (a conditional back edge, its own entry below).
     # See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
     "countdown": "the decrement-while runF model treats the counter as a "
                  "non-negative magnitude; a signed `int` means `n <= 0` exits "
@@ -106,6 +108,28 @@ EXPECTED_FAILURES = {
                      "certificates), the source half is not -- the semantic "
                      "model has no list domain and the list blob's memory "
                      "image is not derived from the source literal",
+
+    # `p.set_x(4); return p.get_x() + p.get_y()` -- the two-field receiver
+    # example, refused at GENERATION time.  The machine half is fine and
+    # proved: `bugs/FORMAL_wide_receiver_by_reference.md` quotes the mutator's
+    # emitted `main_Point_set_x_frame_contract`, the corpus's run tests build
+    # and run the program on both architectures, and
+    # `test_formal_call_proof_gen.py::TestStructFieldHasNoValueInTheModel`
+    # pins that it builds on both with proof generation off.
+    #
+    # What is missing is the SOURCE half, and it is a model DOMAIN: `mojo` is
+    # a `UInt64 -> UInt64` over the source's arithmetic, so `p.x` — which is 4,
+    # and `p.y` — which is 0, whatever `n` is — is not a term in it.  Same gap
+    # as `subscript_var` above, one type further, and the arm refuses rather
+    # than modelling a field read as 0, which would be a false statement about
+    # the source.  Both halves of `subscript_var`'s entry are missing here: the
+    # domain, and the `Frame.frameToEnv`-shaped fact relating the frame's
+    # slots to the struct's fields.  Neither is a dataflow question, and both
+    # are a value-model change shared by both backends and every contract.
+    "wide_recv": "the semantic model `mojo : UInt64 -> UInt64` has no domain "
+                 "for a struct, so a struct field read has no value in it -- "
+                 "the machine half (the frame contract, both backends) is "
+                 "proved and the source half is not",
 }
 
 

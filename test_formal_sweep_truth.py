@@ -2015,6 +2015,138 @@ class TestOleanCurrencyCheck(unittest.TestCase):
             f.write("deadbeef")
         self.assertFalse(self._current())
 
+class TestX86EndToEndTables(unittest.TestCase):
+    """The two tables in `formal/x86_64_endtoend_test.py`, against `lib/X86.lean`.
+
+    Lean-free, and both halves are things that have actually gone wrong here, so
+    the cost of not checking them is a 100-second proof per discovery.
+
+      `_FORMS` and `_SUCCS` must hold the SAME keys.  One direction is a
+      `KeyError` at emit time.  The other is a row nothing can reach, which is
+      worse in the way a stale comment is worse: `alu_ri32:add` sat in `_SUCCS`
+      from the day the value theorem was written until the stack-floor guard's
+      `sub r10, budget` needed a row, and `_shapes`' rsp-versus-register split
+      (commit `1b35d737`) had made it unreachable in between — a second, stale
+      copy of the model's semantics for an `add` that is emitted only as
+      `add rsp, imm32`, which has its own row.
+
+      A row's condition list must be as long as its lemma's hypothesis list, in
+      the lemma's own order.  `_FORMS`' header says this ("a new form needs
+      both, and a mismatch between them is a proof failure rather than a silent
+      gap") and it was the first thing `x86_step_lea_r64_rip` got wrong: `rm`
+      dropped from the list shifted every later condition one place along, the
+      application elaborated with eleven metavariables, and the generated file
+      reported `Type mismatch` with both records printed in full and neither
+      naming the form.  The successor check in
+      `formal/x86_64_model_coverage_test.py` cannot see this — it never applies
+      the lemma — and the applicability check cannot either; it checks
+      hypotheses by name from its own table.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.x86_64_endtoend_test as ET
+        cls.ET = ET
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "lib", "X86.lean")) as f:
+            cls.src = f.read()
+
+    @staticmethod
+    def _hypotheses(src, lemma):
+        """The `(h… : …)` binders of one theorem, in order.
+
+        Read off the source rather than kept beside the table, because the table
+        is the thing that has to be checked.
+
+        The scan walks the binder GROUPS — one `(` … `)` per line of most of
+        these statements, so stopping at the first group's closing paren finds
+        no hypotheses at all in a theorem whose first group is
+        `(s : X86State)` — and stops at the first thing after a group that is not
+        another `(`.  That is also what keeps a proof's own `have` out: the
+        statement ends at the `:` the conclusion follows, long before any `have`.
+        """
+        i = src.find("theorem %s " % lemma)
+        if i < 0:
+            return None
+        chunks, j = [], src.index("(", i)
+        while True:
+            depth, k = 0, j
+            while True:
+                c = src[k]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            chunks.append(src[j:k + 1])
+            m = re.compile(r"\s*").match(src, k + 1)
+            if src[m.end():m.end() + 1] != "(":
+                break
+            j = m.end()
+        return re.findall(r"\(\s*(h[A-Za-z0-9_']*)\s*:", " ".join(chunks))
+
+    def test_every_form_has_a_successor_and_every_successor_a_form(self):
+        forms, succs = set(self.ET._FORMS), set(self.ET._SUCCS)
+        self.assertEqual(sorted(forms - succs), [],
+                         "a form with no successor is a KeyError at emit time")
+        self.assertEqual(sorted(succs - forms), [],
+                         "a successor no form can reach is a stale copy of the "
+                         "model's semantics; `alu_ri32:add` was one from the day "
+                         "the value theorem landed until the guard's `sub` needed "
+                         "a row of its own")
+
+    def test_every_row_has_one_side_condition_per_hypothesis_of_its_lemma(self):
+        for form in sorted(self.ET._FORMS):
+            lemma = self.ET._FORMS[form][0]
+            hyps = self._hypotheses(self.src, lemma)
+            self.assertIsNotNone(
+                hyps, "%s names lemma %s, which is not a theorem in "
+                      "lib/X86.lean" % (form, lemma))
+            self.assertEqual(
+                len(self.ET._FORMS[form][2]), len(hyps),
+                "%s lists %d side conditions and %s has %d hypotheses (%s); the "
+                "application is positional, so every one after the first "
+                "omission is applied to the wrong argument"
+                % (form, len(self.ET._FORMS[form][2]), lemma, len(hyps),
+                   ", ".join(hyps)))
+
+    def test_the_guards_two_own_the_rows_they_needed(self):
+        """The two forms this change added, by NAME, so a later edit that drops
+        either of them fails here rather than in every generated proof.
+
+        `alu_ri32:sub_reg` is the stack-floor guard's `SUB R10, BUDGET` and
+        `lea_r64_rip` is both its `LEA R11, [rip+&floor]` and `_emit_global_init`'s
+        address materialisation — one lemma, two producers, which is why neither
+        is exclusive to the guard.
+        """
+        import formal.x86_64 as X
+        import formal.x86_64_decode as D
+        self.assertEqual(self.ET._FORMS["alu_ri32:sub_reg"][0],
+                         "x86_step_sub_ri32")
+        self.assertEqual(self.ET._FORMS["lea_r64_rip"][0],
+                         "x86_step_lea_r64_rip")
+        # `lea_r64_rip` is a LOAD-shaped form with a concrete destination, so it
+        # must be in the tuple that passes `dst` — and it must NOT be in the
+        # shared displacement branch, which reads `mod = 0` as "no
+        # displacement" and would hand the lemma `rm = 5` as a base register.
+        self.assertIn("lea_r64_rip", self.ET._LOAD_MEMORY_FORMS)
+        self.assertNotIn("lea_r64_rip", self.ET._MEMORY_DISP_FORMS)
+        # …and the decoder already names both modes, at the encodings the guard
+        # emits, or no form of that name could ever reach `_resolve`.  Read out
+        # of the encoder rather than written as bytes here, so a row cannot
+        # disagree with what the backend produces.
+        self.assertEqual(
+            D.decode_one(bytes(X.encode_sub_r64_imm32(X.Reg.R10, 0x780000)),
+                         0).form,
+            "alu_ri32:sub")
+        self.assertEqual(
+            D.decode_one(bytes(X.encode_lea_r64_rip(X.Reg.R11, 0x3ffc24)),
+                         0).form,
+            "lea_r64_rip")
+
+
 class TestX86EndToEndEmitter(unittest.TestCase):
     """What the path-tree EMITTER does with a return, checked on the text.
 
@@ -2080,7 +2212,15 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         """
         text = self._emitted()
         i = text.index("have hrip :")
-        closing = text[i:]
+        # The FACT, not everything after it.  This took `text[i:]` -- the rest of
+        # the file -- which was the same thing while the emitted proof was one
+        # path and stopped at its `ret`, and is not now that the guard puts four
+        # paths and three `rw` blocks in it: the epilogue's own
+        # `alu_ri32:add_rsp` step carries `x86_flags_add` in its successor, so
+        # the rest of the file said "the expensive block is here" about an
+        # instruction two arms away.  The block ends at the `rw` that consumes
+        # the fact, which is the last thing emitted before the next path starts.
+        closing = text[i:text.index("rw [", i)]
         self.assertIn("simp only [hs", closing,
                       "a crossed chain must not pay for the full closing simp")
         # The EXPENSIVE closing block, named by its own simp set rather than by
@@ -2125,23 +2265,51 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         admitted = sorted({n for n, _l, k in facts if k == "admitted"})
         # One per returned-to, plus the closing read. Asserted as a SET and not
         # as a count, because the count is the thing that was wrong.
+        hpops = {n for n in admitted if n.startswith("hpop")}
+        self.assertEqual(
+            hpops, {"hpop%d" % k for k in (int(n[4:]) for n in hpops)},
+            "every admitted `hpop` is named for the step it admits -- a name "
+            "that is not `hpop<number>` is a hole no reader can find.  A SET "
+            "and not a list, and the reason is a bug this assertion had: it "
+            "compared `admitted` (sorted as STRINGS) against a numerically "
+            "sorted expectation, which agrees at two names and disagrees at "
+            "three, so it went red the day the guard's second fork took the "
+            "crossed chain from two `hpop`s to four.  The counters are not "
+            "consecutive -- each arm of each fork consumes its own -- so there "
+            "was no order to assert in the first place.")
         #
-        # What the comparison is FOR is that every crossing the emitter wrote is
-        # reported under its own name and no two share one: the names come out
-        # of `admitted_facts` as a SET, so the count of `have hpop{k}` lines in
-        # the text is the only thing that can catch two crossings collapsed onto
-        # one name. It replaces a comparison of the string-sorted names against
-        # the integer-sorted ones, which agreed only while every index had the
-        # same number of digits — four crossings are hpop37, hpop56, hpop100 and
+        # …and the OTHER direction, which a set form cannot see: `admitted_facts`
+        # hands back a SET of names, so two crossings collapsed onto one name
+        # would come out as one entry and satisfy the assertion above while the
+        # report has lost a hole.  The count of `have hpop{k}` lines in the text
+        # is the only thing that catches that, and it replaces a comparison of
+        # the string-sorted names against the integer-sorted ones, which agreed
+        # only while every index had the same number of digits -- four crossings
+        # on the tree this was measured on are hpop37, hpop56, hpop100 and
         # hpop119, and the old form was comparing digit widths.
-        pops = sorted(n for n in admitted if n.startswith("hpop"))
-        self.assertEqual(len(pops), text.count("have hpop"),
+        self.assertEqual(len(hpops), text.count("have hpop"),
                          "a crossing is either not counted by name or shares a "
-                         f"name with another: {pops}")
+                         f"name with another: {sorted(hpops)}")
         self.assertIn("hrip", admitted,
                       "the closing read is admitted on a crossed chain, and it "
                       "is a hole of its own — reporting only the `hpop`s would "
                       "undercount by one")
+        # The stack-floor guard's trap is the third shape, and the one that is NOT
+        # an admission: every x86-64 image carries one `call` to the exit stub
+        # per guarded prologue, the run leaves the program there, and the emitter
+        # discharges that leaf by naming the CALL's address as a halt
+        # (`hhalt{k}`, pinned by `test_a_leaf_that_leaves_the_image_is_not_
+        # stepped`) rather than by admitting the exit claim.  It used to be a
+        # third kind of admission, `htrap{k}`, one per arm of the guard's own two
+        # forks in each function — asserted here as an ABSENCE, because the
+        # lesson those two kinds were kept apart for is that a hole named `hrip`
+        # and a hole that is not one must never share a name, and the cheaper way
+        # to keep them apart is to have only the one.
+        self.assertEqual(
+            [n for n in admitted if n.startswith("htrap")], [],
+            "a call that leaves the image is a leaf, not an admission: "
+            "`x86_exec_go_exit` stops on `st.rip = exit` BEFORE it steps, so "
+            "naming the call's own address is a claim the model proves")
         self.assertGreaterEqual(len(admitted), 2,
                                 "the point of the check: several distinct "
                                 "admissions must not read as one")

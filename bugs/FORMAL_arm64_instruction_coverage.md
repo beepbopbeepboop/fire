@@ -1,11 +1,11 @@
 # FORMAL_arm64_instruction_coverage: the arm64 encoder survey, and what wiring the new instructions actually bought
 
-**Status: the survey is current as of 2026-10-03 and has been re-measured twice
-on this tree — once for the method and once for the two largest gaps. `TBZ` and
-`TBNZ` are now WIRED (encoder, machine model, proof tables, and a lowering that
-emits them), which moved 74,682 of the 4,026,231 disassembled instructions from
-"excluded by decision" into "covered". The file stays a survey, for the reason
-below.**
+**Status: the survey is current as of 2026-10-03 and has been re-measured THREE
+times on this tree — once for the method, once for the two largest gaps, and
+once more the same day after the `CSEL` neighbourhood and `STRH` gained
+lowerings. `TBZ` and `TBNZ` are WIRED (encoder, machine model, proof tables, and
+a lowering that emits them). The file stays a survey, for the reason below; the
+latest numbers are in §"Re-measured again, 2026-10-03 (later)".**
 
 Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
@@ -87,6 +87,55 @@ the `br` family, so its base came out as `blr_xn` — a string no disassembler e
 prints — and `blr` was reported as a gap the backend can close in one line.
 `blr` is in the family table now, and `test_arm64_encoders.py` fails if any
 `encode_*` maps to no declared mnemonic.
+
+### Re-measured again, 2026-10-03 (later): 76 encoders, 64 emitted, 91.1%
+
+`python3 tools/arm64_insn_audit.py`, unchanged tool, later tree:
+
+```
+encoders in formal/arm64.py : 76 (58 base mnemonics)
+emitted by a lowering       : 64 (50 base mnemonics)
+disassembled               : 4026231 instructions over 420 distinct mnemonics, 200 binaries
+covered by an encoder      : 3669440 (91.1%)
+excluded by decision       : 129102
+genuinely uncovered        : 227689 (5.7%)
+
+encoders no lowering emits (12):
+  encode_blr_xn  (blr)        encode_movn_xd_imm  (movn)
+  encode_cmn_xn_xm  (cmn)     encode_str_xt_sp_imm  (str)
+  encode_cset_wd_cond  (cset)  encode_subs_xd_xn_xm  (subs)
+  encode_csinc_xd_xm_cond  (csinc)   encode_tst_xn_xm  (tst)
+  encode_csinv_xd_xm_cond  (csinv)   encode_ldp_xn_xt_sp  (ldp)
+  encode_csneg_xd_xm_cond  (csneg)   encode_ldr_xt_sp_imm  (ldr)
+```
+
+Against the 62-emitted / 90.9% / 137,791 block above, that is **+1 encoder, +2
+emitted, +8,689 covered, −8,689 excluded, and `genuinely uncovered` unchanged at
+227,689** — which is the invariant this file has been about since the method
+changed, holding for the third measurement.
+
+**The 15-name list printed earlier in this file is stale, and it is stale
+against this file's own 62 number.** Those 15 were printed BEFORE the TBZ/TBNZ
+wiring; three of them (`tbnz`, `tbz`, `strh`) have lowerings now, which is why
+the count is 12. Anyone reading the two blocks as one measurement will get the
+wrong gap list, which is the specific thing the audit prints names instead of
+filtering.
+
+**The largest entry in the top-30 is `tst` at 16,345, and it is NOT a genuine
+gap** — it has an encoder and no lowering, so it is in the excluded bucket, the
+same class as `tbnz` and `tbz` were. The largest GENUINELY uncovered mnemonics
+are `ccmp` (13,842, 0.34% — no encoder at all) and then `cmn` (10,603, also an
+encoder with no lowering). `csinc` is 3,014 and still the largest member of the
+`CSEL` family that is unwired, unchanged from the entry above it.
+
+**Why nothing else moved and what the next row of this survey is.** `ccmp`/
+`cmn` are "compare and set flags conditionally" — the one instruction family
+whose absence forces `if a != b:` to become a branch where a single instruction
+would do, the same argument the `B.cond` row makes. `cmn` is the cheaper half
+(`CMN Xn, Xm` is `SUBS XZR, Xn, Xm` with the result discarded) and its encoder
+already exists, so `cmn` is the next unit of work by the survey's own ranking
+and `ccmp` the one after it. Neither is a NEON/FP/crypto extension, which is the
+class this backend has no use for and which still dominates the tail.
 
 ### The two largest gaps are now closed: TBZ / TBNZ are WIRED (2026-10-03)
 

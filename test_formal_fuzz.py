@@ -539,21 +539,42 @@ MIX_BUILD_INDEXES = 2
 MIX_BUILD_ARCH = "x86_64"
 
 #: Mixes whose constructs are NOT supposed to lower, so "no answer" is the
-#: expected outcome for them and requiring one would be requiring a bug.
+#: expected outcome for them and requiring one would be requiring a bug. The
+#: table's shape is a MIX -> the reason it is here, because "a mix that is
+#: refused" and "a mix that is refused BY DESIGN" are the same tally and only the
+#: second one is allowed to sit here: the alternative reading of an all-refused
+#: mix ("a family that measures nothing") is what the check below exists to
+#: catch, and a doc per row is what tells the two apart.
 #:
-#: There was one row and none today, and the row is `limits` — the REFUSAL half
-#: of the corpus, added because 4032 programs over the thirteen sweeps the
-#: ledger records produced 13 refusals and all 13 were one bug, so nothing in the
-#: corpus could measure a limit and nothing could measure a MESSAGE.  Its whole
-#: job is to be refused, so requiring an answer from it would be requiring the
-#: bug the tool exists to find.
+#:   `limits` — the REFUSAL half of the corpus, added because 4032 programs over
+#:   the thirteen sweeps the ledger records produced 13 refusals and all 13 were
+#:   one bug (`_cb0` has no home), so nothing in the corpus could measure a limit
+#:   and nothing could measure a MESSAGE. Its whole job is to be refused, and
+#:   what it must still produce is an AUDIT: it is the only mix that exercises
+#:   `audit_refusal`, and a mix that stopped reaching a refusal would report a
+#:   clean sweep while measuring nothing. `check_mix_refuses` is that check.
 #:
-#: What it must still produce is an AUDIT: `limits` is the only mix that exercises
-#: `audit_refusal`, and a mix that stopped reaching a refusal would report a
-#: clean sweep while measuring nothing — which is the failure this table's
-#: neighbours in the same file exist to catch, one level down. `check_mix_refuses`
-#: is that check.
-MIXES_NOT_LOWERED = ("limits",)
+#:   `fstrings` — `f"n={n}"` printed the literal's own SOURCE SPELLING on both
+#:   architectures (exit 0) until the fuzz-3 sweep found it, and it is refused
+#:   now because composition needs a buffer a `char *` has nowhere to put it in
+#:   (`formal/model.py`'s `interpolated_literal_refusal`, pinned by
+#:   `test_formal_run.py`'s `fstring_literal_refused`). So the mix answers with
+#:   refusals BY DESIGN, and dropping it the day interpolation is implemented is
+#:   what would turn this row into the hole the check is for.
+#:
+#: There were none before these two, and the rows above are why the small table
+#: is a fact rather than a shrug: a family added to `MIXES` is a family whose
+#: construct the backend lowers unless it comes with a doc saying otherwise. The
+#: `field_read` row in `tools/formal_fuzz.py` is why the check exists at all —
+#: 284 of 300 generated class programs were ONE refusal, which is a family that
+#: measures nothing and a suite that reported numbers.
+MIXES_NOT_LOWERED = {
+    "limits": "the corpus's refusal half — every construct in it is outside "
+              "the modelled subset, and it is the only mix that reaches "
+              "`audit_refusal`",
+    "fstrings": "formal/model.py:interpolated_literal_refusal (a documented "
+                "refusal, pinned by test_formal_run.py)",
+}
 
 
 def check_mix_builds(mix, indexes, verbose):

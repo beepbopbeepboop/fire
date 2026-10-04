@@ -1,30 +1,43 @@
 # FORMAL_arm64_known_proof_gaps: the arm64 examples whose proof is a documented gap
 
-**Not re-measured on 2026-10-02.** The counts below (`41 pass / 4 known-gap /
-0 fail`, measured 2026-10-01) are the last real run, and nothing that session
-changed reaches a proof: two `formal/model.py` walks were made iterative (both
-proved answer-preserving by a differential over all 733 function bodies in
-this worktree's 107 `.mojo` files (none of which failed to parse) and 1,463
-generated statement lists — see `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`
-and the commits behind them), a `with … as y:` alias is now stored before the
-body is walked, and two `call_callee_name` guards in
-`struct_returned_frame_sites` / `_frame_return_status` close a specialization
-gap. None of those is `total_of_halts`, the fuel, or the loop model, and a lean
-run is outside what a light worker may do. **`EXPECTED_FAILURES` in
-`test_formal.py` remains the authority on whether these are still gaps**, and the
-harness's own stale-entry check is what would say otherwise.
+**Status: the FOUR gaps below are still the four `EXPECTED_FAILURES` entries in
+`test_formal.py` (read on this tree, 2026-10-03: `fib`, `countdown`, `wge`,
+`subscript_var`, and nothing else), so the CENSUS in this file is current and
+`EXPECTED_FAILURES` is still its authority. What is NOT current is the
+"0 fail": there are FIVE MORE red examples that this file does not list, they
+are all one fact, and their doc is `FORMAL_arm64_x30_is_reloaded_from_the_frame.md`.
+Nothing changed on this branch, so this is a correction to the file's own header
+rather than a finding.**
 
-The arm64 formal suite is **41 pass / 4 known-gap / 0 fail** (measured
-2026-10-01, `python3 test_formal.py`). The six gaps are listed in
-`EXPECTED_FAILURES` in `test_formal.py`, and that list is the authority on
-whether they are still gaps — a stale entry is reported by the harness's own
-check. This document says *why* each one is hard and what closing it needs,
-which the inline comments do not.
+## The count, corrected (2026-10-03)
 
-Per the harness's own contract: an entry here means "known unproven, for the
-stated reason" — **not** "passing". Nothing is ever stubbed with `sorry` to go
-green, because a `sorry` makes Lean accept the theorem, which would assert
-exactly the semantics these examples exist to check.
+`41 pass / 4 known-gap / 0 fail` was measured 2026-10-01 and the "0 fail" has
+not been true since. On this tree:
+
+* `count`, `fact`, `pow2`, `sqsum`, `sum` — the five arm64 examples with a
+  RECURSIVE CALL in the `_dec1_pattern` shape — all fail with the identical
+  obligation, which is a load of a frame slot against the entry state's `x30`
+  where the read's slot is five writes deep and the innermost write is the
+  stack-floor word at an ABSOLUTE address. Measured directly here for `count`
+  (`python3 fire.py build --formal --backend=arm64 -o .tmp/f18/dump/count2.aout
+  formal/examples/count.mojo`, 4.3 GB, one Lean run): the reduced goal is
+  `mem_read_u64 (mem_write_u64 … (<stack-floor>) (st.sp - 1984))
+  (st.sp - 8).toNat = st.x30`, inside `hx30fr_5` of `count_contract`, whose
+  `st` IS a free `Arm64State` — which is why the emitted theorem is false as
+  stated and why the fix is a premise rather than a tactic. All five are
+  UNEXPECTED failures: nothing in `EXPECTED_FAILURES` names them, so they are
+  reported as failures rather than as gaps.
+
+They are a family and not five findings, and they are worth **12 % of the arm64
+corpus**, which is the number that makes this file's census worth correcting
+rather than leaving at "0 fail".
+
+**What this file is NOT the place to fix them.** `fib`, `countdown`, `wge` and
+`subscript_var` are each owned by another document and are not re-derived here;
+the five dec1 failures are owned by
+`FORMAL_arm64_x30_is_reloaded_from_the_frame.md` and its fix needs a premise on a
+Lean contract theorem plus a per-conjunct `FrameOk` tactic, which is a
+generator-and-library change rather than a census edit.
 
 ## `either` and `both` — FIXED 2026-10-01, the per-path statement it needed
 
@@ -128,8 +141,16 @@ distinct problems, and the counts should not be conflated:
 | | count | owner |
 |---|---|---|
 | known gaps (fail, documented reason) | 4 | this document (`fib` = 1, `countdown`/`wge` = 1, `subscript_var` = 1); `either`/`both` were 2 more and are fixed |
+| **UNEXPECTED failures (fail, no documented reason)** | **5** | `FORMAL_arm64_x30_is_reloaded_from_the_frame.md` — `count`, `fact`, `pow2`, `sqsum`, `sum`, one fact, measured 2026-10-03 and see §"The count, corrected" above |
 | sorries in passing proofs | 2, both in `sum_range` | `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` ("Still open 3", item 2: the range loop's `loop_cond_flag` states an UNSIGNED order) |
 | passing proofs carrying no `sorry` at all | 38 of 39 | — |
+
+**The second row is the one this file was missing, and it is why the "0 fail"
+in the header was wrong.** A gap that is not in `EXPECTED_FAILURES` is
+reported as a FAILURE, which is the correct behaviour and the reason this
+document cannot be a closed list: it is a census of what the harness's table
+says, and anything outside that table is a failure until someone writes the
+entry down.
 
 The `fib` entry above is one of the original three gaps of this document; `countdown`, `wge` and `subscript_var` were added later and are
 recorded in `test_formal.py`'s inline comments with the same contract.

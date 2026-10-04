@@ -3264,7 +3264,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         one_word = {_fn_key(fn): {} for fn in functions}
         for fn in functions:
             _seed_one_word_bindings(fn, structs_by_name, functions,
-                                    holders, one_word, one_field)
+                                    holders, hstruct, one_word, one_field)
         # …and the CALL-SITE edges, iterated here rather than left to the main
         # path's fixpoint, because this early return IS the whole analysis for a
         # module with no framed struct — and a module whose structs are all one
@@ -3543,7 +3543,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
             holders[_fn_key(fn)].add(name)
             hstruct[_fn_key(fn)].setdefault(name, []).append(st)
         _seed_one_word_bindings(fn, structs_by_name, functions, holders,
-                                one_word, one_field)
+                                hstruct, one_word, one_field)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
         grew = False
         changed = True
@@ -4692,10 +4692,24 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     method receiver of a framed struct, a construction of a framed struct, a
     copy of another holder, and a callee parameter some call site reaches with a
     frame address.  Three of those four are ASSIGNMENTS with a value, and they
-    are the two spellings below plus a constructor call:
+    are the three spellings below plus a constructor call:
 
       * `S(...)` where `S` is a framed struct this module declares — the
         construction, whose result IS the address of a fresh block;
+      * `S(...)` where `S` is a ONE-FIELD struct whose sole field holds a
+        PLACED NESTED FRAME. There is no object and no slot of its own, so the
+        construction's value is the NESTED frame's address, and this is the
+        shape `struct_is_framed` cannot see (it is False for every one-field
+        struct). `model.struct_construction_yields_frame_address` is what the
+        question is asked through, rather than a copy of the same two facts
+        derived here. It used to be missing from this list, which is why
+        `check_one_word_frame_receivers` refused a `Box()` whose constructor has
+        brought the frame up since `4af77b16` — naming a construction that
+        "fills the WORD rather than the frame that word will hold", about a
+        program whose word holds exactly that frame's address. Two rows of
+        `test_formal_run.py` were red on the tree for it
+        (`one_word_holder_reads_the_frame_its_constructor_brought_up`,
+        `two_one_word_constructions_get_two_different_frames`);
       * another holder's name — a copy, which copies the address;
       * (a method's receiver is a PARAMETER, so it is not a value at all.)
 
@@ -4732,9 +4746,11 @@ def _value_may_be_a_frame(value, structs_by_name, holders, alias=None,
     if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
         name = value.func.name
         if alias is not None and name == "Self":
-            return M.struct_is_framed(alias)
+            return M.struct_construction_yields_frame_address(alias,
+                                                              structs_by_name)
         st = (structs_by_name or {}).get(name)
-        return st is not None and M.struct_is_framed(st) \
+        return st is not None \
+            and M.struct_construction_yields_frame_address(st, structs_by_name) \
             and M.type_constructor_kind(name) is None
     return False
 
@@ -7759,10 +7775,12 @@ def _one_word_constructor_bindings(fn, structs_by_name, functions=()) -> dict:
     return out
 
 
-def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
+def _seed_one_word_bindings(fn, structs_by_name, functions, holders, hstruct,
                             one_word, one_field=None) -> None:
-    """Seed `one_word[fn]` for `fn` — a LOCAL construction and a DECLARED
-    parameter, the two ways a name becomes a one-field struct's value.
+    """Seed `one_word[fn]` for `fn`, and the HOLDER half of the same fact.
+
+    A LOCAL construction and a DECLARED parameter, the two ways a name becomes
+    a one-field struct's value.
 
     One function because there are two arms that need it and a module whose
     structs are ALL one field takes the early-return arm — which is the case
@@ -7773,10 +7791,70 @@ def _seed_one_word_bindings(fn, structs_by_name, functions, holders,
     keeps THAT classification: the same precedence the framed seeding above
     states for its own evidence, because a name in both tables is a name with
     two layouts and only one of them is the truth.
+
+    **The holder arm is the LOCAL twin of the method seeding in
+    `_frame_receivers`' first loop, and it is the same one fact.**
+    `model.one_word_sole_field_frame` answers "the FRAMED struct this one-field
+    struct's sole field holds", and the construction of such a struct puts that
+    frame's ADDRESS in the word — `model.struct_constructor_site_bytes` says so
+    in its own words ("that struct's own 8 bytes are not reserved, because
+    there is no object: the VALUE is the nested frame's address"), so the word
+    a local receives from `Outer()` is an address from the first instruction
+    and `o.n.<f>` is ONE load at `o + 8·slot(f)`. The METHOD receiver has been
+    a holder of that frame since that function was written; the LOCAL had no
+    case, so the frame analysis still believed `o` was a plain word and the
+    read was refused by name —
+
+        main: 'o.a' is a field access through 'o', and this path has no way to
+        say what 'o' holds. … Bind the base from a constructor whose
+        declaration THIS IMAGE can see (`x = S()`)
+
+    — about a constructor the image had just compiled and can see perfectly
+    well. Both architectures, identical words; measured before this arm, and
+    commit 03e3b7b6 has the table and the correction below. The one-word
+    REWRITE was never the defect and is not what
+    changed: `o.n` IS `o`, and after it the chain is `o.a`, which is `Inner`'s
+    own field read — so all the walk needed was to be told that `o` names a
+    frame, and every consumer downstream (the field walk's slot table, the
+    escape check, `_check_method_receiver_types`) gets that from one place.
+
+    **A DECLARED PARAMETER is deliberately not seeded, and that is the same
+    limit `check_one_word_frame_receivers` states rather than a second one.**
+    Whether a parameter's word holds an address is a fact about the CALLER:
+    `def f(h: Outer) -> Int: return h.n.a` is right for a caller that wrote
+    `f(o)` with `o` built by `Outer()` and a load at address 0 for one that did
+    not, and this pass cannot see the call sites. The local case has no such
+    gap precisely because `struct_constructor_site_bytes` guarantees the block
+    exists before the constructor returns.
+
+    Measured on both architectures, not argued: passing such an object to a
+    callee is refused anyway, by `frame_container_operand_refusal` —
+
+        struct Inner: var a, b
+        struct Outer: var n: Inner
+        def read(o: Outer) -> Int: return o.n.a
+        def main(k: Int) -> Int: var o = Outer(); o.n.a = 7; return read(o)
+
+    → "a Inner frame address is passed to read(), which is a C library entry
+    point and takes a VALUE of a type its own prototype names" — so the
+    parameter case reaches codegen through no door this path opens, and seeding
+    it would have made the callee's own `self.n.a` (a method receiver, which IS
+    seeded, three arms above) the only shape of this family that lowers.
     """
     key = _fn_key(fn)
-    one_word[key].update(_one_word_constructor_bindings(
-        fn, structs_by_name, [f.name for f in functions]))
+    bound = _one_word_constructor_bindings(fn, structs_by_name,
+                                           [f.name for f in functions])
+    one_word[key].update(bound)
+    for name, sts in bound.items():
+        if name in holders[key]:
+            continue
+        for st in sts:
+            inner = M.one_word_sole_field_frame(st, structs_by_name)
+            if inner is None:
+                continue
+            holders[key].add(name)
+            hstruct[key][name] = [inner]
+            break
     # A PARAMETER declared as a one-field struct is the same fact about the
     # same word: `def eq(a: Plain, b: Plain)` hands the caller two values that
     # ARE their fields, so inside `eq` they are that struct and their `==` is
@@ -10175,6 +10253,105 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     return None, None
 
 
+def _container_operand_slot(node, parent):
+    """`(base, op)` when `node` is a container operation over `base`, else None.
+
+    **The four shapes, and they are the four `_refuse_frame_container_operand` /
+    `_refuse_non_container_operand` are asked from** — a subscript, a slice, a
+    membership test and a for-in iteration — so the pair below and this walker
+    between them answer the same set of questions. `CompareChain` carries its
+    membership tests among its `ops`, so its operands are handed to the same
+    test as a `BinaryOp`'s; that is why the walk is over every node rather than
+    over the four types.
+
+    `base` is returned only when it is a struct FIELD reached through a plain
+    name — `s.n`, `self.d` — because that is the shape whose STRUCT this pass can
+    name. A deeper chain's owner is a frame the frame analysis has not built yet
+    at the point the class-constant rewrite runs, so those reach the emitters and
+    are caught there by the same message; `slot_container_operand_refusal`'s own
+    docstring says which recognition sees what.
+    """
+    op = base = None
+    if isinstance(node, F.SubscriptExpr) and node.attrs is None:
+        op, base = "a subscript", node.obj
+    elif isinstance(node, F.SliceExpr):
+        op, base = "a slice", node.obj
+    elif isinstance(node, F.BinaryOp) and node.op in ("in", "not in"):
+        op, base = "a membership test", node.right
+    elif isinstance(node, F.ForStmt):
+        op, base = "a for-in iteration", node.iterable
+    if op is None or not isinstance(base, F.MemberExpr) \
+            or not isinstance(base.obj, F.IdentExpr):
+        return None, None
+    return base, op
+
+
+def _refuse_container_operands_on_scalar_slots(fn, structs_by_name: dict,
+                                              owner, receiver_structs) -> None:
+    """Refuse a container operation whose base is a field declared a NUMBER.
+
+    **Asked at the HEAD of `_rewrite_class_constants`, and the position is the
+    whole of it.** That rewrite replaces `s.n` by the literal its class-level
+    default holds — which is CORRECT, a field with a default and no constructor
+    store always holds it — and in doing so it destroys the only place the
+    source's spelling exists. Measured on this tree before the fix, with the
+    substitution in place:
+
+    | | arm64 | x86-64 |
+    |---|---|---|
+    | `var n: Int = 5` ; `printf("%d", s.n[0])` | refused, naming `IntLiteral` | **SIGSEGV, exit 139** |
+    | `var d: DType = 5` ; `printf("%d", s.d[0])` | the same refusal | **SIGSEGV, exit 139** |
+
+    Both messages are about a node the source never wrote — the gate arm64
+    refused at reports the node it was HANDED, which by then is the
+    substituted literal — and one of the two architectures dereferences the
+    `5`. So the question is asked here, where `s.n` is still `s.n`, and the
+    emitters' own arm (`_refuse_slot_container_operand`, over what the
+    substitution could not match) is the second line rather than the only one.
+
+    The base's STRUCT comes from the same three recognisers
+    `_constant_read_sites` uses for the same purpose, which is what keeps the
+    two passes from disagreeing about what a name holds: the method's own
+    receiver and `Self` (`_method_class_constant_bases`), the bases this body
+    settled on (`receiver_structs`), and a local every binding of which
+    constructs one struct (`_constant_constructor_bindings`, which drops a name
+    two constructors disagree about). A base none of them names claims nothing
+    and is left to the emitter, exactly as a base with no class-level default is.
+
+    `struct_field_kind` is the gate rather than the annotation, and that is its
+    own documented gate: a kind is returned only when the slot's value is
+    something this path materializes — a literal default, a nested frame, or a
+    value a constructor puts there — and `None` otherwise. So this refuses the
+    three rows above and stays silent about every field whose kind the image
+    cannot establish, which is 2 446 of the 2 642 `X.<field>[i]` sites in the
+    610-file stdlib corpus; the census is in
+    `model.slot_container_operand_refusal`.
+    """
+    bases = _method_class_constant_bases(fn, owner)
+    for name, st in (receiver_structs or {}).items():
+        bases.setdefault(name, st)
+    for name, st in _constant_constructor_bindings(fn, structs_by_name)[0].items():
+        bases.setdefault(name, st)
+    if not bases:
+        return
+    for node, parent in M.iter_nodes_with_parent(
+            getattr(fn, "body", None) or []):
+        base, op = _container_operand_slot(node, parent)
+        if base is None:
+            continue
+        st = bases.get(base.obj.name)
+        if st is None:
+            continue
+        kind = M.struct_field_kind(st, base.member, FT.TYPE_NAMES,
+                                   FT.STRING_TYPE_NAMES, structs_by_name,
+                                   dtype_names=FT.DTYPE_TYPE_NAMES)
+        why = M.slot_container_operand_refusal(op, kind, _member_chain(base),
+                                              getattr(fn, "name", None)
+                                              or "<module>")
+        if why is not None:
+            raise CodegenError(why)
+
+
 def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
                              receiver_structs: dict = None,
                              enum_structs=None):
@@ -10214,6 +10391,8 @@ def _rewrite_class_constants(fn, structs_by_name: dict, owner=None,
     same evidence twice. See `_constant_read_sites` for what puts a base in it."""
     if not structs_by_name:
         return
+    _refuse_container_operands_on_scalar_slots(
+        fn, structs_by_name, owner, receiver_structs)
     _apply_constant_sites(
         fn.body,
         _constant_read_sites(fn, structs_by_name, owner, receiver_structs,
@@ -14013,6 +14192,19 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and never sees the module statements, and here rather than at either
     # front end because this is the one pipeline both of them go through.
     M.refuse_module_level_mlir_templates(stmts)
+    # An f-string/t-string LITERAL, asked HERE for the same reason and in the
+    # same place as the line above: the parser keeps an interpolated literal's
+    # whole SOURCE TOKEN as its value, one consumer reads that (`myinterpreter`
+    # evaluates the `{...}` fields), and both backends' expression walks decoded
+    # it as text instead — so the program ran with the spelling as its value.
+    # `print(f"n={n}")` printed `f"n={n}"`, `len(f"n={n}")` was 8 where CPython
+    # says 3, and `f"n={n}" == "n=7"` was false where CPython says true, all of
+    # it on both architectures with exit status 0. Composition is what is
+    # missing and there is no buffer to do it in (`model.py`'s
+    # `interpolated_literal_refusal`), so it is a refusal, and a refusal asked
+    # from either backend would be a second copy of one decision — which is how
+    # the executable and dylib paths come to answer differently about one file.
+    M.refuse_interpolated_literals(stmts)
     # The module's own statement list is the ONE place a module-level name's
     # home is stated, so it is read here and PUBLISHED, for the same reason
     # `attach_field_evidence` and `attach_placed_frame_callees` carry what

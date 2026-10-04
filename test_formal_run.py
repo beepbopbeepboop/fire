@@ -2543,6 +2543,52 @@ CASES = [
      "    k += 4\n"
      "    printf(\"%d\\n\", k)\n"
      "    return 0\n", 0, "7"),
+    # ── an f-string is a LITERAL WHOSE TEXT IS NOT ITS VALUE ──
+    #
+    # Found by `tools/formal_fuzz.py` widening its corpus to string
+    # formatting; before this case the same source printed the literal's own
+    # SPELLING on both architectures, with exit status 0:
+    #
+    #     n = 7
+    #     printf("[%s]\n", f"n={n}")     ->  [f"n={n}"]   CPython: [n=7]
+    #
+    # The parser keeps an f-string's whole source token as the literal's value
+    # (`fire_compiler.py`'s t/f-string placeholder, which `myinterpreter` and
+    # `gimple_codegen` both read) and `decoded_literal` — the reader every
+    # engine shares — handed that text to the emitters, so the interpolation was
+    # never evaluated. Refused rather than lowered: composition needs a buffer,
+    # and a string on this path is a bare `char *` interned into read+execute
+    # `__TEXT` (the same missing buffer as `str_concat_refused` above).
+    ("fstring_literal_refused",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", f\"n={k}\")\n"
+     "    return 0\n",
+     "refuse:an f-string literal", None),
+    # The t-string, which is the OTHER prefix that keeps its token and the same
+    # reader: one case each, because the two are different literals with
+    # different messages and a rule that caught only `f` would leave `t` printing
+    # `t"n={n}"`.
+    ("tstring_literal_refused",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"[%s]\\n\", t\"n={k}\")\n"
+     "    return 0\n",
+     "refuse:a t-string literal", None),
+    # The GUARD, and it is the half that could have gone the other way: an
+    # ordinary string that happens to CONTAIN braces and a quote is still an
+    # ordinary string, and a rule that matched on text instead of on the prefix
+    # would refuse every program that prints a template. Three spellings — no
+    # braces at all, braces with no quotes, and a brace-ful string after a
+    # percent — in one program, so the first refusal is the one that fires and
+    # the case is one assertion about the family.
+    ("braces_in_an_ordinary_string_are_not_a_fstring",
+     "def main(n):\n"
+     "    a = \"{}\"\n"
+     "    b = \"{not a field}\"\n"
+     "    c = \"%d%s\"\n"
+     "    printf(\"[%s][%s][%s]\\n\", a, b, c)\n"
+     "    return 0\n", 0, "[{}][{not a field}][%d%s]"),
 
     # ── the class: every operator that reached the integer path ────────────
     #
@@ -6173,18 +6219,27 @@ BOTH_ARCH_CASES = [
     # initialized it to its defaults both have to agree on the reservation being
     # there, and only one of them survives the fault.
     #
-    # **AND IT IS A REFUSAL NOW** (2026-10-03, `261543f8`, on master): the read
-    # half joined the write half. `Box()` fills the WORD, not the frame that word
-    # will hold, so `self.inner.v` is a load at address 0 and CPython raises
-    # `AttributeError` here — there is no number to compare against, so the honest
-    # answer is a refusal rather than a zero. This row was left pinning the old
-    # number and was RED on master; it is a `refuse:` row now, and the words are
-    # pinned because the message names `b.inner` where an earlier one named
-    # `b.v`, and the source says `b.inner.v`. The row above it — the same
-    # program WITH `b.inner = Opt()` — still builds and answers 155, which is
-    # what keeps this a refusal about the unbuilt frame rather than about the
-    # construct.
-    ("one_word_holder_of_a_frame_read_before_it_is_written",
+    # **IT WAS A `refuse:` ROW, AND WAS WRONG WHILE IT WAS ONE** (2026-10-03,
+    # `261543f8`; reversed the same day by `03e3b7b6`). The refusal's premise was
+    # "`Box()` fills the WORD, not the frame that word will hold, so
+    # `self.inner.v` is a load at address 0" — which stopped being true at
+    # `4af77b16`, which gave that construction the frame it holds:
+    # `model.struct_constructor_site_bytes` reserves the nested block alone
+    # "because there is no object: the VALUE is the nested frame's address".
+    # The refusal kept firing over a program whose word holds exactly that
+    # frame's address, and the tree said so from two directions at once — the
+    # rows above it (155, through the same frame), and
+    # `sole_field_ctor_store_of_a_frame_built_here_is_another_rules` in this file,
+    # which reads a FRESH `Opt` as zeros (`v=0 h=0`) and has done since.
+    #
+    # What answers it now is `model.struct_construction_yields_frame_address`:
+    # a local bound from `Box()` IS a frame holder, so `self.inner.v` is one load
+    # at `b + 8·0` and the number is 0 — the fresh frame's own default. Renamed
+    # with it, because "read before it is written" was the refusal's premise and
+    # the constructor writes it. The row above it — the same program WITH
+    # `b.inner = Opt()` — still builds and answers 155, which is what keeps this
+    # about the reserved-and-defaulted frame rather than about the construct.
+    ("one_word_holder_reads_the_frame_its_constructor_brought_up",
      "struct Opt:\n"
      "    var v: Int\n"
      "    var has: Int\n"
@@ -6198,7 +6253,7 @@ BOTH_ARCH_CASES = [
      "def main() -> int:\n"
      "    var b = Box()\n"
      "    return b.get()\n",
-     "refuse:nothing in this function has put a frame there", None),
+     0, None),
     # **TWO SITES IN ONE FUNCTION**, which is the half of the fix the row above
     # cannot reach: the frame is reserved in the PROLOGUE, one block per call
     # site, laid out in walk order by `model.struct_constructor_sites`, and the
@@ -6209,17 +6264,22 @@ BOTH_ARCH_CASES = [
     #
     # So the numbers are the assertion: `bx` and `by` are separate
     # constructions, `bx.setboth(4, 5)` writes through the FIRST site's frame and
-    # `by.setboth(1, 2)` through the second's, and 9 / 3 is what survives only if
-    # the two blocks are disjoint. CPython prints the same two numbers.
+    # `by.setboth(1, 2)` through the second's, and `54 / 21` is what survives only
+    # if the two blocks are disjoint — `get` is `v + has * 10`, so 4 + 50 and
+    # 1 + 20. A reservation that handed both sites the same offset would print
+    # `1 21`, the first object's fields overwritten by the second construction,
+    # which is a wrong answer on both machines and not a fault. CPython prints
+    # the same two numbers.
     #
-    # …and it is a REFUSAL now, for the same reason as the row above it and by
-    # the same commit: `bx.setboth(4, 5)` is a method call, not
-    # `bx.inner = Opt()`, so nothing ever built the frame either site names. The
-    # disjointness this row was written for is covered where the frames DO get
-    # built — `one_word_holder_of_a_frame_reads_through_its_method` above and the
-    # `b.inner = Opt()` form of it — so what is pinned here is the refusal, and
-    # the words, because a message that named `bx.v` instead of `bx.inner` would
-    # send the reader after a name the source does not have.
+    # …and it was a REFUSAL until `03e3b7b6`, for the reason the row above it
+    # gives: `bx.setboth(4, 5)` is a method call, not `bx.inner = Opt()`, and the
+    # refusal claimed the frame neither site names was never built. It is built —
+    # by `Box()` itself, from `4af77b16` on — and `bx`/`by` are holders of it
+    # because `model.struct_construction_yields_frame_address` says a local bound
+    # from such a construction is one. So this row is a build again, and it is a
+    # BETTER row for it: as a refusal it pinned two words of a message, and as a
+    # build it pins the disjointness the row was written for, which nothing else
+    # in the file reaches (two call sites of one constructor in one function).
     ("two_one_word_constructions_get_two_different_frames",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -6242,7 +6302,7 @@ BOTH_ARCH_CASES = [
      "    by.setboth(1, 2)\n"
      "    printf(\"%d %d\", bx.get(), by.get())\n"
      "    return 0\n",
-     "refuse:nothing in this function has put a frame there", None),
+     0, "54 21"),
     # THE TRAP, which is the one assertion about augmented division that has no
     # CPython oracle: `DIV`/`IDIV` by zero is a HARDWARE fault (SIGFPE on this
     # target), and CPython raises ZeroDivisionError, so neither answer is a
@@ -10197,10 +10257,21 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    return 0\n",
      "refuse:constructing Box with argument 'o' as field 'inner'", None),
     # (b) A frame built HERE, which the receiver rule already stood down from
-    # (`_value_may_be_a_frame` recognises the construction) and which another
-    # rule answers — the field read at the call site, not the store.  It is a
-    # row because "unchanged" is an answer worth pinning: the exemption must not
-    # change which rule answers this one.
+    # (`_value_may_be_a_frame` recognises the construction) and which used to be
+    # answered by ANOTHER RULE — the field read at the call site, refused as
+    # `'b.v' is a field access through 'b'`, because the holder analysis
+    # classified a local bound from a ONE-FIELD struct's constructor as a plain
+    # word.  It no longer needs an answer from any rule: `b`'s word IS the
+    # address of the `Opt` frame (`model.struct_construction_yields_frame_
+    # address`), so `b.inner.v` is one load at `b + 8·0` and the two fields read
+    # as the zeros a fresh `Opt` holds.  `v=0 h=0` is CPython's answer, so this
+    # is a positive row now rather than a `refuse:` one — the numbers are the
+    # assertion and they are not weak: they are only reachable if `Box()`
+    # reserved and initialised the frame, so a lowering that left the word null
+    # and one that read the wrong slot both fail it.  It stayed in this group
+    # because the group's question is WHICH RULE ANSWERS each of the three ctor
+    # stores, and "none of them" is the answer for this one now.
+    # commit 03e3b7b6.
     ("sole_field_ctor_store_of_a_frame_built_here_is_another_rules",
      "struct Opt:\n"
      "    var v: Int\n"
@@ -10216,7 +10287,7 @@ SOLE_FIELD_CTOR_STORE_CASES = [
      "    var b = Box()\n"
      "    printf(\"v=%d h=%d\", b.inner.v, b.inner.has)\n"
      "    return 0\n",
-     "refuse:'b.v' is a field access through 'b'", None),
+     0, "v=0 h=0"),
     # (c) A frame the CALLEE made — which the doc predicted would BUILD, and
     # which does NOT: `init_body_stores` only substitutes a BARE PARAMETER for a
     # right-hand side, because only a bare parameter has the caller's own
@@ -13092,9 +13163,14 @@ def run_both_arch_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     growing a second refusal path here is the point — two copies of "did it
     refuse, with these words" would be two answers to one question, and the
     group a construct sits in is a reading convenience rather than a claim
-    about what the case checks. Two rows need it: the one-word HOLDER's method
-    reading a nested frame nothing built, which is refused rather than answered
-    (see `one_word_holder_of_a_frame_read_before_it_is_written`).
+    about what the case checks. The delegation stays although no row of
+    `BOTH_ARCH_CASES` uses it: the two that did — the one-word HOLDER's method
+    reading a nested frame, and two constructions of it in one function — are
+    answered by the holder analysis rather than refused since `03e3b7b6` (see
+    `one_word_holder_reads_the_frame_its_constructor_brought_up` and
+    `two_one_word_constructions_get_two_different_frames`), and a future refusal
+    row here has to be checked on BOTH backends by the same code that checks the
+    builds, which is `run_case` and not this.
     """
     if isinstance(want_exit, str) and want_exit.startswith(
             ("refuse:", "refuse_either:")):
@@ -18365,11 +18441,25 @@ SOLE_FIELD_CALLEE_REFUSALS = [
     # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3 row 0a names, and
     # it is the file's reported verdict.
     #
-    # The expectation is the METHOD-TABLE refusal, not a build: with `_data`
-    # collapsed into `self`, the emitter is asked for `clear` on a receiver it
-    # cannot type, and `List.clear` is not in its table (row 1 of the same
-    # table).  So this row pins that the diagnosis names the REAL remaining gap
-    # -- and `refuse:` is a substring match, so the old message would fail it.
+    # The expectation WAS the METHOD-TABLE refusal and is now a BUILD, because
+    # `List.clear` landed (row 1 of `bugs/FORMAL_binary_heap_mojo_after_the_len_
+    # value.md`'s table).  Two things in the note above were corrected by that
+    # landing, and both are worth the row staying here as a build rather than
+    # moving out of the group: the collapsed receiver is NOT one "the emitter
+    # cannot type" — `_method_recv_kind(self)` answers `list`, from the field's
+    # declared type through `one_word_receiver_kind`, which is what made the
+    # one-store lowering possible at all; and `clear` is not "not in its table"
+    # any more.
+    #
+    # `size=%d`/`after=%d` are here so the row is not a bare exit status: they
+    # are only reachable if BOTH `len(self._data)` and `self.clear()` lower,
+    # and the numbers are 0 and 0 for the reason the constructor is
+    # `List[Int]()` — an EMPTY list.  The row that shows the store landing is
+    # `test_formal_x86_64_parity.py`'s
+    # `list_clear_through_a_one_word_structs_sole_field`, whose constructor puts
+    # three elements in and prints the length before and after; this one keeps
+    # the zero-operand construction, which is the OTHER of
+    # `ctor_establishes_slot`'s two doors.
     ("a_method_callee_through_a_collapsed_field_is_not_a_field_read",
      "struct Wrap:\n"
      "    var _data: List[Int]\n"
@@ -18380,11 +18470,16 @@ SOLE_FIELD_CALLEE_REFUSALS = [
      "    def clear(mut self):\n"
      "        self._data.clear()\n"
      "\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
      "    var w = Wrap()\n"
+     '    printf("size=%d", w.size())\n'
      "    w.clear()\n"
+     '    printf(" after=%d", w.size())\n'
      "    return 0\n",
-     "refuse:'clear' is not one of those methods of those receivers", None),
+     0, "size=0 after=0"),
 ]
 
 # The two spellings that must keep BUILDING, as the CPython-pair shape, because

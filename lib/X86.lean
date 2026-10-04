@@ -1601,19 +1601,31 @@ theorem x86_step_sar_imm8 (s : X86State) (code : Nat → UInt8) (m : Nat)
     One model arm covers all seven digits and both widths, selecting on `op` for
     the width and on `digit` for the operation, so the same argument as the
     shifts applies: one theorem would state the whole `if` chain and every
-    caller would re-derive which arm it is in.  Three theorems here because
-    three digits are the three the backend emits for these shapes in the corpus
-    -- `add rax, imm32`, `and rbx, imm32` and `cmp rax, imm8`.
+    caller would re-derive which arm it is in.  Four theorems here because
+    four digits are the four the backend emits for these shapes -- `add rax,
+    imm32`, `sub r10, imm32` (the stack-floor guard's budget subtraction, in
+    EVERY guarded prologue), `and rbx, imm32` and `cmp rax, imm8`.  That last
+    one is the measurement that matters for the table: the guard put `sub` in
+    every image on 2026-10-03 (`e11f066d`) and no `sub` row existed, so
+    `formal/x86_64_endtoend_test.py::_plan` refused every function in the
+    corpus by name.  A "three digits are enough" list that nothing measures is
+    how that happened.
 
     `83` versus `81` is not only the immediate's width, it is the LENGTH: the
     model's `endAddr` is `rip + 7` for the 32-bit form and `rip + 4` for the
     8-bit one, so a successor that said `m + 4` for `81` would be a proof of a
     four-byte instruction.  That is B6's shape, one level down.
 
-    `cmp` is different in kind from the other two: digit 7 takes the branch that
-    computes the subtraction and sets flags WITHOUT writing the result back, so
-    its successor mentions no register at all.  A theorem copied from `add`
-    would claim one. -/
+    `cmp` is different in kind from the other three: digit 7 takes the branch
+    that computes the subtraction and sets flags WITHOUT writing the result
+    back, so its successor mentions no register at all.  A theorem copied from
+    `add` would claim one.
+
+    `sub` and `cmp` are the two ends of one model arm: digit 5 writes the
+    difference back and digit 7 does not, and the flags are the SAME
+    `x86_flags_sub` on the same three arguments in both.  They are separate
+    theorems because the register write is not something `simp` can be asked
+    to drop -- the successor is the whole statement. -/
 
 /-- `add r64, imm32` (REX.W 81 /0 id, mod=3). -/
 theorem x86_step_add_ri32 (s : X86State) (code : Nat → UInt8) (m : Nat)

@@ -5557,6 +5557,19 @@ BUILTIN_VALUE_METHODS = {
     # on this path, so the blob's capacity is a compile-time bound — the count
     # of append sites in the function — and the store is checked against it.
     "append": "list_append",
+    # `list.clear()`: the count word is the blob's header, so emptying a list is
+    # ONE store of zero at offset 0 of it. `std/collections/binary_heap.mojo`'s
+    # `clear`, and it is the whole of that method:
+    #
+    #     def clear(mut self):
+    #         self._data.clear()
+    #
+    # It is in this table and not in a backend's own because the two
+    # architectures would otherwise have two `clear` lowerings that can agree
+    # today and drift, and because the KIND GUARD below is a model decision —
+    # `append`'s guard is capacity and lives in the emitter, which is the
+    # reason that arm says why its own does not.
+    "clear": "list_clear",
     # `f.write(s)`: a text-mode write of a C string to a file descriptor.
     # `open(...)` already lowers to the C library's `open`, so the receiver
     # IS a descriptor and this is `write(fd, s, strlen(s))`.
@@ -5564,6 +5577,17 @@ BUILTIN_VALUE_METHODS = {
     # `f.close()`: the C library's `close` on the same descriptor.
     "close": "file_close",
 }
+
+#: The receiver kind a `BUILTIN_VALUE_METHODS` entry REQUIRES, for the ones
+#: whose guard is a kind rather than a fact an emitter has. One table and one
+#: reader (`_shape_guarded_refusal`) rather than a branch per method, and it is
+#: empty for `append`/`write`/`close` because their guards are CAPACITY and
+#: FILE-DESCRIPTOR-ness respectively — `append`'s emitter guard and
+#: `VALUE_METHOD_RECEIVERS`'s. `clear` is the case that needs one: storing zero
+#: at offset 0 of a word that is not a blob's header writes zero into whatever
+#: address that word holds, so it is honest only on a receiver established to be
+#: a list.
+BUILTIN_VALUE_METHOD_LIST_KINDS = frozenset({"clear"})
 
 # ── Methods on a string ───────────────────────────────────────────────────
 #
@@ -6291,6 +6315,106 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
         f"`[1, 2, 3]`), or take the container as a PARAMETER of {function}, "
         f"where the caller's value decides and the subscript is answered for "
         f"its callers too"
+    )
+
+
+#: The kinds a CONTAINER OPERATION cannot be lowered against when its base is a
+#: struct FIELD. `None` is deliberately absent, and its absence is the whole of
+#: the narrowing this family is for: an unclassified slot is a word this image
+#: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
+#: declaration is in another module.
+#:
+#: `FRAME_KIND` is absent too, and for a different reason — a field whose
+#: declared type is a framed struct of this module holds an ADDRESS, and reading
+#: that as a container is a wrong ANSWER rather than a fault, which is its own
+#: defect and not this one:
+#: `bugs/FORMAL_a_subscript_of_a_field_declared_a_framed_struct_is_a_wrong_answer.md`.
+NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
+
+
+def slot_container_operand_refusal(op: str, base_kind, spelled_base: str,
+                                   function: str) -> str | None:
+    """Why {op} of a struct FIELD whose kind is a scalar is refused, or None.
+
+    **The FIELD half of `non_container_element_refusal` and
+    `frame_container_operand_refusal`, and the one both of those are
+    deliberately blind to.** Both are BARE-NAME-only, and each says why: `h.x` is
+    a 64-bit field and reading it as a blob is what a declared `List` field is
+    FOR. That reasoning is right about a field whose DECLARED type says nothing,
+    and it is how a slot that says it holds a number reached the blob walk:
+
+        struct S:
+            var n: Int = 5
+        var s = S()
+        printf("%d", s.n[0])          # a subscript of the integer 5
+
+    Measured on this tree before the fix, and the two architectures disagreed
+    about the same source file, which is the worst failure mode this backend has:
+
+    | | arm64 | x86-64 |
+    |---|---|---|
+    | `var n: Int = 5` | refused — "subscript base must be a list/tuple name or literal … (got IntLiteral)" | **SIGSEGV, exit 139** |
+    | `var d: DType = 5` | the same refusal | **SIGSEGV, exit 139** |
+    | `var d: DType` + `__init__(out self, v: DType)`, `S(DType.int32)` | **SIGSEGV, exit 139** | **SIGSEGV, exit 139** |
+
+    CPython refuses all three (`TypeError: 'int' object is not subscriptable`),
+    so every row is a program no reader would write on purpose — which is the
+    point: the answer is a refusal on both machines and one machine was
+    dereferencing a `5`.  The arm64 message is also false about the file: the
+    source says `s.n`, and `s.n` IS a field.  It names the node its gate was
+    handed, which by then is the slot's materialized default, so the literal in
+    the sentence is a residue of the rewrite rather than anything the reader
+    wrote.  commit f0df70b2.
+
+    **Why the kind and not the base's SPELLING is the gate**, and why `None` is
+    excluded from `NON_CONTAINER_SLOT_KINDS`, is measured rather than argued.
+    Every `X.<field>[i]` in the 610-file stdlib corpus was classified by its
+    field's declared type:
+
+    | declared kind | sites |
+    |---|---|
+    | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
+    | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
+    | a declared name this path has no kind for | 66 |
+    | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
+    | a string | 1 |
+    | a framed struct of the module | 7 |
+    | **an integer or a type tag** | **0** |
+
+    So the refusal costs the corpus nothing, and the permissive `None` is what
+    the other 2 446 sites get — which is the right answer for them: an
+    unclassified slot is a word, a word is a container as far as this path can
+    tell, and the corpus's untyped parameter and module-attribute subscripts are
+    the bulk of the language.
+
+    `op` is the parameter `non_container_element_refusal` takes and for its
+    reason: one message, said four ways, so a read, a store, an augmented
+    assignment, a slice, a membership test and a for-in iteration all answer
+    with the same sentence and the two backends cannot part company.
+    """
+    if base_kind not in NON_CONTAINER_SLOT_KINDS:
+        return None
+    what = ("an integer" if base_kind == INT_KIND
+            else "a TYPE TAG — a hash of a type's name — which is a number")
+    return (
+        f"{op} of `{spelled_base}` asks for a container element, and "
+        f"`{spelled_base}` is a struct field declared to hold {what}. Every "
+        f"container lowering starts by reading eight bytes at offset 0 of its "
+        f"base and calling the result a COUNT — that is the blob's header word "
+        f"— and then reads or writes at `base + 8 + 8k`, so the element "
+        f"address here is the number in the slot itself plus 8. Measured on "
+        f"BOTH architectures, this builds, links, and then dies of SIGSEGV "
+        f"(exit 139) at run time with the build green, because it reads through "
+        f"a number rather than through an address into anything. A frame slot is "
+        f"ONE word: a subscript needs a pointer plus a stride and there is "
+        f"nothing in the slot to compute a stride from, which is why this is a "
+        f"refusal rather than a cheaper index. The base's declared type is what "
+        f"this refusal names, and it is a DECLARATION: `{spelled_base}` is not "
+        f"classified because the image could not read it, it is classified as "
+        f"this because the source says so. What the same source can do instead: "
+        f"index a container it holds (`xs[i]`), or take that container as a "
+        f"PARAMETER of {function}, where the caller's value decides and the "
+        f"subscript is answered for its callers too"
     )
 
 
@@ -7224,6 +7348,134 @@ def string_concat_refusal(op: str, left_kind, right_kind) -> str | None:
 # the buffer their result would need. Every other operator in the arithmetic
 # table is refused on a single string operand too, and is not here.
 STRING_TWO_STRING_ARITHMETIC_OPS = ("+", "+=", "-", "-=")
+
+
+# ── f-strings and t-strings: a LITERAL whose text is not its value ─────────
+#
+# `fire_compiler.py`'s placeholder scan (`replace_tstrings_with_placeholders`)
+# puts the WHOLE SOURCE TOKEN of an f-string or t-string into the string cache
+# under a `__MOJO_STR_n__` name, so the `StringLiteral` the parser hands on
+# carries `f"n={n}"` — prefix, quotes, braces and all — as its `value`. That is
+# a deliberate shape, and one consumer reads it: `myinterpreter.eval_StringLiteral`
+# sees the `f"` prefix, strips it and evaluates the `{...}` fields through the
+# interpreter's own expression machinery, which is why `fire.py run` answers
+# `n=7` where CPython answers `n=7`.
+#
+# The formal path decoded that value as TEXT, because `decoded_literal` is the
+# reader every engine uses and an f-string is a `StringLiteral` like any other.
+# So the interpolation was never evaluated and the program ran with the SOURCE
+# SPELLING as its value. Measured on both architectures, exit 0 in every case,
+# which is what makes this the class the whole backend's refusals exist for:
+#
+#     n = 7
+#     print(f"n={n}")       ->  f"n={n}"   (CPython: n=7)
+#     print(len(f"n={n}"))  ->  8           (CPython: 3)
+#     if f"n={n}" == "n=7"  ->  false       (CPython: true)
+#     print(f"{{lit}}")     ->  f"{{lit}}"  (CPython: {lit})
+#
+# The last one is the `{{` escape, so the wrong value is not even the same text
+# twice. Composition is what is missing, and it is the same missing BUFFER
+# `string_concat_refusal` above names: a string on this path is a bare
+# `char *` interned into read+execute `__TEXT`, so there is nowhere to lay down
+# `"n=" + decimal(n)` — not at compile time, because the field may be a runtime
+# value, and not at run time, because there is no heap. So this is a REFUSAL,
+# and it is asked over the whole module rather than at each use site, because
+# every use site is a different one (a `print` fragment, a comparison, a
+# subscript, a `len`, an intern) and a construct this path cannot represent
+# should be declined by name rather than answered by whichever reader happened
+# to see it first.
+#
+# Spelled as a SET of prefixes rather than as "starts with f" so a `t`-string,
+# an uppercase spelling and a triple-quoted body are all covered by the same
+# test and adding a spelling is one tuple entry.
+INTERPOLATED_LITERAL_PREFIXES = ('f"', "f'", 'F"', "F'", 't"', "t'", 'T"', "T'")
+
+
+def is_interpolated_literal(node) -> bool:
+    """Whether `node` is a `StringLiteral` whose text is an f-string/t-string.
+
+    False for anything that is not a literal, and false for an ordinary string
+    however it is spelled — the test is the PREFIX, because that is the whole of
+    what the parser preserved: an ordinary literal's `value` is its body and an
+    interpolated one's is its source token, and nothing else in the node
+    distinguishes them.
+
+    **And the prefix test cannot see an ordinary string whose TEXT begins with
+    one**, which is a property of the AST rather than of this function. It
+    takes exactly one spelling — the inner quote DIFFERENT from the outer one,
+    so nothing is escaped:
+
+        s = 'f"n"'      # value is f"n"  — read as an f-string
+        s = "f\\"n\\""  # value is f\"n\" — read as an ordinary string
+
+    and on that one spelling every engine in this tree is wrong or refuses:
+    `myinterpreter.eval_StringLiteral` and `gimple_codegen` print `n`, CPython
+    prints `f"n"`, and this predicate refuses. Filed with the three-way
+    measurement and the exact next step:
+    `bugs/PARSE_FAIL_an_ordinary_string_whose_text_starts_with_an_f_prefix.md`.
+    The fix belongs in the parser (a flag beside `is_raw`, set where the
+    t/f-string placeholder is built from the RAW token) and not in a reader of
+    the value.
+    """
+    return (isinstance(node, F.StringLiteral)
+            and isinstance(node.value, str)
+            and node.value.startswith(INTERPOLATED_LITERAL_PREFIXES))
+
+
+def interpolated_literal_refusal(node, where: str = "") -> str:
+    """Why an f-string/t-string literal is refused on this path.
+
+    `where` is the line the literal is on when the caller has it, so the
+    message can point at the source rather than at the construct: two f-strings
+    in one program are two refusals a reader has to tell apart.
+    """
+    spelled = node.value if isinstance(node, str) else getattr(node, "value", "")
+    # The article is spelled out rather than derived from the first letter:
+    # "f-string" is pronounced "eff-string" and so takes "an", while the rule a
+    # `kind[0] in "aeiou"` test would apply gives it "a" — and a message whose
+    # first three words are wrong is a message a reader stops reading.
+    kind = "an f-string" if spelled[:1] in ("f", "F") else "a t-string"
+    at = f" on line {where}" if where else ""
+    return (
+        f"{kind} literal{at} is refused on this path: its value is "
+        f"its INTERPOLATED text, and this path has no buffer to compose one "
+        f"in. The parser keeps the whole source token (`{spelled}`) as the "
+        f"literal's value, so what this build would have printed is the "
+        f"spelling: with `n = 7`, `print(f\"n={{n}}\")` printed "
+        f"`f\"n={{n}}\"` and exited 0 where CPython prints `n=7`. A string "
+        f"here is a bare `char *` interned into read+execute __TEXT, so "
+        f"`\"n=\" + decimal(n)` has nowhere to be laid down at compile time "
+        f"(the field may be a runtime value) or at run time (there is no "
+        f"heap); this is the same missing buffer that keeps string "
+        f"concatenation and the length-dependent methods refused (see "
+        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
+        f"parts as separate operands, or build the text with `+` once that is "
+        f"lowered.")
+
+
+def refuse_interpolated_literals(stmts) -> None:
+    """Raise `CodegenError` on the first f-string/t-string literal in `stmts`.
+
+    Asked over the MODULE's statement list, once, by the one pipeline both
+    front ends go through (`formal/build.py:_prepare_functions`) — the same
+    place and for the same reason as `refuse_module_level_mlir_templates`: a
+    refusal asked from either backend's expression walk would be two copies of
+    one decision, and the executable and dylib paths would then be able to
+    answer differently about one source file.
+
+    `iter_nodes` is the shared walker, so a literal nested two levels down —
+    `print("x", f"v={v}")`, a `f` field inside a format spec, a comprehension's
+    element — is reached by the same walk the frame layout uses, and a node one
+    of them would miss is not missed here.
+
+    A module-level statement the walker does not descend into is not a hole:
+    `iter_nodes` recurses through dataclass fields, and a `FunctionDef`'s body
+    is one of them.
+    """
+    for node in iter_nodes(stmts):
+        if is_interpolated_literal(node):
+            raise CodegenError(interpolated_literal_refusal(
+                node, getattr(node, "line", "")))
 
 
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
@@ -12071,10 +12323,30 @@ def _shape_guarded_refusal(method, receiver_kind, dotted, receiver_is_fd,
         return (f"{dotted}() {MLIR_BOOL_METHODS[method]}")
     if method in BUILTIN_VALUE_METHODS:
         # `append`, whose guard is in the backend: `_scan_list_caps` has the
-        # function in hand and can compute the blob's capacity, and a name the
-        # scan drops refuses there with a message about CAPACITY — which is the
+        # function in hand and can compute the capacity, and a name the scan
+        # drops refuses there with a message about CAPACITY — which is the
         # thing a reader has to fix. Refusing here would be both less accurate
         # and one more thing to keep in step between two architectures.
+        #
+        # `clear` is the other half and its guard IS a kind, so it is asked
+        # here: storing zero at offset 0 of a word that is not a blob's header
+        # writes zero into whatever address that word holds. A receiver this
+        # image cannot establish to be a list therefore refuses, which is the
+        # same default the whole kind model runs on and the reason the arm is a
+        # table and not a flag.
+        if method in BUILTIN_VALUE_METHOD_LIST_KINDS:
+            if is_list_kind(receiver_kind):
+                return None
+            holds = (repr(receiver_kind) if receiver_kind
+                     else "a word of unknown contents")
+            return (f"{dotted}() lowers to one store of zero at offset 0 of "
+                    f"its receiver, and that offset is a container's COUNT — so "
+                    f"the store empties a list and writes into whatever address "
+                    f"anything else holds. {dotted}'s receiver is {holds}, and "
+                    f"this path will not read an arbitrary word as a blob's "
+                    f"header. Bind a list to a name and call the method on the "
+                    f"name, or give the field a `List[…]` declaration so the "
+                    f"receiver's kind is stated")
         return None
     holds = repr(receiver_kind) if receiver_kind else "a word of unknown contents"
     return (f"{dotted}() is a method call on a value, and this backend "
@@ -15214,6 +15486,31 @@ def _kind_of_simple(e) -> str | None:
         if e.op == "not":
             return INT_KIND
         return _kind_of_simple(e.operand)
+    if isinstance(e, F.MemberExpr) and type_value_tag(e) is not None:
+        # `DType.int32` — a type named as a VALUE, which is one 63-bit TAG and
+        # so `TYPE_KIND`. Asked with `type_value_tag`, the ONE reader both
+        # backends' member arms use for exactly this expression, so a third
+        # answer cannot appear here.
+        #
+        # It was missing, and the consequence was a downstream one rather than a
+        # cosmetic one: `declared_type_kind` classifies a field DECLARED `DType`
+        # as a tag, so `struct S { var d: DType }` knows the slot holds a tag —
+        # but `S(DType.int32)` puts the tag there through `__init__`, and
+        # `ValueKinds._constructed_field_kind` requires the constructor
+        # argument's own kind to be EVIDENCE ("a bare name is asked of
+        # `own_shape_kind` and a call result is refused by `_own_shape_of`'s
+        # filter"). The argument is this expression, it classified as None, and
+        # so the slot's kind was unestablished. Measured on both backends,
+        # `struct S { var d: DType; var t: Int }` with
+        # `def __init__(out self, v: DType): self.d = v`, called as
+        # `S(DType.int32)`, and `printf("%d", s.d[0])` then built, ran and died
+        # of SIGSEGV (exit 139) — the container lowering reading a count out of
+        # the tag. Same class as the `DTYPE_TYPE_NAMES` row's own note ("one
+        # value, two kinds, decided by where the name is written"), one level
+        # further in: there the field and the local disagreed, here the field
+        # and the CONSTRUCTOR ARGUMENT do.
+        # commit f0df70b2's row 3.
+        return TYPE_KIND
     return None
 
 
@@ -15732,6 +16029,75 @@ class ValueKinds:
             kinds.add(kind)
         return kinds.pop() if len(kinds) == 1 else None
 
+    def _unpacked_element_kind(self, value, kind, own):
+        """`(kind, own)` for ONE ELEMENT of `value`, for a tuple target.
+
+        `a, b, c = t` binds three names and each holds ONE element of `t`, not
+        `t` itself, so the kinds this returns are the ELEMENT's. Without it the
+        statement's own scan bound every name to the container's kind, and a
+        container kind is not one of the two kinds a value can print as — so
+        the ordinary shape was refused on both architectures:
+
+            t = (1, 2, 3)
+            a, b, c = t
+            print(a)   # -> print() cannot tell whether IdentExpr is a string
+                       #    or a number on the formal arm64/x86-64 path
+
+        which is a sentence false about the source: the source says `a` holds an
+        integer, and says it twice (the tuple literal's elements, and the fact
+        that an unpack binds an element at all). The refusal was the whole
+        observable effect here because a container kind is refused rather than
+        guessed — `print(a)` cannot answer "is this a `%s` or a `%lld`" from
+        `list:int`.
+
+        A container LITERAL is asked for its elements' kinds directly rather than
+        through its own `list_kind`, because `_kind_of_simple` — which
+        `kind_of`'s container arm uses — classifies a LITERAL and nothing else,
+        so `e, f = f, e` (a tuple of two NAMES, the swap) has an element kind
+        its own container kind cannot carry and narrowed to `list` with no
+        element at all. Reading the elements through `kind_of` is what makes the
+        swap work, and it is the same reader `subscript_element_kind`'s callers
+        use for `t[0]`.
+
+        Only a LIST-kind value is narrowed, and the `is_list_kind` gate is what
+        keeps the two shapes apart: `subscript_element_kind` deliberately maps
+        `str` to an integer, because `s[0]` is a BYTE on this path
+        (`subscript_element_kind`'s own docstring), and `a, b = "xy"` binds two
+        one-character STRINGS. So the string arm is not narrowed at all — it
+        keeps the container kind, which is wrong in the same way it was and no
+        more so, rather than right for a reason this file does not have.
+
+        `own` follows the element for the same reason `kind` does: the evidence
+        is the same statement, one level down, and an own-shape claim about the
+        container is not a claim about an element of it. This matters because
+        `own_shape_kind` is the answer both backends' subscript/slice/membership
+        choke points ask before treating a name as a container (`a[0]` after an
+        unpack of a list of ints must read an integer, not a blob).
+        """
+        elem = None
+        if isinstance(value, (F.TupleExpr, F.ListExpr)):
+            kinds = {self.kind_of(el) for el in (value.elements or [])}
+            kinds.discard(None)
+            elem = kinds.pop() if len(kinds) == 1 else None
+        else:
+            # `k, v = d` binds two KEYS — CPython unpacks a mapping's keys and
+            # nothing else — so the element kind here is the dict's KEY kind,
+            # read by the same reader a `for k in d` uses
+            # (`_iterable_dict_key_kind`, whose own docstring carries the
+            # measurement: before it existed a dict walk's target classified as
+            # an integer and `print(k)` printed an ADDRESS). It answers None for
+            # anything that is not a dict with a stated initializer, which is
+            # what makes it its own gate — asking `is_dict_value` first is
+            # wrong, and measurably so: that reader works from `_dict_names`,
+            # which a plain `d = {…}` ASSIGNMENT never reaches, so the arm
+            # below it never ran and `len(k)` still said "classified as 'int'".
+            elem = self._iterable_dict_key_kind(value)
+            if elem is None and is_list_kind(kind or ""):
+                elem = list_elem_kind(kind)
+        if elem is None or elem == kind:
+            return kind, own
+        return elem, elem
+
     def _scan(self, stmts) -> None:
         for s in stmts or []:
             if isinstance(s, F.AssignStmt):
@@ -15741,6 +16107,11 @@ class ValueKinds:
                 # measurement of what happens when only one of the two arms asks.
                 kind, own = self._kind_with_ann(s.value,
                                                 getattr(s, "type_ann", None))
+                if isinstance(s.target, (F.TupleExpr, F.ListExpr)):
+                    # A TUPLE TARGET binds one element per name, and that is the
+                    # same fact `_iterable_kind` states for a `for` over the
+                    # same container — so it is the same reader.
+                    kind, own = self._unpacked_element_kind(s.value, kind, own)
                 self._bind_target(s.target, kind, own=own)
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)
@@ -27369,6 +27740,44 @@ def one_word_nested_frame_structs(decls: dict) -> dict:
         if nested is not None:
             out[name] = nested
     return out
+
+
+def struct_construction_yields_frame_address(struct_def, decls: dict) -> bool:
+    """Whether constructing this struct puts a FRAME ADDRESS in the name.
+
+    Two shapes, and the second is the one this function exists for:
+
+      * a struct with a frame of its own — the construction reserves a block and
+        the value IS that block's address (`struct_constructor_sites`);
+      * **a ONE-FIELD struct whose sole field holds a placed nested frame** —
+        there is no object, so there are no slots of its own to reserve and the
+        value the caller receives is the NESTED frame's address.
+        `struct_constructor_site_bytes` reserves the nested block alone and says
+        why in its own words ("that struct's own 8 bytes are not reserved,
+        because there is no object: the VALUE is the nested frame's address"),
+        and both backends' `_emit_fresh_one_word` bring that frame up and hand
+        back its address.
+
+    It is asked by `formal/build.py::_value_may_be_a_frame`, which is the ONE
+    recogniser in that file for "can this value put a frame in a name", and the
+    second shape used to be missing from it: `struct_is_framed` is False for
+    every one-field struct, so `var b = Box()` was not a frame value and the
+    checks that ask the question refused the program —
+    `check_one_word_frame_receivers` with "nothing in this function has put a
+    frame there: `b` was built by `Box()`, whose construction fills the WORD
+    rather than the frame that word will hold" — about a construction that has
+    filled the frame since `4af77b16`. Two rows of `test_formal_run.py` were red
+    on the tree for it (`one_word_holder_reads_the_frame_its_constructor_brought_
+    up` and `two_one_word_constructions_get_two_different_frames`).
+
+    Both shapes read `struct_is_framed` / `one_word_sole_field_frame` rather than
+    a second opinion about either, because a disagreement here is a load at
+    address 0 rather than a wrong message.
+    """
+    if struct_def is None:
+        return False
+    return (struct_is_framed(struct_def)
+            or one_word_sole_field_frame(struct_def, decls or {}) is not None)
 
 
 def struct_constructor_site_bytes(struct_def, decls: dict) -> int:
