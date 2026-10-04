@@ -5981,8 +5981,11 @@ def _rewrite_eq_on_frame_receivers(functions, holders, hstruct, one_word=None,
         # compare.  That is a SILENT WRONG ANSWER rather than a refusal: a class
         # whose `__eq__` returns True for everything printed `0`, because two
         # calls are two objects and an address compare answers "are these the
-        # same one".  Measured on both architectures; see
-        # `bugs/FORMAL_eq_dispatch_two_call_operands_are_not_a_frame_address.md`.
+        # same one".  Measured on both architectures, and pinned by
+        # `test_formal_run.py`'s `both_arch_eq_dispatch_through_two_call_operands`
+        # (a function that binds nothing) and by
+        # `both_arch_eq_dispatch_through_two_call_operands_beside_a_frame` (one
+        # that binds a frame, where the holder check is what has to agree).
         fn_call_frame = _fn_comparison_call_frame(fn, functions_by_name,
                                                   structs_by_name)
         if not hs and not fn_one_word and not fn_call_frame:
