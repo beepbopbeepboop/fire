@@ -544,6 +544,17 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         gen._funcptr_builtins_needed.add(c_name)
         static_name = f'_funcptr_{c_name}'
         t = gen._new_val('void *', f'{static_name}')
+        # What this function RETURNS, so a later call through the value reads
+        # the right one. `mojo_fnptr_call_N` is the homogenized `int64_t`
+        # convention -- right for the box it hands back, wrong for the value
+        # inside -- so without this every bare-function-pointer VALUE printed
+        # the box: `d = {}; d['k'] = add3; print(d['k'](1, 2, 3))` answered 0
+        # for CPython's 6, while the named-local spelling `f = add3; f(...)`
+        # was right only because it consults `func_return_types` directly.
+        # Mirrors the sibling branches: a capturing closure records
+        # `_bound_method_ret_types`, and a lambda records
+        # `_callable_ret_types` in `_lower_LambdaExpr`.
+        gen._callable_ret_types[t] = gen.func_return_types.get(name, 'int64_t')
         return 'void *', t
     # Module-level global variable (persistent type known across functions).
     # Also catches `global x` declarations inside functions (_func_declared_globals).
@@ -5108,6 +5119,15 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        # A callable held in a LIST or TUPLE LITERAL, so a later
+        # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
+        # single chokepoint every literal element passes through, and the
+        # container table is already keyed by the container's lowered name
+        # (`t`), so recording it is one call. A non-callable element is a
+        # no-op inside the helper, so this is not on the hot path. See
+        # `ginf.note_container_callable_ret`; the dict half of the same
+        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+        ginf.note_container_callable_ret(gen, t, ev, et, el)
         # A list whose elements are TUPLES (`[(a, b), (c, d)]`) — record
         # the tuple's own element type so a later `for x, y in lst:`
         # tuple-target loop reads each slot with the right accessor
@@ -5481,23 +5501,6 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         else:
             gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # A bool stored as a dict value is indistinguishable from a genuine
-        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
-        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
-        # return a C int on purpose), so the dict is MARKED and
-        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
-        # mark used to require a literal RHS, which missed every other bool
-        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
-        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
-        # already right. `is_python_bool_expr` is the one predicate, shared
-        # with the print dispatch.
-        # The one store, not a third spelling of it: `emit_dict_int_value_store`
-        # already decides the per-slot bool kind from `is_python_bool_expr`, and
-        # derives the `bytes_` key-domain prefix from `key_ctype` — which is
-        # `_bytes_key` re-read here, so it cannot disagree with the float and
-        # str arms above. It also goes through `_emit_call`, so a key that
-        # `_char_to_cstr` handed back as a placeholder is still rewritten to the
-        # `_kw` twin.
         gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
@@ -5624,6 +5627,15 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        # A callable held in a LIST or TUPLE LITERAL, so a later
+        # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
+        # single chokepoint every literal element passes through, and the
+        # container table is already keyed by the container's lowered name
+        # (`t`), so recording it is one call. A non-callable element is a
+        # no-op inside the helper, so this is not on the hot path. See
+        # `ginf.note_container_callable_ret`; the dict half of the same
+        # problem is bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
+        ginf.note_container_callable_ret(gen, t, ev, et, _el)
         # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
         # needs the same two maps `_lower_list_literal` records for
         # `[[0, 7], [1, 8]]` — `_nested_elem_types` (what the inner lists

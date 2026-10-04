@@ -2491,6 +2491,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2553,6 +2559,12 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _rewrite_async_gen_stmts(h.body, cvar)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -2633,6 +2645,30 @@ def _mark_coro_body(body_fd):
     """
     body_fd._mojo_coro_body = True
     return body_fd
+
+
+def _mark_coro_callable_param_fns(body_fd, fn):
+    """Attach `{param: the function its declared default names}` to a
+    synthesized coroutine body, as `body_fd._mojo_coro_callable_param_fns`.
+
+    NAMES, not return types, and that is the whole point of attaching them
+    here instead of resolving them: `register` runs as an AST PRE-PASS,
+    before `gen_module_impl` has registered any module-level function's
+    `func_return_types` entry, so a return type looked up there is not there
+    yet. `gen_func` runs during module generation, when it is — so the body
+    carries the fact and the codegen resolves it. `_mark_coro_param_elem_kinds`
+    is the same idiom (evidence attached to the body because "the generator's
+    own FunctionDef is GONE" downstream).
+
+    The consumer is `_lower_fnptr_call_value`: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it (`len`, a
+    `for` loop, `print`) had nothing to dispatch on — exit 0 and no output.
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+    """
+    _fns = _callable_param_function_defaults(fn)
+    if _fns:
+        body_fd._mojo_coro_callable_param_fns = _fns
 
 
 def _mark_coro_param_elem_kinds(body_fd, real_params, env):
@@ -2918,6 +2954,12 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
                 out.append(N.ExprStmt(value=_call('__mojo_async_task_schedule',
                                                   [_c_ident(_tname)])))
             continue
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3108,6 +3150,12 @@ def _rewrite_stmts(stmts: list, cvar: str, kind: str, env=None) -> list:
             for h in (s.handlers or []):
                 h.body = _rewrite_stmts(h.body, cvar, kind, env)
         # recurse into compound-statement bodies
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -3136,6 +3184,38 @@ _STMT_TYPES = tuple(
 
 def _looks_like_stmt_list(v: list) -> bool:
     return all(isinstance(x, _STMT_TYPES) for x in v)
+
+
+def _declares_its_own_scope(s) -> bool:
+    """True for a statement that opens a FUNCTION or CLASS SCOPE of its own,
+    so a coroutine rewrite must pass it through untouched.
+
+    Every `_rewrite_*_stmts` in this file recurses into a statement's
+    attributes looking for nested statement lists, and the test it uses —
+    "is this a list of statements?" — is answered by `_looks_like_stmt_list`,
+    whose `_STMT_TYPES` includes BOTH `FunctionDef` and `StructDef`. So a
+    nested `def`'s body and a nested `class`'s `methods` list were rewritten
+    with the ENCLOSING coroutine's context variable: their `return e` became
+    `__mojo_gen_set_return(__c, e); return`, and their `yield e` /
+    `await e` became this coroutine's yield/await. Both are wrong, and both
+    are silent — `__c` is not in scope in a nested def, so it read through
+    the `ct param or undeclared` fallback as a hard 0:
+
+        def gen(n):
+            def helper(x):
+                return x * 2
+            yield helper(3)
+
+    printed `0` for CPython's `6`.
+
+    The class half only became reachable once a nested `class` had methods to
+    rewrite at all — before that, `module_gen._gmi_hoist_nested_structs`
+    did not exist and a class declared inside a function had no layout and
+    no emitted methods (bugs/CODEGEN_class_defined_inside_a_function_has_no_
+    methods.md). So the two bugs shared one cause and this predicate is the
+    one place that says so.
+    """
+    return isinstance(s, (N.FunctionDef, N.StructDef))
 
 
 # ── lowering ───────────────────────────────────────────────────────────
@@ -4210,6 +4290,12 @@ def _cap_rewrite_stmts(stmts: list, box_names: dict) -> list:
         if isinstance(s, N.TryStmt):
             for h in (s.handlers or []):
                 h.body = _cap_rewrite_stmts(h.body, box_names)
+        if _declares_its_own_scope(s):
+            # A nested `def` / `class` is its own function scope: pass it
+            # through rather than rewriting its body with THIS coroutine's
+            # context variable. See `_declares_its_own_scope`.
+            out.append(s)
+            continue
         for k, v in list(vars(s).items()):
             if k in ('line', 'col'):
                 continue
@@ -4664,6 +4750,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
     _mark_coro_param_elem_kinds(body_fd, real_params, env)
+    _mark_coro_callable_param_fns(body_fd, fn)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])
@@ -4725,6 +4812,41 @@ def _callable_param_generator_names(fn: N.FunctionDef) -> dict:
             continue
         _d = _dflts.get(_pn)
         if isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS:
+            _out[_pn] = _cm_as_str(_d.name)
+    return _out
+
+
+def _callable_param_function_defaults(fn: N.FunctionDef) -> dict:
+    """`{param: the top-level function its declared default names}` for the
+    parameters of `fn`, EXCLUDING the ones `_callable_param_generator_names`
+    already owns.
+
+    The A3 rewrite moves every source parameter into a `var p =
+    __mojo_gen_arg(...)` local, so the body the ordinary codegen emits
+    carries no `param_defaults` — which is why the generator half of this
+    fact has to be re-derived here and hung on the BODY function for
+    `gen_func` to copy out. This is the ordinary-function half, and it needs
+    the same treatment for the same reason: `def apply_to(items, _f=upper)`
+    called inside a generator body got the homogenized `int64_t` box back
+    from `mojo_fnptr_call_N` for a `char *`, and every consumer of it
+    (`len`, a `for` loop, `print`) then had nothing to dispatch on —
+    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
+
+    A bare name only, for the reason
+    `calls_shared._callable_param_ret_types` gives: the answer is then the
+    DEFINING function's own `func_return_types` entry, read in the second
+    pass below (after every function in the module is registered), so a
+    callee declared LATER than the consumer still resolves.
+    """
+    _dflts = getattr(fn, 'param_defaults', None) or {}
+    _gens = _callable_param_generator_names(fn)
+    _out = {}
+    for _pn, _pann in (getattr(fn, 'params', None) or []):
+        _pn = _cm_as_str(_pn)
+        if _pn.startswith('*') or _pn in _gens:
+            continue
+        _d = _dflts.get(_pn)
+        if isinstance(_d, N.IdentExpr):
             _out[_pn] = _cm_as_str(_d.name)
     return _out
 
@@ -5084,8 +5206,6 @@ def register(gen, meta: list) -> None:
     # consumer.
     for m in meta:
         _cpg = m.get('callable_param_generators') or {}
-        if not _cpg:
-            continue
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)

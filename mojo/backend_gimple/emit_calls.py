@@ -49,10 +49,11 @@ from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
-    _callable_param_generator_apis, _callable_value_symbol, _default_expr_to_pair,
+    _callable_param_generator_apis, _callable_param_ret_types, _callable_value_symbol, _default_expr_to_pair,
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
 )
+from fire_compiler import _pair_key
 from mojo.middle.methods_shared import _is_selfhost_source_file
 
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
@@ -1326,7 +1327,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         #
         # What is left of the discriminator is a POSITIVE test, and it has to
         # be one: this container is one a callable was actually recorded
-        # being stored into (see `note_dict_callable_ret`). A negative test
+        # being stored into (see `note_container_callable_ret`). A negative test
         # ("the base looks like a container") is not enough, and finding that
         # out cost a real regression — `re`'s own `_RE.finditer(src)` reaches
         # this branch with a TUPLE index and a base whose actual type is a
@@ -1345,8 +1346,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # read its type from, and guessing is what this bug was.
         if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
                 and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-                and (node.func.obj.name in gen._dict_callable_ret
-                     or node.func.obj.name in gen._global_dict_callable_ret)):
+                and (node.func.obj.name in gen._container_callable_ret
+                     or node.func.obj.name in gen._global_container_callable_ret)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
                 return gen._lower_bound_method_call_value(_callee_v, node)
@@ -1355,7 +1356,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # callables stored in it were recorded as is usable only when
                 # it is UNANIMOUS, which is the same "unanimity or nothing"
                 # rule every other inference in this file follows — and it is
-                # enforced at the store (see `note_dict_callable_ret`), which
+                # enforced at the store (see `note_container_callable_ret`), which
                 # records '' once a second distinct return type appears. A
                 # dict holding callables of different return types therefore
                 # keeps the int64_t answer, i.e. exactly the behaviour before
@@ -1364,14 +1365,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `or 'int64_t'` also covers a dict that was never recorded
                 # at all. It used to be `next(iter(_seen))` over a set of
                 # every stored type, and THAT is what the self-host closure
-                # could not compile: `gen._dict_callable_ret` is set by
+                # could not compile: `gen._container_callable_ret` is set by
                 # attribute assignment, so it has no StructDef `type_ann`,
                 # its `.get()` came back `int64_t` rather than `MojoSet *`,
                 # and `next(...)` matched no lowering at all — it emitted a
                 # call to a `next` symbol that does not exist, so
                 # `fire.py --dump-full` compiled clean and then failed at
                 # `ld: undefined _next` out of this very function.
-                _vt = gen._dict_callable_ret.get(node.func.obj.name)
+                _vt = gen._container_callable_ret.get(node.func.obj.name)
                 if _vt is None:
                     # A dict held in a MODULE GLOBAL, read from `_toplevel`.
                     # `_reset_func`'s seed excludes any name this function
@@ -1379,7 +1380,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # name by definition — so only the never-reset
                     # whole-program table can answer here. Same two-table
                     # shape as `_lower_fnptr_call`'s global callee lookup.
-                    _vt = gen._global_dict_callable_ret.get(node.func.obj.name)
+                    _vt = gen._global_container_callable_ret.get(node.func.obj.name)
                 if not _vt:
                     _vt = 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
@@ -2467,6 +2468,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # already records the renamed name (see `_note_struct_import_alias`).
     _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
                    or {}).get(_fname_ctor, _fname_ctor)
+    # ...and a class declared INSIDE a function body, which is hoisted to
+    # module scope so the struct pipeline will give it a layout at all. A
+    # hoisted name that collided with an existing struct is renamed, and the
+    # rename is recorded against the function it was written in — which is
+    # what `current_func_name` is here, the same key a closure lookup uses.
+    # A hoisted class whose bare name was free has no entry, so its call site
+    # reads exactly as a module-level class's does. See
+    # `_gmi_hoist_nested_structs`.
+    _fname_ctor = (getattr(gen, '_nested_struct_names', None) or {}).get(
+        _pair_key(_as_str(getattr(gen, 'current_func_name', '') or ''), _fname_ctor),
+        _fname_ctor)
     if _fname_ctor in gen.struct_field_types:
         # `node.kwargs` (a direct CallExpr field read) NOT
         # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a
@@ -4877,9 +4889,9 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # an EMPTY set and the wrong answer for both. Restored below with the
     # rest of it.
     saved_callable_rets  = gen._callable_ret_types
-    saved_dict_callable  = gen._dict_callable_ret
+    saved_dict_callable  = gen._container_callable_ret
     gen._callable_ret_types = {}
-    gen._dict_callable_ret = {}
+    gen._container_callable_ret = {}
     saved_func_name      = gen.current_func_name
     saved_ret_type       = gen.func_ret_type
     saved_bb             = gen.bb_counter
@@ -5002,7 +5014,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
     gen._callable_ret_types     = saved_callable_rets
-    gen._dict_callable_ret      = saved_dict_callable
+    gen._container_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type
@@ -5543,6 +5555,19 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     # api is keyed by it; `_lower_fnptr_call` loads a global/captured
     # callable through the IdentExpr path instead, in which case there is
     # no parameter default to consult and nothing is recorded.
+    # The ordinary-function sibling of the arm below: a parameter whose
+    # declared default names a plain top-level function of this compile
+    # (`def apply_to(items, _f=upper)`) returns that function's real type,
+    # so `_lower_fnptr_call_N`'s box is read as the `char *` / `MojoList *` it
+    # actually holds. Consulted for the same reason and at the same point:
+    # the helper's own return type is what every consumer below dispatches
+    # on, and `int64_t` is the box, not the value.
+    _cpt = (getattr(gen, '_callable_param_ret_types', None) or {}).get(fp_raw)
+    if _cpt and ret_type == 'int64_t':
+        if _cpt == 'double':
+            return 'double', gen._new_val('double', f'(double){raw_t}')
+        if _cpt != 'void':
+            return _cpt, gen._new_val(_cpt, f'({_cpt}){raw_t}')
     _cap_api = (getattr(gen, '_callable_param_gen_api', None) or {}).get(fp_raw)
     if _cap_api is not None:
         _gen_t = gen._new_val('MojoGenerator *', f'(MojoGenerator *){raw_t}')

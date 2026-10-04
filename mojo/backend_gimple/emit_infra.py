@@ -222,6 +222,14 @@ def _reset_func(gen, body: list = None, params: list = None,
     # call, once `param_defaults` is in hand. See
     # `calls_shared._callable_param_generator_apis`.
     gen._callable_param_gen_api: dict[str, dict] = {}
+    # The same shape for the ORDINARY function a higher-order parameter's
+    # default names: `{param: the callee's return C type}`, so
+    # `_lower_fnptr_call_value` stops handing back the homogenized int64_t
+    # box for a `char *` / `MojoList *` result. Per-FUNCTION and reset HERE
+    # for the reason the line above gives. Seeded in `gen_func` from
+    # `calls_shared._callable_param_ret_types`, and for an A3 stack-switch
+    # body from `_coro_body_callable_param_rets`.
+    gen._callable_param_ret_types: dict[str, str] = {}
     # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
     # closure) -- reset per function so a stale entry from a
     # previously-compiled closure can never leak into an unrelated
@@ -331,6 +339,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
+    # The ENV VARS of nested `def`s this function owns -- a plain malloc block
+    # each, freed with a bare `free` (there is no bound method and no
+    # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
+    # wrong here). See `register_nested_env_free`.
+    gen._owned_env_names: set = set()
     # Names of values whose per-slot element kinds are recorded ON THE VALUE
     # (`struct.unpack` of a mixed format, and a local bound from one) — the
     # marker that makes a read with no compile-time slot index (iteration, a
@@ -605,8 +618,8 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unanimity rule is unchanged and is now enforced where the value is
     # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret = {}
-    # Seeded from self._global_dict_callable_ret (Phase 1.7, never reset)
+    gen._container_callable_ret = {}
+    # Seeded from self._global_container_callable_ret (Phase 1.7, never reset)
     # for the same reason `_elem_types` is seeded from `_global_elem_types`
     # just above: a module-level dict of callables means the same thing in
     # every function, and without the seed a `d['k']()` inside any FUNCTION
@@ -618,10 +631,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # a new wrong one. Explicit loop + `_as_str`, NOT a dict comprehension
     # over `.items()`: the same self-host boxing gap the `_elem_types` seed
     # above records.
-    for _gck in gen._global_dict_callable_ret:
+    for _gck in gen._global_container_callable_ret:
         _gck_s = _as_str(_gck)
         if _gck_s not in _reset_locally_bound:
-            gen._dict_callable_ret[_gck_s] = _as_str(gen._global_dict_callable_ret[_gck])
+            gen._container_callable_ret[_gck_s] = _as_str(gen._global_container_callable_ret[_gck])
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -1264,10 +1277,52 @@ def carry_callable_ret_types(gen, src: str, dst: str) -> None:
     lines — and the two global-store copies omitted all three, which is
     exactly the case that was broken. A copy that is forgotten is silent: the
     program keeps running and prints a plausible wrong value with exit 0."""
-    for _tbl in (gen._callable_ret_types, gen._dict_callable_ret,
+    for _tbl in (gen._callable_ret_types, gen._container_callable_ret,
                  gen._bound_method_ret_types):
         if src in _tbl:
             _tbl[dst] = _tbl[src]
+
+
+def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
+    """The `_return_callable_ret_types` hop: a name bound to the RESULT of a
+    call to a function that returns a CALLABLE inherits that callable's return
+    type.
+
+        def a():
+            e = lambda: False
+            return e
+        def c():
+            e = a()
+            print(e())        # CPython False; without this hop, 0
+
+    `carry_callable_ret_types` cannot do this hop, and the reason is its own
+    key: it copies from the lowered VALUE (`v`), and a call result is a fresh
+    temp that carries no entry — the fact lives on the NODE
+    (`node._callable_ret`, set by `GimpleGen.lower_expr`) and, before that, in
+    the compile-scoped `_return_callable_ret_types[callee]` the callee's own
+    `return` wrote. This reads the callee name straight off the CallExpr, which
+    is the one spelling that has it.
+
+    Only `_callable_ret_types`, because that is where a non-capturing closure or
+    a lifted free function lands; a callee returning a `MojoBoundMethod *` is
+    the `_bound_method_ret_types` family and is not claimed here.
+
+    A bound method bound through a call is NOT covered, and deliberately so:
+    `f = m.truthy` is an AssignStmt whose RHS is a MemberExpr, not a call,
+    and `m.truthy()` is not this shape either. What this hop buys is the one
+    that was measured wrong.
+
+    Called from the same four store sites that call `carry_callable_ret_types`,
+    because a copy that is silently forgotten is a wrong value with exit 0.
+    """
+    if not isinstance(value_node, gimple_ctypes.CallExpr):
+        return
+    _f = getattr(value_node, 'func', None)
+    if not isinstance(_f, gimple_ctypes.IdentExpr):
+        return
+    _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
+    if _rt:
+        gen._callable_ret_types[dst] = _rt
 
 
 def note_fresh_result(gen, t: str) -> None:
@@ -4593,13 +4648,24 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
-def note_dict_callable_ret(gen, dict_val: str, value_text: str,
-                           value_ctype: str = 'int64_t') -> None:
-    """A callable stored into a dict keeps its return type for a later
-    `d[k](...)` call, which is the one place a dict subscript can be a
-    CALLEE. Called from every dict store of an int64 slot; a non-callable
-    value matches none of the three sources below and is a no-op, which is
-    what keeps this off the hot path.
+def note_container_callable_ret(gen, container_val: str, value_text: str,
+                                value_ctype: str = 'int64_t',
+                                value_node=None) -> None:
+    """A callable stored into a CONTAINER keeps its return type for a later
+    `d[k](...)` / `lst[0](...)` call, which is the one place a container
+    subscript can be a CALLEE. Called from every store of an int64 slot into
+    any container this codegen tracks; a non-callable value matches none of
+    the three sources below and is a no-op, which is what keeps this off the
+    hot path.
+
+    CONTAINER, not dict: the table is keyed by the container's lowered name
+    and its consumer is the subscript-callee gate in `_lower_call`, which
+    asks "was a callable recorded being stored into THIS container?" without
+    caring which kind it is — so `_lower_list_literal`'s per-element append
+    (a single chokepoint) records through this same function, and the honest
+    name is the container-neutral one. It was `_dict_callable_ret` while only
+    dicts used it, and the doc that asked for the rename is
+    bugs/CODEGEN_call_through_subscript_callee_stubbed.md.
 
     THREE sources, because a first-class callable has more than one
     representation here and every one of them has to reach the same
@@ -4636,19 +4702,30 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str,
     """
     _rt = (gen._callable_ret_types.get(value_text)
            or gen._bound_method_ret_types.get(value_text))
+    # A CALL RESULT (`e['c'] = mk(100)` where `mk` returns a closure). The two
+    # tables above are keyed by a lowered VALUE, and a call result is a fresh
+    # temp no materialization site recorded; the fact is under the CALLEE's
+    # name in the compile-scoped `_return_callable_ret_types`, which the
+    # callee's own `return` wrote. Same source
+    # `carry_callable_ret_from_call` reads for the named-local hop, and it has
+    # to be read again here because this is a different destination.
+    if not _rt and isinstance(value_node, gimple_ctypes.CallExpr):
+        _vf = getattr(value_node, 'func', None)
+        if isinstance(_vf, gimple_ctypes.IdentExpr):
+            _rt = gen._return_callable_ret_types.get(_as_str(_vf.name))
     if not _rt and value_ctype == 'MojoBoundMethod *':
         _rt = 'int64_t'
     if not _rt:
         return
-    _cur = gen._dict_callable_ret.get(dict_val)
+    _cur = gen._container_callable_ret.get(container_val)
     if _cur is None:
-        gen._dict_callable_ret[dict_val] = _rt
+        gen._container_callable_ret[container_val] = _rt
     elif _cur and _cur != _rt:
-        # A second, DIFFERENT return type for the same dict: ambiguous from
-        # here on, and it must STAY ambiguous -- a third store of the first
-        # type must not un-poison it, so the '' is sticky (`_cur and ...`
-        # above never re-enters this branch once poisoned).
-        gen._dict_callable_ret[dict_val] = ''
+        # A second, DIFFERENT return type for the same container: ambiguous
+        # from here on, and it must STAY ambiguous -- a third store of the
+        # first type must not un-poison it, so the '' is sticky (`_cur and
+        # ...` above never re-enters this branch once poisoned).
+        gen._container_callable_ret[container_val] = ''
 
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
@@ -4672,12 +4749,12 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     OTHER value in the same dict print as True/False too, so
     `{'name': p.name, 'ok': p.ok}` rendered `{'name': True, 'ok': True}`.
 
-    `key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
+`key_ctype == 'MojoBytes *'` is its own key domain in the runtime (see
     `_DictSlot.keykind`), which is what the `bytes_` prefix selects — the
     same prefix the dict literal's float and str arms use, so the two halves of
     one literal cannot disagree about which domain a key is in.
 
-    `note_dict_callable_ret` runs first for both branches — a stored callable
+    `note_container_callable_ret` runs first for both branches — a stored callable
     keeps its return type whatever its slot kind is.
 
     The store goes through `_emit_call`, NOT a raw `gen._emit`, because that
@@ -4685,7 +4762,7 @@ def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
     integer key arrives as a raw machine word and `_apply_kw_keys` rewrites the
     call to the `_kw` twin (`mojo_dict_set_int_kw(d, 3, v)`). A raw emit skips
     that and hands the runtime `(char *)3` as a key to hash, which segfaults."""
-    gen._note_dict_callable_ret(dict_val, val)
+    gen._note_container_callable_ret(dict_val, val, val_ctype, val_node)
     vv64 = gen._to_int64(val_ctype, val)
     _suffix = 'bool' if gimple_exprtypes.is_python_bool_expr(gen, val_node) else 'int'
     _bs = 'bytes_' if key_ctype == 'MojoBytes *' else ''
@@ -4807,9 +4884,9 @@ def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     _rt = gen._callable_ret_types.get(value_text)
     if _rt:
         gen._global_callable_ret_types[gname] = _rt
-    _drt = gen._dict_callable_ret.get(value_text)
+    _drt = gen._container_callable_ret.get(value_text)
     if _drt is not None:
-        gen._global_dict_callable_ret[gname] = _drt
+        gen._global_container_callable_ret[gname] = _drt
 
 
 def _gen_print(gen, args: list, kwargs: list = None):
@@ -5683,7 +5760,7 @@ def _container_keys_safe(gen, name: str, ctype) -> bool:
     (ownership_destruct.key_views_consumed). Any other type is unaffected."""
     if ctype != 'MojoDict *' and ctype != 'MojoSet *':
         return True
-    return _key_views_ok(gen._own_fn_body, name)
+    return _key_views_ok(gen._cur_func_body, name)
 
 
 def maybe_push_owned_local(gen, name: str, value=None) -> None:
@@ -5722,7 +5799,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     # bare static function pointer and allocates nothing, never appears there).
     if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
         gen._closure_vals.discard(gen._decl_rhs_val)
-        if not _lambda_owned(gen._own_fn_body, name):
+        if not _lambda_owned(gen._cur_func_body, name):
             _drop_owned_candidate(gen, name)
             return
         gen._owned_closure_names.add(name)
@@ -5753,7 +5830,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # name at the scope exit, long after the temp is gone.
         if rhs in gen._owned_str_elem_vals:
             gen._owned_str_elem_vals.discard(rhs)
-            if not _list_elements_ok(gen._own_fn_body, name):
+            if not _list_elements_ok(gen._cur_func_body, name):
                 # The list owns its strings, but the program may hand an
                 # element pointer out (`kept.append(parts[0])`), and the
                 # element free would then dangle. Fail closed to the plain
@@ -5765,7 +5842,7 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
-        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
+        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._cur_func_body, name):
             candidates.discard(name)
             gen._owned_str_elem_names.discard(name)
             return
@@ -5869,6 +5946,10 @@ def _emit_owned_local_frees(gen):
         elif name in gen._owned_closure_names:
             # A bound method and the environment it owns (see mojo_closure_free).
             runtime_fn = 'mojo_closure_free'
+        elif name in gen._owned_env_names:
+            # A nested `def`'s environment: a plain malloc block and NO bound
+            # method, so a bare `free` -- see `register_nested_env_free`.
+            runtime_fn = 'free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
             # `_OWNS_STR_ELEMS` function returned; re-derived here from
@@ -5939,7 +6020,14 @@ def _reset_scope_state(gen) -> None:
     declaring body is being lowered right now."""
     gen._literal_storage = ''
     gen._literal_storage_ctype = ''
-    gen._own_fn_body = []
+    # NOT `gen._cur_func_body`: that is the AST body BEING LOWERED, owned by
+    # `_reset_func` (and by `begin_function`), not per-candidate-set state. Its
+    # only two `reset_no_candidates` callers each call `_reset_func` on the
+    # body they are about to lower immediately before, so resetting it here
+    # did nothing but throw away the one piece of information the ownership
+    # analysis needs about the function in progress -- a struct method's own
+    # body became `[]`, which every "how is this local USED?" question then
+    # answered vacuously, i.e. "no mention, so nothing can hold it, free it".
     gen._scoped_free_candidates = set()
     gen._scope_armed = set()
     gen._scope_live = []
@@ -5954,6 +6042,7 @@ def _reset_scope_state(gen) -> None:
     gen._owned_str_elem_names = set()
     gen._owned_str_elem_vals = set()
     gen._owned_closure_names = set()
+    gen._owned_env_names = set()
     # See `begin_function`'s note: self-hosting cannot infer a set/list
     # field's element type from an assignment, only from this table.
     _fet = gen._field_elem_types.setdefault('GimpleGen', {})
@@ -5964,6 +6053,7 @@ def _reset_scope_state(gen) -> None:
     _fet['_owned_str_elem_names'] = 'char *'
     _fet['_owned_str_elem_vals'] = 'char *'
     _fet['_owned_closure_names'] = 'char *'
+    _fet['_owned_env_names'] = 'char *'
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
@@ -6329,7 +6419,7 @@ def begin_function(gen, fn) -> None:
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
-    gen._own_fn_body = fn.body
+    gen._cur_func_body = fn.body
     gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
     # A lambda local declared in a LOOP BODY is owned by the body, on the same
@@ -6366,6 +6456,49 @@ def reset_no_candidates(gen) -> None:
     gen._owned_stack_allocated = set()
     gen._int_keyed_dicts = set()
     _reset_scope_state(gen)
+
+
+def register_nested_env_free(gen, def_name: str, env_var: str,
+                             owner_body=None) -> None:
+    """Take ownership of the environment a nested `def` just allocated, when
+    the enclosing function's body proves it cannot escape.
+
+    `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
+    nothing freed it: `def helper(n): def inner(x): return x + n; return
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
+    is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
+    sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
+    bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT
+    `mojo_closure_free`, which would read two words of a `helper_inner_env *`
+    as a bound method.
+
+    `ownership_destruct.nested_def_env_owned` is the whole ownership
+    question; everything here is the wiring, and it is the same wiring
+    `_maybe_push_owned_local` does for a capturing lambda's value — register
+    the name, push the thunk at the declaration, let `emit_return_frees` and
+    `emit_fallthrough_frees` free and cancel it. Deliberately NOT
+    scope-registered: the env var is function-scoped
+    (`gen._declare_var` at the nested-`def` STATEMENT), so there is no loop
+    body to register against and the `break`/`continue` half of the block
+    machinery does not apply.
+
+    Fail-closed: an unprovable body leaves the name unregistered, which is
+    today's leak and never a double free.
+    """
+    # `owner_body` is the body of the function this nested `def` is a
+    # STATEMENT of, captured by the caller before anything was lifted -- see
+    # `_gen_stmt_FunctionDef`'s note on why it cannot be `gen._cur_func_body`.
+    # `owner_body is None` means the caller had no body to speak for, and no
+    # proof is no free.
+    if owner_body is None:
+        return
+    if not ownership_destruct.nested_def_env_owned(owner_body, _as_str(def_name)):
+        return
+    gen._owned_env_names.add(env_var)
+    gen._owned_free_candidates.add(env_var)
+    gen._owned_free_pushed.add(env_var)
+    gen._emit(f"  mojo_cleanup_push_ptr ({gen._cname(env_var)});")
 
 
 def emit_return_frees(gen) -> None:

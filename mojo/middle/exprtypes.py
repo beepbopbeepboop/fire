@@ -483,6 +483,80 @@ def _receiver_ctypes(gen, node) -> list:
         return []
 
 
+def record_bool_params(gen, node) -> None:
+    """Record which of the function being lowered has a `bool`-annotated
+    PARAMETER, keyed by `gen.current_func_name`.
+
+    Called from the two sites in `emit_funcs.py` that set `current_func_name`
+    with the `FunctionDef` in hand — the free-function path (`node.name`) and
+    the struct-method path (`<Struct>_<method><overload>`) — because those are
+    the only places where the annotation text and the emitted function name are
+    both available. `_signature_ctypes` was the alternative chokepoint, but it
+    is only reached for a varargs signature on the body-lowering path (the
+    unconditional `func_param_types[...] = _signature_ctypes(...)` writes are
+    in later pre-passes and in prototype emission), so it would have missed
+    every ordinary signature.
+
+    The key is `current_func_name` verbatim rather than a name derived here,
+    so the reader cannot disagree with the writer about what a method's key is.
+
+    `*args` / `**kwargs` are skipped: they are packed into a `MojoList *` /
+    `MojoDict *` and have no per-element annotation to honour, so claiming
+    them would be a claim about nothing.
+    """
+    _tbl = getattr(gen, '_bool_param_names', None)
+    if _tbl is None:
+        _tbl = {}
+        gen._bool_param_names = _tbl
+    _key = _as_str(getattr(gen, 'current_func_name', '') or '')
+    if not _key:
+        return
+    _names = _tbl.get(_key)
+    if _names is None:
+        _names = set()
+        _tbl[_key] = _names
+    # Indexed, and never `isinstance(_p, list)`: a param element is a
+    # (name, annotation) TUPLE under CPython, so a list test is False for
+    # every one of them and the whole table stays empty. Self-hosted, the
+    # documented shape is a 2-slot list, which is why the codebase indexes.
+    _params = getattr(node, 'params', None) or []
+    for _pi in range(len(_params)):
+        _p = _params[_pi]
+        _pn = _as_str(_p[0])
+        if not _pn or _pn.startswith('*'):
+            continue
+        if _p[1] is not None and _as_str(_p[1]).strip() == 'bool':
+            _names.add(_pn)
+
+
+def bool_param_in_scope(gen, name: str) -> bool:
+    """Is `name` a `bool`-annotated parameter of the function being lowered?
+    See `record_bool_params` for how the table is written.
+
+    The trailing-digit strip is the one wrinkle: an OVERLOADED method's
+    `current_func_name` carries its overload id (`Box_report2`) while the
+    annotation is per-declaration, and `Box_report` is the key that names it.
+    Stripping the digit run recovers that key; without it an overloaded
+    method's bool parameters simply fall back to today's answer, which is the
+    safe direction.
+    """
+    _tbl = getattr(gen, '_bool_param_names', None)
+    if not _tbl or not name:
+        return False
+    _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
+    _names = _tbl.get(_cf)
+    if _names is not None and name in _names:
+        return True
+    _base = _cf
+    while _base and _base[-1].isdigit():
+        _base = _base[:-1]
+    if _base != _cf:
+        _names = _tbl.get(_base)
+        if _names is not None and name in _names:
+            return True
+    return False
+
+
 def is_python_bool_expr(gen, node) -> bool:
     """Does this AST expression hold a Python `bool` VALUE, as distinct from a
     plain int?
@@ -511,6 +585,16 @@ def is_python_bool_expr(gen, node) -> bool:
     `[b.flag]` — while the same value compared (`b.flag == True`) was right,
     because the comparison produces its own `_Bool`.
 
+    A `bool`-annotated PARAMETER is the third shape, and the hardest of the
+    three to key. `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`, so
+    a bool param IS distinguishable from an int param in `func_param_types` —
+    but NOT from a small integer LITERAL's own lowering, which is also a plain
+    C `int` (see `_local_literal_ctype`'s docstring). Keying off `'int'` would
+    be a guess that turns `x = 5; print(x)` into `True`. So the annotation is
+    captured where it is still readable — `record_bool_params`, called from
+    the two places that set `gen.current_func_name` with the `FunctionDef` in
+    hand — and read back per function by `bool_param_in_scope`.
+
     One predicate, so `print`, a dict store and a list literal cannot disagree
     about the same value — which they did: `print(b)` formatted as True/False
     while `{'k': b}` stored a value the dict repr then rendered as `1`.
@@ -520,6 +604,8 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, BoolLiteral):
         return True
     if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
+        return True
+    if isinstance(node, IdentExpr) and bool_param_in_scope(gen, _as_str(node.name)):
         return True
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
@@ -555,9 +641,10 @@ def _is_python_bool_field(gen, node) -> bool:
     `b = Box(True, 5)`, because `_quick_type` reads `var_types`, which has no
     entry for a module-level GLOBAL: every spelling of `b.flag` printed
     `1`/`0` at module scope while the same field inside a function printed
-    `True`/`False`. A receiver this cannot type at all (a call result, a
-    subscript) answers False, which is the pre-existing behaviour of every
-    caller of the shared predicate.
+    `True`/`False`. `_receiver_ctypes` answers with a LIST of every type the
+    backend has RECORDED for the name, so a spelling it cannot type at all
+    (a call result, a subscript) matches nothing and this answers False --
+    the pre-existing behaviour of every caller of the shared predicate.
     """
     _member = getattr(node, 'member', None)
     if not _member:
@@ -573,7 +660,8 @@ def _is_python_bool_field(gen, node) -> bool:
     for _rt in _receiver_ctypes(gen, _recv):
         if not _rt or not _rt.endswith(' *'):
             continue
-        if _member in (_bf.get(_struct_name_of(_rt)) or ()):
+        _rsn = _struct_name_of(_rt)
+        if _rsn and _member in (_bf.get(_rsn) or ()):
             return True
     return False
 
@@ -594,11 +682,14 @@ def _is_python_bool_method(gen, node) -> bool:
 
     `struct_bool_methods` records only methods whose EVERY `return` hands
     back a bool field (see module_gen.py's second per-method loop), so a
-    method that merely reads one is not claimed. As with the field case, the
-    answer is deliberately NOT a `_Bool` return type: that would make
-    `b.get() + 1` a GIMPLE operand-type error, which is the reason the real
-    fix (this document's option A, `_TYPE_MAP['bool'] = '_Bool'`) needs the
-    full gate and its own session.
+    method that merely reads one is not claimed. The receiver is resolved
+    through `_receiver_ctypes` for the same reason the field case is — a
+    LIST, so `b.get()` at module scope and the identical call inside a
+    `def` cannot disagree. As with the field case, the answer is
+    deliberately NOT a `_Bool` return type: that would make `b.get() + 1` a
+    GIMPLE operand-type error, which is the reason the real fix (this
+    document's option A, `_TYPE_MAP['bool'] = '_Bool'`) needs the full gate
+    and its own session.
     """
     _f = getattr(node, 'func', None)
     if not isinstance(_f, MemberExpr):
@@ -606,13 +697,12 @@ def _is_python_bool_method(gen, node) -> bool:
     _bm = getattr(gen, 'struct_bool_methods', None)
     if not _bm:
         return False
-    try:
-        _rt = gen._quick_type(_f.obj)
-    except Exception:
-        return False
-    if not _rt or not _rt.endswith(' *'):
-        return False
-    return _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ())
+    for _rt in _receiver_ctypes(gen, _f.obj):
+        if not _rt or not _rt.endswith(' *'):
+            continue
+        if _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ()):
+            return True
+    return False
 
 
 def _as_str_node(v) -> str:

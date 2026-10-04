@@ -72,6 +72,7 @@ import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+from mojo.middle.types import _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -1464,7 +1465,7 @@ def _lambda_pairs_ret_type(gen, pairs) -> str:
     """The single callable return type stored in a dict LITERAL of lambdas,
     or '' when they disagree (or are not all lambdas).
 
-    The unanimity-or-nothing rule is `note_dict_callable_ret`'s, applied at
+    The unanimity-or-nothing rule is `note_container_callable_ret`'s, applied at
     the one site that knows every element before the dict exists. '' is the
     ambiguous answer, and every consumer reads it with `or 'int64_t'`, so
     this can only preserve the pre-existing behaviour, never invent one."""
@@ -1519,6 +1520,309 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
     return result
 
 
+# The statement-lists a `class` statement can be nested inside. A tuple of
+# names, not a dict of attribute name -> is-a-list: the walk has to try EVERY
+# slot on every node type (only the statement types that carry one of them
+# actually have it, and `getattr(..., None)` answers the rest), so the test is
+# "does this attribute hold a statement list", not "is this node a kind that
+# does". Written out rather than reusing the shared `_walk_ast`, for the
+# reason `_gmi_collect_self_assigns`'s own nested-def descent documents:
+# `_walk_ast` does not reliably recurse into a nested `StructDef`/`FunctionDef`
+# self-hosted (the node is misclassified as a scalar leaf), so a walker built
+# on it would find nested classes in the CPython shim and miss them under
+# `mojoc`. Every consumer of "is there a class declared in here" has to be
+# written out, so it is written out once here.
+_NESTED_CLASS_BODY_SLOTS = (
+    'body', 'then_body', 'else_body', 'finally_body', 'items',
+)
+
+
+def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False) -> None:
+    """Every `StructDef` written INSIDE `body`, in source order, as
+    `[node, enclosing_key]` PAIRS rather than 2-tuples.
+
+    The pairs are index-addressed by the one caller for the reason the rest of
+    this file writes index loops instead of `zip()`: the self-hosted backend
+    has no `zip()` lowering, and a 2-tuple unpack in a `for` header boxes both
+    slots to `int64_t` — which here would box the `StructDef` POINTER (losing
+    the node) and the string (losing the name). A list element read by index
+    keeps each slot's own type.
+
+    Recursive over the statement-lists a class can hide in: a plain function
+    body, an `if`/`else`/`while`/`for`/`try`/`with`/`match` body, and a nested
+    `def` or `class` body. `enclosing` is the `current_func_name`-shaped key of
+    the innermost enclosing function — which is exactly the value
+    `current_func_name` holds while that function's body is lowered, so the
+    rename map the caller builds is keyed the same way the constructor call
+    site reads it. `top` is True only for the module-level statement list,
+    whose classes are already module scope and must not be collected again.
+    """
+    for _nc in (body or []):
+        if isinstance(_nc, StructDef):
+            if not top:
+                out.append([_nc, enclosing])
+            # A struct METHOD's enclosing key is `current_func_name`, which the
+            # method emitter sets to `<struct>_<method>` — the class's own name
+            # with no enclosing-function prefix (`closures.discover_closures`
+            # composes it the same way).
+            _cname = _as_str(_nc.name)
+            for _ncm in (_nc.methods or []):
+                if isinstance(_ncm, FunctionDef):
+                    _gmi_nested_struct_defs(
+                        _ncm.body, _cname + '_' + _as_str(_ncm.name), out)
+            continue
+        if isinstance(_nc, FunctionDef):
+            # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
+            # is the lifted name while its body is lowered — so the key
+            # composes rather than replacing. `closures.discover_closures`'s
+            # `lifted = f"{outer_name}_{inner.name}"` is the other half of
+            # that fact.
+            _gmi_nested_struct_defs(
+                _nc.body,
+                enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
+                out)
+            continue
+        if isinstance(_nc, IfStmt):
+            _gmi_nested_struct_defs(_nc.then_body, enclosing, out)
+            # `elifs` is a list of (condition, body) PAIRS, so the body is an
+            # indexed slot read and not another statement list — the same
+            # shape `_gmi_collect_self_assigns` walks.
+            for _nce in range(len(_nc.elifs or [])):
+                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out)
+            _gmi_nested_struct_defs(_nc.else_body, enclosing, out)
+            continue
+        if isinstance(_nc, MatchStmt):
+            for _ncmc in (_nc.cases or []):
+                _gmi_nested_struct_defs(
+                    getattr(_ncmc, 'body', None), enclosing, out)
+            continue
+        for _slot in _NESTED_CLASS_BODY_SLOTS:
+            _gmi_nested_struct_defs(
+                getattr(_nc, _slot, None), enclosing, out)
+
+
+def _gmi_target_leaf_names(target, out: set) -> None:
+    """Add every NAME a binding target introduces to `out`. Handles the three
+    shapes a target has: a bare `IdentExpr`, a `TupleExpr`/`ListExpr` of them
+    (`(a, b) = ...`), and the PARENTHESISED-TEXT form the parser preserves for
+    a `for q, w in ...` loop target and for `*rest` / `**kw` — flattened by the
+    one reader `types._unpack_target_leaf_names` already is, rather than by a
+    second walk (its own docstring records the `(a)`-versus-`(a,)` bug a
+    second walk would reintroduce)."""
+    if target is None:
+        return
+    if isinstance(target, str):
+        for _leaf in _unpack_target_leaf_names(target):
+            if _leaf:
+                out.add(_leaf)
+        return
+    if isinstance(target, (TupleExpr, ListExpr)):
+        for _el in (target.elements or []):
+            _gmi_target_leaf_names(_el, out)
+        return
+    _tname = getattr(target, 'name', None)
+    if isinstance(_tname, str) and _tname:
+        out.add(_tname)
+
+
+def _gmi_local_binding_names(stmts, out: set) -> None:
+    """Every name a LOCAL binding can introduce anywhere in `stmts` — the
+    parameters of every function and method, and every `VarDecl`,
+    assignment target, `for`/`with`/`except`/comprehension target, at any
+    nesting depth inside a body.
+
+    Its only consumer is `_gmi_hoist_nested_structs`, and the question it
+    answers is a C one: a local variable named `K` SHADOWS the typedef
+    `typedef struct K { ... } K;`, so every type use of that struct inside that
+    function stops compiling (`_alloc_K`'s `K * _t4;` becomes "K undeclared",
+    and gcc then cascades over the rest of the function). The rule follows
+    from that: a hoisted class keeps its bare name only when no local in the
+    module can shadow the typedef.
+
+    Written out over the node types rather than delegated to `_walk_ast` for
+    the reason `_gmi_collect_self_assigns` documents: `_walk_ast` does not
+    reliably recurse self-hosted. It is deliberately over-broad — a
+    comprehension's element is a local even where the comprehension lowers to
+    something else, and naming a few names that turn out not to become C
+    locals can only make a hoist be SKIPPED, never make it be wrong.
+    """
+    if not isinstance(stmts, list):
+        return
+    for _lb in (stmts or []):
+        if isinstance(_lb, VarDecl):
+            if _lb.name:
+                out.add(_as_str(_lb.name))
+        elif isinstance(_lb, FunctionDef):
+            # Indexed param slots, never `isinstance(_p, list)`: a param is a
+            # (name, annotation) TUPLE under CPython, so a list test is False
+            # for every one of them and a PARAMETER would never be counted as
+            # a local — which for `_gmi_hoist_nested_structs` means a
+            # parameter shadowing a hoisted struct's typedef goes unnoticed.
+            for _lbp in range(len(_lb.params or [])):
+                _gmi_target_leaf_names(_lb.params[_lbp][0], out)
+            _gmi_local_binding_names(_lb.body, out)
+        elif isinstance(_lb, StructDef):
+            for _lbm in (_lb.methods or []):
+                if isinstance(_lbm, FunctionDef):
+                    for _lbmp in range(len(_lbm.params or [])):
+                        _gmi_target_leaf_names(_lbm.params[_lbmp][0], out)
+                    _gmi_local_binding_names(_lbm.body, out)
+        elif isinstance(_lb, (AssignStmt, AugAssignStmt)):
+            _gmi_target_leaf_names(_lb.target, out)
+            if isinstance(_lb.value, Comprehension):
+                _gmi_comprehension_targets(_lb.value, out)
+        elif isinstance(_lb, MultiAssignStmt):
+            for _lbt in (_lb.targets or []):
+                _gmi_target_leaf_names(_lbt, out)
+        elif isinstance(_lb, ForStmt):
+            _gmi_target_leaf_names(_lb.target, out)
+            _gmi_local_binding_names(_lb.body, out)
+            _gmi_local_binding_names(_lb.else_body, out)
+        elif isinstance(_lb, WhileStmt):
+            _gmi_local_binding_names(_lb.body, out)
+            _gmi_local_binding_names(_lb.else_body, out)
+        elif isinstance(_lb, WithStmt):
+            for _lbi in (_lb.items or []):
+                _gmi_target_leaf_names(getattr(_lbi, 'alias', None), out)
+            _gmi_local_binding_names(_lb.body, out)
+        elif isinstance(_lb, TryStmt):
+            _gmi_local_binding_names(_lb.body, out)
+            for _lbh in (_lb.handlers or []):
+                if getattr(_lbh, 'name', None):
+                    out.add(_as_str(_lbh.name))
+                _gmi_local_binding_names(getattr(_lbh, 'body', None), out)
+            _gmi_local_binding_names(_lb.else_body, out)
+            _gmi_local_binding_names(_lb.finally_body, out)
+        elif isinstance(_lb, IfStmt):
+            _gmi_local_binding_names(_lb.then_body, out)
+            for _lbe in range(len(_lb.elifs or [])):
+                _gmi_local_binding_names(_lb.elifs[_lbe][1], out)
+            _gmi_local_binding_names(_lb.else_body, out)
+        elif isinstance(_lb, MatchStmt):
+            for _lbc in (_lb.cases or []):
+                _gmi_local_binding_names(getattr(_lbc, 'body', None), out)
+
+
+def _gmi_comprehension_targets(comp, out: set) -> None:
+    """The locals a comprehension introduces: each generator's target plus its
+    `element` / `key` binding."""
+    for _cg in (getattr(comp, 'generators', None) or []):
+        _gmi_target_leaf_names(getattr(_cg, 'target', None), out)
+        for _cgc in (getattr(_cg, 'conditions', None) or []):
+            _gmi_target_leaf_names(getattr(_cgc, 'target', None), out)
+    _gmi_target_leaf_names(getattr(comp, 'element', None), out)
+    _gmi_target_leaf_names(getattr(comp, 'key', None), out)
+
+
+def _gmi_hoist_nested_structs(self, stmts: list) -> list:
+    """Return `stmts` with every class declared inside a function body HOISTED
+    to module scope, so the ordinary struct pipeline treats it exactly like a
+    class written at module level.
+
+    Why this has to happen here, at all: a `class` statement is a TYPE
+    declaration, and every consumer of the module's struct set — the
+    `struct_field_types` seed, `_merge_struct_inheritance`, the `_alloc_X`
+    helper, the `typedef struct X` and the method-BODY emission loop — reads
+    the module-level statement list. A `StructDef` nested in a
+    `FunctionDef.body` was in none of them, so the class had no layout and no
+    emitted methods, and `_lower_MemberExpr`'s method-call arm (which resolves
+    the receiver's struct through `struct_field_types`) found nothing and fell
+    into its stub branch, which yields the RECEIVER. That made every method
+    call on a class defined inside a function answer with the object itself at
+    exit 0 with no diagnostic. (Fixed 2026-10-02; the residue — a nested
+    class's method cannot read the enclosing function's locals, so
+    `functools.cmp_to_key`'s comparison dunders compare with a stubbed
+    comparator — is bugs/CODEGEN_nested_class_method_cannot_reach_an_
+    enclosing_local.md.)
+
+    Hoisting APPENDS and does not move: the original statement stays in the
+    function body, where it lowers to the same `TODO: StructDef` no-op it
+    always has. That is deliberate. `_gmi_collect_self_assigns` folds a nested
+    class's `self.<f> = ...` onto the ENCLOSING struct as a workaround for the
+    nested class having no layout of its own
+    (`mojo/middle/module_shared.py`, whose comment says so); removing the
+    statement from the body would silently withdraw that folded field and break
+    every consumer of it. Appending is purely additive — the nested class gains
+    the layout it should have had, and nothing else changes.
+
+    NAME COLLISION. Two things can stop a hoisted class from using its bare
+    name, and both rename it to `<Name>__<enclosing>` with the mapping recorded
+    in `_nested_struct_names` (keyed by `_pair_key(current_func_name,
+    bare_name)` — the composite-key convention the closure tables use, so the
+    constructor call site inside the defining function resolves the RIGHT
+    class):
+
+    * **another struct already claims the name** — a module-level class of the
+      same name, or a second function's nested one. `_struct_name_owner`'s
+      first-wins would DROP the loser's method symbols, so the second class
+      would silently borrow the first one's layout.
+    * **a LOCAL binding in this module has the name** — and this one is a hard
+      build failure rather than a wrong answer. A C local named `K` SHADOWS
+      `typedef struct K { ... } K;`, so every type use of that struct inside
+      that function stops compiling (`K * _t4;` becomes "K undeclared" and gcc
+      cascades over the rest of the function). `functools.cmp_to_key`'s `K` is
+      the real-world instance: the class is nested, and the conventional
+      `K = cmp_to_key(cmp)` binds a local named `K` in the caller.
+
+    The bare name survives whenever neither applies, which is the
+    overwhelmingly common case and leaves every existing name-keyed lookup
+    (constructor, method symbol, field table) untouched.
+    """
+    _taken = set(self._imported_struct_home)
+    for _t_src in (list(stmts) + list(self._imported_typedef_structs)):
+        if isinstance(_t_src, StructDef):
+            _taken.add(_as_str(_t_src.name))
+    _locals_named: set = set()
+    _gmi_local_binding_names(stmts, _locals_named)
+    found: list = []
+    _gmi_nested_struct_defs(stmts, '', found, True)
+    if not found:
+        return stmts
+    _nested_names: dict = getattr(self, '_nested_struct_names', None)
+    if _nested_names is None:
+        _nested_names = {}
+        self._nested_struct_names = _nested_names
+    out = list(stmts)
+    renamed_from: list = []
+    renamed_to: list = []
+    for _h_i in range(len(found)):
+        _h_node = found[_h_i][0]
+        _h_encl = _as_str(found[_h_i][1])
+        _h_bare = _as_str(_h_node.name)
+        if _h_bare not in _taken and _h_bare not in _locals_named:
+            _taken.add(_h_bare)
+            renamed_from.append(_h_bare)
+            renamed_to.append(_h_bare)
+            out.append(_h_node)
+            continue
+        _h_base = _h_bare + '__' + _h_encl
+        _h_new = _h_base
+        _h_n = 2
+        while _h_new in _taken:
+            _h_new = _h_base + str(_h_n)
+            _h_n += 1
+        _taken.add(_h_new)
+        renamed_from.append(_h_bare)
+        renamed_to.append(_h_new)
+        _h_node.name = _h_new
+        out.append(_h_node)
+    # The alias keys need the FINAL struct names, because a method's enclosing
+    # key contains the name of the class it belongs to — so they are computed
+    # on a SECOND walk, after the renames above have landed. The two walks
+    # visit the same nodes in the same order (only `.name` changed, which no
+    # branch of the walk reads), so position correlates them; that is why this
+    # is positional rather than an `id()` keyed side table, which the rest of
+    # this codebase treats as unreliable self-hosted.
+    again: list = []
+    _gmi_nested_struct_defs(stmts, '', again, True)
+    for _h_i in range(len(again)):
+        if renamed_to[_h_i] != renamed_from[_h_i]:
+            _nested_names[_pair_key(
+                _as_str(again[_h_i][1]), renamed_from[_h_i])] = renamed_to[_h_i]
+    return out
+
+
+
 
 
 
@@ -1526,6 +1830,12 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
 
 
 def gen_module_impl(self, stmts):
+
+    # A class written INSIDE a function body is a type declaration like any
+    # other, and the struct pipeline reads the module-level statement list, so
+    # it is hoisted there before anything consumes the list. See
+    # `_gmi_hoist_nested_structs` for why it appends rather than moves.
+    stmts = _gmi_hoist_nested_structs(self, stmts)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
@@ -7489,12 +7799,48 @@ def gen_module_impl(self, stmts):
             continue
         self._compile_nested_async_functions(s, _async_fns)
 
+    # A compiled generator METHOD gets one C++ coroutine unit PER RECEIVER
+    # CLASS, not per defining FunctionDef.
+    #
+    # `_merge_struct_inheritance` (gimple_codegen.py) gives every StructDef's
+    # `.methods` the fully-merged view, so a subclass's list holds the very
+    # SAME FunctionDef object its base's does. The unit's `cls` is an opaque
+    # int64_t placeholder that is passed positionally and NEVER dereferenced —
+    # every supported `cls.<...>` shape resolves purely BY NAME against the
+    # struct the unit was emitted for (`_gen_cpp_generator_unit`'s
+    # `_cls_refs_supported`) — so a subclass needs its OWN unit. Sharing the
+    # base's would read `_classattr_Base__tag` where CPython reads Child's,
+    # which is why this is a per-class unit and not just a lookup.
+    #
+    # Keying the work on `id(m)` — as this loop's predecessor did, popping
+    # `_generator_fns` as it went — therefore registered only the DEFINING
+    # class: `Child`'s turn never came, because its `id(m)` had already been
+    # popped. `Child.gen(4)` then fell through to the ordinary
+    # `Child_gen(...)` lowering, a struct method gen_module's Phase 2a
+    # deliberately never emits for a generator method, so its `yield`s were
+    # dropped on the floor and the consuming `for` got a void value and
+    # answered `mojo_unsupported_iter` at run time. Registering per
+    # (struct, method) closes both halves: `_supported_generator_methods` also
+    # suppresses that stub (both GIMPLE emission sites skip on membership —
+    # module_gen.py's Phase 2a), and the call site
+    # (emit_methods.py's `_lower_method_call`, whose class-level-receiver arm
+    # looks up `(func.obj.name, method)`) finds its unit.
+    #
+    # This also REPLACES two byte-identical loops that ran back to back with
+    # nothing between them — the second's only difference was a "(pass 2)"
+    # debug string, and with the work keyed on the pair rather than on
+    # `id(m)` a second identical pass could only ever find nothing new.
+    _gen_method_keys_done: set = set()
+    _gen_method_ids_done: set = set()
     for _sd in stmts:
         if not isinstance(_sd, StructDef):
             continue
         for m in _sd.methods:
             if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
                     and id(m) not in _async_fns):
+                continue
+            key = (_sd.name, m.name)
+            if key in _gen_method_keys_done:
                 continue
             if not _generator_quick_eligible(m):
                 continue
@@ -7507,7 +7853,8 @@ def gen_module_impl(self, stmts):
                             'eligible for C++ coroutine path, falling '
                             'back to honest refusal', e)
                 continue
-            key = (_sd.name, m.name)
+            _gen_method_keys_done.add(key)
+            _gen_method_ids_done.add(id(m))
             self._supported_generator_methods[key] = m
             self._generator_method_api[key] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
@@ -7525,44 +7872,10 @@ def gen_module_impl(self, stmts):
                 self._func_param_defaults[f"{base}_start"] = [
                     (pn, dv) for pn, dv in _gen_dflts.items()]
             self._generator_cpp_units.append(cpp_text)
-            _generator_fns.pop(id(m), None)
-
-    for _sd in stmts:
-        if not isinstance(_sd, StructDef):
-            continue
-        for m in _sd.methods:
-            if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
-                    and id(m) not in _async_fns):
-                continue
-            if not _generator_quick_eligible(m):
-                continue
-            try:
-                cpp_text, value_ctype, base, param_ctypes = \
-                    self._gen_cpp_generator_unit(m, struct_name=_sd.name)
-            except _UnsupportedGeneratorShape as e:
-                self._cpp_refusal_reasons.setdefault(m.name, str(e))
-                _debug_note(f'generator method {_sd.name}.{m.name!r} not '
-                            'eligible (pass 2)', e)
-                continue
-            key = (_sd.name, m.name)
-            self._supported_generator_methods[key] = m
-            self._generator_method_api[key] = {
-                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                # Which SOURCE parameter, if any, is the receiver slot a
-                # caller must fill -- see mojo/middle/coro.py's identical
-                # key for why the registered `params` (bare ctype strings)
-                # cannot carry it. `m.params[0][0]` is the only place the
-                # name survives, so it is read here, at registration.
-                'receiver': (_cpp_method_receiver_name(m)),
-                'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
-            }
-            self.func_param_types[f"{base}_start"] = param_ctypes
-            _gen_dflts = getattr(m, 'param_defaults', None) or {}
-            if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = [
-                    (pn, dv) for pn, dv in _gen_dflts.items()]
-            self._generator_cpp_units.append(cpp_text)
-            _generator_fns.pop(id(m), None)
+    # The ids come out only here, after EVERY struct has had its turn. Popping
+    # inside the loop is precisely what stopped a subclass from being reached.
+    for _gm_done in _gen_method_ids_done:
+        _generator_fns.pop(_gm_done, None)
 
     if _gsrc:
         for _od in stmts:
@@ -8263,10 +8576,10 @@ def gen_module_impl(self, stmts):
             # A dict literal of LAMBDAS: what a later `d['k'](...)` call site
             # needs is the callee's return type, and the dict's own value
             # type (`void *`) does not carry it. Recorded with the same
-            # unanimity-or-nothing rule `note_dict_callable_ret` applies at a
+            # unanimity-or-nothing rule `note_container_callable_ret` applies at a
             # runtime store (a dict has one value slot, so the answer is only
             # usable when every callable in it agrees).
-            self._global_dict_callable_ret[_gname] = \
+            self._global_container_callable_ret[_gname] = \
                 _lambda_pairs_ret_type(self, _value.pairs)
         elif isinstance(_value, LambdaExpr):
             # `e = lambda: False` at module scope. The lambda's own C return

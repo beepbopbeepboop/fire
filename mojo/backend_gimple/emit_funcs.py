@@ -63,6 +63,36 @@ from mojo.middle.funcs_shared import (
 )
 
 def _gen_stmt_FunctionDef(gen, node: FunctionDef):
+    # The body that OWNS this nested `def`'s environment — read ONCE, here,
+    # before anything nested is lifted. It is emphatically NOT the AST body of
+    # whatever function was lowered most recently: lifting `mid`'s own body
+    # lowers `inner`'s environment statement, and it is `mid`'s body that owns
+    # that environment, not `outer`'s. That is not a near miss -- `outer`'s
+    # body never mentions `inner` at all, so asking about the wrong body always
+    # answers "yes, safe", and
+    #     def outer():
+    #         total = 0
+    #         def mid():
+    #             def inner(k):
+    #                 nonlocal total
+    #                 total = total + k
+    #             return inner        # <-- a real escape
+    #         f = mid(); f(3); f(4)
+    # emitted `free (_env_inner)` in `mid` immediately after handing that same
+    # pointer back as its return value, and the caller's first `f(3)` then
+    # dereferenced freed memory (SIGSEGV, test_nonlocal.py's "two closure
+    # levels deep" pair). `mid`'s own body DOES mention `inner` as a returned
+    # value, so the same rule asked of the right body declines to free it.
+    #
+    # `gen._cur_func_body` is that right body, and it is right here because
+    # `_reset_func` -- the one place that begins lowering a body -- sets it, so
+    # `_gen_lifted_closure` sets it too. The ownership analysis used to read a
+    # SECOND field for this (`_own_fn_body`), which only `begin_function`
+    # assigned, so every one of those questions was answered about a top-level
+    # function's body even while a closure was being lowered; the two fields
+    # are one field now, and the same class of stale read is documented at
+    # `emit_calls.py`'s `_cur_func_body` note.
+    owner_body = gen._cur_func_body
     # A nested `async def` (not an async generator) — whether nested
     # inside a struct method (device_context.mojo's `async def
     # wrapper(...) capturing -> None:` shape, discovered by gen_module's
@@ -181,6 +211,11 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
+        # Take ownership of the environment this nested `def` just allocated,
+        # if the enclosing body proves nothing can hold it past this scope.
+        # A no-op otherwise, which is today's leak and never a double free.
+        # See `ginf.register_nested_env_free`.
+        ginf.register_nested_env_free(gen, node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
 
@@ -2350,8 +2385,19 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         gen._callable_param_gen_api = dict(
             (getattr(gen, '_coro_body_callable_param_apis', None) or {})
             .get(node.name, {}))
+        # A coroutine body carries the FACT (`_mojo_coro_callable_param_fns`,
+        # attached by `coro._mark_coro_callable_param_fns`) rather than the
+        # answer, because `register` is an AST pre-pass that runs before any
+        # module-level function's `func_return_types` entry exists. Resolved
+        # here, where it does exist -- see that function's docstring.
+        gen._callable_param_ret_types = {}
+        for _cpt_pn, _cpt_fn in (getattr(node, '_mojo_coro_callable_param_fns', None) or {}).items():
+            _cpt_rt = gen.func_return_types.get(_as_str(_cpt_fn))
+            if _cpt_rt and _cpt_rt != 'void':
+                gen._callable_param_ret_types[_as_str(_cpt_pn)] = _cpt_rt
     else:
         gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
+        gen._callable_param_ret_types = ggc._callable_param_ret_types(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is
@@ -2387,6 +2433,11 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
+    # Which of THIS function's parameters are annotated `bool` — see
+    # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
+    # one place the annotation text and the emitted function name are both in
+    # hand, and `is_python_bool_expr` reads it back while the body is lowered.
+    gimple_exprtypes.record_bool_params(gen, node)
 
     # Seed param types into var_types BEFORE return-type inference so
     # _quick_type can resolve param names during the pre-pass. Unannotated
@@ -3651,6 +3702,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Key by overload so overloaded methods don't share closure state (each
     # overload's lifted closures + capture env are distinct).
     gen.current_func_name = f"{struct_name}_{node.name}{overload_id}"
+    gimple_exprtypes.record_bool_params(gen, node)
     gen._current_struct_name = struct_name  # for Self() constructor call lowering
 
     # Seed param types for pre-pass inference

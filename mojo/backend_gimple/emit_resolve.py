@@ -47,6 +47,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 # Re-export shared helpers from mojo.middle.resolve_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -1238,22 +1239,30 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
       * `x = insp.Parameter('v', 7); print(x.v)` raised
         `AttributeError: v`, exit 1, on the module handle.
 
-    Scoped to a STRUCT reached through the marker, and to a LOCAL PROJECT
-    SIBLING, both deliberately:
+    The member CLASS no longer matters, because the classifier is the shared
+    one. This used to ask only `_source_defines_struct`, deliberately scoped
+    to a struct "because a FUNCTION reached through a bare marker is a
+    separately tracked bug with its own filed doc" — that doc is
+    `bugs/CODEGEN_bare_import_module_qualified_call_answers_zero.md`, and it
+    is closed by this change, so the exclusion has nothing left to exclude.
+    `_classify_unresolved_export` is the same classifier the `from M import X`
+    spelling uses, it already answers for a plain top-level FUNCTION (inline
+    the module) as well as a struct, and the docstring of the two duplicated
+    copies it replaced is the argument for using it here too: a
+    source-text classifier that is not exhaustive about SPELLING has to be
+    the same classifier everywhere. Without inlining, the member's own
+    definition is not in this translation unit and not behind any dylib on the
+    link line, so the call site the sibling-module branch resolves to a
+    correctly QUALIFIED, overload-suffixed symbol that nothing defines:
+    `ld: symbol(s) not found for architecture arm64: _deep_deep_fn_9f63a2`.
 
-    * struct, not any name — a FUNCTION reached through a bare marker is a
-      separately tracked bug with its own filed doc
-      (`bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md`,
-      plus the `from . import SUB` sibling in
-      `bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md`), and taking it
-      here would widen this change's blast radius to every module this
-      compiler's own closure reaches a function through;
-    * local sibling, not stdlib/test — a stdlib module has a dylib (or
-      module_loader's source-level export table) behind it, and inlining it
-      here would emit a second definition of symbols the link already binds
-      to that dylib.
+    Still scoped to a LOCAL PROJECT SIBLING, deliberately: a stdlib module
+    has a dylib (or module_loader's source-level export table) behind it, and
+    inlining it here would emit a second definition of symbols the link
+    already binds to that dylib.
 
-    Records into `gen._link_inline_modules`; returns nothing."""
+    Records into `gen._link_inline_modules` (or the generic/overload tables);
+    returns nothing."""
     _pairs = _bare_import_bindings(stmt)
     for _i in range(0, len(_pairs), 2):
         _mod = _pairs[_i]
@@ -1280,9 +1289,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
         if not _text:
             continue
         for _m in _members:
-            if _source_defines_struct(_m, _text):
-                gen._link_inline_modules.add(_mod)
-                return
+            _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
 def _register_link_imports(gen, stmts) -> list:
@@ -3463,6 +3470,13 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
+        # A CALLABLE comprehension element, so `[f for ...][0](...)` can
+        # dispatch. The literal and the `append` paths record through the
+        # same helper, and a comprehension is the third way to build the list
+        # a dispatch table lives in; without this one the answer would depend
+        # on which of the three spellings assembled it. Keyed on the PRE-cast
+        # `ev`, which is the name the callable tables are keyed on.
+        ginf.note_container_callable_ret(gen, res, ev, et, node.element)
         # A comprehension whose element is a TUPLE or a nested LIST
         # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
         # record BOTH maps the equivalent list LITERAL records at
@@ -3543,11 +3557,12 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
                 vv = vv_tmp
             gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
         else:
-            # See the dict-literal case's identical comment: vt alone
-            # can't distinguish a real bool literal from a genuine int. `node.key`
-            # is the VALUE expression here -- the parser stores a dict
-            # comprehension as element=key_expr, key=val_expr (see the comment
-            # above `kt, kv = gen.lower_expr(node.element)`).
+# See the dict-literal case's identical comment: vt alone can't
+            # distinguish a real bool literal from a genuine int, so the
+            # shared store helper asks `is_python_bool_expr` instead.
+            # `node.key` is the VALUE expression here -- the parser stores a
+            # dict comprehension as element=key_expr, key=val_expr (see the
+            # comment above `kt, kv = gen.lower_expr(node.element)`).
             #
             # The one store, as in the dict literal: the per-slot bool kind it
             # decides is the whole-dict `mojo_mark_dict_bool_values` marker's

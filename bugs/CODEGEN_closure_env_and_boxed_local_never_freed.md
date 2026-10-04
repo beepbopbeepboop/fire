@@ -1,91 +1,121 @@
 # CODEGEN: closure environments and boxed mutable locals are never freed
 
-## Status (2026-10-01, later — OPEN 1 re-measured and its stated next step is
-## WRONG: there is no bound method in this shape at all)
+## Status (2026-10-02 — OPEN 1 is CLOSED. OPEN 2, the mutable-capture box, is
+## still open and is the only thing left in this document)
 
-OPEN 1 still reproduces, at the same rate, and the fix is smaller and differently
-shaped than this document's "Next step" says. Both corrections matter, because
-the stated next step sends a reader to a file that has no bearing on it.
+Landed: a nested `def`'s environment is now owned by the function it is a
+statement of and freed at that function's scope exits. `tools/mem_slope.py` on
+the same probe that measured `+16.1 B/iter` reports **flat** (`+0.00 MB` over
+300,000 iterations, 1.56 MB at both 100k and 400k), with stdout unchanged.
 
-**Measured** with `tools/mem_slope.py` on
-`build/memprobes/nested_def_closure.mojo` (the `helper`/`inner` shape from OPEN
-1, looped):
-
-    n=100000    peak 3.06 MB
-    n=400000    peak 7.66 MB      ->  +16.1 B/iter
-
-which is OPEN 1's 16 B/iter, unchanged.
-
-**What the generated C actually is.** No `MojoBoundMethod`, no
-`mojo_bound_method_new`, no `_reg_bound_method` entry — the nested `def`'s
-environment and a DIRECT call to the lifted function:
+**The shape of the fix, which is smaller than this document's earlier "Next
+step" said and does NOT use a bound method at all.** There is no
+`MojoBoundMethod`, no `mojo_bound_method_new`, and no `_reg_bound_method` entry
+in this shape — the nested `def`'s call sites are DIRECT:
 
 ```c
 int64_t __GIMPLE helper (int64_t n) {
   helper_inner_env * _env_inner;
-  ...
   _env_inner = _alloc_helper_inner_env ();
-  _t1 = n;
-  _env_inner->n = _t1;
-  _t3 = (int64_t)1;
+  ...
   _t2 = helper_inner (_env_inner, _t3);      /* direct, not through a value */
-  return _t2;                                 /* and no free anywhere */
+  _t5 = helper_inner (_env_inner, _t6);      /* one env, two calls */
+  return _t5;                                 /* freed here now */
 }
 ```
 
-So the next step's specific plan — "a `gen._closure_vals` entry survives into
-the CALL, so `mojo_fnptr_call_N`'s emission site (`emit_calls`, the
-`mojo_is_bound_method` dispatch) can free a closure it was handed as a callee" —
-targets a symbol this program never emits. It is not needed and not sufficient:
-what is needed is a plain `free(_env_inner)`, because there is no registry entry
-to drop.
+So the earlier next step — "a `gen._closure_vals` entry survives into the CALL,
+so `mojo_fnptr_call_N`'s emission site can free a closure it was handed as a
+callee" — targets a symbol this program never emits, and the earlier
+diagnosis that a `MojoBoundMethod` is involved was simply wrong. What is
+needed is a plain `free(_env_inner)`, because there is no registry entry to
+drop, and `mojo_closure_free` (the capturing-lambda case's kind) would be
+actively wrong: it would read two words of a `helper_inner_env *` as a bound
+method. The unwind entry that does apply is the one already in the runtime,
+`MOJO_CLEANUP_PTR` / `mojo_cleanup_push_ptr`, documented in `fire_runtime.c`
+as "a plain malloc/calloc block: a struct instance" — which is exactly what a
+bare env with no bound method is.
 
-Three further facts that make the real fix smaller than this document implies:
+**Where it landed, and why that placement.** The three things the analysis
+needed already existed, so nothing new was invented:
 
-1. **The record already exists.** No new `gen._closure_vals` entry is wanted:
-   `gen._closure_envs[node.name] = env_var` (`emit_funcs.py:169`) is the env var,
-   keyed by the nested def's name, and it already survives into the call —
-   `_lower_closure_call` reads it at `emit_calls.py:4244`.
-2. **The ownership predicate already exists too, modulo one requirement that
-   cannot apply.** `ownership_destruct._lambda_uses_ok(body, name)` asks exactly
-   the right question — "is every mention of this name the CALLEE of a call?" —
-   and answers True for this body. `lambda_value_owned` adds "and the binding
-   must be a `lambda` expression, and there must be exactly one", which is about
-   a callable bound to a LOCAL. A nested `def` binds no local, so the fix is
-   `lambda_value_owned` minus the binding clause, not a new analysis.
-3. **No new runtime cleanup kind is needed.** The unwind entry already exists:
-   `MOJO_CLEANUP_PTR` / `mojo_cleanup_push_ptr`, documented in
-   `fire_runtime.c` as "a plain malloc/calloc block: a struct instance" — which
-   is what a bare env with no bound method is. `mojo_closure_free` (the lambda
-   case's kind) would be wrong here: it frees a bound method and drops its
-   `_reg_bound_method` entry.
+1. the ownership question is `ownership_destruct._lambda_uses_ok(body, name)`
+   — "is every mention of this name the CALLEE of a call?" — which answers
+   True for `return inner(1) + inner(2)` and False for every shape that can
+   outlive the scope. It is now named for what it owns
+   (`ownership_destruct.nested_def_env_owned`), because the question is the
+   same as `lambda_value_owned`'s and the TEARDOWN is the difference; a nested
+   `def` binds no local, so there is no callable value to own.
+2. the wiring is the capturing-lambda case's wiring —
+   `ginf.register_nested_env_free` registers the name, emits the
+   `mojo_cleanup_push_ptr` thunk at the declaration, and lets
+   `emit_return_frees`/`emit_fallthrough_frees` free and cancel it. The env var
+   is function-scoped (`gen._declare_var` at the nested-`def` STATEMENT) and
+   one env legitimately backs several calls, so the free has to be at the
+   enclosing function's scope exit, not after a call. It is deliberately NOT
+   `_scope_register`ed: there is no loop body to register against, so the
+   `break`/`continue` half of the block machinery does not apply.
+3. `mojo_cleanup_cancel_n` at the free cancels the thunk, so an exception
+   raised between the declaration and the return frees it exactly once.
 
-**Why it still is not a "free it after the call" change.** The env var is
-declared with `gen._declare_var` at the nested-`def` STATEMENT
-(`emit_funcs.py:104`), i.e. function-scoped, and the same env legitimately backs
-several calls (`return inner(1) + inner(2)`). So the free has to go where the
-lambda case's does — the ownership machinery's scope exits
-(`_owned_free_candidates` / `_scope_register` / `_emit_scope_frees`, plus the
-`mojo_cleanup_push_ptr` thunk at the declaration) — which is also the only place
-that gets `break`/`continue`/`return` right. That is a real piece of work in the
-one subsystem whose failure mode is a use-after-free, and it is why it wants a
-session that can run `gimple_owned_closure_env_is_freed`'s siblings plus the
-gate.
+**Two traps this hit on the way, both of which are the SAME trap item 2 below
+names, and both of which had to be fixed for the free to be safe rather than
+merely effective.** They are recorded here because neither is visible in the
+generated C for the OPEN 1 shape — you only find them by running the suite:
 
-### Regression
+- **A lifted closure lowered inside another function's body.** Lifting `mid`
+  lowers `inner`'s environment statement while the ownership code is still
+  reasoning about `outer`. `outer`'s body never mentions `inner`, so the
+  question "can `outer` hold `inner` past its own scope?" answers "yes, safe",
+  and
 
-`test_gimple_bounded_memory` is the right helper for the fixed shape (the
-existing `gimple_owned_closure_env_is_freed` is exactly that for the lambda
-half), sized so the leak is several times the limit: OPEN 1's own 16 B/iter
-needs ~4M iterations to reach a 64 MB ceiling, and `gimple_owned_closure_env_is_freed`
-already uses a bounded loop, so the same shape works. Pair it with a
-`test_gimple_stdout` case for the multi-call body (`inner(1) + inner(2)`), since
-"the free happened after the first call" is the failure a slope alone would not
-catch — the second call would read freed memory and print garbage, which the
-stdout assertion does catch, and MallocScribble is already on in
-`run_executable_stdout`.
+  ```python
+  def outer():
+      total = 0
+      def mid():
+          def inner(k):
+              nonlocal total
+              total = total + k
+          return inner          # a real escape
+      f = mid(); f(3); f(4)
+  ```
 
-## Status (2026-10-01 — the CLOSURE half is closed and regression-tested; the nested-`def` and boxed-local halves are OPEN, with measurements)
+  emitted `free (_env_inner)` in `mid` immediately after handing that same
+  pointer back as its return value. The caller's first `f(3)` then dereferenced
+  freed memory — SIGSEGV, `test_nonlocal.py`'s "two closure levels deep" pair.
+  `mid`'s own body does mention `inner` as a returned value, so the same rule
+  asked of the right body declines to free it. Fixed by reading the owning body
+  once, at the top of `_gen_stmt_FunctionDef`, where `_cur_func_body` is
+  provably the body being lowered; this needed no save/restore, because that
+  statement is the only thing that can be lowering it.
+- **The owning body was thrown away inside a struct method.**
+  `_gen_struct_method` calls `_reset_func(node.body, ...)` and then
+  `reset_no_candidates`, which cleared the body, so every "how is this name is
+  USED?" question was answered about an empty body — which reads as "no
+  mention, so nothing can hold it, free it", the opposite of fail-closed. The
+  body is not per-candidate-set state and no longer resets there.
+
+**A third finding, deliberately NOT fixed here and filed separately:**
+`bugs/CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md` —
+`kept.append(inner)` compiles and stores correctly, but `kept[0](5)` answers
+`0` instead of `base + 5`. The environment never reaches the container slot, so
+a call through it has nothing to dispatch on. That is the boxed/boxed-read half
+of this document's family, and it is not the free.
+
+**Regression:** `gimple_nested_def_env_is_freed`
+(`test_gimple_runner.py`, `test_gimple_bounded_memory`, 4,000,000 iterations,
+40 MB ceiling). It carries all four consumers in one program: the shared
+two-call body, the same inside a STRUCT METHOD, a nested `def` raised past by
+an exception, and a nested `def` RETURNED to its caller and then called — the
+last one is the fail-closed half, and calling it after `maker` returned is a
+use-after-free if the rule is not fail-closed. Measured: **1.5 MB** after,
+**63.1 MB** with the rule disabled (verified by stubbing
+`nested_def_env_owned` to False, not by reverting), same stdout both ways —
+so it is a real tripwire, not a limit nothing could ever reach. 4M iterations
+is the size doc/MEMORY.html §8 asks for: the leak's own 16 B/iter is 64 MB
+against a 40 MB ceiling.
+
+## Status (2026-10-01 — the CLOSURE half is closed and regression-tested; the nested-`def` half has since closed too, above; the boxed-local half is OPEN, with measurements)
 
 ### Closed: a capturing lambda bound to a local, and the environment it captured
 
@@ -126,7 +156,11 @@ captured closures must survive — the stored one is CALLED after its scope
 exited). Both fail when the rule is disabled: 112 MB against a 40 MB limit,
 and a SIGSEGV respectively.
 
-### OPEN 1: a nested `def` whose closure is created and called without ever being bound to a local — 16 B/iter
+### CLOSED (was OPEN 1): a nested `def` whose closure is created and called without ever being bound to a local — was 16 B/iter
+
+**What this section claimed, and where each claim went.** Kept because the
+error is the useful part: a reader sent here by the old text would build the
+bound-method machinery and free nothing.
 
 ```mojo
 def helper(n: Int) -> Int:
@@ -135,24 +169,24 @@ def helper(n: Int) -> Int:
     return inner(1)
 ```
 
-Peak RSS 3.05 MB at 100,000 iterations, 7.64 MB at 400,000. The environment
-and the bound method are built where the nested `def` is lowered and the call
-consumes them immediately, so there is no local to own: this is a CLASS C
-temporary (doc/MEMORY.html §3.C) whose consumer is a call through the
-closure, and class C's freshness test
-(`emit_infra.is_fresh_container_operand`) does not recognise a
-lambda/`def`-producing value.
+Peak RSS 3.05 MB at 100,000 iterations, 7.64 MB at 400,000 — the leak, real.
+Then: *"the environment AND THE BOUND METHOD are built where the nested `def`
+is lowered ... this is a CLASS C temporary whose consumer is a call through the
+closure."* **Wrong on the second half.** There is no bound method: the call is
+DIRECT (`helper_inner (_env_inner, _t3)`), so there is nothing for a
+call-site "create and consume in one lowering" rule to consume, and treating it
+as a CLASS C temporary sends you to `is_fresh_container_operand`, which cannot
+help because the value is not a container at all. It is a plain `malloc` block
+whose owner is the function the nested `def` is a statement of — which is what
+the fixed version records.
 
-Next step: a `gen._closure_vals` entry survives into the CALL, so
-`mojo_fnptr_call_N`'s emission site (`emit_calls`, the `mojo_is_bound_method`
-dispatch) can free a closure it was handed as a callee — the same
-"create and consume in one lowering" shape `claim_loop_iterable_temp` already
-handles for `for x in <fresh>`. The value reaching the call is the lifted
-function's name, not the `MojoBoundMethod *` (see the generated C:
-`_t3 = mojo_fnptr_call_1 (f, _t2)` with `f` the local), so the entry has to
-be keyed on the local the `def` was bound to — and a nested `def` statement
-binds no local, which is the actual reason this is a separate piece of work
-rather than a special case of what landed.
+*Next step* (the `mojo_fnptr_call_N` dispatch, keyed on the local the `def` was
+bound to, "and a nested `def` statement binds no local, which is the actual
+reason this is a separate piece of work rather than a special case"): the
+conclusion was right for the wrong reason. A nested `def` binds no local, so
+there was never a local to key anything on — and the piece of work was not a
+new mechanism but the ownership machinery's own scope exits, applied to the env
+var. See the 2026-10-02 Status at the top of this file.
 
 ### OPEN 2: the box for a mutable captured local — `malloc(8)` per call, per variable
 
@@ -275,8 +309,17 @@ excluded — which is intentional, not an inconsistency to tidy away.
 
 ## Done when
 
-The loop above is flat between 100k and 400k iterations, output unchanged, and
-`lambda k: d[k]` with `d` a local container demonstrably keeps `d` alive (add
-both as runner tests). `make gate` green. **The first two of those three are
-done**; the third needs trap 2's first bullet, above, and is a container
-question rather than a closure one — so it belongs with that work, not here.
+Both leaks in the loops above are flat between 100k and 400k iterations, output
+unchanged, each with a runner test that fails when its rule is disabled
+(`gimple_owned_closure_env_is_freed` for the lambda, and
+`gimple_nested_def_env_is_freed` for the nested `def`). `lambda k: d[k]` with
+`d` a local container still needs to demonstrably keep `d` alive. `make gate`
+green.
+
+**Remaining after all that: OPEN 2, the mutable-capture box, and trap 2's first
+bullet.** Both are the same unfinished analysis — `_is_free_eligible_function`
+still refuses to look at a function containing a nested `def`/`lambda`, so such
+a function still gets no container freeing, and a `{mut}` box's lifetime is the
+CLOSURE's, which means it cannot be freed until "does any closure built here
+escape?" can be answered. That is the whole of what is left here, and it is one
+piece of work, not two.

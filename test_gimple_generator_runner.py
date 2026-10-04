@@ -2153,6 +2153,70 @@ def main():
         print(x)
 """, "42\n")
 
+    # A generator method INHERITED from a base class, called on the
+    # SUBCLASS -- the generator half of
+    # bugs/CODEGEN_compiled_path_gaps_round2.md's #1, whose `cls` /
+    # plain-`@classmethod` half closed on 2026-10-01.
+    #
+    # One unit per RECEIVER CLASS is the whole requirement, and both halves
+    # of it were broken in opposite directions:
+    #
+    # * the unit's `cls` is an opaque int64_t placeholder passed
+    #   positionally and never dereferenced -- every `cls.<...>` read
+    #   resolves BY NAME against the struct the unit was emitted for -- so
+    #   sharing the base's unit would iterate `Base.tag` where CPython
+    #   iterates `Child.tag`. That is why registering a subclass ALIAS
+    #   alone (the doc's "walk the base chain at the call site") was
+    #   explicitly not done there: it converts this program's loud
+    #   `mojo_unsupported_iter` into a silent `7, 4`.
+    # * with only the base registered, `Child.gen(4)` fell through to the
+    #   ordinary `Child_gen(...)` lowering -- a struct method gen_module's
+    #   Phase 2a deliberately never emits for a generator method -- so its
+    #   yields were dropped and the consuming `for` got a void value.
+    #
+    # `test_generator_matches_cpython`, not a hand-written string: the
+    # failure this must catch is precisely "agrees with itself and is
+    # wrong", and `Base.gen(4)` in the same program is the control that a
+    # fix which made the subclass read the BASE's value (or vice versa)
+    # cannot satisfy.
+    test_generator_matches_cpython("inherited_classmethod_generator_dispatches_per_class", """\
+class Base:
+    tag = 7
+
+    @classmethod
+    def gen(cls, n: Int):
+        yield cls.tag
+        yield n
+
+class Child(Base):
+    tag = 9
+
+def main():
+    for v in Base.gen(4):
+        print("B", v)
+    for v in Child.gen(4):
+        print("C", v)
+""", """\
+class Base:
+    tag = 7
+
+    @classmethod
+    def gen(cls, n):
+        yield cls.tag
+        yield n
+
+class Child(Base):
+    tag = 9
+
+def main():
+    for v in Base.gen(4):
+        print("B", v)
+    for v in Child.gen(4):
+        print("C", v)
+
+main()
+""")
+
     # `yield from sorted(<iterable>, key=lambda x: ...)` — a single-
     # parameter lambda passed directly as a `key=` call argument (not
     # assigned to a local first, unlike `generator_lambda_and_*_bound_
@@ -4416,6 +4480,74 @@ def main():
     for v in rows(d):
         print(v)
 """, "k\n0\n")
+
+    # A callable-valued PARAMETER, CALLED inside a coroutine body. This is
+    # the ordinary-path half of
+    # bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md,
+    # and it needs its own plumbing: the A3 rewrite moves every source
+    # parameter into a `var p = __mojo_gen_arg(...)` local, so the body the
+    # ordinary codegen emits carries NO `param_defaults` — so the fact cannot
+    # be read off the body at all and has to travel with it. It travels as
+    # `_mojo_coro_callable_param_fns` (`{param: the function its default
+    # names}`), attached by `coro._mark_coro_callable_param_fns`, and is
+    # RESOLVED in `gen_func` — because `register` is an AST pre-pass that runs
+    # before any module-level function's `func_return_types` entry exists,
+    # which is the same reason `_mark_coro_param_elem_kinds` attaches names
+    # rather than answers.
+    #
+    # `yield len(r)` is the assertion: the callable's `char *` result used to
+    # come back as the homogenized `int64_t` box, so `len` of it was 0.
+    # `yield r` itself is NOT here — a generator that yields a STRING
+    # obtained by iterating a string is a different defect
+    # (bugs/CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md),
+    # and it was already broken before this change.
+    test_generator_stdout("generator_callable_param_result_keeps_its_type", """\
+def upper(s):
+    return s.upper()
+
+def apply_to(items, _f=upper):
+    r = _f(items)
+    yield len(r)
+    yield len(_f(items))
+
+def main():
+    for v in apply_to('ab'):
+        print(v)
+main()
+""", "2\n2\n")
+
+    # A nested `def` or a nested `class` inside a coroutine body is its OWN
+    # function scope, and the A3 rewrite used to descend into it: every
+    # `_rewrite_*_stmts` in `mojo/middle/coro.py` recurses into a statement's
+    # attributes looking for nested statement lists, and `_STMT_TYPES` counts
+    # both `FunctionDef` and `StructDef`, so the nested body's `return e`
+    # became `__mojo_gen_set_return(__c, e); return` with THIS coroutine's
+    # context variable. `__c` is not in scope there, so it read through the
+    # `ct param or undeclared` fallback as a hard 0 and every `helper(...)`
+    # call in the generator answered 0 at exit 0.
+    #
+    # Both halves are in this test because they are one fix
+    # (`coro._declares_its_own_scope`) and because the class half was
+    # unreachable until `module_gen._gmi_hoist_nested_structs` gave a class
+    # declared inside a function a layout and methods at all.
+    test_generator_stdout("generator_nested_def_and_class_are_their_own_scope", """\
+def gen(n):
+    def helper(x):
+        return x * 2
+    class Box:
+        def __init__(self, v: int):
+            self.v = v
+        def get(self):
+            return self.v + 1
+    b = Box(10)
+    yield helper(3)
+    yield b.get()
+    yield helper(4) + b.get()
+
+def main():
+    for v in gen(2):
+        print(v)
+""", "6\n11\n19\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

@@ -181,9 +181,63 @@ the number it was assigned when it was filed.
   `dict | dict` has no static value type; and a cross-module symbol-name
   mismatch (`__itertools_only_<hash>` emitted where `_itertools_only_<hash>`
   is defined) that blocks a whole module. Each is ordered there by how likely
-  it is to bite real code.
+  it is to bite real code. **#1 is closed in full and #2/#4 were already
+  fixed; only #3 remains, and it remains open BY CONSTRUCTION rather than by
+  decision** — its next action is "measure the blast radius
+  (`compile_stdlib.py`'s `U` count) before refusing a heterogeneous union",
+  and a whole-stdlib compile is not affordable in a light-worker session, so
+  taking it would mean refusing ~dozens of modules on no measurement at all.
+  That is the one thing CLAUDE.md's type-resolution warning is about, so the
+  honest state is "not started", not "half done".
+- **`work/bugs4-1`, 2026-10-02 — six compiled-path claims closed, one doc
+  deleted, three filed.** In claim order: a class defined inside a function had
+  no methods at all (`CODEGEN_class_defined_inside_a_function_has_no_methods.md`
+  **DELETED**, its residue becoming
+  `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`, which is
+  still open and is the honest remainder); a `bool`-annotated struct field and
+  parameter (doc kept — `isinstance`/`type` still answer int, and that is
+  Option A, a `_TYPE_MAP` change with its own blast radius); a callable's
+  return type at two more hops; calling a function value held in a subscript;
+  a bare `import <sibling>` + `<sibling>.<free_fn>(...)` answering 0 on the
+  link/build path; and a callable-valued parameter called in an ordinary
+  generator. Two docs were filed rather than fixed from what those turned up:
+  `CODEGEN_generator_iterating_a_string_parameter_yields_nothing.md` and
+  `CODEGEN_calling_a_nested_def_fetched_from_a_container_answers_zero.md`.
+  A merge in the same batch restored the
+  `emit_dict_int_value_store` delegate that another worker's doc
+  (`CODEGEN_merge_dropped_the_emit_dict_int_value_store_delegate.md`, on
+  another branch) says was dropped — that doc can be retired at integration
+  rather than re-fixed.
+- **The nested-`def` closure environment is freed**
+  (`CODEGEN_closure_env_and_boxed_local_never_freed.md`, doc kept — its
+  OPEN 2, the `{mut}` capture box, is still open and is now the only thing in
+  it). This also found and fixed a **stale-read class of bug the ownership
+  analysis had everywhere**: the body a "how is this local USED?" question was
+  asked about was a second field that only `begin_function` assigned, so during
+  a lifted closure every such question was answered about some top-level
+  function's body instead of the closure's. It is one field now. Worth
+  knowing before trusting any ownership decision reached through a closure.
 - `CODEGEN_noshim_dumpfull_preexisting_divergence.md` — already-active investigation, not a new queue item.
 - `hard/CODEGEN_generator_lambda_expr_unsupported.md` — deliberately guarded miscompile; only revisit with a new supported-shape design.
+
+## Claims triaged 2026-10-02 and left UNSTARTED, with the reason and the cost
+
+Three of `work/bugs4-1`'s claims are not waiting on understanding. Each is
+blocked on a budget this worker did not have, and each was checked against its
+own doc and the registry rather than re-derived — so a next session does not
+repeat the triage. **Nothing here is "half done": no code was written and no
+result is claimed.**
+
+| claim | state | what unblocks it, and what it costs |
+|---|---|---|
+| `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` (row 0) | the CODEGEN half landed 2026-09-26 and is verified; "still open 3" is **entirely inside `formal/`** (the `dec`-while and `range` models assume a non-negative counter, plus two named `sum_range` holes) | a session with `formal/` budget. `test_formal_run.py` is 91/91 today; the gap is model-level, and the shared piece is a reusable `Nat`-to-two's-complement signed-order lemma in ProofLib. |
+| `CODEGEN_bootstrap_resource_blowup.md` (row 1) | both cheap wins landed (`33f4b72d`); the remaining lever is per-module AST lifetime, untried, with the starting question written down (`_SELFHOST_PARSE_CACHE` and its three readers at three different pipeline points, so a bounded release scheme rather than a clear) | one `./mojoc` build plus the ~30-58 GB dump. `--dump-full` is already CAS-cached by real inputs, so `make native` is cheap to re-enter; the DUMP is not. |
+| `CODEGEN_ab_native_fails.md` | registered `disabled=` on purpose, and correctly: 20.5 GB measured, exclusive, every gate — which is `CLAUDE.md`'s own rule (a known failure too expensive to run gets `disabled=`, not `expect=`) | nothing until the python-vs-native codegen divergence it measures is worth 20.5 GB of an exclusive reservation. The doc is the switch, so a fix cannot land without re-enabling it. |
+
+The pattern worth carrying forward: all three are **known-shape, budget-blocked**
+work, and in each the doc already says what the next step is. The only thing
+that was missing was the statement "this was looked at and deliberately not
+started", which is what this table is.
 
 ## Working rules
 

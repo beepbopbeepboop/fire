@@ -7357,7 +7357,7 @@ main()
           `_toplevel`, which is emitted after every ordinary function, so the
           per-function reset wiped whatever the store had recorded.
         - a DICT OF CALLABLES (`d = {"k": lambda: False}`): a second table
-          (`_dict_callable_ret`), gated on the dict's NAME, with the same
+          (`_container_callable_ret`), gated on the dict's NAME, with the same
           never-reset twin needed for a global.
         - a FACTORY (`def mk(): return lambda: 2.5`): the result is cast
           into a fresh temp before the outer `mk()()` sees it, so the answer

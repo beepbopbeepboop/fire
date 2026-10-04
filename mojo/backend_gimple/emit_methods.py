@@ -39,6 +39,7 @@ import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_infra as ginf
 
 # Re-export shared helpers from mojo.middle.methods_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -487,8 +488,24 @@ def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
     codegen); recover the real pointer through the same int64_t->void*->
     real-type cast dance `_lower_MemberExpr`'s object-lowering path uses
     for the identical situation.
+
+    The NAME is resolved exactly as `_lower_fnptr_call` and
+    `_lower_maybe_bound_call` resolve it, and for the same reason: a
+    module-level global is stored in this module's globals STRUCT, so
+    `gen._c_names.get(fname_raw, fname_raw)` on its own emits a reference
+    to a bare C identifier that does not exist — gcc's "'f' undeclared".
+    `f = m.truthy` at module scope followed by `f()` reached this function
+    (through the `_actual_types` overlay the global store records, which is
+    what makes the callee a bound method at all) and then failed to build
+    for exactly this reason. A captured name goes through `_lower_IdentExpr`
+    too, so it reads `_env->f`.
     """
-    bm_raw = gen._c_names.get(fname_raw, fname_raw)
+    if fname_raw in gen._captures and gen._env_param:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    elif fname_raw not in gen.var_types and fname_raw in gen._global_var_types:
+        _bt, bm_raw = gen.lower_expr(gimple_ctypes.IdentExpr(name=fname_raw))
+    else:
+        bm_raw = gen._c_names.get(fname_raw, fname_raw)
     if stored_ctype == 'MojoBoundMethod *':
         bm_type, bm = 'MojoBoundMethod *', bm_raw
     else:
@@ -2669,6 +2686,70 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # exactly what caused the self-host regression noted
                     # above.
                     gen._note_own_func_home(method_name, _mgc_sub_ref, record_scope=False)
+                    # …and register the MEMBER, which a bare `import X`
+                    # never did. `_note_own_func_home` alone is not enough
+                    # and this document's own next step says why: the entry
+                    # `_note_own_func_home` writes is the module's, and a
+                    # bare `import X` records only `imported_symbols['X']`
+                    # -- for the MODULE, not its members. So the re-dispatched
+                    # BARE call found no `imported_symbols['deep_fn']`,
+                    # `_func_mangleable('deep_fn')` was False,
+                    # `_func_csym` produced the bare `_safe_name('deep_fn')`
+                    # with no qualifier and no overload suffix, and
+                    # `_lower_named_call`'s `_is_unknown` branch emitted its
+                    # weak 0-returning stub:
+                    #
+                    #   __attribute__((weak)) int64_t deep_fn (...) {
+                    #     mojo_print ((char *)"deep_fn: unavailable in
+                    #                   compiled mode"); return (int64_t)0; }
+                    #   _t2 = deep_fn (1);
+                    #
+                    # exit 0, no diagnostic beyond the stub's own message,
+                    # and 0 where CPython prints 8. The inline
+                    # (`do_imports`) path emits `deep_deep_fn_9f63a2` for the
+                    # same two files, so the two paths disagreed about the
+                    # same symbol's NAME as well as about whether it exists.
+                    #
+                    # The signature comes from the DEFINING module's own
+                    # parsed FunctionDef via `_resolved_export_entry`, NOT
+                    # from `module_loader`'s text scan: the scan answers
+                    # `int64_t deep_fn (void)` for an unannotated
+                    # `def deep_fn(x)` (it reads signatures off the text),
+                    # which as the only prototype in the file would reject
+                    # its own call site. That is the same upgrade the
+                    # `from X import Y` path performs, through the same two
+                    # helpers -- `bugs/CODEGEN_bare_import_module_
+                    # qualified_call_answers_zero.md`, whose "partial fix
+                    # that is NOT enough, recorded so nobody re-lands it"
+                    # section is the `_note_own_func_home`-only version.
+                    try:
+                        _mgc_exps, _mgc_qual = gen._local_sibling_module_exports(
+                            _mgc_sub_ref)
+                    except Exception:
+                        _mgc_exps, _mgc_qual = None, None
+                    # ONLY when nothing has registered it already. An
+                    # import this compile already resolved properly --
+                    # `_emit_stdlib_import_externs` for a stdlib/test
+                    # module, `_register_link_imports` for a `from X import
+                    # Y` -- has an entry whose signature came from the
+                    # DEFINING module's own compile, and overwriting it with
+                    # a locally rebuilt one produced
+                    # `non-trivial conversion in 'function_decl'` across
+                    # `std/builtin/dtype.mojo` and `std/python/_cpython.mojo`
+                    # (measured). A missing entry is the whole bug; an
+                    # existing one is not this code's to improve.
+                    _mgc_raw = None
+                    if method_name not in gen.imported_symbols:
+                        _mgc_raw = (_mgc_exps or {}).get(method_name)
+                    if _mgc_raw:
+                        _mgc_entry = gen._resolved_export_entry(
+                            _mgc_sub_ref, method_name, _mgc_raw)
+                        if _mgc_entry:
+                            _mgc_entry = dict(_mgc_entry)
+                            _mgc_entry['module'] = _mgc_sub_ref
+                            gen._register_imported_symbol(
+                                method_name, _mgc_entry, method_name,
+                                write_param_types=True)
                     _mgc_bare_node = gimple_ctypes.CallExpr(
                         func=gimple_ctypes.IdentExpr(
                             name=method_name, line=getattr(node, 'line', 0)),
@@ -4141,6 +4222,15 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                 av = gen._coerce_to_type(at, 'int64_t', av)
                 at = 'int64_t'
             gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+            # A CALLABLE appended to a list, so a later `lst[0](...)` can
+            # dispatch. The list literal records through the same helper (see
+            # `_lower_list_literal`), and this is the `append` half: without
+            # it a list built one element at a time -- the shape every
+            # dispatch table assembled in a loop has -- was still stubbed, so
+            # the table's key would depend on whether the list was written
+            # `[f]` or `[]; .append(f)`. A non-callable element is a no-op
+            # inside the helper.
+            ginf.note_container_callable_ret(gen, ov, av, at, args[0])
             if at.endswith(' *') or (at == 'int64_t' and av in gen._actual_types and gen._actual_types[av].endswith(' *')):
                 actual_elem = gen._actual_types.get(_gmm_as_str(av), at)
                 gen._elem_types[ov] = actual_elem

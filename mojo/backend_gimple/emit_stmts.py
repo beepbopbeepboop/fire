@@ -515,6 +515,7 @@ def _gen_stmt_VarDecl(gen, node):
         # branches had none of them — a copy that is silently forgotten is a
         # wrong value with exit 0, not a build error.
         ginf.carry_callable_ret_types(gen, v, node.name)
+        ginf.carry_callable_ret_from_call(gen, getattr(node, 'value', None), node.name)
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -752,7 +753,8 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
-def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
+def _note_global_store_types(gen, tname: str, vtype: str, v: str,
+                             value_node=None) -> None:
     """Carry a value stored into a module global's type knowledge forward to
     the global's NAME, so the read path can dispatch on the container it
     really holds.
@@ -796,6 +798,29 @@ def _note_global_store_types(gen, tname: str, vtype: str, v: str) -> None:
     if v in gen._actual_types:
         gen._actual_types[tname] = gen._actual_types[v]
     ginf.carry_callable_ret_types(gen, v, tname)
+    ginf.carry_callable_ret_from_call(gen, value_node, tname)
+    # A bound METHOD stored into a module global. The globals-struct FIELD is
+    # `int64_t` (`_global_dst_ctype`), whatever the value's own type is, so the
+    # call site's `_get_actual_type` has nothing to dispatch on, routes the
+    # call to `mojo_fnptr_call_N`, and that helper calls the RAW method symbol
+    # with no `self` — a call with the wrong arity, which happened to print
+    # `1` for `f = m.truthy; print(f())` rather than crash. The identical
+    # spelling bound to a LOCAL is right, because there the destination keeps
+    # its `MojoBoundMethod *` type.
+    #
+    # The kind is known here and nowhere else: `_bound_method_ret_types` holds
+    # a `MojoBoundMethod *` and nothing else, and the carry just above put
+    # `tname` in it precisely when this value is one. So the presence of that
+    # entry IS the answer, and it goes in the same `_actual_types` overlay the
+    # local path already consults (see `_lower_call`'s
+    # `_get_actual_type(_fname_var_ctype, fname_raw) ==
+    # 'MojoBoundMethod *'` guard). Keyed on `tname`, not on `v`: the RHS temp
+    # is a per-function name that recycles, and a stale entry on it is
+    # exactly the bug class this table's own comment warns about. Harmless
+    # when the field really is a `MojoBoundMethod *`, because `_get_actual_type`
+    # only consults `_actual_types` for an `int64_t`-declared slot.
+    if vtype == 'MojoBoundMethod *' and tname in gen._bound_method_ret_types:
+        gen._actual_types[tname] = 'MojoBoundMethod *'
     # …and the WHOLE-PROGRAM half of the same fact. `carry_callable_ret_types`
     # writes the per-function tables, which are keyed by the lowered VALUE, and
     # this function RETURNS right here — so a store into a globals-struct field
@@ -986,7 +1011,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # Without this, _dict_val_types[name] is never set for globals,
             # and d["key"] on a global dict falls back to mojo_dict_get_int
             # instead of mojo_dict_get_str — see BUG-2026-043.
-            _note_global_store_types(gen, tname, vtype, v)
+            _note_global_store_types(gen, tname, vtype, v, node.value)
             return
         # Genuine module-scope statement (we're generating THIS module's own
         # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -1029,7 +1054,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # `_func_declared_globals` arm was missing the `_actual_types`
             # half that this one had. The callable return-type tables are in
             # there too, for the reason the helper's own docstring gives.
-            _note_global_store_types(gen, tname, vtype, v)
+            _note_global_store_types(gen, tname, vtype, v, node.value)
             return
         # Regular local variable assignment
         if tname not in gen.var_types:
@@ -1232,6 +1257,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # because three hand-written copies of it is how the two module-global
         # store branches came to omit all of it.
         ginf.carry_callable_ret_types(gen, v, tname)
+        ginf.carry_callable_ret_from_call(gen, getattr(node, 'value', None), tname)
         # A `MojoBoundMethod *` value stored into a local whose declared C
         # type is NOT `MojoBoundMethod *` — the var-type-inference join
         # with another branch's plain fn-pointer / lambda value collapsed
@@ -1562,17 +1588,6 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
             else:
-                # The one dict store of an integer-ish value, not a third
-                # spelling of it. A literal RHS used to be the only shape whose
-                # bool-ness was recognised, so `d['a'] = b` for a `b = True` and
-                # `d['a'] = 1 == 1` both printed `{'a': 1}` while `print(b)` and
-                # `repr(b)` were already right; `is_python_bool_expr` is the one
-                # predicate for that, and the store that follows is the one that
-                # carries the kind -- `mojo_dict_set_bool` tags THIS slot, in
-                # place of the dict-WIDE `mojo_mark_dict_bool_values` flag that
-                # made one bool value render every other value in the dict as
-                # True/False (deleted). Passing `vtype` as the value's declared
-                # type is what lets `_emit_call` coerce a pointer to int64_t.
                 gen._emit_dict_int_value_store(obj_v, 'char *', key_tmp,
                                                 vtype, v, node.value)
         else:
@@ -1625,7 +1640,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    # The same one store the statically-typed arm above uses;
+# The same one store the statically-typed arm above uses;
                     # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
                                                     vtype, v, node.value)
@@ -1639,7 +1654,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
-                    gen._note_dict_callable_ret(_dsw_dp, v, vtype)
+                    gen._note_container_callable_ret(_dsw_dp, v, vtype)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])

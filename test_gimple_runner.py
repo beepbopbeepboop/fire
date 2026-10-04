@@ -1186,7 +1186,7 @@ main()
 """, "5\n9\nhi\n")
 
     # The SAME subscript callee, reached with a `MojoBoundMethod *` in the
-    # dict instead of a bare function pointer. `note_dict_callable_ret`
+    # dict instead of a bare function pointer. `note_container_callable_ret`
     # consulted only `_callable_ret_types`, which is where a non-capturing
     # closure and a lifted free function land; a struct method bound as a
     # value (`C().m`) lands in `_bound_method_ret_types` instead. With no
@@ -1222,6 +1222,221 @@ def main():
 main()
 """, "8\n10\n8\n")
 
+    # The same subscript callee reached through a LIST rather than a dict, and
+    # through a FUNCTION-RETURNED closure rather than a literal. Both were
+    # still stubbed when this doc's dict half landed, for reasons that are
+    # worth recording because they are the same reason twice:
+    #
+    #   * the gate is a POSITIVE test -- "was a callable recorded being stored
+    #     into THIS container?" -- and a list literal, an `append` and a
+    #     comprehension are three different code paths, so recording the dict
+    #     store recorded none of them. All three now record through the one
+    #     `note_container_callable_ret`, which is why the table is named for
+    #     the CONTAINER and not for the dict (`_container_callable_ret`;
+    #     the rename is the doc's own instruction, and it is why the helper
+    #     reads `container_val`).
+    #   * `e['c'] = mk(100)` stores a CALL RESULT, and the value-keyed tables
+    #     are keyed by a lowered value a call result never has. Its fact is
+    #     under the callee's name in `_return_callable_ret_types` — the same
+    #     compile-scoped record the named-local hop reads.
+    #
+    # `lst3 = [add3, mk(10)]` is the control for the second point: with the
+    # bare function pointer stored first, the dict is already recorded, so a
+    # missing entry for the second element rides in on the first. That
+    # ordering dependence is exactly why the `mk` line is not a comment.
+    test_gimple_matches_cpython("gimple_call_through_a_list_subscript_callee", """\
+def add3(a, b, c):
+    return a + b + c
+
+def mk(n):
+    return lambda x: x + n
+
+def main():
+    lst = [add3]
+    print(lst[0](1, 2, 3))
+    grown = []
+    grown.append(add3)
+    print(grown[0](1, 2, 3))
+    built = [add3 for _ in range(1)]
+    print(built[0](1, 2, 3))
+    tup = (add3,)
+    print(tup[0](1, 2, 3))
+    e = {}
+    e['c'] = mk(100)
+    print(e['c'](1))
+    lst3 = [add3, mk(10)]
+    print(lst3[0](1, 2, 3))
+main()
+""")
+
+    # A class written INSIDE a function body. Every consumer of the module's
+    # struct set reads the MODULE-LEVEL statement list, and a `StructDef`
+    # nested in a `FunctionDef.body` was in none of them, so the class had no
+    # layout and no emitted methods: `_lower_MemberExpr`'s method-call arm
+    # resolves the receiver's struct through `struct_field_types`, found
+    # nothing, and fell into its stub branch, which yields the RECEIVER. So
+    # `i.twice()` returned `21` for `i = Inner(21)` — the right shape for the
+    # zero-argument case by accident, and a plausible number at exit 0 with no
+    # diagnostic for every other one.
+    #
+    # `dd['m'](4)` is the OTHER end of the same root cause and is in this test
+    # for that reason: with no layout the bound method `c.m` never became a
+    # `MojoBoundMethod *` at all (it stayed a plain `int64_t` receiver word, so
+    # `note_container_callable_ret` had nothing to record), and the subscript callee
+    # lowered to a dict read followed by a generic attribute lookup on a value
+    # that is not a `C` — an `AttributeError`, exit 1.
+    #
+    # The rest of the program is the collision matrix, because a hoisted name
+    # that is already taken has to be disambiguated or two classes would both
+    # claim one struct and the loser would silently borrow the winner's layout:
+    # `mk1`/`mk2` declare `Inner` in two different functions, and `Inner` is
+    # ALSO a module-level class here. All four answer differently (`4 60 200
+    # 45`), so a rename that lost the wrong mapping shows up immediately.
+    test_gimple_stdout("gimple_nested_class_methods", """\
+class Inner:
+    def __init__(self, v: int):
+        self.v = v
+    def twice(self):
+        return self.v * 100
+
+def mk1(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v
+        def twice(self):
+            return self.v * 2
+    return Inner(n).twice()
+
+def mk2(n: int):
+    class Inner:
+        def __init__(self, v: int):
+            self.v = v * 10
+        def twice(self):
+            return self.v * 3
+    return Inner(n).twice()
+
+def main():
+    class C:
+        def m(self, x):
+            return x * 2
+    c = C()
+    print(c.m(4))
+    dd = {}
+    dd['m'] = c.m
+    print(dd['m'](4))
+
+main()
+print(mk1(2))
+print(mk2(2))
+print(Inner(2).twice())
+""", "8\n8\n4\n60\n200\n")
+
+    # A callable-valued PARAMETER, CALLED in an ordinary function body. The
+    # call returned `mojo_fnptr_call_N`'s homogenized `int64_t` box — right
+    # for the box, wrong for the value inside — so a `char *` result printed
+    # its own pointer decimal, `len()` of it was 0, and a `for` loop over it
+    # iterated nothing:
+    #
+    #     def upper(s):
+    #         return s.upper()
+    #     def apply_to(items, _f=upper):
+    #         r = _f(items)
+    #         print(r)          # CPython AB
+    #         print(len(r))      # CPython 2
+    #         for ch in r: ...
+    #     apply_to('ab')        # compiled 4337064208 / 0 / nothing, exit 0
+    #
+    # The parameter is typed `int64_t` because `_param_ctype` is shared by
+    # both generator emitters and neither has a callable category, so the fix
+    # is the doc's own second option: carry the parameter's callable-ness as
+    # side-table metadata the way `_callable_param_gen_api` already does.
+    # `calls_shared._callable_param_ret_types` reads the declared default's
+    # bare name out of `func_return_types`; `_lower_fnptr_call_value`
+    # consults it where it already consults `_callable_ret_types`.
+    #
+    # `print(s.upper())` directly above each line is the control that says
+    # the loss is in the callable PARAMETER and not in a string-returning
+    # function's own call site.
+    test_gimple_stdout("gimple_callable_param_result_keeps_its_type", """\
+def upper(s):
+    return s.upper()
+
+def apply_to(items, _f=upper):
+    r = _f(items)
+    print(r)
+    print(len(r))
+    for ch in r:
+        print(ch)
+
+def main():
+    apply_to('ab')
+    print('ab'.upper())
+    print(len('ab'.upper()))
+main()
+""", "AB\n2\nA\nB\nAB\n2\n")
+
+    # The same hoisting, in the statement lists a class statement can hide in:
+    # an `if` arm, a loop body (re-created per iteration, so the struct must
+    # not carry per-call state), and a METHOD body — the last one is the case
+    # `module_shared._gmi_collect_self_assigns` folds a nested class's
+    # `self.<f> = ...` onto the ENCLOSING struct for, because a nested class
+    # had no layout of its own. The hoist APPENDS rather than moves for
+    # exactly that reason: moving the statement out of the body would silently
+    # withdraw the folded field.
+    test_gimple_stdout("gimple_nested_class_in_every_body", """\
+class WithAttrs:
+    tag = 7
+    def __init__(self, v: int):
+        self.v = v
+    def get(self):
+        return self.v
+
+class Outer:
+    def build(self, k: int):
+        class Nested:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v * 2
+        return Nested(k).get()
+
+def in_if(flag: int):
+    if flag:
+        class K:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v + 1
+        return K(10).get()
+    return -1
+
+def in_loop(n: int):
+    total = 0
+    for i in range(n):
+        class L:
+            def __init__(self, v: int):
+                self.v = v
+            def get(self):
+                return self.v
+        total = total + L(i).get()
+    return total
+
+def useattrs(x: int):
+    class WithAttrs2:
+        def __init__(self, v: int):
+            self.v = v
+            self.b = WithAttrs(v)
+        def both(self):
+            return self.v + self.b.get() + WithAttrs.tag
+    return WithAttrs2(x).both()
+
+print(in_if(1))
+print(in_if(0))
+print(in_loop(4))
+print(Outer().build(21))
+print(useattrs(3))
+""", "11\n-1\n6\n42\n13\n")
+
 
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
@@ -1250,7 +1465,7 @@ main()
     # target is a field of this module's globals struct, so the store takes a
     # different path from a local assignment AND every read mints a fresh temp
     # — and all three of the "what does this callable really return" tables
-    # (`_callable_ret_types`, `_dict_callable_ret`, `_bound_method_ret_types`)
+    # (`_callable_ret_types`, `_container_callable_ret`, `_bound_method_ret_types`)
     # were dropped at BOTH of those hops, silently. `mojo_fnptr_call_N` is the
     # homogenized `int64_t` convention (right for the box it hands back, wrong
     # for the value inside), so with the type missing every module-level
@@ -1287,7 +1502,7 @@ print(d["k"]())
     # aliased the same way. Each hop re-keys the tables on a new name, so a
     # carry that only handled the first would still print `0` here, and a
     # dict-of-lambdas alias additionally goes through the separate
-    # `_dict_callable_ret` table.
+    # `_container_callable_ret` table.
     test_gimple_matches_cpython("gimple_module_level_callable_alias_keeps_its_return_type", """\
 e = lambda: False
 alias = e
@@ -1295,6 +1510,85 @@ print(alias())
 d = {"k": lambda: True}
 d2 = d
 print(d2["k"]())
+""")
+
+    # A function that RETURNS a callable — the hop the tables above cannot
+    # reach at all, because the value is a CALL RESULT rather than a
+    # materialized lambda. `def a(): return lambda: False` boxes its
+    # `void *` into an `int64_t` (`func_return_types` records `a` as
+    # returning `int64_t`), so `e = a()` records nothing, and `print(e())`
+    # printed `0` where CPython prints `False`.
+    #
+    # The carry that fixes it cannot be the shared one: `carry_callable_
+    # ret_types` copies from the lowered VALUE, and a call result is a fresh
+    # temp with no entry. The fact lives on the AST — `node._callable_ret`,
+    # set by `GimpleGen.lower_expr` — and before that in the compile-scoped
+    # `_return_callable_ret_types[callee]` that the callee's own `return`
+    # wrote — so `carry_callable_ret_from_call` reads the callee name straight
+    # off the CallExpr. `print(a())` on the same program is the control: the
+    # direct `mk()(...)` callee spelling already worked, via `node._callable_
+    # ret` directly.
+    test_gimple_matches_cpython("gimple_function_returning_a_callable_keeps_its_return_type", """\
+def a():
+    e = lambda: False
+    return e
+
+def b():
+    e = lambda x: x > 1
+    return e
+
+def c():
+    e = a()
+    print(e())
+    f = b()
+    print(f(5))
+    print(f(0))
+c()
+""")
+
+    # A BOUND METHOD stored in a MODULE GLOBAL — the calling CONVENTION, not
+    # the return type, and the two failed separately. The globals struct field
+    # is `int64_t`, so the call site had nothing to dispatch on and routed
+    # `f()` to `mojo_fnptr_call_N`, which calls the RAW method symbol with no
+    # `self`: a call with the wrong arity. It happened to print `1` rather
+    # than crash, which is luck and not a property. `truthy` returning `k > 4`
+    # is one argument, so a missing receiver is a single garbage register
+    # read; `add(a, b)` is two, and is the shape that shows the arity is
+    # really wrong rather than merely untidy.
+    #
+    # Two fixes, and the second was only reachable after the first: the global
+    # store records `_actual_types[name] = 'MojoBoundMethod *'` (the kind IS
+    # known there — `_bound_method_ret_types` holds a bound method and nothing
+    # else), and `_lower_bound_method_call` then resolved the name the way
+    # `_lower_fnptr_call` and `_lower_maybe_bound_call` already did. Without
+    # that second one the call site emitted a bare `f`, and gcc rejected the
+    # module with "'f' undeclared", because a global is a field of the globals
+    # struct and not a C identifier.
+    #
+    # The `local()` lines are the control: the identical spelling bound to a
+    # local was always right, which is what made this look like a return-type
+    # carry rather than a calling-convention one.
+    test_gimple_matches_cpython("gimple_bound_method_in_a_module_global_keeps_its_convention", """\
+class C:
+    def __init__(self):
+        self.k = 9
+    def truthy(self):
+        return self.k > 4
+    def add(self, a, b):
+        return self.k + a + b
+
+m = C()
+f = m.truthy
+print(f())
+g = m.add
+print(g(1, 2))
+
+def local():
+    lf = m.truthy
+    lg = m.add
+    print(lf())
+    print(lg(3, 4))
+local()
 """)
 
     # ── `with` teardown: the `as` target is optional, and so is running
@@ -2683,6 +2977,74 @@ def main():
         acc += escape_list(kk, 10) % 1000 + escape_rebind() + capture_chain()
     print(acc)
 """, "44\n4\n44\n3\n5\n1040000\n")
+
+    # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
+    # bound method, so its teardown is `free` and not `mojo_closure_free` --
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
+    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # environment is shared by BOTH of `callee`'s call sites, which is why it
+    # must be freed once at the enclosing function's scope exit rather than at
+    # each call. The last two consumers are the ones that make it an ownership
+    # question rather than a `free`: raised past by an exception (the push the
+    # declaration emitted frees it, the skipped `return` free does not), and a
+    # nested `def` RETURNED to its caller, which is a real escape and must stay
+    # alive -- calling it after `maker` returned is a use-after-free if the
+    # rule is not fail-closed. `Boxed` is the same pair inside a STRUCT METHOD,
+    # whose `_reset_func` is immediately followed by `reset_no_candidates`: the
+    # owning body has to survive that reset or every "how is this name USED?"
+    # question is answered about an empty body, which reads as "nothing can
+    # hold it" and frees BOTH of these.
+    test_gimple_bounded_memory("gimple_nested_def_env_is_freed", """\
+def callee(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    return inner(1) + inner(2)
+
+def maker(base: Int):
+    def adder(x: Int) -> Int:
+        return x + base
+    return adder
+
+def boom(base: Int) -> Int:
+    def inner(x: Int) -> Int:
+        return x + base
+    if base > 2:
+        raise ValueError("no")
+    return inner(1)
+
+struct Boxed:
+    var v: Int
+
+    def run(self, base: Int) -> Int:
+        def inner(x: Int) -> Int:
+            return x + base
+        return inner(1) + inner(2)
+
+    def make(self, base: Int):
+        def adder(x: Int) -> Int:
+            return x + base + self.v
+        return adder
+
+def main():
+    var f = maker(10)
+    print(f(1))
+    print(f(2))
+    print(callee(10))
+    var b = Boxed(7)
+    print(b.run(10))
+    print(b.make(10)(1))
+    var total = 0
+    for r in range(4000000):
+        total += callee(6) % 1000
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "11\n12\n23\n23\n18\n60000000\n20000\n", 40)
 
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
@@ -6701,6 +7063,54 @@ def main():
     print(c.truthy())
 main()
 """, "[True]\n[True, False]\nFalse\n1\n0\n")
+
+    # A `bool`-annotated PARAMETER, which is the third shape the one shared
+    # bool predicate has to answer and the only one that cannot be keyed on a
+    # type. `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`, so a bool
+    # param IS distinguishable from an int param in `func_param_types` — but
+    # NOT from a small integer LITERAL's own lowering, which is also a plain C
+    # `int` (see `_local_literal_ctype`). Keying off the type would have
+    # turned `x = 5; print(x)` into `True`; the annotation is instead
+    # captured where it is still readable, by
+    # `mojo/middle/exprtypes.record_bool_params` at the two sites that set
+    # `current_func_name` with the FunctionDef in hand, and read back per
+    # function by `bool_param_in_scope`.
+    #
+    # `get2() -> bool` and `get()` are the method-return shapes and belong
+    # here too because they share the predicate; `b.report(True)` is the
+    # METHOD's bool parameter, whose key is `<Struct>_<method>` rather than
+    # the bare name — the two spellings of the same table. `v + 1` is the
+    # control: a bool param is still an ordinary int in arithmetic.
+    test_gimple_stdout("gimple_bool_annotated_parameter", """\
+class Box:
+    def __init__(self, flag: bool, n: int):
+        self.flag = flag
+        self.n = n
+    def get(self):
+        return self.flag
+    def get2(self) -> bool:
+        return self.flag
+    def report(self, other: bool):
+        print(other)
+
+def show(v: bool, n: int):
+    print(v)
+    print({'k': v})
+    print(v + 1)
+
+def main():
+    b = Box(True, 5)
+    print(b.get())
+    print(repr(b.get()))
+    print({'g': b.get()})
+    print(b.get2())
+    b.report(True)
+    b.report(False)
+    show(True, 5)
+    show(False, 5)
+main()
+""", "True\nTrue\n{'g': True}\nTrue\nTrue\nFalse\nTrue\n{'k': True}\n2\n"
+       "False\n{'k': False}\n1\n")
 
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value

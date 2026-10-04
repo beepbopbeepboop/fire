@@ -1511,7 +1511,7 @@ class GimpleGen:
         # runs BEFORE any function body is emitted, since a function that
         # calls `e()` is emitted before `_toplevel` lowers the lambda) and
         # consulted by _reset_func to re-seed the per-function
-        # _callable_ret_types/_dict_callable_ret.
+        # _callable_ret_types/_container_callable_ret.
         #
         # Without this, a lambda bound to a MODULE global lost its return
         # type at the box: `e = lambda: False; print(e())` printed `0`, and
@@ -1521,7 +1521,7 @@ class GimpleGen:
         # the name (see _gen_stmt_AssignStmt). See
         # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
         self._global_callable_ret_types: dict[str, str] = {}
-        self._global_dict_callable_ret: dict[str, str] = {}
+        self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
         # Functions whose `return` statements produce containers of MORE THAN
@@ -2119,8 +2119,8 @@ class GimpleGen:
         # emit_infra._reset_func's `_callable_ret_types` entry.
         self._callable_ret_types: dict = {}
         # dict value -> the single callable return type stored into it ('' when
-        # ambiguous); see emit_infra._reset_func's `_dict_callable_ret` entry.
-        self._dict_callable_ret: dict = {}
+        # ambiguous); see emit_infra._reset_func's `_container_callable_ret` entry.
+        self._container_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}
@@ -2517,6 +2517,17 @@ class GimpleGen:
         # `_bool_valued` directly above: a field created lazily behind
         # `hasattr` reads as existing-but-NULL self-hosted.
         self._gmi_bool_params: set = set()
+        # current_func_name -> the parameter names whose ANNOTATION says
+        # `bool`, written by `mojo.middle.exprtypes.record_bool_params` at the
+        # two sites that lower a function/method body and read back by
+        # `bool_param_in_scope` from the one shared bool predicate. A
+        # `bool`-annotated parameter's own ctype is a plain `int` (same
+        # `_TYPE_MAP` reason `struct_bool_fields` exists), and it is NOT
+        # distinguishable from a small int LITERAL's lowering, so the
+        # annotation has to be captured rather than re-derived from the type.
+        # Declared here for the same self-hosting reason as `_bool_valued`:
+        # a field created lazily behind `hasattr` reads as existing-but-NULL.
+        self._bool_param_names: dict = {}
         # Struct -> method names whose every `return` hands back a `bool`
         # field of that struct (see module_gen.py's second method loop). The
         # method's own C return type is `int` -- the field's ctype -- so this
@@ -2532,7 +2543,7 @@ class GimpleGen:
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
-        self._own_fn_body: list = []   # the analysed function's body (string receiver pre-scan)
+        self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
         self._decl_rhs_val: str = ''   # and the value it lowered to
         self._literal_storage: str = ''        # see emit_infra.emit_container_new
@@ -4430,6 +4441,11 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _register_imported_symbol(self, name: str, info, original_name=None,
+                                  write_param_types: bool = True):
+        import mojo.middle.funcs_shared as _fn2
+        return _fn2.register_imported_symbol(self, name, info, original_name,
+                                            write_param_types)
     def _resolved_export_entry(self, module: str, name: str, info):
         return gfn._resolved_export_entry(self, module, name, info)
     def _resolve_test_relative_module(self, module: str) -> str | None:
@@ -4910,12 +4926,14 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
-    def _note_dict_callable_ret(self, dict_val: str, value_text: str,
-                                value_ctype: str = 'int64_t') -> None:
-        return ginf.note_dict_callable_ret(self, dict_val, value_text, value_ctype)
+    def _note_container_callable_ret(self, container_val: str, value_text: str,
+                                     value_ctype: str = 'int64_t',
+                                     value_node=None) -> None:
+        return ginf.note_container_callable_ret(self, container_val, value_text,
+                                                value_ctype, value_node)
     def _emit_dict_int_value_store(self, dict_val: str, key_ctype: str,
                                    key_val: str, val_ctype: str, val: str,
-                                   val_node) -> None:
+                                   val_node=None) -> None:
         return ginf.emit_dict_int_value_store(self, dict_val, key_ctype, key_val,
                                               val_ctype, val, val_node)
     def _eval_const_int(self, node) -> int | None:
