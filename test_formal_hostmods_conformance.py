@@ -525,7 +525,7 @@ class Case:
 
     __slots__ = ("module", "file", "line", "fn", "args", "keywords",
                  "oracle", "fidelity", "unicode", "case_number",
-                 "bound", "kind", "template", "emit", "want")
+                 "bound", "kind", "template", "emit", "want", "status")
 
     def __init__(self, **kw):
         for key in self.__slots__:
@@ -669,6 +669,7 @@ def build_cases(spec):
             case_number=len(out),
             bound=bound, kind=entry.kind, template=entry.template,
             emit=entry.emit, want=want,
+            status=spec.statuses.get(case["fn"], (None, None))[0],
         ))
     detail = {}
     for case in cases:
@@ -766,11 +767,17 @@ class Spec:
     places and `spec.name` at all of them is worse to read than `spec.name`.
     """
 
-    def __init__(self, name, source, fns, note, ascii_only=False):
+    def __init__(self, name, source, fns, note, ascii_only=False, statuses=None):
         self.name = name
         self.source = source
         self.fns = fns
         self.note = note
+        # `fn -> (value, reason)` for the functions whose answer the module
+        # DECLARES a status for rather than a value. Empty for every module
+        # here but `math`, and empty is not the same as absent: it says "no
+        # function of this module has a documented degradation", which is what
+        # makes a divergence report trustworthy.
+        self.statuses = statuses or {}
         # `re` sets it: this path has no code points, so `\w`, `\d` and `\b`
         # are ASCII-only here whatever the flag says, which `re.mojo` records as
         # a real difference from CPython's Unicode default for a `str` pattern.
@@ -897,10 +904,12 @@ MODULES = [
         "`math.gcd`/`lcm`/`comb`/`perm` are variadic or optional in CPython; "
         "the model has the two-argument form and the list form "
         "(`gcdn(vals, n)`), so a call with a different arity is skipped and "
-        "counted. `factorial` answers -1 above 20 where CPython's answer does "
-        "not fit a 64-bit word — that is the model's documented status, and a "
-        "case whose CPython answer does not fit is compared against the status "
-        "rather than dropped.",
+        "counted. `factorial` above 20 is the one DECLARED STATUS here: `20!` "
+        "fits a 64-bit word and `21!` needs 66 bits, so the module answers -1 "
+        "where CPython answers a 66-bit integer, and a case whose CPython answer "
+        "does not fit is compared against that status rather than dropped or "
+        "counted as a wrong answer.",
+        statuses={"factorial": (-1, "`21!` does not fit a 64-bit word")},
     ),
     Spec(
         "re",
@@ -1172,6 +1181,25 @@ def records(raw):
 
 # ── the comparison ──────────────────────────────────────────────────────────
 
+WORD_MIN = -(2 ** 63)
+WORD_MAX = 2 ** 63 - 1
+
+
+def _fits_a_word(value):
+    """Whether `value` is an integer this path can hold at all.
+
+    A formal value is ONE 64-bit word (`formal/model.py`), so an integer
+    CPython can compute and this path cannot is a question with no answer here
+    rather than a wrong one -- which is the difference a conformance table has
+    to keep, because a module that answers -1 for it is being HONEST and a
+    table that reads that as a wrong answer sends the next person looking for a
+    bug that is not there.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        return True
+    return WORD_MIN <= value <= WORD_MAX
+
+
 def expected_parts(case):
     """CPython's answer as the LIST OF PARTS the model's records are read as.
 
@@ -1188,6 +1216,16 @@ def expected_parts(case):
     if case.oracle[0] == "raises":
         return None
     value = case.want if case.want is not None else case.oracle[1]
+    if case.status is not None and not _fits_a_word(value):
+        # The model DECLARES a status for this function -- `math.factorial`
+        # answers -1 above 20 because `21!` needs 66 bits and this path has 64
+        # -- and CPython's answer for the same input does not fit a word. So
+        # there is no value to compare: what is being compared is the module's
+        # documented degradation against the fact that the question has an
+        # answer CPython can give and this path cannot. Counting it as a
+        # divergence would report a documented limit as a bug; calling it a
+        # pass would report a limit as conformance.
+        return [case.status]
     if case.kind == I1:
         return [value]
     if case.kind == S1:
