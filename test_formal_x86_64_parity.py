@@ -1419,7 +1419,65 @@ CASES = [
 # the check is `refuse:`-shaped for the same reason `test_formal_run.py`'s are:
 # nothing about the program's OUTPUT can carry the assertion, because the
 # assertion is that it must not have one.
+# …and the CONTROL for those three, which is a CASE rather than a refusal because
+# nothing about its OUTPUT is wrong: an unclassified base keeps the container
+# reading, and that is load-bearing. `INT_KIND` is this model's DEFAULT for a
+# word, so a rule that read it as a claim would refuse every subscript over an
+# unannotated parameter — 284 of them, measured, by the census
+# `subscript_base_lowering`'s own docstring cites. This is the one program that
+# says so, on both machines, with CPython's answer as the expectation.
+CASES.append(
+    ("a_subscript_on_an_unclassified_parameter_still_builds",
+     "def at(xs, i):\n"
+     "    return xs[i]\n"
+     "\n"
+     "def main():\n"
+     "    print(at([4, 5, 6], 1))\n"
+     "    return 0\n",
+     "def at(xs, i):\n"
+     "    return xs[i]\n"
+     "\n"
+     "def main():\n"
+     "    print(at([4, 5, 6], 1))\n"
+     "    return 0\n")
+)
+
 REFUSALS = [
+    # A SUBSCRIPT on a base the source proves to be a scalar. This is the
+    # worst failure mode in the area — an image that SEGFAULTS with no
+    # diagnostic — and it was not one shape but three, and the two machines did
+    # not agree about any of them: x86-64 exited 139 on all three, arm64 refused
+    # two of them with a message about the literal a one-field rewrite folded
+    # the field to, and faulted on the third.
+    #
+    # The needle is the shared SENTENCE rather than the base, because the base is
+    # what the two machines spelled differently (`5` against `s`) and what a
+    # future rewrite of the one-field identity would move again. What has to be
+    # pinned is that both say the base is not a container, in the same words.
+    ("a_subscript_on_a_literal_field_faulted_identically",
+     "struct S:\n"
+     "    var n: Int = 5\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S()\n"
+     "    printf(\"%d\", s.n[0])\n"
+     "    return 0\n",
+     "asks for a container element"),
+    # The `DType` row, and the one that faulted on BOTH machines: the field is
+    # established by the CONSTRUCTOR rather than by a class-level default, so
+    # nothing folds to a literal and nothing refuses. A type's value is its tag
+    # word, and a tag has no count and no elements.
+    ("a_subscript_on_a_type_value_faulted_identically",
+     "struct S:\n"
+     "    var d: DType = 5\n"
+     "    def __init__(out self, v: DType):\n"
+     "        self.d = v\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var s = S(DType.int32)\n"
+     "    printf(\"%d\", s.d[0])\n"
+     "    return 0\n",
+     "is a TYPE value"),
     # A CALLEE this backend does not lower, which used to stop at a link audit
     # that named a FILE and a SYMBOL and never the call — so a reader could not
     # tell whether to change the program or the link line, and the fuzz audit

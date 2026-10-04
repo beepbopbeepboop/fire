@@ -2892,6 +2892,7 @@ dylib_exports: list = None, globals_base: int = None,
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_scalar_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
@@ -4682,6 +4683,41 @@ ctor_field_value=self._ctor_field_value_for(name),
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
+    def _refuse_scalar_operand(self, op: str, obj) -> None:
+        """Raise if the source PROVES `obj` to be a number or a type.
+
+        The fourth arm of the container family, and the one whose operand need
+        not be a NAME at all — which is why it is asked of any expression where
+        the first two are asked of a bare one. `s.n[0]`, where `S` has exactly
+        one field `n`, reaches the container walk as a base that is either the
+        literal the field's class-level default folded to or, when the
+        CONSTRUCTOR established the field, a local whose declared kind is
+        `DType`. Measured on BOTH architectures: x86-64 SEGFAULTED (exit 139) on
+        all three shapes and arm64 did too on the constructor-established one,
+        with the build green and no diagnostic.
+
+        `M.scalar_container_base_evidence` is the whole of the decision and
+        `M.scalar_container_base_refusal` the whole of the wording, so this is
+        the same reader and the same sentence on both architectures — which is
+        what `formal/model.py`'s `ValueKinds` docstring means by asking the
+        container question from "both backends' single subscript/slice/
+        membership/for-in choke point, so the two architectures cannot come to
+        disagree about which bases are containers".
+
+        Asked at the same four choke points as the pair above and BETWEEN them,
+        so a read, a store, an augmented assignment, a slice, a membership test
+        and a for-in iteration of one base all give one answer. Between them
+        because the bare-name arm's own question is the narrower one: a name
+        this function bound to a number is still that arm's business, and this
+        one would not answer it.
+        """
+        evidence = M.scalar_container_base_evidence(
+            obj, self._expr_str_kind(obj))
+        if evidence is None:
+            return
+        raise CodegenError(M.scalar_container_base_refusal(
+            op, M.spelled(obj), evidence, self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checkes (exit 1 on OOB).
@@ -4706,6 +4742,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         and a flag the store caller sets and every other caller has to
         remember to clear is a flag that survives an exception path."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_scalar_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         if M.is_external_call_template(e):
             # The ONE place an `external_call[...]` is a subscript that is not
@@ -6907,6 +6944,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_scalar_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
         if type(right) not in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                F.TupleExpr, F.MemberExpr, F.SubscriptExpr,
@@ -9136,6 +9174,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_scalar_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))

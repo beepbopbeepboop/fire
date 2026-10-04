@@ -799,6 +799,17 @@ _REFUSAL_FAMILIES = (
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
     ("multi-index subscript", "multi-index subscript"),
+    # The container-operand family, and it is the one the sweep could not see
+    # before: `non_container_element_refusal` and its
+    # `scalar_container_base_refusal` sibling both open with this clause, and
+    # neither had a family, so every one of them landed in `other refusal` —
+    # which is the specific outcome `test_refusal_taxonomy.py`'s docstring says a
+    # family table exists to prevent. One marker for both wordings because both
+    # messages are the same construct said from the emitter's evidence (a name
+    # this function bound to a number) and from the source's (a literal, or a
+    # type), and a reader of the census needs one row rather than two.
+    ("asks for a container element",
+     "element of a value that is not a container"),
     # A call through a VALUE, in three shapes with three fixes: the callee's
     # declared type, the bracket, the keyword. Ahead of everything below
     # because each message contains "a call through a VALUE" and the generic

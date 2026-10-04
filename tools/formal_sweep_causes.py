@@ -209,6 +209,17 @@ CAUSES = (
     # ranks the causes rather than the one that summarises them.
     ("multi-index subscript",
      (("is a subscript whose index is a tuple",),)),
+    # An ELEMENT of a value that is not a container, and the row that finally
+    # makes the container-operand family visible: before it, every message from
+    # `non_container_element_refusal` and `scalar_container_base_refusal` fell
+    # into `other refusal`, which is the outcome this table exists to prevent.
+    # ONE marker for two wordings is deliberate — both messages open with the
+    # same clause, which is why the emitters share one `_refuse_scalar_operand`
+    # / `_refuse_non_container_operand` pair across the two architectures — and
+    # the two shapes it covers are one defect: a container lowering reads eight
+    # bytes at offset 0 of its base and calls that a COUNT.
+    ("element of a value that is not a container",
+     (("asks for a container element",),)),
     # ABOVE the two rows below it, and for a reason that is a fact about the
     # messages rather than about this construct: they are all one family — a
     # representation the target does not have — and the broad ones end with a

@@ -6294,6 +6294,94 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
     )
 
 
+def scalar_container_base_evidence(expr, kind) -> str | None:
+    """Why `expr` is provably a SCALAR and not a container, or None.
+
+    **The reader that answers `own_shape_kind`'s question for a base that is not
+    a NAME, and the one reader of "a type has no elements".** Two arms, and both
+    are claims rather than defaults — which is the whole difficulty, because
+    `INT_KIND` is this model's default for a word and reading it as a claim is
+    what `own_shape_kind` exists to prevent (its own table: an unannotated
+    parameter, a call result and a loop target all carry `INT_KIND` while being
+    containers, and all three built and answered correctly).
+
+      * **A scalar LITERAL.** `5[0]`, `1.5[i]`, `True[0]`. The node IS the
+        value, so there is no default and no declaration to disagree with, and
+        nothing about it can be a container. This arm is why the shape reached
+        the emitter at all: a one-field struct's sole field collapses onto its
+        receiver (`_rewrite_self_fields`) and the receiver then folds to the
+        field's materialized class-level default, so `s.n[0]` arrives here
+        spelled `5`.
+      * **A TYPE VALUE.** `kind == TYPE_KIND`, which comes from
+        `type_tag_for_name` and from the `declared_kind` hook — a field
+        declared `DType`, or a construction's argument. It is never a fallback,
+        and a tag word is as unmapped as an integer: a type has no elements and
+        no count.
+
+    **Not refused, and the reasons are the same two the rest of the family
+    gives.** `None` for the kind — an unclassified base keeps the container
+    reading, which is load-bearing for the 284 subscripts over an unannotated
+    parameter that `subscript_base_lowering`'s own census measured.
+    `INT_KIND` reached any other way is also None, because that is the default.
+    A `StringLiteral` is not a scalar here: a string's subscript IS a byte
+    load, and both emitters take that path above the container one.
+    """
+    if kind == TYPE_KIND:
+        return ("a TYPE value — the tag word this path gives a type name, and a "
+                "tag has no elements and no count")
+    if isinstance(expr, (F.IntLiteral, F.FloatLiteral, F.BoolLiteral)):
+        return ("a number — the literal carries no count at offset 0 and no "
+                "memory behind it, so there is nothing for the container walk "
+                "to read")
+    return None
+
+
+def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
+                                  function: str) -> str:
+    """Why a base this path PROVES to be a scalar is refused as a container.
+
+    The fourth arm of the family `frame_container_operand_refusal`,
+    `string_iteration_refusal` and `non_container_element_refusal` belong to,
+    and the one whose operand is neither an address nor a `char *` nor a word a
+    statement of this function bound to a number: it is a word the SOURCE says
+    is a number or a type, whatever the name it arrives under.
+
+    **What it was, measured on both architectures, and the reason this is a
+    refusal rather than a better lowering.** `s.n[0]` and `s.d[0]` on a struct
+    whose only field is annotated `Int` / `DType`:
+    arm64 refused the first two with a message about the literal the default
+    folded to (`subscript base must be a list/tuple name or literal … got
+    IntLiteral`), which is false about the source — the source says `s.n` — and
+    x86-64 SEGFAULTED on both, exit 139, with the build green. The third shape,
+    where the field is established by the constructor rather than by a class
+    default, SEGFAULTED on BOTH. A container lowering reads eight bytes at
+    offset 0 of its base and calls that a COUNT, so a `5` and a type tag are
+    both read as a length and both used as an address.
+
+    `non_container_element_refusal` is not reused because it is a DIFFERENT
+    claim: it says the base is a word a statement of this function bound to a
+    number, and this one says the source establishes the base as a number or a
+    type without naming a binding — which is the whole difference between
+    `var a = 5; a[0]` and `s.n[0]`, and a reader who is handed the first
+    message for the second is sent to look for a binding the program does not
+    have.
+    """
+    return (f"{op} of `{spelled_obj}` asks for a container element, and "
+            f"`{spelled_obj}` is {evidence}. Every container lowering starts by "
+            f"reading eight bytes at offset 0 of its base and calling the "
+            f"result a COUNT, then reads at `base + 8 + 8k`, so the element "
+            f"address here is the scalar itself plus 8. Measured on BOTH "
+            f"architectures: this builds, links, and dies of SIGSEGV at run "
+            f"time with the build green, because it reads through a scalar "
+            f"rather than through an address into anything. Refused rather "
+            f"than emitted: a scalar's container reading is not merely wrong, "
+            f"it is unmapped, and no subscript spelling of one means anything "
+            f"else. What the same source can do instead: index a list or a "
+            f"tuple you built, take the container as a PARAMETER of {function} "
+            f"where the caller's value decides, or pass the value itself to the "
+            f"function that wants it")
+
+
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.
 

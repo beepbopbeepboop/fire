@@ -4566,6 +4566,32 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         raise CodegenError(M.non_container_element_refusal(
             op, M.spelled(obj), self.func_name or "<module>"))
 
+    def _refuse_scalar_operand(self, op: str, obj) -> None:
+        """Raise if the source PROVES `obj` to be a number or a type.
+
+        The same fourth arm of the container family as arm64's, asked at the
+        same four choke points and for the same reason: this backend had NO
+        gate at all for a base the source proves to be a scalar, so `s.n[0]`
+        reached the blob walk and the image died of SIGSEGV with the build
+        green — measured on both architectures, exit 139, on a program three
+        lines long whose source says `s.n` is a field.
+
+        `M.scalar_container_base_evidence` is the whole of the decision and
+        `M.scalar_container_base_refusal` the whole of the wording, so the two
+        architectures cannot describe one construct differently — nor disagree
+        about WHICH bases qualify, which is the half that is a language
+        question rather than a wording one. Growing this backend's own copy of
+        arm64's emitter gate would have been half a line and is not sufficient:
+        it makes the two agree on two of the three shapes and leaves the
+        constructor-established one faulting on both.
+        """
+        evidence = M.scalar_container_base_evidence(
+            obj, self._expr_str_kind(obj))
+        if evidence is None:
+            return
+        raise CodegenError(M.scalar_container_base_refusal(
+            op, M.spelled(obj), evidence, self.func_name or "<module>"))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
                              for_store: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
@@ -4585,6 +4611,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._refuse_scalar_operand("a subscript", e.obj)
         self._refuse_non_container_operand("a subscript", e.obj)
         self._sub_width = 8
         if M.is_external_call_template(e):
@@ -5038,6 +5065,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # field as the count — see `model.frame_container_operand_refusal` for
         # the measurement, which is a wrong answer rather than a crash.
         self._refuse_frame_container_operand("a membership test", right)
+        self._refuse_scalar_operand("a membership test", right)
         self._refuse_non_container_operand("a membership test", right)
         # The dict question, asked here for the same reason the `for`-in walk
         # asks it and for the same reason `model.walk_stride` exists: a dict is
@@ -5124,6 +5152,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_scalar_operand("a for-in iteration", it)
             self._refuse_non_container_operand("a for-in iteration", it)
             self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
@@ -6959,6 +6988,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
         self._refuse_frame_container_operand("a slice", obj)
+        self._refuse_scalar_operand("a slice", obj)
         self._refuse_non_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))

@@ -573,6 +573,16 @@ CAUSE_SAMPLES = [
      "size_of[type, target] is a subscript whose index is a tuple. A value "
      "here is one 64-bit word and a list is a flat blob of words, so a tuple "
      "index has no representation on this path"),
+    # The container-operand family, which had no row and so fell into
+    # `other refusal` for every message the two emitters produce from it. The
+    # sample is the SCALAR half (`model.scalar_container_base_refusal`), which
+    # is the one this row is new for; the bare-name half
+    # (`non_container_element_refusal`) has produced this same clause since the
+    # `a = 5; a[0] = 1` SIGSEGV and is the reason the marker is one string.
+    ("element of a value that is not a container",
+     "a subscript of `5` asks for a container element, and `5` is a number — "
+     "the literal carries no count at offset 0 and no memory behind it, so "
+     "there is nothing for the container walk to read"),
     # NOTE the order boundary this one sits on: the message opens with the
     # receiver sentence the frame-address cause keys on and only reaches its
     # own marker in the second clause, so a sample abbreviated before that
