@@ -7468,10 +7468,29 @@ def gen_module_impl(self, stmts):
         bugs/hard doc since FIXED and DELETED with this contract; the cases
         that pin it are `gimple_for_over_list_param_from_float_literal`,
         `..._from_keyword_literal`, `..._from_str_literal` and
-        `..._nested_list_param_from_literal` in test_gimple_runner.py."""
-        if not isinstance(a, ListExpr):
+        `..._nested_list_param_from_literal` in test_gimple_runner.py.
+
+        A `SetExpr` is the same question asked of the same literal shape and
+        was simply not asked: a set literal argument recorded nothing, so an
+        unannotated set parameter stayed at the `int64_t` default and every
+        reader of its elements used the int accessor. Measured, `f({'a','b'})`
+        against a callee that iterates its set argument bound each element as a
+        boxed pointer decimal, and `{v for v in f({'r','q'})}` then STORED
+        those decimals, so `sorted(...)` of the result ordered by address and
+        the answer depended on where the string literals happened to land.
+        See `bugs/CODEGEN_set_iteration_loses_the_element_type_so_sorted_answers_by_address.md`.
+
+        Only `ListExpr` and `SetExpr` qualify, and `TupleExpr` is NOT added
+        for free: a tuple literal lowers to the same `MojoList *` but its
+        elements are heterogeneous by nature, so the joined element type is a
+        lossy summary rather than a description — which is the same reason the
+        list-of-lists arm below answers a 2-tuple instead."""
+        if isinstance(a, ListExpr):
+            els = a.elements
+        elif isinstance(a, SetExpr):
+            els = a.elements
+        else:
             return None
-        els = a.elements
         if not els:
             return None
         if isinstance(els[0], ListExpr):
@@ -7572,7 +7591,20 @@ def gen_module_impl(self, stmts):
                     return None, None
                 return _e, _gmi_as_str(nested.get(_n))
             return None, None
-        if isinstance(a, gimple_ctypes.ListExpr):
+        if isinstance(a, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr)):
+            # A `SetExpr` is the same question asked of the same literal
+            # shape, and it was not asked at all — so a set LITERAL argument
+            # recorded nothing and an unannotated set parameter stayed at the
+            # `int64_t` default. Every reader of a set's elements then used
+            # the int accessor: `{v for v in f({'r','q'})}` read each element
+            # as a boxed pointer decimal, STORED those decimals (the
+            # comprehension's own arm), and `sorted(...)` of the result ordered
+            # by address — so the answer depended on where the string literals
+            # landed, which depends on what the same process compiled before.
+            # `TupleExpr` is deliberately still absent: it lowers to the same
+            # MojoList but is heterogeneous by nature, so the joined element
+            # type is a lossy summary rather than a description.
+            # See `bugs/CODEGEN_set_iteration_loses_the_element_type_so_sorted_answers_by_address.md`.
             _e = self._infer_list_elem_type(a.elements)
             if _e == 'int64_t':
                 return None, None

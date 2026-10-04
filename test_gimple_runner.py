@@ -8695,6 +8695,43 @@ def main():
     show([[1, 2], [3, 4]])
 """, "1\n2\n3\n4\n")
 
+    # A SET literal as the argument, which the cross-call element-type
+    # contract simply did not ask about: `_static_arg_elems` (the positional
+    # path) and `_literal_arg_elems` (the keyword path) both recognised
+    # `ListExpr` only, so an unannotated set PARAMETER stayed at the
+    # `int64_t` default and every reader of its elements used the int
+    # accessor.
+    #
+    # The damage was three wrong answers in one program, and the third is the
+    # reason this was worth fixing rather than filing. `{v for v in f({'r',
+    # 'q'})}` read each element as a boxed pointer DECIMAL, and the
+    # comprehension's own arm then STORED those decimals (`mojo_set_add_int`),
+    # so `sorted()` of the result ordered by address — which means the program's
+    # answer depended on where the string literals happened to be placed, and
+    # that depends on how many other programs the same compiler PROCESS
+    # compiled first. That is the intermittency this bug was filed for, and it
+    # is why the acceptance bar was five consecutive whole-file runs rather
+    # than one.
+    #
+    # `pick` is the comprehension half and `via_for` the plain-loop half; both
+    # are asserted against CPython so the order is pinned, not just the set.
+    test_gimple_matches_cpython("gimple_set_literal_param_keeps_its_element_type", """\
+def pick(box):
+    box = {v for v in box}
+    return sorted(box)
+
+def via_for(box):
+    out = []
+    for v in box:
+        out.append(v)
+    return sorted(out)
+
+def main():
+    print(pick({'r', 'q'}))
+    print(via_for({'r', 'q'}))
+main()
+""")
+
     # The STRING spelling of the line above, which is where the same program
     # was wrong. The OUTER loop already carried the nested element ctype
     # across the call boundary (`_param_elem_types` / `_nested_elem_types`
