@@ -13630,6 +13630,39 @@ POINTER_DEREF_REFUSALS = [
      "    var o = Box()\n"
      "    return park(t, o)\n",
      "refuse:is stored in the field 'o.held'", None),
+    # A field the pointee's struct does NOT declare, in both the read and the
+    # store spelling.  They are here for the SENTENCE rather than the refusal:
+    # both backends raise these from `model.pointer_frame_member_refusal` /
+    # `…_store_refusal`, one function each for the same reason
+    # `model.member_access_refusal` is one function — a construct the two
+    # machines newly answer has to refuse with the same WORDS, and a message
+    # written out at four sites (two machines × read and store) is four texts
+    # that agree until one of them is edited.
+    ("deref_refuse_a_field_the_struct_pointee_does_not_declare",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def read_bad(p: Pointer[P3]) -> Int:\n"
+     "    return Int(p.value().zz)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return read_bad(t)\n",
+     "refuse:reads 'zz' out of a P3 this pointer points at, and that struct's",
+     None),
+    ("deref_refuse_a_store_into_a_field_the_struct_pointee_does_not_declare",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def store_bad(p: Pointer[P3]) -> Int:\n"
+     "    p.value().zz = 5\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    return store_bad(t)\n",
+     "refuse:stores into 'zz' of a P3 this pointer points at, and that struct's",
+     None),
     # `p.value().b += 5` — the ONE shape of this family that is still refused,
     # and it is pinned so it is a recorded limit rather than a surprise.  The
     # augmented-assignment arm works from a NAME (`_load_var`/`_store_var` on a

@@ -11353,6 +11353,43 @@ def pointer_frame_expression(fn, expr, decls: dict,
     return pointer_frame_pointee(fn, expr.func.obj, decls, structs_by_name)
 
 
+def pointer_frame_member_refusal(expr, st) -> str:
+    """`p.value().f` where `f` is not a field of the struct the pointer names.
+
+    The sibling of `member_access_refusal`, and it exists for the same reason
+    that one does: **both backends raise it, and they must raise the SAME
+    WORDS.** The emitters' fall-through for a field access whose base this path
+    cannot classify is one message in this module for exactly that reason, and a
+    construct that newly became answerable — a pointer to a frame of this image —
+    would otherwise have had its "no such field" sentence written out four
+    times (two machines × read and store), which is four texts that agree until
+    the day one of them is edited.
+
+    The frame is known here, which is what makes the sentence specific: the
+    struct's own field summary is the evidence, and "which word is this" is a
+    question about THAT struct's layout rather than about the path's ignorance.
+    """
+    return (f"{spelled(expr)} reads {expr.member!r} out of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and reading the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
+def pointer_frame_store_refusal(expr, st) -> str:
+    """`p.value().f = v` where `f` is not a field of the struct the pointer
+    names — `pointer_frame_member_refusal`'s store half, and a separate function
+    for the same reason it is a separate sentence: storing to the wrong word is
+    not the same failure as reading it, and a reader who is told "reading the
+    wrong one is a wrong answer" is being sent to look at a read that is not
+    what their program does."""
+    return (f"{spelled(expr)} stores into {expr.member!r} of a {st.name} this "
+            f"pointer points at, and that struct's "
+            f"{struct_field_summary(st)} has no such field: this path has no "
+            f"way to know which word that is, and storing to the wrong one is a "
+            f"wrong answer rather than a failure")
+
+
 def pointer_frame_bindings(fn, decls: dict, structs_by_name: dict = None):
     """`{name: [struct, …]}` for the locals in `fn` bound from a POINTER to a
     frame of a struct this image declares.

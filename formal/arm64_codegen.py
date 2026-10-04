@@ -2296,14 +2296,8 @@ dylib_exports: list = None, globals_base: int = None,
                     if st is not None:
                         slot = M.struct_frame_slot(st, stmt.target.member)
                         if slot is None:
-                            raise CodegenError(
-                                f"{M.spelled(stmt.target)} stores into "
-                                f"{stmt.target.member!r} of a {st.name} this "
-                                f"pointer points at, and that struct's "
-                                f"{M.struct_field_summary(st)} has no such "
-                                f"field: this path has no way to know which "
-                                f"word that is, and storing to the wrong one "
-                                f"is a wrong answer rather than a failure")
+                            raise CodegenError(M.pointer_frame_store_refusal(
+                                stmt.target, st))
                         self._emit_frame_store_through(
                             stmt.value, M.member_base_node(stmt.target), slot)
                         return
@@ -3559,13 +3553,8 @@ dylib_exports: list = None, globals_base: int = None,
                 if st is not None:
                     slot = M.struct_frame_slot(st, expr.member)
                     if slot is None:
-                        raise CodegenError(
-                            f"{M.spelled(expr)} reads {expr.member!r} out of a "
-                            f"{st.name} this pointer points at, and that "
-                            f"struct's {M.struct_field_summary(st)} has no "
-                            f"such field: this path has no way to know which "
-                            f"word that is, and reading the wrong one is a "
-                            f"wrong answer rather than a failure")
+                        raise CodegenError(M.pointer_frame_member_refusal(
+                            expr, st))
                     self._emit_expr(expr.obj)
                     self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 8 * slot))
                     return
