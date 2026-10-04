@@ -765,7 +765,9 @@ UNSUPPORTED = [
     ("a**", "two quantifiers"),
     ("a*+", "a possessive quantifier"),
     ("(?>a)", "an atomic group"),
-    ("(?i)a", "an inline flag"),
+    ("(?i:a)", "a SCOPED inline flag -- the bare `(?i)` form is supported; "
+               "see `_p_inline` in `formal/hostmods/re.mojo` for why the "
+               "scoped one cannot be"),
     ("(?(1)a|b)", "a conditional"),
     ("(a", "an unclosed group"),
     ("a)", "an unmatched )"),
@@ -828,6 +830,161 @@ def test_unsupported_constructs_are_refused(tmpdir):
         check(got == want,
               "%r (%s) is refused with status %d, not answered" %
               (pat, why, want[0]), "got %s" % got)
+
+
+# `(inline pattern, argument flag, subject, what it decides)`. The first two
+# columns are the SAME feature in CPython's two spellings, and the third is what
+# makes the pair worth a test rather than a spot check: a `(?i)` that parsed and
+# then did nothing would answer 0 where the argument answers 1, and a `(?x)`
+# that parsed and then skipped nothing would match the space where CPython
+# matches the `a`.
+INLINE_FLAG_PAIRS = [
+    ("(?i)AB", re.IGNORECASE, "ab", "IGNORECASE"),
+    ("(?s)a.b", re.DOTALL, "a\nb", "DOTALL"),
+    ("(?m)^b", re.MULTILINE, "a\nb", "MULTILINE"),
+    ("(?x) a", re.VERBOSE, "a", "VERBOSE, a leading space"),
+    ("(?x)#c\na", re.VERBOSE, "a", "VERBOSE, a comment"),
+    ("(?i)(?m)a", re.IGNORECASE | re.MULTILINE, "A", "two flag groups"),
+]
+
+# What CPython REFUSES, and so must this module -- as a status, which is what
+# `test_unsupported_constructs_are_refused` is about. Each is measured against
+# CPython rather than quoted: `(?i:a)b` is the one this engine does NOT yet
+# compile and is in `SCOPED_NOT_YET` below rather than here.
+INLINE_FLAG_REFUSED = [
+    ("(?L)a", "bad inline flags: cannot use 'L' flag with a str pattern"),
+    ("(?z)a", "unknown extension ?z)"),
+    ("(?-i)a", "missing -"),
+    ("(?i)a(?m)b", "global flags not at the start of the expression"),
+    ("(a)(?i)b", "global flags not at the start of the expression"),
+    ("(?i)((?m)a)", "global flags not at the start of the expression"),
+]
+
+# The one construct in this neighbourhood the module does not compile, named
+# here so it is a CLAIM rather than an absence. `(?x: ... )` scopes a flag to
+# one group; flags here are one word `_vm` reads at entry, so a flag that
+# changes mid-program needs the matcher to carry a mutable word through
+# `_step`. `formal/hostmods/re.mojo`'s `_p_inline` says the same thing where the
+# decision is made.
+SCOPED_NOT_YET = ["(?i:a)b", "(?x: a) c", "(?-i:AB)"]
+
+
+def _inline_status_program(pairs):
+    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
+    for index, (pat, flag, subj, _what) in enumerate(pairs):
+        lines.append("    p%d = %s" % (index, mojo_str(pat)))
+        lines.append("    s%d = %s" % (index, mojo_str(subj)))
+        lines.append("    st%d = [0, 0, 0, 0, 0, 0]" % index)
+    for index, (pat, flag, subj, _what) in enumerate(pairs):
+        lines.append("    r%d = re.search(st%d, 6, p%d, s%d, %d)"
+                     % (index, index, index, index, flag))
+        lines.append("    emit(0, r%d)" % index)
+    lines.append("    return 0")
+    return "\n".join(lines) + "\n"
+
+
+def test_inline_flags_answer_like_the_arguments_they_duplicate(tmpdir):
+    """`(?i)` is `re.IGNORECASE`, and the module has to say so on both spellings.
+
+    It used to refuse the spelling inside the pattern, which made the engine
+    answer `STATUS_UNSUPPORTED` for `(?x) a` while answering "matched" for the
+    same pattern with `re.VERBOSE()` as an argument -- the same feature twice,
+    one of them refused, and `re.mojo`'s own docstring claiming `re.VERBOSE` is
+    implemented. Found by generating CPython's own `test_re.py` as a
+    conformance table (`test_formal_hostmods_conformance.py`), which is where
+    `(?x) a` and `(?m)abc$` come from.
+
+    ONE program for the six pairs, and the expected list is CPython's: a status
+    of `STATUS_OK` is 1 and `STATUS_NO` is 0, so the comparison is against
+    `1 if re.search(...) else 0` computed here.
+    """
+    src = _inline_status_program(INLINE_FLAG_PAIRS)
+    want = [1 if re.search(pat, subj, flag) else 0
+            for pat, flag, subj, _what in INLINE_FLAG_PAIRS]
+    try:
+        out = build_and_run(tmpdir, "inlineflags", src)
+    except AssertionError as e:
+        check(False, "the inline-flag program builds", str(e)[:400])
+        return
+    # `build_and_run` answers LINES of whitespace-separated tokens, so one line
+    # here is every case. Flattening is the same two steps the tests below it
+    # do, and it is why the expected value is a flat list and not a list of
+    # lines.
+    out = [int(tok) for line in out for tok in line.split()]
+    check(out == want,
+          "every inline flag group answers as its argument flag does (%d "
+          "spellings)" % len(want),
+          "got %s, CPython %s" % (out, want))
+
+
+def test_inline_flags_that_cpython_refuses_are_refused_here(tmpdir):
+    """The five shapes CPython will not compile, refused with a STATUS.
+
+    A global flag group is legal only before any real part of the pattern, and
+    that rule is CPython's rather than this file's taste: `(?i)(?m)a` compiles
+    and `(?i)a(?m)b` does not. Asserting the refusals is what stops the "at the
+    head" rule from decaying into "anywhere", which is a question with a
+    different answer for every one of the five.
+    """
+    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
+    for index, (pat, _why) in enumerate(INLINE_FLAG_REFUSED):
+        lines.append("    p%d = %s" % (index, mojo_str(pat)))
+        lines.append("    st%d = [0, 0, 0, 0]" % index)
+    for index, (pat, _why) in enumerate(INLINE_FLAG_REFUSED):
+        lines.append("    emit(0, re.search(st%d, 4, p%d, \"ab\", 0))"
+                     % (index, index))
+    lines.append("    return 0")
+    src = "\n".join(lines) + "\n"
+    try:
+        out = build_and_run(tmpdir, "inlineflagsrefused", src)
+    except AssertionError as e:
+        check(False, "the inline-flag refusal program builds", str(e)[:400])
+        return
+    out = [int(tok) for line in out for tok in line.split()]
+    # Every one of them must be a STATUS the caller can see, and 3 is
+    # STATUS_UNSUPPORTED; a 0 here would be "no match", which is the silent
+    # wrong answer `test_unsupported_constructs_are_refused` exists to prevent.
+    check(out == [3] * len(INLINE_FLAG_REFUSED),
+          "all %d refused flag shapes answer STATUS_UNSUPPORTED"
+          % len(INLINE_FLAG_REFUSED), "got %s" % out)
+
+
+def test_the_scoped_flag_form_is_refused_and_named(tmpdir):
+    """`(?x: ... )` is not compiled, and this test says so rather than leaving it.
+
+    The counterpart to the two above: a construct that is genuinely absent is
+    asserted to be ABSENT, with the reason in `SCOPED_NOT_YET` and in
+    `re.mojo`'s `_p_inline`. It is not in `INLINE_FLAG_REFUSED` because that
+    list is CPython's refusals and this is ours, and a test that cannot tell the
+    two apart would claim CPython refuses something it compiles.
+    """
+    # CPython compiles every one of them, which is the PREMISE: a shape CPython
+    # also refused would not be a divergence, and asserting the premise is what
+    # keeps this test honest if CPython ever changes its mind.
+    for pat in SCOPED_NOT_YET:
+        try:
+            re.compile(pat)
+        except re.error as e:
+            check(False, "%r compiles in CPython, so refusing it here is a "
+                         "divergence and not a shared limit" % pat, str(e))
+    lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
+    for index, pat in enumerate(SCOPED_NOT_YET):
+        lines.append("    p%d = %s" % (index, mojo_str(pat)))
+        lines.append("    st%d = [0, 0, 0, 0]" % index)
+    for index, pat in enumerate(SCOPED_NOT_YET):
+        lines.append("    emit(0, re.search(st%d, 4, p%d, \"abc\", 0))"
+                     % (index, index))
+    lines.append("    return 0")
+    src = "\n".join(lines) + "\n"
+    try:
+        out = build_and_run(tmpdir, "scopedflags", src)
+    except AssertionError as e:
+        check(False, "the scoped-flag program builds", str(e)[:400])
+        return
+    out = [int(tok) for line in out for tok in line.split()]
+    check(out == [3] * len(SCOPED_NOT_YET),
+          "the scoped flag form is refused with STATUS_UNSUPPORTED, which is "
+          "what `re.mojo` documents", "got %s" % out)
 
 
 def test_mojo_str_round_trips_through_the_decoder(tmpdir=None):
@@ -1344,6 +1501,9 @@ def main():
         test_the_corpus_against_cpython_on_x86_64,
         test_escape_every_byte,
         test_unsupported_constructs_are_refused,
+        test_inline_flags_answer_like_the_arguments_they_duplicate,
+        test_inline_flags_that_cpython_refuses_are_refused_here,
+        test_the_scoped_flag_form_is_refused_and_named,
         test_a_span_list_that_is_too_small_is_a_status_not_a_crash,
         test_the_corpus_patterns_all_work,
         test_the_sweep_files_no_longer_refuse_on_the_import,
