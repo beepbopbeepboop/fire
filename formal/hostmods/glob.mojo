@@ -565,83 +565,188 @@ def _glob_in_dir(dirname, basename, mode, dironly, include_hidden) -> Pointer[In
     return _glob2(dirname, basename, dironly, include_hidden)
 
 
-def _iglob(pathname, recursive, dironly, include_hidden) -> Pointer[Int64]:
-    """CPython's `_iglob`: every path under `pathname` that matches it.
+# ── `_iglob`: one pattern, at any depth ──────────────────────────────────────
+#
+# CPython's `_iglob` is a GENERATOR, and a generator has no length. So this is
+# the one function in the module that had to become a PAIR — `_iglob_count` and
+# `_iglob_fill`, the same bargain `_rlistdir_count`/`_rlistdir_fill` make and the
+# same one `os.walk` makes in `_walk_dirs`/`_walk_fill`. `glob()` above sizes the
+# blob from the first and hands it to the second, which is what keeps the
+# allocation in the function the CALLER called
+# (`test_formal_blob_contract.py`'s producer rule, and the reason `os.walk` sizes
+# its own).
+#
+# `_iglob_count` runs the walk and adds up; `_iglob_fill` runs it again and
+# writes. They are twins by hand and that is a real risk — a divergence between
+# them is a blob written past its end — so every decision they share is made by a
+# helper neither of them inlines, and the test's 33 cases include the shapes
+# where a count and a fill most easily disagree (`**`, `dironly`, a directory
+# that is not there).
 
-    CPython's is a GENERATOR and the recursion is lazy, which is the one place
-    this transcription cannot follow it literally: `dirs` here is a blob and the
-    loop over it is an index. Two consequences, both stated where they happen:
 
-      * **two passes over `dirs`**, one to total the answers and one to write
-        them, because a blob's allocation has to be decided before the first
-        word is stored. This is `os.listdir`'s and `os.walk`'s bargain, and the
-        cost is a second scan of each directory at each level.
-      * the per-directory answers are BUILT TWICE, once per pass, and released
-        after each is consumed — they are this module's own blobs, so they are
-        freed with `_blob_free`.
+def _iglob_dirs(pathname, recursive, dironly, include_hidden) -> Pointer[Int64]:
+    """The DIRECTORIES `pathname`'s dirname expands to, as a blob this module owns.
 
-    `dironly` is CPython's own flag: `_iglob` passes 1 when it recurses into the
-    pattern's DIRECTORY, so every intermediate answer is a list of directories
-    and the leaves are the only answers that can be files.
+    The half of `_iglob` that both twins need and neither owns: CPython's
+
+        if dirname != pathname and has_magic(dirname):
+            dirs = _iglob(dirname, root_dir, dir_fd, recursive, True, ...)
+        else:
+            dirs = [dirname]
+
+    with `dironly` fixed at 1, because an intermediate answer is a list of
+    directories and only the leaves can be files. Returning a blob rather than a
+    count is what lets the caller iterate it without knowing whether the answer
+    was one directory or forty.
     """
     dn = dirname(pathname)
-    bn = basename(pathname)
-    if has_magic(pathname) == 0:
-        # No magic: the answer is the pattern itself or nothing. CPython tests
-        # `_lexists(_join(root_dir, pathname))` and `root_dir` is `""`, so this
-        # is `lexists(pathname)` — not a join of the two halves, which would
-        # spell the directory twice.
-        if str_len(bn) > 0:
-            if lexists(pathname) == 1:
-                return _single(pathname)
-            return _empty()
-        if isdir(dn) == 1:
-            return _single(pathname)
-        return _empty()
-    if str_len(dn) == 0:
-        if recursive == 1 and _isrecursive(bn) == 1:
-            return _glob_in_dir(dn, bn, 2, dironly, include_hidden)
-        return _glob_in_dir(dn, bn, 1, dironly, include_hidden)
-    # `dirname != pathname` is CPython's guard against a drive or UNC path whose
-    # own name carries magic characters: without it this recurses on the same
-    # string for ever. It is transcribed rather than assumed away, because on a
-    # POSIX target it is also the only thing keeping `//`-shaped patterns finite.
-    var dirs: Pointer[Int64]
     if str_cmp(dn, pathname) != 0 and has_magic(dn) == 1:
-        dirs = _iglob(dn, recursive, 1, include_hidden)
-    else:
-        dirs = _single(dn)
-    var mode = 0
-    if has_magic(bn) == 1:
-        if recursive == 1 and _isrecursive(bn) == 1:
-            mode = 2
-        else:
-            mode = 1
-    # Pass one: how many answers in all.
+        # `dirname != pathname` is CPython's guard against a drive or UNC path
+        # whose own name carries magic characters: without it this recurses on the
+        # same string for ever. It is transcribed rather than assumed away,
+        # because on a POSIX target it is also the only thing keeping
+        # `//`-shaped patterns finite.
+        return _iglob(dn, recursive, 1, include_hidden)
+    return _single(dn)
+
+
+def _iglob_mode(bn, recursive) -> int:
+    """Which of CPython's three per-directory helpers this pattern's basename
+    selects: 0 for `_glob0` (a literal basename), 1 for `_glob1` (a pattern) and
+    2 for `_glob2` (`**` under `recursive`).
+
+    CPython picks a function OBJECT and a value on this path is one 64-bit word,
+    so there is no word that denotes a function to put in it
+    (`bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`). The
+    choice is therefore an integer, and it is the same choice at the same point
+    in the same order — which is why it is a function rather than three copies
+    of the test at each of the two twins.
+    """
+    if has_magic(bn) == 0:
+        return 0
+    if recursive == 1 and _isrecursive(bn) == 1:
+        return 2
+    return 1
+
+
+def _iglob_literal(pathname) -> int:
+    """1 when `_iglob` answers the PATTERN ITSELF or nothing.
+
+    CPython's:
+
+        if not has_magic(pathname):
+            if basename:
+                if _lexists(_join(root_dir, pathname)): yield pathname
+            else:
+                if _isdir(_join(root_dir, dirname)): yield pathname
+            return
+
+    Split out because both twins have to take this branch or not, and a branch
+    the two of them spell differently is a count that disagrees with a fill. The
+    `lexists` test is on `pathname` and NOT on a join of its two halves —
+    `root_dir` is `""` in CPython too, and joining the dirname back on would
+    spell the directory twice.
+    """
+    if has_magic(pathname) == 1:
+        return 0
+    bn = basename(pathname)
+    if str_len(bn) > 0:
+        return 1 if lexists(pathname) == 1 else 0
+    return 1 if isdir(dirname(pathname)) == 1 else 0
+
+
+def _iglob_count(pathname, recursive, dironly, include_hidden) -> int:
+    """How many paths `_iglob` yields for `pathname`. The sizing pass.
+
+    The no-magic case first, because it is the one with no per-directory work:
+    the answer is the pattern itself or nothing.
+    """
+    if _iglob_literal(pathname) == 1:
+        return 1
+    if has_magic(pathname) == 0:
+        return 0
+    dn = dirname(pathname)
+    bn = basename(pathname)
+    mode = _iglob_mode(bn, recursive)
+    if str_len(dn) == 0:
+        part = _glob_in_dir(dn, bn, mode, dironly, include_hidden)
+        total = part[0]
+        _blob_free(part)
+        return total
+    dirs = _iglob_dirs(pathname, recursive, dironly, include_hidden)
     var total = 0
     var k = 0
     while k < dirs[0]:
-        d = dirs[1 + k]
-        part = _glob_in_dir(d, bn, mode, dironly, include_hidden)
+        part = _glob_in_dir(dirs[1 + k], bn, mode, dironly, include_hidden)
         total = total + part[0]
         _blob_free(part)
         k = k + 1
-    var out: Pointer[Int64] = _blob_new(total)
-    # Pass two: write them, in `dirs` order and in each part's order.
-    var w = 1
-    k = 0
+    _blob_free(dirs)
+    return total
+
+
+def _iglob_fill(pathname, recursive, dironly, include_hidden,
+                b: Pointer[Int64], w) -> int:
+    """Write `_iglob`'s answers at blob word `w` on, and return the next free word.
+
+    The twin of `_iglob_count` above, and the write side of the pair. Every
+    branch here has a counterpart there and both call `_iglob_literal` and
+    `_iglob_mode`, so the two cannot disagree about WHICH answers there are —
+    only about how many of them, which is the property the test corpus is built to
+    catch.
+    """
+    if _iglob_literal(pathname) == 1:
+        b[w] = str_dup(pathname)
+        return w + 1
+    if has_magic(pathname) == 0:
+        return w
+    dn = dirname(pathname)
+    bn = basename(pathname)
+    mode = _iglob_mode(bn, recursive)
+    if str_len(dn) == 0:
+        return _glob_fill(dn, bn, mode, dironly, include_hidden, b, w)
+    dirs = _iglob_dirs(pathname, recursive, dironly, include_hidden)
+    var k = 0
     while k < dirs[0]:
         d = dirs[1 + k]
-        part = _glob_in_dir(d, bn, mode, dironly, include_hidden)
-        var j = 0
-        while j < part[0]:
-            out[w] = str_dup(join(d, part[1 + j]))
-            w = w + 1
-            j = j + 1
-        _blob_free(part)
+        w = _glob_fill(d, bn, mode, dironly, include_hidden, b, w)
         k = k + 1
-    out[0] = w - 1
     _blob_free(dirs)
+    return w
+
+
+def _glob_fill(dirname_, basename_, mode, dironly, include_hidden,
+               b: Pointer[Int64], w) -> int:
+    """One directory's answers, written at `w` on — the leaf of `_iglob_fill`.
+
+    The per-directory answers are BUILT, joined onto the directory and released,
+    in `dirs` order and in each part's order, which is the order CPython's lazy
+    generator yields them in. The part is a blob this module owns, so it is freed
+    with `_blob_free` after its words have been copied out.
+    """
+    part = _glob_in_dir(dirname_, basename_, mode, dironly, include_hidden)
+    var j = 0
+    while j < part[0]:
+        b[w] = str_dup(join(dirname_, part[1 + j]))
+        w = w + 1
+        j = j + 1
+    _blob_free(part)
+    return w
+
+
+def _iglob(pathname, recursive, dironly, include_hidden) -> Pointer[Int64]:
+    """CPython's `_iglob` as a BLOB, for the one caller that wants a blob.
+
+    `_iglob_dirs` above needs a real one — it hands its answer to a caller that
+    iterates it — and it needs it before any count is known, so this is the one
+    place a blob is built by a helper rather than by the function the caller
+    called. It is not the EXPORT (`glob` is, and `glob` allocates), so the
+    producer rule is not evaded by it; `test_formal_blob_contract.py` reads
+    `HOST_OWNED_BLOBS` and `glob` is what it names.
+    """
+    n = _iglob_count(pathname, recursive, dironly, include_hidden)
+    var out: Pointer[Int64] = _blob_new(n)
+    out[0] = _iglob_fill(pathname, recursive, dironly, include_hidden, out, 1) - 1
     return out
 
 
@@ -666,15 +771,42 @@ def glob(pathname, recursive = 0, include_hidden = 0) -> List[String]:
     empty or whose first TWO characters are `**` under `recursive`. That is what
     drops the `""` `_glob2` yields first, so `glob("**", recursive=True)` answers
     nothing for a tree with nothing in it rather than answering `[""]`.
+
+    THE ALLOCATION IS HERE AND NOT IN `_iglob`, and that is a decision rather
+    than an accident of the transcription. `test_formal_blob_contract.py` requires
+    a blob PRODUCER to `malloc` its own block, because that is the whole
+    difference between a blob that outlives the call and a frame that does not —
+    and the check reads the export's own body, so a producer that forwards to a
+    helper which allocates cannot be seen to allocate. `os.walk` has the same
+    shape for the same reason (`_walk_fill` writes into a blob `walk` sized), and
+    it is why `HOST_OWNED_BLOBS` names this export at all.
+
+    So `_iglob` FILLS a caller's blob and this function sizes it: `_iglob_count`
+    is the counting twin of `_iglob_fill`, the same bargain
+    `_rlistdir_count`/`_rlistdir_fill` make and for the same reason — a blob's
+    length has to be decided before the first word is stored. The cost is that
+    the walk runs TWICE, which is the cost `os.listdir` and `os.walk` both pay and
+    which their docstrings state; the benefit is that word 0 of the answer is a
+    fact about the filesystem and that the block a caller holds was allocated by
+    the function the caller called.
     """
-    one = _iglob(pathname, recursive, 0, include_hidden)
+    n = _iglob_count(pathname, recursive, 0, include_hidden)
+    # SPELLED OUT rather than delegated to `_blob_new`, and the reason is that
+    # `test_formal_blob_contract.py` reads a producer's own body for the shape
+    # that decides whether the value outlives the call: a producer that forwards
+    # to a helper which allocates cannot be SEEN to allocate, and `os.walk` has
+    # the same `malloc` written out in its own body for the same reason. The
+    # helper still exists for the six internal blobs, where nothing is checking.
+    var b: Pointer[Int64] = malloc(8 * (1 + n))
+    memset(b, 0, 8 * (1 + n))
+    b[0] = _iglob_fill(pathname, recursive, 0, include_hidden, b, 1) - 1
     if str_len(pathname) == 0 or (recursive == 1 and _isrecursive(str_prefix(pathname, 2)) == 1):
-        if one[0] > 0 and str_len(one[1]) == 0:
-            dropped = one[1]
+        if b[0] > 0 and str_len(b[1]) == 0:
+            dropped = b[1]
             var i = 1
-            while i < one[0]:
-                one[i] = one[1 + i]
+            while i < b[0]:
+                b[i] = b[1 + i]
                 i = i + 1
             free(dropped)
-            one[0] = one[0] - 1
-    return one
+            b[0] = b[0] - 1
+    return b
