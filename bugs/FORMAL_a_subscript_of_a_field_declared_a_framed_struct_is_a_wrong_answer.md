@@ -3,7 +3,7 @@
 **Area:** FORMAL, both backends. **Status: OPEN, measured on this tree; it is a
 SILENT WRONG ANSWER, not a fault, which is why it is a separate document from
 the one whose fix left it out.** Found 2026-10-03 while fixing
-`FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_two_backends_disagree.md`,
+commit f0df70b2,
 whose census said "the frame kind is out of scope for that fix" and whose fix
 therefore deliberately excluded it.
 

@@ -5875,8 +5875,7 @@ def slot_container_operand_refusal(op: str, base_kind, spelled_base: str,
     source says `s.n`, and `s.n` IS a field.  It names the node its gate was
     handed, which by then is the slot's materialized default, so the literal in
     the sentence is a residue of the rewrite rather than anything the reader
-    wrote.  `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_
-    and_the_two_backends_disagree.md`.
+    wrote.  commit f0df70b2.
 
     **Why the kind and not the base's SPELLING is the gate**, and why `None` is
     excluded from `NON_CONTAINER_SLOT_KINDS`, is measured rather than argued.
@@ -14319,8 +14318,7 @@ def _kind_of_simple(e) -> str | None:
         # value, two kinds, decided by where the name is written"), one level
         # further in: there the field and the local disagreed, here the field
         # and the CONSTRUCTOR ARGUMENT do.
-        # `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_
-        # the_two_backends_disagree.md` row 3.
+        # commit f0df70b2's row 3.
         return TYPE_KIND
     return None
 

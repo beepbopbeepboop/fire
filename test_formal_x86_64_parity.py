@@ -1644,8 +1644,7 @@ REFUSALS = [
     # said "got IntLiteral" about a source that says `s.n`.  A reader sent to
     # look for an `IntLiteral` in a file that has none is the C5 failure this
     # project's diagnostics exist to stop.
-    # `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_pointer_dereference_and_the_
-    # two_backends_disagree.md`.
+    # commit f0df70b2.
     ("subscript_of_a_slot_declared_an_int_refused_identically",
      "struct S:\n"
      "    var n: Int = 5\n"
