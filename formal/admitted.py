@@ -83,6 +83,7 @@ is refused by `contract_text_is_scoped`, because an admission wider than the
 answer is a claim about a host nobody checked.
 """
 
+import collections
 import os
 import re
 import sys
@@ -724,6 +725,155 @@ def library_trust_lines(lean_dir: str) -> list:
                 shown = ",".join(str(x) for x in lines[:6])
                 more = "" if len(lines) <= 6 else f",+{len(lines) - 6}"
                 out.append(f"{mod}: {kind}={count} at {shown}{more}")
+    return out
+
+
+# A top-level Lean DECLARATION head, for the per-theorem attribution below.  It is
+# a separate regex from `formal/lean.py`'s because this module is leaf-most and
+# must not import the launcher, and the two differ in what they accept rather
+# than in what they are for: `vacuous_declarations` wants `theorem`/`lemma`/`def`
+# with a NAME (it reads the name out of the match), while the attribution wants
+# every head that can own a proof body — `example`, and an `instance … where`
+# block's own `where`-bound fields, which this project does not write.
+_LEAN_DECL_RE = re.compile(
+    r"^[ \t]*(?:@\[[^\]\n]*\][ \t\n]*)*"
+    r"(?:private\s+|protected\s+|noncomputable\s+)*"
+    r"(theorem|lemma|def|example|instance|abbrev)\s+"
+    r"([A-Za-z_][\w'.]*)")
+
+# The name the attribution gives a hit that is in no declaration's body.  Not an
+# invented one: Lean's own word for a proof that is not attached to a name, and a
+# reader grepping `lib/` for it finds nothing, which is the point — a hit with no
+# theorem above it is a shape someone has to look at.
+FILE_SCOPE = "<file scope>"
+
+
+def library_trust_by_declaration(lean_dir: str) -> dict:
+    """`{module: [(name, line, {kind: n})]}` — the census, attributed.
+
+    **The other direction from `library_trust`, and the one that makes its number
+    actionable.** `library_trust` reports SITES because a count with no location
+    is a number nobody can act on; this reports how many of them each THEOREM
+    owns, because the ceiling `test_formal_admitted.py` pins is per FILE and the
+    work is per proof. `bugs/FORMAL_native_decide_axiom.md` item 2 is this
+    function: "the ceiling can be lowered per theorem rather than per file", which
+    needs the theorem to be named before anything can be lowered.
+
+    Only declarations that OWN at least one hit are listed, and the sort is by
+    site count descending then by line, so the head of the list is what to work
+    on. A module with no hits is an empty list rather than absent, so a caller
+    can tell "nothing here" from "the module is not in the census".
+
+    **The attribution rule is "the LAST declaration head at or before the hit",
+    and its limits are written down rather than left to be discovered.** Lean
+    declarations do not nest, so that is the declaration a hit is inside for
+    well-formed source; two shapes fall outside it and both are reported rather
+    than silently absorbed:
+
+      * a hit BEFORE the first declaration head in the file — a top-level tactic
+        script, or an `example` whose head this regex missed — is attributed to
+        `FILE_SCOPE`, which is a finding rather than a theorem;
+      * a hit in a `where` clause bound to the previous declaration is
+        attributed to THAT declaration. In this project a `where` clause's body
+        is a field or a lemma over the same statement, so counting it against
+        the head is the honest reading; in a file where `where` held an
+        unrelated proof it would not be, and the file would be worth reading.
+
+    Completeness is the property that makes this usable rather than decorative,
+    and the test checks it in both directions: the per-declaration counts for a
+    module must SUM to that module's `library_trust` count, so an attribution
+    that loses or invents a site fails rather than reporting a plausible
+    smaller number.
+    """
+    out = {}
+    for name in sorted(os.listdir(lean_dir)):
+        if not name.endswith(".lean"):
+            continue
+        path = os.path.join(lean_dir, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        code = lean_code_regions(raw)
+        lines = code.split("\n")
+
+        # (line, decl name) for every head, in order, then a per-declaration
+        # tally filled in by walking the file's hits forward.
+        heads = []
+        for i, text in enumerate(lines, 1):
+            m = _LEAN_DECL_RE.match(text)
+            if m:
+                heads.append((i, m.group(2)))
+        tally = collections.OrderedDict()
+        for i, text in enumerate(lines, 1):
+            hit = False
+            for regex in (_SORRY_RE, _TACTIC_RE):
+                if regex.search(text):
+                    hit = True
+                    break
+            if not hit:
+                continue
+            owner = FILE_SCOPE
+            for hline, hname in heads:
+                if hline <= i:
+                    owner = hname
+                else:
+                    break
+            slot = tally.setdefault(owner, {"line": 0, "axiom": 0,
+                                            "sorry": 0, "axiom_tactic": 0})
+            if slot["line"] == 0:
+                slot["line"] = next(h for h, n in heads if n == owner) \
+                    if owner != FILE_SCOPE else 1
+            for kind, regex in (("sorry", _SORRY_RE),
+                                ("axiom_tactic", _TACTIC_RE)):
+                if regex.search(text):
+                    slot[kind] += 1
+            # WHICH of the two, because the two want different replacements and
+            # the difference decides which of them is worth attempting:
+            # `native_decide` on a closed `UInt64`/`Nat` arithmetic goal is
+            # usually `decide`, `rfl` or `norm_num`, while `bv_decide` on a
+            # `∀ w, … ≠ …` bit-pattern lemma is the right tool and has no
+            # kernel-checked spelling short of writing the arithmetic out.
+            for tactic in AXIOM_TACTICS:
+                slot[tactic] = slot.get(tactic, 0) + len(
+                    re.findall(r"(?<![\w.'])" + tactic + r"(?![\w'])", text))
+        rows = [(nm, slot["line"],
+                 dict({k: slot[k] for k in ("axiom", "sorry", "axiom_tactic")},
+                      **{t: slot.get(t, 0) for t in AXIOM_TACTICS}))
+                for nm, slot in tally.items()]
+        rows.sort(key=lambda r: (-r[2]["axiom_tactic"], -r[2]["sorry"], r[1]))
+        out[name[:-len(".lean")]] = rows
+    return out
+
+
+def library_trust_by_declaration_lines(lean_dir: str, top: int = 6) -> list:
+    """The attribution as report lines, biggest first, `top` per module.
+
+    What makes the per-theorem number a WORK LIST rather than another count: each
+    line names a theorem, where it starts, and how many axiom-carrying sites its
+    own proof has. `top` is a parameter rather than a constant because the reader
+    is a report and the writer is a ceiling — the full table is always available
+    from `library_trust_by_declaration`, and a truncated one must never be the
+    only way to see a site.
+    """
+    out = []
+    for mod, rows in sorted(library_trust_by_declaration(lean_dir).items()):
+        if not rows:
+            continue
+        shown = rows[:top]
+        parts = []
+        for name, line, kinds in shown:
+            bits = ",".join(f"{k}={kinds[k]}" for k in
+                            ("axiom_tactic", "sorry", "axiom") if kinds[k])
+            mix = ",".join(f"{t}={kinds[t]}" for t in AXIOM_TACTICS
+                           if kinds.get(t))
+            if mix:
+                bits += " (" + mix + ")"
+            parts.append(f"{name}@{line} [{bits}]")
+        more = "" if len(rows) <= top else f", +{len(rows) - top} more"
+        out.append(f"{mod}: {len(rows)} declaration(s) with a hit; "
+                   + "; ".join(parts) + more)
     return out
 
 

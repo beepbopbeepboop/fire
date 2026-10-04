@@ -1160,6 +1160,144 @@ def test_the_library_trust_counts_are_pinned(tmpdir=None):
                   f"{total} native_decide/bv_decide site(s), within the ceiling")
 
 
+def test_the_census_is_attributed_to_theorems_not_only_to_lines(tmpdir=None):
+    """`lib/`'s axiom-carrying sites, per THEOREM, and the completeness of that.
+
+    `LIBRARY_TRUST` above pins a count per FILE, and a file-level ceiling is the
+    right shape for a debt several branches pay down at once — but it is not the
+    shape the WORK has. `bugs/FORMAL_native_decide_axiom.md` item 2 asks for
+    "for each top-level `theorem`/`lemma` in `lib/`, the number of
+    axiom-carrying tactic sites in its own proof, so the ceiling can be lowered
+    per theorem rather than per file", and that is
+    `formal/admitted.py::library_trust_by_declaration`.
+
+    Three things are asserted, in the order they can fail:
+
+      * **COMPLETENESS, both directions.** The per-declaration counts for a module
+        must SUM to that module's file-level count. An attribution that lost a
+        site would report a smaller, plausible number, and one that invented one
+        would report a bigger one; neither is visible without this.
+      * **No hit is in no theorem.** A site above the first declaration head in a
+        file is `library_trust`'s own `FILE_SCOPE` bucket, which is a shape
+        somebody has to look at rather than a theorem to work on. There are none,
+        and that is a fact about the corpus rather than an assumption — a future
+        top-level tactic script would land here.
+      * **The shortlist is a ceiling, not a snapshot.** The theorems carrying
+        exactly ONE site are the cheapest to replace (`decide` or `rfl` closes a
+        closed arithmetic goal; `bv_decide` is the right tool for the `∀ w, … ≠
+        …` bit-pattern lemmas and those are the ones to leave), so their NUMBER
+        is pinned as a ceiling and their names are printed. A name list as an
+        equality would fail on every proof somebody improves, which is the
+        failure mode `LIBRARY_TRUST`'s own note describes for a per-file
+        equality.
+    """
+    lib = A.lean_dir(HERE)
+    census = A.library_trust(lib)
+    by_decl = A.library_trust_by_declaration(lib)
+    errors = []
+    for mod in sorted(census):
+        rows = by_decl.get(mod)
+        if rows is None:
+            errors.append(f"{mod}: the per-declaration census has no row for a "
+                          f"module the file-level census has")
+            continue
+        for kind in ("sorry", "axiom_tactic"):
+            attributed = sum(r[2][kind] for r in rows)
+            whole = census[mod][kind][0]
+            if attributed != whole:
+                errors.append(
+                    f"{mod}: {kind} — {attributed} attributed to declarations "
+                    f"against {whole} in the file. An attribution that loses a "
+                    f"site reports a smaller plausible number and one that "
+                    f"invents a site reports a bigger one; neither is visible "
+                    f"without this comparison")
+        for name, line, _kinds in rows:
+            if name == A.FILE_SCOPE:
+                errors.append(
+                    f"{mod}: a {census[mod]['axiom_tactic'][0]} site(s) with no "
+                    f"theorem above it, at line {line}. That is a top-level "
+                    f"tactic script or a declaration head "
+                    f"`_LEAN_DECL_RE` does not match, and both are shapes a "
+                    f"reader has to look at rather than a theorem to work on")
+    check(not errors,
+          "the per-theorem attribution of lib/'s trust census:\n    "
+          + "\n    ".join(errors))
+
+    # The two tactics SUM to the count, per declaration.  They are counted with
+    # their own regexes rather than derived from `_TACTIC_RE`, so this is the
+    # check that says the split did not drift from the total — and the split is
+    # what decides which of a theorem's sites is worth attempting.
+    mixed = []
+    for mod in sorted(by_decl):
+        for name, _line, kinds in by_decl[mod]:
+            split = sum(kinds.get(t, 0) for t in A.AXIOM_TACTICS)
+            if split != kinds["axiom_tactic"]:
+                mixed.append(f"{mod}: {name} — {split} counted as "
+                             f"{'/'.join(A.AXIOM_TACTICS)} against "
+                             f"{kinds['axiom_tactic']} sites")
+    check(not mixed,
+          "the per-tactic split of a theorem's sites does not add up:\n    "
+          + "\n    ".join(mixed))
+
+    shortlist = sorted((r[2]["axiom_tactic"], r[0], mod)
+                       for mod, rows in by_decl.items()
+                       for r in rows if r[2]["axiom_tactic"] == 1)
+    check(len(shortlist) <= ONE_SITE_THEOREMS,
+          f"{len(shortlist)} theorems in lib/ carry exactly one axiom-carrying "
+          f"site and the ceiling says {ONE_SITE_THEOREMS}. That count is a "
+          f"WORK LIST — each of those is one site away from a kernel-checked "
+          f"proof — so it moving DOWN is the outcome and moving UP means new "
+          f"debt landed. Either way the ceiling and the commit move together.")
+    # …and the sharper one.  Of the 19, ten are the `arm64_flag_*` family, whose
+    # sites are `simp only […]; bv_decide` over bit patterns — the right tool
+    # with no kernel-checked spelling short of writing the arithmetic out.  A
+    # theorem whose ONLY site is a `native_decide` is the other kind: closed
+    # `UInt64`/`Nat` arithmetic, which `decide`, `rfl`, `norm_num` or `omega`
+    # very often closes.  This is the list `bugs/FORMAL_native_decide_axiom.md`
+    # item 3 asks for by another name, and it is short enough to read.
+    replaceable = sorted(r[0] for mod, rows in by_decl.items() for r in rows
+                         if r[2]["axiom_tactic"] == 1
+                         and r[2].get("native_decide", 0) == 1)
+    check(len(replaceable) <= REPLACEABLE_THEOREMS,
+          f"{len(replaceable)} theorems in lib/ carry exactly one site and that "
+          f"site is a `native_decide` ({', '.join(replaceable)}), and the "
+          f"ceiling says {REPLACEABLE_THEOREMS}. Those are the sites with a "
+          f"kernel-checked spelling standing next to them, so the count "
+          f"falling is the whole of item 3's first step.")
+    hot = sorted(((r[2]["axiom_tactic"], r[0], mod)
+                  for mod, rows in by_decl.items() for r in rows),
+                 reverse=True)[:3]
+    total = sum(census[m]["axiom_tactic"][0] for m in census)
+    holders = sum(1 for mod, rows in by_decl.items() for r in rows
+                  if r[2]["axiom_tactic"])
+    return True, (f"{total} site(s) over {holders} theorem(s), all attributed; "
+                  f"{len(shortlist)} carry a single site and {len(replaceable)} "
+                  f"of those a single native_decide ({', '.join(replaceable)}); "
+                  f"the three heaviest are "
+                  + ", ".join(f"{n} ({k})" for k, n, _m in hot))
+
+
+# How many theorems in `lib/` may carry EXACTLY ONE axiom-carrying tactic site.
+# A ceiling, for the reason `LIBRARY_TRUST`'s note gives: each of those is one
+# site away from a kernel-checked proof, so the count moving DOWN is the outcome
+# and moving UP means new debt landed.  19 on this tree (16 in `ProofLib`, 2 in
+# `X86`, 1 in `Contracts`): 2.5% of the 749 sites, and 34% of the 56 theorems
+# that carry any.  `test_the_census_is_attributed_to_theorems_not_only_to_lines`
+# prints their names, and ten of them are the `arm64_flag_*` family.
+ONE_SITE_THEOREMS = 19
+
+# How many theorems may carry exactly one site AND that site be a
+# `native_decide`.  This is `bugs/FORMAL_native_decide_axiom.md` item 3's list
+# by another name, and it is the sharpest version: 8 on this tree
+# (`Semantics_refutable`, `backward_branch_in_image`,
+# `backward_branch_run_none`, `work_step_mov`, `toNat_sub_one`,
+# `toNat_sub_two` in `ProofLib`; `lowMask_eight` in `X86`; and
+# `spec_triple_ne_identity` in `Contracts`).  The other 11 of the 19 are
+# `bv_decide` over bit patterns, which is the right tool.  A ceiling, again: a
+# replacement lowers it, and the commit says which.
+REPLACEABLE_THEOREMS = 8
+
+
 # ── the inventory FORMAL.md publishes ─────────────────────────────────────────
 
 def _formal_md_inventory():
@@ -2450,6 +2588,8 @@ PURE = [("the emitted Lean is inert where nothing is admitted",
          test_every_contract_points_at_its_own_declaration),
         ("the Lean library's trust counts are pinned",
          test_the_library_trust_counts_are_pinned),
+        ("the census is attributed to theorems, not only to lines",
+         test_the_census_is_attributed_to_theorems_not_only_to_lines),
         ("FORMAL.md's inventory is the census",
          test_the_formal_md_inventory_agrees)]
 
