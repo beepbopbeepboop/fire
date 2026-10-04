@@ -7775,6 +7775,146 @@ def gen_module_impl(self, stmts):
                     _record_param_dict_val(callee, pnames[i], _dv)
     _resolve_param_dict_vals()
 
+    # ── a FORWARDED container parameter takes the callee's container kind ──
+    #
+    # `_infer_param_types` types a parameter from how its OWN body uses it,
+    # and a pure forwarder has no use to read: `def middle(d): return
+    # leaf(d)` mentions `d` exactly once, as an argument. Every use-based
+    # inference therefore has nothing to say, and `_infer_param_types` falls
+    # to its name-based container guess — `MojoList *` for a name it has no
+    # evidence about. That is a hard wrong-pointer coercion, not a missing
+    # type: `MojoList *` where `MojoDict *` is meant survives the C compiler
+    # silently and the callee reads whatever is at that offset, so
+    #
+    #     def leaf(d): print(d["x"])
+    #     def middle(d): return leaf(d)
+    #     middle({"x": "1"})
+    #
+    # printed `None` (and, before the dict-value contract landed, a decimal
+    # address). The callee's OWN inference already answers `MojoDict *` — the
+    # subscript in `leaf` is enough — so the evidence exists at the same
+    # place the scalar and struct-pointer observers read it, and this is a
+    # third observer there rather than a new pass.
+    #
+    # Two things this deliberately does NOT do.
+    #
+    # 1. It does not run inside `_infer_param_types`. That is per-function
+    #    and runs in SOURCE order, so `middle` typed before `leaf` would see
+    #    nothing and `leaf` typed first would see everything — which is why
+    #    this defect was ORDER-DEPENDENT: the same program with `middle`
+    #    defined first printed `1`, correctly and for no reason anyone
+    #    designed. A post pass over the collected call sites cannot be
+    #    order-sensitive, and `_reconcile_param_container_kinds` is already
+    #    the established place for exactly this ("applied to the shared table
+    #    rather than at a reader, because that table feeds the forward
+    #    DECLARATION as well as the definition").
+    #
+    # 2. It reads only `_inferred_param_types`, and only overwrites a slot
+    #    that is already one of the three container ctypes or empty. A
+    #    `char *`, a `double`, a `MojoBytes *` or a `<Struct> *` conclusion is
+    #    real use evidence from the callee's own body and outranks what a
+    #    caller happens to pass it; `param_binding_ctype` is narrow for the
+    #    same reason.
+    #
+    # Iterated to a fixpoint rather than applied once, because a chain
+    # forwards in both directions of the walk's order: `mid1 -> mid2 -> leaf`
+    # records `mid2`'s kind from `leaf` and `mid1`'s from `mid2`, and a single
+    # pass resolves `mid1` only if it happens to run after `mid2`. The bound
+    # is 4 rounds, one more than any forwarding chain in this compiler's own
+    # closure; a program that needs a fifth gets the third-from-last hop's
+    # answer, which is the pre-fix behaviour for that shape rather than a
+    # wrong one.
+    def _propagate_forwarded_container_kinds():
+        """A parameter whose only use is to be FORWARDED takes the callee's
+        container kind. See the block comment at the call site below for why
+        this is a post pass over the collected call sites and not part of
+        `_infer_param_types`."""
+        _FK_CTYPES = ('MojoList *', 'MojoDict *', 'MojoSet *')
+        for _fk_round in range(4):
+          _fk_obs: dict = {}
+          for _fk_caller, _fk_body in _caller_bodies:
+            _fk_calls = []
+            self._calls_in_stmts(_fk_body, _fk_calls)
+            for _fk_call in _fk_calls:
+                if not isinstance(_fk_call.func, IdentExpr):
+                    continue
+                _fk_callee = _as_str(_fk_call.func.name)
+                _fk_pnames = _free_params.get(_fk_callee)
+                if not _fk_pnames:
+                    continue
+                _fk_args = _fk_call.args or []
+                # Arity must equal the declared param count, or positional
+                # alignment is not trustworthy (an optional, a defaulted param, a
+                # `*args` call) — the same admission discipline
+                # `_gmi_apply_call_site_param_evidence` states for its own walk.
+                if len(_fk_args) != len(_fk_pnames):
+                    continue
+                _fk_ann = (getattr(self, '_annotated_params', {}) or {}).get(_fk_callee) or {}
+                _fk_callee_ipt = self._inferred_param_types.get(_fk_callee) or {}
+                for _fk_i, _fk_a in enumerate(_fk_args):
+                    # Only a PARAMETER of the caller being handed on: the caller's
+                    # own LOCAL of that name is `_infer_local_var_types`'s
+                    # business (`_reconcile_param_container_kinds`), and anything
+                    # else has no name to forward.
+                    if not isinstance(_fk_a, gimple_ctypes.IdentExpr):
+                        continue
+                    _fk_an = _as_str(_fk_a.name)
+                    _fk_caller_pnames = _free_params.get(_as_str(_fk_caller))
+                    if not _fk_caller_pnames or _fk_an not in _fk_caller_pnames:
+                        continue
+                    _fk_pn = _as_str(_fk_pnames[_fk_i])
+                    # An ANNOTATED parameter is left alone: `_param_ctype` gives
+                    # `_inferred_param_types` no say over an annotation, so an
+                    # entry written here reaches the forward declaration and not
+                    # the definition, and the pair disagrees ("conflicting types"
+                    # — the reason `_annotated_params` exists at all).
+                    if _fk_ann.get(_fk_pn):
+                        continue
+                    _fk_want = _fk_callee_ipt.get(_fk_pn)
+                    if _fk_want not in _FK_CTYPES:
+                        continue
+                    # Split the chained setdefault so the intermediate result has
+                    # a static type on the self-hosted path — the same trap the
+                    # sibling `_record_param_elem` / `_record_param_dict_val`
+                    # blocks above document.
+                    _fk_in = _fk_obs.setdefault(_as_str(_fk_caller), {})
+                    _fk_s = _fk_in.setdefault(_fk_an, set())
+                    _fk_s.add(_gmi_as_str(_fk_want))
+          # Observe-then-apply, REPEATED, and the observation is redone each round
+          # rather than accumulated: a chain's outer hop sees its neighbour's
+          # ANSWER, not the guess that neighbour started with, so `mid1 -> mid2 ->
+          # leaf` resolves `mid2` in round 1 and `mid1` in round 2. Accumulating
+          # instead would leave `mid1` holding `{'MojoList *', 'MojoDict *'}`,
+          # which the unanimity rule below reads as no evidence at all — the
+          # guess and the answer are not two witnesses, they are the same witness
+          # before and after.
+          _fk_changed = False
+          for _fk_caller, _fk_pm in _fk_obs.items():
+            _fk_dst = self._inferred_param_types.get(_fk_caller)
+            if _fk_dst is None:
+                continue
+            for _fk_pn, _fk_types in _fk_pm.items():
+                if len(_fk_types) != 1:
+                    continue          # disagreeing hops: no evidence
+                _fk_want = _gmi_as_str(sorted(_fk_types)[0])
+                if _fk_dst.get(_fk_pn) not in (None,) + tuple(_FK_CTYPES):
+                    continue          # real use evidence in the body; keep it
+                if _fk_dst.get(_fk_pn) == _fk_want:
+                    continue
+                _fk_dst[_fk_pn] = _fk_want
+                _fk_changed = True
+                # `_container_param_kinds` too, so the equality lowering's own
+                # container-kind reader (`emit_exprs`'s `_maybe_eq_kind`) sees the
+                # same answer for this parameter. Only ever fills a slot this pass
+                # proved; nothing here invents one.
+                _fk_kinds = self._container_param_kinds.setdefault(_fk_caller, {})
+                if _fk_kinds.get(_fk_pn) is None:
+                    _fk_kinds[_fk_pn] = ('list' if _fk_want == 'MojoList *' else
+                                         'set' if _fk_want == 'MojoSet *' else
+                                         'dict')
+          if not _fk_changed:
+            break
+    _propagate_forwarded_container_kinds()
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
