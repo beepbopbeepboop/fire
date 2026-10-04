@@ -72,7 +72,7 @@ One edit, in the doc you already own:
 2. Rewrite the paragraph at line ~31: the `expect=` is deleted, the job is in
    `check` and `proofs`, and the "that edit is the integrator's" sentence goes
    with it.
-3. `python3 tools/dangling_doc_refs.py --ratchet` in the same commit, if step 2
-   is the last text that cites
-   `bugs/TEST_formal_receiver_position_expect_marker_outlived_its_three_cases.md`
-   (it is cited nowhere after this commit — the ratchet is reported clean here).
+3. `python3 tools/dangling_doc_refs.py --ratchet` in the same commit. Nothing
+   else in the tree cites the TEST doc that carried this step, and it was deleted
+   with its fix, so the ratchet is reported clean at this commit — which is the
+   check that will tell you if step 2 has reintroduced one.

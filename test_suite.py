@@ -3245,7 +3245,14 @@ UNREGISTERED = {
     # table's own comment is where a reader looks for what these have in
     # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
-    'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
+    # `test_formal_bracketed_method_field_set.py` was here too, under the same
+    # reason, and was REGISTERED instead (2026-10-04, as
+    # `formal-bracketed-method-field-set`, in `check` and `proofs`): 3.7 s and
+    # 0.05 GB measured, 26 rows, no Lean — `_FORMAL_SUITE_REASON`'s "minutes per
+    # job" is a measurement of the suites that build and RUN a program per group,
+    # and this file does that for its last two rows out of twenty-six. It was also
+    # the file whose four ask-COUNT rows had been red in no bucket, which is the
+    # cost argument and the coverage argument agreeing.
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
