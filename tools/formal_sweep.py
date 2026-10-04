@@ -823,6 +823,21 @@ _REFUSAL_FAMILIES = (
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
+    # COMPOSITION: the missing BUFFER, in the two wordings the model emits it
+    # in. Named rather than left in "other refusal" because it is 114 files on
+    # the 2026-10-04 b11 sweep — the largest family in the corpus by a wide
+    # margin, and it had no row here or in `formal_sweep_causes.py` until that
+    # sweep. The two markers are one family because `formal/model.py` says in
+    # both messages that they are one missing thing, and `LENGTH_DEPENDENT_
+    # METHODS` is its third spelling; the sibling row above
+    # ("string method needing a length") is the other half — a missing WRITE
+    # rather than a missing buffer to write into. Position is load-bearing and
+    # these two sit with the other string rows for the reason every other
+    # placement here does: first match wins, and a broader marker above a
+    # narrower one swallows it silently.
+    ("no buffer to compose one in", "string composition has no buffer"),
+    ("on two strings is refused on this path",
+     "string composition has no buffer"),
     ("multi-index subscript", "multi-index subscript"),
     # A call through a VALUE, in three shapes with three fixes: the callee's
     # declared type, the bracket, the keyword. Ahead of everything below

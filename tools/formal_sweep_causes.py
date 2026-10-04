@@ -711,6 +711,45 @@ CAUSES = (
     # does not write, which is the fix's shape.
     ("a String method that returns a SHORTER string writes the receiver's bytes",
      (("returns a SHORTER string",),)),
+    # COMPOSITION, which is the missing BUFFER rather than a missing write, and
+    # which had NO row until 2026-10-04: 114 of the 722 files on the b11 sweep,
+    # 32% of every codegen finding in the tree, every one of them one sentence
+    # from `formal/model.py::interpolated_literal_refusal` — and 94% of the
+    # `other refusal` bucket, which this table's own docstring defines as "nobody
+    # has looked". The row above is its sibling and says so: that one needs a
+    # writable copy of the receiver's bytes, this one needs somewhere to PUT the
+    # new ones.
+    #
+    # TWO WORDINGS, ONE MISSING THING, so two alternatives and not one AND. An
+    # interpolated literal is refused at the MODULE (`refuse_interpolated_literals`,
+    # over the whole body, before any emitter runs) and a binary `+`/`-` on two
+    # strings is refused at the operator (`string_concat_refusal`), and the two
+    # messages share no clause beyond the missing buffer — which is why they are
+    # two alternatives. They are ONE row because `formal/model.py` says in both
+    # messages that they are one thing: the f-string's own text calls it "the
+    # same missing buffer `string_concat_refusal` names", and `LENGTH_DEPENDENT_
+    # METHODS` is the third spelling of it. A queue that saw three rows would
+    # read them as three projects.
+    #
+    # It is the largest row in the corpus with no owner, and it arrived five days
+    # before this row did: the refusal landed 2026-10-03 (`9b40c019`, "an f-string
+    # literal is REFUSED, not printed as its own spelling"), replacing a
+    # wrong-but-exit-0 answer. That fix EMPTIED two rows behind it without fixing
+    # them — the handler-arm row went 30 -> 1 with 29 files dark, and the
+    # module-ATTRIBUTE row 30 -> 4 with 25 dark — which is
+    # `FILES BLOCKED IS AN UPPER BOUND` arriving as a queue's blind spot rather
+    # than as a caveat. See `bugs/FORMAL_string_composition_has_no_buffer.md` for
+    # the measurement and what a lowering would have to be.
+    #
+    # THE MARKER IS THE FACT, NOT THE ADVICE. "no buffer to compose one in" is
+    # what is missing; the advice that follows it in the same message ("Print the
+    # parts as separate operands, or build the text with `+` once that is
+    # lowered") is wrong about `print` — `print("n=", n)` inserts a separator
+    # between its operands, so it is not the same text — and would be deleted by
+    # the fix rather than kept by it.
+    ("string composition: nothing to compose into",
+     (("no buffer to compose one in",),
+      ("on two strings is refused on this path",))),
     # A one-field struct's mutating method, where the RECEIVER is the struct, so
     # the callee has to hand the receiver back somehow. Four wordings and one
     # cause, because one convention covers the receiver and what is refused is
