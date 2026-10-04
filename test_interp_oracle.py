@@ -317,6 +317,56 @@ def h[T, U]():
 def main():
     print(h[T=Int]())
 ''', 'TypeError'),
+    # A call that does not supply a REQUIRED parameter is an arity error, and
+    # it used to be a body run with that parameter bound to `None`: the
+    # interpreter's own error here was `unsupported operand type(s) for +:
+    # 'int' and 'NoneType'`, raised from inside `add`'s body, one call away
+    # from the mistake. CPython raises `add() missing 1 required positional
+    # argument: 'b'` for the identical text, which is why the interpreter's
+    # wording is CPython's (see `MojoFunction._invoke`).
+    #
+    # There is no bracket in this program on purpose: the bracket was never
+    # the defect. It is how the defect was FOUND
+    # (`add[2, 5](x)` on a non-generic `add`), and the two cases below are
+    # the two halves of it — this one is the root cause, the next is the
+    # bracket on top.
+    "missing_required_argument_is_an_arity_error": ('''\
+def add(a: Int, b: Int) -> Int:
+    return a + b
+
+def main():
+    print(add(10))
+''', 'TypeError'),
+    # A specialization item with no declared comptime parameter to bind it is
+    # refused rather than dropped. `dict(zip(comptime_params, values))` stops
+    # at the shorter side, so both items were discarded, the call went on as
+    # `add(x)`, and the root cause above produced the `NoneType` crash. A
+    # specialization is a type-level claim, so an item the declaration cannot
+    # hold is a program whose own signature refutes it — and CPython refuses
+    # the same subscript outright ('function' object is not subscriptable).
+    "a_bracket_item_with_no_parameter_to_bind_is_refused": ('''\
+def add(a: Int, b: Int) -> Int:
+    return a + b
+
+def main():
+    print(add[2, 5](10))
+''', 'TypeError: add[...] supplies 2 specialization argument'),
+    # …and the refusal must not fire on a bracket that DOES fit, including
+    # through a function VALUE, which is the shape
+    # `std/algorithm/backend/tile.mojo`'s `workgroup_function[size](x, y)`
+    # reaches the interpreter by: a builtin holding the callable invokes it
+    # directly, so this is the same binding with no call site to lean on.
+    "a_bracket_that_fits_still_binds_through_a_function_value": ('''\
+def widen[x: Int](a: Int, b: Int) -> Int:
+    return a * 100 + b + x
+
+def call_it(f, a: Int, b: Int) -> Int:
+    return f(a, b)
+
+def main():
+    print(widen[3](5, 7))
+    print(call_it(widen[3], 5, 7))
+''', '510\n510\n'),
 }
 
 

@@ -457,6 +457,56 @@ def _parse_arm64_module(src: str, filename: str) -> list:
     return Parser(py_tokenize_named(src, filename)).with_filename(filename).parse_module()
 
 
+def _main_entry_args(main_def):
+    """The arguments `fire.py run` passes when it invokes `main` itself: one
+    `0` per parameter that has NO default, and nothing for the rest.
+
+    The compiled path's C `main()` wrapper does the same thing for the same
+    reason — it renames `def main(...)` to `_gimple_main` and calls
+    `_gimple_main(0, 0, ...)` (`mojo/backend_gimple/emit_funcs.py`, "Generate C
+    wrapper for main"), because a bare `main()` call cannot satisfy a signature
+    that declares parameters. This is the interpreter half of that convention,
+    and it was MISSING: `fire.py` invoked `main()` with no arguments at all, so
+    a program declaring the extremely common `def main(n):` had `n` bound to
+    nothing. That was invisible while `myinterpreter.py`'s `_invoke` bound an
+    unsupplied parameter to `None` — which it did until `MojoFunction._invoke`
+    made it the arity error CPython already raised, so the gap surfaced as
+    eight red cases in `test_nonlocal.py` the moment that landed. Every one of
+    them was a `def main(n):` whose body never reads `n`, so the programs are
+    correct and the entry point was the thing that had to change.
+    `test_runtime_diff.py`'s `main_takes_a_parameter` is the case that reads
+    `n`, because the eight could not tell a `0` from a `None`.
+
+    Two deliberate differences from the compiled wrapper, both of them cases
+    where the interpreter can be right and the wrapper cannot:
+
+      * a parameter WITH a default keeps it here (`def main(args=None)` sees
+        `None`, which is what the source says), while the wrapper passes `0`
+        for every parameter unconditionally because it has no way to spell a
+        default expression in a C call site;
+      * `*args` / `**kwargs` catch-alls take no positional at all, which the
+        wrapper's `len(param_strs)` would get wrong for the same reason.
+
+    `0` is the value because it is what the compiled path passes and because
+    this repository's `def main(n):` convention reads `n` as an argument count
+    — a program that wants the real count reads `sys.argv`, which both paths
+    give it.
+    """
+    from fire_compiler import IntLiteral
+    from myinterpreter import Interpreter
+    defaults = getattr(main_def, 'param_defaults', None) or {}
+    out = []
+    for param in Interpreter._extract_param_names(main_def):
+        # `_extract_param_names` keeps the stars (`*rest`, `**kw`); neither
+        # takes a positional, and a bare `*` separator is not a name at all.
+        if param.startswith('*'):
+            continue
+        if param in defaults:
+            continue
+        out.append(IntLiteral(value=0))
+    return out
+
+
 def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
     """Does this statement list call `main()` anywhere reachable at module
     scope — including the extremely common Python idiom
@@ -528,7 +578,10 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
             already_called = _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr)
             if has_main_def and not already_called:
-                interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
+                main_def = next(s for s in stmts
+                                if isinstance(s, FunctionDef) and s.name == 'main')
+                interpreter.eval_expr(CallExpr(func=IdentExpr(name='main'),
+                                               args=_main_entry_args(main_def)))
         except SystemExit as e:
             # A worker thread swallows SystemExit silently instead of ending
             # the process — a Mojo script's exit() builtin (mapped to

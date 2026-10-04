@@ -246,7 +246,45 @@ class MojoFunction:
         return self._invoke(interp, {}, args, kwargs)
 
     def __getitem__(self, item):
+        """`f[...]` at a call site: bind the bracket items to the declared
+        comptime parameters BY POSITION (`_parse_generic_params_capture`'s
+        docstring is the rule this implements) and answer a callable that
+        still takes the call-time arguments.
+
+        **An item with no parameter to bind it is REFUSED, and it used to be
+        dropped.** `dict(zip(...))` stops at the shorter of the two, so
+        `add[2, 5](x)` on a two-parameter `add` that declares no comptime
+        parameter at all bound nothing, discarded both items, and went on to
+        call `add(x)` — one argument for two parameters, which
+        `_invoke` then bound as `a=x, b=None` and the body duly computed
+        `x + None`. That is the whole reported symptom — "`add[2, 5](10)`
+        answers None and then dies on `int + None`", the doc for which was
+        deleted with the fix (`test_interp_oracle.py`'s
+        `a_bracket_item_with_no_parameter_to_bind_is_refused` and
+        `missing_required_argument_is_an_arity_error` pin both halves) — and
+        the wrong answer is worse than the error the program deserves: a
+        specialization is a type-level claim, so an item the declaration has
+        nowhere to put is a program whose own signature refutes it, and this
+        engine already refuses that claim on the other two paths —
+        `formal/model.py`'s `value_call_bracket_reading` refuses a tuple index
+        when it has the callee's declaration, and CPython refuses the subscript
+        outright (`'function' object is not subscriptable`).
+
+        The refusal names the function, how many items the bracket supplied and
+        how many comptime parameters it declares, because "too many" is a
+        different mistake from "too few" and the caller can only fix it if it
+        is told which.
+        """
         values = item if isinstance(item, tuple) else (item,)
+        declared = len(self.comptime_params)
+        if len(values) > declared:
+            names = ', '.join(self.comptime_params)
+            if not names:
+                names = 'none'
+            raise TypeError(
+                f"{self.name}[...] supplies {len(values)} specialization "
+                f"argument(s) but {self.name} declares {declared} comptime "
+                f"parameter(s): {names}")
         bindings = dict(zip(self.comptime_params, values))
         return _MojoBoundComptimeFunction(self, bindings)
 
@@ -315,8 +353,38 @@ class MojoFunction:
                         if _k == param:
                             func_scope.define(param, interpreter.eval_expr(_v))
                             _found = True; break
+                # A parameter with NO value and NO declared default is an
+                # ARITY ERROR, and it used to be a silent `None` here. That was
+                # the root cause under the specialization-bracket bug, not the
+                # bracket that found it: `add[2, 5](x)` used to report
+                # "unsupported operand type(s) for +: 'int' and 'NoneType'", and
+                # so did a plain `add(x)` with no bracket at all — the bracket
+                # only supplied the missing argument. A body that runs with an
+                # unbound parameter is the worst of the three answers available
+                # (an error is recoverable, a wrong value is not), and CPython,
+                # which this engine is measured against by
+                # `test_interp_oracle.py`, raises here too.
+                #
+                # The message is CPython's own wording, because that suite
+                # compares the two engines and a reader comparing them should
+                # not have to learn two vocabularies for one mistake. A
+                # keyword-only parameter gets CPython's other phrasing, which
+                # is the same distinction Python draws: naming the parameter
+                # and the way it had to be passed are both in it.
+                #
+                # `test_interp_oracle.py`'s
+                # `missing_required_argument_is_an_arity_error` and
+                # `test_runtime_diff.py`'s `main_takes_a_parameter` pin both
+                # halves of this — the second one because making it an error
+                # is what exposed `fire.py run` invoking `def main(n):` with no
+                # argument at all, which is `_main_entry_args` there.
                 if not _found:
-                    func_scope.define(param, None)
+                    if _seen_star:
+                        raise TypeError(
+                            f"{self.name}() missing required keyword-only "
+                            f"argument: '{param}'")
+                    raise TypeError(
+                        f"{self.name}() missing required argument: '{param}'")
         # Leftover positionals -> `*rest`; leftover keywords -> `**kw`. Built
         # with plain loops rather than a slice/comprehension: this file is
         # itself self-hosted, and plain loops are what that compiler lowers
