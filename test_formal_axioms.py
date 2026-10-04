@@ -71,7 +71,11 @@ from formal import lean as L                      # noqa: E402
 
 # Import order matters and is the library's own: `ProofLib` first because every
 # other module imports it, `Contracts` last because it imports `Refine` too.
-LIBRARY_MODULES = ("ProofLib", "Refine", "X86", "work", "Contracts")
+# `IEEE754` imports nothing and is listed FIRST for that reason — it is the
+# binary64 semantics over the `UInt64` bit pattern, and `group_census` has to
+# cover it for the same reason it covers every other module: a module outside
+# this tuple is a module whose axioms nobody counts.
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "Refine", "X86", "work", "Contracts")
 FOUNDATION = set(L.AXIOM_FOUNDATION)
 
 # The theorems whose axiom set this campaign CHANGED, plus the three that keep

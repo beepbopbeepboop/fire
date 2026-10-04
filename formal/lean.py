@@ -126,7 +126,20 @@ import time
 # model without naming a fourth module.
 # Order is build order: `Contracts` imports `ProofLib` and `Refine`, so it
 # must come after them.
-LIBRARY_MODULES = ("ProofLib", "X86", "work", "Refine", "Contracts")
+#
+# `IEEE754` is FIRST and imports nothing: the binary64 semantics, stated over
+# the `UInt64` bit pattern both backends carry a `double` in.  It is a separate
+# module rather than a section of `ProofLib.lean` for the reason every change to
+# `ProofLib.lean` is expensive — it is a 400KB file several branches edit, and
+# its `.olean` is 27MB and ~90s to produce, so a module that is 1/200th of the
+# semantics and 1/200th of the edit surface does not belong inside it.  Nothing
+# imports it yet: the FP step functions that would are `arm64_step`'s and
+# `x86_64_step`'s, and giving either state a second register file is the step
+# that has to land first (`bugs/FORMAL_float_step_functions.md`).  Until then it
+# is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
+# hole census and the `.olean` currency check read the tuple — a module outside
+# it is a module nothing checks.
+LIBRARY_MODULES = ("IEEE754", "ProofLib", "X86", "work", "Refine", "Contracts")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on
