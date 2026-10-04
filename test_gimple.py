@@ -6797,6 +6797,39 @@ def outer():
 """,
         "capture box cannot be threaded into a driven consumer")
 
+    # A nested generator inside a plain `def` is not stack-switch-eligible, so
+    # it lands on the C++20 companion backend — and `compile_to_gimple` cannot
+    # return that companion (its signature is the pinned 3-in/1-out self-host
+    # ABI). It must therefore REFUSE and NAME the symbols, instead of writing a
+    # `.ci` whose `extern MojoGenerator *_mojogen_render_start(void);` has no
+    # definition anywhere; that artifact links to a Darwin "Undefined symbols"
+    # naming `_funcptr_render`, thousands of lines from the generator that
+    # caused it.
+    #
+    # This guard could never fire as written: it searched the `.ci` for
+    # `__mojogen_` (TWO underscores) while `mojo/backend_gimple/cpp_async.py`
+    # emits `_mojogen_` (one) — so the condition was false for every symbol the
+    # pipeline actually produces, and its own docstring spelled a third prefix.
+    # It is now the intersection of the two artifacts' own symbol names, which
+    # is what makes it un-rot-able: a rename on the emitting side moves both
+    # halves together. See
+    # bugs/CODEGEN_refuse_dropped_companion_matches_a_prefix_nothing_emits.md.
+    test_raises(
+        "nested_generator_needing_the_cpp_companion_is_refused_by_name",
+        """\
+def build(n):
+    def render():
+        yield ''
+        yield 'x'
+    return render
+
+def main():
+    for s in build(1)():
+        print(s)
+main()
+""",
+        "_mojogen_render_start")
+
     # The SAME shape on the C++ backend (`MOJO_CORO=cpp`, the escape
     # hatch), which the assertion above does not reach: the guard it
     # exercises -- `_UNTHREADABLE_NESTED_ASYNC_GENS` -- used to be filled
