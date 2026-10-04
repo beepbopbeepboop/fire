@@ -120,9 +120,8 @@ permanently out of reach and they are not; `fcntl` was in NO tier at all, so its
 three files were not even classified with a reason; `stat` and `math` each move
 one file off a row whose reason was a module that now exists. **None of that is
 a coverage improvement and none of it should be reported as one** — the same
-arithmetic `bugs/FORMAL_platform_reachable_row_measured.md` §2 performs on the
-`platform` row, which moved thirty files and says "the ceiling for this row is
-0".
+arithmetic the `platform` row performs, which moved thirty files and says "the
+ceiling for this row is 0".
 
 ## The five that are NOT written, and each one's number
 
@@ -209,9 +208,9 @@ is done and measured; what remains is `FORMAL.md` phase 7.
 `checked_run.py`, `test_no_new_container_casts.py`, `test_relaxed_imports.mojo`,
 `tools/audit_selfhost_ast.py`, `tools/fix_genexpr_anyall.py`, `tools/suite.py`.
 
-**What has changed since `bugs/FORMAL_platform_reachable_row_measured.md` §3
-measured it, and it is the reason this is now a decision rather than a "not
-attempted":** the listing exists. `formal/hostmods/os/__init__.mojo` has `walk`,
+**What has changed since that row was last measured (30 files wanting
+`platform`, none of them wanting a small program), and it is the reason this is
+now a decision rather than a "not attempted":** the listing exists. `formal/hostmods/os/__init__.mojo` has `walk`,
 `walk_free`, `listdir_len`, `listdir_get` as a `malloc`'d blob of paths in
 PRE-ORDER, and `formal/hostmods/pathlib.mojo` and `formal/hostmods/fcntl.mojo`
 between them hold one bracket matcher (`fnmatch.match_core` with a
@@ -244,9 +243,8 @@ does-`*`-cross-`/` flag, which `pathlib.match_seg` already calls). So both halve
 **Worth: 0 to PASS and about 4 files into `codegen`.** Two of the seven
 (`test_no_new_container_casts.py`, `tools/audit_selfhost_ast.py`) were measured
 to land on refusals in themselves, and the rest want `subprocess` or a keyword
-argument. So a day for four findings and no pass — which is the `fnmatch`
-arithmetic in `FORMAL_platform_reachable_row_measured.md` §5, arrived at again
-from the other side. **The one dependency this row had — the keyword-argument
+argument. So a day for four findings and no pass — the arithmetic of a
+pattern-matching host module, arrived at again from the other side. **The one dependency this row had — the keyword-argument
 capability — is measured and pinned as already present (§CORRECTION), so
 `glob` is no longer waiting on that change.** What it IS waiting on, measured
 2026-10-03, is a different one this document did not predict: the cross-module

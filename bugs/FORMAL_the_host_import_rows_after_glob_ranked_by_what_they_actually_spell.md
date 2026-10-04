@@ -31,8 +31,8 @@ files (`tools/formal_sweep.py -j 4 -t 120 --no-stdlib`, arm64,
 
 **0 passes, and that is the prediction every host-import row in this project has
 made** (`bugs/FORMAL_subprocess_row_measured_b7.md` §7 for `tempfile`,
-§"what it moved" for `textwrap`, `bugs/FORMAL_platform_reachable_row_measured.md`
-§2 for `platform`): none of these 50 files is a small program — they are
+§"what it moved" for `textwrap`, and the `platform` row's thirty files, none of
+them a small program): none of these 50 files is a small program — they are
 `cas.py`, `driver.py`, `module_loader.py`'s callers, the test suite. What moved
 is that they now report the truth about where they actually stop.
 

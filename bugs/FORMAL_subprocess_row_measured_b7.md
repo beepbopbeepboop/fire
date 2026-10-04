@@ -136,8 +136,7 @@ Measured over the 128 files in this repository that import it, **44 use ONLY
 `mkdtemp`/`mkstemp`/`gettempdir`** and no unreachable name, so writing the
 reachable half moves 44 files off `not-answerable/host-import` into the
 answerable denominator, where they are counted as `codegen` findings rather than
-as target facts. That is the `platform` row's arithmetic
-(`bugs/FORMAL_platform_reachable_row_measured.md` §2) and the ceiling for a
+as target facts. That is the `platform` row's arithmetic — thirty files, and the ceiling for a
 `host-import` row to **PASS** is 0 either way: none of those 44 is a small
 program.
 
