@@ -1,5 +1,77 @@
 # FORMAL_module_state_no_storage: a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path
 
+**Status (2026-10-04, `formal18-4`): §(2)'s member refusal had a THIRD arm
+missing, and it was the same disease that function was written to cure — a
+sentence false about the name it names. Fixed; the two items this document's
+tables still name (an EXPORTED SLOT, and `argv`'s SOURCE) are unchanged and
+are still projects.** Read this before "What is left", which does not move.
+
+**A name the module does not publish AT ALL is now its own answer.**
+`model.module_attribute_refusal` had two arms for a name it *can* see —
+a published VARIABLE (`mylib.G`, an `Int` that crosses fine and is stopped by
+having a second writer) and a published CONTAINER (`mylib.TABLE`, whose blob is
+static data and whose ADDRESS is what does not cross) — and every other name
+fell into one arm that said *"`{leaf}` is one: a list, an object or a stream has
+no representation as a word on the other side of the boundary"*.
+
+**That is false of most of what reached it.** Measured on this tree, both
+architectures, `formal/hostmods/sys.mojo` declares NONE of `argv`, `stderr`,
+`stdout`, `path`, `modules` or `executable` — its own module docstring lists
+them as deliberately absent, and §(4) below records why — so all six were
+refused with a claim about a value on the other side of the boundary that was
+not there:
+
+```
+$ for f in argv stderr executable; do … done        # import sys; sys.$f
+build: main: sys.argv reads 'argv' out of the imported module `sys`, and a
+module is not a value this path can place: … What it cannot publish is a
+VARIABLE, and `argv` is one: a list, an object or a stream has no
+representation as a word on the other side of the boundary …
+```
+
+**`sys.executable` is the instance that makes it a defect rather than an
+imprecision**, and it is this document's own `sys.executable` row: a PATH is a
+`char *`, which is ONE folded word and is exactly what the same message says
+crosses two clauses earlier, so the message was arguing with itself. The reason
+that name is missing is a SOURCE — `_NSGetExecutablePath` is refused by name on
+this path and the `__file__` route would put one build's `-o` into a
+content-addressed dylib's cache key — not a representation. A reader sent
+after "a list, an object or a stream" for a `char *` is reading the wrong
+document, which is the sentence this document's own 2026-10-03 §(2) work wrote
+about the sibling arm.
+
+The arm now asks the PUBLISHED SET the message was already printing, so it can
+say what it can now know:
+
+```
+build: main: sys.executable reads 'executable' out of the imported module
+`sys`, … `sys` publishes no 'executable', so there is nothing on the other side
+of the boundary to read — which is a DIFFERENT fact from "it is there and
+cannot cross", and the two have different repairs: a name the module's own
+functions write through `global` gets the sentence above, which names an
+accessor that works today, and a name it declares as a container gets the one
+above that, which names an element accessor. What `sys` publishes:
+api_version, byteorder, flush_output, …
+```
+
+**The clause the sweep keys on is unchanged** — "a module is not a value this
+path can place" is about the MODULE, which is true either way, so
+`tools/formal_sweep_causes.py`'s cause row and `test_refusal_taxonomy.py`'s
+sample for it both still match and no file is reclassified. The two arms above
+are untouched, which is what the test's controls are for: a discriminator that
+asked the wrong question would swallow `mylib.COUNTER` or `mylib.ITEMS`, and
+each of those has its own row in `test_formal_module_attr.py`.
+`test_formal_module_attr.py` is 34/34 with the new row, and
+`test_refusal_taxonomy.py` 261/261.
+
+**What is left of this document is unchanged and is still two things:** an
+EXPORTED SLOT (item 2 of "the exact next step", and an ABI change), and
+`sys.argv`'s SOURCE (§(4) — the entry stub overwrites the kernel's
+`argc`/`argv` before the first statement runs, so even with storage there would
+be nothing to read). §(2)'s subject is now diagnosed correctly in every
+spelling this tree can reach, which is the difference between a refusal that
+misdirects and one that does not.
+
 **Status (2026-10-04, `work/formal19-4`): `computed_element` — the last of the
 two `static_initializer_refusal_reason` remainders — was a MISDIAGNOSIS, and
 `global_value_refusal`'s sentence about why a name has a slot was false of every

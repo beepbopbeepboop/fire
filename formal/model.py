@@ -33177,7 +33177,27 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     `published` is the list of what the module DOES publish, so a reader can see
     in one line whether the name they wrote is one of the module's own or a
     capability it does not have. That is `dylib_extern_symbol`'s own device,
-    reused rather than reinvented."""
+    reused rather than reinvented.
+
+    **And it is what makes the LAST arm possible, which is the third instance of
+    the disease this function was written to remove.** With the published set in
+    hand, "`{module}` publishes no `{leaf}`" is a question this function can
+    answer, and until 2026-10-04 it did not — every name that was not a
+    published variable and not a published container fell into one arm that
+    said "`{leaf}` is one: a list, an object or a stream". That is FALSE of most
+    of what reaches it. Measured, `formal/hostmods/sys.mojo` declares NONE of
+    `argv`, `stderr`, `stdout`, `path`, `modules` or `executable` — its own
+    module docstring lists them as deliberately absent, and the doc's §(4)
+    records why — so all six were refused with a claim about a value on the
+    other side of the boundary that was not there. `sys.executable` is the
+    sharpest instance: a PATH is a `char *`, which is one folded word and is
+    exactly what the message two clauses earlier says crosses, and the reason
+    that name is missing is a SOURCE (`_NSGetExecutablePath` is refused by name
+    on this path, and the `__file__` route would put one build's `-o` into a
+    content-addressed dylib's cache key) rather than a representation. So the
+    arm now asks the published set first, and keeps the VARIABLE sentence for
+    the names it is true of — which is the discipline this function's own
+    docstring states for the two arms above it, applied to the third."""
     who = f"{fn_name}: " if fn_name else ""
     shown = ", ".join(sorted(published)[:8])
     if len(published) > 8:
@@ -33221,6 +33241,30 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"What `{module}` publishes: {shown}. "
                 f"`bugs/FORMAL_module_state_no_storage.md` §(2) records what "
                 f"publishing the blob itself would take")
+    if leaf not in set(published or ()):
+        return (f"{who}{spelling} reads {leaf!r} out of the imported module "
+                f"`{module}`, and a module is not a value this path can place: "
+                f"there is no register, frame slot or `__DATA` word for it "
+                f"because it is not one — it is the library on this link line, "
+                f"and what a dylib publishes is its FUNCTIONS (as symbols, so "
+                f"`{module}.fn(...)` lowers) and its module-level names the "
+                f"build FOLDED TO A LITERAL (as values, so `{module}.K = 1` "
+                f"lowers — there is exactly one value of a folded module-level "
+                f"name in a whole program, so the importer materializes the "
+                f"same one). `{module}` publishes no {leaf!r}, so there is "
+                f"nothing on the other side of the boundary to read — which is "
+                f"a DIFFERENT fact from \"it is there and cannot cross\", and "
+                f"the two have different repairs: a name the module's own "
+                f"functions write through `global` gets the sentence above, "
+                f"which names an accessor that works today, and a name it "
+                f"declares as a container gets the one above that, which names "
+                f"an element accessor. What `{module}` publishes: {shown}. "
+                f"`formal/hostmods/sys.mojo`'s own module docstring says which "
+                f"of those names it deliberately does not declare and why "
+                f"(`argv`, `stderr`, `stdout`, `modules`, `path`), and "
+                f"`bugs/FORMAL_module_state_no_storage.md` §(2) and §(4) "
+                f"record what would have to be true to close the boundary for "
+                f"the ones CPython has and this path does not")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
             f"`{module}`, and a module is not a value this path can place: "
             f"there is no register, frame slot or `__DATA` word for it because "

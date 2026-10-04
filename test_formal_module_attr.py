@@ -1012,6 +1012,78 @@ def test_a_module_attribute_read_is_refused_as_an_attribute(
               f"{text.strip()[-400:]}")
 
 
+def test_a_name_the_module_does_not_publish_says_so(tmpdir, _shared, verbose):
+    """`mylib.THING` — the third arm, and the third instance of the same disease.
+
+    `module_attribute_refusal` has two arms that were added because the
+    sentence they replaced was false about the name it named: a published
+    VARIABLE (`mylib.G`, an `Int` that crosses fine and is stopped by having a
+    second writer) and a published CONTAINER (`mylib.TABLE`, whose blob is
+    static data and whose ADDRESS is what does not cross). Both are in
+    `variables` and `containers`, and both print an accessor that works today.
+
+    A name the module does not publish AT ALL reached neither, and fell into one
+    arm that said "`THING` is one: a list, an object or a stream". That is false
+    of most of what reaches it: `formal/hostmods/sys.mojo` declares none of
+    `argv`, `stderr`, `stdout`, `path`, `modules` or `executable` — its own
+    module docstring lists them as deliberately absent — so all six were refused
+    with a claim about a value on the other side of the boundary that was not
+    there. `sys.executable` is the sharpest instance and it is why this is a
+    fix rather than a reword: a PATH is a `char *`, which is ONE folded word and
+    is exactly what the same message says crosses two clauses earlier, and the
+    reason that name is missing is a SOURCE — `_NSGetExecutablePath` is refused
+    by name on this path and the `__file__` route would put one build's `-o`
+    into a content-addressed dylib's cache key
+    (`bugs/FORMAL_module_state_no_storage.md`'s `sys.executable` row) — not a
+    representation.
+
+    So the assertion is threefold and the middle one is the load-bearing: the
+    message must SAY the module publishes no such name, and it must NOT claim
+    the name is a list, an object or a stream. A reword that kept the shape and
+    dropped the fact would satisfy the first and fail the second.
+
+    The controls are the two arms above, on the same library, because this row
+    is a new branch in a function whose other two are the point: a
+    discriminator that asked the wrong question would swallow `mylib.COUNTER`
+    (a published variable) or `mylib.ITEMS` (a published container), and each
+    of those has its own test above.
+    """
+    lib = ("ITEMS = [1, 2, 3]\n"
+           "\n"
+           "G = 5\n"
+           "\n"
+           "\n"
+           "def bump(v):\n"
+           "  global G\n"
+           "  G = v\n"
+           "\n"
+           "\n"
+           "def addup(a, b):\n"
+           "  return a + b\n")
+    prog = ("import mylib\n"
+            "\n"
+            "def main():\n"
+            "  printf(\"%d\", mylib.THING)\n"
+            "  return 0\n")
+    root = os.path.join(tmpdir, "attribute_absent")
+    os.makedirs(root)
+    write_tree(root, {"mylib.mojo": lib, "prog.mojo": prog})
+    for arch in ARCHES:
+        text = build_expecting_refusal(root, "prog", arch)
+        check("publishes no 'THING'" in text,
+              f"{arch}: the refusal must say the module publishes no such "
+              f"name, which is a different fact from \"it is there and cannot "
+              f"cross\": {text.strip()[-400:]}")
+        check("a list, an object or a stream" not in text,
+              f"{arch}: the refusal still claims the absent name is a list, an "
+              f"object or a stream, which is a claim about a value on the "
+              f"other side of the boundary that is not there: "
+              f"{text.strip()[-400:]}")
+        check("addup" in text,
+              f"{arch}: the refusal must still print what the module DOES "
+              f"publish: {text.strip()[-400:]}")
+
+
 def test_a_module_root_is_not_reported_as_a_variable(tmpdir, _shared, verbose):
     """The negative of the above, stated as its own test because it is the one
     that can pass while the positive one is green.
@@ -1647,6 +1719,8 @@ TESTS = [
      test_a_module_object_read_is_still_refused),
     ("`mylib.ITEMS` is refused as the ATTRIBUTE, naming what the module does",
      test_a_module_attribute_read_is_refused_as_an_attribute),
+    ("a name the module does NOT publish says so, and does not call it a list",
+     test_a_name_the_module_does_not_publish_says_so),
     ("a module root is never reported as a variable with no storage",
      test_a_module_root_is_not_reported_as_a_variable),
     ("a module-attribute read never reaches the emitter as a silent zero",
