@@ -224,7 +224,7 @@ reports `uses: 1 of 1 … every blocked file uses it, so the row is work`.
 
 **Whose it is, honestly:** the export rule is `formal13-3`'s and `formal13-5`'s
 (`FORMAL_dylib_export_loops_and_frame_bounds`,
-`FORMAL_dylib_export_audit_adds_a_second_underscore`, `FORMAL_per_export_contracts`),
+`FORMAL_dylib_export_audit_adds_a_second_underscore`),
 so this doc does not claim it and does not propose a rule change. What it adds is
 the number, which no doc in `bugs/` carries: **147 library files**, so the row
 is a project about the ABI and not a per-file fix, and whoever picks it up

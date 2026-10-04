@@ -144,7 +144,7 @@ no in-file row is fixed here except §5's.
 | **4** | `std/ffi` | `dealloc` | `formal19-1` |
 | 3 each | `builtin/variadics`, `builtin/constrained`, `format/_utils`, `std/memory` | the same two callees | `formal19-1` |
 | 2 each | `std/hashlib/hasher`, `std/traits`, `sys/.defines`, `builtin/device_passable` | the same | `formal19-1` |
-| **1** | `utils/_select.mojo` | every declaration is private (`_select_register_value`), so the export trie is empty | the private-import row: **147 library files** across the stdlib, measured by round 1 §6. The export rule is `FORMAL_dylib_export_audit_adds_a_second_underscore` / `FORMAL_per_export_contracts` (`formal13-5`/`formal13-3`) |
+| **1** | `utils/_select.mojo` | every declaration is private (`_select_register_value`), so the export trie is empty | the private-import row: **147 library files** across the stdlib, measured by round 1 §6. The export rule is `FORMAL_dylib_export_audit_adds_a_second_underscore` and `FORMAL_builtin_slice_optional_field_is_a_frame_holder` (`formal13-5`/`formal13-3`) |
 | **1** | `time/time.mojo` | `CompilationTarget` — a module-level name of ANOTHER module, not exported as a word | `FORMAL_type_name_as_value` (`formal16-8`) |
 
 **The largest dependency row in this slice (15 files) is two constants-only

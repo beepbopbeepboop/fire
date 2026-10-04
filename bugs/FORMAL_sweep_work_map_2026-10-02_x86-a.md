@@ -101,7 +101,7 @@ count unchanged.
 | 3 | 3 | a module-global name has no storage | `FORMAL_module_state_no_storage` (claim `formal3-5`). `ELF_MAGIC` in `formal/elf.py`, `_MSL_FLOAT_TYPES` in `mojo/middle/metal_ops.py`, `REPO` in `tools/bootstrap_verify.py` |
 | 3 | 3 | a module's ATTRIBUTE read as a value (`sys.argv`) | `FORMAL_module_state_no_storage`, "What is left" (claim `formal3-5`) — `t_argv.mojo`, `tools/ci_line.py`, `tools/detach.py` |
 | 2 | 2 | `print()` cannot classify the argument's type | **unowned and NOT x86-specific** — arm64 refuses the same two files with the same words except "arm64" for "x86-64". The arm64 repository sweep (`sweep:repo-a/b/c`) is the natural owner; a lowering decision, not a wrong answer |
-| 2 | 2 | a linked module exports no such name (`sys.exit`) | not attributed; the closest doc is `FORMAL_per_export_contracts` / `FORMAL_module_exports_nothing` (claim `formal3-5`) |
+| 2 | 2 | a linked module exports no such name (`sys.exit`) | not attributed; the closest doc is `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib` (claim `formal16-2`), whose §4.6 records this row as deliberately not taken |
 
 ## 4. arm64 versus x86-64 on this slice: one file, and it is owned
 
