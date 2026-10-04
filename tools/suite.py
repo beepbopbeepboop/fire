@@ -488,7 +488,7 @@ MEASURED_PEAK_GB = {
     'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
     'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
     'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
-    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
+    'formal-receiver-position': (0.07, 'measured'),  # 16 s, 38 cases (was "2 s, 12 cases")
     'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
     'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
     # The x86-64 MACHINE MODEL against the hardware, which had never been run
@@ -2656,32 +2656,22 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
 # family covers it.
 #
-# RED, and registered red rather than excused. 2 of 12, and BOTH are the same
-# direction: a construct with no representation now BUILDS instead of being
-# refused, once on the return side and once on a value-only callee reached
-# through a specialization. A built image here is a wrong program (measured: the
-# return case exits 0 where the source's answer is 7, and the callee case exits
-# 8, which is a frame address read as an integer), so this is a real gap and not
-# a stale expectation; see
-# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md.
+# GREEN, and it was carried as `expect=` for a count that stopped being true in
+# KIND rather than in number. The marker forgave three cases of
+# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md — all three
+# of which assert a REFUSAL — and all three refuse again, with the sentences
+# their rows pin, so the marker had nothing left to forgive. Since an expect-marked
+# job that PASSES is reported as a FAILURE whose text is "it PASSES — drop the
+# marker", every `proofs` run was reporting this job red for the right reason and
+# nobody runs `proofs`. The marker is gone (2026-10-04) and the job is in `check`
+# below, so the next red is visible in the everyday gate; that placement is the
+# half of the fix that keeps it from rotting back.
+#
+# 38 cases, 16 s, 0.05 GB, no Lean (`build --formal --no-prove`), which is the
+# cost shape `formal-shlex` (40 s) and `formal-receiver-spelling` (2.8 s) are in
+# `check` for.
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
-     expect='bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md '
-            '— 3 of 14: TWO of them are that doc — a specialized call with a '
-            'frame address at an argument position bypasses both the '
-            'returned-frame and the value-only-callee refusals and builds — '
-            'and the THIRD is a different defect wearing this test: '
-            '`refuse_a_dotted_specialized_callee_names_it` stops at a '
-            'module-state refusal (`Box` has no home) before reaching the '
-            'specialization refusal its needle wants, so it belongs to the row '
-            'in bugs/FORMAL_module_state_no_storage.md. The leading number is '
-            'the TOTAL and it is checked against the run, because a marker '
-            'that forgives FAIL wholesale absorbs a new failure silently. '
-            'Measured 2026-10-01; the marker said "2 of 12" until then and '
-            'nothing could see the difference until 2026-10-01, when the '
-            'stated count in an `expect=` reason became checkable against the '
-            'run (`_apply_expectations` in this file, and its checks in '
-            'test_suite.py).',
      extra=['test_formal_receiver_position.py', 'formal/build.py',
             'formal/model.py'] + FORMAL_BUILD_INPUTS,
      desc='a frame address at a specialization\'s argument position, refused')
@@ -3235,7 +3225,20 @@ BUCKETS = {
               # slot, so this is a coverage hole and not a stale entry — which
               # is the distinction `test_suite.py` draws between registering a
               # file and excusing one. Also in `proofs`, like the two above it.
-              'formal-field-walk'],
+              'formal-field-walk',
+              # …and `formal-receiver-position`, 38 cases on both backends at
+              # 16 s and 0.05 GB with no Lean. It is here because of what
+              # happened to it rather than what it is: it carried an `expect=`
+              # whose three forgiven cases stopped failing, so `proofs` — the
+              # only bucket that ran it, and a bucket nobody runs — reported it
+              # red as "marked expect=… but it PASSES". A marker nobody can
+              # observe rotting out is not a marker, so the job joined the
+              # everyday gate with the marker removed and the reasons for both
+              # written at its registration. `formal-read-before-store` (8.5 s)
+              # and `formal-receiver-spelling` (2.8 s) are the two beside it on
+              # cost; the subject — a frame address at an argument position of a
+              # specialization — is the reason it is not merely another row here.
+              'formal-receiver-position'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

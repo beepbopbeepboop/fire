@@ -1150,9 +1150,14 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # it was watching), so a census that still states them fails on the
     # registry's own state — which is the check working, not the entry being
     # wrong. `formal-x86-machine-model` is theirs and is real: it is the count
-    # for the job they registered.
+    # for the job they registered. `formal-receiver-position` is a FOURTH
+    # removal (2026-10-04), and it is the only one of the four that is
+    # interesting: the three cases its marker forgived stopped failing, so the
+    # job PASSED and `suite.py`'s `PASS` arm reports an expect-marked job that
+    # passes as a FAILURE — while sitting in `proofs`, a bucket no gate runs.
+    # Its count was 3 of 33 at the time it was written and the file has 38
+    # cases now, but the count was never the problem; the marker was.
                      'coro-future-await': 17,
-                     'formal-receiver-position': 3,
                      'formal-x86-machine-model': 1,
                      'gimple-async-runner': 36,
                      'gimplerunner': 4,
