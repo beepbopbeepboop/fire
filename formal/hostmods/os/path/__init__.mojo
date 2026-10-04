@@ -61,7 +61,7 @@ inputs rather than against a table written here.
 re-exports them from here, so both spellings reach one definition.
 """
 
-from .._syscalls import str_alloc, str_trunc, str_put, str_append
+from .._syscalls import str_alloc, str_trunc, str_put
 from .._syscalls import str_dup, str_prefix, str_build, str_repeat
 from .._syscalls import str_len, str_eq_n, str_starts, str_at
 from .._syscalls import str_rfind, str_rindex_of, str_rstrip_len, str_lead
@@ -98,7 +98,24 @@ def join(a, b) -> str:
     if str_len(a) == 0:
         return b
     if str_at(a, str_len(a) - 1, "/") == 1:
-        return str_append(str_dup(a), b)
+        # `str_build(a, "", b)` and NOT `str_append(str_dup(a), b)`, and the
+        # difference is a HEAP OVERFLOW rather than a style preference:
+        # `str_dup(a)` is `str_alloc(len(a))` — a block of `len(a) + 1` bytes,
+        # room for `a` and its terminator and NOTHING else — and `strcat`
+        # writes `len(b) + 1` bytes at `dst + len(a)`, so every byte of `b`
+        # and its terminator land past the end of the allocation. Measured on
+        # this tree with `join("some/dir/with/slash/", b)` and `b` 100 bytes
+        # long: all 40 same-size blocks allocated after the call came back
+        # overwritten, on three runs out of three, while the ANSWER was
+        # correct — which is why every differential test of `join` passed over
+        # it. `formal/hostmods/glob.mojo`'s `**` walk is what turned it into
+        # an observed `SIGABRT` ("malloc: Heap corruption detected, free list
+        # is damaged"), because CPython's `_glob2` yields a trailing-slash
+        # dirname and every join it does is this branch.
+        #
+        # `str_append` is not wrong and still exists for a `dst` that HAS the
+        # room; what was wrong was handing it a fresh `str_dup`.
+        return str_build(a, "", b)
     return str_build(a, "/", b)
 
 
