@@ -74,6 +74,19 @@ stride starts at `--example-offset`. A second round over the same tree therefore
 measures a DIFFERENT set of functions with the same rule, and round 0 still means
 what it meant when round 0's numbers were taken.
 
+ONE PROCESS PER ITEM, and that is a correctness property
+--------------------------------------------------------
+A verdict is a measurement, and this tool used to take its measurements with
+several at once in ONE interpreter, where `formal/model.py` keeps the current
+unit's module-level symbol table in a process global (`_MODULE_SYMBOLS`, replaced
+by `publish_module_symbols` on every `compile_formal`). Two items compiling
+concurrently therefore read each other's tables, and the reading is not a
+theoretical one: phase A, arm64, 78 items, same tree, same flags, only `-j`
+changed — **1 of 78 verdicts differs**, and it is a module-global verdict saying
+the table is empty when the unit declares a global. `_worker_pool` is the fix
+(one PROCESS per item, spawned) and its docstring is the measurement; `-j` is a
+memory decision and nothing else.
+
 TWO PHASES, because a Lean run costs 100x a codegen run
 ------------------------------------------------------
 Phase A builds each program with `prove=True, check=False`: the codegen runs and
@@ -127,6 +140,7 @@ import argparse
 import ast
 import collections
 import concurrent.futures
+import multiprocessing
 import json
 import os
 import signal
@@ -1091,6 +1105,75 @@ def disagreements(results, arch_list):
     return "\n".join(out)
 
 
+def _run_one(job):
+    """One item, in a worker. Module-level because a PROCESS pool has to pickle
+    it, and a closure over `args` cannot be pickled at all.
+
+    Every item gets its own PROCESS, which is the whole point and the reason
+    this is not a thread — `_worker_pool`'s docstring is the measurement and
+    the root cause.
+    """
+    item, arch, workdir, timeout, check = job
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        return run_item(item, arch, timeout, workdir, check=check)
+    except Exception as e:                      # noqa: BLE001 — a class here
+        return Verdict(item.ident, arch, "build-crash",
+                       _first_line(f"{type(e).__name__}: {e}"), "harness",
+                       0.0, None, 0, False)
+
+
+def _worker_pool(jobs_count: int):
+    """A PROCESS pool with a SPAWN context, and why neither word is optional.
+
+    **`formal/model.py` publishes the current unit's module-level symbol table
+    into a process global** — `_MODULE_SYMBOLS`, installed by
+    `publish_module_symbols` — and three other tables are published the same way
+    beside it. One `compile_formal` call REPLACES them, which is right for the
+    case they were written for (two units compiled one after another: a dylib and
+    its dependent) and wrong for two units compiled AT ONCE, because the second
+    one's table is installed over the first one's while the first is still
+    walking.
+
+    Measured on this tree, phase A, arm64, 78 items, the same tree and the same
+    flags with only `-j` changed: **1 of 78 verdicts differs**, and the two
+    answers are about a module-level global:
+
+    ```
+    test_formal_math.py:365:combperm_source   -j 4
+      'BIG_N' has no home: the module-level symbol table is empty for this unit
+    test_formal_math.py:365:combperm_source   -j 1, and a direct build of the
+      same emitted program, which the tool prints with --list
+      'BIG_N' has storage here — it is one of the module-global slots in this
+      image's `__DATA`
+    ```
+
+    `_declared_module_names` asks that table whether the unit declares anything,
+    so an item that ran beside another unit's compile is told the table is empty
+    and prints the wrong one of two sentences. The class COUNTS were identical
+    (17 / 21 / 40), which is why this survived: the damage is to the per-item
+    detail, and one of the two is what the report's `DIFFERENT CONSTRUCTS`
+    section compares ACROSS ARCHITECTURES — so a thread artifact can be
+    published as a two-backend disagreement.
+
+    `spawn` rather than the platform default because `fork` copies whatever the
+    parent has already imported and published, which is the same hazard with an
+    extra step: a forked child would inherit the previous item's tables instead
+    of starting empty.
+    """
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=jobs_count,
+        mp_context=multiprocessing.get_context("spawn"))
+
+
+def _interruptible_cancel(futures):
+    """Cancel what has not started, so a SIGTERM stops the queue rather than
+    the run. A no-op for the items already in flight, which is why the drain
+    above is what prints the partial counts."""
+    for other in futures:
+        other.cancel()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n")[0],
@@ -1098,9 +1181,14 @@ def main(argv=None):
     ap.add_argument("--arch", default="both",
                     choices=["arm64", "x86_64", "both"])
     ap.add_argument("-j", "--jobs", type=int, default=2,
-                    help="concurrent items; each one can run a Lean proof, "
-                         "so this is a MEMORY decision (one proof measured at "
-                         "1.7 GB, Lean's own ceiling for one is 6 GB)")
+                    help="concurrent items, each in its own PROCESS; each one "
+                         "can run a Lean proof, so this is a MEMORY decision "
+                         "(one proof measured at 1.7 GB, Lean's own ceiling for "
+                         "one is 6 GB). It is also the count that decides "
+                         "whether two verdicts can see each other, and the "
+                         "answer is no: `_worker_pool`'s docstring is the "
+                         "measurement, and it is why a `-j 1` ledger and a "
+                         "`-j 4` ledger are the same census")
     ap.add_argument("-t", "--timeout", type=float, default=180.0,
                     help="per-proof WALL bound in seconds (run_lean's own CPU "
                          "bound is unchanged). A breach is reported as "
@@ -1177,7 +1265,8 @@ def main(argv=None):
     for arch in arches:
         for i, item in enumerate(items):
             jobs.append((item, arch,
-                         os.path.join(tmp, f"{arch}_{i:04d}")))
+                         os.path.join(tmp, f"{arch}_{i:04d}"),
+                         args.timeout, not args.no_check))
     results = []
     ledger = open(ledger_path, "a")
     ledger.write(f"# formal_proof_breadth {time.strftime('%F %T')} "
@@ -1186,17 +1275,6 @@ def main(argv=None):
                  f"example_offset={args.example_offset} repo={args.repo} "
                  f"admit_returns={args.admit_returns} "
                  f"examples={args.examples}\n")
-
-    def work(job):
-        item, arch, workdir = job
-        os.makedirs(workdir, exist_ok=True)
-        try:
-            return run_item(item, arch, args.timeout, workdir,
-                            check=not args.no_check)
-        except Exception as e:                  # noqa: BLE001 — a class here
-            return Verdict(item.ident, arch, "build-crash",
-                           _first_line(f"{type(e).__name__}: {e}"), "harness",
-                           0.0, None, 0, False)
 
     interrupted = {"flag": False}
 
@@ -1209,9 +1287,12 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     started = time.monotonic()
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
+    # `_worker_pool`, not a thread pool: the compiler publishes the current
+    # unit's tables into process globals, so two items in one interpreter read
+    # each other's. The measurement and the root cause are its docstring.
+    ex = _worker_pool(args.jobs)
     try:
-        futures = {ex.submit(work, job): job for job in jobs}
+        futures = {ex.submit(_run_one, job): job for job in jobs}
         for fut in concurrent.futures.as_completed(futures):
             v = fut.result()
             results.append(v)
@@ -1228,8 +1309,7 @@ def main(argv=None):
                       f"[wall {v.wall_s}s — a cached verdict, not a run]",
                       flush=True)
             if interrupted["flag"]:
-                for other in futures:
-                    other.cancel()
+                _interruptible_cancel(futures)
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     elapsed = time.monotonic() - started
