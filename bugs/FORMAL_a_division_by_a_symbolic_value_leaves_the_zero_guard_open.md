@@ -17,13 +17,19 @@ re-measured 2026-10-04 on `work/formal27-1`.
 
 ## 0. What the measurement is, and what it refutes
 
-**The doc's stated blocker is gone.** `lib/ProofLib.olean` "cannot be built for
-a light worker's 8 GB ceiling, which is the whole reason this doc is filed
-rather than landed" — and it is no longer true: `formal/lean.py::ensure_library`
-publishes the library out of `~/.gmojo/cas` instead of building it, so the whole
-measurement below ran at **0.1 GB / 0.7 s** for the library and **3.2 GB /
-61-70 s** for each proof, through `formal/lean.py::run_lean`. Whoever takes
-this next does not have to take the claim on trust.
+**Half of the doc's stated blocker is gone, and which half matters.** The claim
+was that the next step "cannot be made from a branch that holds 8 GB" because
+`lib/ProofLib.olean` "has to be rebuilt for any proof in this tree to check".
+For READING the residual that is no longer true: `formal/lean.py::ensure_library`
+publishes the library out of `~/.gmojo/cas` instead of building it, so the
+whole measurement below ran at **0.1 GB / 0.7 s** for the library and **3.2 GB /
+61-70 s** for each proof, through `formal/lean.py::run_lean`. For CHANGING
+`lib/ProofLib.lean` it is still exactly as stated, and re-measured: one comment
+line added to the library changes its source digest, forces the rebuild, and
+`memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%), 2 procs -- killing lib` after
+**1 m 48 s**. So option 1 of "The exact next step" below is not a light
+worker's job even with the CAS to read from, and whoever takes it needs a
+heavier budget than this one had.
 
 **The doc's diagnosis of the MECHANISM is wrong, and the error is worth
 recording because the sentence reads as though the fix were mechanical.**
