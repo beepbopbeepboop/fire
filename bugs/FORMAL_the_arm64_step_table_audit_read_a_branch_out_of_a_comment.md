@@ -4,7 +4,10 @@
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py`'s
 `audit_step_table`, and the census it was hiding.
 **Status: the AUDIT is fixed (same commit); the twelve examples it was hiding are
-NOT, and they are not fixed here.** Filed 2026-10-03 on `work/formal16-2`.
+re-measured ONE AT A TIME below and each of the four signatures now has the
+obligation that fails, named from the generated file rather than from a truncated
+tail. Nine of the ten are still red and still undiagnosed beyond that; one
+(`wdiff`) is fixed on master and this doc's count was stale.**
 
 ## 1. What was wrong, and why it is a hole rather than a red test
 
@@ -99,11 +102,49 @@ check is satisfied and the count is the table's.
    stopped typechecking, and both are one `formal/lean.py::ensure_library` away
    from being distinguished.
 
+## 5. Re-measured, one example at a time (2026-10-04, `work/formal19-5`)
+
+Step 1 above is done, and it changed the census: **ten red, not twelve**, and
+each of the four signatures is now named by the OBLIGATION that fails rather
+than by the tail of a diagnostic. Every row is a measurement on this tree, and
+the two Lean-side families were read out of the generated file with
+`formal/lean.py::run_lean` on `output/<stem>_proof.lean` — because
+`test_formal.py` shows only the last 300 characters of a failure, and that is
+what made family 1 read as an ADRP page computation when it is not.
+
+| # | examples | red? | first error in the generated file | the obligation it names |
+|---|---|---|---|---|
+| 1 | `count`, `fact`, `pow2`, `sqsum`, `sum` | 5 red, one shared first error | `sum_proof.lean:5903:16: error: Tactic 'rfl' failed` inside `have hx30fr_5 : (sum_b5_qS4 (({s_4 with pc := 4294968088}))).x30 = (st).x30` | the walk's "x30 survives from the initial state to the epilogue's reload" fact. Its goal is a `mem_read_u64` over a FIVE-deep `mem_write_u64` chain at `st.sp - 16`, `- 8`, `- 32`, …, and the fact's tactic is `simp +decide only [_VALUE_SIMP] ; all_goals rfl`. The separation rewrite IS in that simp set (`mem_read_after_write_u64_slot`), but its side conditions (`j < 2^64`, `k + j + 8 ≤ 2^64`, `j + 8 ≤ k`) are inequalities in the SYMBOLIC `st.sp`, so `decide` cannot discharge them, `simp` skips the rewrite, and `rfl` is left holding the chain. **B6's shape with the peel missing**, and the fix is already written down elsewhere: `formal/x86_64_endtoend_test.py`'s closing `hrip` peels the same shape with an explicit `key : ∀ m a v b, a + 8 ≤ b → …` and `repeat rw [key _ _ _ _ (by first | decide | omega)]` — "`repeat` in front of it peels every layer, and each layer's side condition is closed over literals" is that file's own sentence. The write offsets are already computed on this path (`ctx["stores"]`, from `_sp_stores`). Everything after line 5903 in these five files is cascade. |
+| 2 | `sgt8`, `sle8`, `ug8` | 3 red, one shared shape | `sgt8_proof.lean:4745:43: error: unsolved goals` on `FrameBound 131120 (let __src := Arm64State.init n 4294967968; {x0 := …, x29 := …}) n` | the universal theorem's FRAME-BOUND obligation, over the TYPED model's initial state — the 30-field literal this doc's author read as "the truncator shape". The next diagnostic is `The prover found a potentially spurious counterexample … abstracted … [3, t8s n, arm64_matches_condition 2 nzcv✝¹, arm64_reg 16 …]`: `bv_decide` gave up on the typed truncator terms inside that obligation. Nothing here is a codegen claim. It is the `t8s`/`t8u` half of `formal/types.py::lean_trunc_defs` meeting `FrameBound`, and the fix is to teach the bound's obligation those truncators. |
+| 3 | `both`, `either` | 2 red, identically | `both_proof.lean:5517:8: error: (kernel) excessive memory consumption detected`, at `theorem both_compiles_correctly_universal`, 7.5 GB peak | **the "is it the library?" question above is answered: it is not.** One `formal/lean.py::ensure_library` later, with a freshly built `lib/*.olean`, both still fail, and they fail at the FINAL universal theorem of the file — every per-block certificate above it (`both_blk_0` … `both_blk_6`) is accepted. So this is the arm64 kernel-memory class (`BLOW.md` §0, `bugs/CODEGEN_bootstrap_resource_blowup.md`) at one declaration, and it is the only one of the twelve that costs more than 3 GB to observe. |
+| 4 | `sum_range`, `wdiff` | **1 red, 1 already fixed** | `ValueError: unsupported cbz taken continuation to 0x100000330` (`sum_range` only) | `wdiff` GENERATES on this tree — its back edge is the unconditional `b` that `test_formal_call_proof_gen.py::TestLoopContractBlocks` pins, and that discovery works. Family 4 is one example now, and `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md` carries the diagnosis, which is BIGGER than this doc's "a missing `loop_test` or `cond_branches` entry": for `sum_range` the loop contract is never built at all, because the caller's loop-test rule asks for a `b` block whose target is a `cbz` block and this loop's back edge is the `cbz` block's own taken edge. |
+
+**What this changes for the next session, and what it does not.** It closes none
+of the ten: a named obligation is not a fix. What it does is make step 1 of §4
+impossible to repeat — each family has a file, a line and a goal — and it
+settles family 3's question, which was the one §4 said to look at first. Two of
+the families are cheaper in the GENERATOR than the census showed: family 1 is one
+missing peel in one emitted fact (five examples), and family 3 is one
+declaration's memory (two examples) — though "cheap to emit" and "cheap to
+measure" are different things here, and family 3 costs 7.5 GB per example.
+
+**Not claimed:** that adding the peel to `hx30fr` would make those five PROVE.
+The `rfl` failure is the FIRST error; the five examples' remaining obligations
+have never been observed with it discharged, and nothing measured here says
+anything about them.
+
 ## Reproducing
 
 ```console
 $ export PATH=/opt/homebrew/bin:$PATH
 $ python3 -c "import formal.arm64_proof_gen as G; G.audit_step_table('lib/ProofLib.lean')"
 ['entry 3 shadows entry 5', 'entry 4 shadows entry 47', 'entry 48 shadows entry 50']
-$ python3 tools/memslot.py --gb 32 --label tf -- python3 test_formal.py -j 6
+$ python3 tools/memslot.py --gb 8 --label tf -- python3 test_formal.py -j 1 sum
+  [1/1] FAIL  sum  (build/proof failed: t64.ofNat 4294968008 - …)
+$ python3 tools/memslot.py --gb 8 --label le -- python3 .tmp/leerr.py output/sum_proof.lean
+/…/output/sum_proof.lean:5903:16: error: Tactic `rfl` failed: The left-hand side
+  mem_read_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64 (mem_write_u64 …
+$ python3 tools/memslot.py --gb 8 --label tf -- python3 test_formal.py -j 1 both
+  [1/1] FAIL  both  (build/proof failed: build: proof check failed:
+  both_proof.lean:5517:8: error: (kernel) excessive memory consumption detected)
 ```
