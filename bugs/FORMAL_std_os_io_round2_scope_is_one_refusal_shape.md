@@ -131,28 +131,55 @@ printed is that placeholder with five characters sliced off as if it were a
 reported **no chain at all** for the refusal that blocks the most files, and
 named a module that does not exist. Cause and fix in §4.
 
-With it fixed, the scope's chain is four links deep before the walk's own limit:
+With it fixed the walk names every module and gets three links deep before its own
+limit stops it. Verbatim from `.tmp/probe3_arm64.txt`:
+
+```
+=== round 0: 3 built, 8 refusing module(s)
+   19  std/format/_utils.mojo        4  _io.mojo
+   11  std/memory/alloc.mojo         3  std/_gpu/_utils.mojo      <- §6.4, MISATTRIBUTED
+    2  constants.mojo                2  std/math/__init__.mojo
+    1  std/bit/mask.mojo             1  std/os/fstat.mojo
+  stubbed _io.mojo (1 file(s)) and dropped import lines from 5 file(s)
+
+=== round 1: 3 built, 8 refusing module(s)      _io.mojo -> arg.mojo (4)
+=== round 2: 3 built, 7 refusing module(s)      arg.mojo -> the next 2 links
+=== round 3: 3 built, 0 refusing module(s), 43 unmeasurable (the stub step left the copy unparseable)
+```
 
 | link | files | refusing module | the refusal |
 |---|---|---|---|
-| 1 | 37 | `std/format/_utils.mojo` (22), `std/memory/alloc.mojo` (11), `std/math/__init__.mojo` (2), `std/bit/mask.mojo` (1), `std/os/fstat.mojo` (1) | a bare call to a generic template (§2's first five rows) |
-| 2 | 3 | `std/sys/arg.mojo`, behind `std/sys/_io.mojo` | `Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a subscript` |
+| 1 | 34 | `std/format/_utils.mojo` (19), `std/memory/alloc.mojo` (11), `std/math/__init__.mojo` (2), `std/bit/mask.mojo` (1), `std/os/fstat.mojo` (1) | a bare call to a generic template (§2's first five rows) |
+| 2 | 4 | `std/sys/arg.mojo`, behind `std/sys/_io.mojo` | `Span[StaticString, ImmStaticOrigin] is a compile-time explicit-parameter list on a generic, not a subscript` |
 | 3 | 2 | `std/math/constants.mojo` | exports nothing under `doc/ABI.md`'s rules |
-| 4 | 42 | — | the walk's own stub step emptied an indented block and the copy stopped parsing |
+| — | 43 | — | the walk's own stub step emptied an indented block and the copy stopped parsing |
 
 ```sh
 python3 tools/memslot.py --gb 12 --label probe -- \
-  python3 -u tools/formal_chain_probe.py 6 arm64 $F
+  python3 -u tools/formal_chain_probe.py 5 arm64 $F
 ```
+
+**Round 0's eight groups account for all 43 non-passing files, and one of the
+eight is keyed on the IMPORTER rather than the module that refused.** Adding the
+group sizes: 19 + 11 + 4 + 3 + 2 + 2 + 1 + 1 = 43. The five groups whose key is a
+real refusing module for link 1 are 19 + 11 + 2 + 1 + 1 = **34**, and the three
+left over are the `std/_gpu/_utils.mojo` group — so **link 1's feature accounts
+for 37 files, exactly §2's 37, with 3 of them filed under the wrong name.**
+`std.format._utils` resolves to `std/_gpu/_utils.mojo` ITSELF, so the importer is
+named as the refuser; see §6.4 and
+`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`. It is the only group in the
+walk whose key is wrong, and it is wrong because of a defect in the resolver the
+walk and the build share — which is also why §2's table, read off the sweep log
+rather than off this walk, is the one to use.
 
 **Link 2 has NO bug doc and no claim: `std/sys/arg.mojo` is outside every package
 here, and the refusal — `Span[StaticString, ImmStaticOrigin] is a compile-time
 explicit-parameter list on a generic, not a subscript` — is the shape
 `bugs/FORMAL_generic_monomorph_scope.md` §"what is not covered" already holds. It
-is filed nowhere of its own, and 3 files of this scope sit behind it, so it is
-worth a doc rather than a mention. **Link 4 is the tool's documented limit** —
+is filed nowhere of its own, and 4 files of this scope sit behind it, so it is
+worth a doc rather than a mention. **The stop is the tool's documented limit** —
 neutering a module removes the names its users call — and it is now detected and
-reported as such rather than as 42 files refusing a construct (§4).
+reported as such rather than as 43 files refusing a construct (§4).
 
 **Read §2 before planning anything in this scope, and §2's owner column before
 working it.** Neither feature is in this scope's packages, and closing link 1
