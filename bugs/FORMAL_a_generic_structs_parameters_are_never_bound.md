@@ -1,13 +1,100 @@
 # FORMAL_a_generic_structs_parameters_are_never_bound: `Self.<param>` in a class body has no value, and the two places that read it say so for the wrong reason
 
-**Status: the DIAGNOSTIC is fixed (`d62016d6`, this branch). The wall is not, and
-it is a monomorphizer.** What is left is stated here with the family's size and
-the one measurement that says which half is which, because the previous refusal
-named a repair that cannot be carried out and a reader following it would edit
-the wrong line forever.
+**Status: the DIAGNOSTIC is fixed (`d62016d6`). THE WALL HAS MOVED — a
+monomorphizer now exists (`formal/monomorph.py`, 2026-10-03) and it DOES bind
+a value parameter, so §5's option (1) is no longer missing and §5's "do not
+start (2) for this row" is no longer the right advice. What is left is
+measured, it is three limits rather than one project, and the FIRST of the
+three is a one-line regex bug filed as
+`bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`
+— so this row's next step is that fix, not a monomorphizer.** Re-measured
+2026-10-03 on `work/formal18-1`.
 
 Found by sweeping `std/collections` for `sweep14:std-collections`; see
 `FORMAL_sweep14_std_collections.md` §4.2.
+
+---
+
+## 0. Re-measured 2026-10-03: the monomorphizer is here, and §5's advice has expired
+
+Everything below was written before `formal/monomorph.py` landed. Three
+measurements, and they change what this row's next step is.
+
+**1. The value parameter IS bound.** `formal/monomorph.py`'s `instantiate`
+substitutes it, for the doc's own reproducer:
+
+```console
+$ python3 -c "import formal.monomorph as MO; \
+    print(MO.instantiate(open('.tmp/ptd/m.mojo').read(), 'Box', ['Int', '[1, 2, 3]'])[1])"
+struct Box_1_T_3_Int_4_keys_39__x005B1_x002C_x00202_x002C_x00203_x005D]:
+    comptime length = len([1, 2, 3])
+
+    def size(self) -> Int:
+        return Self.length
+```
+
+`len(keys)` became `len([1, 2, 3])`. So §5's option (1) — "bind the parameter
+values at the instantiation site" — is BUILT, and the refusal below is no
+longer standing in front of a missing mechanism.
+
+**2. The refusal's own sentence is now FALSE about the tree, and that is a
+defect in its own right.** It still says "This path compiles one image for every
+instantiation — `doc/ABI.md` §Generics makes each instantiation a separate
+boundary symbol and there is no monomorphizer here — so at the class body there
+is no instantiation". Both halves of that are untrue now: `formal/monomorph.py`
+is exactly that mechanism and its module docstring says it is `doc/ABI.md`
+§Generics' "Stage 5". A refusal that names a repair the tree already has is the
+`refuse_without:` class of defect (`test_formal_run.py`'s own note on a
+reworded refusal), and it sends a reader to build the thing that exists. The
+honest sentence is the next step, and it is short: **the binding happens in
+`formal/monomorph.py`, which is DEMAND-DRIVEN and reaches only the
+instantiations an importing unit asks for, so a class body's `comptime` binding
+is folded only when some consumer writes `Box[…]` — and a module that declares
+the template and never instantiates it is not reached at all.**
+
+**3. What the monomorphizer cannot yet do, for THIS family — two limits, both
+measured here, and the first is a bug rather than a project.**
+
+* **A parameter whose ANNOTATION contains a bracket is not instantiable at
+  all.** `keys: List[T]` is the reproducer above, and `monomorphize.py`'s `_HEAD`
+  is `\b(fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]`, which stops at the first `]` —
+  `List[T]`'s. So the concrete source it emits is
+
+  ```
+  struct Box_1_..._x005D]:
+  ```
+
+  with a stray `]`, which is a **parse error** (`either_proof`-class: the
+  instantiation is produced and then cannot be compiled). Filed as
+  `bugs/MONOMORPH_a_bracket_in_a_template_parameter_annotation_is_not_matched.md`,
+  which also carries the three other `[^\]]*` copies of the same rule in
+  `elaborate.py`. It is not fixed here because `_HEAD` is the COMPILED path's
+  monomorphizer too and its regression surface is a full `make gate`, which is
+  the integrator's.
+* **A VARIADIC value parameter is refused by the arity check.** `*values` is a
+  parameter `type_param_names` reports and `instantiate` will not accept an
+  argument for:
+
+  ```
+  MonomorphError: Pair[Int, 1, 2, 3] supplies 4 type arguments but `Pair`
+  declares 2 (T, *values); an instantiation is one template specialized for
+  exactly the arguments it declares
+  ```
+
+  Every element of `args` is treated as a TYPE argument, so the second shape in
+  §2 (`struct Pair[T, *values: T]`, and `std/collections/type_dict.mojo`'s
+  `*values: Trait`) has no instantiation at all. The message is the right shape
+  — a refusal rather than a guess — and it is `type_arg_text`'s rule that the
+  variadic half has to grow into.
+
+**So the remaining work is §5's option (2) — a comptime evaluator that can run
+`len(<a literal>)` over a folded parameter — and it is now the WHOLE of what is
+left rather than "not enough on its own".** The doc's warning still holds and is
+the reason the order is what it is: an evaluator that can fold `len([1,2,3])`
+still cannot say which list it was handed, because the class body never learns
+it — except that it NOW does, because `instantiate` wrote the list into the
+class body. That is the whole difference, and it is why the fix this row wants
+is the `_HEAD` bug rather than anything here.
 
 ---
 
