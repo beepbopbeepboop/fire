@@ -500,30 +500,104 @@ class TestGeneratorSource(unittest.TestCase):
                       "the step lemma rather than the ADRP")
 
 
-# The forms whose `Rn` can be register 31, and how the assembler answers.  The
-# right-hand column is NOT written down: it is what `clang -c` says, which is
-# the only authority for whether an encoding HAS an SP form at all, and the
-# model's answer is checked against it below.
+# The forms whose `Rn` can be register 31, and what the ARCHITECTURE says 31
+# means there.  The third column is not computed from the model — it is the
+# measured answer, and the two cases below are what measure it (by assembling
+# these spellings and RUNNING the words), so the table cannot drift into
+# agreeing with the thing it is checking.
 #
-# The left-hand column is the model's own branch, keyed by the comment that
-# introduces it in `lib/ProofLib.lean`'s `arm64_step` — a comment rather than an
-# opcode so the test fails LOUDLY when a branch is renamed (the key goes
-# missing) instead of silently checking a different branch.
+# The second column is the model's own branch, keyed by the condition that
+# introduces it in `lib/ProofLib.lean`'s `arm64_step` — a condition rather than an
+# opcode so the test fails LOUDLY when a branch is renamed (the key goes missing)
+# instead of silently checking a different branch.
+#
+# The fourth column is what the WORD clang assembles for the spelling does, and
+# it is the column whose absence made this table pass for the wrong reason: a row
+# keyed on a branch's text says nothing about whether any word can ARRIVE at that
+# branch.  `neg x0, x7` is the case in point — `NEG Xd, Xn` is `SUB Xd, XZR, Xn`,
+# so its word matches the SUB-register arm first and the NEG arm is unreachable.
+#
+#   "lands here"  the assembled word decodes to the branch this row names
+#   "extended"    the assembler accepts `sp` in `Rn` by emitting the
+#                 EXTENDED-register class (bit 21 set), which no branch decodes,
+#                 so the model says nothing about that word
+#   "rejected"    clang refuses the spelling: there is no SP encoding at all
 SP_IN_RN_FORMS = (
-    ("add x0, sp, x16", "= 0x8b000000 then"),
-    ("sub x0, sp, x16", "= 0xcb000000 then"),
-    ("cmp sp, x16", "= 0xeb000000 then"),
-    ("cmp sp, #16", "= 0xf1000000 then"),
-    ("add x0, sp, #16", "= 0x91000000 then"),
-    # …and the five whose 31 is the ZERO register.  They are in the table
-    # because they are the direction a "31 means SP everywhere" change gets
-    # wrong, and a test that only checked the accepting forms would not notice.
-    ("and x0, sp, x1", "= 0x8a000000 then"),
-    ("eor x0, sp, x1", "= 0xca000000 then"),
-    ("mul x0, sp, x1", "= 0x9b007c00 then"),
-    ("neg x0, sp", "= 0xcb0003e0 then"),
-    ("add w0, sp, #16", "= 0x11000000 then"),
+    # The immediate class reads SP, and it is the class that reaches a branch:
+    # the emitter's stack-floor guard is `ADD X17, SP, #0 ; CMP X17, X16`, and the
+    # `ADD` half is the only SP read in it.
+    ("add x0, sp, #16", "= 0x91000000 then", "sp", "lands here"),
+    ("cmp sp, #16", "= 0xf1000000 then", "sp", "lands here"),
+    # The shifted-register class reads the ZERO register, for all three of
+    # ADD/SUB/SUBS — which is what makes a NEG `-Xn` rather than `sp - Xn`.  Each
+    # spelling below is the one clang accepts for the encoding, so the word is
+    # the one a reader can paste into a disassembler.
+    ("add x0, xzr, x1", "= 0x8b000000 then", "zr", "lands here"),
+    ("sub x0, xzr, x1", "= 0xcb000000 then", "zr", "lands here"),
+    ("cmp xzr, x1", "= 0xeb000000 then", "zr", "lands here"),
+    # `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, so this word is read by the SUB arm
+    # above and the NEG arm is never reached.  The row names the arm that IS
+    # reached, which is the whole point: the old table named the NEG arm, checked
+    # its source text, and said nothing about the word.
+    ("neg x0, x7", "= 0xcb000000 then", "zr", "lands here"),
+    # The three SP spellings the assembler DOES accept in the register class.
+    # Each reaches the extended-register class instead, which no branch decodes,
+    # so the model makes no claim about it — asserted as exactly that, because
+    # "the model's branch for this form" was never a question about these.
+    ("add x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("sub x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("cmp sp, x16", "= 0x91000000 then", "sp", "extended"),
+    # …and the five whose 31 is the ZERO register with no SP encoding at all.
+    # They are in the table because they are the direction a "31 means SP
+    # everywhere" change gets wrong, and a test that only checked the accepting
+    # forms would not notice.
+    ("and x0, sp, x1", "= 0x8a000000 then", "zr", "rejected"),
+    ("eor x0, sp, x1", "= 0xca000000 then", "zr", "rejected"),
+    ("mul x0, sp, x1", "= 0x9b007c00 then", "zr", "rejected"),
+    ("neg x0, sp", "= 0xcb0003e0 then", "zr", "rejected"),
+    ("add w0, sp, #16", "= 0x11000000 then", "zr", "rejected"),
 )
+
+# The three words the hardware is asked about directly, as
+# `(spelling, the C expression, what the answer means)`.  Each is ONE
+# instruction with its second operand set to 1, so `Rn = 31` is the only thing
+# the answer can be about: `0 + 1` is 1, `0 - 1` is -1, and `sp` is neither.
+RN31_PROBES = (
+    ("add x0, xzr, x1", "add_xzr_x1()", "sp"),
+    ("sub x0, xzr, x1", "sub_xzr_x1()", "zr"),
+    ("cmp xzr, x1", "cmp_xzr_x1_eq()", "zr"),
+)
+
+
+def _assembler_word(form):
+    """The instruction WORD clang assembles for `form`, or None if it refuses.
+
+    One `clang -c` per form, then the object's `__TEXT,__text` read back — the
+    same thing `_assembler_accepts` builds and throws away, so the two cannot
+    disagree about whether a spelling is legal.  The word is what makes a row
+    REACHABLE: a table of spellings cannot tell `neg x0, x7` (whose word the
+    SUB-register arm reads) from `neg x0, sp` (which clang refuses).
+    """
+    import struct
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "probe.s")
+        with open(src, "w") as fh:
+            fh.write(".text\n.globl _sp_probe\n_sp_probe:\n  " + form + "\n")
+        obj = os.path.join(td, "probe.o")
+        p = subprocess.run(
+            ["clang", "-target", "arm64-apple-macos11", "-c", "-o", obj, src],
+            capture_output=True, text=True)
+        if p.returncode != 0:
+            return None
+        with open(obj, "rb") as fh:
+            data = fh.read()
+    i = data.find(b"__text")
+    if i < 0:
+        return None
+    _addr, size, offset = struct.unpack_from("<QQI", data, i + 32)
+    return struct.unpack_from("<I", data, offset)[0]
 
 
 def _assembler_accepts(form):
@@ -539,18 +613,7 @@ def _assembler_accepts(form):
     bare `clang` assembles for the HOST, which would make `add x0, sp, x16` a
     syntax error for a reason that has nothing to do with the encoding.
     """
-    import subprocess
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, "probe.s")
-        with open(src, "w") as fh:
-            fh.write(".text\n.globl _sp_probe\n_sp_probe:\n  "
-                     + form + "\n")
-        p = subprocess.run(
-            ["clang", "-target", "arm64-apple-macos11", "-c", "-o",
-             os.path.join(td, "probe.o"), src],
-            capture_output=True, text=True)
-    return p.returncode == 0
+    return _assembler_word(form) is not None
 
 
 def _arm64_step_branch(src, key):
@@ -574,15 +637,34 @@ class TestRegister31(unittest.TestCase):
 
     `arm64_reg 31 s = 0` is right for a data-processing form and wrong for
     `cmp sp, floor` — the comparison a stack-floor guard is built from — so the
-    model's step for `SUBS XZR, X31, X16` used to compute
+model's step for `SUBS XZR, X31, X16` used to compute
     `arm64_subs_flags 0 X16`: a proof about a different instruction than the
     one emitted, which typechecks and is false.
 
-    The fix reads `Rn` through `arm64_reg_or_sp` in the forms that HAVE an SP
-    encoding.  Deciding which forms those are is architectural, and this test
-    does not take the model's or this file's word for it: it asks the assembler,
-    which is where the answer comes from, and requires the two to agree.  A
-    blanket "31 means SP everywhere" passes the accepting half and fails here.
+The fix reads `Rn` through `arm64_reg_or_sp` in the forms that HAVE an SP
+encoding.  Deciding which forms those are is architectural, and this test
+does not take the model's or this file's word for it: it asks the assembler,
+which is where the answer comes from, and requires the two to agree.  A
+blanket "31 means SP everywhere" passes the accepting half and fails here.
+
+**And it asks the HARDWARE, for the three words where the two disagree.**
+That is the half this class did not have, and the reason is the defect
+the shifted-register `SUB`/`SUBS` arms names: the
+table below used to be checked against the branch's SOURCE TEXT, so the
+`NEG` row asserted a real property of a branch the decoder CANNOT REACH
+(`NEG Xd, Xn` is `SUB Xd, XZR, Xn`, whose word matches the SUB-register
+arm first) and passed for the wrong reason.  Keying on the comment finds
+the text; it does not find out whether any word can arrive there.  So:
+
+  * `test_every_row_is_reachable` asks `_step_branch_index` about the word
+    clang actually assembles for each spelling, and requires the branch it
+    names to be the one the row names — the property whose absence made the
+    `NEG` row vacuous;
+  * `test_the_hardware_agrees_with_the_model_about_rn_31` assembles three
+    one-instruction functions, RUNS them (arm64 host; skipped elsewhere), and
+    asks the machine what register 31 means in each: `sp` for `ADD` in the
+    shifted-register class, and the ZERO register for `SUB` and `SUBS` in the
+    same class, which is exactly what makes a `NEG` `-Xn`.
     """
 
     @classmethod
@@ -590,43 +672,159 @@ class TestRegister31(unittest.TestCase):
         with open(os.path.join(HERE, "lib", "ProofLib.lean")) as f:
             cls.lib = f.read()
         cls.branches = {}
-        for form, key in SP_IN_RN_FORMS:
+        for form, key, _rn, _reach in SP_IN_RN_FORMS:
             cls.branches[form] = _arm64_step_branch(cls.lib, key)
 
     def test_every_form_in_the_table_is_still_in_the_model(self):
-        for form, key in SP_IN_RN_FORMS:
+        for form, key, _rn, _reach in SP_IN_RN_FORMS:
             with self.subTest(form=form):
                 self.assertIsNotNone(
                     self.branches[form],
                     f"{key!r} is not in lib/ProofLib.lean's arm64_step any "
                     f"more, so this table is checking nothing for {form!r}")
 
-    def test_the_model_reads_rn_as_sp_exactly_where_the_assembler_allows_it(self):
-        accepts = {f: _assembler_accepts(f) for f, _k in SP_IN_RN_FORMS}
-        # Sanity on the oracle itself: a missing clang, or one assembling for
-        # the wrong target, rejects EVERY form and this case would then pass
-        # for the wrong reason — every model answer would "match".  So the
-        # accepting set is asserted to be the one the architecture has.
-        self.assertEqual(
-            sorted(f for f, ok in accepts.items() if ok),
-            sorted(f for f, _k in SP_IN_RN_FORMS
-                   if f not in ("and x0, sp, x1", "eor x0, sp, x1",
-                                "mul x0, sp, x1", "neg x0, sp",
-                                "add w0, sp, #16")),
-            "the assembler accepted a different set of forms than the "
-            "architecture does, so this case is measuring clang rather than "
-            "the model")
-        for form, key in SP_IN_RN_FORMS:
+    def test_the_model_reads_rn_the_way_the_architecture_does(self):
+        """The model's branch text against the MEASURED column, row by row.
+
+        This is the check that used to be an oracle of its own — "clang accepts
+        `sp` in `Rn`, therefore the model's branch must read SP" — and it was
+        wrong, because accepting the spelling says the ENCODING has an SP form
+        somewhere and not that this branch decodes it.  The expectation is now
+        written down (`SP_IN_RN_FORMS`'s third column) and the two cases around
+        this one are what justify it.
+        """
+        for form, key, rn, _reach in SP_IN_RN_FORMS:
             with self.subTest(form=form):
                 reads_sp = "arm64_reg_or_sp" in (self.branches[form] or "")
                 self.assertEqual(
-                    reads_sp, accepts[form],
-                    f"{form!r} is "
-                    f"{'accepted' if accepts[form] else 'REFUSED'} by the "
-                    f"assembler with `sp` in `Rn`, and the model's branch for "
-                    f"it ({key!r}) "
+                    reads_sp, rn == "sp",
+                    f"{form!r} is measured to read `Rn = 31` as {rn.upper()}, "
+                    f"and the model's branch for it ({key!r}) "
                     f"{'reads' if reads_sp else 'does NOT read'} register 31 "
                     f"as SP — so one of them is wrong about the architecture")
+
+    def test_every_row_is_reachable(self):
+        """The word clang assembles must decode to the branch the row names.
+
+        The check whose absence is the defect this table was filed for: a row
+        keyed on a branch's SOURCE TEXT says nothing about whether any word can
+        arrive there, and `neg x0, x7` — the `NEG` every image carries — is read
+        by the SUB-register arm, not by the NEG arm this table used to name.  So
+        for each row the word is asked of `_step_branch_index`, the generator's
+        own decoder, and the three dispositions are distinguished:
+
+          * "lands here" — the word decodes to this row's branch;
+          * "extended" — clang accepted `sp` in `Rn` by emitting the
+            extended-register class, which no branch decodes, so the model says
+            nothing about that word.  Asserted as EXACTLY that, because "the
+            model's branch for this form" was never a question about it;
+          * "rejected" — clang refuses the spelling, so no word exists.
+        """
+        import formal.arm64_proof_gen as G
+        for form, key, _rn, reach in SP_IN_RN_FORMS:
+            with self.subTest(form=form):
+                word = _assembler_word(form)
+                if reach == "rejected":
+                    self.assertIsNone(
+                        word, f"clang now ASSEMBLES `{form}`, so this row is no "
+                              f"longer in the class it was filed in — the "
+                              f"architecture may have gained an SP encoding, or "
+                              f"the row needs a spelling that reaches "
+                              f"{key!r}")
+                    continue
+                self.assertIsNotNone(
+                    word, f"clang refuses `{form}` but this row expects it to "
+                          f"assemble ({reach})")
+                idx = G._step_branch_index(word)
+                if reach == "extended":
+                    self.assertIsNone(
+                        idx, f"`{form}` assembles to 0x{word:08x}, which the "
+                             f"model DOES decode (branch {idx}); this row says "
+                             f"it is the extended-register class, which no "
+                             f"branch claims, so one of the two is stale")
+                else:
+                    self.assertIsNotNone(
+                        idx, f"`{form}` assembles to 0x{word:08x}, which no "
+                             f"branch of arm64_step decodes — the generator "
+                             f"cannot say anything about this word, so this row "
+                             f"is checking a branch nothing reaches")
+                    _mask, value = G._STEP_CONDS[idx]
+                    _mask = (1 << 32) - 1 if _mask is None else _mask
+                    want = int(key.split("=")[1].split("then")[0].strip(), 16)
+                    self.assertEqual(
+                        (word & _mask), value,
+                        f"`{form}` decodes to branch {idx}, whose condition is "
+                        f"not {key!r}: the row names one branch and the word "
+                        f"reaches another, which is the vacuity this case "
+                        f"exists to end")
+                    self.assertEqual(
+                        want, value,
+                        f"the row names {key!r} but the branch this word "
+                        f"reaches tests a different value")
+
+    def test_the_hardware_agrees_with_the_model_about_rn_31(self):
+        """Ask the MACHINE, for the three words the model branches on.
+
+        `ADD X0, XZR, X1` / `SUB X0, XZR, X1` / `CMP XZR, X1` with the second
+        operand set to 1: each answer is `1`, `-1`, or "not equal", and `sp` is
+        none of them, so one clang invocation and one run settles register 31 for
+        the whole shifted-register class — which is the class a `NEG` lives in
+        and the one this file's model used to read as `sp`.
+
+        Skipped on a host that cannot run arm64, because there is no other way
+        to ask this question: the alternative oracle is the model, which is the
+        thing under test.
+        """
+        import platform
+        import subprocess
+        import tempfile
+        if platform.machine() not in ("arm64", "aarch64"):
+            self.skipTest("the probes are arm64 code; there is nothing to run "
+                          "them on here")
+        expected = {"add x0, xzr, x1": 1, "sub x0, xzr, x1": -1,
+                    "cmp xzr, x1": 0}
+        with tempfile.TemporaryDirectory() as td:
+            asm = os.path.join(td, "probe.s")
+            with open(asm, "w") as fh:
+                fh.write(".text\n")
+                for i, (form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f".globl _p{i}\n_p{i}:\n    mov x1, #1\n"
+                             f"    {form}\n")
+                    if form.startswith("cmp"):
+                        fh.write("    cset x0, eq\n")
+                    fh.write("    ret\n")
+            c = os.path.join(td, "main.c")
+            with open(c, "w") as fh:
+                fh.write("#include <stdio.h>\n")
+                for i, (_form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f"extern long p{i}(void);\n")
+                fh.write("int main(void) {\n")
+                for i, (form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f'    printf("%s %ld\\n", "{form}", p{i}());\n')
+                fh.write("    return 0;\n}\n")
+            exe = os.path.join(td, "probe")
+            build = subprocess.run(
+                ["clang", "-target", "arm64-apple-macos11", "-o", exe, c, asm],
+                capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0,
+                             f"the probe did not build: {build.stderr[-400:]}")
+            run = subprocess.run([exe], capture_output=True, text=True)
+        got = {}
+        for line in run.stdout.splitlines():
+            form, value = line.rsplit(" ", 1)
+            got[form] = int(value)
+        for form, _call, rn in RN31_PROBES:
+            with self.subTest(form=form):
+                self.assertIn(form, got, f"the probe printed nothing for it: "
+                                         f"{run.stdout!r}")
+                if rn == "sp":
+                    continue          # the stack pointer is not a small constant
+                self.assertEqual(
+                    got[form], expected[form],
+                    f"`{form}` with X1 = 1 answered {got[form]}, so this "
+                    f"machine reads `Rn = 31` as something other than the "
+                    f"ZERO register — the model, and every proof that depends "
+                    f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
         """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
@@ -668,7 +866,7 @@ class TestRegister31(unittest.TestCase):
 #     NEG branch cannot fire.  `formal/examples/udivmod.mojo`'s proof failed with
 #     `native_decide … is false` on every input, and it is live on master today
 #     through unary minus.  Filed as
-#     `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`.
+#     the `arm64_step` SUB-register arm reading SP.
 #   * `MSUB Xd, Xn, Xm, XZR` — the word the fix reached for next — is accepted
 #     by BOTH `MUL`'s mask (`0xffe07c00`) and `MSUB`'s (`0xffe08000`), and
 #     `arm64_step` tests MUL first, so `-(d*c)` was read as `+d*c` and the
@@ -753,7 +951,15 @@ def _msub_xzr_word():
 
 
 _FLOOR_FORBIDDEN = (
-    # Reads as `s.sp - x5`: NEG is shadowed by the SUB-register arm.
+    # `arm64_reg 31 s -` IS `-X5`: `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, so the
+    # word lands in the SUB-register arm and that arm now reads `Rn` as the
+    # ZERO register (`lib/ProofLib.lean`'s `arm64_step_neg_reads_zero_rn` is the
+    # pin).  It used to read SP here, which is
+    # the shifted-register `SUB` arm reading SP, and is why
+    # this row existed at all — so what the row now says is "the emitter does
+    # not emit it", which is the half that is still load-bearing: whether the
+    # corrected floor division could now spell it this way is open, and until it
+    # is measured this row is what says the block does not.
     ("neg x6, x5", _neg_word, "arm64_reg 31 s -"),
     # Reads as `x1 * x5`: MUL is tested before MSUB and both masks accept it.
     ("msub x6, x1, x5, xzr", _msub_xzr_word,

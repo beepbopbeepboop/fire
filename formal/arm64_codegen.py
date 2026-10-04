@@ -1632,14 +1632,19 @@ dylib_exports: list = None, globals_base: int = None,
             movz x0, 2 ; movz x16, 1 ; svc #0x80       SP < floor: exit(2)
         ok:
 
-        **Every one of those forms is one `lib/ProofLib.lean` already reads.**
+**Every one of those forms is one `lib/ProofLib.lean` already reads.**
         That is not luck and it is the reason the sequence is shaped this way
         rather than as the shorter `CMP SP, X16`: the model reads an `Rn` of 31
-        as `s.sp` in exactly the forms A64 gives that encoding to — `ADD Xd, SP,
-        #imm` and the register `CMP` among them — and as the ZERO register
-        everywhere else. So both the `ADD Xd, SP, #0` and the `CMP` that
-        follows name two ordinary registers once the first has run, which is
-        the same pair of instructions the machine executes either way.
+        as `s.sp` in exactly the forms A64 gives that encoding to — the
+        add/subtract IMMEDIATE forms and every memory form — and as the ZERO
+        register everywhere else, `SUB`/`SUBS`/`CMP` (register) included
+        (measured: a `SUBS X0, X31, X1` computes `-1`, not `sp - 1`;
+        `lib/ProofLib.lean`'s `arm64_step_cmp_reg_n31_reads_zero` is the pin and
+        `test_formal_call_proof_gen.py::TestRegister31` is the measurement). So
+        the `ADD Xd, SP, #0` below is deliberately the form that DOES read SP in
+        `Rn`, and the `CMP` that follows it reads an ordinary register instead —
+        one instruction each way round, and no `Rn` of 31 for either reading to
+        be ambiguous about.
 
         X16 and X17: the intra-procedure scratch pair `_emit_global_init` and
         the spill addressing already use. Neither holds anything across a
@@ -9455,14 +9460,20 @@ ctor_field_value=self._ctor_field_value_for(name),
         and both emit a word `ProofLib.arm64_step` reads as a DIFFERENT
         instruction:
 
-        * **`NEG X6, X5 ; MSUB X0, X1, X6, X3`** — the obvious one — computes
-          `SP - c` in the model, because `NEG Xd, Xn` is `SUBS Xd, XZR, Xn` with
-          `Rn = 31` and `arm64_step`'s SUB-register arm reads
-          `arm64_reg_or_sp 31 s`. Every generated proof of a program with a NEG
-          then fails with `native_decide … is false`, on every input including
-          the ones where `c = 0`. That is
-          `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`, and it
-          is live on `master` today through unary minus (line 3352).
+        * **`NEG X6, X5 ; MSUB X0, X1, X6, X3`** — the obvious one — used to
+          compute `SP - c` in the model, because `NEG Xd, Xn` is `SUB Xd, XZR,
+          Xn` with `Rn = 31` and `arm64_step`'s SUB-register arm read
+          `arm64_reg_or_sp 31 s`, so every generated proof of a program with a
+          NEG failed with `native_decide … is false`, on every input including
+          the ones where `c = 0`
+          (the `arm64_step` SUB-register branch, fixed with the rest of that
+          class).
+          **That arm reads the ZERO register now**, so the word decodes to
+          `-X5` and the shadowing is gone; the spelling is still not emitted
+          here, and `test_formal_call_proof_gen.py::TestFloorCorrectionDecodes`
+          pins that it is not. Whether it now closes the proof is OPEN — the
+          second bullet below is the reason the block was written this way and
+          it has not been re-measured since.
         * **`SUB`/`MVN`/`AND`/`ADD`** — masking the divisor by `~(c-1)` instead
           of negating it — is correct on both machines (it is what x86-64's
           `_emit_floor_remainder` still does) and it does NOT close the proof:

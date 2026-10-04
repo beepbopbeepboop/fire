@@ -2823,19 +2823,24 @@ def _step_rhs(w: int, idx: int):
     if idx == 5:  # NEG
         rn = (w >> 16) & 0x1f
         return f"some (arm64_set_reg {rd} s (-(arm64_reg {rn} s)))"
-    # `Rn` here is SP for the ADD/SUB/CMP shifted-register forms (A64 reads SP
-    # in `Rn`, measured: `add x0, sp, x16` assembles) and `ProofLib`'s branches
-    # say `arm64_reg_or_sp`.  This generator still spells the CONCRETE answer —
-    # `s.sp` for 31, `arm64_reg n` otherwise — and that asymmetry is deliberate:
-    # the step-result lemma is closed by `exact`-ing the library lemma
-    # INSTANTIATED AT THIS WORD, so the two right-hand sides only have to be
-    # defeq, and on a literal index they are.  Emitting `arm64_reg_or_sp` here
-    # instead would make that `exact` trivial but put `arm64_reg_or_sp n s` into
-    # every downstream value-flow goal, and those are simplified with
-    # `simp only [..., arm64_reg, arm64_set_reg]` lists that do not carry the
-    # helper — measured: 8 examples typecheck with the spelling below and the
-    # helper is not in those lists.  `test_formal_call_proof_gen.py`'s
-    # `TestRegister31` pins both halves of that sentence.
+    # `Rn` here is SP for `ADD` (shifted register) and for every add/subtract
+    # IMMEDIATE form — measured, and `ProofLib`'s branches say
+    # `arm64_reg_or_sp` — and the ZERO register for `SUB`/`SUBS`/`CMP` register,
+    # which is what makes a `NEG` (whose `Rn` field is 31) `-Xn` rather than
+    # `sp - Xn`.  This generator still spells the CONCRETE answer — `arm64_reg
+    # n` for every register form, `s.sp` for the immediate ones — and that
+    # asymmetry is deliberate: the step-result lemma is closed by `exact`-ing the
+    # library lemma INSTANTIATED AT THIS WORD, so the two right-hand sides only
+    # have to be defeq, and on a literal index they are.  Emitting
+    # `arm64_reg_or_sp` here instead would make that `exact` trivial but put
+    # `arm64_reg_or_sp n s` into every downstream value-flow goal, and those are
+    # simplified with `simp only [..., arm64_reg, arm64_set_reg]` lists that do
+    # not carry the helper — measured: 8 examples typecheck with the spelling
+    # below and the helper is not in those lists.
+    # `test_formal_call_proof_gen.py`'s `TestRegister31` pins both halves of that
+    # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
+    # table used to check the branch's source text, which the decoder cannot
+    # reach.
     if idx == 2:  # ADD register
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s + arm64_reg {rm} s))"
     if idx == 4:  # MUL
