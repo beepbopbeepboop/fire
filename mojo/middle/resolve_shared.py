@@ -16,7 +16,11 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
+# NO `import gimple_codegen` at module level: nothing in this module reads
+# anything from it, and the edge middle-tier -> gimple_codegen -> the gimple
+# backend -> middle-tier is an import CYCLE that only test_suite.py's
+# declared exemption list was hiding. See mojo/middle/methods_shared.py's
+# header comment for the whole rule.
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,

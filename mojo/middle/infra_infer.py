@@ -18,7 +18,11 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _struct_value_codes  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
+# NO `import gimple_codegen` at module level: nothing in this module reads
+# anything from it, and the edge middle-tier -> gimple_codegen -> the gimple
+# backend -> middle-tier is an import CYCLE that only test_suite.py's
+# declared exemption list was hiding. See mojo/middle/methods_shared.py's
+# header comment for the whole rule.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes

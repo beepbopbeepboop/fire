@@ -15,10 +15,34 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+
+# NO `import gimple_codegen` AT MODULE LEVEL, anywhere in `mojo/middle/*`, and
+# this file's two readers of `gimple_codegen._SELFHOST_DIR` are the reason the
+# rule exists. The edge middle-tier -> `gimple_codegen` -> the gimple backend
+# -> middle-tier IS a cycle, and Python resolves it by letting whichever module
+# the process reached first finish: enter through any of the eight middle-tier
+# modules and `from mojo.middle.infra_infer import _FC_SEP` (or
+# `user_dunder_repr_call`, `_selfhost_parsed_source`, `builtin_module_constant`,
+# `_is_none_literal`, `_annotation_container_elem_type`,
+# `_emit_starred_slot_list`, `_is_selfhost_source_file`) meets a half-built
+# module. Only `test_suite.py`'s declared exemption list kept that from being a
+# red, and every real entry point in `driver.py` reaches `gimple_codegen`
+# first, so nothing else could see it.
+#
+# `import X` binds a module object and survives a half-initialised X (its
+# attribute reads happen later, at call time, by which point X is finished);
+# `from X import NAME` resolves EAGERLY and does not. So the two readers below
+# do their `import gimple_codegen` inside the function — the same placement
+# `module_loader.load_module` and `fire_compiler.compile_with_interpreter`
+# already use for exactly this reason.
+#
+# `test_suite.py`'s "imports: every real entry point imports first" is the
+# measurement, and it is checked in both directions: a new module that closes
+# the cycle fails, and so does an entry left on the exemption list that now
+# imports fine.
 
 def _gmm_callexpr_node(x) -> CallExpr:
     """Same-module `CallExpr`-view identity helper (the `_gmm_as_str`
@@ -74,6 +98,11 @@ def _is_selfhost_source_file(path: str) -> bool:
     """
     if not path or not path.endswith('.py'):
         return False
+    # FUNCTION-LOCAL, and that placement is the whole point: see
+    # `_no_module_level_gimple_codegen_import`'s own comment at the top of
+    # this file. Nothing else in `mojo/middle/*` may reach `gimple_codegen`
+    # at module level, because that edge is the middle-tier import cycle.
+    import gimple_codegen
     _rp = os.path.realpath(os.path.abspath(path))
     _sd = gimple_codegen._SELFHOST_DIR
     _rsd = os.path.realpath(_sd)
@@ -112,6 +141,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     if not cf or not cf.endswith('.py'):
         return False
     cur_abs = gimple_ctypes.os.path.abspath(cf)
+    import gimple_codegen          # function-local; see the note above
     sd = gimple_codegen._SELFHOST_DIR
     # Path-INDEPENDENT sibling signal (`fire_compiler.py` at the tree root),
     # mirroring `_is_selfhost_source_file` above. The bare

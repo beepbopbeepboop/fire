@@ -16,8 +16,14 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
-from gimple_codegen import _selfhost_impl_py_files
+# NO module-level `import gimple_codegen` here, and
+# `_selfhost_extracted_fn_index` below is the reason: it is this module's only
+# reader of `gimple_codegen._SELFHOST_DIR` / `_selfhost_impl_py_files`, and the
+# middle-tier -> gimple_codegen -> backend -> middle-tier edge is an import
+# CYCLE that only `test_suite.py`'s declared exemption list was hiding. It
+# imports inside the function instead — see `mojo/middle/methods_shared.py`'s
+# own header comment for the whole rule and why a function-local `import X`
+# survives where `from X import NAME` cannot.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -1642,8 +1648,9 @@ def _selfhost_extracted_fn_index() -> dict:
     _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
     if _validated is not None:
         return _validated
+    import gimple_codegen          # function-local; see the note at the top
     _sd = gimple_codegen._SELFHOST_DIR
-    _files = sorted(_selfhost_impl_py_files(_sd))
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(_sd))
     _key = 'fnidx#' + _selfhost_files_key(_files)
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
     if _hit is not None:

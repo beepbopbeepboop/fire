@@ -2659,6 +2659,15 @@ def test_the_compiler_imports_from_every_real_entry_point():
         `mojo/backend_gimple/module_gen.py` -> `module_shared` ->
         `funcs_shared` -> `gimple_codegen`.
 
+    The exemption list this used to carry is now EMPTY (2026-10-04). All
+    eight `mojo/middle/*` modules opened with a module-level `import
+    gimple_codegen`, and only three of them read anything from it —
+    `_SELFHOST_DIR` and `_selfhost_impl_py_files` — so those three now import
+    inside the function that uses them. That is the whole fix: `import X`
+    binds a module object and survives a half-initialised X (its attribute
+    reads happen later, at call time), while `from X import NAME` resolves
+    EAGERLY and does not. Every other middle-tier module's copy was dead code.
+
     Each module that can be a process's FIRST `mojo.*` import is therefore
     probed in a FRESH interpreter. Checking from inside this process would
     prove nothing: by the time this test runs, `sys.modules` already holds
@@ -2692,22 +2701,15 @@ def test_the_compiler_imports_from_every_real_entry_point():
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
     # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
-    # which imports the gimple backend, which imports them back. That is the
-    # middle tier's pre-existing shape — measured identical on master, before
-    # any of the branches this test was written for — so none of the eight can
-    # be the first `mojo.*` import a program makes, and every one of them
-    # DOES import fine behind `gimple_codegen` or `fire.py`. Named rather than
-    # omitted so a reader who finds one of them broken learns it was already
-    # load-order-dependent instead of concluding the exemption is where to
-    # start looking. No `mojo/backend_gimple/*` module is exempt: the backend
-    # sits downstream of `gimple_codegen`, so every one of them is reachable
-    # first and a new cycle among them would be caught here.
-    declared = {
-        'mojo.middle.calls_shared', 'mojo.middle.funcs_shared',
-        'mojo.middle.infra_infer', 'mojo.middle.loops_shared',
-        'mojo.middle.methods_shared', 'mojo.middle.module_shared',
-        'mojo.middle.resolve_shared', 'mojo.middle.stmts_shared',
-    }
+    # which imports the gimple backend, which imports them back. That list is
+    # now EMPTY: the middle tier no longer imports `gimple_codegen` at module
+    # level at all, so there is nothing to exempt. Kept as a named declaration
+    # rather than deleted because the check that reads it is checked in BOTH
+    # directions, and a list that can silently reappear is the point.
+    # No `mojo/backend_gimple/*` module is exempt: the backend sits
+    # downstream of `gimple_codegen`, so every one of them is reachable first
+    # and a new cycle among them would be caught here.
+    declared: set = set()
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
     check('imports: the load-order exemption list is not stale',
@@ -2717,6 +2719,15 @@ def test_the_compiler_imports_from_every_real_entry_point():
     check('imports: the probe actually probed something', len(entries) >= 30,
           f'only reached {len(entries)} modules — the glob or the list went '
           f'stale and this check is vacuous')
+    # The exemption list is now EMPTY, which means the check above is
+    # currently `not bad`. Assert that it is not vacuous by construction: an
+    # empty list with a non-empty failure set is the state this whole test
+    # exists to prevent, and `failed <= declared` alone would pass it.
+    check('imports: no middle-tier module needs an exemption any more',
+          not (declared or failed),
+          f'exempt={sorted(declared)} failing={sorted(failed)} — the middle '
+          f'tier must not import gimple_codegen at module level (see '
+          f'mojo/middle/methods_shared.py\'s header comment for the rule)')
 
 
 def test_every_backend_call_of_a_gen_method_has_the_delegate():
