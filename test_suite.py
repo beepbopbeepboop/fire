@@ -3481,6 +3481,19 @@ UNREGISTERED = {
         '`other` row, both read off the real tree rather than written for the '
         'test.',
 
+    'test_formal_frame_slot_subscript_census.py': 'The frame-slot-subscript '
+        'census TOOL, and the same shape as the two entries above: a parse and '
+        'a walk over `.mojo` files, no build and no Lean (5 cases, 0.002 s). '
+        "Not registered because this session's task says not to register "
+        'anything; listed here for the reason the estate check below exists. '
+        'It covers `tools/formal_frame_slot_subscript_census.py`\'s '
+        'classification of every `X.<field>[i]` base — a container field, a '
+        'chain, a one-field receiver\'s own field, and the framed struct whose '
+        'two corpus sites are the dict case `frame_slot_element_refusal`\'s '
+        'placement is load-bearing for — each with the exclusion that turns it '
+        'off, because the census is what decides a row and a filter with no '
+        'negative case is a filter nobody has measured.',
+
     'test_formal_returnless_census.py': 'The return-less census TOOL, and the '
         'third census tool in this shape: a parse and a walk over `.mojo` files, '
         'no build and no Lean (11 cases, 0.01 s — the instrument is cheap, not '

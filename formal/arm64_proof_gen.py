@@ -7647,6 +7647,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  all_goals try (simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}])")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
+                # A branch whose tested register was LOADED FROM MEMORY is the
+                # one this leaf cannot decide from the value flow, because the
+                # value flow is over REGISTERS and the load's address is an
+                # `adrp`/`add` expression the fold never touches.  Peeling the
+                # frame stores off the read is what decides it, and the side
+                # condition each peel needs is an inequality between two closed
+                # `Nat`s — the address and a frame slot — so `decide` is the
+                # discharge and no hypothesis is needed.
+                #
+                # It is emitted for EVERY branch here rather than only for a
+                # recognised one, because recognising it means decoding the
+                # load's address back out of the instruction stream and
+                # `_cbz_reg_const` (the reader that could) deliberately stops at
+                # the `LDR`.  `try`, so a branch the previous lines closed costs
+                # nothing, and `simp (disch := decide)` rather than `simp only`,
+                # so the `if` the model leaves is decided rather than merely
+                # unfolded.
+                A(f"{IND}  all_goals try (simp (disch := decide) "
+                  f"[mem_read_after_write_u64, mem_read_after_write_u64_ne, "
+                  f"mem_read_two_writes_same])")
+                A(f"{IND}  all_goals try native_decide")
                 _cfg_leaf(A, IND + "  ", "runs-cbz-condition",
                           "all_goals (first | done | sorry)")
             A(f"{IND}have hr_{n} : arm64_runs {C} 1 ({cur}) = some {tgt_state} := by")

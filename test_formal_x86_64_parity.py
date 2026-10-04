@@ -1639,6 +1639,29 @@ CASES = [
      "    w.clear()\n"
      '    sys.stdout.write(" after %d" % w.size())\n'
      "    return 0\n"),
+    # A BYTE BLOB is `[count][byte 0][byte 1]…` — one header word and ONE-BYTE
+    # elements — and this case is the whole of that claim, on both machines.
+    # Read `b[1]` and a word-stride blob answers 0 where CPython says 98, so
+    # the expected output is a number only a one-byte-element lowering can
+    # produce; and it is read off CPython by this file rather than written down,
+    # which is what makes it an assertion about the layout rather than a
+    # constant agreed with by hand. `test_formal_run.py`'s `constr_bytearray_*`
+    # group is the rest of it (iteration, membership, append, and the `bytes`
+    # refusal), and this row is what says the two machines build the SAME blob
+    # from the same constructor — the property a one-sided assertion cannot see.
+    ("bytearray_both_backends_build_it_identically",
+     "def main():\n"
+     "    var b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    printf(\"%d %d %d %d %d\\n\", len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n",
+     "def main():\n"
+     "    b = bytearray(4)\n"
+     "    b[0] = 65\n"
+     "    b[1] = 66\n"
+     "    print(len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n"),
 ]
 
 
@@ -1837,23 +1860,26 @@ REFUSALS = [
      "    printf(\"%d\", o.x)\n"
      "    return 0\n",
      "past the 4 levels this path lays out"),
-    # `bytearray()` and `bytes()` are the one refusal here that is a fact about
-    # a TYPE, and it used to reach the bind audit as a dangling extern named
-    # `bytearray` — so both machines "built" it and the build failed about a
-    # SYMBOL. The needle is the clause that says what is actually undecided
-    # (the ELEMENT WIDTH) rather than the name, because the name is what both
-    # messages would say whatever they meant, and a byte blob's layout is not a
-    # fact about one architecture.
+    # `bytes()` is the one byte-sequence constructor still refused, and the
+    # refusal is the x86-64 half of a message arm64 prints too. The needle is
+    # the clause naming what to write instead — `bytearray` IS the blob on this
+    # path, and the two byte sequences being told apart by which blob they are
+    # is the decision `bytearray_both_backends_build_it_identically` below
+    # exercises.
     #
-    # `test_formal_run.py`'s `constr_refuse_bytearray_by_name` pins the same
-    # refusal's WORDS on the host backend; this row is what says the two
-    # backends say them, which is the property a one-sided assertion cannot see.
-    ("bytearray_constructor_refused_identically",
+    # Before the element width was decided, all four spellings reached the bind
+    # audit as a dangling extern named `bytearray`/`bytes`, so both machines
+    # "built" them and the build failed about a SYMBOL — a fact about the link
+    # line rather than about the type the reader wrote.
+    ("bytes_constructor_refused_identically",
      "def main():\n"
-     "    var b = bytearray()\n"
+     "    var b = bytes()\n"
      "    printf(\"%d\", 1)\n"
      "    return 0\n",
-     "the element width is the undecided part"),
+     "The MUTABLE byte blob is `bytearray`"),
+    # `bytes_constructor_refused_identically` below is the refusal direction:
+    # the two byte-sequence names are told apart by WHICH blob each builds, and
+    # the row above is the construction that has to agree on both machines.
     # A SUBSCRIPT OF A FRAME SLOT, and this group is where the disagreement
     # lived: `s.n` on a field declared `Int` was REFUSED on arm64 and SIGSEGV'd
     # (exit 139) on x86-64, and with the field constructor-established BOTH
@@ -1944,6 +1970,95 @@ REFUSALS = [
      "    w.clear()\n"
      "    return 0\n",
      "lowers to one store of zero at offset 0 of its receiver"),
+    # A FRAME-valued FIELD read as a container.  `w.d` is `Deep`'s frame BASE,
+    # so `w.d[0]` means `Deep`'s first field and the blob walk answered
+    # something else: it read offset 0 of the base as the container's COUNT,
+    # computed `base + 8 + 8*count` from it, and read THAT — with `x = 3` in
+    # slot 0, `w + 32`, which is past `Deep`'s two slots.  Both machines printed
+    # 4, out of the frame's scratch region, and the build was green.
+    #
+    # The needle names the FRAME rather than a slot or a count, because that is
+    # the part the reader acts on: the declaration `var d: Deep` is two lines
+    # above the use, and `w.d.x` is the same program with a name where the
+    # index is.  A needle about the arithmetic would name a number the reader
+    # never wrote.
+    #
+    # It is a REFUSAL rather than a lowering at `base + 8i` because the index is
+    # not a field name: slot `i` is the struct's `i`-th declared field while
+    # `i` is inside them and a spill slot past that, so the bound that would
+    # make it an answer is one this path would have to invent for a program
+    # CPython refuses outright.  `formal/model.py`'s `frame_slot_element_refusal`
+    # has the argument and the corpus census; this row is the anti-rot for the
+    # two emitters asking it at the same point, which is after the dict and
+    # string readings and not beside the scalar-field gate.
+    ("a_subscript_of_a_field_declared_a_framed_struct_refused_identically",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Wrap()\n"
+     "    w.d.x = 3\n"
+     "    w.d.y = 4\n"
+     "    printf(\"%d\", w.d[0])\n"
+     "    return 0\n",
+     "offset 0 of a frame is that struct's FIRST FIELD"),
+    # The same refusal from the OTHER three choke points, because
+    # `_refuse_frame_slot_element` is asked at four of them and a gate that
+    # covers the subscript alone leaves a for-in iteration to read the frame's
+    # first field as a count.  One row per op is what keeps the four from
+    # drifting apart; the needles differ by the leading words the message builds
+    # from the op, so each names its own.
+    ("a_for_in_iteration_of_a_frame_field_refused_identically",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Wrap()\n"
+     "    var t = 0\n"
+     "    for f in w.d:\n"
+     "        t = t + f\n"
+     "    printf(\"%d\", t)\n"
+     "    return 0\n",
+     "a for-in iteration of `w.d` asks for a container element"),
+    ("a_membership_test_against_a_frame_field_refused_identically",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Wrap()\n"
+     "    printf(\"%d\", 3 in w.d)\n"
+     "    return 0\n",
+     "a membership test of `w.d` asks for a container element"),
+    ("a_slice_of_a_frame_field_refused_identically",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var w = Wrap()\n"
+     "    var s = w.d[0:1]\n"
+     "    printf(\"%d\", len(s))\n"
+     "    return 0\n",
+     "a slice of `w.d` asks for a container element"),
 ]
 
 # The other direction, and it is a PER-PLATFORM limit rather than a shared one,

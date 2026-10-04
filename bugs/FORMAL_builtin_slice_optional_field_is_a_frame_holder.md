@@ -6,6 +6,14 @@ the x86-64 sweep. **NOT FIXED, and not a one-construct change** — but the
 boundary is now measured rather than described, which is what the next person
 needs.
 
+**Status 2026-10-04 (`formal23-3`): the headline above is now FALSE as written
+for every holder with more than one field — shape 1 builds and answers CPython
+on both backends — and the two `_REASSIGNED` refusals were promising a spelling
+this path itself refuses, which is fixed. What is left is one predicate's worth
+of lifetime argument, not a layout decision. Read the "Status, 2026-10-04"
+section at the end; it is the current state and everything above it is the
+record of how the question got here.**
+
 ## What was run, and what it says
 
 **The 13-file row.** `tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-4.txt`
@@ -309,6 +317,115 @@ promise nobody checks is how a refusal sends readers after a non-bug. That is
 the failure mode this family documents itself as existing to prevent, and the
 message here names a specific alternative spelling, so the alternative has to
 keep working for the message to keep being true.
+
+## Status, 2026-10-04 (`formal23-3`): shape 1 is CLOSED for every holder with a
+## block, and the two `_REASSIGNED` refusals were promising a spelling this path
+## refuses
+
+Four measurements and one fix. The first retires this document's own headline
+for the shape it names, the second and third are what the fix is, and the fourth
+is where the 13-file row's refusals actually are now. **The remaining item is a
+lifetime question about which function assigns the field, not a question about
+what a struct-typed field is** — which is a correction to the reading the
+"Status, 2026-10-02" section above ends on.
+
+**Shape 1 (`Box(o)` with `self.inner = o`) BUILDS AND ANSWERS CPython, both
+architectures**, as long as the holder has more than one field:
+
+```console
+$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label w -- \
+    python3 fire.py build --formal --no-prove --backend=$a -o .tmp/wf2_$a .tmp/wf2.mojo; done
+$ .tmp/wf2_arm64; .tmp/wf2_x86_64
+v=41 h=1
+v=41 h=1
+```
+
+`struct Box { var pad: Int; var inner: Opt; def __init__(out self, o: Opt):
+self.inner = o }` with `Box(o)`, `o.v = 41`, `o.has = 1`. CPython prints
+`v=41 h=1`. So "a struct-typed FIELD cannot be initialised from an argument" is
+false as written; it is true of exactly ONE spelling, and the section above
+already measured the boundary ("**The boundary is the holder's OWN field count,
+measured**") without connecting it to the headline. The one-field spelling is
+refused by a DIFFERENT construct — `struct Box { var inner: Opt }` gives
+"constructing Box with argument 'o' as field 'inner' … Box has one field, so its
+whole value IS that word … a one-field struct's value is passed around as an
+ordinary word, which every frame-lifetime check here is bypassed by" — which is
+`FORMAL_one_field_holder_of_a_frame_is_not_a_holder`, named by the 2026-10-02
+section and **not a file in `bugs/`**. It is recorded in the 2026-10-03
+section's own note that the receiver-seeding fix "turns the store case from a
+refusal into a SIGSEGV", which is why it is still refused.
+
+**The `_REASSIGNED` refusals were promising a spelling that is itself refused.**
+Both sites in `formal/build.py` that raise it ended with an alternative, and
+both alternatives were measured false on both architectures:
+
+| what the refusal said | what the program does |
+|---|---|
+| "Assign the field to a name and read through the name" | `var t = self.inner; t.v` → `field_access_refusal`: "'t.v' is a field access through 't', and this path has no way to say what 't' holds" — a local bound to a nested frame FIELD READ is not classified as a frame address |
+| "…and call the method on the name" | `var t = self.inner; t.get()` → the value-method-call refusal: "the receiver is a name on this path, and 'get' is not one of those methods of those receivers" |
+
+So the reader was sent to a non-bug twice, which is the failure mode this family
+of diagnostics documents itself as existing to prevent. The advice is now ONE
+string (`formal/build.py`'s `DELEGATING_FIELD_ADVICE`, read by both sites so
+they cannot drift) naming the form that is measured to build: **assign the field
+in `__init__` from a parameter of `__init__`**, and read it through the field.
+That is the DELEGATING field `model.init_stores_a_parameter_struct` already
+exempts, and the reason it is sound is that predicate's own argument — the only
+assignment is the constructor's and its argument is the CALLER's frame, so the
+two die together.
+
+**What is refused, and why it is a LIFETIME question.** The delegating form
+builds and answers `g=41` = CPython on both backends; what is refused is a
+NON-CONSTRUCTOR method that assigns the frame-typed field and another method
+that reads it back through `self`:
+
+```
+self.inner.v reads through self.inner, which is a Opt — a struct of this module
+whose receiver is a frame — but a method of Box ASSIGNS it, so the word in the
+slot is a frame belonging to whichever function ran the assignment. …
+```
+
+Pinned by two cases in `test_formal_method_param_field.py`: the refusal with the
+clause that makes the delegating form sound as its needle, and the delegating
+form EXECUTED against CPython on both backends. The second is the half that is
+easy to leave out — a reworded advice nobody runs is an advice nobody knows is
+true.
+
+**So the two-way question this document is named for is not what stands in the
+way, and the terminal cause is not in this document.** What a frame-typed field
+IS is already decided — the frame address, with the delegating constructor as the
+one sound assignment — by `FORMAL_wide_receiver_by_reference` (claimed, and its
+`model.init_stores_a_parameter_struct` / `_frame_field_store_is_sound` are the
+code this section leans on). What is left here is the narrower question that
+survives it: whether a NON-CONSTRUCTOR method may assign a frame-typed field at
+all. It is one predicate's worth of work in `_typed_nested_frame`'s loop (the
+`for st in cands:` exemption list), it is a lifetime argument rather than a
+layout change, and it is **not attempted here** — the measurement above says the
+refusal is CORRECT about the program it sees, so closing it needs an argument
+that a non-constructor assigner's frame outlives nothing, and no such argument
+has been written down yet.
+
+**And the 13-file row is no longer where any of this lives.** `builtin_slice.mojo`
+on this tree refuses LATER than this document's 2026-10-03 status recorded, and
+identically on both backends:
+
+```console
+$ for a in arm64 x86_64; do python3 tools/memslot.py --gb 8 --label sl -- \
+    python3 fire.py build --formal --no-prove --backend=$a -o .tmp/sl_$a \
+    ../new-modular/Mojo/stdlib/std/builtin/builtin_slice.mojo; done
+build: `FormatStruct` is called, and it is imported from `std.format._utils`, so
+the call has to bind a symbol `std.format._utils` exports. That module does not
+export it … **If the call names no type argument at all, the SOURCE is right and
+this path is short** … bugs/FORMAL_a_bare_call_to_a_template_whose_type_
+arguments_are_inferrable.md
+```
+
+Everything this document traced — the two-field `Optional`, the
+`dylib_frame_return_refusal` on `StridedSlice___init__`, the `self.step.or_else()`
+unwrap — is behind that. `FORMAL_a_bare_call_to_a_template_whose_type_arguments_
+are_inferrable` is claimed (`formal23-1`) and is the 170-file row in
+`FORMAL_sweep_work_map_2026-10-04_b10.md` §3.1, so a reader who starts at the
+`Optional` document is now three layers from the refusal they will meet.
 
 ## The next step (as originally written)
 
