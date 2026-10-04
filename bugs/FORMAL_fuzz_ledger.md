@@ -37,9 +37,9 @@ file: **0.1 GB** (`tools/memslot.py --gb 4`), so none of it is within an order o
 magnitude of the 3-4 GB line.
 
 **4032 programs over 13 sweeps.** Two bugs fixed, two limits filed, and four
-defects in the tool itself. §2.1 adds **3400 programs over 24 more sweeps** and
-two more fixes, so the whole file is **7432 programs over 37 sweeps: four
-backend fixes, three limits filed, five tool defects.**
+defects in the tool itself. §2.1 adds **4200 programs over 32 more sweeps**,
+two more fixes and one more tool defect, so the whole file is **8232 programs
+over 45 sweeps: four backend fixes, three limits filed, six tool defects.**
 
 | date | mix | seed | indexes | programs | tally | what came of it |
 |---|---|---|---|---|---|---|
@@ -59,7 +59,7 @@ backend fixes, three limits filed, five tool defects.**
 
 ### 2.1 The fuzz-3 sweep (2026-10-03, seed `sweep19c`)
 
-**3400 programs over 24 sweeps, and every mix in the table is a mix this
+**4200 programs over 32 sweeps, and every mix in the table is a mix this
 session ADDED** — the corpus could not produce a loop's `else` arm, a closure, a
 default or keyword argument, a list slice, a tuple unpack, a word-boundary
 integer, a comparison chain as a value, a `try`/`finally`, or an interpolated
@@ -70,8 +70,15 @@ budget re-deriving `FORMAL_known_limits.md`.
 `-j 4` (the earlier rows used `-j 2`), both backends, `tools/memslot.py --gb 8`.
 Peak memory: **0.2 GB**. Cost: **0.7–2.8 programs/second** except `fstrings`,
 which is 17/s because every program is a refusal that never reaches the image.
-A sweep row is one `(mix, range)` pair, so the 24 rows below are 24 runs and the
-"sweeps" this file counts are rows — the earlier table's 13 are the same thing.
+A sweep row is one `(mix, range, options)` triple, so the 32 rows below are 32
+runs and the "sweeps" this file counts are rows — the earlier table's 13 are the
+same thing.
+
+The cost is not flat, and the shape of the cost is worth reading: `--stmts 30 50`
+is **3–7x slower per program** than the default body, because a wide body is a
+longer function to lower and two images to emit (`chains` went from 2.1/s to
+0.2/s, `bignum` from 2.0/s to 0.4/s). A family that looked cheap at the default
+body is not necessarily cheap at the width where the SPILL paths are.
 
 **Ranges are recorded here so no row ever re-runs another's programs**, and
 `make_program(seed, index, mix)` is a pure function of its arguments. Two ranges
@@ -105,6 +112,14 @@ same indexes give different programs.
 | 2026-10-03 | `closures` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — the SPILL paths (a wide body is what reaches them) |
 | 2026-10-03 | `unpack` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
 | 2026-10-03 | `argshape` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `loopelse` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `tryfinally` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing |
+| 2026-10-03 | `bignum` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — and the SLOWEST mix per program (0.4/s) |
+| 2026-10-03 | `chains` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 100 match | nothing — 400 s for 100 programs, the widest body in this table |
+| 2026-10-03 | `strfmt` | `sweep19c` | 7400-7499, `--stmts 30 50` | 100 | 95 match, **5 `TIMEOUT`** | the machine, not the programs — §4.6 |
+| 2026-10-03 | `strfmt` | `sweep19c` | 7400-7499, `--stmts 30 50` (re-run after §4.6) | 100 | 100 match | nothing |
+| 2026-10-03 | `closures` | `sweep19c` | 7500-7599 (captured-container corpus) | 100 | 100 match | nothing |
+| 2026-10-03 | `slicing` | `sweep19c` | 7500-7599 (negative-bound corpus) | 100 | 100 match | nothing |
 
 The three `--stmts 30 50` rows are a different AXIS rather than more of the same:
 x86-64 has fifteen usable general registers, so a function with twenty live
@@ -418,6 +433,34 @@ CPython, so `loop_nested`'s inner arm had to belong to an inner LOOP (48 of the
 first 80 `loopelse` programs failed to compile); and a `return` inside `main`'s
 body truncates the program there, so the `try_finally_return` arm moved into a
 helper — dead code on both engines measures nothing.
+
+### 4.6 A `TIMEOUT` was reported about the SCHEDULER
+
+The sixth defect, and the only one in this file that is about the harness rather
+than about the corpus or the backend: **the tool believed a timeout on the first
+observation.** Measured on the `strfmt` row of §2.1 — 5 `TIMEOUT` verdicts out of
+100 programs at `--stmts 30 50`, all five of which:
+
+* run in **0.58 s or less** (four of them in 0.01 s), on both architectures,
+  repeatedly, timed directly;
+* re-ran as `match` the moment the sweep was asked for those five indexes
+  alone (`--seeds 7480-7484`, `-j 2`: 5 match), with CPython's own output as the
+  oracle and both images agreeing with it.
+
+A 0.01 s program does not become a 30 s one, so what the tally said was about
+the machine — this sweep ran `-j 4` alongside other work on a shared box, and
+`RUN_TIMEOUT` is a wall-clock limit measured against a scheduler the tool does
+not own. It was NOT a finding (`classify` counts `TIMEOUT` apart from
+`MISMATCH-*`), so the run still exited 0 and nothing was claimed as a defect; but
+it was in the table as a fact, and a fact that is a measurement of the weather is
+worse than no fact.
+
+`run_on` now re-runs a timeout once and believes the verdict only if the second
+run agrees. A program that times out twice is still a `TIMEOUT` and is still not
+a finding — it is now a statement about the program. The same re-run argument
+would apply to a BUILD timeout, and does not yet: a build that exceeds 120 s is
+expensive enough to be worth believing, which is the only reason it is spelled
+one way and not the other.
 
 ## 5. What the corpus still cannot say, and what it costs to run
 
