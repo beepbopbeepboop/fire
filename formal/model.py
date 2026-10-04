@@ -24072,18 +24072,41 @@ def struct_field_default(struct_def, name,
     for field in struct_fields(struct_def):
         if struct_field_name(field) == name:
             value = getattr(field, "value", None)
-            if structs_by_name is None:
-                return class_constant_word(name, value)
-            kind, payload = class_constant_word_in(structs_by_name, value)
-            return (kind, name if kind == DEFAULT_OPAQUE else payload)
+            kind, payload = _field_default_word(struct_def, name, value,
+                                                structs_by_name)
+            return kind, payload
     inherited = getattr(struct_def, "_inherited_field_defaults", None) or {}
     if name in inherited:
         value = inherited[name]
-        if structs_by_name is None:
-            return class_constant_word(name, value)
+        kind, payload = _field_default_word(struct_def, name, value,
+                                            structs_by_name)
+        return kind, payload
+    kind, payload = _field_default_word(struct_def, name, None,
+                                        structs_by_name)
+    return kind, payload
+
+
+def _field_default_word(struct_def, name, value, structs_by_name):
+    """One field's initializer read as a word — the `Optional` row included.
+
+    The `Optional` row is asked only when the initializer IS a `None` (or is
+    absent), because that is the one case where "no initializer" and "empty
+    `Optional`" are the same fact; an `Optional` field initialized with a
+    literal has an ordinary literal word and the ordinary rule is right. It
+    returns `(DEFAULT_INT, niche)` so both readers of a field default —
+    `struct_field_default` here and `struct_default_word` for the one-field
+    case — agree about what an absent `Optional` is, which is the same
+    one-reader rule the rest of this file keeps.
+    """
+    if is_none_expr(value) or value is None:
+        niche = optional_field_none_word(struct_def, name, structs_by_name)
+        if niche is not None:
+            return (DEFAULT_INT, niche)
+    if structs_by_name is None:
+        kind, payload = class_constant_word(name, value)
+    else:
         kind, payload = class_constant_word_in(structs_by_name, value)
-        return (kind, name if kind == DEFAULT_OPAQUE else payload)
-    return (DEFAULT_NONE, None)
+    return (kind, name if kind == DEFAULT_OPAQUE else payload)
 
 
 def struct_frame_defaults(struct_def, structs_by_name: dict = None) -> list:
@@ -28238,6 +28261,390 @@ def is_none_expr(node) -> bool:
     return isinstance(node, F.IdentExpr) and node.name == NONE_NAME
 
 
+# ── `Optional[T]`: the word `None` IS, per payload type ────────────────────
+#
+# The paragraph above is the WHOLE of what this target knew about `None`, and
+# its last sentence — "A distinguishable null is not available and is not
+# attempted" — is the sentence `UNWRAP_METHODS` has been refusing with, on both
+# architectures, for the 43-file row the sweep map names.  It is wrong, and the
+# measurement that says so is one line long:
+#
+#     var z: Optional[Int] = 0
+#     if z is None: print("WRONG")     # arm64 and x86-64 both print it
+#
+# Both images built, ran, and reported a `Some(0)` as EMPTY, because the word
+# `0` is `None` and the word `0` is also the integer 0.  So the null was not
+# merely unavailable, it was AMBIGUOUS, and an ambiguous null answers one of the
+# two questions wrongly with no diagnostic — the one outcome this backend's own
+# rule ("a wrong answer is the one outcome it may not produce",
+# `refuse_none_comparisons`) exists to prevent.
+#
+# ## The representation, stated once
+#
+# An `Optional[T]` value is ONE 64-bit word, and that word is the PAYLOAD.
+# `None` is a word the payload's type cannot produce — a NICHE — and which
+# niche is a fact about `T`, not about `Optional`.  So:
+#
+#     Optional[T]  ==  the word `niche(T)`, for `None`
+#     Some(v)       ==  the word `v`, for a payload `v`
+#     x is None     ==  x == niche(T)
+#     x == None     ==  x == niche(T)      (a payload cannot BE niche(T))
+#     x.or_else(d)  ==  x == niche(T) ? d : x
+#     x.unsafe_value() == x
+#
+# Every one of those is a compare and a conditional on the value word, so the
+# PROOF side needs nothing new: `lib/ProofLib.lean` already models a compare
+# against an immediate and a conditional branch, and `NONE_WORD` is already the
+# immediate it would carry.  That is the whole reason this is a niche and not a
+# two-word (tagged) value — see `OPTIONAL_TWO_WORD` for the alternative and for
+# what it would cost.
+#
+# ## Why a niche is SOUND, and when there is not one
+#
+# It is sound exactly when `niche(T)` is outside `T`'s domain, and the table
+# below is the argument for each row rather than a preference:
+#
+#   * a POINTER-LIKE payload (`String`, `Pointer[T]`, a container, a frame
+#     address, any struct of this module) — the word is an ADDRESS, and no
+#     address a program can hold is 0.  This is also the word `x is None` has
+#     ALREADY meant for a reference on this path, so choosing it makes the
+#     Optional answer and the reference answer the same answer.
+#   * a `Bool` — a Bool is a word holding 0 or 1 (`formal.types`' own note),
+#     so 2 is outside its domain.
+#   * a NARROW integer (`Int8`/`Int16`/`Int32`, `UInt8`/`UInt16`/`UInt32`) or a
+#     `Float32` — the word `1 << w` decodes to the value `2^w`, which is not a
+#     `w`-bit two's-complement integer nor a 32-bit float pattern, so the type
+#     cannot produce it.
+#
+# And there are types where there is NO such word, and the honest answer for
+# them is a REFUSAL rather than the 0 the fold produces today:
+#
+#   * `Int`, `Int64`, `UInt`, `UInt64` — every one of the 2^64 words is a value
+#     of the type (`formal.types`: values live in 64-bit registers, signed
+#     types sign-extended), so there is no word left over.
+#   * `Float64` — every 64-bit pattern is a double, NaNs included.
+#   * `DType` — a type TAG is an index and 0 is a legal one.
+#   * a payload whose type the source does not state, and a payload that is a
+#     struct of another module (whose layout this image cannot see).
+#
+# `optional_none_word` returns None for exactly those, and every caller turns
+# that None into a refusal that NAMES the alternative.  A program that used to
+# build and compute the wrong answer now refuses; that is the direction this
+# rule moves, and the measurement above is why.
+#
+# ## `OPTIONAL_TWO_WORD`: what the no-niche row needs, and why it is not here
+#
+# The other sound answer is a TAGGED TWO-WORD value: a pair `{tag, payload}`,
+# where `Optional[T]` is a pointer to it.  It covers every `T` including
+# `Int`, and this target already has the machinery for a multi-word value — a
+# struct of two fields IS a frame, and `struct_is_framed` /
+# `struct_constructor_sites` / `receiver_writeback_name` are the whole of it.
+# It is NOT done here for three measured reasons, each of which a later
+# session should check rather than take on trust:
+#
+#   1. `Optional` is a stdlib struct this image does NOT compile, so its frame
+#     is not in any module's `structs_by_name` — and `struct_frame_block_bytes`
+#     sizes a construction site's reservation out of `decls`, so nothing is
+#     reserved for a block whose struct the table does not know.
+#   2. `x is None` where `x` is a LOCAL holding the pair's address is a frame
+#     slot read through a word that is not a receiver.  Measured: every frame
+#     read this path has lowers from a RECEIVER (`self.f`) or from a name whose
+#     candidate struct is known, and a name declared `Optional[…]` has no
+#     candidate struct here.  See `bugs/FORMAL_a_subscript_on_a_frame_slot_is_a_
+#     pointer_dereference_and_the_two_backends_disagree.md` for the shape.
+#   3. `x = None` is then a store of a FRAME into a slot, which is
+#     `_refuse_holder_use`'s case ("it outlives the frame it names"), and that
+#     refusal is `formal13-5`'s claim to answer.
+#
+# The niche row is what this target can do SOUNDLY today, and it is what makes
+# the two-word row decidable rather than guessed at: one table says which `T`
+# the two-word form is needed for, so that work is a list and not a project.
+#
+# ## Why `OptionalReg` is in `OPTIONAL_TYPE_NAMES`
+#
+# `std/collections/optional.mojo`'s `OptionalReg` is the register-passable
+# sibling and it is spelled `OptionalReg[T]`, so a reader who annotates it must
+# get the same answer as one who annotates `Optional[T]`.  Its own payload
+# constraint (`T: TrivialRegisterPassable`) is narrower and is not checked
+# here: the representation question is the same either way, and refusing the
+# narrower half would be refusing a construct whose representation this
+# section states.
+OPTIONAL_TYPE_NAMES = frozenset({"Optional", "OptionalReg"})
+
+# The lowerings this section provides, as names.  `or_else` covers `value_or`
+# and `or` because they are the same question with two spellings — a
+# conditional between the payload and a default — and spelling them apart would
+# be three lowerings to keep in step rather than one.
+OPTIONAL_UNWRAP_DEFAULT = "optional_or_else"
+OPTIONAL_UNWRAP_PAYLOAD = "optional_payload"
+
+# The Optional methods this target answers, mapped to the lowering.  One table,
+# read by both backends, so the two architectures cannot answer `or_else` and
+# refuse `value_or` for the same receiver.
+OPTIONAL_METHOD_LOWERINGS = {
+    "or_else": OPTIONAL_UNWRAP_DEFAULT,
+    "value_or": OPTIONAL_UNWRAP_DEFAULT,
+    "or": OPTIONAL_UNWRAP_DEFAULT,
+    "unsafe_value": OPTIONAL_UNWRAP_PAYLOAD,
+}
+
+
+def optional_payload_annotation(ann) -> str | None:
+    """`Optional[Int]` -> `'Int'`; anything that is not an `Optional` -> None.
+
+    The one reader of "is this annotation an `Optional`, and of what", and it is
+    a reader of the ANNOTATION TEXT because the value model's one-word
+    representation of an `Optional` is exactly why the argument matters: the
+    base name says the slot can be empty and the argument says what the word
+    holds when it is not, and the argument is the only thing that decides
+    whether a `None` word exists at all (see the section note above).
+
+    `Some[F]` — the spelling the stdlib uses for a function-valued optional —
+    is NOT here.  It is a different type constructor with its own
+    representation question, and treating it as this one would make
+    `Some[def() -> Int]` answer with an `Int` niche.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    text = _strip_type_decorations(ann.strip(), None)
+    if text is None:
+        return None
+    base = _strip_type_args(text)
+    if base not in OPTIONAL_TYPE_NAMES:
+        return None
+    args = _split_type_args(text)
+    if not args:
+        return None
+    payload = args[0].strip()
+    return payload or None
+
+
+# A scalar type name -> `(width in BITS, signed)`, or None for a name that is
+# not one.  The ONE width table this section reads, and it is here rather than
+# taken from `formal.types.TYPE_NAMES` for the reason `STRING_TYPE_CTORS` above
+# names its own list "so this module does not have to import types to say it":
+# a representation is a fact about the TARGET, and the target's machine word is
+# not a property of whichever module happens to have loaded.
+#
+# It has to agree with `formal.types.TYPE_NAMES` entry for entry, and
+# `test_formal_optional.py::the_niche_table_and_the_scalar_types_agree` is what
+# keeps it there — the same "one reader plus a test that the second table has
+# not drifted" discipline `POINTEE_WIDTHS` above states.  Two tables of widths
+# with no test between them is how a `Int32` niche becomes an `Int64` one.
+SCALAR_TYPE_WIDTHS = {
+    "Bool": (1, None),        # a Bool is a word holding 0 or 1; `signed` unused
+    "Int8": (8, True), "Int16": (16, True), "Int32": (32, True),
+    "Int64": (64, True),
+    "UInt8": (8, False), "UInt16": (16, False), "UInt32": (32, False),
+    "UInt64": (64, False),
+    "Float32": (32, True), "Float64": (64, True),
+    # The UNANNOTATED `int` and Mojo `Int` are `Int64` (formal.types'
+    # `DEFAULT_INT_TYPE`), so they are the full-width row and are deliberately
+    # ABSENT here: naming them would give them a 64-bit width, and the branch
+    # below refuses a 64-bit width precisely because there is no word left.
+    "int": (64, True), "Int": (64, True), "UInt": (64, False),
+}
+
+
+def optional_none_word(payload, decls: dict = None):
+    """`(niche_word, None)`, or `(None, why)` when `T` has no word left over.
+
+    `payload` is the annotation TEXT `optional_payload_annotation` returns.  The
+    order is the argument, and it is the argument `declared_type_kind` makes for
+    the same question, so a reader comparing the two functions sees one rule
+    rather than two:
+
+      1. a STRING (`STRING_TYPE_CTORS`) — an interned `char *`, never NULL;
+      2. a POINTER (`POINTER_TYPE_CTORS`) — an address, never 0;
+      3. a CONTAINER (`BLOB_TYPE_CTORS`) — a pointer to a blob with an 8-byte
+         count header, never 0;
+      4. a STRUCT OF THIS MODULE (`decls`) — a frame address or a one-word
+         cell, never 0, and this row is why the function takes `decls`;
+      5. a SCALAR (`SCALAR_TYPE_WIDTHS`) — the word `1 << width`, or 2 for a
+         `Bool`, and nothing at all at width 64.
+
+    Everything else returns `(None, why)`.  `why` is a refusal TEXT and not a
+    category, because every caller raises it verbatim: two callers spelling "no
+    niche" differently is two messages describing the same gap, and a reader who
+    has read one has read the other.
+
+    NO VOCABULARIES ARE PASSED IN, and that is a change from the way most of
+    this file's tables are parameterised.  Every one of those exists because a
+    NAME is a string and two architectures must not each decide what a string
+    means — but the four tables consulted here (`STRING_TYPE_CTORS`,
+    `POINTER_TYPE_CTORS`, `BLOB_TYPE_CTORS`, `SCALAR_TYPE_WIDTHS`) are all
+    already owned by this module, so passing a vocabulary for them would let a
+    caller narrow a fact the model has already stated.  `decls` is the only
+    argument that is per-image, and it is per-image because it is a fact about
+    the declarations rather than about the language.
+    """
+    if not isinstance(payload, str) or not payload.strip():
+        return (None, optional_no_niche_refusal("<unstated>"))
+    text = _strip_type_decorations(payload.strip(), None)
+    if text is None:
+        return (None, optional_no_niche_refusal(payload))
+    base = _strip_type_args(text)
+    if not base:
+        return (None, optional_no_niche_refusal(payload))
+    if base in STRING_TYPE_CTORS:
+        return (NONE_WORD, None)
+    if base in POINTER_TYPE_CTORS:
+        return (NONE_WORD, None)
+    if base in BLOB_TYPE_CTORS:
+        return (NONE_WORD, None)
+    if decls is not None and structs_declared(base, decls) is not None:
+        # A struct of this module is a frame address or a one-word cell.  Both
+        # are addresses, so both are outside the payload's domain for the same
+        # reason a `Pointer[T]` is.  Asked BEFORE the scalar row because a
+        # struct of this module can be NAMED `Int` in a test fixture, and the
+        # representation that decides the niche is the struct's, not the
+        # spelling's.
+        return (NONE_WORD, None)
+    scalar = SCALAR_TYPE_WIDTHS.get(base)
+    if scalar is not None:
+        width = scalar[0]
+        if width == 1:
+            return (2, None)                       # a Bool: 0 or 1, so 2 is out
+        if width < 64:
+            return (1 << width, None)              # 2^w is not a w-bit value
+        return (None, optional_no_niche_refusal(payload))
+    # A base that is not one of this module's structs and not a scalar this
+    # target has a representation for is, in every case that reaches here, a
+    # STRUCT OF ANOTHER MODULE — and that is a different obstacle from a type
+    # that provably has no spare word, because the layout that would prove it
+    # is in a library this build does not compile.  Said as such rather than as
+    # "every word is a value of it", which is a claim about a type this
+    # function has not read.
+    if decls is not None and base[:1].isupper():
+        return (None, optional_no_niche_refusal(
+            payload, "it is a struct whose fields this build does not compile, "
+                     "so the words it can hold are not known here"))
+    return (None, optional_no_niche_refusal(payload))
+
+
+def optional_no_niche_refusal(payload: str, extra: str = None) -> str:
+    """Why this `Optional`'s payload leaves no word for `None`, as a refusal.
+
+    Stated as the SHAPE OF THE MISSING THING rather than as "unsupported",
+    because the whole point of naming the payload type is that the reader can
+    act on it: a `Bool`, a `String` or an `Int32` payload is answered by this
+    target today, and the ones that are not are the ones whose every word is a
+    value.  `extra` carries the one distinction the table above cannot put in
+    the payload spelling alone — a struct of ANOTHER module, whose layout this
+    image cannot see, is a different obstacle from a type that provably has no
+    spare word, and a reader who is told "every word is a value of it" about a
+    struct has been told something this build cannot know.
+    """
+    because = extra or ("every 64-bit word is a value of it"
+                        if not isinstance(payload, str) or not payload.strip()
+                        else f"every word is a value of `{payload}`")
+    return (
+        f"is an `Optional[{payload}]`, and this target has no word to spell "
+        f"`None` as for it: {because}. An `Optional` here is ONE 64-bit word "
+        f"holding the payload, so `None` has to be a word the payload cannot "
+        f"produce (`formal/model.py`'s `optional_none_word`, which is what "
+        f"answers `Optional[Bool]`, `Optional[String]`, `Optional[Int32]` and "
+        f"every reference-shaped payload from this same table). Answered "
+        f"anyway it would have to treat the integer 0 as the empty one, which "
+        f"is WRONG about `Some(0)` — measured on both architectures: "
+        f"`var z: Optional[Int] = 0; if z is None:` prints the empty branch. So "
+        f"this is refused rather than answered. What closes it is the OTHER "
+        f"representation: a tagged TWO-WORD value, `{{tag, payload}}`, where "
+        f"`Optional[T]` is the address of the pair — which is what "
+        f"`formal/model.py`'s `OPTIONAL_TWO_WORD` records, with the three "
+        f"measured reasons it is not a one-line change, and which covers every "
+        f"payload type including this one")
+
+
+def optional_unwrap_lowering(method, annotation, decls: dict = None):
+    """`(how, niche_word)` for an Optional method call, or `(None, why)` to refuse.
+
+    `annotation` is the RECEIVER's declared type — the `Optional[…]` itself, not
+    its payload — because that is the only evidence this function accepts.  A
+    receiver whose type the source does not state gets None here, and every
+    caller raises the message, which is the difference between "this path
+    cannot answer it" and "this path answered it about the wrong type".
+
+    The two lowerings are in the section note above and both are ONE-WORD
+    operations on the value:
+      * `OPTIONAL_UNWRAP_DEFAULT` — `x == niche ? d : x`, a conditional;
+      * `OPTIONAL_UNWRAP_PAYLOAD` — `x`, the identity.  `unsafe_value` is spelled
+        "unsafe" in the stdlib for exactly this: Mojo says the value must be
+        present, and this target's answer for an absent one is the niche word
+        rather than a trap, which is the same thing every other unchecked read
+        of a payload does on this path.
+
+    The niche comes back with the lowering rather than being asked for twice,
+    because a caller that lowered `x == niche ? d : x` from a DIFFERENT niche
+    than the one it materialized `None` as is a program that is right about
+    every value and wrong about the empty one, which is the failure this whole
+    section is about.
+    """
+    how = OPTIONAL_METHOD_LOWERINGS.get(method)
+    if how is None:
+        return (None, None)
+    payload = optional_payload_annotation(annotation)
+    if payload is None:
+        return (None, optional_unwrap_refusal(method, annotation))
+    word, why = optional_none_word(payload, decls)
+    if word is None:
+        return (None, why)
+    return (how, word)
+
+
+def optional_unwrap_refusal(method: str, annotation) -> str:
+    """The refusal for an Optional method whose receiver's type is not usable.
+
+    Two sentences and a name each, because the reader's next action is one of
+    exactly two: state the receiver's type if the source has one and this build
+    cannot see it, or read the two-word note if it does.
+    """
+    spelled = annotation if isinstance(annotation, str) and annotation.strip() \
+        else None
+    declared = (f"its declared type is `{spelled}`" if spelled
+                else "the source states no type for it")
+    return (
+        f"`{method}()` is an `Optional` unwrap and {declared}, so this target "
+        f"cannot say which word of it is the empty one. An `Optional[T]` here "
+        f"is one 64-bit word holding the payload, and `None` is a word `T` "
+        f"cannot produce — `formal/model.py`'s `optional_none_word` is the one "
+        f"table that says which `T` those are, and this receiver is not one of "
+        f"them. Annotate the receiver `Optional[T]` with a `T` this table "
+        f"answers, and `x is None`, `x == None`, `x.or_else(…)`, `x.`"
+        f"value_or(…)`, `x.or(…)` and `x.unsafe_value()` all lower from the one "
+        f"representation")
+
+
+def optional_local_declared_annotation(fn, name: str) -> str | None:
+    """The annotation `fn` gives the LOCAL `name`, or None.
+
+    The one reader of "what did this function's own `var` say", and it is
+    separate from `param_annotation` because a local's declaration is a
+    statement in the body rather than an entry in the signature, and because
+    the two are read at different places: a parameter is bound before the body
+    runs and a local only at its `VarDecl`.
+
+    The LAST binding wins, which is the flow-insensitive choice this file makes
+    everywhere else (`ValueKinds` records a name bound to two kinds as
+    undecidable; here a name re-declared with a different annotation is a
+    re-declaration the source does not make, and taking the first would answer
+    about a binding that is not the one in force).  `AssignStmt` is read as well
+    as `VarDecl` because the lowered program keeps both and `x: Optional[Int] = 5`
+    arrives as the former on some paths.
+    """
+    found = None
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if isinstance(node, F.VarDecl) and node.name == name:
+            found = node.type_ann
+        elif isinstance(node, F.AssignStmt) \
+                and isinstance(node.target, F.IdentExpr) \
+                and node.target.name == name:
+            ann = getattr(node, "annotation", None)
+            if isinstance(ann, str) and ann.strip():
+                found = ann
+    return found if isinstance(found, str) and found.strip() else None
+
+
 def struct_default_word(struct_def, decls: dict = None) -> tuple:
     """`(kind, payload)` — what `S()` must leave in the word for this struct.
 
@@ -28277,7 +28684,18 @@ def struct_default_word(struct_def, decls: dict = None) -> tuple:
     is the honest refusal, and a literal one is a different bug.
 
     Only meaningful for a struct of at most one field; a wider one brings each
-    of its fields up separately, through `struct_frame_defaults`."""
+    of its fields up separately, through `struct_frame_defaults`.
+
+    **("int", niche) for an `Optional[...]` field is the one row added by the
+    `Optional` representation, and it is asked FIRST because the default of an
+    empty `Optional` is `None` — which is a word chosen by the representation
+    and not always the word 0.** `var flags: Optional[Bool]` with no
+    initializer leaves a fresh instance's slot holding `None`, and `None` for a
+    `Bool` payload is 2, so leaving 0 there would make `h.flags is None` (which
+    compares against 2) answer "set" about an instance nobody had set. The
+    reader is `optional_field_none_word`, shared with `struct_field_default`, so
+    the one-field and the many-field readers cannot disagree about what an
+    absent `Optional` is."""
     if struct_field_count(struct_def) != 1:
         return (DEFAULT_NONE, None)
     field_name = struct_sole_field_name(struct_def)
@@ -28287,11 +28705,44 @@ def struct_default_word(struct_def, decls: dict = None) -> tuple:
             default = getattr(field, "value", None)
             break
     kind, payload = literal_default_word(default)
+    if kind == DEFAULT_NONE:
+        niche = optional_field_none_word(struct_def, field_name, decls)
+        if niche is not None:
+            return (DEFAULT_INT, niche)
     if kind == DEFAULT_NONE and decls:
         nested = one_word_sole_field_frame(struct_def, decls)
         if nested is not None:
             return (DEFAULT_NESTED_FRAME, (field_name, nested))
     return (kind, field_name if kind == DEFAULT_OPAQUE else payload)
+
+
+def optional_field_none_word(struct_def, name, decls: dict = None):
+    """The `None` word for an `Optional[...]` FIELD, or None if it is not one.
+
+    `None` here is the DEFAULT of the field: `var step: Optional[Int]` declares
+    no initializer, so a fresh `Slice()` leaves that slot empty, and "empty" is
+    a word the representation chooses (`optional_none_word`'s table).  The
+    function returns None for a field that is not an `Optional`, and also for an
+    `Optional` whose payload has no niche — the second is not a refusal AT THIS
+    POINT because a field that is never read as an `Optional` is harmless, and
+    raising here would refuse a struct whose `Optional` field is only ever
+    written.  The read is where the obligation is real, and that is
+    `optional_unwrap_lowering` / `formal/build.py`'s
+    `apply_optional_none_representation`.
+
+    `decls` is the module's struct table for the same reason it is an argument
+    everywhere else in this file: whether the payload is a struct of THIS module
+    decides the niche, and that is a fact about the image rather than about the
+    language.
+    """
+    base, ann, _why, is_declared = struct_field_declared_type(struct_def, name)
+    if not is_declared or not isinstance(ann, str):
+        return None
+    payload = optional_payload_annotation(ann)
+    if payload is None:
+        return None
+    word, _why = optional_none_word(payload, decls)
+    return word
 
 
 def literal_default_word(value) -> tuple:

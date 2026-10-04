@@ -3867,6 +3867,88 @@ ctor_field_value=self._ctor_field_value_for(name),
             return None
         return self._slot_ann_pair(ann)
 
+    def _optional_receiver_annotation(self, expr):
+        """The `Optional[...]` annotation a method RECEIVER is declared with.
+
+        The one reader of "is this receiver an `Optional`, and of what", and it
+        is a reader of the DECLARED TYPE rather than of the value for the reason
+        `formal/model.py`'s `optional_none_word` is a table about payload types:
+        the word an `Optional` is empty at is a fact about `T`, and nothing
+        about the word itself says which `T` it is.  `Some(2)` is the same word
+        whether `T` is a `Bool` (where `2` is out of domain and so is the empty
+        word) or an `Int8` (where `2` is a perfectly good payload and the empty
+        word is 256).
+
+        Four sources, in the order that puts the strongest evidence first, and
+        they are the same four `formal/model.py`'s `param_annotation` and
+        `frame_slot_declared_annotation` already read elsewhere in this file:
+        a receiver name (`self.step` → the owner's field declaration), a
+        PARAMETER's annotation, a LOCAL's own `var`, and a FRAME SLOT's field.
+        A receiver that is none of those gets None, and every caller turns that
+        into a refusal — which is the direction this has to fail in, because the
+        alternative is answering an `Optional` question about a word whose type
+        nothing stated.
+        """
+        owner = M.method_owner_struct(
+            self._structs, getattr(self._cur_fn, "name", None))
+        if isinstance(expr, F.IdentExpr):
+            ann = M.param_annotation(self._cur_fn, expr.name)
+            if ann is None:
+                ann = M.optional_local_declared_annotation(self._cur_fn,
+                                                           expr.name)
+            return ann
+        if isinstance(expr, F.MemberExpr) and isinstance(expr.obj, F.IdentExpr):
+            if owner is not None and expr.obj.name in M.struct_receivers(owner):
+                return M.frame_slot_declared_annotation([owner], expr.member,
+                                                        self._structs)
+            slot = self._slot_declared_annotation(expr)
+            return slot[0] if slot else None
+        return None
+
+    def _emit_optional_unwrap(self, e, how: str, niche: int) -> None:
+        """`recv.or_else(d)` / `recv.unsafe_value()` on an `Optional` receiver.
+
+        Both lowerings are ONE-WORD operations on the value word, which is the
+        whole reason this target answers them at all: `x == niche ? d : x` is a
+        compare, a CSEL and nothing else, so `lib/ProofLib.lean` needs no new
+        rule to verify it — it already models a compare against an immediate and
+        a conditional register move.  See `formal/model.py`'s `Optional` section
+        note for the representation itself and for the payload types that have
+        no `niche` at all.
+
+        The receiver is evaluated ONCE and both arms are evaluated (CSEL reads
+        two registers at once, so a branch would need the default's size before
+        it could be emitted).  That is not a behaviour change for `or_else`: its
+        `default` is an ARGUMENT, and an argument is evaluated at the call site
+        in this language and in the stdlib's own signature
+        (`def or_else(self, default: Self.T) -> Self.T`).
+        """
+        recv = e.func.obj
+        if how == M.OPTIONAL_UNWRAP_PAYLOAD:
+            if e.args or e.kwargs:
+                raise CodegenError(
+                    f"{_dotted(e.func)}() takes no argument on the formal arm64 "
+                    f"path (got {len(e.args) + len(e.kwargs)})")
+            self._emit_expr(recv)
+            return
+        if len(e.args) != 1 or e.kwargs:
+            raise CodegenError(
+                f"{_dotted(e.func)}() takes exactly one argument on the formal "
+                f"arm64 path — the default (got {len(e.args) + len(e.kwargs)})")
+        # X0 = the word; it is the `then` arm of the select, so it goes on the
+        # stack across the default's evaluation rather than in a register.
+        self._emit_expr(recv)
+        self.asm.emit(encode_stp_sp_pre(0, 31))
+        self._emit_expr(e.args[0])
+        self.asm.emit(encode_mov_zr_xn(1, 0))            # X1 = the default
+        self.asm.emit(encode_ldp_sp_post(0, 31))        # X0 = the word
+        self._emit_mov_imm("X2", niche)                 # X2 = the `None` word
+        self.asm.emit(encode_cmp_xn_xm(0, 2))           # word - None
+        # `ne`, so a word that is NOT the empty one keeps itself. Inverting this
+        # is the `csel` mistake `_emit_csel_ternary`'s own note records, and it
+        # would compile, run and answer with the other arm.
+        self.asm.emit(encode_csel_xd_xm_cond(0, 0, 1, "ne"))
+
     def _one_word_slot_ann(self, cands):
         """`(annotation, kind)` for a struct that IS its one field, or None."""
         if not cands or M.struct_field_count(cands[0]) != 1:
@@ -5361,6 +5443,24 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_value_method(self, e: F.CallExpr, method: str) -> None:
         """`recv.method(...)` where `recv` is a local value."""
         obj = e.func.obj if isinstance(e.func, F.MemberExpr) else None
+        # An `Optional` unwrap, asked FIRST because `UNWRAP_METHODS` in
+        # `formal/model.py` refuses these four names by name and its own note
+        # says the refusal is standing in for a representation that did not
+        # exist. It does now: `optional_unwrap_lowering` is that
+        # representation, it returns the niche with the lowering so the two
+        # cannot come apart, and this table is not reached for a receiver whose
+        # payload has one. A receiver that is an `Optional` and has NO niche
+        # raises that refusal with `optional_no_niche_refusal`'s text instead,
+        # which is the message that names the payload type.
+        if method in M.OPTIONAL_METHOD_LOWERINGS:
+            ann = self._optional_receiver_annotation(obj)
+            if M.optional_payload_annotation(ann) is not None:
+                how, word = M.optional_unwrap_lowering(method, ann,
+                                                       self._structs)
+                if how is None:
+                    raise CodegenError(word)
+                self._emit_optional_unwrap(e, how, word)
+                return
         reason = M.value_method_refusal(
             method, self._method_recv_kind(e), _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
@@ -7954,9 +8054,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         # `model.value_method_refusal`, because the refusal cannot see the
         # function and so cannot see a declared pointee — which is the whole of
         # the pointer value model.
+        # The `Optional` exception, and it is asked BEFORE the dereference
+        # intercept because `unsafe_value` is in BOTH tables: it reads the
+        # receiver's word rather than an address, and the pointer table would
+        # answer it with "this is not a pointer type on this path" — a refusal
+        # about a construct that is now answerable, which is the exact failure
+        # the two tables' note above warns of. The test is the receiver's
+        # DECLARED type naming an `Optional`, and it is deliberately the narrow
+        # spelling rather than "the niche exists": an `Optional` with no niche
+        # (`Optional[Int]`) must fall THROUGH to `_emit_value_method` so that
+        # the refusal the reader gets is the representation's, naming the
+        # payload type, rather than the pointer model's.
         if isinstance(e.func, F.MemberExpr) \
                 and e.func.member in M.DEREFERENCE_TRY_NAMES \
-                and self._expr_str_kind(e.func.obj) != M.STR_KIND:
+                and self._expr_str_kind(e.func.obj) != M.STR_KIND \
+                and M.optional_payload_annotation(
+                    self._optional_receiver_annotation(e.func.obj)) is None:
             self._emit_dereference(e, e.func.member)
             return
         # A method on a plain VALUE is not a call to a symbol spelled

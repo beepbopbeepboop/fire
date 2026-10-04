@@ -13696,6 +13696,204 @@ def _constant_read_spelling(node) -> str:
     return None
 
 
+# The `Optional` representation's ONE rewriting site.  Everything else about
+# `Optional` is a decision in `formal/model.py`; this is the place that decision
+# reaches the value stream, and it is here — before the `None` fold, beside
+# `refuse_none_comparisons` and for the same reason — because the fold is what
+# destroys the fact this pass is about.  `None` is a NAME on this front end
+# (`model.NONE_NAME`), and after `fold_literal_expr` it is an `IntLiteral(0)`
+# that no longer says whether it arrived as a `None` or as the integer 0.
+#
+# WHAT IT REWRITES, and why each rewrite is the same rewrite:
+#
+#   * `x == None` / `x != None` / `x is None` / `x is not None` — the `None`
+#     operand becomes the NICHE of the receiver's payload type, and the rest of
+#     the comparison is left to the ordinary compare lowering.  `is None` and
+#     `== None` are the SAME question once a niche exists and are different
+#     questions without one (`p == 0` and `p is None` are the same expression
+#     after the fold, and Python says one is False and the other True), which
+#     is why the niche, not the operator, is what this pass supplies.
+#   * `x = None`, `var x: Optional[T] = None`, `self.f = None` and
+#     `return None` from `-> Optional[T]` — the same substitution on the store.
+#     A field with NO initializer is not here: `model.optional_field_none_word`
+#     answers that from the struct's declaration, because a field that declares
+#     nothing has no `None` node to rewrite.
+#
+# WHAT IT REFUSES, and why that is the right direction: a receiver whose
+# declared payload type has NO niche (`Optional[Int]` is the corpus's own case,
+# in `std/builtin/builtin_slice.mojo`).  Answered from the folded 0 it would be
+# wrong about `Some(0)` — measured on both architectures, `var z: Optional[Int]
+# = 0; if z is None:` prints the empty branch — and this backend's rule is that
+# a wrong answer is the one outcome it may not produce.  So the pass raises
+# `model.optional_no_niche_refusal`, which names the payload type and the
+# tagged two-word alternative.
+#
+# WHAT IT LEAVES ALONE, deliberately: a `None` whose value's Optional type is
+# not STATED.  `x is None` on an unannotated name is the pre-existing
+# `x == 0` fold, unchanged and undeclared; refusing it would refuse every
+# unannotated predicate in a corpus that annotates almost nothing, and the
+# obligation this pass can discharge is the one the SOURCE took on itself by
+# writing the type.  That residual is recorded, with its measurement, in
+# `bugs/FORMAL_optional_needs_a_niche.md`.
+_OPTIONAL_COMPARISON_OPS = ("==", "!=", "is", "is not")
+
+
+def _optional_operand_annotation(expr, fn, owner, structs_by_name,
+                                frame_candidates=None):
+    """The annotation a `None`-comparison's OTHER operand is declared with.
+
+    Four sources and nothing else, in the order the evidence is strongest, and
+    the same four both backends read in `_optional_receiver_annotation` — which
+    is the point: this pass decides the WORD and the emitter decides the
+    COMPARE, so a receiver this pass could not type is a receiver the emitter
+    cannot lower either, and one it types differently is a program that tests
+    one word and empties at another.
+
+    A receiver name (`self.step`), a parameter, a local, and a frame slot's
+    field (`h.a`, which needs the holder census `_frame_receivers` publishes —
+    see the two call sites of `apply_optional_none_representation`). Everything
+    else returns None, and None means "leave the `None` alone" here rather than
+    "refuse": the shape is one this pass has no evidence about, and the
+    pre-existing `== 0` is not made worse by declining to guess.
+    """
+    if isinstance(expr, F.IdentExpr):
+        if owner is not None and expr.name in M.struct_receivers(owner):
+            return M.frame_slot_declared_annotation([owner], expr.name,
+                                                    structs_by_name)
+        ann = M.param_annotation(fn, expr.name)
+        if ann is None:
+            ann = M.optional_local_declared_annotation(fn, expr.name)
+        return ann
+    if isinstance(expr, F.MemberExpr) and isinstance(expr.obj, F.IdentExpr):
+        if owner is not None and expr.obj.name in M.struct_receivers(owner):
+            return M.frame_slot_declared_annotation([owner], expr.member,
+                                                    structs_by_name)
+        cands = (frame_candidates or {}).get(expr.obj.name)
+        if cands:
+            return M.frame_slot_declared_annotation(list(cands), expr.member,
+                                                    structs_by_name)
+        return None
+    return None
+
+
+def _optional_target_annotation(target, fn, owner, structs_by_name,
+                               frame_candidates=None):
+    """The annotation an assignment TARGET is declared with, or None.
+
+    Separate from `_optional_operand_annotation` because a target has one more
+    shape — a `var x: Optional[T] = …` carries its annotation on the DECLARATION
+    — and because a target that is a frame slot on a struct this pass has no
+    holder census for is a plain None here, where the same expression in a
+    comparison would go through `_slot_declared_annotation`.  The receiver-name
+    and parameter/local arms are shared by reading the same three functions.
+    """
+    if isinstance(target, (F.MemberExpr, F.IdentExpr)):
+        return _optional_operand_annotation(target, fn, owner, structs_by_name,
+                                           frame_candidates)
+    return None
+
+
+def _set_child(parent, old, new):
+    """Point `parent`'s field that holds `old` at `new`, in place.
+
+    `_node_field_names` is the ONE list of a node's child fields (it is what
+    `iter_nodes` walks, and it knows `IfStmt.elifs` is a list of tuples), so a
+    replacement that walked `__dict__` instead would be a second answer to "what
+    is this node's shape" — and would miss a field this walk finds.
+    """
+    for name in M._node_field_names(parent):
+        if getattr(parent, name, None) is old:
+            setattr(parent, name, new)
+            return True
+    return False
+
+
+def apply_optional_none_representation(functions: list,
+                                       structs_by_name: dict,
+                                       method_owners: dict = None) -> None:
+    """Put the `None` WORD of every typed `Optional` into the value stream.
+
+    Asked at the same point as `refuse_none_comparisons` and immediately after
+    it, for the same reason: `None` is still the NAME `None` here, and after
+    the constant substitution it is a 0 that cannot say where it came from.
+    That refusal protects the ONE lossy comparison that has no type to declare;
+    this pass answers the ones that do, and the two are complements rather than
+    rivals — together they are the whole of "`None` is a word this target can
+    tell apart".
+
+    `method_owners` is `{function name: struct}` because `self.<field>` is the
+    spelling the stdlib's own `Optional` fields are read through
+    (`self.step.or_else()`), and a method's receiver read is visible here and
+    not after `_rewrite_self_fields` collapses it.
+    """
+    method_owners = method_owners or {}
+    for fn in functions:
+        owner = method_owners.get(getattr(fn, "name", None))
+        # `parent` is None for a TOP-LEVEL statement, because `fn.body` is a
+        # list and `iter_nodes_with_parent` treats a list as transparent. That is
+        # why the three store shapes below rewrite the node's OWN field and only
+        # the comparison needs a parent: skipping parentless nodes would skip
+        # every statement in the function, which is most of what this pass is for.
+        candidates = getattr(fn, "_frame_candidates", None)
+        for node, parent in M.iter_nodes_with_parent(getattr(fn, "body", None)):
+            if isinstance(node, F.BinaryOp) \
+                    and node.op in _OPTIONAL_COMPARISON_OPS:
+                if parent is None:
+                    continue
+                _optional_none_operand(fn, owner, structs_by_name, node,
+                                       node.left, node.right, candidates)
+                _optional_none_operand(fn, owner, structs_by_name, node,
+                                       node.right, node.left, candidates)
+            elif isinstance(node, F.VarDecl):
+                _replace_none_with_niche(node, node.value, node.type_ann,
+                                         structs_by_name)
+            elif isinstance(node, F.AssignStmt):
+                ann = _optional_target_annotation(node.target, fn, owner,
+                                                  structs_by_name,
+                                                  candidates) \
+                    or getattr(node, "annotation", None)
+                _replace_none_with_niche(node, node.value, ann,
+                                         structs_by_name)
+            elif isinstance(node, F.ReturnStmt):
+                _replace_none_with_niche(node, node.value,
+                                         getattr(fn, "return_type", None),
+                                         structs_by_name)
+    return None
+
+
+def _optional_none_operand(fn, owner, structs_by_name, node, side, other,
+                           frame_candidates=None):
+    """Substitute the niche into one `None` operand of a comparison, or not."""
+    if not M.is_none_expr(side):
+        return
+    ann = _optional_operand_annotation(other, fn, owner, structs_by_name,
+                                       frame_candidates)
+    if M.optional_payload_annotation(ann) is None:
+        return
+    _replace_none_with_niche(node, side, ann, structs_by_name)
+
+
+def _replace_none_with_niche(parent, old, annotation, structs_by_name):
+    """`IntLiteral(niche)` in place of `old`, or refuse naming the payload.
+
+    `old` is None for a bare `return` and for a declaration with no value, and
+    both return early: there is no `None` node to rewrite in either, and a
+    field's absent initializer is `model.optional_field_none_word`'s question
+    rather than this one.
+    """
+    if old is None or not M.is_none_expr(old):
+        return
+    payload = M.optional_payload_annotation(annotation)
+    if payload is None:
+        return
+    word, why = M.optional_none_word(payload, structs_by_name)
+    if word is None:
+        raise CodegenError(why)
+    line = getattr(old, "line", 0)
+    col = getattr(old, "col", 0)
+    _set_child(parent, old, F.IntLiteral(value=word, line=line, col=col))
+
+
 def refuse_none_comparisons(functions: list, structs_by_name: dict,
                              receiver_bases=None,
                              method_owners: dict = None,
@@ -14258,6 +14456,20 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # a reader actually writes (`x.kind == y.kind`, `x.kind == Kind.A`,
     # `Reg.A.value == Reg.B.value`) are not this rule's business.
     refuse_enum_member_comparisons(functions, structs_by_name)
+    # …and the half of the `None` question that ANSWERS rather than refuses,
+    # asked at the same point for the same reason. `refuse_none_comparisons`
+    # above protects the comparison whose operand's type nothing states;
+    # `apply_optional_none_representation` is the case where the source DOES
+    # state it (`Optional[Bool]`, `Optional[String]`, `Optional[Int32]`, every
+    # reference-shaped payload), so the `None` word is a fact about the payload
+    # type rather than an ambiguity, and it is put into the value stream here.
+    # Both are asked before the two rewrites above materialize constants,
+    # because both are about the `None` NAME and after them it is an
+    # `IntLiteral(0)` that no longer says what it was. The pass also raises for
+    # the payload types that have no niche at all — `Optional[Int]` — where the
+    # old answer was `x == 0` and CPython says `Some(0)` is not empty.
+    apply_optional_none_representation(functions, structs_by_name,
+                                       method_owners)
     # The ONE-FIELD MUTATOR write-back, decided once for the whole module
     # because it is a property of the image rather than of one function: the
     # callee half is "return the receiver on every path" and the caller half is
@@ -14585,6 +14797,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     _frame_receivers(functions, structs_by_name, dc_equality,
                      imported_bound_names(stmts),
                      star_imported_modules(stmts), enum_structs, one_field)
+    # …and the SECOND call of the `Optional` representation pass, for the one
+    # shape the call above could not reach. `h.a` where `a` is a field of a
+    # struct `h` holds needs the holder census `_frame_receivers` just
+    # published (`fn._frame_candidates`), and that table does not exist before
+    # this line — which is the same reason the `None`-comparison refusal is
+    # called twice, one line apart in effect. It is a second call rather than a
+    # moved one for the same reason that is: the FIRST call (in
+    # `_prepare_functions`, beside the refusal) is the one that can see a
+    # method's own receiver read before `_rewrite_self_fields` rewrites it, and
+    # moving it here would lose that. The pass is IDEMPOTENT over the two, so a
+    # site both could reach is substituted once and left alone the second time:
+    # the substitution replaces the `None` NAME with an `IntLiteral`, and a
+    # node that is no longer a `None` is not a site this pass revisits.
+    apply_optional_none_representation(functions, structs_by_name,
+                                       method_owners)
     # …and the ONE shape the by-reference receiver cannot serve, asked now
     # because it needs `_returns_frame_struct`, which the call above is what
     # publishes. Both conventions want a hidden word and neither wants the
