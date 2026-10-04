@@ -3,9 +3,10 @@
 
 **Area:** FORMAL — `formal/build.py`'s `_collect_receiver_frame_escapes`.
 **Status: OPEN, measured on `master`, not fixed.** Found 2026-10-04 while
-landing the byte-blob element width
-(`bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`, deleted with its
-fix), by running the whole of `test_formal_run.py` and reading its failures. It
+landing the byte-blob element width (a `bytearray` is now a blob with a
+one-byte element, so `bytearray()` builds — the document that recorded the open
+decision is deleted with that fix), by running the whole of
+`test_formal_run.py` and reading its failures. It
 is **pre-existing**: the two failing case names fail identically with that
 change reverted (`git apply -R`, re-run, re-apply).
 

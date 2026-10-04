@@ -11256,7 +11256,6 @@ CONSTRUCTION_REFUSALS = [
     # dangling extern named `bytearray`/`bytes` and the build failed with a
     # message about a SYMBOL, which is a fact about the link line and not about
     # the type the reader wrote.
-    # `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
     ("constr_refuse_bytes_by_name",
      "def main(n: Int) -> Int:\n"
      "    var b = bytes()\n"

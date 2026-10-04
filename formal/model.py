@@ -18394,8 +18394,11 @@ STRING_TYPE_CTORS = ("String", "str", "StringLiteral", "StringSlice")
 # both architectures, `len(b"abc")` is 3 off `strlen` and `b"abc"[i]` is one byte
 # at offset `i` — so a `bytes(n)` needs a blob whose SIZE is a runtime value,
 # which is the reservation every runtime-sized container is refused for.
-# `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md` carries the
-# decision and the measurements.
+# So the pair is decided by MEASUREMENT rather than by preference, and the
+# measurements are the two sentences above: the literal's `strlen`/byte-load
+# pair, and a constructor's having to build a counted region. Every consumer
+# reads the decision from `BYTE_BLOB_CTORS` (the widths) or from
+# `empty_blob_constructor` (the routing), never from this tuple.
 BYTE_BLOB_TYPE_CTORS = ("bytearray", "bytes")
 
 UNREPRESENTABLE_TYPE_CTORS = (
@@ -18442,12 +18445,11 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
             f"reservation sized by a value this compiler does not have at "
             f"layout time, which is the same limit `List[Int](3)` has and the "
             f"same bargain every container here makes. The MUTABLE byte blob "
-            f"is `bytearray`, and it is the spelling to reach for. (The "
-            f"decision and the measurements behind both halves are in "
-            f"bugs/FORMAL_bytearray_and_bytes_have_no_representation.md; "
-            f"emitting a call to a symbol named {callee_name!r} that nothing "
-            f"defines is not the alternative — that reached the bind audit as "
-            f"a dangling extern and failed with a message about a symbol.)")
+            f"is `bytearray`, and it is the spelling to reach for. (Emitting a "
+            f"call to a symbol named {callee_name!r} that nothing defines is "
+            f"not the alternative — that reached the bind audit as a dangling "
+            f"extern and failed with a message about a SYMBOL rather than "
+            f"about the type.)")
     return (
         f"constructing {callee_name} has no representation on this path: this "
         f"image has no declaration of {callee_name} to construct — it is not a "

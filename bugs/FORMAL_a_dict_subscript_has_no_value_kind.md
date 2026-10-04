@@ -85,8 +85,21 @@ be loaded: bytearray. …  (Provider check: asked the C library (dlsym).)
 
 So the program this document was filed with — `d: dict[str, bytearray] =
 {"text": bytearray()}` — is TWO gaps, and this fix closes the one about the
-subscript. The other is filed as
-`bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`.
+subscript. The other was the missing representation of `bytearray` itself, and
+it is CLOSED: a byte blob is `[count:i64][byte 0][byte 1]…` — the blob layout
+this path already lays out, with a one-byte element stride read from the value's
+kind (`model.blob_elem_stride`) — so `bytearray()` and a constant-size
+`bytearray(n)` build and run on both backends, and `len`, `b[i]`, `b[i] = v`,
+`for c in b`, `x in b` and `append` all read that layout. Its own document is
+deleted with that fix; `test_formal_run.py`'s `constr_bytearray_*` group is the
+pinning, and `test_formal_x86_64_parity.py`'s
+`bytearray_both_backends_build_it_identically` is the two-machine half.
+
+**What is still not reachable, and it is the other half of this document's
+program:** the dict SUBSCRIPT is fixed, but `self.sections["text"]` where
+`self.sections: dict[str, bytearray]` is a DECLARED FIELD is still refused by
+`ctor_establishes_slot`, and that half of the file's own "The field spelling,
+and why it stays refused" section below is unchanged by the byte blob.
 
 ## The field spelling, and why it stays refused
 

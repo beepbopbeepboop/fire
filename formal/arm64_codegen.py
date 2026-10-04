@@ -6314,9 +6314,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         Both come from `model.blob_constructor_lowering` and
         `model.blob_ctor_elem_stride`, so the reservation here cannot disagree
         with the kind the value model gave the name; a blob reserved at the
-        word stride whose kind says `byte` is the exact defect
-        `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md` was filed
-        for. The elements are explicitly zeroed rather than assumed: the frame
+        word stride whose kind says `byte` is the defect a byte blob exists to
+        prevent — `len(b)` right, `b[i]` wrong. The elements are explicitly
+        zeroed rather than assumed: the frame
         scratch is not zeroed on entry, and an unwritten byte would be whatever
         the previous blob left there — a right count over arbitrary bytes.
         """
