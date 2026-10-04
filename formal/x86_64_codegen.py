@@ -4187,8 +4187,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         ONE store, and that is the whole difference from `append`: there is no
         capacity to know (an append has to know there is room, an empty needs
         none), no element type to agree on, and no traversal. The blob is
-        `[count][elem0]\u2026` and a list value IS its address, so this is the word `len` of the
-        same receiver reads \u2014 which is why the guard is
+        `[count][elem0]…` and a list value IS its address, so this is the word
+        `len` of the same receiver reads — which is why the guard is
         `model.list_clear_refusal`'s question and not a capacity lookup, and why it
         is POSITIVE evidence (`is_list_kind`) rather than the absence of a refusal:
         a name in `BUILTIN_VALUE_METHODS` with no kind guard would zero the first
