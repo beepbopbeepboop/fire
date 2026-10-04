@@ -2650,7 +2650,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `print(i)` is 2 under CPython and was 3 here.
 
             start:  <test>          --done--> false:
-                    fallthrough to body:
+                    fallthrough to init:
+            init:   i = start_val
             body:   <body>
             step:   [for: i += step]
                     <test>          --again--> body:
@@ -2667,12 +2668,27 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `for i in range(0, 0)` is `0` under CPython and would print `-step`.
         Hence the head test being separate from the test at the bottom.
 
+        **And the head test reads `start_val`, not the counter** — the same rule
+        from the other end. CPython's `for` binds the target only when the
+        iteration produces a value, so a range that yields nothing must leave a
+        name that already held one alone; storing `start_val` into the counter
+        before the test cannot express that, and measured on both architectures
+        `i = 7; for i in range(0, 0): …` left `i == 0` where CPython leaves 7.
+        So the store moved to `init:`, between the test and the body, and the
+        test's left operand became the `start_val` EXPRESSION (`_emit_for_test`
+        takes one, so the head and the loop back edge stay one comparison).
+        That evaluates `start_val` twice, which is only sound when
+        `model.expr_is_repeatable` says so; `for i in range(f(), 0)` keeps the
+        store-then-test order. Nothing else about the loop moved, and no
+        instruction the model has no step for was added.
+
         `break` jumps to end (skipping the else); `continue` jumps to step, so
         a for-loop still advances its counter."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        init_label = f"{fn}_loop{wid}_init"
         body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
@@ -2683,6 +2699,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         end_tmp = f"_fe{depth}"
         step_tmp = f"_fs{depth}"
         descending = False
+        # Whether the head test may read `start_val` and leave the store for
+        # `init:`. `model.expr_is_repeatable` is the shared answer and arm64's
+        # `_emit_loop` asks it for the same reason.
+        bind_after_test = False
         if for_range:
             target, rargs = for_info
             start_val, end_val, step_val = _range_info(rargs)
@@ -2698,7 +2718,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_expr(step_val)
                 self._store_var(step_tmp, Reg.RAX)
             self._emit_expr(start_val)
-            self._store_var(target, Reg.RAX)
+            if M.expr_is_repeatable(start_val):
+                bind_after_test = True
+            else:
+                self._store_var(target, Reg.RAX)
             self._for_depth += 1
 
         self._loops.append({"start": start_label, "step": step_label,
@@ -2709,7 +2732,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             leave_cc = None
             if for_range:
                 leave_cc = COND_LE if descending else COND_GE
-                self._emit_for_test(target, end_tmp, leave_cc, false_label)
+                self._emit_for_test(
+                    start_val if bind_after_test else F.IdentExpr(target),
+                    end_tmp, leave_cc, false_label)
+                if bind_after_test:
+                    self.asm.label(init_label)
+                    self._emit_expr(start_val)
+                    self._store_var(target, Reg.RAX)
             else:
                 self._emit_truthy_word(cond)
                 self._emit_branch_if_false(false_label)
@@ -2724,8 +2753,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 # The loop-back test is the same comparison as the head test
                 # with the opposite polarity, emitted by the same helper, so the
                 # two cannot drift into disagreeing about when the loop ends.
-                self._emit_for_test(target, end_tmp, cond_negated(leave_cc),
-                                    body_label)
+                self._emit_for_test(F.IdentExpr(target), end_tmp,
+                                    cond_negated(leave_cc), body_label)
                 self._emit_for_restore(target, step_val, step_tmp, lit_step)
                 self._emit_jmp(false_label)
             else:
@@ -2740,14 +2769,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._for_depth -= 1
             self._loops.pop()
 
-    def _emit_for_test(self, target: str, end_tmp: str, cc: int,
+    def _emit_for_test(self, left, end_tmp: str, cc: int,
                        label: str) -> None:
-        """CMP the counter against the bound and jump to `label` on `cc`.
+        """CMP the loop's left operand against the bound and jump to `label`
+        on `cc`.
+
+        `left` is an EXPRESSION, because the loop head tests `range()`'s own
+        `start` while the loop back edge tests the counter — and both go through
+        here so the two cannot drift into disagreeing about when the loop ends.
 
         `cc` is a CONDITION CODE, and the caller supplies both polarities of the
         same comparison: the loop head jumps on the one that leaves the loop and
-        the loop back edge on its negation. Both go through here so the two
-        cannot be spelled differently.
+        the loop back edge on its negation.
 
         The branch LEAVES the loop when its condition is the negation of the
         loop's own: an ascending range runs while i < end and leaves on
@@ -2756,7 +2789,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         negation of a value the condition expression already produced.) Signed,
         since the counter and the bound are int64 values.
         """
-        self._load_var(target, Reg.RAX)
+        self._emit_expr(left)
         self._load_var(end_tmp, Reg.R11)
         self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
         self._record_cond_branch()

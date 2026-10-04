@@ -2699,13 +2699,15 @@ dylib_exports: list = None, globals_base: int = None,
         past. Measured, both architectures, on a five-line program:
         `for i in range(0, 3): …` then `print(i)` is 2 under CPython and was 3.
 
-            start:  <test>  --holds--> body:   <body>
-                    B false                   (an empty range leaves the
-            step:   i += step                 counter at its initial value,
-                    <test> --holds--> body     which is what CPython does —
-                    i -= step                 it never binds the name at all,
-                    B false                   and what it does when the name
-            false:  [<else_body>]             already held one)
+            start:  <test>  --holds--> init:   i = start_val
+                    B false                   (an empty range must not BIND
+            init:   i = start_val             the counter at all — see below;
+            body:   <body>                    it is CPython's rule, not an
+            step:   i += step                 optimisation, and the emptiness
+                    <test> --holds--> body     is a run-time fact as often as
+                    i -= step                 not a compile-time one)
+                    B false
+            false:  [<else_body>]
             end:
 
         The counter is tested BEFORE the increment, so the loop-exit path
@@ -2721,11 +2723,28 @@ dylib_exports: list = None, globals_base: int = None,
         blanket `i -= step` prints `-step`. Hence the first test being emitted
         separately from the loop-back test.
 
+        **The head test reads `start_val`, not the counter, and that is the
+        second half of the same rule.** CPython's `for` binds the target only
+        when the iteration produces a value, so a range that yields NOTHING must
+        leave a name that already held one alone. Storing `start_val` into the
+        counter before the test cannot express that: measured on both
+        architectures, `i = 7; for i in range(0, 0): …` left `i == 0` where
+        CPython leaves 7 — and the emptiness is a RUN-TIME fact as often as not
+        (`for i in range(0, k)` with `k <= 0`), so it cannot be decided by
+        looking at the arguments. Hence `init:`, between the head test and the
+        body, which is where the store goes. It costs a second evaluation of
+        `start_val`, so it is only emitted when `model.expr_is_repeatable` says
+        the second one has the same answer; `for i in range(f(), 0)` keeps the
+        store-then-test order, which is the old behaviour and the only sound one
+        there. The instruction vocabulary is unchanged (CMP, B.cond, and the
+        store the prologue already emitted), so the model needs no new step.
+
         `continue` → step (for-loops still advance the counter)."""
         self._while_counter += 1
         wid = self._while_counter
         fn = self.func_name
         start_label = f"{fn}_loop{wid}_start"
+        init_label = f"{fn}_loop{wid}_init"
         body_label = f"{fn}_loop{wid}_body"
         step_label = f"{fn}_loop{wid}_step"
         false_label = f"{fn}_loop{wid}_false"
@@ -2733,11 +2752,18 @@ dylib_exports: list = None, globals_base: int = None,
 
         is_for = for_info is not None
         for_conds = None
+        # Whether the head test can read `start_val` and leave the store for
+        # `init:`. Set here so the prologue below knows not to store, and read
+        # again inside the loop; `model.expr_is_repeatable` is the shared answer
+        # and the x86-64 backend asks the same question for the same reason.
+        bind_after_test = False
         if is_for:
             target, rargs = for_info
             start_val, end_val, step_val = self._range_info(rargs)
-            self._emit_expr(start_val)
-            self._store_var(target, 0)
+            bind_after_test = M.expr_is_repeatable(start_val)
+            if not bind_after_test:
+                self._emit_expr(start_val)
+                self._store_var(target, 0)
             # The comparison has to follow the step's direction, or a descending
             # range exits immediately (and an ascending one would run away). A
             # step whose sign is only known at runtime is refused rather than
@@ -2762,10 +2788,21 @@ dylib_exports: list = None, globals_base: int = None,
                 # on the CSET it left behind: `for i in range(a, b)` computed
                 # a boolean, dropped it, and looped forever. Compare and branch
                 # on the flags directly.
-                self._emit_branch_if_cmp(F.IdentExpr(target), end_val,
-                                         for_conds[0], for_conds[1],
-                                         body_label)
+                #
+                # The left operand is `start_val` itself when the store was
+                # deferred to `init:`, and the COUNTER otherwise. Both are the
+                # same comparison with the same condition codes; the difference
+                # is only which word answers it, and only the `init:` below
+                # depends on that.
+                self._emit_branch_if_cmp(
+                    start_val if bind_after_test else F.IdentExpr(target),
+                    end_val, for_conds[0], for_conds[1],
+                    init_label if bind_after_test else body_label)
                 self._emit_b_to(false_label)
+                if bind_after_test:
+                    self.asm.label(init_label)
+                    self._emit_expr(start_val)
+                    self._store_var(target, 0)
             elif not self._emit_branch_unless(cond, false_label):
                 self._emit_truthy_word(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))

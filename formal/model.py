@@ -2915,8 +2915,11 @@ def _cfg_block_defs(stmts) -> tuple:
             # and the target is still bound, which is what keeps
             # `for i in range(0, 100): if i > 3: break` then `return i` legal
             # (CPython's `for_range_break`, and the reason this decision is
-            # not "the target is stored by the body").
-            defs |= _store_names(getattr(s, "target", None))
+            # not "the target is stored by the body"). `_loop_target_defs` is
+            # the one reader of the exception to that, because `read_before_store`
+            #'s own per-block walk asks the same question and a second answer
+            # here would be a graph that disagrees with the walk over it.
+            defs |= _loop_target_defs(s)
     return defs, kills
 
 
@@ -2997,6 +3000,51 @@ def _cond_key(e, depth: int = 0) -> str:
         return "(&%s)" % " ".join(parts)
     # A literal, by value: `if 3:` twice is the same fact twice.
     return "L:%s(%r)" % (type(e).__name__, getattr(e, "value", None))
+
+
+def expr_is_repeatable(e, depth: int = 0) -> bool:
+    """Whether evaluating `e` a second time yields the same value, so an emitter
+    may evaluate it once for a TEST and once for the use that follows.
+
+    **This is `_TRACKABLE_COND`'s question asked of an emitter rather than of
+    the fact environment**, and it is deliberately built on that tuple instead of
+    a new node list: the comment above `_TRACKABLE_COND` already says why the
+    set is what it is ("a call, an attribute read, a subscript, a comprehension
+    — can answer differently the second time it is evaluated"), and a second list
+    would be a second answer to it that could disagree with the first.
+
+    The one emitter that asks is the for-range loop head, and the reason is
+    CPython's own rule: `for i in range(a, b)` binds `i` only when the iteration
+    PRODUCES a value, so the loop's first test has to be on `start` itself and
+    the store into the counter has to come after it. Testing the counter instead
+    — the store first, the test second — overwrites a name that already held
+    one whenever the range turns out to be empty: `i = 7; for i in range(0, 0)`
+    printed `0` here and prints `7` under CPython. Two evaluations of `a` is the
+    price of getting that right, so it is only paid when the answer cannot
+    change; for `range(f(), 0)` the emitter keeps today's order, because
+    `expr_is_repeatable` says no and a second `f()` is not free.
+
+    Names are repeatable because nothing runs between the two evaluations — the
+    emitters ask this of a value they are about to test and immediately bind —
+    so a name cannot be re-bound in between. `depth` bounds the recursion for
+    the same reason `_cond_key` bounds it: False, the answer that keeps the
+    existing order.
+    """
+    if e is None or depth > 12:
+        return False
+    if isinstance(e, F.IdentExpr):
+        return True
+    if not isinstance(e, _TRACKABLE_COND):
+        return False
+    if isinstance(e, F.BinaryOp):
+        return (expr_is_repeatable(e.left, depth + 1)
+                and expr_is_repeatable(e.right, depth + 1))
+    if isinstance(e, F.UnaryOp):
+        return expr_is_repeatable(e.operand, depth + 1)
+    if isinstance(e, F.CompareChain):
+        return all(expr_is_repeatable(o, depth + 1) for o in e.operands)
+    # A literal, by value: the same `0` twice is the same `0` twice.
+    return True
 
 
 def _cond_names(e) -> set:
@@ -3128,12 +3176,30 @@ def _range_is_nonempty(args) -> bool:
     drop an edge the program really has. Returns None ("cannot tell") for
     anything that is not a `range` of 1-3 integer literals, so the caller
     keeps the zero-iteration path.
+
+    **The step's sign needs the NEGATION folded here**, because the parser does
+    not keep `-1` as a negative literal: it is `UnaryOp('-', IntLiteral(1))`
+    (`_for_step_sign`'s docstring in `formal/arm64_codegen.py` says so from the
+    emitter's side, and reads the same shape). So the docstring's second example
+    did not hold until 2026-10-03 — `range(0, 5, -1)` answered "cannot tell"
+    rather than "empty" — and every caller inherited the gap:
+    `_loop_body_always_runs` kept the zero-iteration edge for a descending empty
+    range (a lost precision, which only refuses), while
+    `_for_target_never_binds` could not call a descending empty range empty,
+    which is the half that decides whether a read of such a target is a refusal.
+    Folding here rather than in a new reader is deliberate: this is the ONE
+    question in the file about "what integers does this `range` have", and
+    `_cfg_int_literal` stays what its own docstring says it is.
     """
     if len(args) > 3:
         return None
     vals = []
     for a in args:
         v = _cfg_int_literal(a)
+        if v is None and isinstance(a, F.UnaryOp) and a.op == "-":
+            v = _cfg_int_literal(getattr(a, "operand", None))
+            if v is not None:
+                v = -int(v)
         if v is None:
             return None
         vals.append(int(v))
@@ -3146,6 +3212,61 @@ def _range_is_nonempty(args) -> bool:
     if step == 0:
         return None                       # a ValueError at run time
     return len(range(start, stop, step)) > 0
+
+
+def _for_target_never_binds(stmt) -> bool:
+    """Whether this `for` provably produces NO value, so it never binds its
+    target — which is CPython's rule, not an optimisation:
+
+        i = 7
+        for i in range(0, 0):
+            x = 1
+        print(i)          # 7
+
+    `i` holds 7 because the iteration produced nothing, so the assignment never
+    ran. Both emitters lay the loop out the same way (`_emit_loop`, per
+    backend): the head test reads `range()`'s own start and the store into the
+    counter is emitted AFTER it, so an empty range leaves whatever the name
+    already had — which is the only layout that can produce CPython's answer.
+
+    **And a name the loop never binds and nothing else stores is UNBOUND**, so
+    the read after it is CPython's `UnboundLocalError` and this path's answer
+    has to be a refusal: there is nothing in an emitted Mach-O image that means
+    "this name is unbound", and a register nothing stored is the caller's
+    leftover, which is the failure the "Read before store" section above exists
+    to refuse. `read_before_store`'s `for` arm asks here before it counts the
+    target as a definition.
+
+    Only a range whose emptiness is DECIDABLE here, and it is the same decision
+    `_range_is_nonempty` makes for the zero-iteration edge — an unknown bound
+    (`range(0, k)`) keeps the target defined, which is a real loss (see
+    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
+    and the safe direction: keeping a definition can only let through a program
+    whose range happened to be non-empty, where dropping it would refuse a
+    program CPython runs.
+    """
+    it = getattr(stmt, "iterable", None)
+    if not isinstance(it, F.CallExpr) or getattr(it, "kwargs", None):
+        return False
+    func = getattr(it, "func", None)
+    if not (isinstance(func, F.IdentExpr) and func.name == "range"):
+        return False
+    return _range_is_nonempty(list(getattr(it, "args", None) or [])) is False
+
+
+def _loop_target_defs(stmt) -> set:
+    """The names a `for`'s HEADER defines — its target, unless the loop
+    provably yields no value at all.
+
+    **One reader, two callers.** `_cfg_block_defs` fills a block's `defs` with
+    it and `read_before_store`'s per-block walk fills its running `live` set
+    with it, and they have to agree: the fixpoint intersects the first and the
+    walk reads the second, so a shape the two answered differently would be
+    accepted or refused according to which one reached it first.
+    """
+    if _for_target_never_binds(stmt):
+        return set()
+    return _store_names(getattr(stmt, "target", None))
 
 
 _CMP_OPS = {
@@ -4599,9 +4720,14 @@ def read_before_store(fn, params: set = None, placed: set = None):
             if kind in ("ForStmt", "ComptimeForStmt"):
                 # The ITERABLE is read before the target exists (a `for` target
                 # is a fresh binding, not a read of an enclosing one), and the
-                # target is bound BEFORE the body runs.
+                # target is bound BEFORE the body runs — except for a range
+                # that yields nothing, which binds it not at all:
+                # `_loop_target_defs`, which is the same reader
+                # `_cfg_block_defs` uses, because a graph and a walk that
+                # disagree about one definition is a refusal that appears and
+                # disappears with which of them runs.
                 walk_expr(getattr(s, "iterable", None), live)
-                live |= _store_names(getattr(s, "target", None))
+                live |= _loop_target_defs(s)
                 continue
             if kind == "WhileStmt":
                 walk_expr(getattr(s, "condition", None), live)
@@ -19377,7 +19503,7 @@ def receiver_writeback_name(fn) -> object:
 # call site joins on the KEY and reads only the receiver, while a refusal has to
 # name the construct — and re-deriving the owner from the key at refusal time
 # would be a second lookup that can disagree with the first.
-def one_field_dropped_receiver_stores(fn, owner):
+def one_field_dropped_receiver_stores(fn, owner, one_field=None):
     """Where `fn` stores a ONE-FIELD struct's own field and the store is DROPPED.
 
     A one-field struct's receiver IS its field — `struct_is_one_field` is what
@@ -19420,7 +19546,7 @@ def one_field_dropped_receiver_stores(fn, owner):
     convention as the source spelled it, `None` for a plain `self` — or `[]` when
     the method is not at risk.
     """
-    if owner is None or not struct_is_one_field(owner):
+    if owner is None or not one_field_answer(owner, one_field):
         return []
     recv = method_receiver_name(fn)
     receivers = struct_receivers(owner)
@@ -19470,7 +19596,8 @@ ReceiverWriteback.__doc__ = (
     "(`mutating_receiver_value_refusal`).")
 
 
-def one_field_mutating_methods(functions, method_owners: dict) -> dict:
+def one_field_mutating_methods(functions, method_owners: dict,
+                              one_field=None) -> dict:
     """`{lifted method name: ReceiverWriteback}` for every one-field mutator.
 
     Keyed by the function's OWN name, which is the LIFTED `<Struct>_<member>`
@@ -19491,11 +19618,19 @@ def one_field_mutating_methods(functions, method_owners: dict) -> dict:
     FunctionDef carries no back-pointer to the class body it was written in, so
     the owner is the one thing this cannot derive for itself, and `functions` is
     what carries the receiver's convention.
+
+    `one_field` is `one_field_struct_names`' table, handed in by the caller that
+    already derived it (`formal/build.py::_prepare_functions`), because this loop
+    asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
+    one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
+    the same answer at the cost of the walk; see
+    `bugs/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
+    why reading the table is sound.
     """
     out = {}
     for fn in (functions or ()):
         st = (method_owners or {}).get(fn.name)
-        if st is None or not struct_is_one_field(st):
+        if st is None or not one_field_answer(st, one_field):
             continue
         recv = receiver_writeback_name(fn)
         if recv is None:
@@ -21720,7 +21855,7 @@ def field_type_one_word_struct(structs, name, decls: dict):
     return st
 
 
-def one_word_sole_field_frame(struct_def, decls: dict):
+def one_word_sole_field_frame(struct_def, decls: dict, one_field=None):
     """The FRAMED struct a ONE-FIELD struct's sole field holds, or None.
 
     **The one fact two callers need for opposite reasons, and neither of them
@@ -21757,7 +21892,7 @@ def one_word_sole_field_frame(struct_def, decls: dict):
     apart from the "disagreed" one asks `field_type_is_value`, as
     `frame_field_type_candidates`' own docstring says its callers should.
     """
-    if not struct_is_one_field(struct_def):
+    if not one_field_answer(struct_def, one_field):
         return None
     sole = struct_sole_field_name(struct_def)
     if sole is None:
@@ -25349,6 +25484,55 @@ def framed_struct_names(structs) -> dict:
     method and the pass that emits its field accesses cannot disagree about how
     wide the receiver is."""
     return {st.name: st for st in structs if struct_is_framed(st)}
+
+
+def one_field_struct_names(structs) -> dict:
+    """`{name: struct}` for every struct that is exactly ONE field.
+
+    The third predicate of the partition `framed_struct_names` and the build's
+    `wide` table already spell as module-level tables, and the reason this one
+    exists is the same: `struct_is_one_field` is `struct_fits_one_word` plus
+    `struct_field_count`, and each of those derives the struct's whole field set
+    by walking **every method body of that struct twice**. So one ask is a
+    whole-struct walk, and a per-FUNCTION asker pays it once per function per
+    struct — 1 031 of them on `myinterpreter.py` from `_prepare_functions`'s
+    loop alone, which is 2.9 s of that file's remaining 3.8 s.
+
+    **Sound by the measurement the framed table's threading was sound by**, not
+    by an invalidation argument: `formal/model.py`'s `read_before_store`
+    derivation and `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    146 779 asks of the four predicates over 7 788 (question, struct) pairs
+    across 14 files and NOT ONE pair changed its answer between two asks inside
+    one `_prepare_functions` call — `struct_is_one_field` was one of the four.
+
+    And it is not a cache: nothing is remembered across a mutation, the way
+    `framed_struct_names` is not one either. A caller with no module context
+    keeps asking `struct_is_one_field`, which is the same answer at the cost of
+    one walk, so a test reading one function's answer is unaffected.
+    """
+    return {st.name: st for st in structs if struct_is_one_field(st)}
+
+
+def one_field_answer(struct_def, one_field=None) -> bool:
+    """`struct_is_one_field(struct_def)`, read off `one_field_struct_names`'
+    table when the caller has one.
+
+    The threaded form, and a FUNCTION rather than a `name in table` at each of
+    the seven call sites because the table is OPTIONAL: a caller with no module
+    context — a test, a tool reading one function's answer, any of the model
+    functions `formal/build.py` calls before it has a module table — keeps
+    asking `struct_is_one_field`, which is the same answer at the cost of one
+    whole-struct walk rather than none.
+
+    `None` in, the predicate out, INCLUDING for `struct_def is None`, which the
+    predicate answers False and a `getattr(struct_def, "name", None)` membership
+    test also answers False. The two paths must not differ on the shape that
+    reaches both, or "the threaded table changed the answer" would be a question
+    about which path ran rather than about the struct.
+    """
+    if one_field is None:
+        return struct_is_one_field(struct_def)
+    return getattr(struct_def, "name", None) in one_field
 
 
 # The largest slot offset `LDR Xt, [Xn, #imm]` / `MOV Xt, [Xn+imm]` can name

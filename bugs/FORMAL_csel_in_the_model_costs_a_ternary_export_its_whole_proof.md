@@ -9,6 +9,31 @@ Found 2026-10-03 on `work/formal13-3` while doing the `CSEL` step that
 prescribes. **OPEN, measured, NOT fixed here** — and it is the reason that step's
 CSEL model row is not landed even though it is three lines and it builds.
 
+**Re-read 2026-10-03: nothing here has moved, and the OWNERSHIP has.** The CSEL
+model row is `formal16-2`'s (`bug:FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
+whose §next step names this doc as the blocker), so what this doc owes is the
+COST half and the modelling half is not duplicated here. Re-confirmed on this
+tree, cheaply, without a Lean run:
+
+* `_STEP_CONDS` has **no** CSEL row and `arm64_step` has no CSEL branch, and the
+  comment where the row used to be says why the row is absent rather than
+  missing — so the "modelling it costs 14 GB" claim is still the reason it is
+  unlanded, not a stale memory of one experiment;
+* the `hx30_{bi}` goal is still the whole-chain shape §"Where the cost is"
+  quotes, verbatim: `simp only [qS…, qT…, arm64_reg, arm64_set_reg,
+  Arm64State.init]` then `simp (disch := decide) […]` over the composed state;
+* the technique the next step prescribes is in the file and unchanged —
+  `hpc_{bi}` at the top of a run is `by rfl` when the pc is decided, and
+  `hpc_s_{bi}` is its sibling for the composed state.
+
+**What HAS changed is what it costs to find out.** The eight Lean-checking
+formal gate tests are disabled, so nothing measures this any more; and
+`lib/ProofLib.olean`'s build peaks at **7.82 GB** (`formal/lean.py`'s own
+measured table), so a light worker with an 8 GB ceiling cannot rebuild the
+library at all — and re-measuring this doc's 14 GB number needs a `MEMLIMIT_GB`
+above 8. Anyone picking this up should budget for that rather than discovering
+it at the end.
+
 ## What I ran
 
 Six export bodies, each built as its own dylib with `fire.py dylib --formal`
@@ -107,10 +132,18 @@ it is the only one left.
 1. `formal/arm64_proof_gen.py`'s `is_ret` arm in `_gen_run_cert` (the `hx30_`
    emission, and its `unfold_terms` / `flow_hsid` / `flow_defs` machinery) —
    that is the code to change, and the per-step lemma has to be emitted where
-   `qT_i` is defined rather than at the goal.
+   `qT_i` is defined rather than at the goal. Re-confirmed in place 2026-10-03.
 2. `test_formal_dylib.py` in full: it is the file that proves the dylib path, and
    its "default path emits a checked proof" case is the one that would catch a
-   per-step lemma that is `rfl` for the wrong reason.
+   per-step lemma that is `rfl` for the wrong reason. **It is one of the eight
+   Lean-checking formal gate tests, which are DISABLED** — so running it is now a
+   deliberate act rather than something the gate does for you, and it needs a
+   `MEMLIMIT_GB` above 8 for the library build.
 3. `hpc_{bi}` is the same shape of goal one field down and is already cheap
    (`by rfl`), so the technique is in the file; it is the `hx30` goal that pays
    for the whole chain.
+4. **And the dependency runs the other way**: `formal16-2`'s
+   `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` §3
+   lists this doc as the thing to solve before the CSEL model row can land. So
+   this is on the critical path of a claim somebody else holds, which is why it
+   is worth the `MEMLIMIT_GB` rather than waiting for a quieter machine.

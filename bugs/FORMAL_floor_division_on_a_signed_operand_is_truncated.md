@@ -4,15 +4,135 @@
 `_emit_div_shift_pow`, `formal/x86_64_codegen.py`'s `_emit_div_mod`, the
 source-level model in `lib/ProofLib.lean`, and `formal/arm64_proof_gen.py`'s /
 `formal/x86_64_proof_gen.py`'s `_expr_go` / `_expr_go_t`.
-**Status: NOT FIXED. Measured, minimised, localised to five places, and NOT a
-patch — the Lean model has to change with the emitted code and that is the whole
-of why.**
+**Status: NOT FIXED, and NOT attempted by a light worker — re-measured
+2026-10-03 (the table below is unchanged), the emitted shape is now DERIVED and
+written down in §"The emitted shape", and the blocker is named with its number:
+the `lib/ProofLib.olean` build peaks at 7.82 GB, which does not fit under the
+8 GB a light worker here is given, and the emitted code and the model cannot
+move apart. §"Why this was not attempted" says what a worker with the ceiling
+should do first.**
 
 Found 2026-10-03 on `work/formal14-fuzz-arm64` by `tools/formal_fuzz.py`, which
 puts `%` and `//` in its operator pool precisely because a generator that cannot
 emit them cannot notice the day they are fixed. It is the single largest source
 of divergence in a 1000-seed sweep (37 of 300 seeds blamed `modulo` and 15 on
 `floordiv` in the first 300).
+
+## Re-measured 2026-10-03, unchanged
+
+One program, eight of the rows below, both backends, `build --formal
+--no-prove` and then the image (CPython through a `printf` shim, since these
+sources are the ones the formal entry point takes):
+
+```
+            CPython   arm64   x86-64
+a=-3           -3       -3      -3
+b= 7//(0-2)    -4       -3      -3     ← wrong
+c=-8//2        -4       -4      -4
+d=(-7)%3         2       -1      -1     ← wrong
+e= 7%(-3)      -2        1       1     ← wrong
+f=(-7)%(-3)    -1       -1      -1
+g= 7%3          1        1       1
+h=(-7)%2==1     1        0       0     ← wrong
+```
+
+Four of eight, both architectures, all of them the sign-mismatch rows. Nothing
+in this tree has moved since the table below was taken.
+
+## The emitted shape
+
+Derived rather than guessed, because the obvious correction is not the only one
+and the choice is load-bearing for the proof side.
+
+**No encoding that contains `SDIV` can express a floor.** `SDIV` truncates, so
+every `q = ±tdiv(±n, ±d)` with at most a negation of one side is a truncating
+quotient; only a CONDITIONAL correction reaches `Int.fdiv`. That kills the
+cheap-looking options (negate one side, negate both, negate the quotient) and it
+means `lib/ProofLib.lean`'s `arm64_step` case for `SDIV` — which computes
+`sdiv64` — is correct as the model of ONE INSTRUCTION and simply no longer
+describes the whole block. The source model and the value flow cannot drift
+apart; they have to move together, which is §Why this is not a patch below.
+
+**The correction, and the identity that makes it need neither `n` nor a
+multiply.** With `q = tdiv(n, d)` and `r = n - q*d`:
+
+    q_floored = q - c        where  c = 1 if r ≠ 0 and sign(r) ≠ sign(d) else 0
+    r_floored = r + d*c
+
+so the correction is decided from `r` and `d` alone — the dividend is not needed
+after the divide, which is what makes the x86-64 side possible at all (`IDIV`
+leaves `q` in RAX and `r` in RDX and the dividend nowhere). Both identities are
+the reason the two backends can be given the SAME shape, which is the property
+this tree wants of them.
+
+| step | arm64 (all modelled: `_STEP_CONDS` 43, 47, 8, 13, 30, 7, 12, 5) | x86-64 (all modelled in `lib/X86.lean`: cqo, idiv, xor, test, setcc, and, sub, neg, add) |
+|---|---|---|
+| `q = tdiv(n, d)` | `SDIV X2, X0, X1` | `CQO ; IDIV R11` |
+| `r = n - q*d` | `MSUB X3, X2, X1, X0` | (already in RDX) |
+| `t = r XOR d` | `EOR X4, X3, X1` | `MOV RCX, RDX ; XOR RCX, R11` |
+| `c1 = (r ≠ 0)` | `CMP X3, #0 ; CSET X5, ne` | `MOV R9, RDX ; TEST R9, R9 ; SETNE R9D` |
+| `c2 = (t <s 0)` | `CMP X4, #0 ; CSET X6, lt` (code 11) | `TEST RCX, RCX ; SETL R8D` |
+| `c = c1 & c2` | `AND X5, X5, X6` | `AND R8, R9` |
+| `//` | `SUB X2, X2, X5 ; MOV X0, X2` | `MOV R9, R8 ; SUB RAX, R9` |
+| `%` | `NEG X5 ; MSUB X3, X1, X5, X3` (which is `r + d*c`) | `MOV R9, R8 ; NEG R9 ; AND R9, R11 ; ADD RDX, R9` |
+
+**Zero new instruction steps on either side**, which is the one piece of good
+news in this document and the reason the model change is smaller than it looks:
+`MSUB`, `EOR`, `AND`, `CMP` (register and immediate), `CSET`, `SUB` (immediate)
+and `NEG` are all in `arm64_step`'s table and all in `lib/X86.lean`, and
+`_STEP_CONDS` already routes each of them. The generator's per-instruction steps
+are emitted mechanically from that table, so the new instructions cost nothing
+there. What they do NOT cost nothing is the FINAL goal: the block's value now has
+to be shown equal to the source model's term for `//`, which today is `sdiv64`.
+
+**The shape the model should take, and why it is not `Int.fdiv`.** Point
+`evalExpr`'s `//` and `%` at new `fdiv64` / `frem64` and define them over the
+machine's OWN terms rather than over `Int.fdiv`:
+
+```lean
+def fdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else
+    let q := sdiv64 a b; let r := srem64 a b
+    if r = 0 ∨ sKey a = sKey b then q else q - 1
+def frem64 (a b : UInt64) : UInt64 := a - b * fdiv64 a b
+```
+
+That is `Int.fdiv` mathematically — the correction condition is exactly "the
+remainder is non-zero and the operands' signs differ", and `frem64` is
+`a - b*floor(a/b)`, which is Python's `%` — but it is built from `sdiv64` /
+`srem64` / `sKey`, the terms the machine's own steps already compute. The
+property `sdiv64`'s comment claims for the model ("the source model and the value
+flow cannot drift") is then preserved by construction instead of by a bridge
+lemma, which is the difference between a change that needs one new theorem and a
+change that needs a theorem about `Int.fdiv` over two's-complement words
+(`srem64_sub` is 60 lines of exactly that, and it is the shape a second one
+would take). The price is that "this is Python's floor division" becomes a fact
+to be argued rather than a definition, so the honest version states both and
+proves the equality where it can be afforded.
+
+## Why this was not attempted
+
+**The blocker, with its number.** `lib/ProofLib.lean` is the source of the 27 MB
+`ProofLib.olean` every proof-checking path links against, and `formal/lean.py`'s
+own measured table (top of the file) records the build at **112 s wall and a
+7.82 GB peak** — against the 8 GB ceiling a light worker on this task is given
+(`memslot --gb 8`), and against a budget the whole machine shares. So:
+
+* the runtime half alone (both emitters, `test_formal_run.py`'s `neg_div_rem` /
+  `neg_mod` rewritten, the fuzzer's two `KNOWN_DIVERGENCES` rows deleted) would
+  leave every existing proof RED on any program that divides, silently, because
+  the model would still say `sdiv64` — which is the doc's own step 1 and is
+  correctly described there as "the honest intermediate state";
+* the model half needs the library rebuilt, which does not fit, and cannot be
+  checked by a proof run either — the slowest proof in the corpus is
+  `formal/examples/udivmod.mojo` at 297 s and 2.30 GB, and it would need the
+  rebuilt library first.
+
+Landing a change that makes the proof path quietly wrong for every dividing
+program, with no way to check it, is worse than the divergence, which is loud in
+a fuzz sweep and attributed. So the work is written down instead, and the next
+worker should take it with the ceiling the library build needs (`MEMLIMIT_GB`
+above 8, or the `prooflib` step's own class) rather than under this one.
 
 ## What is wrong
 
@@ -92,20 +212,34 @@ here rather than attempted.
 
 ## The next step, in order
 
-1. Land the **source model** change alone: `fdiv64` / `frem64` over
-   `Int.fdiv` / `Int.fmod` in `lib/ProofLib.lean`'s `evalExpr` and its
-   `_`-parameterised twin, leaving both backends emitting `SDIV`. Every existing
-   proof then goes red on exactly the programs that divide a negative, which is
-   the honest intermediate state and it is also the measurement of how much
-   depends on it: run `test_formal.py` and count. That number is what sizes the
-   rest of the project, and it is not knowable without doing it.
-2. arm64's `_emit_div_shift_pow`: emit the correction, and teach
-   `formal/arm64_proof_gen.py` the step for each instruction it adds. `CMP`
-   (register form), `CSET` and a predicated `SUB` are the candidates to check
-   against `ProofLib`'s instruction table first — `SUB` (immediate and register)
-   and `CMP` are already there, so the count of genuinely new steps may be one.
+**As of 2026-10-03 step 1 is wrong as written and should be read with §The
+emitted shape above.** Landing the source model ALONE, with both backends still
+emitting `SDIV`, is not the honest intermediate state — it is a tree in which
+every proof of a dividing program is wrong and no gate can see it, because the
+Lean-checking tests are disabled. The model and the emitters move in ONE commit
+or not at all, and the order inside that commit is: model first (so the
+definition the generator will name exists), then arm64, then x86-64, then the
+generator's `_expr_go` / `_expr_go_t` (`sdiv64` → `fdiv64`, `srem64` →
+`frem64`), then the tests.
+
+0. **Get a ceiling the library build fits under** (§Why this was not attempted).
+   Everything below is blocked on it and nothing below is blocked on anything
+   else. `MEMLIMIT_GB=16` for the session is enough; the build's measured peak
+   is 7.82 GB.
+1. Define `fdiv64` / `frem64` in `lib/ProofLib.lean` over `sdiv64` / `srem64` /
+   `sKey` — the shape in §The emitted shape, not `Int.fdiv` — and point
+   `evalExpr`'s `//` and `%` and the `_`-parameterised twin's at them. **No new
+   theorem in this step**: a definition that elaborates cannot break the library,
+   and an unproven theorem in `ProofLib.lean` would. Rebuild, then run
+   `test_formal.py`'s example corpus and count what goes red: that number sizes
+   the rest, and it is not knowable without doing it.
+2. arm64's `_emit_div_shift_pow`: emit the correction from the table above.
+   **No new step to teach** — every instruction it adds is already in
+   `_STEP_CONDS` — so what this step actually buys is the residual goal, and
+   `fdiv64`'s definition is shaped to be the same expression the block computes
+   so `simp`/`grind` has a chance rather than a bridge lemma to cross.
 3. x86-64's `_emit_div_mod`, mirroring it, with `cond_negated`'s new sibling for
-   the sign test.
+   the sign test (`SETL`, which `lib/X86.lean` already routes).
 4. Rewrite `neg_div_rem` and `neg_mod` to CPython's answers and add the eight rows
    of the table above as `BOTH_ARCH_CASES`, including the `x % 2 == 1` idiom that
    no amount of reading the spec would have found.
@@ -121,6 +255,10 @@ here rather than attempted.
    asserts that `--mix signed` reaches `floordiv`, so deleting the row without
    deleting the mix fails there instead of in a two-thousand-program sweep
    nobody reads.
+6. **Re-enable the Lean-checking tests for the division corpus**, or add one
+   narrow proof case that divides a negative. Without it, step 1's red is
+   invisible and step 2's residual goal is unproven — which is how this document
+   would have been written twice.
 
 ## What the corpus looks like once this is accounted for
 

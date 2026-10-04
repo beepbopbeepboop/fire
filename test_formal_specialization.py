@@ -552,25 +552,51 @@ def test_a_function_read_as_a_value_is_refused_by_name(tmpdir):
     value at all, which is what this case pins. Pinned on both architectures:
     the two backends each have their own copy of the placement fallback, and
     either one losing the check is a different diagnostic for one construct.
+
+    **Why the assertions are CLAUSES and not one sentence**, which is the whole
+    of this case's second history: `model.function_value_refusal` was DEFINED
+    TWICE in `formal/model.py` — two commits, two honest wordings, one refusal —
+    and Python's rebinding made the first dead, so for one gate this case
+    asserted a sentence no build could print and was RED on a tree whose
+    behaviour was correct (the dead definition is deleted; the doc that recorded
+    it went with its fix, and this paragraph is what is left of it). A pin on
+    one spelling of a message is what let that happen, so what is pinned here is
+    what the message has to MEAN — the name the reader wrote, the construct, the
+    missing representation — which survives a reword and fails on a message that
+    has gone back to describing the machinery. The duplicate cannot come back:
+    `test_formal_external_call.py`'s `no_module_level_name_is_bound_twice_in_model`
+    fails on any module-level name bound twice in `formal/model.py`.
     """
+    seen = {}
     for arch in ARCHES:
         root = os.path.join(tmpdir, f"fnvalue_{arch}")
         os.makedirs(root)
         with open(os.path.join(root, "prog.mojo"), "w") as f:
             f.write(FUNCTION_AS_VALUE)
-        text = text_of(build(root, expect_ok=False, arch=arch))
-        check("plain" in text,
-              f"[{arch}] the refusal does not name the name the reader wrote: "
-              f"{text.strip()[-300:]}")
-        check("read as a VALUE" in text,
-              f"[{arch}] the refusal is still a placement symptom rather than "
-              f"the construct: {text.strip()[-300:]}")
-        check("no value of a function" in text,
-              f"[{arch}] the refusal does not say what is missing, which is "
-              f"the fact that makes it actionable: {text.strip()[-300:]}")
+        seen[arch] = text_of(build(root, expect_ok=False, arch=arch)).strip()
+    for arch, text in seen.items():
+        for needle, why in (
+            ("plain",
+             "the refusal does not name the name the reader wrote"),
+            ("is a FUNCTION",
+             "the refusal does not name the CONSTRUCT: it is still reporting "
+             "a placement symptom rather than the thing that is missing"),
+            ("no representation",
+             "the refusal does not say what is missing, which is the fact "
+             "that makes it actionable"),
+        ):
+            check(needle in text,
+                  f"[{arch}] {why} ({needle!r}): {text[-300:]}")
         check("has no home" not in text,
-              f"[{arch}] the register-allocator sentence is back: "
-              f"{text.strip()[-300:]}")
+              f"[{arch}] the register-allocator sentence is back: {text[-300:]}")
+    # One construct, one sentence: the two backends each read the same
+    # `model.function_value_refusal`, so the only way they can differ is if one
+    # of them stops asking it — which is a different diagnostic for one
+    # program, and the same class of defect as the shadowed definition.
+    a, b = seen["arm64"], seen["x86_64"]
+    check(a == b,
+          "the two architectures refused one construct differently:\n"
+          f"  arm64:  {a[:220]}\n  x86-64: {b[:220]}")
 
 
 def test_a_local_shadowing_a_function_is_still_read_as_the_local(tmpdir):

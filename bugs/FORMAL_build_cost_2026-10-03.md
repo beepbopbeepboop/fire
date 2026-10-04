@@ -5,8 +5,11 @@
 **shared, so every number here moved both backends at once.**
 
 **Status: the two costs below are FIXED and verified (byte-identical artifacts
-on both architectures); what is left is four residues, each MEASURED and each
-with its exact next step and its precondition in §6.** Nothing in
+on both architectures), and the FIRST of the four residues is now fixed too
+(§6.1: the module's ONE-FIELD set, threaded the same way — 1 541 asks down to
+146 on `myinterpreter.py`, 1.38x on that file and a wash on three others, images
+byte-identical). What is left is three residues, each MEASURED and each with its
+exact next step and its precondition in §6.** Nothing in
 `formal/build.py` or `formal/model.py` here is a cache: the fix removes two
 derivations of a MODULE-level table that a per-FUNCTION loop was making for
 itself, which is the same shape as the `wide` / `dispatch_owners` /
@@ -381,6 +384,8 @@ one level down, which is why it is written down rather than guessed at.
   and `_overridden_comptime_names`, which asks `struct_derived_names` per struct.
   **Not attempted in this pass**: it is another four signatures, and the win is
   ~2 s on one file against 53 s already taken off it.
+  **LANDED 2026-10-03** — see §6.1, which has the numbers and the two callers
+  this list did not name.
 * **`struct_receiver_stores` walks every node of every method body to find
   assignments** (2.05 s of the remaining 3.4 s, 2 245 derivations, 6 160 632
   nodes visited for the few thousand assignments it finds). Two things were
@@ -447,6 +452,87 @@ one level down, which is why it is written down rather than guessed at.
   beside `framed`, which would also answer `struct_is_enum`'s 876 genexpr calls
   and `_derived_overrides`' 18 — is not worth the surface. Recorded so the next
   profile of this pipeline does not re-derive it.
+
+## 6.1 The one-field threading, LANDED (2026-10-03)
+
+§6's first residue is closed, and the numbers are better and smaller than the
+§6 estimate in both directions.
+
+**The asks, measured by wrapping `struct_is_one_field` and attributing each call
+to its caller** (the `.tmp/callers2.py` shape §3.1 used), on `myinterpreter.py`:
+
+| | before | after |
+|---|---|---|
+| `struct_is_one_field` calls | **1 541** | **146** |
+| …of which the derivation itself | 146 | 146 |
+| per-function askers | 1 395 | **0** |
+
+146 is `one_field_struct_names` asking once per one-field struct (146 of the
+file's 275), so **every per-function asker now reads the module-level table** and
+the residual is the derivation. The before-column's four remaining callers were
+not the ones §6 listed — §6 named `_prepare_functions`' loop,
+`one_field_mutating_methods` and `_collect_one_field_receiver_rebinds`, and the
+measurement adds `model.one_word_sole_field_frame` (276, called from three
+build.py sites and from three model.py ones) and
+`model.one_field_dropped_receiver_stores` (276, one per method).
+
+**The wall clock, three runs each, best of, in one process per side** with
+`one_field_struct_names` stubbed to `None` for the "predicate" side (which puts
+every `one_field_answer` back on the per-struct walk without editing a file):
+
+| file | table | predicate | |
+|---|---|---|---|
+| `myinterpreter.py` (1 031 functions) | **3.30 s** | 4.54 s | **1.38x** |
+| `test_metal_codegen.py` | 3.55 s | 3.59 s | 1.01x |
+| `ast_rewriter.py` | 1.58 s | 1.56 s | 0.99x |
+| `formal/examples/count.mojo` | 0.07 s | 0.07 s | — |
+
+**So the win is on the outlier and is a wash elsewhere, and §6's "~2 s on one
+file" was half of what actually landed (1.2 s).** The reason is visible in the
+ask counts: the saving is `#functions × #structs` and only `myinterpreter.py`
+has both large — `test_metal_codegen.py` asks 124 either way, which is its own
+method count, and the table's 123 is mostly the derivation. **A file that is
+REFUSED before the per-function loop pays the derivation for nothing**
+(`ast_rewriter.py`: 85 asks with the table against 15 without, and 0.99x on the
+clock), which is the honest cost of a module-level table and the reason the win
+is a per-file property rather than a uniform one.
+
+**Behaviour, which is the bar for a change that is supposed to be
+behaviour-preserving.** Eight `formal/examples/*.mojo` plus every corpus file
+that declares a one-field struct and still builds: the image is **byte-identical**
+(`sha256`) and the refusals are **identical in exit code and full diagnostic
+text**, table against predicate, on both architectures.
+
+**What it cost in surface, honestly: fifteen signatures**, not the four §6
+predicted — `_frame_receivers`, `_seed_one_word_bindings`,
+`_collect_one_field_dropped_stores`, `_collect_one_word_frame_receivers`,
+`_park_one_word_frame_receivers`, `_check_method_receiver_types`,
+`_collect_receiver_rebinds`, `_one_word_field_map`, `_one_word_sole_field_chain`,
+`_rewrite_self_fields`, `_rewrite_one_word_field_method_calls`,
+`_lift_one_word_field_method`, and in `formal/model.py`
+`one_word_sole_field_frame`, `one_field_dropped_receiver_stores`,
+`one_field_mutating_methods` — plus the two new readers
+`one_field_struct_names` and `one_field_answer`. Every one of them is a
+keyword with a `None` default that keeps the old behaviour, so a caller with no
+module context is unaffected; `one_field_answer` is the single place that decides
+between the two paths, which is why it is a function and not twelve copies of
+`st.name in table`.
+
+**One caller deliberately NOT threaded**, and it is not an oversight:
+`_one_word_constructor_bindings` asks `struct_field_count(st) != 1`, which is a
+DIFFERENT question — it includes a struct of ZERO fields, which
+`struct_is_one_field` excludes — so the table cannot answer it. It also asks
+`struct_is_framed`, which is threaded elsewhere and would be the next table if
+this residue is ever followed by another.
+
+**Pinned by a test, not by a timing**, which is §3.1's rule and the reason this
+paragraph is allowed to claim anything: `test_formal_bracketed_method_field_set.py`'s
+`module table` group now also asserts that `one_field_struct_names`' set IS the
+set `struct_is_one_field` accepts, that `one_field_answer(st, table)` agrees
+with the predicate for every struct in the case, **and that
+`one_field_answer(st, None)` agrees with it too** — the second half is what a
+caller with no module context gets, and a difference there would be "the threaded
+table changed the answer" as a question about which path ran.
 
 ## 7. What this doc supersedes
 
