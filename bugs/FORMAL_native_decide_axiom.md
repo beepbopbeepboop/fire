@@ -397,7 +397,7 @@ inside the `(by …)` that closes a closed goal.
 | `arm64_step_add_reg` | `+ …ax_1_1, …ax_1_2` | `[propext, Quot.sound]` |
 | `arm64_step_sub_reg` | 3 generated | `[propext, Quot.sound]` |
 | `arm64_step_mul` | 5 generated | `[propext, Quot.sound]` |
-| `arm64_step_cmp_sp_reads_sp` | 7 generated | `[propext, Quot.sound]` |
+| `arm64_step_cmp_reg_n31_reads_zero` | 7 generated | `[propext, Quot.sound]` |
 | `arm64_step_and_xzr_reads_zero` | 8 generated | `[propext, Quot.sound]` |
 | `toNat_sub_one`, `toNat_sub_two` | 1 each | `[propext, Quot.sound]` |
 | `arm64_step_bl` | 16 `bv_decide` + 1 `native_decide` | 15 `bv_decide` |

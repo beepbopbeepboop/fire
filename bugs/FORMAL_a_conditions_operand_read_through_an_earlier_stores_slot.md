@@ -8,11 +8,13 @@ moot on this tree and the third is a change to a shared proof chain that a light
 worker cannot Lean-verify.
 
 **Area:** FORMAL (the arm64 proof generator's CFG walk — the `cbz` arm's
-`hcond` obligation). Found 2026-10-04 on `work/formal21-6`, while fixing
-`FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md`,
-whose generation refusal has since been fixed at the root cause (its own Status)
-— so `sum_range.mojo` now generates a proof at all, which it did not when this
-doc was written.
+`hcond` obligation). Found 2026-10-04 on `work/formal21-6`, while fixing the
+`sum_range` GENERATION refusal — a doc since deleted with its fix (commit
+`cbf00b9f`: a `for`-range loop lowers with the test at the bottom of its body,
+so its back edge is a conditional branch, and the loop-discovery scan only asked
+the unconditional-`b` question). That fix is what makes this bug observable at
+all: `sum_range.mojo` now generates a proof, which it did not when this doc was
+written.
 
 ## §0 What landed, and what it is worth
 

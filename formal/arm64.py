@@ -645,9 +645,9 @@ def encode_msub_xd_xn_xm_xa(xd: int, xn: int, xm: int, xa: int) -> bytes:
     `MSUB X6, X1, X5, XZR` for the `//` correction's negation made
     `formal/examples/udivmod.mojo`'s generated proof fail with the correction
     having the WRONG SIGN.  `_emit_floor_remainder` spells that value with a mask
-    instead, and the reason is recorded there and in
-    `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`'s
-    neighbourhood.
+    instead, and the reason is recorded there: its neighbouring spelling,
+    `NEG X6, X5`, was the same class of word read by the wrong branch, which is
+    what made both of them worth measuring instead of assuming.
     """
     assert all(0 <= r <= 30 for r in (xd, xn, xm, xa))
     insn = 0x9b008000 | (xm << 16) | (xa << 10) | (xn << 5) | xd

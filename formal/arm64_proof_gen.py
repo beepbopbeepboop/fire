@@ -2823,19 +2823,24 @@ def _step_rhs(w: int, idx: int):
     if idx == 5:  # NEG
         rn = (w >> 16) & 0x1f
         return f"some (arm64_set_reg {rd} s (-(arm64_reg {rn} s)))"
-    # `Rn` here is SP for the ADD/SUB/CMP shifted-register forms (A64 reads SP
-    # in `Rn`, measured: `add x0, sp, x16` assembles) and `ProofLib`'s branches
-    # say `arm64_reg_or_sp`.  This generator still spells the CONCRETE answer —
-    # `s.sp` for 31, `arm64_reg n` otherwise — and that asymmetry is deliberate:
-    # the step-result lemma is closed by `exact`-ing the library lemma
-    # INSTANTIATED AT THIS WORD, so the two right-hand sides only have to be
-    # defeq, and on a literal index they are.  Emitting `arm64_reg_or_sp` here
-    # instead would make that `exact` trivial but put `arm64_reg_or_sp n s` into
-    # every downstream value-flow goal, and those are simplified with
-    # `simp only [..., arm64_reg, arm64_set_reg]` lists that do not carry the
-    # helper — measured: 8 examples typecheck with the spelling below and the
-    # helper is not in those lists.  `test_formal_call_proof_gen.py`'s
-    # `TestRegister31` pins both halves of that sentence.
+    # `Rn` here is SP for `ADD` (shifted register) and for every add/subtract
+    # IMMEDIATE form — measured, and `ProofLib`'s branches say
+    # `arm64_reg_or_sp` — and the ZERO register for `SUB`/`SUBS`/`CMP` register,
+    # which is what makes a `NEG` (whose `Rn` field is 31) `-Xn` rather than
+    # `sp - Xn`.  This generator still spells the CONCRETE answer — `arm64_reg
+    # n` for every register form, `s.sp` for the immediate ones — and that
+    # asymmetry is deliberate: the step-result lemma is closed by `exact`-ing the
+    # library lemma INSTANTIATED AT THIS WORD, so the two right-hand sides only
+    # have to be defeq, and on a literal index they are.  Emitting
+    # `arm64_reg_or_sp` here instead would make that `exact` trivial but put
+    # `arm64_reg_or_sp n s` into every downstream value-flow goal, and those are
+    # simplified with `simp only [..., arm64_reg, arm64_set_reg]` lists that do
+    # not carry the helper — measured: 8 examples typecheck with the spelling
+    # below and the helper is not in those lists.
+    # `test_formal_call_proof_gen.py`'s `TestRegister31` pins both halves of that
+    # sentence, INCLUDING the reachability the NEG defect was hiding behind: the
+    # table used to check the branch's source text, which the decoder cannot
+    # reach.
     if idx == 2:  # ADD register
         return f"some (arm64_set_reg {rd} s (arm64_reg {rn} s + arm64_reg {rm} s))"
     if idx == 4:  # MUL
@@ -5618,6 +5623,15 @@ def _unmodelled_instruction(word: int):
         `bugs/FORMAL_arm64_instruction_coverage.md` lists this pair as the one
         instruction whose emission carried a real bug, and the step table still
         has no arm for it.
+      * **the EXTENDED-register `ADD`/`SUB`** — bits 28..23 = `010111`, bit 21
+        set, which is a different CLASS from the shifted-register rows the step
+        table has (`0x8b000000`, `0xcb000000`) and not a spelling of them: it is
+        where A64 keeps the SP encoding for `Rn`.  Measured by assembling the
+        spelling and reading the word — `add x0, sp, x1` is `0x8b2163e0` and
+        `sub x0, sp, x1` is `0xcb2763e0`, both RUN as `sp + 1`, while the
+        shifted-register words for the zero register (`add x0, xzr, x1` =
+        `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
+        `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
     """
     if ((word >> 21) & 0x7ff) == 0x4d4:
@@ -5628,6 +5642,24 @@ def _unmodelled_instruction(word: int):
                 "missing here is the machine half, and the measurement is "
                 "`bugs/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
                 "cannot_claim_it.md`.")
+    if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
+        which = ("SUBS/CMP extended" if (word >> 29) & 1 else
+                 "SUB extended" if (word >> 30) & 1 else "ADD extended")
+        return (which,
+                "A64's EXTENDED-register `ADD`/`SUB` — bits 28..24 = 01011 with "
+                "bit 21 set — which is where the architecture keeps the SP "
+                "encoding for `Rn`. The shifted-register row the step table has "
+                "(`0x8b000000` / `0xcb000000`) is a DIFFERENT class and reads "
+                "`Rn = 31` as the zero register, which is what a `NEG` is; this "
+                "one reads it as `sp`. Measured by assembling the spelling and "
+                "running it: `add x0, sp, x1` is 0x8b2163e0 and computes "
+                "`sp + 1`, while `add x0, xzr, x1` (0x8b0103e0) computes `0 + 1`, "
+                "and `sub x0, sp, x1` is 0xcb2763e0 and computes `sp - 1` while "
+                "`sub x0, xzr, x1` (0xcb0103e0) computes `0 - 1`. Nothing this "
+                "backend emits is in this class today (every SP add or subtract "
+                "it wants is spelled as the immediate form), so this is a "
+                "coverage gap rather than a mis-read — the census that would "
+                "close it is `bugs/FORMAL_arm64_instruction_coverage.md`.")
     top = word & 0xffc00000
     if top in (0xf8000000, 0xf8400000):
         which = "STUR" if top == 0xf8000000 else "LDUR"
@@ -9043,7 +9075,8 @@ def _admitted_model_note(contracts: list) -> str:
 
 
 def _call_func_lean(func_name: str, admitted: dict = None,
-                    wrap: bool = True, arity: int = 1) -> str:
+                    wrap: bool = True, arity: int = 1,
+                    exports: dict = None) -> str:
     """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
 
     ONE function for what five call sites used to spell out.  They agreed
@@ -9079,9 +9112,19 @@ def _call_func_lean(func_name: str, admitted: dict = None,
     is refused rather than emitted as a theorem that is false for the reason the
     `else 0` branch documents.  (`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
     is the filing: widening `MojoExpr.call` to carry a LIST is what would let
-    the branch be written, and it is a `lib/ProofLib.lean` change.)
+    a WIDER call be written, and it is a `lib/ProofLib.lean` change.)
+
+    **`exports` is the program's own callees** — `{spelling: f_go}`, from
+    `_callee_call_table` — and it is what makes a call to a function of this
+    image evaluate to the callee's VALUE instead of `0`.  Each branch is the
+    same shape as an admitted one (`if name = "f" then f_go arg else`), so the
+    two kinds cannot be rendered differently, and an empty table reproduces the
+    stub byte for byte: every program in the corpus that reaches no admitted
+    contract and calls nothing of its own emits exactly the text it emitted
+    before this existed.
     """
-    if not admitted:
+    exports = exports or {}
+    if not admitted and not exports:
         if arity > 1:
             return ("(fun name arg => 0)" if not wrap
                     else "(fun name arg =>\n    0)")
@@ -9098,12 +9141,54 @@ def _call_func_lean(func_name: str, admitted: dict = None,
                  f'    if name = "{func_name}" then mojo arg else 0)') if wrap else
                 (f'(fun name arg => if name = "{func_name}" then mojo arg else 0)'))
     arms = "\n  ".join(
-        f'if name = "{spelling}" then {lean} arg else'
-        for spelling, lean in sorted(admitted.items()) if lean)
+        [f'if name = "{spelling}" then {lean} arg else'
+         for spelling, lean in sorted((exports or {}).items())]
+        + [f'if name = "{spelling}" then {lean} arg else'
+           for spelling, lean in sorted((admitted or {}).items()) if lean])
     if arity > 1:
-        return f'(fun name arg =>\n  {arms}\n  0)'
+        return f'(fun name arg =>\n  {arms}\n  0)' if arms else (
+            "(fun name arg => 0)" if not wrap else "(fun name arg =>\n    0)")
     return (f'(fun name arg =>\n  {arms}\n'
             f'  if name = "{func_name}" then mojo arg else 0)')
+
+
+def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
+    """`{spelling: the `_go` definition to call}` for every callee with a model.
+
+    **This is step 2 of `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`
+    and the half that was never a `lib/ProofLib.lean` change**: `callFunc` is a
+    stub that answers `0` for every name it was not told about, so a call to a
+    function of this image evaluated to `0` while `_gen_go`'s model evaluated it
+    to the callee's value — and `eval_eq_mojo`, which says the AST and the model
+    are the same function, was not merely unproved but FALSE.  `_gen_go` already
+    emits a model for every callee, so the table is those definitions, named.
+
+    Three conditions, each of which is a way the branch could name something
+    that does not exist or does not typecheck:
+
+      * **not the entry** — its branch is `mojo arg`, which `_call_func_lean`
+        already emits, and two branches for one name would be a redefinition of
+        the same answer;
+      * **exactly one parameter** — `callFunc` is `String → UInt64 → UInt64`, so
+        it is handed ONE value, and a two-parameter `_go` has no faithful
+        `f_go arg`.  This is the same limit the entry's own branch has, and for
+        the same reason: the AST layer packs nothing;
+      * **the model is IN `go_defs`** — read back off the emitted text rather
+        than predicted from the source, because `_gen_go` does not always
+        define one: a for-range-loop function returns its loop model and no
+        `f_go` at all.  A branch naming an undefined identifier is a Lean error
+        hundreds of lines downstream of the call that caused it, which is the
+        failure mode `_go_defs_for` exists to prevent for the MODEL side.
+    """
+    out = {}
+    for g in sorted(getattr(prog, "functions", None) or [],
+                    key=lambda f: f.name):
+        if g.name == func_name or _entry_arity(g) != 1:
+            continue
+        if re.search(r"^(partial )?def %s_go\b" % re.escape(g.name), go_defs,
+                     re.M):
+            out[g.name] = f"{g.name}_go"
+    return out
 
 
 def _admitted_lean(admitted) -> str:
@@ -9230,11 +9315,12 @@ def generate_arm64_proof(prog, code, info) -> str:
     evalues = model.entry_arg_values(
         info.get("entry_args", test_input), arity)
     tinput = test_input if arity <= 1 else ", ".join(str(v) for v in evalues)
-    # The `callFunc` the AST layer is given, which has to know the admitted
-    # spellings as well as the proved function, and is stated AT THE ENTRY'S
-    # ARITY because `mojo` is — see `_call_func_lean`, which is where the
-    # reason a wider entry gets no branch of its own is written down.
-    _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity)
+    # `callFunc`'s branches over the program's OWN callees, and the `callFunc`
+    # text itself, are both built from `go_defs` and so both come after it —
+    # they are two independent computations that used to be in the other order,
+    # and `_callee_call_table` reads the emitted definitions rather than
+    # predicting them, which is the only way it can be sure a branch names
+    # something Lean has heard of.
 
     # Which of those this program ACTUALLY calls, walked with `_callees_of` —
     # the same walk that builds the `_go` dependency graph, so it cannot call a
@@ -9287,6 +9373,13 @@ def generate_arm64_proof(prog, code, info) -> str:
                 if is_typed else "")
 
     go_defs = "\n\n".join(_go_defs_for(prog, fn, tc))
+    # The `callFunc` the AST layer is given: the proved function's own name, the
+    # admitted spellings, and every CALLEE of this image whose model was emitted
+    # — stated AT THE ENTRY'S ARITY because `mojo` is (see `_call_func_lean`,
+    # where the reason a wider entry gets no branch of its own is written down).
+    _callees = _callee_call_table(go_defs, prog, func_name)
+    _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity,
+                               exports=_callees)
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -9338,7 +9431,8 @@ def generate_arm64_proof(prog, code, info) -> str:
         # tree recursion (`fib`): `mojo` is the structural model, so the AST
         # evaluation unfolds to the same `n<=1 / n-1 / n-2` recurrence and
         # `fib_model_lt2`/`_ge2` close it directly (no induction needed).
-        _cf = _call_func_lean(func_name, _admitted_calls_map, wrap=False)
+        _cf = _call_func_lean(func_name, _admitted_calls_map, wrap=False,
+                              exports=_callees)
         # This site writes its own parentheses around the callFunc, so the
         # one-line arm must not carry a second pair -- otherwise `fib`'s proof
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
@@ -9566,6 +9660,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # and a call to it is the UNRESOLVABLE-callee gap below, which is a
     # refusal rather than a false theorem.
     _resolvable = (({func_name} if arity <= 1 else set())
+                   | set(_callees)
                    | {spelling for spelling, lean
                       in _admitted_calls_map.items() if lean})
     # …and only where the AST is going to be EMITTED. A body the AST model

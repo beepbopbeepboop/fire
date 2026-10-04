@@ -69,11 +69,13 @@ CPython. Without the guard a fix that refused everything would pass this file.
   * `encode` and `decode` are refused as VALUE METHODS before any question
     about encoding arises — `formal/model.py`'s `BUILTIN_VALUE_METHODS` has
     neither name. Both are string→bytes and bytes→string, so on this path they
-    would be a blob's element width (the undecided half of
-    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`) and a
-    one-object buffer respectively; neither is modelled and neither is
-    approximated. Not pinned here because the refusal is about the METHOD TABLE
-    and not about text.
+    would be a blob's element width and a one-object buffer respectively;
+    neither is modelled and neither is approximated. The element-width axis was
+    a DECISION this tree has since made, in `formal/model.py`'s
+    `blob_elem_stride` off the value's kind (a bytes literal's constructor
+    element is ONE byte — commit 37056734), so `encode`/`decode` are refused
+    for the missing model rather than for an open question about width. Not
+    pinned here because the refusal is about the METHOD TABLE and not about text.
   * ITERATION over a string is `string_iteration_refusal`, which fires on the
     container protocol rather than on the encoding: a blob walk reads eight bytes
     at offset 0 and calls the result a count, and a string's first eight bytes

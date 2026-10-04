@@ -9,10 +9,14 @@ the registry.
 
 **The census over the corpus, which is what the 2026-10-01 entry above could not
 give.** 47 of `formal/examples`' 50 files generate an arm64 proof (`subscript_var`
-and `wide_recv` are refused by the model, and `sum_range` raises
-`ValueError: unsupported cbz taken continuation to 0x100000330` — see
-`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md`).
-Over those 47:
+and `wide_recv` are refused by the model, and `sum_range` raised
+`ValueError: unsupported cbz taken continuation to 0x100000330` — that last one
+was the GENERATION refusal and is FIXED: a `for`-range loop lowers with the test
+at the bottom of its body, so its back edge is a conditional branch, and the
+loop-discovery scan only asked the unconditional-`b` question; commit `cbf00b9f`
+teaches it the conditional arm and adds `while_lt_exit_contract_bottom` to
+`lib/ProofLib.lean`. `sum_range` is in the census below on that basis). Over
+those 47:
 
 | site | leaves reached | admits (measured by stripping the fallback and reading Lean) |
 |---|---|---|

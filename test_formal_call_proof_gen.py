@@ -573,30 +573,104 @@ class TestGeneratorSource(unittest.TestCase):
                       "the step lemma rather than the ADRP")
 
 
-# The forms whose `Rn` can be register 31, and how the assembler answers.  The
-# right-hand column is NOT written down: it is what `clang -c` says, which is
-# the only authority for whether an encoding HAS an SP form at all, and the
-# model's answer is checked against it below.
+# The forms whose `Rn` can be register 31, and what the ARCHITECTURE says 31
+# means there.  The third column is not computed from the model — it is the
+# measured answer, and the two cases below are what measure it (by assembling
+# these spellings and RUNNING the words), so the table cannot drift into
+# agreeing with the thing it is checking.
 #
-# The left-hand column is the model's own branch, keyed by the comment that
-# introduces it in `lib/ProofLib.lean`'s `arm64_step` — a comment rather than an
-# opcode so the test fails LOUDLY when a branch is renamed (the key goes
-# missing) instead of silently checking a different branch.
+# The second column is the model's own branch, keyed by the condition that
+# introduces it in `lib/ProofLib.lean`'s `arm64_step` — a condition rather than an
+# opcode so the test fails LOUDLY when a branch is renamed (the key goes missing)
+# instead of silently checking a different branch.
+#
+# The fourth column is what the WORD clang assembles for the spelling does, and
+# it is the column whose absence made this table pass for the wrong reason: a row
+# keyed on a branch's text says nothing about whether any word can ARRIVE at that
+# branch.  `neg x0, x7` is the case in point — `NEG Xd, Xn` is `SUB Xd, XZR, Xn`,
+# so its word matches the SUB-register arm first and the NEG arm is unreachable.
+#
+#   "lands here"  the assembled word decodes to the branch this row names
+#   "extended"    the assembler accepts `sp` in `Rn` by emitting the
+#                 EXTENDED-register class (bit 21 set), which no branch decodes,
+#                 so the model says nothing about that word
+#   "rejected"    clang refuses the spelling: there is no SP encoding at all
 SP_IN_RN_FORMS = (
-    ("add x0, sp, x16", "= 0x8b000000 then"),
-    ("sub x0, sp, x16", "= 0xcb000000 then"),
-    ("cmp sp, x16", "= 0xeb000000 then"),
-    ("cmp sp, #16", "= 0xf1000000 then"),
-    ("add x0, sp, #16", "= 0x91000000 then"),
-    # …and the five whose 31 is the ZERO register.  They are in the table
-    # because they are the direction a "31 means SP everywhere" change gets
-    # wrong, and a test that only checked the accepting forms would not notice.
-    ("and x0, sp, x1", "= 0x8a000000 then"),
-    ("eor x0, sp, x1", "= 0xca000000 then"),
-    ("mul x0, sp, x1", "= 0x9b007c00 then"),
-    ("neg x0, sp", "= 0xcb0003e0 then"),
-    ("add w0, sp, #16", "= 0x11000000 then"),
+    # The immediate class reads SP, and it is the class that reaches a branch:
+    # the emitter's stack-floor guard is `ADD X17, SP, #0 ; CMP X17, X16`, and the
+    # `ADD` half is the only SP read in it.
+    ("add x0, sp, #16", "= 0x91000000 then", "sp", "lands here"),
+    ("cmp sp, #16", "= 0xf1000000 then", "sp", "lands here"),
+    # The shifted-register class reads the ZERO register, for all three of
+    # ADD/SUB/SUBS — which is what makes a NEG `-Xn` rather than `sp - Xn`.  Each
+    # spelling below is the one clang accepts for the encoding, so the word is
+    # the one a reader can paste into a disassembler.
+    ("add x0, xzr, x1", "= 0x8b000000 then", "zr", "lands here"),
+    ("sub x0, xzr, x1", "= 0xcb000000 then", "zr", "lands here"),
+    ("cmp xzr, x1", "= 0xeb000000 then", "zr", "lands here"),
+    # `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, so this word is read by the SUB arm
+    # above and the NEG arm is never reached.  The row names the arm that IS
+    # reached, which is the whole point: the old table named the NEG arm, checked
+    # its source text, and said nothing about the word.
+    ("neg x0, x7", "= 0xcb000000 then", "zr", "lands here"),
+    # The three SP spellings the assembler DOES accept in the register class.
+    # Each reaches the extended-register class instead, which no branch decodes,
+    # so the model makes no claim about it — asserted as exactly that, because
+    # "the model's branch for this form" was never a question about these.
+    ("add x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("sub x0, sp, x16", "= 0x91000000 then", "sp", "extended"),
+    ("cmp sp, x16", "= 0x91000000 then", "sp", "extended"),
+    # …and the five whose 31 is the ZERO register with no SP encoding at all.
+    # They are in the table because they are the direction a "31 means SP
+    # everywhere" change gets wrong, and a test that only checked the accepting
+    # forms would not notice.
+    ("and x0, sp, x1", "= 0x8a000000 then", "zr", "rejected"),
+    ("eor x0, sp, x1", "= 0xca000000 then", "zr", "rejected"),
+    ("mul x0, sp, x1", "= 0x9b007c00 then", "zr", "rejected"),
+    ("neg x0, sp", "= 0xcb0003e0 then", "zr", "rejected"),
+    ("add w0, sp, #16", "= 0x11000000 then", "zr", "rejected"),
 )
+
+# The three words the hardware is asked about directly, as
+# `(spelling, the C expression, what the answer means)`.  Each is ONE
+# instruction with its second operand set to 1, so `Rn = 31` is the only thing
+# the answer can be about: `0 + 1` is 1, `0 - 1` is -1, and `sp` is neither.
+RN31_PROBES = (
+    ("add x0, xzr, x1", "add_xzr_x1()", "sp"),
+    ("sub x0, xzr, x1", "sub_xzr_x1()", "zr"),
+    ("cmp xzr, x1", "cmp_xzr_x1_eq()", "zr"),
+)
+
+
+def _assembler_word(form):
+    """The instruction WORD clang assembles for `form`, or None if it refuses.
+
+    One `clang -c` per form, then the object's `__TEXT,__text` read back — the
+    same thing `_assembler_accepts` builds and throws away, so the two cannot
+    disagree about whether a spelling is legal.  The word is what makes a row
+    REACHABLE: a table of spellings cannot tell `neg x0, x7` (whose word the
+    SUB-register arm reads) from `neg x0, sp` (which clang refuses).
+    """
+    import struct
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "probe.s")
+        with open(src, "w") as fh:
+            fh.write(".text\n.globl _sp_probe\n_sp_probe:\n  " + form + "\n")
+        obj = os.path.join(td, "probe.o")
+        p = subprocess.run(
+            ["clang", "-target", "arm64-apple-macos11", "-c", "-o", obj, src],
+            capture_output=True, text=True)
+        if p.returncode != 0:
+            return None
+        with open(obj, "rb") as fh:
+            data = fh.read()
+    i = data.find(b"__text")
+    if i < 0:
+        return None
+    _addr, size, offset = struct.unpack_from("<QQI", data, i + 32)
+    return struct.unpack_from("<I", data, offset)[0]
 
 
 def _assembler_accepts(form):
@@ -612,34 +686,40 @@ def _assembler_accepts(form):
     bare `clang` assembles for the HOST, which would make `add x0, sp, x16` a
     syntax error for a reason that has nothing to do with the encoding.
     """
-    import subprocess
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, "probe.s")
-        with open(src, "w") as fh:
-            fh.write(".text\n.globl _sp_probe\n_sp_probe:\n  "
-                     + form + "\n")
-        p = subprocess.run(
-            ["clang", "-target", "arm64-apple-macos11", "-c", "-o",
-             os.path.join(td, "probe.o"), src],
-            capture_output=True, text=True)
-    return p.returncode == 0
+    return _assembler_word(form) is not None
 
 
 def _arm64_step_branch(src, key):
-    """The text of one `arm64_step` branch, from its dispatch condition.
+    """The CODE of one `arm64_step` branch, from its dispatch condition.
 
     Keyed by the `= 0x… then` the branch tests, which is unique per branch and
     survives a reworded comment — and a missing key FAILS the case rather than
     silently matching a neighbour, which is the failure mode of keying on prose.
+
+    **Comments are blanked first, and that is the whole reason this can answer
+    the question it is asked.**  What the cases below want to know is which
+    register accessor the MODEL'S CODE uses, and `arm64_step`'s branches carry
+    long comments that name the *other* one — the SUB branch's says in prose
+    "`arm64_reg`, NOT `arm64_reg_or_sp`" and then explains at length why ADD is
+    the opposite. A substring search over the raw text therefore reads the
+    SUB branch as reading SP, which is the exact defect the table was rewritten
+    to end: a test that takes the model's word for what the model says about
+    itself.  `formal/admitted.py::lean_code_regions` is the one Lean lexer in
+    the tree and blanks comments and string contents at every offset, so it is
+    used rather than a second stripper written here; the lines it empties are
+    then DROPPED, because what is left of a comment is its indentation and
+    that indentation is what a `\n  ` cut would otherwise stop at.
     """
-    i = src.find(key)
+    from formal.admitted import lean_code_regions
+
+    code = "\n".join(l for l in lean_code_regions(src).split("\n") if l.strip())
+    i = code.find(key)
     if i < 0:
         return None
-    j = src.find("\n  else if", i)
-    k = src.find("\n  -- ", i)
+    j = code.find("\n  else if", i)
+    k = code.find("\n  -- ", i)
     ends = [x for x in (j, k) if x >= 0]
-    return src[i:min(ends)] if ends else src[i:]
+    return code[i:min(ends)] if ends else code[i:]
 
 
 class TestRegister31(unittest.TestCase):
@@ -647,15 +727,34 @@ class TestRegister31(unittest.TestCase):
 
     `arm64_reg 31 s = 0` is right for a data-processing form and wrong for
     `cmp sp, floor` — the comparison a stack-floor guard is built from — so the
-    model's step for `SUBS XZR, X31, X16` used to compute
+model's step for `SUBS XZR, X31, X16` used to compute
     `arm64_subs_flags 0 X16`: a proof about a different instruction than the
     one emitted, which typechecks and is false.
 
-    The fix reads `Rn` through `arm64_reg_or_sp` in the forms that HAVE an SP
-    encoding.  Deciding which forms those are is architectural, and this test
-    does not take the model's or this file's word for it: it asks the assembler,
-    which is where the answer comes from, and requires the two to agree.  A
-    blanket "31 means SP everywhere" passes the accepting half and fails here.
+The fix reads `Rn` through `arm64_reg_or_sp` in the forms that HAVE an SP
+encoding.  Deciding which forms those are is architectural, and this test
+does not take the model's or this file's word for it: it asks the assembler,
+which is where the answer comes from, and requires the two to agree.  A
+blanket "31 means SP everywhere" passes the accepting half and fails here.
+
+**And it asks the HARDWARE, for the three words where the two disagree.**
+That is the half this class did not have, and the reason is the defect
+the shifted-register `SUB`/`SUBS` arms names: the
+table below used to be checked against the branch's SOURCE TEXT, so the
+`NEG` row asserted a real property of a branch the decoder CANNOT REACH
+(`NEG Xd, Xn` is `SUB Xd, XZR, Xn`, whose word matches the SUB-register
+arm first) and passed for the wrong reason.  Keying on the comment finds
+the text; it does not find out whether any word can arrive there.  So:
+
+  * `test_every_row_is_reachable` asks `_step_branch_index` about the word
+    clang actually assembles for each spelling, and requires the branch it
+    names to be the one the row names — the property whose absence made the
+    `NEG` row vacuous;
+  * `test_the_hardware_agrees_with_the_model_about_rn_31` assembles three
+    one-instruction functions, RUNS them (arm64 host; skipped elsewhere), and
+    asks the machine what register 31 means in each: `sp` for `ADD` in the
+    shifted-register class, and the ZERO register for `SUB` and `SUBS` in the
+    same class, which is exactly what makes a `NEG` `-Xn`.
     """
 
     @classmethod
@@ -663,43 +762,159 @@ class TestRegister31(unittest.TestCase):
         with open(os.path.join(HERE, "lib", "ProofLib.lean")) as f:
             cls.lib = f.read()
         cls.branches = {}
-        for form, key in SP_IN_RN_FORMS:
+        for form, key, _rn, _reach in SP_IN_RN_FORMS:
             cls.branches[form] = _arm64_step_branch(cls.lib, key)
 
     def test_every_form_in_the_table_is_still_in_the_model(self):
-        for form, key in SP_IN_RN_FORMS:
+        for form, key, _rn, _reach in SP_IN_RN_FORMS:
             with self.subTest(form=form):
                 self.assertIsNotNone(
                     self.branches[form],
                     f"{key!r} is not in lib/ProofLib.lean's arm64_step any "
                     f"more, so this table is checking nothing for {form!r}")
 
-    def test_the_model_reads_rn_as_sp_exactly_where_the_assembler_allows_it(self):
-        accepts = {f: _assembler_accepts(f) for f, _k in SP_IN_RN_FORMS}
-        # Sanity on the oracle itself: a missing clang, or one assembling for
-        # the wrong target, rejects EVERY form and this case would then pass
-        # for the wrong reason — every model answer would "match".  So the
-        # accepting set is asserted to be the one the architecture has.
-        self.assertEqual(
-            sorted(f for f, ok in accepts.items() if ok),
-            sorted(f for f, _k in SP_IN_RN_FORMS
-                   if f not in ("and x0, sp, x1", "eor x0, sp, x1",
-                                "mul x0, sp, x1", "neg x0, sp",
-                                "add w0, sp, #16")),
-            "the assembler accepted a different set of forms than the "
-            "architecture does, so this case is measuring clang rather than "
-            "the model")
-        for form, key in SP_IN_RN_FORMS:
+    def test_the_model_reads_rn_the_way_the_architecture_does(self):
+        """The model's branch text against the MEASURED column, row by row.
+
+        This is the check that used to be an oracle of its own — "clang accepts
+        `sp` in `Rn`, therefore the model's branch must read SP" — and it was
+        wrong, because accepting the spelling says the ENCODING has an SP form
+        somewhere and not that this branch decodes it.  The expectation is now
+        written down (`SP_IN_RN_FORMS`'s third column) and the two cases around
+        this one are what justify it.
+        """
+        for form, key, rn, _reach in SP_IN_RN_FORMS:
             with self.subTest(form=form):
                 reads_sp = "arm64_reg_or_sp" in (self.branches[form] or "")
                 self.assertEqual(
-                    reads_sp, accepts[form],
-                    f"{form!r} is "
-                    f"{'accepted' if accepts[form] else 'REFUSED'} by the "
-                    f"assembler with `sp` in `Rn`, and the model's branch for "
-                    f"it ({key!r}) "
+                    reads_sp, rn == "sp",
+                    f"{form!r} is measured to read `Rn = 31` as {rn.upper()}, "
+                    f"and the model's branch for it ({key!r}) "
                     f"{'reads' if reads_sp else 'does NOT read'} register 31 "
                     f"as SP — so one of them is wrong about the architecture")
+
+    def test_every_row_is_reachable(self):
+        """The word clang assembles must decode to the branch the row names.
+
+        The check whose absence is the defect this table was filed for: a row
+        keyed on a branch's SOURCE TEXT says nothing about whether any word can
+        arrive there, and `neg x0, x7` — the `NEG` every image carries — is read
+        by the SUB-register arm, not by the NEG arm this table used to name.  So
+        for each row the word is asked of `_step_branch_index`, the generator's
+        own decoder, and the three dispositions are distinguished:
+
+          * "lands here" — the word decodes to this row's branch;
+          * "extended" — clang accepted `sp` in `Rn` by emitting the
+            extended-register class, which no branch decodes, so the model says
+            nothing about that word.  Asserted as EXACTLY that, because "the
+            model's branch for this form" was never a question about it;
+          * "rejected" — clang refuses the spelling, so no word exists.
+        """
+        import formal.arm64_proof_gen as G
+        for form, key, _rn, reach in SP_IN_RN_FORMS:
+            with self.subTest(form=form):
+                word = _assembler_word(form)
+                if reach == "rejected":
+                    self.assertIsNone(
+                        word, f"clang now ASSEMBLES `{form}`, so this row is no "
+                              f"longer in the class it was filed in — the "
+                              f"architecture may have gained an SP encoding, or "
+                              f"the row needs a spelling that reaches "
+                              f"{key!r}")
+                    continue
+                self.assertIsNotNone(
+                    word, f"clang refuses `{form}` but this row expects it to "
+                          f"assemble ({reach})")
+                idx = G._step_branch_index(word)
+                if reach == "extended":
+                    self.assertIsNone(
+                        idx, f"`{form}` assembles to 0x{word:08x}, which the "
+                             f"model DOES decode (branch {idx}); this row says "
+                             f"it is the extended-register class, which no "
+                             f"branch claims, so one of the two is stale")
+                else:
+                    self.assertIsNotNone(
+                        idx, f"`{form}` assembles to 0x{word:08x}, which no "
+                             f"branch of arm64_step decodes — the generator "
+                             f"cannot say anything about this word, so this row "
+                             f"is checking a branch nothing reaches")
+                    _mask, value = G._STEP_CONDS[idx]
+                    _mask = (1 << 32) - 1 if _mask is None else _mask
+                    want = int(key.split("=")[1].split("then")[0].strip(), 16)
+                    self.assertEqual(
+                        (word & _mask), value,
+                        f"`{form}` decodes to branch {idx}, whose condition is "
+                        f"not {key!r}: the row names one branch and the word "
+                        f"reaches another, which is the vacuity this case "
+                        f"exists to end")
+                    self.assertEqual(
+                        want, value,
+                        f"the row names {key!r} but the branch this word "
+                        f"reaches tests a different value")
+
+    def test_the_hardware_agrees_with_the_model_about_rn_31(self):
+        """Ask the MACHINE, for the three words the model branches on.
+
+        `ADD X0, XZR, X1` / `SUB X0, XZR, X1` / `CMP XZR, X1` with the second
+        operand set to 1: each answer is `1`, `-1`, or "not equal", and `sp` is
+        none of them, so one clang invocation and one run settles register 31 for
+        the whole shifted-register class — which is the class a `NEG` lives in
+        and the one this file's model used to read as `sp`.
+
+        Skipped on a host that cannot run arm64, because there is no other way
+        to ask this question: the alternative oracle is the model, which is the
+        thing under test.
+        """
+        import platform
+        import subprocess
+        import tempfile
+        if platform.machine() not in ("arm64", "aarch64"):
+            self.skipTest("the probes are arm64 code; there is nothing to run "
+                          "them on here")
+        expected = {"add x0, xzr, x1": 1, "sub x0, xzr, x1": -1,
+                    "cmp xzr, x1": 0}
+        with tempfile.TemporaryDirectory() as td:
+            asm = os.path.join(td, "probe.s")
+            with open(asm, "w") as fh:
+                fh.write(".text\n")
+                for i, (form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f".globl _p{i}\n_p{i}:\n    mov x1, #1\n"
+                             f"    {form}\n")
+                    if form.startswith("cmp"):
+                        fh.write("    cset x0, eq\n")
+                    fh.write("    ret\n")
+            c = os.path.join(td, "main.c")
+            with open(c, "w") as fh:
+                fh.write("#include <stdio.h>\n")
+                for i, (_form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f"extern long p{i}(void);\n")
+                fh.write("int main(void) {\n")
+                for i, (form, call, _rn) in enumerate(RN31_PROBES):
+                    fh.write(f'    printf("%s %ld\\n", "{form}", p{i}());\n')
+                fh.write("    return 0;\n}\n")
+            exe = os.path.join(td, "probe")
+            build = subprocess.run(
+                ["clang", "-target", "arm64-apple-macos11", "-o", exe, c, asm],
+                capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0,
+                             f"the probe did not build: {build.stderr[-400:]}")
+            run = subprocess.run([exe], capture_output=True, text=True)
+        got = {}
+        for line in run.stdout.splitlines():
+            form, value = line.rsplit(" ", 1)
+            got[form] = int(value)
+        for form, _call, rn in RN31_PROBES:
+            with self.subTest(form=form):
+                self.assertIn(form, got, f"the probe printed nothing for it: "
+                                         f"{run.stdout!r}")
+                if rn == "sp":
+                    continue          # the stack pointer is not a small constant
+                self.assertEqual(
+                    got[form], expected[form],
+                    f"`{form}` with X1 = 1 answered {got[form]}, so this "
+                    f"machine reads `Rn = 31` as something other than the "
+                    f"ZERO register — the model, and every proof that depends "
+                    f"on this arm, would then be wrong")
 
     def test_the_generator_keeps_its_own_spelling_and_why(self):
         """`_step_rhs` says `s.sp`/`arm64_reg` where the library says the
@@ -714,16 +929,71 @@ class TestRegister31(unittest.TestCase):
         arm64_set_reg]` goal consumes, and those lists do not carry the helper:
         the change would put `arm64_reg_or_sp 3 s` in every value-flow goal and
         break them.  Recorded here because the asymmetry looks like a bug.
+
+        **The pin is the WHOLE right-hand side, `arm64_set_reg rd` included, and
+        that is a merge of two facts rather than one.**  The library's CMP arm
+        WRITES `Rd`, because `SUBS` with `Rd != 31` is not a `CMP` but
+        `formal/arm64.py`'s `encode_subs_xd_xn_xm`, which leaves the difference
+        in a register; `_step_rhs` writes it for the same reason, and the two
+        right-hand sides have to agree in shape or the `exact` does not close.
+        So this row is also what would catch the generator silently reverting to
+        the flags-only `some { s with nzcv := … }` — a `_step_rhs` that stops
+        writing `rd` models every `subs xd, xn, xm` in an image as "set the
+        flags, change no register", and every theorem over it still typechecks.
         """
         import formal.arm64_proof_gen as G
         self.assertEqual(G._step_rhs(0xeb1003ff, 6),
-                         "some { s with nzcv := arm64_subs_flags "
+                         "some { (arm64_set_reg 31 s (arm64_reg 31 s - "
+                         "arm64_reg 16 s)) with nzcv := arm64_subs_flags "
                          "(arm64_reg 31 s) (arm64_reg 16 s) }",
                          "`_step_rhs`'s CMP-register arm changed shape; if it "
                          "now emits `arm64_reg_or_sp`, the `simp only` lists in "
-                         "this generator need the helper in them too")
+                         "this generator need the helper in them too — and if it "
+                         "stops writing `arm64_set_reg rd`, it has reverted to "
+                         "modelling `subs xd, xn, xm` as a flag-only CMP")
         self.assertIn("arm64_reg 31 s", G._step_rhs(0x8b1003e0, 2),
                       "`_step_rhs`'s ADD-register arm changed shape")
+
+    def test_the_sp_encodings_are_named_rather_than_left_unnamed(self):
+        """The words clang emits for `sp` in `Rn` are NAMED, not "an instruction".
+
+        A64's SP encoding for `Rn` is in the EXTENDED-register class, and
+        nothing this backend emits is in it — every `ADD Xd, SP, Xm` it wants is
+        spelled as the immediate form, and every register-form add/sub/cmp it
+        emits names an ordinary register.  So this is a COVERAGE gap, and the
+        only thing the generator owes a reader who hits one is its NAME: the
+        shifted-register rows are a different class, and the reason the class
+        exists is the same fact the NEG fix turned on (an `Rn` of 31 is the zero
+        register there and `sp` here).
+
+        The words are the ones clang assembles for the SP spellings, measured by
+        assembling them, and each is required to decode to no branch AND to be
+        named — a word that decodes to nothing and has no name is the failure
+        mode, and `_unmodelled_instruction`'s own contract is `(name, why)`.
+        """
+        import formal.arm64_proof_gen as G
+        for form, want in (("add x0, sp, x1", "ADD extended"),
+                           ("sub x0, sp, x1", "SUB extended"),
+                           ("subs x0, sp, x1", "SUBS/CMP extended"),
+                           ("cmp sp, x16", "SUBS/CMP extended")):
+            with self.subTest(form):
+                word = _assembler_word(form)
+                self.assertIsNotNone(word, f"clang refuses `{form}`")
+                self.assertIsNone(
+                    G._step_branch_index(word),
+                    f"`{form}` assembles to 0x{word:08x}, which now DECODES — so "
+                    f"either the extended-register class has a model branch (and "
+                    f"this row is stale) or the emitter started producing one")
+                name, why = G._unmodelled_instruction(word)
+                self.assertEqual(
+                    name, want,
+                    f"0x{word:08x} (what clang assembles for `{form}`) is named "
+                    f"{name!r}; an unmodelled word with no name is reported as "
+                    f"'an instruction', which sends the reader to a "
+                    f"disassembler for a word the answer is about")
+                self.assertIn("sp", why,
+                              "the reason has to say what the class IS, since "
+                              "the name alone does not say why it is missing")
 
 
 # ── the floor correction, decoded ───────────────────────────────────────────
@@ -741,7 +1011,7 @@ class TestRegister31(unittest.TestCase):
 #     NEG branch cannot fire.  `formal/examples/udivmod.mojo`'s proof failed with
 #     `native_decide … is false` on every input, and it is live on master today
 #     through unary minus.  Filed as
-#     `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_register_arm.md`.
+#     the `arm64_step` SUB-register arm reading SP.
 #   * `MSUB Xd, Xn, Xm, XZR` — the word the fix reached for next — is accepted
 #     by BOTH `MUL`'s mask (`0xffe07c00`) and `MSUB`'s (`0xffe08000`), and
 #     `arm64_step` tests MUL first, so `-(d*c)` was read as `+d*c` and the
@@ -826,7 +1096,15 @@ def _msub_xzr_word():
 
 
 _FLOOR_FORBIDDEN = (
-    # Reads as `s.sp - x5`: NEG is shadowed by the SUB-register arm.
+    # `arm64_reg 31 s -` IS `-X5`: `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, so the
+    # word lands in the SUB-register arm and that arm now reads `Rn` as the
+    # ZERO register (`lib/ProofLib.lean`'s `arm64_step_neg_reads_zero_rn` is the
+    # pin).  It used to read SP here, which is
+    # the shifted-register `SUB` arm reading SP, and is why
+    # this row existed at all — so what the row now says is "the emitter does
+    # not emit it", which is the half that is still load-bearing: whether the
+    # corrected floor division could now spell it this way is open, and until it
+    # is measured this row is what says the block does not.
     ("neg x6, x5", _neg_word, "arm64_reg 31 s -"),
     # Reads as `x1 * x5`: MUL is tested before MSUB and both masks accept it.
     ("msub x6, x1, x5, xzr", _msub_xzr_word,
@@ -2028,6 +2306,15 @@ class TestAstBridgeCallLimit(unittest.TestCase):
               "    return 0\n"
               "def main(x):\n"
               "    return zero() + x\n")
+    # A callee that takes ONE parameter, called with one argument: the shape the
+    # call TABLE answers.  It is the same program as `ONE_ARG` with the callee's
+    # arity dropped, and the difference is the whole point — `callFunc` is handed
+    # exactly one value, so a callee of one parameter has a faithful
+    # `f_go arg` and a callee of two does not.
+    ONE_ARG_CALLEE = ("def _bump1(a):\n"
+                      "    return a + 1\n"
+                      "def main():\n"
+                      "    return _bump1(41)\n")
 
     def _gaps(self, source, resolvable):
         from formal.arm64_proof_gen import _ast_bridge_gaps
@@ -2151,6 +2438,72 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          "the x86-64 generator's TWO designed trust "
                          "boundaries and no more: a third hole would be this "
                          "file quietly admitting something new")
+
+    def test_a_callee_of_one_parameter_gets_a_branch_and_the_bridge_with_it(self):
+        """`callFunc` answers for the program's OWN functions, so the bridge is
+        STATED rather than omitted.
+
+        This is the other half of the refusal above: `ONE_ARG`'s callee takes
+        two parameters and `callFunc` is handed one value, so there is no
+        faithful branch and the omission is right.  With ONE parameter there IS
+        one — `_gen_go` already emitted `_bump1_go` — and the bridge used to be
+        omitted anyway, which is the gap
+        `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md` names as step
+        2: `eval_eq_mojo` was FALSE for this program, not unproved.
+
+        Three assertions, and the middle one is the one that would catch a
+        branch naming something Lean has not heard of: the `callFunc` text, the
+        theorem's presence, and the theorem typechecking with the same TWO
+        designed sorries as every other x86-64 proof here.
+        """
+        tmp = tempfile.mkdtemp(prefix="a2-bridge-callee-")
+        try:
+            p, err = _generate(tmp, self.ONE_ARG_CALLEE, "bridge_callee",
+                               arch="x86_64")
+            self.assertIsNone(err, err)
+            text = open(p).read()
+            got = _check_proof(p)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn('if name = "_bump1" then _bump1_go arg else',
+                      text,
+                      "the call table did not reach the emitted `callFunc`, so "
+                      "the AST would still evaluate this call to 0")
+        self.assertIn("theorem eval_eq_mojo", text,
+                      "with a branch for the callee the bridge is statable, and "
+                      "omitting it would drop a theorem that now holds")
+        self.assertNotIn("AST bridge omitted", text,
+                         "the bridge was omitted anyway: the table and the "
+                         "omission disagree about the same call")
+        # …and the model the branch names is really in the file.
+        self.assertRegex(text, r"def _bump1_go\b",
+                         "the branch names `_bump1_go` and the file does not "
+                         "define it, which is a Lean error hundreds of lines "
+                         "downstream of the call")
+        if got is None:
+            self.skipTest("no Lean / no lib/ProofLib.olean")
+        ok, detail, n = got
+        self.assertTrue(ok, detail)
+        self.assertEqual(n, 2,
+                         "still exactly the two designed trust boundaries: "
+                         "stating the bridge must not have added a hole")
+
+    def test_an_empty_call_table_is_the_old_stub_byte_for_byte(self):
+        """Nothing is added to a program that calls nothing of its own.
+
+        Every generated proof in the tree with no admitted contract and no
+        callee must keep the text it had, because a re-wrap would invalidate
+        every cached verdict in `~/.gmojo` for a whitespace change — which is
+        the same sentence `_call_func_lean` carries, pinned here from the other
+        side so the two cannot disagree about what "no callee" means.
+        """
+        from formal.arm64_proof_gen import _call_func_lean
+        for wrap in (True, False):
+            with self.subTest(wrap=wrap):
+                self.assertEqual(
+                    _call_func_lean("main", {}, wrap=wrap),
+                    _call_func_lean("main", {}, wrap=wrap, exports={}),
+                    "an empty table must reproduce the stub exactly")
 
 
 class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
@@ -2653,9 +3006,8 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
         ValueError: unsupported cbz taken continuation to 0x100000330
 
     out of the proof generator, on arm64, and the doc that recorded it
-    (`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md`)
-    had no `EXPECTED_FAILURES` entry for it — an UNEXPECTED failure of the
-    `formal` suite job.
+    (deleted with its fix, commit `cbf00b9f`) had no `EXPECTED_FAILURES` entry
+    for it — an UNEXPECTED failure of the `formal` suite job.
 
     The cause is a shape, not a missing case: `arm64_codegen`'s `_emit_while`
     puts a `for`-range loop's emptiness test in a PREHEADER and leaves the
@@ -2924,19 +3276,27 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     recorded twelve red examples on 2026-10-03 and measured them one family at a
     time, which is the right discipline and produced a list that has since gone
     stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
-    `sorry`, and `sum_range` is the only one of the twelve that still refuses at
-    generation — and its refusal belongs to
-    `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure`,
-    another worker's claim.
+    `sorry`, and `sum_range` was the last one refusing at generation — its
+    back edge is a conditional branch, and a `for`-range loop lowers with the
+    test at the BOTTOM of the body, so the walk's "is the taken target the loop
+    top?" question had to be asked on the conditional arm too.
+
+    **All twelve now generate**, and the reason the count is stated here rather
+    than left to the reader is that it was WRONG in this file for a while: the
+    census pinned `sum_range` as the one refusal, its owner doc recorded the
+    generation refusal as fixed, and the two had been merged onto this tree
+    without either noticing the other. That is what `REFUSED` below is for — an
+    empty dict here is not a table nobody filled in, it is the assertion that
+    every one of the twelve reaches a proof file, and the moment one stops, the
+    case below says which and why.
 
     A census that has gone stale is worth exactly as much as the measurement
     that refreshed it, and the refresh is cheap: **emission needs no Lean**, so
     this file (whose rule is generation only, no Lean) can pin it on every run
     and the doc's list cannot rot again between sessions. What it cannot do is
-    say whether Lean ACCEPTS each of the eleven — an emitted proof can still be
+    say whether Lean ACCEPTS each of them — an emitted proof can still be
     rejected at typecheck — and this class says so in its own name rather than
-    letting "generates" read as "is proved". The doc records the eleven's
-    acceptance as unmeasured here and names the command.
+    letting "generates" read as "is proved".
 
     Two things are pinned per stem, because "did not raise" is the weaker claim:
     a file was written AND it carries the end-to-end theorem. A generator that
@@ -2944,21 +3304,21 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     """
 
     #: The twelve, grouped as the doc grouped them, so a reader can see which
-    #: family each is in and which of them is still refusing.
+    #: family each is in.  `sum_range` is family 1's range loop and the one that
+    #: took the conditional back edge; it is in this tuple rather than in
+    #: `REFUSED` below because it generates.
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
                 "both", "either",                               # family 3
-                "wdiff")                                        # family 4
+                "wdiff",                                        # family 4
+                "sum_range")                                    # family 1
 
-    #: The one that still refuses, and the WORDING pinned rather than the
-    #: address: the address is `sum_range.mojo`'s loop header in today's layout
-    #: and moves with any layout change, while "the CBZ's taken arm has no block
-    #: to go to" is the premise and is what a reader needs.
-    REFUSED = {
-        "sum_range": ("cbz taken continuation",
-                      "the refusal is about something else now — a stale "
-                      "wording pin that would pass while the shape changed"),
-    }
+    #: Nobody refuses, and the shape says so: a stem here is pinned as NOT
+    #: generating, with the WORDING of the refusal rather than an address (an
+    #: address is `sum_range.mojo`'s loop header in today's layout and moves
+    #: with any layout change, while a message is the premise).  Adding a row
+    #: is how a newly-found refusal stops being a note in somebody's session.
+    REFUSED = {}
 
     @classmethod
     def setUpClass(cls):
@@ -2993,6 +3353,30 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
                               f"{stem} generated a file with no end-to-end "
                               f"theorem in it; that is not a proof of anything")
 
+    def test_the_range_loop_is_proved_by_a_bottom_tested_contract(self):
+        """Why `sum_range` generates, and not by accident.
+
+        `for n:` lowers with the emptiness test in a PREHEADER, so the body, the
+        counter increment, the comparison and the back edge are ONE `cbz`-kinded
+        block whose taken edge targets its OWN start. The loop-discovery scan
+        used to ask "is this a `b` block whose target is a `cbz` block" — an
+        unconditional back edge — and so found no loop contract at all for this
+        shape, which is why the walk raised `unsupported cbz taken continuation`
+        rather than applying one.
+
+        So "generates" for this stem could be true for a reason that has nothing
+        to do with the loop, and the pin is that it is proved by the contract
+        for a test at the BOTTOM (`while_lt_exit_contract_bottom`, whose `Rn` of
+        31 is the zero register — see `lib/ProofLib.lean`'s
+        `arm64_step_neg_reads_zero_rn`), not by the top-tested one.
+        """
+        text, err = self._generate("sum_range")
+        self.assertIsNotNone(text, f"sum_range generates now? {err}")
+        self.assertIn("while_lt_exit_contract_bottom", text)
+        self.assertNotIn("while_lt_exit_contract ", text,
+                         "sum_range's test is at the bottom of its body, so the "
+                         "top-tested contract is the wrong one for it")
+
     def test_the_one_that_refuses_says_why(self):
         for stem, (needle, why) in sorted(self.REFUSED.items()):
             with self.subTest(stem=stem):
@@ -3012,7 +3396,23 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
         is deleted. So a row here that pins a refusal must also pin the document
         that owns the repair, or the row becomes a way to keep a stale claim
         alive after the fix has landed.
+
+        **Vacuous while `REFUSED` is empty, and that is asserted rather than
+        left to be discovered**: an empty table and a table whose rows all point
+        at deleted docs look identical from the outside, and the difference is
+        the difference between "nobody refuses" and "the records of the refusals
+        were thrown away".  So the empty case states the census it means — all
+        twelve reach a proof file — and the census is `GENERATE`, which the case
+        above walks.
         """
+        if not self.REFUSED:
+            self.assertEqual(
+                len(self.GENERATE), 12,
+                "REFUSED is empty, so this class now claims that ALL TWELVE of "
+                "the red examples generate. If the census changed, say so here "
+                "and name the new count — an empty table that quietly stops "
+                "meaning 'all of them' is how a refusal goes unrecorded")
+            return
         for stem in sorted(self.REFUSED):
             owners = [n for n in os.listdir(os.path.join(HERE, "bugs"))
                       if n.startswith(f"FORMAL_{stem}")]

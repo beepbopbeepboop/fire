@@ -48,10 +48,13 @@ One line, no Lean, both examples. **`either.mojo`'s `(kernel) excessive memory
 consumption` is therefore NOT a proof-generation failure** — the generator writes
 its 6 910 lines on this tree — so §0.3's second row is a LEAN-side fact about
 `either_proof.lean`'s elaboration, and the integrator's budget is what decides
-it, not a worker. `sum_range`'s crash is already filed and claimed by another
-worker (`bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_
-failure.md`, `formal21-6`), so nothing is filed here: it is re-measured, not
-rediscovered.
+it, not a worker. `sum_range`'s crash was already filed and claimed by another
+worker (`formal21-6`), so nothing is filed here: it is re-measured, not
+rediscovered. **That claim has since been discharged** — commit `cbf00b9f` fixed
+the generation refusal at the root cause (a `for`-range loop lowers with the
+test at the bottom of its body, so its back edge is a conditional branch) and the
+doc was deleted with the fix, so `sum_range` now generates and this census's
+`sum_range` row is a LEAN-side fact about its elaboration like `either`'s.
 
 **The family mix moved, which is the one comparison a reader can make by eye.**
 §0.2's largest family was `print(flush=…)` at 9 of 32, closed by §0.4; today's

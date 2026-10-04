@@ -102,17 +102,16 @@ one of the twelve, plus one Lean run for `wdiff`:
 | `count` `fact` `pow2` `sqsum` `sum` | Lean type mismatch on an ADRP page computation | **GENERATE** |
 | `sgt8` `sle8` `ug8` | a 30-field `Arm64State` literal mismatch | **GENERATE** |
 | `both` `either` | `build: proof check failed: ProofLib` — the LIBRARY | **GENERATE** |
-| `sum_range` | a generator `ValueError` out of `emit_block` | **still refuses**: `ValueError: unsupported cbz taken continuation to 0x100000330` |
+| `sum_range` | a generator `ValueError` out of `emit_block` | **PASSES** — commit `cbf00b9f`: a `for`-range loop lowers with the test at the BOTTOM of its body, so its back edge is a conditional branch, and the loop-discovery scan only asked the unconditional-`b` question. It now finds the self-looping `cbz` block, generates the contract, and `while_lt_exit_contract_bottom` discharges it |
 | `wdiff` | a generator `ValueError` out of `emit_block` | **PASSES** — `test_formal.py -j 1 wdiff` gives `PASS=1 KNOWN-GAP=0 FAIL=0`, `proof census: 0 admitted sorry` |
 
-**Eleven of the twelve reach a proof file and one does not.** `sum_range`'s
-refusal belongs to `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure`,
-another worker's claim, which names the cause exactly (the loop's back edge is a
-CONDITIONAL branch, so `emit_block`'s `tgt_bi is None or tgt_bi in path` fires)
-and cites a `wdiff`-loop-contract doc as "one arm away" — that doc has since been
-fixed and DELETED, and `wdiff` passing today is the measurement of it. So
-§4's original step 2 is closed by someone else and nothing here touches either
-file.
+**All twelve reach a proof file.** `sum_range` was the last one refusing and its
+refusal is FIXED (commit `cbf00b9f`), which named the cause exactly: the loop's
+back edge is a CONDITIONAL branch, so `emit_block`'s
+`tgt_bi is None or tgt_bi in path` fired on what is actually *loop again*. That
+doc also cited a `wdiff`-loop-contract doc as "one arm away" — that doc has since
+been fixed and DELETED, and `wdiff` passing today is the measurement of it. So
+§4's original step 2 is closed and nothing here touches either file.
 
 Family 3's premise — "either a `.olean` is stale against `lib/*.lean` or the
 library stopped typechecking" — is measured FALSE by the same table: both stems
@@ -166,7 +165,7 @@ what made family 1 read as an ADRP page computation when it is not.
 | 1 | `count`, `fact`, `pow2`, `sqsum`, `sum` | 5 red, one shared first error | `sum_proof.lean:5903:16: error: Tactic 'rfl' failed` inside `have hx30fr_5 : (sum_b5_qS4 (({s_4 with pc := 4294968088}))).x30 = (st).x30` | the walk's "x30 survives from the initial state to the epilogue's reload" fact. Its goal is a `mem_read_u64` over a FIVE-deep `mem_write_u64` chain at `st.sp - 16`, `- 8`, `- 32`, …, and the fact's tactic is `simp +decide only [_VALUE_SIMP] ; all_goals rfl`. The separation rewrite IS in that simp set (`mem_read_after_write_u64_slot`), but its side conditions (`j < 2^64`, `k + j + 8 ≤ 2^64`, `j + 8 ≤ k`) are inequalities in the SYMBOLIC `st.sp`, so `decide` cannot discharge them, `simp` skips the rewrite, and `rfl` is left holding the chain. **B6's shape with the peel missing**, and the fix is already written down elsewhere: `formal/x86_64_endtoend_test.py`'s closing `hrip` peels the same shape with an explicit `key : ∀ m a v b, a + 8 ≤ b → …` and `repeat rw [key _ _ _ _ (by first | decide | omega)]` — "`repeat` in front of it peels every layer, and each layer's side condition is closed over literals" is that file's own sentence. The write offsets are already computed on this path (`ctx["stores"]`, from `_sp_stores`). Everything after line 5903 in these five files is cascade. **And the peel alone is NOT the fix — measured, see §5.1.** |
 | 2 | `sgt8`, `sle8`, `ug8` | 3 red, one shared shape | `sgt8_proof.lean:4745:43: error: unsolved goals` on `FrameBound 131120 (let __src := Arm64State.init n 4294967968; {x0 := …, x29 := …}) n` | the universal theorem's FRAME-BOUND obligation, over the TYPED model's initial state — the 30-field literal this doc's author read as "the truncator shape". The next diagnostic is `The prover found a potentially spurious counterexample … abstracted … [3, t8s n, arm64_matches_condition 2 nzcv✝¹, arm64_reg 16 …]`: `bv_decide` gave up on the typed truncator terms inside that obligation. Nothing here is a codegen claim. It is the `t8s`/`t8u` half of `formal/types.py::lean_trunc_defs` meeting `FrameBound`, and the fix is to teach the bound's obligation those truncators. |
 | 3 | `both`, `either` | 2 red, identically | `both_proof.lean:5517:8: error: (kernel) excessive memory consumption detected`, at `theorem both_compiles_correctly_universal`, 7.5 GB peak | **the "is it the library?" question above is answered: it is not.** One `formal/lean.py::ensure_library` later, with a freshly built `lib/*.olean`, both still fail, and they fail at the FINAL universal theorem of the file — every per-block certificate above it (`both_blk_0` … `both_blk_6`) is accepted. So this is the arm64 kernel-memory class (`BLOW.md` §0, `bugs/CODEGEN_bootstrap_resource_blowup.md`) at one declaration, and it is the only one of the twelve that costs more than 3 GB to observe. |
-| 4 | `sum_range`, `wdiff` | **1 red, 1 already fixed** | `ValueError: unsupported cbz taken continuation to 0x100000330` (`sum_range` only) | `wdiff` GENERATES on this tree — its back edge is the unconditional `b` that `test_formal_call_proof_gen.py::TestLoopContractBlocks` pins, and that discovery works. Family 4 is one example now, and `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure.md` carries the diagnosis, which is BIGGER than this doc's "a missing `loop_test` or `cond_branches` entry": for `sum_range` the loop contract is never built at all, because the caller's loop-test rule asks for a `b` block whose target is a `cbz` block and this loop's back edge is the `cbz` block's own taken edge. |
+| 4 | `sum_range`, `wdiff` | **both fixed** | — | `wdiff`'s back edge is the unconditional `b` that `test_formal_call_proof_gen.py::TestLoopContractBlocks` pins, and that discovery worked all along. `sum_range` was the one this doc's "a missing `loop_test` or `cond_branches` entry" does not describe: for `sum_range` the loop contract was never built at all, because the caller's loop-test rule asked for a `b` block whose target is a `cbz` block and this loop's back edge is the `cbz` block's own taken edge. Commit `cbf00b9f` asks the conditional question too and adds `while_lt_exit_contract_bottom` to the library. Family 4 is two fixed examples now. |
 
 **What this changes for the next session, and what it does not.** It closes none
 of the ten: a named obligation is not a fix. What it does is make step 1 of §4

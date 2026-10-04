@@ -24,6 +24,13 @@ both must say so with the SAME words.  A construct that is genuinely absent
 from the value model is better refused than emitted, and "one architecture
 crashes and the other declines" is the shape that must not survive.
 
+`FAILING_CASES` are the third shape: a program every machine leaves through a
+TRAP, so CPython raises too and its own stdout is the expectation.  Nothing
+about a differential-against-CPython fuzzer can reach them (it records a
+`generator-error` and never builds an image), and the property they pin is the
+one that class cannot have: that an exit path leaves BEHIND what the program
+printed.
+
 The first construct here is the read-modify-write through a subscript
 (`q[0] += 5`), which arm64 had as `_emit_subscript_aug` and x86-64 refused
 outright — FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused.
@@ -1737,6 +1744,78 @@ CASES.append(
      "    return 0\n")
 )
 
+# A construct that leaves through a TRAP: every machine stops with a NONZERO
+# status, and CPython raises.  That is a third shape, and it needs its own
+# runner rather than a fourth flag on `run_case`, because `run_case` refuses an
+# oracle that does not exit 0 — and this is precisely the class where the
+# oracle cannot: every program here raises in CPython, so the traceback goes to
+# stderr and CPython's own STDOUT is still exactly the expectation.  The
+# assertion is therefore three things at once, and all three are needed:
+#
+#   * CPython exits nonzero, so the case is really about the exit path and not
+#     about a construct one backend refuses to lower;
+#   * both backends exit with CPython's status; and
+#   * both backends' stdout is byte-identical to CPython's — which is the whole
+#     assertion.  The two backends differ in HOW they leave (arm64's exit is a
+#     raw Darwin trap, x86-64's is a call to the C library's `exit`, which
+#     flushes), and stdout is block-buffered whenever it is not a terminal —
+#     which is every case a test harness creates, `subprocess.run(
+#     capture_output=True)` above all.  So a program that printed and then
+#     trapped printed EVERYTHING on x86-64 and NOTHING on arm64: the output was
+#     still in the buffer when the raw `SYS_exit` stopped the process.  Both
+#     exited 1, both were "correct", and the two architectures disagreed about
+#     what the program left on stdout.
+#
+# Why this is a COVERAGE statement and not a gap in either backend's coverage:
+# `tools/formal_fuzz.py` compares against CPython, so every program that
+# reaches one of these exits is recorded as a `generator-error` and never
+# reaches an image.  A differential-against-CPython fuzzer structurally cannot
+# see a bug the two backends do not SHARE — and only a parity file compares
+# those two directly.  (Fixed on arm64 by `_emit_exit`, which flushes through
+# the same `fflush(NULL)` the `flush=True` path already emits; x86-64 needed no
+# change, because `exit` flushes and that asymmetry WAS the defect.)
+FAILING_CASES = [
+    # The subscript, which is the shape the doc that filed this measured.  The
+    # OOB check is an emitter-side trap on this path (not CPython's own
+    # IndexError in the image), which is why it is the case that shows the exit
+    # flushing rather than the exception machinery.
+    ("printed_output_survives_an_out_of_range_subscript",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    xs = [1, 2, 3]\n"
+     "    print(xs[7])\n"
+     "    return 0\n",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    xs = [1, 2, 3]\n"
+     "    print(xs[7])\n"
+     "    return 0\n"),
+    # The same exit, reached by a different trap: a tuple unpack's runtime arity
+    # check.  It is here because it rules out the alternative explanation.  If
+    # the missing line were about the SUBSCRIPT — a lost diagnostic, a swallowed
+    # print — this case would print `before` on both machines anyway, and one
+    # case that agrees for a different reason is worth less than the two.
+    # A BLOB right-hand side, not a literal: `a, b = (1,)` is refused at BUILD
+    # time on arm64 ("tuple assignment length mismatch: 2 targets, 1 values"),
+    # so the literal spelling never reaches the trap and would test the
+    # build-time check rather than the exit.
+    ("printed_output_survives_a_tuple_arity_check",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    t = (1,)\n"
+     "    a = 0\n"
+     "    b = 0\n"
+     "    a, b = t\n"
+     "    return 0\n",
+     "def main() -> Int32:\n"
+     "    print(\"before\")\n"
+     "    t = (1,)\n"
+     "    a = 0\n"
+     "    b = 0\n"
+     "    a, b = t\n"
+     "    return 0\n"),
+]
+
 REFUSALS = [
     # A SUBSCRIPT on a base the source proves to be a scalar. This is the
     # worst failure mode in the area — an image that SEGFAULTS with no
@@ -2258,6 +2337,44 @@ def run_case(name, mojo_src, cpython_src, tmpdir, verbose):
     return True, ""
 
 
+def run_failing_case(name, mojo_src, cpython_src, tmpdir, verbose):
+    """A program every machine exits NONZERO on: stdout must still be CPython's.
+
+    The three assertions are in `FAILING_CASES`'s own comment.  The order
+    matters: the oracle's exit status is checked before either image is built,
+    so a case that stopped raising (the construct gained an in-band error
+    report, say) fails as "the oracle now exits 0" rather than as two machines
+    quietly agreeing on something CPython no longer does.
+    """
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(mojo_src)
+    want_exit, want_out = cpython_answer(cpython_src, tmpdir, name)
+    if want_exit == 0:
+        return False, ("CPython now exits 0 for this program, so it no longer "
+                       "exercises an exit path and belongs in CASES, where a "
+                       "successful run is compared instead")
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build(src, out, backend)
+        if rc != 0:
+            return False, (f"--backend={backend} did not build: "
+                           f"{text.strip()[-300:]}")
+        r = run(out, backend)
+        if r.returncode != want_exit:
+            return False, (f"--backend={backend} exited {r.returncode}, CPython "
+                           f"exits {want_exit}; stderr: {r.stderr.strip()[:160]}")
+        if r.stdout != want_out:
+            return False, (
+                f"--backend={backend} printed {r.stdout[:120]!r} where CPython "
+                f"prints {want_out[:120]!r} — its exit does not flush what the "
+                f"program printed, so the line is LOST rather than wrong")
+        if verbose:
+            print(f"      {backend}: {r.stdout[:60]!r} exit={r.returncode} "
+                  f"(CPython agrees)")
+    return True, ""
+
+
 def run_refusal(name, mojo_src, needle, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -2287,12 +2404,17 @@ def main():
     if args.list:
         for name, _s, _c in CASES:
             print(f"  case    {name}")
+        for name, _s, _c in FAILING_CASES:
+            print(f"  case    {name}  (exits nonzero on every machine)")
         for name, _s, needle in REFUSALS:
             print(f"  refusal {name}  ({needle!r})")
         return 0
 
-    known = {c[0] for c in CASES} | {c[0] for c in REFUSALS}
-    wanted = [(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+    known = ({c[0] for c in CASES} | {c[0] for c in REFUSALS}
+             | {c[0] for c in FAILING_CASES})
+    wanted = ([(c, "case") for c in CASES]
+              + [(c, "failing") for c in FAILING_CASES]
+              + [(c, "refusal") for c in REFUSALS])
     if args.cases:
         missing = set(args.cases) - known
         if missing:
@@ -2302,11 +2424,14 @@ def main():
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for (name, mojo_src, third), is_refusal in wanted:
+        for (name, mojo_src, third), kind in wanted:
             try:
-                if is_refusal:
+                if kind == "refusal":
                     ok, detail = run_refusal(name, mojo_src, third, tmpdir,
                                              args.verbose)
+                elif kind == "failing":
+                    ok, detail = run_failing_case(name, mojo_src, third, tmpdir,
+                                                  args.verbose)
                 else:
                     ok, detail = run_case(name, mojo_src, third, tmpdir,
                                           args.verbose)

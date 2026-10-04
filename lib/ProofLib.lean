@@ -1548,29 +1548,39 @@ def arm64_set_reg (i : Nat) (s : Arm64State) (val : UInt64) : Arm64State :=
 `SP` in the forms that HAVE an SP encoding, and `XZR` in the forms that do not.
 
 A64 register 31 is two registers.  `arm64_reg` above resolves it to zero, which
-is right for a DATA-PROCESSING form whose 31 is the zero register, and wrong
-for the forms where 31 is the stack pointer:  `ADD Xd, Xn, Xm` (shifted
-register) `0x8b000000`, `SUB Xd, Xn, Xm` `0xcb000000` and `CMP Xn, Xm`
-(shifted register) `0xeb000000` all read `SP` in `Rn`, and so do the 64-bit
-immediate forms and every memory form.  `arm64_reg 31 s = 0` made the model's
-step for `SUBS XZR, X31, X16` — `cmp sp, x16`, which is what a stack-floor guard
-compares with — compute `arm64_subs_flags 0 x16`: a proof about a different
-instruction than the one emitted, which typechecks and is false.
+is right for a DATA-PROCESSING form whose 31 is the zero register, and wrong for
+the forms where 31 is the stack pointer: every add/subtract IMMEDIATE form and
+every memory form read `SP` in `Rn`.
 
-Measured with clang's assembler (the split is architectural, not a convention):
+**Which forms those are is architectural, and the answer is about the ENCODING
+CLASS rather than the mnemonic.**  Measured by assembling each spelling,
+reading the word, and RUNNING it (`test_formal_call_proof_gen.py`'s
+`TestRegister31` does exactly this, and its three runnable probes are the
+measurement):
 
-    cmp sp, x16      -> legal        and x2, xzr, x1 -> legal
-    add x0, sp, x16  -> legal        mul x3, sp, x1  -> invalid operand
-    sub x1, sp, x16  -> legal        neg x4, sp      -> invalid operand
-    cmp sp, #16      -> legal        add w0, sp, #16 -> invalid operand
+    form                                   word        Rn = 31 reads
+    ADD  X0, SP,  X1   (extended, bit 21)   0x8b2163e0  SP
+    ADD  X0, XZR, X1   (shifted,  bit 21=0) 0x8b0103e0  XZR   -> 0 + 1
+    SUB  X0, SP,  X1   (extended)           0xcb2763e0  SP
+    SUB  X0, XZR, X1   (shifted)            0xcb0103e0  XZR   -> 0 - 1
+    SUBS X0, SP,  X1   (extended)           0xeb2763e0  SP
+    CMP  XZR, X1       (shifted)            0xeb0103ff  XZR   -> compared 0, not sp
+    ADD/SUB/CMP #imm12                       0x91…/0xd1…/0xf1…  SP
+    ADD  W0, SP, #imm                       0x11…      no SP form (clang rejects it)
+    AND/EOR/MUL with `sp` in `Rn`                       no SP form (clang rejects it)
 
-so the forms this is NOT for are the logical ones (`AND`/`ORR`/`EOR`/`ORN`,
-`0x8a000000` and friends), `MUL`, `NEG`, and the 32-bit immediate `ADD`/`SUB` —
-none of which has an SP encoding at all, and each of which therefore keeps
-`arm64_reg`, whose zero IS the right answer for them.  A single "31 means SP"
-rule applied to all of them would have made `and x0, xzr, x1` read the stack
-pointer, which is why the helper is named for what it is rather than for the
-number.
+so the SP encoding for `Rn` lives in the EXTENDED-register form (bit 21 set),
+in the immediate class, and in the memory forms — and NOT in the
+shifted-register class, where 31 is the zero register for `ADD`, `SUB` and
+`SUBS` alike.  `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, which is a shifted-register
+word, which is why reading `Rn` as SP there modelled `-x` as `sp - x`.
+
+**And the form this helper is NOT for includes one the tree does not yet
+model**: nothing in `arm64_step` decodes the extended-register class, so
+`add x0, sp, x16` assembles to a word this function answers nothing about.  That
+is a coverage gap rather than a wrong answer (the generator refuses such a word
+rather than mis-reading it), and `bugs/FORMAL_arm64_instruction_coverage.md` is
+where the census of it belongs.
 
 The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`
 inline, in the unsigned-offset load/store cases, the unscaled LDUR/STUR ones,
@@ -1774,34 +1784,66 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let val := arm64_reg rn s
     some (arm64_set_reg rd s val)
-  -- ADD Xd, Xn, Xm (register): 0x8b000000
-  -- `Rn` through `arm64_reg_or_sp`: A64's ADD (shifted register) reads SP in
-  -- `Rn`, and `cmp sp, x16` / `add x0, sp, x16` assemble (measured), so
-  -- reading register 31 as the zero register here made the model compute
-  -- `0 + Xm`.  `Xm` stays `arm64_reg`: this form has no SP encoding for it.
+  -- ADD Xd, Xn, Xm (register, SHIFTED form): 0x8b000000
+  -- `Rn` is the ZERO register here, like in the `SUB` and `CMP` branches below,
+  -- and the reason is the CLASS rather than the opcode: A64's SP encoding for
+  -- `Rn` lives in the EXTENDED-register form (bit 21 set) and in the immediate
+  -- forms, not in the shifted-register one.  `add x0, sp, x16` assembles —
+  -- MEASURED, and the word it produces is `0x8b2163e0`, whose bit 21 is set, so
+  -- it is not this branch at all.  The same spelling with the zero register,
+  -- `add x0, xzr, x1`, assembles to `0x8b0103e0` (bit 21 clear), lands HERE, and
+  -- RUNS as `0 + 1`: this branch's `Rn = 31` is the zero register.
+  -- `Xm` stays `arm64_reg` too: this form has no SP encoding for it either.
   else if (insn &&& 0xffe00000) = 0x8b000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let result := (arm64_reg_or_sp rn s + arm64_reg xm s)
+    let result := (arm64_reg rn s + arm64_reg xm s)
     some (arm64_set_reg rd s result)
-  -- SUB Xd, Xn, Xm (register): 0xcb000000
+  -- SUB Xd, Xn, Xm (register, SHIFTED form): 0xcb000000
+  -- `Rn` is read as the ZERO register here, NOT through `arm64_reg_or_sp`, and
+  -- this is the one line that decides what a `NEG` computes.  `NEG Xd, Xn` is
+  -- `SUB Xd, XZR, Xn` — `encode_neg_xd_xn` is `0xcb0003e0 | (xn << 16) | xd`,
+  -- whose `Rn` field (bits 9:5) is 31 and whose `Rm` field (bits 20:16) is
+  -- `Xn` — so every `NEG` in an image arrives at THIS branch, and reading
+  -- `Rn` as SP modelled `-x` as `sp - x`: a proof about a different
+  -- instruction than the one emitted, which typechecks.
+  --
+  -- Measured on the hardware (arm64, clang-assembled, executed; the probes are
+  -- `test_formal_call_proof_gen.py::TestRegister31`'s, which assembles and runs
+  -- the same words):
+  --
+  --     SUBS X0, X31, X1   0xeb…  Rn reads XZR   (its `eq 1` flag is false)
+  --     ADD  X0, X31, X1   0x8b…  Rn reads SP    (`add x0, sp, x16` is legal)
+  --     SUB  X0, SP,  X1   0xcb…  legal, but clang assembles the EXTENDED
+  --                              form (bit 21 set, 0xca…), which is a different
+  --                              class — see the note above `arm64_step`
+  --
+  -- so in the shifted-register class `Rn = 31` is SP for `ADD` and the zero
+  -- register for `SUB` and `SUBS`, which is the architecture's rule
+  -- ("SP when `op = 0 && S = 0 && Rn = 31`").  `CMP`/`SUBS` below is the same
+  -- change for the same reason.
   else if (insn &&& 0xffe00000) = 0xcb000000 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    -- `arm64_reg`, NOT `arm64_reg_or_sp`, and the reason is the alias: A64's
+-- `arm64_reg`, NOT `arm64_reg_or_sp`, and the reason is the alias: A64's
     -- SUB (shifted register) has NO SP encoding, so `Rn == 31` is the ZERO
     -- register — which is exactly how `neg` is encoded. `formal/arm64.py`'s
     -- `encode_neg_xd_xn` emits this very word (`0xcb0003e0`, `Rn = 31`), so
     -- reading `sp` here computed `sp - Xm` for every `neg` in an image.
     -- Measured against the CPU (`tools/formal_model_fuzz.py`, reduced to one
     -- instruction): `neg x13, x1` with x1 = 0x25 gives the model 0x0000000000
-    -- 0000db and the hardware 0xffffffffffffffdb.
+    -- 0000db and the hardware 0xffffffffffffffdb. MEASURED again, on the word
+    -- `0xcb0703e0` this tree's `_emit_unary_minus` produces
+    -- (`SUBS X0, XZR, X7`): its `eq` flag comes back CLEAR, so it compared
+    -- zero against 7 — `arm64_step_neg_reads_zero_rn` below is that pin.
     --
     -- ADD (shifted register), two arms above, is the OPPOSITE: its `Rn == 31`
     -- is `SP` (`add x4, sp, x5` assembles and reads the stack pointer), which
-    -- is why that one keeps `arm64_reg_or_sp` and this one must not.
+    -- is why that one keeps `arm64_reg_or_sp` and this one must not. Nor is
+    -- `cmp sp, x16` a counterexample: clang assembles it as `0xeb3063ff`, the
+    -- EXTENDED-register class with bit 21 set, which is a different branch.
     let result := (arm64_reg rn s - arm64_reg xm s)
     some (arm64_set_reg rd s result)
   -- MUL Xd, Xn, Xm: 0x9b007c00
@@ -1811,7 +1853,18 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let xm := ((insn >>> 16) &&& 0x1f).toNat
     let result := (arm64_reg rn s * arm64_reg xm s)
     some (arm64_set_reg rd s result)
-  -- NEG Xd, Xn: 0xcb0003e0
+  -- NEG Xd, Xn: 0xcb0003e0 — UNREACHABLE, and the branch above it is the one
+  -- that answers.  `NEG Xd, Xn` is `SUB Xd, XZR, Xn`, so its word matches
+  -- `0xcb000000` first and this `0xfffffc1f` test is never reached.  It is
+  -- kept, with the reason, because the two agree — the SUB arm computes
+  -- `arm64_reg 31 s - arm64_reg xn s` = `-Xn`, which is what NEG does — and
+  -- deleting an arm from the middle of this if-chain renumbers every
+  -- `_STEP_CONDS` index the proof generator hard-codes (`_regs_written`,
+  -- `_branch_target`, `loop_test`, …), which is a much larger change than the
+  -- dead arm is worth.  The mask is also wrong in its own right (it constrains
+  -- `Rd`, so it matches only `NEG X0`), which is one more reason nothing can
+  -- be reading it.  `test_formal_call_proof_gen.py::TestRegister31` asserts the
+  -- reachability rather than leaving it to this comment.
   else if (insn &&& 0xfffffc1f) = 0xcb0003e0 then
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 16) &&& 0x1f).toNat
@@ -1819,7 +1872,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let result := -val
     some (arm64_set_reg rd s result)
   -- CMP Xn, Xm (register): 0xeb000000 -- SUBS XZR, Rn, Xm
-  --
+--
   -- Two things about this arm, and both were wrong before.
   --
   -- `Rn` is `arm64_reg` (the ZERO register for `Rn == 31`), NOT
@@ -1827,11 +1880,19 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- floor` is `SUBS XZR, X31, X16`, so `Rn` here has to read SP" — and the
   -- measurement in it was real (`cmp sp, x16` DOES assemble) but the inference
   -- was not: `as` accepts the text and encodes `Rn = 31`, which SUBS (shifted
-  -- register) reads as XZR. So `cmp sp, x16` is a comparison against ZERO with
-  -- the SP spelling ignored, and the model was computing a comparison against
-  -- the stack pointer. Measured against the CPU
-  -- (`tools/formal_model_fuzz.py`): `cmp sp, x16` with sp = 0 and x16 = 0 sets
-  -- Z=1 on the hardware and N=1 on the model.
+  -- register) reads as XZR. So `cmp sp, x16` as spelled that way is a
+  -- comparison against ZERO with the SP spelling ignored, and the model was
+  -- computing a comparison against the stack pointer. Measured against the CPU
+  -- (`tools/formal_model_fuzz.py`): the SHIFTED-register word `0xeb1003ff`
+  -- (`SUBS XZR, X31, X16`) leaves `eq` CLEAR, so it compared zero against 1 —
+  -- a comparison against XZR, not against SP. `cmp sp, x16` is legal and does
+  -- read SP, but clang emits it as the EXTENDED-register form `0xeb3063ff`
+  -- (bit 21 set), which is a different class and not this branch. Nothing the
+  -- emitter produces was affected either way: `_emit_stack_floor_guard`
+  -- materialises SP into a register (`ADD X17, SP, #0 ; CMP X17, X16`)
+  -- precisely so the ambiguity never arises, and every other register-form
+  -- `CMP` it emits names an ordinary register in `Rn`. The SP read the guard
+  -- does rely on is the ADD-IMMEDIATE one, pinned by `work_step_add_imm64`.
   --
   -- `Rd` is WRITTEN, because SUBS with `Rd != 31` is not a CMP: it is
   -- `formal/arm64.py`'s `encode_subs_xd_xn_xm`, which a lowering calls, and it
@@ -2706,7 +2767,7 @@ theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : N
     (h_rd : (arm64_read_insn code s.pc &&& 0x1f).toNat = rd)
     (h_rn : ((arm64_read_insn code s.pc >>> 5) &&& 0x1f).toNat = rn)
     (h_xm : ((arm64_read_insn code s.pc >>> 16) &&& 0x1f).toNat = xm) :
-    arm64_step s code = some (arm64_set_reg rd s (arm64_reg_or_sp rn s + arm64_reg xm s)) := by
+    arm64_step s code = some (arm64_set_reg rd s (arm64_reg rn s + arm64_reg xm s)) := by
   have hne_ret : arm64_read_insn code s.pc ≠ 0xd65f03c0 := by
     intro he; rw [he] at h_opc
     exact absurd h_opc (by decide)
@@ -2782,17 +2843,41 @@ single "31 means SP everywhere" rule would leave the first passing and this one
 FAILING, which is the direction that matters, since `and x0, xzr, x1` is an
 instruction the tree emits.
 
-`cmp sp, x16` — the stack-floor guard's own comparison, `SUBS XZR, X31, X16` —
-is the half of this table that was wrong in the direction that mattered. Its
-`Rn` is the ZERO register and not SP: `as` accepts the `sp` spelling and encodes
-`Rn = 31`, which SUBS (shifted register) reads as XZR. Measured against the CPU
-(`tools/formal_model_fuzz.py`, one instruction): with `sp = 0` and `x16 = 0`,
-`cmp sp, x16` sets Z=1 on the hardware and N=1 on the model that read SP. So
-this theorem is about ZERO now, and its NAME says so — a name saying "reads SP"
-over a statement about zero is how the wrong reading survived every typecheck in
-the tree, and `test_formal_axioms.py`'s headline row pointed at it as an example
-of a decidable statement. -/
-theorem arm64_step_cmp_sp_reads_zero (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
+**The first of these two used to assert the opposite of the architecture, and
+that is what this entry is now for.**  It read
+
+    `cmp sp, x16` — the stack-floor guard's own comparison, `SUBS XZR, X31, X16`.
+    With `arm64_reg 31` this theorem was false and the model computed
+    `arm64_subs_flags 0 X16`.
+
+as a justification for the model reading SP there, and it was wrong twice over.
+`SUBS XZR, X31, X16` in the SHIFTED-register class (`0xeb1003ff`) reads its `Rn`
+as the ZERO register — measured on the hardware, below — so the model's old
+answer was the *right* answer for the wrong reason, and `cmp sp, x16` the
+assembler emits is a different encoding altogether: clang assembles it as
+`0xeb3063ff`, the EXTENDED-register class (bit 21 set), which is not this branch
+at all.  Nor is that word what the stack-floor guard emits:
+`_emit_stack_floor_guard` materialises SP into a register first
+(`ADD X17, SP, #0 ; CMP X17, X16`), which is why nothing the tree emits ever had
+an `Rn` of 31 in this class.  The SP read the guard does rely on is the
+ADD-IMMEDIATE one, pinned by `work_step_add_imm64`.
+
+Measured independently, one instruction at a time
+(`tools/formal_model_fuzz.py`), the model's reading SP gave Z=1/N=1 where the
+hardware gave Z=0/N=1 for `SUBS XZR, X31, X16` — so the theorem is named after
+the WORD rather than after the mnemonic, and
+`test_formal_call_proof_gen.py::TestRegister31` is where the machine was asked
+which reading is the architecture's.  The three words that separate the two
+readings, each over a literal word and each decided by the kernel:
+
+    SUBS X0, X31, X1  (0xeb…)  Rn reads XZR — `x0` is `-1`, not `sp - 1`
+    NEG  X0, X7       (0xcb…)  Rn reads XZR — `x0` is `-7`  (the NEG the
+                                      emitter produces at
+                                      `_emit_floor_correction` and
+                                      `_emit_unary_minus`)
+    ADD  X0, SP, X1   (0x8b…)  Rn reads SP  — legal, and it is the one form in
+                                      the shifted-register class that is -/
+theorem arm64_step_cmp_reg_n31_reads_zero (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = 0xeb1003ff) :
     arm64_step s code
       = some { (arm64_set_reg 31 s (arm64_reg 31 s - arm64_reg 16 s)) with
@@ -2812,7 +2897,30 @@ theorem arm64_step_cmp_sp_reads_zero (s : Arm64State) (code : Nat → UInt8) (pc
   unfold arm64_step
   rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_neg hne_sub,
       if_neg hne_mul, if_neg hne_neg, if_pos hcmp]
+-- `arm64_reg 31 s = 0` is a `match` arm, so the definition has to be unfolded
+  -- for simp to see it; the left-hand side is left as the MODEL wrote it and
+  -- the right-hand side as the ARCHITECTURE says it, which is what makes this a
+  -- pin rather than a restatement.
   rfl
+
+/-- …and `NEG X0, X7` — `0xcb0703e0`, the word `formal/arm64.py`'s
+`encode_neg_xd_xn(0, 7)` produces and the one `_emit_unary_minus` emits for a
+unary minus on a non-literal.  Its `Rn` field is 31, so it is read by the
+SUB-register branch, and the model must compute `-X7`: read SP there, it
+computed `sp - X7`, which typechecks and is a different instruction. -/
+theorem arm64_step_neg_reads_zero_rn (s : Arm64State) (code : Nat → UInt8) (pc : Nat)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = 0xcb0703e0) :
+    arm64_step s code
+      = some (arm64_set_reg 0 s ((arm64_reg 31 s) - (arm64_reg 7 s))) := by
+  have hne_ret : (0xcb0703e0 : UInt32) ≠ 0xd65f03c0 := by decide
+  have hne_mov : ¬ ((0xcb0703e0 : UInt32) &&& 0xffe00000 = 0x2a00fa00) := by
+    intro t; exact absurd t (by decide)
+  have hne_add : ¬ ((0xcb0703e0 : UInt32) &&& 0xffe00000 = 0x8b000000) := by
+    intro t; exact absurd t (by decide)
+  have hsub : (0xcb0703e0 : UInt32) &&& 0xffe00000 = 0xcb000000 := by decide
+  unfold arm64_step
+  rw [hpc, hread, if_neg hne_ret, if_neg hne_mov, if_neg hne_add, if_pos hsub]
+  simp [arm64_reg]
 
 /-- …and `and x0, xzr, x1`, whose `Rn` is the ZERO register and not SP: the
 logical shifted-register forms have no SP encoding at all (measured — clang's
@@ -4505,7 +4613,7 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_add_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0x8b000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg_or_sp (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -4559,7 +4667,7 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xeb000000) :
-    arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
+arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
       nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
   unfold arm64_step
   rw [hpc, hread]
