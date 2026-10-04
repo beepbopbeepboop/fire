@@ -244,8 +244,9 @@ descriptors.
 
 **What would be the next thing to generate**, in this ledger's order: `while`/`else`
 and `for`/`else` (the corpus emits neither), a `with` statement, a `try`/`except`
-shape (the model never emits an except arm per
-`bugs/FORMAL_except_arm_is_never_emitted.md`, so it would measure a refusal), a
+shape (a `try`'s handler arm with a body is REFUSED — `formal/model.py` stops
+walking the arms, and commit `95d3d580` is where that landed — so it would
+measure a refusal rather than a lowering), a
 comprehension whose generator has a CONDITION over a dict walk, and a
 `global` container mutated through two different helpers. Each is a family whose
 absence from this table is a coverage hole rather than a decision.
