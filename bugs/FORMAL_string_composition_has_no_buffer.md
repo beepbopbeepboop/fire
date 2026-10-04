@@ -133,7 +133,7 @@ modules that refuse the other 70, and 4 of the 45 in-file findings:
 
 | file | files it blocks | what it lands on with the f-strings gone |
 |---|---|---|
-| `cas.py` | 40 | a **handler arm with a body** (line 131, `except OSError`) — `FORMAL_except_arm_is_never_emitted`, a refusal that is **correct**: `formal` has no unwinder, so every statement in an arm would be absent from the program that runs |
+| `cas.py` | 40 | a **handler arm with a body** (line 131, `except OSError`) — a refusal that is **correct**: `formal` has no unwinder, so every statement in an arm would be absent from the program that runs |
 | `module_loader.py` | 21 | `os.environ` read as a **module attribute** — `FORMAL_module_state_no_storage.md` §(2): an exported slot is a symbol kind, a relocation the loader honours, and a lifetime story in the proof |
 | `tools/memslot.py` | 5 | a **handler arm with a body** (line 507) — correct, as above |
 | `type_system.py` | 2 | a frame address passed where a value is wanted (`isinstance()`), `FORMAL_known_limits.md` |
@@ -221,13 +221,18 @@ obligations above come from. The instrument rows this branch added are in
 `tools/formal_sweep.py::_REFUSAL_FAMILIES` and
 `tools/formal_sweep_causes.py::CAUSES`; neither file is claimed.
 
-**The two walls behind this row are not this row's to fix.** One is claimed:
-`FORMAL_except_arm_is_never_emitted` (`formal8-5`), and §5 measures its refusal
-to be *correct* rather than a gap. The other, `FORMAL_module_state_no_storage.md`,
-is **unowned** — the `-10` map recorded it as `formal19-4`'s, and that branch has
-landed and released the claim, so the 23 files behind `module_loader.py` are
-waiting on a project (an exported slot: a symbol kind, a relocation the loader
-honours, and a lifetime story in the proof) that nobody holds. The instrument
-rows this branch added are in `tools/formal_sweep.py::_REFUSAL_FAMILIES` and
+**The two walls behind this row are not this row's to fix.** The bigger one — the
+handler arm, 45 of the 115 files — is a refusal that is **correct**, and §5
+measures that rather than asserting it: `formal` has no exception unwinder, a
+`raise` flushes the enclosing `finally` clauses and exits, so no edge runs from a
+raise site into an arm and every statement in an arm's body would be absent from
+the program that runs. Its doc was deleted with the fix that established that,
+and the claim `formal8-5` still carries its name; there is nothing to work on.
+The other wall, `FORMAL_module_state_no_storage.md`, is **unowned** — the `-10`
+map recorded it as `formal19-4`'s, and that branch has landed and released the
+claim, so the 23 files behind `module_loader.py` are waiting on a project (an
+exported slot: a symbol kind, a relocation the loader honours, and a lifetime
+story in the proof) that nobody holds. The instrument rows this branch added are
+in `tools/formal_sweep.py::_REFUSAL_FAMILIES` and
 `tools/formal_sweep_causes.py::CAUSES`; neither file is claimed. The map for this
 round is `bugs/FORMAL_sweep_work_map_2026-10-04_b11.md`.
