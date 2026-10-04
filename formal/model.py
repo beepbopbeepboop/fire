@@ -28152,6 +28152,54 @@ def returned_frame_library_refusal(name: str) -> str:
             f"caller and the callee are compiled together")
 
 
+def receiver_frame_escape_library_refusal(name: str, owner: str, member: str,
+                                           field: str, nested: str) -> str:
+    """A dylib cannot export a mutator that hands a frame back THROUGH its
+    receiver — the receiver-word form of `returned_frame_library_refusal`.
+
+    A one-field struct whose sole field holds a FRAME has no object: its value
+    IS the nested frame's address, so its receiver is the address of a one-word
+    CELL and the cell holds an address. The cell is how the mutator's store
+    reaches the caller (`receiver_writeback_name`), and that is sound for a
+    store THROUGH the nested frame — the caller reserved those bytes and the
+    callee writes into them. It is not sound for a store of a frame the CALLEE
+    built: the block for that frame is reserved in this function's own prologue
+    scratch (`struct_constructor_sites`), and the callee hands the caller the
+    address of bytes that stop being its own the moment it returns.
+
+    Measured on the emitted arm64 code, on the two constructors that differ in
+    exactly this one store (`self.inner.a = a` against `self.inner = Inner(a,
+    b)`, both `def __init__(out self, a: Int, b: Int)` of a struct whose only
+    field is a two-slot frame). Both publish the same
+    `frame_params: [["Inner", "Inner"], …]`. The write-through one emits
+    `ldr x19, [x0]` then `str x0, [x19]` / `str x0, [x19, #8]` — it writes both
+    slots of the block the CALLER reserved, which is what the contract says. The
+    assigning one emits the two stores into its OWN scratch and then
+    `str <that address>, [x0]`: one word into the caller's cell, pointing at a
+    frame in a dead activation. A contract that describes the first and is
+    published for the second is the wrong answer this path treats as the worst
+    outcome available, and the only sound fixes are to refuse the export or to
+    stop publishing a block the callee does not write.
+
+    Refused rather than dropped, for the reason `returned_frame_library_refusal`
+    gives: silently changing a module's public API is the same defect with a
+    different spelling. The advice names the spelling that has a lifetime both
+    ends can see, because that is what the reader has to write instead.
+    """
+    return (f"{name} returns a frame address through its receiver, so it "
+            f"cannot be compiled into a dylib: {owner}'s only field "
+            f"{field!r} holds a {nested} FRAME, so {owner} has no object of its "
+            f"own — its value is that frame's address, its receiver is the "
+            f"address of a one-word cell, and `{member}` stores into that cell "
+            f"the address of a {nested} block this function built in its own "
+            f"prologue scratch. The block is reclaimed when it returns, so an "
+            f"importer that reserves the {nested} frame its `frame_params` "
+            f"entry describes ends up reading a dead block through a contract "
+            f"this function does not honour. Assign the fields one at a time "
+            f"(`self.{field}.a = a`), which is the same program across a "
+            f"boundary with a lifetime both ends can see")
+
+
 
 
 def returned_frame_blob_refusal(fn_name: str, holder: str, field: str,

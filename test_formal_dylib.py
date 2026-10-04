@@ -1520,31 +1520,47 @@ def test_frame_params_are_published_not_empty(tmpdir, shared):
 
 
 def test_a_receiver_writeback_is_not_a_returned_frame(tmpdir, shared):
-    """A one-word mutator's appended `return <receiver>` is not a frame return.
+    """A one-word mutator's receiver write-back is not a frame return — and one
+    of the two ways of doing it hands a frame back anyway.
 
-    `_return_the_receiver` appends `return <receiver>` to every exit of a
-    one-field mutator, because a one-word struct's receiver IS its field and a
-    store to the callee's copy of that word has to reach the caller. When the
-    receiver is an ADDRESS of a block the caller owns, that text is a NO-OP —
-    the same address goes back — and reading it as a frame return refused a
-    module whose only frame belongs to the caller. Both halves are here because
-    the two constructors differ in exactly one thing and only one of them is a
-    real escape:
+    `model.receiver_writeback_name` hands the receiver of a one-field struct's
+    mutator over BY REFERENCE: the caller passes the ADDRESS of its own one-word
+    cell, so a store to that cell reaches the caller with no return register and
+    no statement-position rewrite (it used to be `_return_the_receiver`
+    appending `return <receiver>`; that walk is gone and the tag it set had no
+    producer left). Both constructors below are that mechanism, and they differ
+    in exactly one thing, and only one of them is an escape:
 
-      * WRITING THROUGH (`self.inner.a = a`, below) writes the caller's block in
-        place. It used to be refused on both counts — "Box1___init__ returns a
+      * WRITING THROUGH (`self.inner.a = a`, below) writes the caller's own
+        bytes. It used to be refused on both counts — "`Box1___init__` returns a
         frame address, so it cannot be compiled into a dylib", and, once that
         was out of the way, "a Inner receiver is returned from a method of Box1,
         which did not create the frame". The second sentence was the check
         refusing its own convention: the frame it names is the CALLER's and is
-        still there.
-      * ASSIGNING A FRAME (`self.inner = Inner(a, b)`, which the one-word elision
-        makes a rebinding of the receiver) really does hand back a block the
-        CALLEE built, so the escape is real and the refusal is right.
+        still there. This one is exported, with `frame_params` naming `Inner`,
+        and the emitted arm64 code is what says the contract is true —
+        `ldr x19, [x0]` once, then `str` to `[x19]` and `[x19, #8]`.
+      * ASSIGNING A FRAME (`self.inner = Inner(a, b)`) really does hand back a
+        block the CALLEE built: the two stores go into this function's own
+        prologue scratch and the last instruction stores the SCRATCH's address
+        into the receiver cell. A caller that followed the published
+        `frame_params` — reserve a two-word `Inner` frame, pass its address —
+        would read a dead block through a contract the callee does not honour,
+        so it is refused (`receiver_frame_escape_library_refusal`) and no
+        manifest is written.
+
+    Neither of the two rules can be the other's, which is why this case is one
+    case: `_collect_receiver_rebinds` exempts `__init__` because a constructor
+    is INLINED at a construction site rather than called, and
+    `_collect_one_field_dropped_stores` stands aside for every nested-frame
+    owner because "`self.inner = o` is `self = o` there, and
+    `_collect_receiver_rebinds` refuses exactly that". Both are true of a
+    program and false of an exported constructor, which is a call.
 
     The refusal is asserted with its own sentence rather than as "something was
-    refused": a reader who hits it needs to know which of the two shapes they
-    wrote.
+    refused", and the manifest is asserted both ways, because a `returncode`
+    check alone passes on a library that published a contract it does not
+    honour.
     """
     write_through = (
         "struct Inner:\n"
@@ -1569,6 +1585,25 @@ def test_a_receiver_writeback_is_not_a_returned_frame(tmpdir, shared):
           f"the module built but exported {sorted(exports)}, expected mk; a "
           f"library whose write-back constructor is classified as a returned "
           f"frame is refused, not exported")
+    # …and the CONTRACT it publishes, which is the half a `returncode` check
+    # cannot see: the write-through constructor writes into the block the
+    # IMPORTER reserved, so `frame_params[0]` naming `Inner` is the truth about
+    # the emitted code and has to keep being published. Measured on the arm64
+    # image this module produces (`ldr x19, [x0]` then `str x0, [x19]` /
+    # `str x0, [x19, #8]`, read out of `info["labels"]` and `otool`), the
+    # importer's address is dereferenced once and both slots are written
+    # through it.
+    entry = exports.get("Box1___init__")
+    check(entry is not None,
+          f"the write-through constructor is not in the manifest at all "
+          f"({sorted(exports)}); it is callable across the boundary and its "
+          f"contract is what makes the call sound")
+    contract = (entry or {}).get("frame_params") or []
+    holders = [c for c in contract if c]
+    check(holders and all("Inner" in c for c in holders),
+          f"the write-through constructor published {contract!r} for a "
+          f"receiver whose only field is an Inner frame; position 0 is the "
+          f"receiver, so it has to name Inner as the block the caller reserves")
 
     rebinds = write_through.replace(
         "        self.inner.a = a\n        self.inner.b = b\n",
@@ -1586,6 +1621,20 @@ def test_a_receiver_writeback_is_not_a_returned_frame(tmpdir, shared):
     check("returns a frame address" in text,
           f"the assigning constructor was refused without naming the returned "
           f"frame it really is: {text}")
+    # …and nothing published. A `returncode` check alone would pass on a
+    # library that refused nothing and wrote a manifest whose `frame_params`
+    # told the importer to reserve a two-word Inner block the callee never
+    # writes: the emitted code here builds that frame in its own prologue
+    # scratch and stores the scratch's ADDRESS into the receiver cell
+    # (`str <scratch>, [x0]`), so the contract and the code disagree about the
+    # size of the caller's block. This is the assertion the doc's next step
+    # asked for, and it is the one that would still hold if the refusal were
+    # ever downgraded to a warning.
+    check(not os.path.exists(out2 + ".manifest.json") and not os.path.exists(
+        out2),
+          f"the build refused but left {sorted(os.listdir(tmpdir))} behind; a "
+          f"manifest published for this constructor is an ABI contract the "
+          f"image does not honour")
 
 
 def test_the_manifest_offers_nothing_the_image_does_not_define(tmpdir, shared):

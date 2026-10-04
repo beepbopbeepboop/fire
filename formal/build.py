@@ -4856,6 +4856,73 @@ def _collect_one_field_dropped_stores(fn, owner, structs_by_name,
         getattr(owner, "name", None), M.method_member_name(owner, fn))
 
 
+def _collect_receiver_frame_escapes(fn, owner, structs_by_name,
+                                    one_field=None) -> None:
+    """PARK a by-reference mutator that stores a frame it BUILT into its own
+    receiver cell.
+
+    The third collector in this family, and it exists because the other two both
+    stand aside for this shape. `_collect_receiver_rebinds` grants its
+    one-field exemption unless the sole field is a frame, but then exempts
+    `__init__` on the premise that "a constructor is never CALLED — its
+    `self.<field> = …` stores are inlined into the fresh block at the
+    construction site". `_collect_one_field_dropped_stores` stands aside
+    entirely for a nested-frame owner, because "`self.inner = o` is `self = o`
+    there, and `_collect_receiver_rebinds` refuses exactly that". Both premises
+    are true of a PROGRAM and false of a MODULE BOUNDARY: an exported
+    constructor is a call across a dylib edge, its body is never inlined
+    anywhere, and the block its frame needs does not exist when the importer
+    reserves one.
+
+    So the question is asked here, before `_rewrite_self_fields` collapses
+    `self.<field>` onto `self` (after which a store through the frame and a
+    rebinding of the receiver are the same text), and parked rather than raised
+    because it is a LIBRARY-boundary fact: a program cannot reach this shape
+    (`model.init_body_stores` refuses a constructor body that is not a straight
+    line of stores, at the construction site, with the offending statement
+    spelled out), while a dylib export publishes the constructor as a callable
+    symbol whether or not any importer can call it soundly.
+
+    **The stored value is a CONSTRUCTION, and that is the decidable half.** "A
+    frame this function built" is `model.struct_constructor_sites` — the same
+    prologue-scratch table both emitters lay their blocks out from — so a store
+    of anything else is not this finding: a parameter's frame belongs to the
+    CALLER (and copying its address into the cell is a no-op the write-back
+    already performs), and a word is not a frame at all. A store of the address
+    of a frame a CALLEE returned is the same escape and is not decided here;
+    `struct_constructor_sites` is the table that decides it for a construction,
+    and a frame-returning callee's block is the caller's own trailing word.
+    """
+    if owner is None:
+        return
+    nested = M.one_word_sole_field_frame(owner, structs_by_name or {}, one_field)
+    if nested is None:
+        return
+    recv = M.receiver_writeback_name(fn)
+    if recv is None or recv not in M.struct_receivers(owner):
+        return
+    field = M.struct_sole_field_name(owner)
+    if field is None:
+        return
+    sites = M.struct_constructor_sites(fn, structs_by_name or {})
+    if not sites:
+        return
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
+        if not isinstance(node, (F.AssignStmt, F.VarDecl)):
+            continue
+        target = node.target
+        if not (isinstance(target, F.MemberExpr)
+                and target.member == field
+                and isinstance(target.obj, F.IdentExpr)
+                and target.obj.name == recv):
+            continue        # a store THROUGH the frame: the caller's own bytes
+        if isinstance(node.value, F.CallExpr) and id(node.value) in sites:
+            fn._receiver_frame_escape = (
+                getattr(owner, "name", None), M.method_member_name(owner, fn),
+                field, getattr(nested, "name", None))
+            return
+
+
 def _collect_receiver_rebinds(functions, structs_by_name: dict,
                               one_field=None) -> None:
     """PARK every method that rebinds its own receiver to something that is not
@@ -14332,6 +14399,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # `_rewrite_self_fields` the store and a rebinding are the same text.
         _collect_one_field_dropped_stores(fn, method_owners.get(fn.name),
                                           structs_by_name, one_field)
+        # …and the third of the family: a nested-frame owner whose mutator
+        # stores a frame it BUILT into its own receiver cell, which is an escape
+        # through the receiver word rather than through the return register.
+        # Asked at the same point for the same reason, and it is the shape the
+        # other two decline: `_collect_receiver_rebinds` exempts `__init__`
+        # because a constructor is inlined rather than called, and
+        # `_collect_one_field_dropped_stores` stands aside for every
+        # nested-frame owner. An EXPORTED constructor is called.
+        _collect_receiver_frame_escapes(fn, method_owners.get(fn.name),
+                                        structs_by_name, one_field)
         # …and the OWNING STRUCT, published on every method so
         # `model.declared_receiver_writeback` can ask the one-field question of a
         # declaration without a `method_owners` table in hand. That is what lets
@@ -17575,6 +17652,20 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # Read off the per-function table `_frame_receivers` published rather than
     # recomputed, so the question is the one the emitters will ask.
     for fn in ordered:
+        # …and neither can it export a mutator that hands a frame back through
+        # its RECEIVER, which is the same fact with the hidden word replaced by
+        # the receiver cell (`_collect_receiver_frame_escapes` parked it). The
+        # `frame_params` this export would publish describes a block the callee
+        # does not write, so publishing it is a contract the library does not
+        # honour; a program cannot reach the shape (`init_body_stores` refuses
+        # the body at the construction site), so this is the whole of the
+        # surface. Architecture-independent, and it says so: the refusal is
+        # raised before any codegen, which is why it holds for a backend with
+        # no dylib mode as much as for this one.
+        parked = getattr(fn, "_receiver_frame_escape", None)
+        if parked is not None:
+            raise FormalBuildError(
+                M.receiver_frame_escape_library_refusal(fn.name, *parked))
         if getattr(fn, "_returns_frame_struct", None) is not None:
             raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
 
