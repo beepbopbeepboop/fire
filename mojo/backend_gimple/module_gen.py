@@ -12914,6 +12914,43 @@ def gen_module_impl(self, stmts):
                 for _ckw in ('default', 'register', 'auto', 'static', 'extern',
                              'volatile', 'inline'):
                     signature = re.sub(r'\b' + _ckw + r'\b(?=\s*[,)])', f'_kw_{_ckw}', signature)
+                # A `(void)` prototype is a statement about a function that
+                # takes NO arguments, and this one demonstrably does: the same
+                # translation unit already carries the defining module's own
+                # forward declaration, `int64_t p_lister_hits_2dbb98 (int64_t,
+                # int64_t)`, emitted from the DEFINITION's inferred parameter
+                # types. gcc rejects the unit — `conflicting types ... have
+                # 'int64_t(void)'` against `previous definition ... with type
+                # 'int64_t(int64_t, int64_t)'`, and then `too many arguments`
+                # at every call through it.
+                #
+                # The scanned signature reached `(void)` because it is the
+                # IMPORTER's snapshot (`module_loader`'s text scan of the
+                # import), and a diamond — `main -> {p.lister, p.checker}`,
+                # `p.checker -> p.lister` — is the shape where the two scans
+                # disagree. The DEFINING module's own committed signature is
+                # already in a whole-program store, keyed by home qualifier,
+                # and it is the one that has to win for the same reason it
+                # wins in `_imported_def_pts`: only a unit that defines the
+                # name writes there.
+                #
+                # Scoped to the empty-parameter case on purpose. When the scan
+                # DID resolve a parameter list, this block already prints the
+                # scan's types and overriding them would change many currently
+                # green externs on the strength of a second inference; the
+                # contradiction this fixes is the one where the scan says
+                # "no parameters" and the definition says otherwise.
+                if not sym_info.get('c_parameters') and not sym_info.get('parameters'):
+                    _sig_pts = _ggf_dup._imported_def_pts(self, _sn)
+                    if _sig_pts:
+                        _sig_ret = _as_str(sym_info.get('c_return_type')) \
+                            or _as_str(sym_info.get('return_type')) or 'int64_t'
+                        if _sig_ret and _sig_ret != 'unknown' \
+                                and not any(c in _sig_ret for c in ('*', ' ')):
+                            pass
+                        else:
+                            _sig_ret = 'int64_t'
+                        signature = f'{_sig_ret} {safe} ({", ".join(_as_list(_sig_pts))})'
                 parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
         else:
             ret_type = _as_str(sym_info.get('return_type', 'int64_t'))

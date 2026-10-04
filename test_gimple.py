@@ -8273,6 +8273,97 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype():
+        """A module reached by TWO importers gets a `(void)` prototype under
+        link mode, and every call through it is then "too many arguments".
+
+        The link-mode extern preamble types an imported symbol from the
+        IMPORTER's snapshot (`module_loader`'s text scan of the import). In a
+        diamond that snapshot comes back with no resolved parameter list, so
+        the extern read `extern int64_t p_lister_hits_2dbb98 (void);` — beside
+        the DEFINING module's own forward declaration,
+        `int64_t p_lister_hits_2dbb98 (int64_t, int64_t)`, emitted from the
+        definition's inferred parameter types and emitted by the same
+        translation unit. Two independent inferences about one prototype, and
+        gcc rejects the unit:
+
+            p/checker.py: error: conflicting types for 'p_lister_hits_2dbb98';
+                have 'int64_t(void)'
+            p/lister.py: note: previous definition ... with type
+                'int64_t(int64_t, int64_t)'
+            p/main.py: error: too many arguments to function
+                'p_lister_hits_2dbb98'; expected 0, have 2
+
+        So the trigger is a module with two importers, not a name collision
+        and not a return type: the fixture below is three modules with no
+        homonyms at all, and the single-TU half of the same fixture already
+        compiled and printed CPython's answer. Both pipelines are asserted
+        against CPython on the same text, so this is a real two-pipeline
+        assertion rather than a new expectation.
+
+        The second `print` is the control that makes it a DIAMOND: without it
+        `p.lister` has exactly one importer and the defect does not fire."""
+        global _PASS, _FAIL
+        name = "a_diamond_import_does_not_give_an_imported_function_a_void_prototype"
+        files = {
+            'p/lister.py': 'def hits(items, name):\n    return len(items)\n',
+            'p/checker.py': ('from p.lister import hits\n'
+                             'def found(items, name):\n'
+                             '    return hits(items, name) + 1\n'),
+            'p/main.py': ('from p.checker import found\n'
+                          'from p.lister import hits\n'
+                          '\n'
+                          'def main():\n'
+                          '    print(found([1, 2, 3], "a"))\n'
+                          '    print(hits([4, 5], "b"))\n'
+                          'main()\n'),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            for rel, body in files.items():
+                fp = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with open(fp, 'w') as fh:
+                    fh.write(body)
+            entry = os.path.join(td, 'p', 'main.py')
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60,
+                                env=dict(os.environ, PYTHONPATH=td))
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:400]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            for mode in ('single-TU', 'link-mode'):
+                c_src = gimple_codegen._run_pipeline(
+                    files['p/main.py'], filename=entry,
+                    **({'do_imports': True} if mode == 'single-TU'
+                       else {'link_mode': True}))[0]
+                c_file = os.path.join(td, f'diamond_{mode}.c')
+                exe = os.path.join(td, f'diamond_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          f"{cc.stderr[:1200]}")
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                if run.stdout != want:
+                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
+                          f"CPython printed {want!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_gen_taking_middle_helper_is_never_reached_by_a_local_import():
         """No `gen`-taking `mojo/middle` helper may be reached by a
         FUNCTION-LOCAL `from mojo.middle.X import ...` unless the importing
@@ -11070,6 +11161,7 @@ print(run('x/y.txt'))
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype()
     test_two_modules_one_same_named_function_keep_their_own_return_types()
     test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
