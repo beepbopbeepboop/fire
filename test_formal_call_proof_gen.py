@@ -2060,6 +2060,51 @@ class TestCfgLeafCensus(unittest.TestCase):
              "walk-terminal"} - reached, set(),
             "the corpus slice no longer reaches the leaves it was chosen for")
 
+    def test_the_cbz_leaf_peels_the_frame_reads_before_it_admits(self):
+        """The `runs-cbz-condition` leaf's peel is emitted BEFORE the leaf, and
+        it is the whole of what that leaf can be reduced to.
+
+        A branch whose tested register came from a `LDR` has a condition the
+        value flow -- which is over registers -- cannot decide, because the
+        address is an `adrp`/`add` expression nothing in the fold touches. The
+        peel (`mem_read_after_write_u64` and its `_ne` sibling, with `decide` as
+        the discharge) is what turns that into a fact about one `mem_read_u64`
+        at a literal address, and it has to come after the value-flow lines and
+        before the leaf: emitted after the leaf it is dead text, and emitted
+        before `rw [hsr]` it has no chain to unfold.
+
+        The residual it leaves is `mem_read_u64 (four frame stores) A = 0`,
+        which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
+        place that says memory is zero, and the universal theorem's `st` is a
+        free state. So this test pins the REDUCTION and not a pass, and the doc
+        that says so is `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`.
+        """
+        import formal.arm64_proof_gen as G
+        corpus = os.path.join(HERE, "formal", "examples")
+        with tempfile.TemporaryDirectory(prefix="cfg-leaf-") as tmp:
+            r = _generate_dir(tmp, os.path.join(corpus, "count.mojo"),
+                              "count", os.path.join(tmp, "count.aout"))
+            with open(r["proof_path"]) as fh:
+                lines = fh.read().splitlines()
+        site = "runs-cbz-condition"
+        tagged = [i for i, l in enumerate(lines)
+                  if G.CFG_LEAF_TAG in l and site in l]
+        self.assertTrue(tagged, f"count reached no {site} leaf at all")
+        peel = "mem_read_after_write_u64_ne"
+        for i in tagged:
+            window = lines[max(0, i - 4):i]
+            self.assertTrue(
+                any(peel in w for w in window),
+                f"line {i + 1}: a tagged leaf with no memory peel in the four "
+                f"lines before it, so the obligation it admits is the "
+                f"un-reduced one: {lines[i].strip()[:90]}")
+        # and the peel is where the ADDRESS becomes a literal, which is the
+        # whole difference between a goal a reader can check and an `adrp`
+        # expression. One occurrence is enough to pin the spelling.
+        self.assertTrue(any(peel in l for l in lines),
+                        "the peel disappeared from the generated proof "
+                        "entirely")
+
     def test_removing_the_fallback_leaves_no_admission_on_a_tagged_line(self):
         """`no_admission_fallback` is the instrument; this is its own contract.
 

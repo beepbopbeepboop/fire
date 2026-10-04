@@ -1,14 +1,57 @@
-# `runs-cbz-condition`: the CBZ the `@require` guard emits tests a LITERAL POOL word, so the leaf admits an obligation the contract's hypotheses cannot decide
+# `runs-cbz-condition`: the CBZ that tests the STACK-FLOOR word, so the leaf admits an obligation no tactic can reach
 
 **Area:** FORMAL (the arm64 proof generator's CFG walk, `emit_runs`' `cbz`
 arm). Claim `project22:arm64-cfg-leaves`.
 
-**Status: OPEN, and the shape of it is measured.** The obligation left open is
-quoted verbatim from a real Lean run, the structural reason it is not derivable
-is named, and §"What is left to decide" is the one measurement that turns
-"cannot be proved" into "is not true". Not fixed: closing it needs a relation
-between the machine's `mem` and the image's literal pool, which is a model
-change and not a tactic.
+**Status: OPEN, PARTIAL LANDED (2026-10-04, `work/formal23-2`), and the
+SUBJECT of this document is misidentified — which is the finding.** The
+register this leaf tests is **not** a literal-pool word and the `@require` guard
+emits no code at all: it is `_emit_stack_floor_guard`'s own
+`ADRP+ADD X17, &floor ; LDR X16, [X17] ; CBNZ X16, done`, reading the floor
+word in `__DATA`, and the address in the quoted goal is exactly
+`model.stack_floor_address(0x100400000)`:
+
+    >>> hex(model.stack_floor_address(0x100400000))
+    '0x100400008'          # 4299161608, the literal in the residual goal
+
+So §"What is left to decide" below — the `native_decide` experiment, and the
+lemma it would produce, "the value at a pool address is a function of `code`" —
+**cannot work and should not be run**: the address is in `__DATA`, it is read
+through `st.mem` and not through `code`, and the word there is one the PROGRAM
+writes (the first caller stores `SP - BUDGET`), so relating it to the image
+would be false. §"What was measured, and where" is still right about the census.
+
+**What landed.** `emit_runs`' `cbz` arm now peels the frame stores off the
+tested register's load before the leaf
+(`mem_read_after_write_u64` / `mem_read_after_write_u64_ne`, `decide` as the
+discharge), which reduces the obligation to its minimal form and makes the
+diagnosis legible — the ADRP expression is gone and the goal is one
+`mem_read_u64` at a literal address. Pinned by
+`test_formal_call_proof_gen.py::TestCfgLeafCensus::test_the_cbz_leaf_peels_the_frame_reads_before_it_admits`,
+which pins the REDUCTION and not a pass.
+
+**What the reduction settles, and it is stronger than "unproved".** The residual
+is
+
+    ⊢ mem_read_u64
+          (mem_write_u64 (mem_write_u64 (mem_write_u64
+              (mem_write_u64 st.mem (st.sp - 16).toNat st.x29)
+              (st.sp - 8).toNat st.x30)
+              (st.sp - 32).toNat st.x19)
+              (st.sp - 24).toNat st.x20)
+          4299161608
+        = 0
+
+**which is FALSE for an arbitrary `st.mem`, so this is not a true claim the
+model cannot decide — it is a false obligation, because the theorem's `st` has
+unconstrained memory.** `Arm64State.init` is the only place that says memory is
+zero (`mem := fun _ => 0`), and the universal theorem quantifies over every
+`Arm64State`. The doc's own reading of the situation — "both values of the pool
+word are live states of the theorem, and the theorem can only be true if the two
+arms agree" — is therefore not a question about this example at all: with
+`mem` free the branch is undecided in BOTH directions, so "do the two arms agree"
+is not well posed in the theorem as stated. What is left is a `lib/Refine.lean`
+hypothesis, and §"The next step" says which.
 
 Found while replacing the CFG leaves' `sorry` fallbacks
 (`formal/arm64_proof_gen.py`'s `CFG_LEAF_SITES`, added by the commit that
@@ -71,11 +114,12 @@ mem_read_u64 (frame stores over st.mem) <pool address>
 ```
 
 where `<pool address>` is `4294968008 - (4294968008 % 4096 - 1024*4096 - 8)`,
-the ADRP materialisation of a **literal-pool slot inside the image**. The
-stores on the left are the four frame slots at `sp - 8/16/24/32`; the pool
-address is none of them, so `mem_read_after_write_u64` — the lemma that is in
-the emitted simp set and is the right one when a read hits a written slot — does
-not apply, and nothing else in the file relates `mem` at that address to
+the ADRP materialisation of a word in `__DATA`. **That word is the stack-floor
+word, not a literal-pool slot** (the Status section has the arithmetic), so the
+name in the rest of this document is wrong and the conclusion drawn from it is
+wrong with it. The stores on the left are the four frame slots at
+`sp - 8/16/24/32`; the floor address is none of them, so the frame writes cannot
+decide the read, and nothing else in the file relates `mem` at that address to
 anything.
 
 The contract makes that unfixable within the walk.
@@ -103,52 +147,86 @@ exact absurd hc_{bi} hne_{bi}
 ```
 
 — "the taken arm is statically dead". This leaf is the case `_cbz_reg_const`
-cannot see: the constant is behind an `LDR` from the pool, so the scan clears
-x16 on the load and returns `None`. The generator's existing mechanism is right
-and its blind spot is exactly a literal-pool load.
+cannot see: the value is behind an `LDR`, so the scan clears x16 on the load and
+returns `None`. **But that mechanism must NOT be extended to cover it**, which
+the original reading of this document asked for and which would be wrong: the
+image's own floor word is non-zero from the second call onwards, so "statically
+non-zero" is true of the MACHINE and false of the MODEL (`st.mem` is zero there
+until the walk's own store), and `hne_{bi} : arm64_reg 16 s_cur ≠ 0` would be
+unprovable — and asserting it would be asserting something false about the
+model. What is needed is not a constant but a MEMORY fact; see the next
+section.
 
-## What is left to decide, and it is one `native_decide`
+## What is left to decide — SUPERSEDED, and the answer is in the Status
 
-Whether the leaf is admitting a **false** claim or a true-but-unprovable one
-turns on a single question: do the two arms of that `CBNZ` leave the same value
-in x0? Do not assume either answer.
+The section this replaces proposed one `native_decide` experiment: run the
+compiled `count` with `mem` overwritten at the loaded word, and see whether the
+two arms of the `CBNZ` leave the same value in x0. **Do not run it.** It asks
+whether the leaf admits a false claim or a true-but-unprovable one, and that
+question is not well posed: with `st.mem` free the branch is undecided in both
+directions, so there is no pair of arms to compare. It also assumed the loaded
+word is a function of `code`, which is false for the stack-floor word — the
+program writes it.
+
+What replaces it is a measurement of the reduced goal, which the landed peel
+makes possible, and it is the whole of what is now known:
 
 ```
-$ python3 - <<'PY'
-import sys, os; sys.path.insert(0, os.getcwd())
-import formal.build as fb
-r = fb.compile_formal('formal/examples/count.mojo', arch='arm64',
-                      output='.tmp/count_decide.aout', prove=True, check=False)
-print(r['proof_path'])
-PY
+$ python3 tools/memslot.py --gb 8 --label lean-count -- python3 .tmp/lean_count.py output/count_nohole.lean
+OK False cached False sorries 0
+errors: 9
+   count_nohole.lean:5249:32: error: unsolved goals      ← this leaf, before
+   count_nohole.lean:5284:32: error: unsolved goals      ← this leaf, before
+   count_nohole.lean:5330:16: error: Tactic `rfl` failed        (formal21-3)
+   count_nohole.lean:5364:22: error: Tactic `introN` failed  ×4 (formal21-3)
+   count_nohole.lean:5406:32: error: unsolved goals      ← a recursion branch
+   count_nohole.lean:5434:32: error: unsolved goals      ← a recursion branch
+memcap: done, peak 4.2 GB across up to 2 procs (ceiling 8.0 GB)
 ```
 
-then, in a scratch file importing that proof's own `count_code` /
-`count_prog`, evaluate
+(the harness is the doc's own "Reproduce" below with `repo_root=os.getcwd()` —
+`repo_root='.'` makes `lean.py` build a RELATIVE `LEAN_PATH` and Lean answers
+`unknown module prefix 'ProofLib'`, and the CAS then caches that verdict under
+the proof's bytes, so a re-run needs a one-byte change to the file to be
+re-measured at all. Both are recorded because both cost an hour.)
+
+## The next step: a MEMORY hypothesis, not a constant
+
+The theorem quantifies over every `Arm64State`, and `st.mem` is one of its
+fields, so nothing in it says the machine's memory outside its own frame is
+zero. `Arm64State.init`'s `mem := fun _ => 0` says it for the CONCRETE run and
+for nothing else. The missing statement is the same shape as `FrameBound`, and
+`FrameBound` is where to put it — `lib/Refine.lean:512`, next to it, as its
+sibling:
 
 ```lean
-example : (match arm64_exec_go_exit { (Arm64State.init 10 4294967968)
-                                      with x30 := UInt64.ofNat 4294968164 }
-            count_code 200000 with
-          | some s => s.x0 | none => 0) = mojo 10 := by native_decide
+abbrev FrameBound (stride : Nat) (st : Arm64State) (arg : UInt64) : Prop :=
+  stride * (arg.toNat + 1) ≤ st.sp.toNat
 ```
 
-and the same with `mem` overwritten at the pool word
-(`mem_write_u64`-style, or `Arm64State.init`'s `mem` composed with a function
-that is non-zero at that address only). Two answers:
+Something of the shape "this frame's stores are the only ones below `sp`, so
+`st.sp - K ≤ a → st.mem a = 0` for every `K` the emitter can have written" —
+which is precisely what makes `mem_read_u64 (four frame stores) 4299161608 = 0`
+follow by `mem_read_after_write_u64_ne`, since `FrameBound` already puts
+`st.sp` near 2^64 and the floor address is at `0x100400008`.
 
-* **they differ** — `count_contract` is FALSE as stated, which is the sharpest
-  entry in `FORMAL.md` §7 and needs its own row there, and the fix is to
-  constrain the contract's `st` (or to make `mem` the image's memory, which is
-  the honest reading of a freestanding image and a much larger change);
-* **they agree** — the claim is true and unproved, and the fix is a lemma: the
-  value at a pool address is a function of `code`, so `code`-relative facts
-  about literal slots are the reusable piece (one `native_decide` per slot, and
-  `_cbz_reg_const` grows an `LDR`-from-pool case).
+What it costs, and it is a project rather than a patch:
 
-Either way the first change is the same and it is small: teach
-`_cbz_reg_const` to read the constant an `ADR`/`ADRP`+`LDR` pair materialises,
-so the leaf emits a fact instead of a question.
+* the hypothesis has to be **discharged for the initial state** (where it is
+  `rfl`/`decide`, because `init`'s `mem` is the constant-zero function) and
+  **carried through the frame contract** — `frameBound_succ` and its siblings
+  are the pattern, and each needs the memory fact to survive a `BL`;
+* every arm64 proof that reaches a memory load from outside its own frame is
+  regenerated and re-checked, which is a full Lean sweep, not a single example
+  — `count` alone cannot show the change is sound;
+* and the shape of the hypothesis is a value-model decision, not a tactic: a
+  program that legitimately maps memory low (a `malloc`'d buffer below 2^32, an
+  `mmap`) would falsify it, and this path's allocator has to be checked for that
+  before the hypothesis is stated as universal. `bugs/PERF_memory_over_4gb_is_a_bug.md`'s
+  standard applies to the decision, not to the code.
+
+Until that lands the leaf admits, and it is the only one of the fifteen that
+does.
 
 ## What is already measured, and where
 
@@ -172,7 +250,14 @@ at proof line 5330 and the `FrameOk` window's `intro j hj` fails at 5364, which
 is `bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` (claimed by
 `work/formal21-3`). `count` is NOT in `test_formal.py`'s `EXPECTED_FAILURES`, so
 `test_formal.py` should be reporting it as a FAIL on this tree; nobody has
-looked because the leaf it also admits was invisible.
+looked because the leaf it also admits was invisible. **Re-measured
+2026-10-04** on this tree's tip and unchanged in every figure: 9 diagnostics, of
+which 5 are `formal21-3`'s and **4** are this leaf — the two floor-guard CBZs
+above plus two RECURSION branches (`count_proof.lean:5406`, `:5434`), which the
+table's "2 of 6" did not separate out. The recursion branches carry
+`have hne_6 : arg ≠ 0` and are a different subject (`∀ n, n ≠ 0 → count n = …`
+against a branch the walk forces), so they are left here rather than merged into
+this document's claim; a reader counting this leaf should count four, not two.
 
 Reproduce the second half with no Lean at all (the first is generation, ~1 s per
 example; the census over all 47 is ~2 s):
@@ -196,7 +281,7 @@ r = fb.compile_formal("formal/examples/count.mojo", arch="arm64",
 text = G.no_admission_fallback(open(r["proof_path"]).read())
 open("output/count_nohole.lean", "w").write(text)
 ok, detail, cached, n = check_proof_cached(
-    "output/count_nohole.lean", repo_root=".")
+    "output/count_nohole.lean", repo_root=os.getcwd())   # ABSOLUTE: see above
 print(detail.splitlines()[4])        # the leaf, by name
 ```
 
