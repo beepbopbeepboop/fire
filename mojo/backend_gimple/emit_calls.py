@@ -4867,6 +4867,33 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_decls          = gen.decls
     saved_body           = gen.body_lines
     saved_var_types      = dict(gen.var_types)
+    # `_c_names` is the ONE entry in `_reset_func`'s per-function list whose
+    # keys are not temp names, so dropping it is not the "safe direction" that
+    # list's own comment promises. It is the source-level-name → C-identifier
+    # map, and an entry in it exists only because some local SHADOWED
+    # something: a C keyword, a macro, a libc function (`close`), a struct
+    # typedef. Losing the map does not lose a temp, it changes the SPELLING of
+    # the enclosing function's own already-declared local — and every later
+    # reference falls back to the raw Python name, which is either a different
+    # variable or nothing at all.
+    #
+    # Real: `elab_intu._mentions` declares `close = _matching_bracket(ann,
+    # open_at)` (so `_declare_var` mints `int64_t _var_close;` and records the
+    # rename), then a lambda — `found.sort(key=lambda t: t[3] - t[1])` — runs
+    # `_reset_func` in the middle of the parent, and the SECOND
+    # `for base, bs, open_at, close in found:` unpack then wrote the raw
+    # spelling into a C variable nothing declares:
+    #
+    #     error: 'close' undeclared (first use in this function);
+    #            did you mean 'pclose'?
+    #
+    # `base`, `bs` and `open_at` in that same unpack were declared normally and
+    # gcc reported only `close`, which is what makes this one name's history
+    # rather than the unpack's. This is the same defect
+    # `_callable_ret_types`/`_dict_callable_ret` below were saved for, and the
+    # same discipline: `_reset_func`'s list and this list have to agree, name
+    # for name, or a nested lift silently changes the parent's meaning.
+    saved_c_names        = dict(gen._c_names)
     # The callable-value knowledge the ENCLOSING function has built up, for
     # the same reason and with the same shape as the state saved just below:
     # `_gen_lifted_closure` calls `_reset_func` to generate the lambda's own
@@ -5004,6 +5031,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     gen._callable_ret_types     = saved_callable_rets
     gen._dict_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
+    gen._c_names                = saved_c_names
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type
     gen.bb_counter              = saved_bb

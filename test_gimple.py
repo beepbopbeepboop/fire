@@ -10,6 +10,8 @@ import os
 import sys
 import gimple_codegen
 from gimple_codegen import compile_to_gimple
+import fire_compiler
+import mojo.middle.infra_infer
 import platform
 from build_config import find_gcc
 
@@ -518,6 +520,203 @@ def set_only(n: Int):
         _FAIL += 1
 
 
+def test_returned_param_takes_its_declared_container_return_type():
+    """An unannotated parameter a `-> container` function hands STRAIGHT back
+    is that container.
+
+    `_infer_param_types` reads a parameter's type out of its USES, and the
+    `is_subscripted or is_iterated` arm's last resort is `MojoList *` — a guess
+    standing in for "this key's stringness is unprovable", which the dict arm
+    right above it says in as many words. But a `-> dict` is not decoration:
+    every `return` is coerced to it and `emit_resolve._sce_simple_emit` refuses
+    a container-kind mismatch outright, so where the guess disagrees with the
+    annotation the build is ALREADY a hard `cannot coerce`. Reading the same
+    fact where the type is first invented (`infra_infer.
+    _returned_param_containers`) is what makes the two halves agree.
+
+    Real, and it took out three registered jobs at once: `elaborate.py::
+    _fill_erased_params(template_src, params, binding) -> dict` does
+    `binding[p] = ERASED_TYPE_ARG` with `p` a comprehension loop variable — no
+    local analysis can prove that key is a string — so `binding` took the guess
+    and the `return binding` refused the whole self-host closure with
+
+        cannot coerce MojoList * to MojoDict * (incompatible container kinds)
+        at elaborate.py: value='binding' dest='_t20'
+
+    which is `selfhost`, `mojoc` and `bootstrap-stage2-cc` (the last behind
+    the second), all from one defect.
+
+    Two arms on the generated C, because the answer was never the point — the
+    shape did not compile — and one arm on `_returned_param_containers`
+    directly for the GUARD, since that is where the guard lives and a
+    rebinding cannot be observed through a signature: `rebound`'s parameter is
+    excluded because the annotation there describes a value the parameter no
+    longer holds, and `_prebound_local_ctypes` (the mirror-image rule for
+    locals) is what types it. `to_list` is in the pair to show the rule is not
+    a dict special case.
+    """
+    global _PASS, _FAIL
+    name = "returned_param_takes_its_declared_container_return_type"
+    try:
+        ok, c_src, stderr = gimple_compiles("""\
+def to_dict(names, box) -> dict:
+    missing = [n for n in names if n not in box]
+    for n in missing:
+        box[n] = n
+    return box
+
+
+def to_list(xs) -> list:
+    out = []
+    for x in xs:
+        out.append(x)
+    return xs
+
+
+def rebound(kind, box) -> dict:
+    if kind > 0:
+        box = {}
+    return box
+""")
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+
+    def param_ctype(fname, pname):
+        """The C type `pname` is DECLARED with in `fname`'s emitted DEFINITION.
+        The emitted symbol is the mangled `fname_<hash>`, and the definition is
+        the occurrence whose parameter list NAMES its parameters and is not
+        `;`-terminated — the forward declaration above it is the same name with
+        bare types, so matching either would read the wrong one."""
+        m = re.search(r'^\S[^\n;]*\b' + re.escape(fname) + r'_[0-9a-f]+'
+                      r'\s*\(([^;\n]*)\)\s*$', c_src, re.M)
+        if m is None:
+            return ''
+        for part in m.group(1).split(','):
+            part = part.strip()
+            if part.endswith(' ' + pname):
+                return part[:-len(pname) - 1]
+        return ''
+
+    guard = {}
+    for s in fire_compiler.Parser(
+            fire_compiler.py_tokenize("""\
+def rebound(kind, box) -> dict:
+    if kind > 0:
+        box = {}
+    return box
+""")).parse_module():
+        if isinstance(s, fire_compiler.FunctionDef) and s.name == 'rebound':
+            guard = mojo.middle.infra_infer._returned_param_containers(s)
+            break
+
+    d_t = param_ctype('to_dict', 'box')
+    l_t = param_ctype('to_list', 'xs')
+    if ok and d_t == 'MojoDict *' and l_t == 'MojoList *' and guard == {}:
+        print(f"PASS  {name}  (to_dict={d_t}, to_list={l_t}, rebound={guard})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} to_dict={d_t!r} to_list={l_t!r} "
+              f"rebound={guard!r} (want 'MojoDict *' / 'MojoList *', and the "
+              f"rebound arm excluded)")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
+def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
+    """Lifting a closure must not un-rename the enclosing function's locals.
+
+    `_declare_var` renames a local that SHADOWS something C cares about — a
+    keyword, a macro, a libc function, a struct typedef — to `_kw_x` / `_var_x`
+    and records the rename in `gen._c_names`, which every later reference
+    resolves through. `_reset_func` clears that map per function, and a lifted
+    closure runs `_reset_func` in the middle of its PARENT, which is why
+    `_gen_lifted_closure` saves and restores `decls`, `body_lines`, `var_types`
+    and the callable tables around the nested codegen. `_c_names` was in the
+    reset list and not in the save/restore list, so lifting ANY closure erased
+    the enclosing function's map: every later reference fell back to the raw
+    Python name, which is a different variable or nothing at all.
+
+    `close` is the measured instance (real: `elab_intu._mentions` declares
+    `close = _matching_bracket(ann, open_at)` and then sorts with
+    `found.sort(key=lambda t: t[3] - t[1])`), and it is a libc function, so the
+    failure is loud:
+
+        error: 'close' undeclared (first use in this function);
+               did you mean 'pclose'?
+
+    Asserted on the generated C rather than on gcc's exit status, because the
+    spelling is the property: `int64_t _var_close;` declared and every
+    reference `_var_close`, with no bare `close` assignment anywhere in the
+    function. The second arm is the same function WITHOUT the lambda, so the
+    case fails if a future fix makes the rename itself go away.
+    """
+    global _PASS, _FAIL
+    name = "a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals"
+    body = """\
+    found = []
+    for m in items:
+        opened = m
+        close = bracket(opened)
+        if close is None:
+            continue
+        found.append((m, opened, close))
+    %s
+    out = []
+    for first, opened, close in found:
+        out.append(first)
+        out.append(close)
+    return out
+"""
+    def program(sort_line):
+        return ('def bracket(x):\n    return x\n\n'
+                'def walk(items):\n' + (body % sort_line)
+                + '\nprint(walk([1, 2]))\n')
+
+    try:
+        ok_sort, c_sort, err_sort = gimple_compiles(
+            program('found.sort(key=lambda t: t[2] - t[1])'))
+        ok_plain, c_plain, err_plain = gimple_compiles(
+            program('found.sort()'))
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+
+    def walk_body(src):
+        m = re.search(r'^\S[^\n;]*\bwalk_[0-9a-f]+[^\n;]*\n\{\n(.*?)^\}$',
+                      src, re.M | re.S)
+        return m.group(1) if m else ''
+
+    def verdict(src):
+        """`('bare'|'renamed', count)` — whether the function ever WRITES the raw
+        `close` spelling, and how many times it reads/writes `_var_close`."""
+        b = walk_body(src)
+        if not b:
+            return ('no walk body', 0)
+        return ('bare' if re.search(r'^  close = ', b, re.M) else 'renamed',
+                len(re.findall(r'\b_var_close\b', b)))
+
+    v_sort, n_sort = verdict(c_sort)
+    v_plain, n_plain = verdict(c_plain)
+    if (ok_sort and ok_plain and v_sort == 'renamed' and v_plain == 'renamed'
+            and n_sort >= 2 and n_plain >= 2):
+        print(f"PASS  {name}  (with lambda {v_sort}/{n_sort}, "
+              f"without {v_plain}/{n_plain})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: with-lambda compiles={ok_sort} {v_sort}/{n_sort}, "
+              f"without compiles={ok_plain} {v_plain}/{n_plain} "
+              f"(want compiles + 'renamed'/>=2 both ways)")
+        if not ok_sort:
+            for line in err_sort.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
     # A comprehension's `for` target that SHADOWS a live local of the same name
     # must get its own C variable, and the element's own type must be the one
@@ -728,6 +927,12 @@ def main():
     test_return_type_of_a_rebound_local_is_the_box()
     # ... and neither does one rebound to a different CONTAINER kind.
     test_rebound_container_local_is_the_box()
+    # ... and a parameter a `-> container` function hands back is that
+    # container, which is what took out selfhost/mojoc/bootstrap-stage2-cc.
+    test_returned_param_takes_its_declared_container_return_type()
+    # ... and a lifted lambda does not un-rename the enclosing function's
+    # shadowing locals, which is the next layer of the same build.
+    test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals()
 
 
     # 1. Empty void function (pass body)
