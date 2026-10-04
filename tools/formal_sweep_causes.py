@@ -400,6 +400,26 @@ CAUSES = (
     # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
     ("a bracketed specialization of a callee this unit does not compile",
      (("so the brackets cannot be bound",),)),
+    # ── a call through a VALUE: three shapes, three rows, and the distinction
+    #    is which DECLARATION is missing. They used to be one refusal, so all
+    #    three sat in `other refusal`, which is the bucket that means nobody has
+    #    looked. Above the `is passed to` pair below because each of these
+    #    messages contains "a call through a VALUE" and two of them contain a
+    #    clause that pair would otherwise claim; pinned in both directions by
+    #    `test_refusal_taxonomy.py`'s samples.
+    #
+    # The construct LOWERS when there is nothing to read: a function value is a
+    # code address, and `f[w, h](x)` through a word passes the bracket as
+    # leading arguments
+    # (`std/algorithm/backend/tile.mojo`'s `workgroup_function[tile_size]`).
+    # These three are the shapes with no declaration in hand, and each one says
+    # what the reader can write instead.
+    ("a call through a value whose declared type cannot hold one",
+     (("a word that is not a code address is nothing to branch through",),)),
+    ("a bracketed callee through a value, which this build cannot read",
+     (("is a bracketed call through a VALUE",),)),
+    ("a keyword argument in a call through a value",
+     (("no declaration to bind it by NAME",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",

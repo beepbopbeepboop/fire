@@ -221,6 +221,26 @@ SAMPLES = [
     ("one-field mutator receiver hand-off",
      "Cell.swap() changes its receiver and returns a frame, and this path has "
      "two hidden-word conventions"),
+    # ── a call through a VALUE, 2026-10-03. The construct itself LOWERS now
+    #    (a function value is a code address and the specialization's brackets
+    #    are leading arguments), so what is in this bucket is the three shapes
+    #    with NO declaration in hand — three rows rather than one because the
+    #    three fixes are different, which is the whole criterion this table is
+    #    keyed on. One cause and one sample each: `classify_message` sees only
+    #    the message, so a marker with no sample is the dead-marker failure.
+    ("value call: declared type cannot hold a function",
+     "`f` is a call through a VALUE rather than through a function of this "
+     "unit — `f` is a name call_container binds, a parameter or a local of it "
+     "and it is declared `List[Int]`, and a word that is not a code address "
+     "is nothing to branch through"),
+    ("value call: bracket unreadable",
+     "`workgroup_function[…](…)` is a bracketed call through a VALUE, and a "
+     "bracket on a value is two constructs: the comptime parameters of a "
+     "specialization, or an index into a container"),
+    ("value call: keyword unreadable",
+     "`f(x, b=2)` is a keyword argument in a call through a VALUE, and this "
+     "path has no declaration to bind it by NAME: a callee reached through a "
+     "word is read as taking the arguments the call site writes"),
 
 ]
 
@@ -590,6 +610,24 @@ CAUSE_SAMPLES = [
     ("a one-field mutator's receiver hand-off is refused",
      "Cell.bump() changes its receiver and declares no return type, so the "
      "call has no value, and it is used as one here"),
+    # The same three, in the PLANNER's table, which has its own markers and
+    # therefore its own rot. The bracket one is quoted from
+    # `std/algorithm/backend/tile.mojo`'s own spelling (`workgroup_function`),
+    # because that is the file the row is about and a sample from a test
+    # program would let a reword of the test's own text go unnoticed.
+    ("a call through a value whose declared type cannot hold one",
+     "`func` is a call through a VALUE rather than through a function of this "
+     "unit — `func` is a name call_container binds, a parameter or a local "
+     "of it and it is declared `List[Int]`, and a word that is not a code "
+     "address is nothing to branch through"),
+    ("a bracketed callee through a value, which this build cannot read",
+     "`workgroup_function[…](…)` is a bracketed call through a VALUE, and a "
+     "bracket on a value is two constructs: the comptime parameters of a "
+     "specialization, or an index into a container"),
+    ("a keyword argument in a call through a value",
+     "`func(x, b=2)` is a keyword argument in a call through a VALUE, and "
+     "this path has no declaration to bind it by NAME: a callee reached "
+     "through a word is read as taking the arguments the call site writes"),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,
