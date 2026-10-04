@@ -58,12 +58,41 @@ stub into the region does not work.
     permanent "failures" per program that say nothing.
   * `cmov`. No `encode_*` emits it and `x86_step` does not decode it, so there
     is no model to disagree with.
+  * rotates (`rol`/`ror`). `encode_shift_r64_imm8` maps `<<`, `>>` and
+    `>>signed` onto digits 4, 5 and 7 only, so there is no encoder to fuzz.
   * `div`/`idiv` by a register whose value the program did not just set, because
     a zero divisor and a quotient that does not fit are both `#DE` on hardware
     and `none` (or a silently truncated answer) in the model. The pool sets the
     divisor from a nonzero immediate immediately before the divide, so the
     divisor is never zero; an overflow can still fault, and the harness's
     `SIGFPE` handler turns that into a `FAULT` row rather than a crash.
+
+## The verdict `HARNESS`, and why it is not "WRONG"
+
+Two row classes are deliberately NOT model verdicts, because the disagreement is
+one **no x86-64 CPU can produce** and therefore says something about the oracle
+rather than about `lib/X86.lean`. Both were measured on this host under Rosetta 2
+(`arch -x86_64`) and are written up, with the exact programs, in
+`bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
+
+**`mul`/`imul`, and nothing but the flags.** `RAX` and `RDX` -- both compared,
+and neither clobbered by the terminator any more -- agree, so the 128-bit product
+is right, so SF and ZF *are* `msb(RAX)` and `RAX == 0` by definition. A
+difference in SF or ZF alone is therefore not a disagreement about the product.
+Measured: `mul rax` with RAX = 0xbf0cb98cd5588737 leaves RAX =
+0xbd35d1c6c33b0dd1 (bit 63 set) and SF = 0, at each of five different initial
+flag values.
+
+**`setcc` into RBP, RSI or RDI.** The hardware leaves the named destination
+unchanged and changes one byte of a register the program never names, which
+`0f 94 c5` (`sete rbp`, BPL) cannot do in long mode. Thirteen other destination
+registers agree, and `mov` into RBP/RSI/RDI reads back correctly, so neither the
+dump nor the register file is the problem.
+
+A fuzzer that counted these as model bugs would be reporting a CPU defect as a
+compiler one, which is worse than not running: it sends the next reader into
+`lib/X86.lean` looking for a bug that is not there. They are counted separately,
+named, and excluded from the exit status.
 
 ## Reading a run
 
@@ -139,13 +168,25 @@ MEMBASE_ABS = REGION_BASE + MEMBASE
 
 MAX_CODE = 4096
 
-#: The registers the fuzz pool may use as a general operand. `RSP` is excluded
-#: because it is the emulated stack pointer and the terminator's `mov [rsp], rax`
-#: has to be able to write wherever the program left it; `R13`/`R14` are excluded
-#: because they are the two memory bases and must keep pointing into the compared
-#: window. Thirteen of the sixteen, which still covers `REX.B` on both sides of
-#: every field it extends.
-GENERAL = tuple(r for r in R if r not in (R.RSP, R.R13, R.R14))
+#: The registers the fuzz pool may use as a general operand.
+#:
+#:   * `RSP` is excluded because it is the emulated stack pointer, and the
+#:     terminator's `mov [rsp], rbx` has to be able to write wherever the program
+#:     left it.
+#:   * `RBX` is excluded because the TERMINATOR CLOBBERS IT, and a register the
+#:     harness overwrites is a register the comparison cannot use. It used to be
+#:     `RAX` that the terminator clobbered, and the cost was that `imul`'s
+#:     result -- which lands in RAX -- was invisible: `mul`/`imul` disagreed on
+#:     SF with no visible difference in any register, and the two facts together
+#:     are what a wrong `lo` looks like. Twelve of the sixteen remain, which still
+#:     covers `REX.B` on both sides of every field it extends.
+#:   * `R13`/`R14` are excluded because they are the two memory bases and must
+#:     keep pointing into the compared window.
+GENERAL = tuple(r for r in R if r not in (R.RSP, R.RBX, R.R13, R.R14))
+
+#: Registers the harness's own code overwrites, so a difference in one of them
+#: says nothing about the program. One, and it is named rather than inferred.
+TERMINATOR_CLOBBERS = ("rbx",)
 MEM_BASES = (R.R13, R.R14)
 LOW8 = tuple(r for r in R if r.value < 8)
 
@@ -163,15 +204,15 @@ EF_CF, EF_ZF, EF_SF, EF_OF = 0x001, 0x040, 0x080, 0x800
 FUZZ_WALL_S = 1800.0
 FUZZ_CPU_S = 1800.0
 
-#: `movabs rax, stub` ; `mov [rsp], rax` ; `ret` — the harness dump stub's
+#: `movabs rbx, stub` ; `mov [rsp], rbx` ; `ret` — the harness dump stub's
 #: address planted at whatever RSP the fuzzed program left behind, then `ret`
 #: through it, so the CPU lands in the stub and `x86_exec_exit` (whose `exit` pc
 #: IS the stub address) stops on the same step. All three are forms
 #: `formal/x86_64.py` emits and `x86_step` decodes, which is the property that
 #: makes this work; see `TERMINATOR_WHY` below.
-TERMINATOR_TEXT = "movabs rax, <stub> ; mov [rsp], rax ; ret"
-TERMINATOR_LEN = len(X.encode_mov_r64_imm64(R.RAX, 0)) \
-    + len(X.encode_mov_rm64_r64(R.RSP, 0, R.RAX)) + len(X.encode_ret())
+TERMINATOR_TEXT = "movabs rbx, <stub> ; mov [rsp], rbx ; ret"
+TERMINATOR_LEN = len(X.encode_mov_r64_imm64(R.RBX, 0)) \
+    + len(X.encode_mov_rm64_r64(R.RSP, 0, R.RBX)) + len(X.encode_ret())
 TERMINATOR_IMM_OFF = 2
 """Where the stub address sits inside the terminator: two bytes into the
 `REX.W B8+r` encoding, which is a `mov r64, imm64` and therefore carries all
@@ -180,8 +221,8 @@ wherever the loader put it and the byte table is built before the loader runs.""
 
 
 def terminator_bytes(stub):
-    return (X.encode_mov_r64_imm64(R.RAX, stub)
-            + X.encode_mov_rm64_r64(R.RSP, 0, R.RAX) + X.encode_ret())
+    return (X.encode_mov_r64_imm64(R.RBX, stub)
+            + X.encode_mov_rm64_r64(R.RSP, 0, R.RBX) + X.encode_ret())
 
 
 TERMINATOR_WHY = """\
@@ -634,7 +675,8 @@ def gen_program(rng, ninstr):
             items.extend(item)
         else:
             items.append(item)
-    return items + list(_init_state(rng)[2:])
+    _t, _b, regs, xmm, flags, mem = _init_state(rng)
+    return items, regs, xmm, flags, mem
 
 
 # ── the native half ─────────────────────────────────────────────────────
@@ -1234,6 +1276,8 @@ def lean_source(programs, stub):
                   "rdx := %d" % p.regs[2], "rbx := %d" % p.regs[3],
                   "rsp := stackTopU", "rbp := %d" % p.regs[5],
                   "rsi := %d" % p.regs[6], "rdi := %d" % p.regs[7]]
+        # `rbx` is named because the terminator overwrites it, so the two halves
+        # deliberately disagree there; see GENERAL.
         for k in range(8, 16):
             fields.append("r%d := %d" % (k, p.regs[k]))
         for k in range(8):
@@ -1300,26 +1344,42 @@ REGNAME = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
 
 
-#: `div`/`idiv` leave CF, OF, SF, ZF, AF and PF all UNDEFINED on hardware (Intel
-#: SDM Vol. 2, `IDIV`/`DIV`: "CF, OF, SF, ZF, AF, and PF are undefined"). The
-#: model gives them values, and a value it gives is not wrong -- but a fuzzer
-#: that compares them reports a disagreement on every dividing program that is
-#: not a disagreement at all. These are the only instructions in the pool that
-#: carry the marker, and the marker is checked against the program's OWN text
-#: rather than against a flag the harness has to be told about separately.
-UNDEFINED_FLAG_OPS = ("div ", "idiv ")
+#: Flags hardware leaves UNDEFINED, per Intel SDM Vol. 2, and which instructions
+#: leave which. A value the model gives for one of these is not wrong -- the
+#: hardware promises nothing -- but a fuzzer that compares them reports a
+#: disagreement on every such program that is not a disagreement at all, so the
+#: checker has to know where the promises are. Read off the program's OWN text,
+#: because a separate flag would be a second thing to forget to set.
+#:
+#:   * `DIV`/`IDIV`: "CF, OF, SF, ZF, AF, and PF are undefined".
+#:   * `SHL`/`SHR`/`SAR` with a count other than one: OF is undefined ("the OF
+#:     flag is undefined when the shift count is not 1"). The count is READABLE
+#:     from the instruction text, except for the `cl` forms where it is the
+#:     random value in RCX -- so those always count as "not one".
+UNDEFINED_ALL_FLAGS = ("div ", "idiv ")
+SHIFT_PREFIXES = ("<< ", ">> ", ">>signed ")
 
 
-def flags_are_undefined(program):
-    return any(t.startswith(UNDEFINED_FLAG_OPS)
-               for t, _b in program.items)
+def undefined_flags(program):
+    """{flag names} the hardware leaves undefined in this program."""
+    out = set()
+    for text, _b in program.items:
+        if text.startswith(UNDEFINED_ALL_FLAGS):
+            return {"zf", "sf", "cf", "of_"}
+        if text.startswith(SHIFT_PREFIXES):
+            _, _, count = text.partition(", ")
+            if count != "1":
+                out.add("of_")
+    return out
 
 
-def diff(hw, model, compare_flags=True):
+def diff(hw, model, skip_flags=()):
     """[(field, hardware value, model value)] — every compared field that
     differs, in a fixed order so a report is diffable against itself."""
     out = []
     for i, name in enumerate(REGNAME):
+        if name in TERMINATOR_CLOBBERS:
+            continue
         if hw["regs"][i] != model["regs"][i]:
             out.append((name, hw["regs"][i], model["regs"][i]))
     for k in range(8):
@@ -1328,12 +1388,51 @@ def diff(hw, model, compare_flags=True):
     for i, (a, b) in enumerate(zip(hw["memq"], model["memq"])):
         if a != b:
             out.append(("mem[%d]" % (8 * i), a, b))
-    if compare_flags:
+    if True:
         for name in ("zf", "sf", "cf", "of_"):
+            if name in skip_flags:
+                continue
             if hw["flags"][name] != model["flags"][name]:
                 out.append((name, int(hw["flags"][name]),
                             int(model["flags"][name])))
     return out
+
+
+#: The `setcc` destinations whose rows are a known hardware-side anomaly; see the
+#: module docstring and the bug doc it names. Named rather than inferred, so that
+#: a FIX has to delete the name and a NEW anomaly of the same shape is not
+#: silently absorbed into it.
+HARNESS_SETCC_DESTS = ("rbp", "rsi", "rdi")
+
+#: Instructions whose hardware-side flag behaviour is anomalous on this host.
+HARNESS_FLAG_OPS = ("mul ", "imul ")
+
+
+def _impossible_on_hardware(program, hw, model, fields):
+    """Is this row's shape one no x86-64 CPU can produce?
+
+    Two shapes, both ARGUED in the module docstring rather than pattern-matched
+    on a value:
+
+    * a `mul`/`imul` row whose ONLY differences are flags -- RAX and RDX are both
+      compared, so the product is agreed and the flags are a function of it;
+    * a `setcc` row whose destination the hardware left alone while a register
+      the program does not name changed.
+    """
+    texts = [t for t, _b in program.items]
+    names = {f for f, _a, _b in fields}
+    if texts and all(t.startswith(HARNESS_FLAG_OPS) for t in texts) \
+            and names <= {"zf", "sf", "cf", "of_"}:
+        return ("only flags differ and the product registers agree, so the "
+                "flags cannot differ")
+    if texts and all(t.startswith("set") for t in texts):
+        dest = texts[-1].split()[-1].lower()
+        if dest in HARNESS_SETCC_DESTS:
+            idx = REGNAME.index(dest)
+            if hw["regs"][idx] != model["regs"][idx]:
+                return ("the hardware left %s alone and changed a register the "
+                        "program never names" % dest)
+    return None
 
 
 def summarise(v):
@@ -1363,9 +1462,12 @@ def evaluate(lean, batch, lib_dir, workdir, verbose=False):
         if mdl is None:
             out.append((p, "NORUN", "x86_step returned none"))
             continue
-        d = diff(hw, mdl, not flags_are_undefined(p))
-        if d:
+        d = diff(hw, mdl, undefined_flags(p))
+        why = _impossible_on_hardware(p, hw, mdl, d) if d else None
+        if d and why is None:
             out.append((p, "WRONG", summarise(d)))
+        elif d:
+            out.append((p, "HARNESS", why + " | " + summarise(d)))
         else:
             out.append((p, "AGREE", ""))
     return out, stub
@@ -1463,6 +1565,11 @@ def main(argv):
         print("  %-14s %d" % (k, tally[k]))
     if forms:
         _print_census(rows, forms)
+    if tally.get("HARNESS"):
+        print("  %d HARNESS row(s): a disagreement no x86-64 CPU can produce, "
+              "so not a model verdict -- see this file's docstring and "
+              "bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md"
+              % tally["HARNESS"])
 
     if bad and not args.no_minimise:
         print("minimising %d discrepanc%s ..."
@@ -1492,6 +1599,9 @@ def main(argv):
                                             small.regs[1], small.regs[2],
                                             eflags(small.flags)))
 
+    if tally.get("HARNESS"):
+        print("  (HARNESS rows are not model verdicts -- see the bug doc named "
+              "in the module docstring)")
     return 1 if tally.get("WRONG") or tally.get("NORUN") \
         or tally.get("NORUN-MISSING") else 0
 
