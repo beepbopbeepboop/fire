@@ -91,7 +91,15 @@ _STACK_ARG_OFF = 16
 # until the function returns. The cursor grows UP from the frame bottom (so a
 # nested container sits above its parent, as in the arm64 backend) and is
 # capped just below the spill/saved-register area.
-_BLOB_BYTES = 16384
+#
+# The VALUE is `formal/model.py::X86_64_CONTAINER_BUDGET`, next to arm64's
+# `ARM64_CONTAINER_BUDGET`. It is 8x smaller and deliberately so: this region
+# has to sit inside the frame this backend's own locals, spill area and
+# receiver frames are laid out against, and raising it is a frame-layout change
+# with a proof obligation on `lib/X86.lean`'s stack-floor and frame-bound
+# lemmas. What the pair buys is `MIN`-of-the-two deciding anything that must
+# hold on both machines — `formal/model.py::CONTAINER_BUDGET`.
+_BLOB_BYTES = M.X86_64_CONTAINER_BUDGET
 
 # The local a frame-returning function keeps the CALLER'S block address in.
 # A name rather than a dedicated register, so the word goes through the same
