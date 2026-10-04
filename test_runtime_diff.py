@@ -480,8 +480,8 @@ BUILTIN_PROGRAMS = {
     # exempted `str`/`bytes` from the unpack, and the compiled path REFUSED the
     # shape outright (`_emit_unsupported_iter`) because lowering CPython's
     # reading while the interpreter disagreed would have made the two engines
-    # differ on the one comparison this file is. Both are fixed
-    # (`bugs/RUNTIME_starred_for_target_over_a_dict_key_is_not_unpacked.md`).
+    # differ on the one comparison this file is. Both are fixed (2026-10-04,
+    # with the filing deleted).
     #
     # All three positions the star can be in, because each is a different piece
     # of arithmetic and the slots after the star are counted from the END of the

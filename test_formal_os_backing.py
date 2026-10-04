@@ -1454,9 +1454,9 @@ def run(out, arch, env=None):
     program cannot raise on itself. The two are kept apart because they are
     different claims — a hang is this module's image
     failing to terminate, a signal is this machine failing to let it run — and
-    that difference is the whole of what
-    `bugs/TEST_formal_os_backing_stat_cases_die_of_SIGKILL_under_load.md` could
-    not conclude while both printed `FAIL <case>`.
+    that difference is the whole of what the two `stat_*` cases that died this
+    way under load (2026-10-04, deleted with this fix) could not conclude while
+    both printed `FAIL <case>` with an empty stderr.
 
     `env` replaces the environment the image starts with; `None` inherits this
     process's, which is what every case but `environ_view` wants. It is the
