@@ -1,99 +1,129 @@
-# the stack-floor guard's `exit(2)` call target is outside the image, so no end-to-end path tree exists
+# the stack-floor guard's `exit(2)` call target is outside the image: the path tree now ends there, and the theorem is a disjunction over halt addresses
 
-## Status: OPEN, not fixed — the two missing step lemmas this sat behind are now
-## proved and wired (`work/gatefix5`, 2026-10-03), and this is the layer they
-## uncovered. It was NOT visible before them: `_plan` refused first, so
-## `test_formal_sweep_truth.py`'s six `TestX86EndToEndEmitter` cases reported the
-## coverage gap and never reached the tree.
+**Status: the path tree is FIXED (2026-10-04, `work/gatefix6`); what the guard
+still costs is written down below and is not fixed.** The defect this doc filed
+— "no end-to-end path tree exists", every example reporting `body loops, or
+branches out of the function` — no longer happens, and the theorem that is
+emitted instead is one the model can support.
 
-## What I ran
+## What landed
 
-    python3 tools/memslot.py --gb 8 --label fst -- python3 test_formal_sweep_truth.py
-    ...
-    ValueError: body loops, or branches out of the function
-    Ran 97 tests in 20.296s
-    FAILED (errors=6)
+1. **`_tree`: a `call_rel32` whose target is not in the image is a LEAVE**, with
+   the halt address the call's OWN address, and the walk stops there without
+   stepping it. `info["compiler_traps"]` is not consulted for this — the test is
+   "is the target an instruction the image has", which is what `by_addr` already
+   answers, and which is the same test that makes an extern `printf` the same
+   kind of leaf.
+2. **`emit_terminates` states the theorem as a DISJUNCTION**, one disjunct per
+   leaf of the tree, each naming that leaf's halt address: the exit sentinel `0`
+   for the outermost `ret`, and the call's address for a leaf that leaves the
+   image. Each arm picks its own with `right`×index and (except on the last)
+   `left`; the index is on the node (`_Node.halt`), assigned by `_leaf_halts`,
+   so the statement and the walk cannot read two different leaves as one.
+3. **`_MAX_CHAIN_STEPS = 2000`**, refused as `_NoTree("size")` and counted as
+   `too large to prove` in the reporter's own line — see "what the guard costs"
+   below for why this is a refusal rather than a bigger number.
 
-All six errors are the same one, and it is a different `ValueError` from the one
-this layer used to raise: `_plan`'s `no step lemma wired for: alu_ri32:sub_reg,
-lea_r64_rip` is gone, and `emit_terminates` now fails one line later, in
-`_tree`.
+The reading of the model that decides (2) is the one this doc's "Next step" step
+1 asked for, written down: `rc` is 0 outside the image, `x86_step_plain` has no
+arm for the byte `0x00`, so `x86_step` returns `none`, so `x86_exec_go_exit`
+returns `none` there (`x86_exec_go_exit_stuck`). **So a trap path does not reach
+the exit sentinel and the old statement was FALSE for it** — it could not have
+been fixed by walking that arm, only by changing what is claimed. The
+`= none` disjunct is NOT the alternative: `Option.isSome = false` and `= none`
+are the same statement, and fuel exhaustion ends a run with `none` too, so
+`A ∨ = none` holds for every `Option` and says nothing. Only a NAMED halt
+address carries information — and `x86_exec_go_exit` tests `st.rip = exit`
+BEFORE it steps, which is what makes "the run reaches the call" a theorem rather
+than a hope. This is the arm64 generator's own answer to the same question
+(`formal/arm64_proof_gen.py::_call_boundary`'s "opaque" kind and
+`_gen_universal_e2e_cfg`'s `exit_at`: *"the fix is not to admit the `none` branch
+but to state the theorem the model CAN support, with the call as the halt
+address"*), applied to every opaque call rather than to the first one.
 
-## What it is
+### Measured, on this tree
 
-`_tree` follows a `call_rel32` to its TARGET (B22's fix — the instruction after a
-call is not the one the machine runs). The stack-floor guard's trap arm is a call
-to the C library's `exit`, and that target is not in the image, so `by_addr`
-misses and the whole tree declines.
+Emission is Lean-free, so the whole corpus was measured with
+`emit_terminates` alone. Steps = the sum of path lengths, which is what the
+emitted file contains; leaves = the disjuncts.
 
-Measured on the fixture `TestX86EndToEndEmitter.SOURCE` compiles
-(`formal/build.compile_formal(..., arch='x86_64')` then `_plan`), image
-4294968274..4294968501, entry 4294968274:
-
-| call at | target | what it is |
+| | before | after |
 |---|---|---|
-| 4294968343 | 4294968504 | **outside** — `exit(2)`, function 1's guard |
-| 4294968397 | 4294968412 | in the image — the real call to `Point.get_x` |
-| 4294968481 | 4294968504 | **outside** — `exit(2)`, function 2's guard |
+| `formal/examples/ret42.mojo` | `body loops, or branches out of the function` | 4 leaves, 58 steps, 397 lines, **`terminates: proved, 2 admitted (hrip), 26 guarded`** |
+| `TestX86EndToEndEmitter.SOURCE` | same | 10 leaves, 1624 lines, **Lean accepts, 8 admitted**, 24 s |
+| `TestX86EndToEndEmitter.STRAIGHT` | same | 4 leaves, 825 lines, **Lean accepts, 2 admitted**, 11 s |
+| 50 examples in `formal/examples/` | **0** with a tree | **38** emit; 10 are recursive (`count`, `countdown`, `fact`, `fib`, `pow2`, `sqsum`, `sum`, `sum_range`, `wdiff`, `wge` — a backward call, refused as `loops` before and after); `udivmod` has no step lemma for `group3:idiv`; `wide_recv` is refused as too large |
+| corpus emitted bytes | 0 | 4.3 MB over 38 files |
 
-Exactly two, one per function, both to the same address — the same 2-per-function
-shape the two missing step lemmas had, which is the guard and nothing else.
-`_has_loop` answers False, so this is the "branches out of the function" half of
-that message and not the loop half.
+The two Lean runs above are the only Lean this branch ran, and they are the ones
+that cover the change (`formal/x86_64_endtoend_test.py`'s own entry point is 43
+Lean proofs and is not in a gate bucket).
 
-The guard's own sequence says where it comes from
-(`formal/x86_64_codegen.py::_emit_stack_floor_guard`):
+## What the guard still costs, and the exact next step
 
-    LEA R11, [rip+&floor] ; MOV R10, [R11]   the floor word
-    TEST R10, R10 ; JNE done                 already stored
-    MOV R10, RSP ; SUB R10, BUDGET ; MOV [R11], R10
-    done:
-    MOV R11, RSP ; CMP R11, R10
-    JAE ok                                    SP >= floor: carry clear
-    exit(2)                                   SP < floor
-    ok:
+**The guard's two branches per prologue are a per-path TREE, so they multiply.**
+`_tree` walks every branch outcome and there is no way to share the two arms of
+a fork whose arms converge (`JNE done` and `JAE ok` both land on the same `done`
+/ `ok` label, through states that differ), so each guarded function on a path
+doubles the number of paths through it:
 
-and `_emit_call_exit(M.STACK_TRAP_STATUS)` at its end is what emits the `call`.
+| | leaves | steps | emitted |
+|---|---|---|---|
+| `ret42` (1 function) | 4 | 58 | 397 lines |
+| `bittest` (1 call) | 10 | 457 | 2338 lines |
+| `wide_recv` (5 functions) | 94 | 12241 | 29908 lines |
 
-## Why it is not a one-line fix, and what the question is
+`wide_recv` is the corpus's one image whose tree is past what a proof can be:
+attempting it spends `PROOF_WALL_S` (1500 s) and then reports a FAILURE whose
+message is about the clock, which is B21's lesson from the other side — so it is
+refused with its size in the line instead.
 
-`_tree` declining is CORRECT for what it was built to do: it walks paths whose
-every step is inside the image, and this one leaves it. The question is what the
-MODEL says happens at an address with no instruction, because the answer decides
-whether `terminates` is even TRUE:
+**The fix is not a bigger bound. It is to decide the guard's own two branches
+instead of walking both arms**, and both are decidable from facts the emitter
+can compute:
 
-* If `x86_exec` at an unknown address is "the run has left the modelled
-  machine" — no step, no successor — then the guard's trap arm makes
-  `(x86_exec_exit (X86State.init n entry) rc 0).isSome = true` FALSE for every
-  input whose stack is shallower than the budget, and no tree can prove it. The
-  theorem as stated is then wrong for every program with a guard, and the fix is
-  to the STATEMENT (a disjunct for "or the run traps"), not to the tree.
-* If `x86_exec` treats a missing instruction as "the pc is wherever it is" and
-  keeps going, the trap arm is a step the model does not take and the guard is
-  unsound in the model.
+* **`JNE done`** (has the floor word been stored already?). In `main`'s guard
+  the word reads 0 — `X86State.init`'s memory is zero, and
+  `lib/X86.lean::x86_init_mem_reads_zero` says so — so the branch is NOT taken.
+  In a CALLEE's guard the word is what `main`'s guard stored, so it IS taken.
+  The library has both shapes it needs — `mem_read_bytes_write_above` (which
+  the emitter already emits as `key`) and `mem_read_bytes_write_same`
+  (`lib/X86.lean:2452`) — so the obligation is that read followed by `v ≠ 0` for
+  a ground `v`, and whether the second half closes is a `decide` away and
+  untried.
+* **`JAE ok`** (is SP still above the floor?). The floor word is
+  `SP_at_first_guard − model.STACK_FLOOR_BUDGET_BYTES`, and SP on a path is a sum
+  of literal frame sizes (`push`, `sub rsp, imm32`, and the `call`'s own 8), so
+  the emitter can keep a LOWER BOUND on the depth below the entry and conclude
+  "not trapped" whenever that bound is inside the budget — 7.5 MiB against a
+  measured worst case of 76 frames (1.2 MiB on x86-64,
+  `tools/formal_call_depth_census.py`). This needs no model change; it needs the
+  wrapping `UInt64` comparison to close, which `simp … <;> decide` should do on
+  ground terms but has not been tried.
 
-Both readings are defensible and they are not the same theorem, so this is a
-decision about the model's semantics rather than a patch. It is the same
-`exit`-in-the-prologue fact
-`bugs/FORMAL_x86_64_run_tests_are_gone_since_the_stack_floor_guard_emits_exit.md`
-records for `formal/x86_64_proof_gen.py`'s externs guard, in a third consumer:
-that one loses the RUN TESTS section, this one loses the path tree.
+Both must be emitted as a PROOF, not as a dropped path: the surviving arm gets a
+`have` that the discarded side's condition holds and the other arm closes with
+`simp [that] at <the by_cases hypothesis>`. A decision the emitter gets wrong
+then makes the file Lean-rejects, which is the property that makes the static
+analysis safe to have — B21's "a pin nobody can run is not a pin" applies to the
+analysis too.
 
-## Next step
+**The VALUE theorem is a second, separate loss from the same guard, and it is
+not fixed.** `emit()` (the constant-result theorem) has no path structure at
+all — it walks straight-line from the entry and refuses on the first `jcc` or
+`call` — so with two branches and a `call_rel32` in every prologue it declines
+EVERY example: measured, `ret42` reports `value: - (branches: call_rel32,
+jcc_rel32)`. Before the guard it covered 7 of 43. Fixing it is the same
+decide-the-guard project plus `by_cases` in an emitter that has none; it is not
+started.
 
-1. Read `x86_exec` / `x86_exec_exit` in `lib/X86.lean` and write down what
-   happens at an address with no instruction — one sentence, and it decides
-   step 2. Do not start from the tree.
-2. If the run ends there, `terminates` needs a second disjunct ("…or the run
-   leaves the image") and `_tree` needs to emit that arm, which is a real
-   change to the emitted theorem and not a tolerance.
-3. Whichever it is, pin it Lean-free next to
-   `test_the_return_is_a_named_fact_and_the_step_uses_it` so the six cases
-   cannot silently go back to reporting a coverage gap they have passed.
-
-## Re-verify with
+## Reproducing
 
     python3 tools/memslot.py --gb 8 --label fst -- python3 test_formal_sweep_truth.py
+    python3 test_formal_x86_64_call_tree.py            # the `_tree` arm, no image, no Lean
+    python3 formal/x86_64_endtoend_test.py formal/examples/ret42.mojo formal/examples/wide_recv.mojo
 
-all six `TestX86EndToEndEmitter` cases must stop raising, and
-`python3 tools/suite.py formal-x86-endtoend` must stay at 3 passed.
+The first was `FAILED (errors=6)` on `work/gatefix6`'s base commit — six
+`ValueError: body loops, or branches out of the function` from
+`TestX86EndToEndEmitter`, which is what the gate reported as
+`formal-sweep-truth`. It is 101 tests, all passing.

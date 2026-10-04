@@ -33,6 +33,14 @@ and one that must NOT build a tree: a BACKWARD call, which is a back edge and
 reports `None` rather than recursing in Python until the interpreter's limit.
 
     python3 test_formal_x86_64_call_tree.py [-v]
+
+The second class is the OTHER thing a `call` can be: one whose target is not in
+the image at all. Every program carries one in its prologue — the stack-floor
+guard's `exit(2)` — and `_tree` declined the whole body when it reached one, so
+every example reported `body loops, or branches out of the function`. It is a
+LEAF now, with the call's own address as its halt address, and
+`TestACallThatLeavesTheImageIsALeaf` pins that plus the leaf ORDER
+(`_leaf_halts`), which is what the emitted theorem's disjuncts are written in.
 """
 import os
 import struct
@@ -77,6 +85,11 @@ def _ret():
     return bytes([0xC3])
 
 
+def _jne_rel32(at, target):
+    """`0F 85 disp32` at `at`, branching to `target` when ZF is clear."""
+    return bytes([0x0F, 0x85]) + struct.pack("<i", target - (at + 6))
+
+
 def _body(pieces):
     """`(shapes, code)` for a body given as `(offset, bytes)`, plus its bytes.
 
@@ -101,6 +114,8 @@ def _form_of(raw):
         return "call_rel32", raw
     if raw[0] == 0xC3:
         return "ret", raw
+    if raw[0] == 0x0F and len(raw) == 6:
+        return "jcc_rel32", raw
     if raw == _cqo():
         return "cqo", raw
     raise AssertionError(f"this test does not write {raw.hex()}")
@@ -200,6 +215,105 @@ class TestCallIsAJumpNotAFallThrough(unittest.TestCase):
                           "but the fall-through path from 7 to the `ret` at 9 "
                           "does, so a tree here means the call was walked as a "
                           "fall-through")
+
+
+class TestACallThatLeavesTheImageIsALeaf(unittest.TestCase):
+    """The stack-floor guard's trap arm, which is a call to the C library.
+
+    `_emit_stack_floor_guard` puts `mov rdi, 2; mov rax, 0; call exit` at the end
+    of the guard in EVERY prologue of every program image, so "a `call` whose
+    target is not in the image" is not a rarity in this backend — it is the
+    first thing every program does. `_tree` used to decline the whole body when it
+    reached one (`body loops, or branches out of the function`, which names two
+    reasons when the real one is a third), and every example in
+    `formal/examples/` reported that.
+
+    The fix is the arm64 generator's own answer to the same question: the halt
+    address is the CALL's address, so the claim becomes "the run reaches the
+    call". `x86_exec_go_exit` tests `st.rip = exit` before it steps, and the
+    model cannot decode an address outside the image (`rc` is 0 there and
+    `x86_step_plain` has no arm for 0x00), so stepping the call would leave a
+    path that the runner reports as `none` — which is NOT the exit sentinel the
+    theorem names.
+    """
+
+    #:  0  jne -> 10     a fork, so the leaf ORDER is pinned as well as the leaf
+    #:  6  cqo
+    #:  8  ret           the fall-through arm's end of run
+    #: 10  call -> 0x9000   outside the image: the trap
+    OUTSIDE = 0x9000
+    TRAP = [(0, _jne_rel32(0, 10)), (6, _cqo()), (8, _ret()),
+            (10, _call_rel32(10, OUTSIDE))]
+
+    def _trap_tree(self):
+        shapes, code = _body(self.TRAP)
+        return code, ET._tree(code, {"base_addr": BASE, "func_offset": BASE},
+                              shapes)
+
+    def test_a_call_out_of_the_image_builds_a_tree_rather_than_refusing(self):
+        code, t = self._trap_tree()
+        self.assertIsNotNone(t,
+                             "a call whose target is outside the image must not "
+                             "decline the body: every program carries one in its "
+                             "prologue (the stack-floor guard's exit(2))")
+
+    def test_the_leaf_is_the_call_and_its_halt_is_the_calls_own_address(self):
+        _code, t = self._trap_tree()
+        node = t.kids[0]
+        self.assertEqual(node.form, "call_rel32",
+                         "the fork's taken arm IS the call: `kids[0]` is the "
+                         "branch target and the call is the leaf")
+        self.assertEqual(node.kind, "leaves",
+                         "a leaf that leaves the image is its own kind, not a "
+                         "`ret`: the run does not RETURN anywhere, it stops at "
+                         "an address the model has no instruction for")
+        self.assertEqual(node.succ, BASE + 10,
+                         "the halt address is the CALL's own address %d, not "
+                         "its target 0x%x: the runner stops at `st.rip = exit` "
+                         "BEFORE it steps, so the claim is 'the run reaches the "
+                         "call'" % (BASE + 10, self.OUTSIDE))
+        self.assertEqual(node.kids, [], "a leaf has nothing after it")
+
+    def test_two_arms_halt_at_different_addresses_in_walk_order(self):
+        _code, t = self._trap_tree()
+        halts = ET._leaf_halts(t)
+        self.assertEqual(halts, [BASE + 10, None],
+                         "the trap arm halts at the call and the fall-through "
+                         "arm at the exit sentinel (None), TAKEN FIRST because "
+                         "it is kids[0] — and `emit_terminates` writes the "
+                         "statement's disjuncts in this order and picks between "
+                         f"them by index. Got {halts}")
+        # The index is on the node, so the statement and the walk cannot read
+        # two different leaves as the same one.
+        trap = t.kids[0]
+        exit_leaf = t.kids[1].kids[0]
+        self.assertEqual(trap.halt, 0)
+        self.assertEqual(exit_leaf.halt, 1)
+        self.assertIsNone(exit_leaf.succ,
+                          "the outermost `ret` pops the zero `X86State.init` "
+                          "leaves on the stack, so its halt address is the exit "
+                          "sentinel and None is how the statement spells it")
+        self.assertEqual(trap.form, "call_rel32")
+
+    def test_a_body_that_never_leaves_the_image_still_halts_at_the_sentinel(self):
+        """The other direction: the arm above must not have cost the old case."""
+        t = _tree_of(FORWARD)
+        self.assertEqual(ET._leaf_halts(t), [None],
+                         "a body whose every path ends at the outermost `ret` "
+                         "has one leaf and it halts at the exit sentinel")
+
+    def test_a_body_whose_paths_all_leave_the_image_has_no_exit_disjunct(self):
+        """`subscript_var` is the shape: every path ends at a `call` out.
+
+        The statement then has no disjunct any arm can reach at 0, and that is
+        correct rather than a gap — the theorem says the run halts at one of the
+        calls, which is all the model supports. Pinned because it is the case a
+        later "every image must have an exit arm" tidy-up would break."""
+        shapes, code = _body([(0, _call_rel32(0, self.OUTSIDE))])
+        t = ET._tree(code, {"base_addr": BASE, "func_offset": BASE}, shapes)
+        self.assertIsNotNone(t)
+        self.assertEqual(ET._leaf_halts(t), [BASE + 0])
+        self.assertEqual(t.halt, 0)
 
 
 class TestTheReporterNamesTheForm(unittest.TestCase):
