@@ -3034,10 +3034,25 @@ class TestX86EndToEndEmitter(unittest.TestCase):
 # writer" and a path that says "any number of them".
 #
 # The guard is scoped to files that RUN Lean, which is the estate this bug is
-# in. `tools/tu_grind.py` has the same shape for its own `.ci` scratch and is
-# outside it; it is written down at `bugs/TOOLS_tu_grind_scratch_defaults_to_tmp.md`.
+# in. `tools/tu_grind.py` had the same shape for its own `.ci` scratch — the same
+# fixed name, the same `/tmp` default, no cleanup — and it no longer does: its
+# scratch is `formal/lean.py::scratch_dir`, the helper the two x86-64 model
+# scripts above already use, with `TU_SCRATCH` still honoured as a KEEP-the-
+# artifacts override. The row below is what holds that in place, and it is here
+# rather than in a `tools/` test file because the guard it widens is here.
 
 _TMP_LITERAL = re.compile(r"^/tmp(?:/|$)")
+
+# The `tools/`-side estate's exemptions, each with the reason it is not a
+# writer. `ast` can see that a script NAMES a directory and cannot see whether
+# it reads or writes it, so a read-only `/tmp` is stated here rather than
+# inferred — and the row below fails if a listed file stops naming one, which is
+# what keeps this from becoming a list that hides whatever is added next.
+_TOOLS_TMP_READERS = {
+    "tools/wave2b_fix_deps.py":
+        "reads /tmp/gimple_pre_wave2, a snapshot of the pre-wave2 sources a "
+        "human made, and writes every file it produces into the repo",
+}
 
 
 def _shared_scratch_dirs(source: str, path: str = "<snippet>"):
@@ -3245,6 +3260,115 @@ class TestScratchDirEstate(unittest.TestCase):
                     "formal/x86_64_model_coverage_test.py"):
             self.assertIn(rel, scanned,
                           "the guard stopped reaching " + rel)
+
+    # ── the same guard over the one tools/ script that grinds generated code ──
+    #
+    # `tools/tu_grind.py` writes two `.ci` files per translation unit — the
+    # self-hosted binary's and `python3 fire.py`'s — and compares them, so its
+    # scratch is a COMPARISON rather than a build input: a second run writing the
+    # same `<name>.ci` hands the first run's `gcc` somebody else's bytes and
+    # reports a DIFF that is an artifact of the collision. It had
+    # `os.path.join(os.environ.get('CLAUDE_JOB_DIR', '/tmp'), 'tu')` — writable
+    # or not, shared by every run that set neither variable, never cleaned.
+    #
+    # Scoped to `tools/*.py` rather than the whole tree because the guard's
+    # subject is a GENERATED file, and a hard-coded `/tmp` in a tool that
+    # generates nothing is a different question (several tools read `/tmp`
+    # fixtures on purpose). The scan reaches every `tools/*.py`, so a second
+    # script that grows the shape is caught by the next run rather than by
+    # whoever remembers this one.
+    def test_no_tool_grinds_generated_code_into_a_hard_coded_dir(self):
+        found, scanned = {}, []
+        for rel, path in _lean_files(HERE):
+            if not rel.startswith("tools" + os.sep):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            scanned.append(rel)
+            hits = _shared_scratch_dirs(source, rel)
+            if hits:
+                found[rel] = hits
+        self.assertGreaterEqual(len(scanned), 10,
+                                f"only {len(scanned)} tools/*.py reached the "
+                                f"scan, so this guard is measuring a sliver of "
+                                f"the estate it names")
+        unexempt = {r: h for r, h in found.items()
+                    if r not in _TOOLS_TMP_READERS}
+        self.assertEqual(
+            unexempt, {},
+            "generated code goes in a private directory "
+            "(formal/lean.py::scratch_dir): " + repr(unexempt))
+        # …and the exemption is one that can be DELETED rather than one that
+        # hides a writer: a listed file must still exist, and must still be the
+        # file whose `/tmp` literal justified the listing. Both were true of the
+        # entry when it was written and neither is a claim about the future, so
+        # this is where a snapshot that moves tells the row to go.
+        for rel, why in _TOOLS_TMP_READERS.items():
+            self.assertIn(rel, found,
+                          f"{rel} no longer has a /tmp literal, so its "
+                          f"exemption ({why}) is a hole in this guard")
+        for rel in _TOOLS_TMP_READERS:
+            self.assertTrue(os.path.exists(os.path.join(HERE, rel)),
+                            f"{rel} is gone: delete its exemption")
+
+    def test_tu_grind_scratch_is_private_removed_and_overridable(self):
+        """The three properties, against the real module rather than a copy.
+
+        `formal/lean.py::scratch_dir` is the helper and its own rows above pin
+        it, so this row is about the two things the helper cannot decide for
+        `tu_grind.py`: that the script ASKS for it (a private mkdtemp written
+        out longhand would satisfy every other row here while being a second
+        implementation), and that `TU_SCRATCH` still means KEEP.
+
+        It also pins the override's direction, which is the one thing a
+        well-meaning cleanup would silently break: a caller that names a
+        directory to read the `.ci` files out of would find them deleted.
+        """
+        import importlib.util
+        import shutil
+        import tempfile
+        path = os.path.join(HERE, "tools", "tu_grind.py")
+        spec = importlib.util.spec_from_file_location("tu_grind_under_test",
+                                                      path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        base = tempfile.mkdtemp(prefix="tu_grind_base_")
+        old_dir = os.environ.get("TMPDIR")
+        old_scratch = os.environ.get("TU_SCRATCH")
+        os.environ["TMPDIR"] = base
+        os.environ.pop("TU_SCRATCH", None)
+        try:
+            with mod.scratch() as a:
+                with mod.scratch() as b:
+                    self.assertNotEqual(
+                        a, b, "two runs got the same directory, which is the "
+                              "collision")
+                    self.assertEqual(
+                        os.path.dirname(a), base,
+                        "TMPDIR is what puts the scratch inside a checkout; a "
+                        "run that ignored it is back to /tmp")
+                    self.assertTrue(os.path.isdir(a) and os.path.isdir(b))
+                # The override: named, therefore kept.
+                keep = os.path.join(base, "kept")
+                os.environ["TU_SCRATCH"] = keep
+                with mod.scratch() as got:
+                    self.assertEqual(got, keep, "TU_SCRATCH is ignored")
+                    open(os.path.join(got, "kept.ci"), "w").close()
+                self.assertTrue(os.path.exists(keep),
+                                "a directory the caller named must survive the "
+                                "run — reading the .ci files back is what the "
+                                "override is for")
+        finally:
+            for k, v in (("TMPDIR", old_dir), ("TU_SCRATCH", old_scratch)):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            shutil.rmtree(base, ignore_errors=True)
+        for gone in (a, b):
+            self.assertFalse(os.path.exists(gone),
+                             "a scratch directory outlived its run")
 
     def test_the_two_scripts_ask_for_a_private_directory(self):
         """The positive half, against the two files the doc named.

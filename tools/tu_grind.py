@@ -18,18 +18,61 @@ Both sides run from the repo root (the self-host reflection injection is
 CWD-gated — see test_ab_native's harness note), writing their .ci into
 separate scratch dirs so neither clobbers the other.
 
+That scratch is a PRIVATE directory per run (`formal/lean.py::scratch_dir`, the
+same helper the two x86-64 model scripts use), removed when the run ends. It was
+a fixed name under `$CLAUDE_JOB_DIR` or `/tmp`, which is the three-part defect
+`test_formal_sweep_truth.py::TestScratchDirEstate` guards for the Lean half: a
+path that may not be writable, a path SHARED between two concurrent runs — so
+the second writer's `.ci` is what the first run's `gcc` reads — and no cleanup.
+`TU_SCRATCH` is still honoured, and a directory named there is KEPT, which is
+the reason the override exists: a caller that wants to read the `.ci` files a run
+produced asks for a directory of its own.
+
 Usage:
     tools/tu_grind.py [--limit N] [--only PAT] [--start-at FILE] [FILES...]
 """
+import contextlib
 import os
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
-SCRATCH = os.environ.get('TU_SCRATCH',
-                         os.path.join(os.environ.get('CLAUDE_JOB_DIR', '/tmp'), 'tu'))
+sys.path.insert(0, HERE)
+
+# The one private-scratch helper in the tree, rather than a second
+# mkdtemp-and-rmtree here: `tools/tu_grind.py` and the two x86-64 model scripts
+# want the same three properties (unique, inside `TMPDIR`, removed on the way
+# out including when the body raises), and two implementations of them is how
+# one of the two stops getting them.
+from formal.lean import scratch_dir
+
 GCC = os.environ.get('MOJO_GCC', '/opt/local/bin/gcc-mp-15')
 STAGE2 = os.path.join(HERE, 'stage2', 'mojo')
+
+
+@contextlib.contextmanager
+def scratch():
+    """The directory this run writes its two `.ci` sides into.
+
+    A `TU_SCRATCH` directory is used as it stands and KEPT, which is the reason
+    the override exists: a caller that wants to read the `.ci` files a run
+    produced names a directory of its own, and quietly deleting them would make
+    the override useless. Without it the directory is `scratch_dir`'s — unique
+    per call, inside `TMPDIR`, removed on the way out including when the body
+    raises, which is the `finally` inside the helper rather than one here.
+
+    `CLAUDE_JOB_DIR` is deliberately gone: it scoped a path whose NAME was
+    fixed, and the name no longer is. `mkdtemp` is unique per call, so two runs
+    cannot collide whether or not anything set an environment variable, and it
+    honours `TMPDIR`, which is what puts it inside a worktree's own `.tmp`.
+    """
+    keep = os.environ.get('TU_SCRATCH')
+    if keep:
+        os.makedirs(keep, exist_ok=True)
+        yield keep
+        return
+    with scratch_dir('tu_grind') as path:
+        yield path
 
 
 def _run(cmd, cwd, timeout, env=None):
@@ -44,11 +87,11 @@ def _run(cmd, cwd, timeout, env=None):
         return -99, b'', b'TIMEOUT'
 
 
-def classify(src, timeout=180):
+def classify(src, scratch, timeout=180):
     """Returns (status, detail). `src` is a path relative to the repo root."""
     base = os.path.basename(src).rsplit('.', 1)[0]
-    nat_dir = os.path.join(SCRATCH, 'nat')
-    py_dir = os.path.join(SCRATCH, 'py')
+    nat_dir = os.path.join(scratch, 'nat')
+    py_dir = os.path.join(scratch, 'py')
     os.makedirs(nat_dir, exist_ok=True)
     os.makedirs(py_dir, exist_ok=True)
     nat_ci = os.path.join(nat_dir, base + '.ci')
@@ -142,11 +185,12 @@ def main(argv):
         files = files[:limit]
 
     counts = {}
-    for f in files:
-        st, det = classify(f)
-        counts[st] = counts.get(st, 0) + 1
-        line = '%-7s %-28s %s' % (st, f, det.replace('\n', '\n' + ' ' * 37))
-        print(line, flush=True)
+    with scratch() as scratch_dir_path:
+        for f in files:
+            st, det = classify(f, scratch_dir_path)
+            counts[st] = counts.get(st, 0) + 1
+            line = '%-7s %-28s %s' % (st, f, det.replace('\n', '\n' + ' ' * 37))
+            print(line, flush=True)
     print('\n== ' + '  '.join('%s=%d' % kv for kv in sorted(counts.items())),
           flush=True)
     return 0
