@@ -6,6 +6,15 @@ scope's files** — that is the finding, and it is the answer to the question th
 sweep cannot answer. What is left open is the per-file refusal table, the chain
 underneath it, and an owner per link.
 
+**Status (2026-10-04, `work/formal21-6`): §6 item 1 is CLOSED — the instrument
+can now rank this scope's causes, and the table it prints is measured rather
+than 21 rows of `NOT MEASURED`.** §6 items 2 and 3 are unchanged and item 4 was
+filed by its own branch (`FORMAL_a_dotted_import_resolves_to_a_nearer_leaf`,
+`formal21-1`), so **this document has nothing left of its own**: the two
+features §2 names are `formal19-1`'s and `formal16-2`'s, the per-file table is
+§2's, and the only thing this document asked for was an instrument that can
+answer the question. §0.1 is what changed.
+
 Round 1 of this scope is `FORMAL_std_os_io_scope_is_decided_by_five_modules_outside_the_claim.md`
 (`sweep14:std-os-io`, **not edited here** — it is that claim's document). It
 measured `std/{os,io,pathlib,sys,time,hashlib,base64,ffi}` = 46 files, 3 pass,
@@ -243,16 +252,64 @@ so a model added now would be a model of code the backend has not reached. §2 i
 the honest dependency order, and adding to the hostmod surface before link 1
 closes would be writing against a boundary that has not moved.
 
+## 0.1 §6 item 1 is CLOSED: the cause-ranking instrument can rank this scope
+
+The defect §6 item 1 described is fixed at the cause, and the fix is the one
+`tools/formal_chain_probe.py` had already taken for itself: **read the module the
+MESSAGE names, and resolve it with the build's own resolver.**
+
+`formal/model.py::imported_callee_refusal` states the defining module in a
+sentence — `` `FormatStruct` is called, and it is imported from
+`std.format._utils` `` — and carries **no `<file>: ` prefix** for it, which is
+what §6 item 1 measured ("the same prose shape defeats it") and what
+`…_b10.md` §3.3 described from the other side ("the chain names this module by
+basename only"). `formal_sweep.py::refusing_module` is now ONE reader for that
+sentence, cut from the f-string that writes it (the same discipline as
+`…_b9.md` §5.1's samples: a log line drifts, a generated sentence does not), and
+`tools/formal_sweep_causes.py::_resolve_refuser` asks two questions in the order
+that has answers — a name that is a FILE goes to the basename index as before,
+and a DOTTED MODULE name goes to `formal.imports.resolve_module_path`.
+
+**Measured on the b10 log, which contains this scope, arm64 and x86-64
+identically:**
+
+| `refused in:` | before | after |
+|---|---|---|
+| this scope's largest row | keyed on the IMPORTER (`std._gpu._utils` — §6.4's misattribution) | `std.format._utils` x111, `std.memory.alloc` x29, `std.bit.mask` x13, `.philox` x6, `std.math` x3 |
+| `uses:` on `std.format._utils` | **NOT MEASURED** | **42 of 111** blocked files name something it declares; 69 are closure |
+| `uses:` on `std.memory.alloc` | **NOT MEASURED** | **6 of 29** |
+| `uses:` on `std.bit.mask` | **NOT MEASURED** | **2 of 13** |
+
+Two cells still read NOT MEASURED (`pathlib` x2, `time` x1) and both are the
+documented ambiguity case rather than a gap: each basename matches a stdlib
+package AND `formal/hostmods/`, and the tool says so instead of picking one.
+
+**A relative spelling still resolves through the basename index or not at all**,
+on purpose: `..fstat` and `.philox` are relative to the file that did the
+importing, which is inside the chain and not the file the sweep swept, so
+answering it would be a guess — and this column's whole discipline is that an
+unmeasured number says so.
+
+`python3 test_refusal_taxonomy.py` is 235/235 (was 219/219) with rows pinning
+the reader against `formal/model.py`'s own sentence, that the row is keyed on
+the DEFINING module rather than the importer, that a dotted name resolves to a
+file at all, that `uses` counts the one file that names the callee, and that a
+relative spelling stays unmeasured.
+
+**What this does NOT do:** it ranks the scope's causes, it does not FIX them.
+§2's two features are still `formal19-1`'s and `formal16-2`'s, and
+`…_b10.md` §3.1's measurement of them (170 files, 14 symbols, 79 call sites,
+largest site 13) is unchanged by this — which is what a reader should take from
+it: the queue can now PRIORITISE the corpus's largest construct.
+
 ## 6. What is left
 
-1. **The cause-ranking instrument cannot rank this scope's causes.**
-   `tools/formal_sweep_causes.py` reads the refusing module from the chain
-   prefix, so both of §2's features collapse into "other refusal" and the
-   `refused in:` / `uses:` columns print "NOT MEASURED" for 21 of the 22 groups.
-   The fix is the one `tools/formal_chain_probe.py` just took: resolve the module
-   the message names, with `formal.imports.resolve_module_path`, so the row reads
-   `std.format._utils` rather than whatever import the chain's first hop happened
-   to be. Until then the ranked table for this scope is §2's and not the tool's.
+1. ~~**The cause-ranking instrument cannot rank this scope's causes.**~~ **CLOSED
+   — §0.1.** `tools/formal_sweep.py::refusing_module` reads the module the
+   message names and `tools/formal_sweep_causes.py::_resolve_refuser` resolves a
+   dotted name with `formal.imports.resolve_module_path`, so `refused in:` names
+   the DEFINING module and the `uses:` column is measured for every group whose
+   name resolves.
 2. **`__init__`-only modules are refused with "nothing this backend could
    add"**, which is not true — the backend could inline them, which is
    `formal16-2`'s feature. Worth a doc edit when that lands, because the sentence
