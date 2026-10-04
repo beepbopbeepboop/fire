@@ -193,6 +193,18 @@ are equalities between two representations of the same model, both defined
 through the same admitted declarations, so they inherit the admission rather than
 a falsity.
 
+### The same file on x86-64
+
+The whole mechanism is shared, so the correction reaches both backends from one
+edit — `formal/x86_64_proof_gen.py::_admitted_lean` calls
+`formal/admitted.py::lean_declarations` rather than writing its own.  Verified by
+generating the same program on x86-64: 14 `sorry`s, being the same 12 contract
+declarations and two theorems — `main_compile_correct` and
+`main_compiles_correctly` where arm64 has the extern-step theorem and the five
+`eval_eq_mojo_*` layers — and the corrected text, the `THE WORD IS THE MODEL'S`
+clause and the real `subprocess.mojo:471`-style line numbers are all in that
+file's Lean too.  Nothing here is arm64-only.
+
 That is the important distinction for this audit: **a false contract does not make
 a generated theorem false** — `admitted_subprocess_run` is unconstrained, so
 `mojo 10` is whatever it is and the statement is an equality between two things
