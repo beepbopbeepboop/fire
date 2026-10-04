@@ -1094,6 +1094,14 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
     rather than left as an untested branch: over the whole step table there is
     no such word (see `test_the_derivation_is_total_over_the_step_table`), so
     the corpus cannot reach that path.
+
+    `test_the_derivation_changed_the_proof_and_not_the_claim` is the row that
+    carries "nothing was weakened" on its own: it asks the generator for one
+    instruction's step-OK lemma both with and without the step-RESULT lemma
+    available and requires the two STATEMENTS to be the same string.  The
+    corpus-level version of that check, over the 49 `formal/examples` that
+    build, is that 14 375 generated declarations compare statement-for-statement
+    identical before and after and only their order in the file moves.
     """
 
     # A small program, so every step-OK lemma in its proof can be read.
@@ -1226,6 +1234,37 @@ class TestStepOkDerivesFromStepResult(unittest.TestCase):
         self.assertIn("unfold arm64_step", text,
                       "with no step-RESULT lemma to derive from, the "
                       "discriminator proof is the proof")
+
+    def test_the_derivation_changed_the_proof_and_not_the_claim(self):
+        """The same statement either way — read off the emitted text, both ways.
+
+        The strongest statement of "nothing was weakened" available without a
+        before/after corpus: for one instruction word, ask the generator for its
+        step-OK lemma with the step-RESULT lemma available and again with it
+        withdrawn, and require the two STATEMENTS to be identical strings.  What
+        differs must be the proof and only the proof."""
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+
+        word = _STEP_ENTRY_WORD(G, 21)
+        self.assertIsNotNone(word)
+        code = _struct.pack("<I", word)
+        derived = G._gen_step_lemmas("syn", code, 0x1000)
+        real_rhs = G._step_rhs
+
+        def no_rhs(w, idx, _real=real_rhs):
+            return None if (w, idx) == (word, G._step_branch_index(word)) \
+                else _real(w, idx)
+
+        G._step_rhs = no_rhs
+        try:
+            direct = G._gen_step_lemmas("syn", code, 0x1000)
+        finally:
+            G._step_rhs = real_rhs
+        head = "theorem syn_step_ok_0 (s : Arm64State) (h : s.pc = 4096) :\n" \
+               "  arm64_step s syn_code ≠ none"
+        self.assertTrue(derived.startswith(head), derived[:120])
+        self.assertTrue(direct.startswith(head), direct[:120])
 
     def test_the_step_result_of_every_covered_word_is_still_emitted(self):
         """The corollary may only lean on lemmas that exist.
