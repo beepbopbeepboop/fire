@@ -553,6 +553,20 @@ two committed ledgers with the same 120 keys:
 | `…_round0-phaseA-before-both-fixes.jsonl` | 66 | 12 | 42 |
 | `…_round0-phaseA.jsonl` | 64 | 13 | 43 |
 
+**What was run to cover them**, so the integrator does not have to guess which
+suites this touches: `test_formal_globals.py` 53/53 (three engines per case,
+which is where both fixes' pins live), `test_formal_run.py` **954/954**,
+`test_formal_toplevel.py` 111/111 — the module-level statements are the fold's
+blast radius — `test_formal_target_queries.py` 32/32 (the other reader of the
+module-level folder), `test_formal_x86_64_parity.py` 51/51 (the refusals both
+machines have to word identically), `test_formal_proof_breadth.py` 14/14 and
+`test_suite.py` 299/299. **No gate, no Lean, no stdlib sweep** — this worker may
+run neither, and §0.6.5's last bullet is what is left. One static fact that
+bounds the stdlib verdicts by construction: **no `.mojo` file in this tree has a
+module-level constant whose initializer uses `**`, `<<`, `>>`, `|`, `&` or `^`**
+(250 module-level bindings scanned, 0 hits), so the two module-level folders
+cannot reclassify a stdlib module's body from this change.
+
 Two verdicts changed, both `tools/memslot.py:448:held_env`, and both off the
 code generator's frontier into the proof layer. It is worth being precise about
 what that is worth: `held_env` is not yet proved, it is now *provable-shaped* —
