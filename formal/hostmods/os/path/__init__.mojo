@@ -68,6 +68,7 @@ from .._syscalls import str_rfind, str_rindex_of, str_rstrip_len, str_lead
 from .._syscalls import str_chr_from
 from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
+from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
 from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
 
@@ -817,23 +818,51 @@ def _same_component(a, ca, b, cb) -> int:
 
 
 def expanduser(p) -> str:
-    """CPython's `os.path.expanduser`: a leading `~` replaced from `$HOME`.
+    """CPython's `os.path.expanduser`: a leading `~` replaced from `$HOME`,
+    and a leading `~name` from that user's home DIRECTORY.
 
-    `"~"` is the home directory and `"~/x"` is `x` inside it. A `~name` for
-    some other user is returned UNCHANGED, because reading the password
-    database is not something this target can do — and returning it unchanged
-    is what CPython does when it cannot resolve the name either.
+    **THE `~name` HALF IS A `getpwnam`, and this function used to claim it could
+    not be done.**  It said "reading the password database is not something this
+    target can do", and answered `~root/` unchanged where CPython answers
+    `/var/root/`.  That is a divergence CPython's own `test_posixpath.py` has a
+    case for — `self.assertEqual(posixpath.expanduser('~root/'), '/var/root')` —
+    and it was found by generating that suite's cases rather than by reading it,
+    which is the argument for generating them: the case is in the file the whole
+    time, and a hand-picked corpus does not have it because `~root` only means
+    something on a machine where `root` exists.
 
-    A fresh buffer, except when `p` has no leading `~` at all: then `p` comes
-    back as it arrived.
+    It CAN be done, and the measurement is in `os/_syscalls.mojo`'s
+    `fs_getpwnam_dir`: `getpwnam` binds on both backends, and `pw_dir` is one
+    64-bit load at byte 48 of the struct.  The three states CPython distinguishes
+    are all still distinguished, and they are:
+
+        `~`         `$HOME`, and unchanged when `HOME` is unset
+        `~/x`       `$HOME` + `/x`
+        `~name/x`   `getpwnam(name)->pw_dir` + `/x`
+        `~name`     `getpwnam(name)->pw_dir`
+        anything else, including a name `getpwnam` does not know, UNCHANGED
+
+    A fresh buffer in every case where the answer is not `p` itself.  `p` comes
+    back as it arrived when there is no leading `~`, which is CPython's answer
+    and is also the one case where there is nothing to allocate.
     """
     if str_starts(p, "~") == 0:
         return p
-    if str_len(p) > 1 and str_starts(p + 1, "/") == 0:
+    # `~` alone and `~/x` are `$HOME`; `~name` and `~name/x` are the database's.
+    if str_len(p) == 1 or str_starts(p + 1, "/") == 1:
+        h = fs_getenv("HOME")
+        if h == 0:
+            return p
+        if str_len(p) == 1:
+            return h
+        return str_build(h, "", p + 1)
+    n = str_len(p)
+    i = 1
+    while i < n and str_at(p, i, "/") == 0:
+        i = i + 1
+    d = fs_getpwnam_dir(str_prefix(p + 1, i - 1))
+    if d == 0:
         return p
-    h = fs_getenv("HOME")
-    if h == 0:
-        return p
-    if str_len(p) == 1:
-        return h
-    return str_build(h, "", p + 1)
+    if i >= n:
+        return d
+    return str_build(d, "", p + i)

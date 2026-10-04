@@ -35,12 +35,23 @@ import argparse
 import os
 import posixpath
 import platform
+import pwd
 import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+
+# The `~name` half of `expanduser` reads the PASSWORD DATABASE, so the name it
+# is asked about has to be a user this machine has. `root` is the one every
+# POSIX has; `getpass.getuser()` is the one this session is, so the test is not
+# green only on a host where root's home directory is `/var/root`. Both are
+# read here and interpolated into the generated program rather than written into
+# it, because a literal user name in a Mojo source is a test that fails on
+# every machine but this one.
+USER_TILDE = "~" + pwd.getpwuid(os.getuid()).pw_name
+USER_HOME = pwd.getpwuid(os.getuid()).pw_dir
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -325,6 +336,18 @@ def main(n):
     printf("expanduser-tilde=[%s]@@", expanduser("~"))
     printf("expanduser-slash=[%s]@@", expanduser("~/sub"))
     printf("expanduser-other=[%s]@@", expanduser("~someone/sub"))
+    # A `~name` for a user that EXISTS, which is a different code path from the
+    # one above and used to be missing from this file entirely: `~someone`
+    # resolves to nothing on any machine, so the branch that consults the
+    # password database was never entered here and a model that answered every
+    # `~name` unchanged would have passed. The two names are computed by this
+    # process and interpolated, because they have to be users THIS machine has
+    # — `root` for the one every POSIX has, and `getpass.getuser()` for the
+    # one this session is, so the test is not green only on a host with root.
+    printf("expanduser-named=[%s]@@", expanduser("~root"))
+    printf("expanduser-named-slash=[%s]@@", expanduser("~root/sub"))
+    printf("expanduser-self=[%s]@@", expanduser({user_tilde}))
+    printf("expanduser-named-mid=[%s]@@", expanduser("~root/a/b"))
     printf("expanduser-abs=[%s]@@", expanduser("/abs"))
     # The two answers are PRINTED and compared by this process rather than
     # compared by the program. `rp == ap` is a real bug on this path, and not
@@ -541,7 +564,8 @@ def group_fs(tmpdir, verbose):
     want["size-missing"] = "-1"
     src = os.path.join(tmpdir, "os_fs.mojo")
     with open(src, "w") as f:
-        f.write(FS_PROGRAM.format(root=mojo_string(root)))
+        f.write(FS_PROGRAM.format(root=mojo_string(root),
+                                  user_tilde=mojo_string(USER_TILDE)))
     out = os.path.join(tmpdir, "os_fs")
     rc, text = build(src, out)
     if rc != 0:
@@ -582,10 +606,18 @@ def group_fs(tmpdir, verbose):
         "unlinked-size": "-1",
         "expanduser-tilde": f"[{os.environ['HOME']}]",
         "expanduser-slash": f"[{os.path.join(os.environ['HOME'], 'sub')}]",
-        # A `~name` for another user is returned unchanged: reading the
-        # password database is not reachable on this target, and CPython also
-        # returns the path unchanged when it cannot resolve the name.
+        # A `~name` for a user that does NOT exist is returned unchanged, which
+        # is what CPython does when it cannot resolve the name either. So is
+        # this a check of the password database or not? It is a check of the
+        # REFUSAL: the two cases below are the ones that read it, and they read
+        # it through `pwd`, so the three together are the whole decision.
         "expanduser-other": "[~someone/sub]",
+        "expanduser-named": f"[{pwd.getpwnam('root').pw_dir}]",
+        "expanduser-named-slash":
+            f"[{pwd.getpwnam('root').pw_dir}/sub]",
+        "expanduser-self": f"[{USER_HOME}]",
+        "expanduser-named-mid":
+            f"[{pwd.getpwnam('root').pw_dir}/a/b]",
         "expanduser-abs": "[/abs]",
     })
     for tag, path in (("made", p("a", "b", "c")),

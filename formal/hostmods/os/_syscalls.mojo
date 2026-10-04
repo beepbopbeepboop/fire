@@ -659,6 +659,56 @@ def fs_getenv(name) -> str:
     return getenv(name)
 
 
+def fs_getpwnam_dir(name) -> str:
+    """`getpwnam(name)->pw_dir`, COPIED, or 0 when there is no such user.
+
+    **The `struct passwd` LAYOUT IS THIS TARGET'S, and it is measured rather
+    than transcribed.**  `pw_dir` is at byte 48, which is word 6 of the struct
+    on LP64:
+
+        pw_name      0      pw_class   32
+        pw_passwd    8      pw_gecos   40
+        pw_uid      16      pw_dir     48      <- this one
+        pw_gid      20      pw_shell   56
+        pw_change   24      pw_expire  64      sizeof(struct passwd) == 72
+
+    `pw_uid` and `pw_gid` are `uid_t`/`gid_t` — 32 bits — and `pw_change` is a
+    `__darwin_time_t` that the compiler aligns to 8, so `pw_gid` at 20 and
+    `pw_change` at 24 are contiguous with no padding between them and the
+    pointers start at 32.  That is macOS's layout and NOT Linux's: a Linux
+    `struct passwd` has no `pw_change`, no `pw_class` and no `pw_expire`, so
+    the same six words would be reading three fields the target does not have.
+    Measured against the C library's own `getpwnam` through `ctypes`, on this
+    machine, for `root`:
+
+        0 "root"   1 "*"   4 ""   5 "System Administrator"
+        6 "/var/root"   7 "/bin/sh"
+
+    which is the table above read back through a `Pointer[Int64]`.
+
+    **WHY THE STRUCT IS READ AS A `Pointer[Int64]` AND NOT AS A FIELD.**  A
+    value on this path is one 64-bit word, so `getpwnam`'s answer is a word
+    whichever way it is declared, and a subscript on a base with a DECLARED
+    pointee is a load at that pointee's width (`_syscalls.mojo`'s byte-read
+    section).  `pw[6]` is therefore one 64-bit load at byte 48 — the pointer —
+    where six one-byte loads would be six bytes of an address.
+
+    **THE COPY IS THE POINT.**  A `struct passwd *` and the strings it points at
+    belong to the C library and are invalidated by the next call to any of the
+    `getpw*` family on the same buffer.  Handing `pw_dir` back as an interior
+    pointer is the `fs_dirent_name` bug in a different function: `expanduser`
+    would answer on a name that changes under the caller.  So this copies,
+    which is what `str_dup` is for.
+    """
+    var pw: Pointer[Int64] = getpwnam(name)
+    if pw == 0:
+        return 0
+    var d: str = pw[6]
+    if d == 0:
+        return 0
+    return str_dup(d)
+
+
 def fs_setenv(name, value, overwrite) -> int:
     """`setenv(name, value, overwrite)`: 0 on success, -1 on failure."""
     return setenv(name, value, overwrite)
