@@ -209,21 +209,22 @@ PAIRS = [
 # The cases where `os.path` ITSELF diverges from CPython, excluded from the
 # `forward` comparison and REPORTED on every run. One name, two paths.
 #
-# `os.path.realpath` keeps a leading `//` and CPython collapses it, because the
-# module calls the C library's `realpath(3)` (which implements the POSIX rule
-# that EXACTLY two leading slashes are implementation-defined) where CPython
-# resolves lexically. Measured on this tree, both backends:
+# **EMPTY, since 2026-10-03, and that is the pin.** `os.path.realpath` kept a
+# leading `//` where CPython collapses it, and these two cases were excluded
+# rather than dropped so the divergence was visible instead of being a corpus
+# that quietly lacked them. Both are compared against CPython now, on both
+# backends, and the fix was not "collapse it in `realpath`" alone — it was to
+# find that `realpath(3)` on this target ALREADY collapses the double slash,
+# so what leaked it was the branch that answers `abspath(p)`, whose `normpath`
+# keeps the root because CPython's does. `os.path`'s `realpath` asks
+# `os.path.splitroot_root` — the rule `normpath` asks too, and the one
+# `posixpath.splitroot_root` forwards to — and collapses on its way in.
 #
-#     os.path.realpath("//a")     ->  //a      CPython: /a
-#     posixpath.realpath("//a")   ->  //a      (the forward is FAITHFUL)
-#
-# Excluded rather than dropped: the group prints the count and the doc on a
-# verbose run and carries the doc in its own summary, so the exclusion is
-# visible rather than being a corpus that quietly lacks a case. `same` does NOT
-# skip them — the two spellings agree there, and the divergence belongs to
-# `os.path` rather than to a module that forwards to it.
-# bugs/FORMAL_os_path_realpath_keeps_a_double_slash_root.md
-EXCLUDED = {("realpath", "//a"), ("realpath", "//a/b")}
+# The set is KEPT, empty, because the exclusion is a thing this corpus is
+# allowed to contain and a reader who finds it empty learns that the `//` class
+# was measured and closed rather than that nobody thought of it. Adding a case
+# to it is how a future divergence becomes a quiet hole.
+EXCLUDED = set()
 
 # The pairs CPython REFUSES, kept out of `PAIRS` and pinned separately.
 #
@@ -423,20 +424,23 @@ def _same_cases():
     cannot drift: the program emits one record per entry here in this order, and
     the checker maps a record's INDEX back to the same entry.
 
-    `os_path_has_it` is False for exactly one name, `splitroot_root`, and it has
-    to be a FIELD rather than an assumption. `splitroot_root` is `posixpath`'s
-    alone — `os.path` does not have it, because `os/path/__init__.mojo` is
-    `posixpath` MINUS the root/drive split, which is a tuple on this path (the
-    module's own `splitroot` entry says why) — so a builder that asked
-    `os.path.splitroot_root` gets a build refusal that names the WRONG module
-    and says nothing about the case that was meant:
+    `os_path_has_it` is True for every name in this corpus, and it is a FIELD
+    rather than an assumption. It was False for exactly one name,
+    `splitroot_root`, because `os.path` did not have it then: `os/path/
+    __init__.mojo` was `posixpath` MINUS the root/drive split, which is a tuple
+    on this path (the module's own `splitroot` entry says why), and a builder
+    that asked `os.path.splitroot_root` got a build refusal naming the WRONG
+    module and saying nothing about the case that was meant:
 
         os.path.splitroot_root(): `os.path` is a linked module but it exports
         no `splitroot_root`, so the call has no symbol to bind.
 
-    A one-name exception is carried as a per-case flag rather than as a
-    hard-coded skip in the builder, because the flag is the thing a reader can
-    check against the module's docstring.
+    `os.path` HAS it now — the ROOT half is one word and `realpath` and
+    `normpath` both need the same three tests, so the rule lives there and
+    `posixpath` forwards to it (2026-10-03). The flag is kept rather than
+    deleted because a per-case field is what a reader can check against the
+    module's docstring, and because the failure it was introduced for is still
+    a live one for any name the two modules do not share.
 
     Nothing about a case is written into the FORMAT STRING, and that is not
     tidiness: a path is data, and a data character in a format string is a
@@ -444,15 +448,13 @@ def _same_cases():
     flags. The index carries the identity instead.
     """
     cases = []
-    # NOT filtered by `EXCLUDED`, and that is the point: `os.path` and
-    # `posixpath` AGREE on the double-slash cases (both keep the `//`), so there
-    # IS a real in-image comparison to make. The divergence is `os.path`'s and is
-    # filed against `os.path`; a spelling module that inherited it as its own
-    # would be wrong about where the defect lives.
+    # NOT filtered by `EXCLUDED`, and that is still the point: `os.path` and
+    # `posixpath` are compared to EACH OTHER here rather than to CPython, so a
+    # case `os.path` gets wrong would have been a case the `forward` group
+    # found instead. The set is empty and says why; see its own comment.
     for label, tmpl, _py, kind in ONE_ARG:
         for a in PATHS:
-            cases.append((label, tmpl % mojo_string(a), kind, 1,
-                          label != "splitroot_root"))
+            cases.append((label, tmpl % mojo_string(a), kind, 1, True))
     for label, tmpl, _py in TUPLE_ONE_ARG:
         for a in PATHS:
             cases.append((label, tmpl % mojo_string(a), "s", 2, True))
@@ -641,9 +643,9 @@ def group_forward(tmpdir, verbose):
           + dev_detail)
     note = ""
     if EXCLUDED:
-        note = (f" ({len(EXCLUDED)} case(s) excluded: os.path's own "
-                f"realpath divergence on a POSIX double-slash root, "
-                f"bugs/FORMAL_os_path_realpath_keeps_a_double_slash_root.md)")
+        note = (f" ({len(EXCLUDED)} case(s) excluded: a case where `os.path` "
+                f"itself diverges from CPython, listed in EXCLUDED with its "
+                f"reason)")
     if verbose:
         print(f"    {len(want)} cases x {len(backends())} backends, "
               f"each against CPython's own posixpath{note}")

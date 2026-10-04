@@ -51,10 +51,10 @@ deviations that are properties of this target and are stated on each one:
     outlives the function that made it where a frame does not.
 
 The pure-string half — `join`, `split`, `dirname`, `basename`, `splitext`,
-`normpath`, `isabs`, `splitdrive`, `commonprefix` — is CPython's
-`posixpath`/`genericpath` algorithm for a POSIX target, transcribed, and
-`test_formal_os.py` checks it against CPython's own answers on the same inputs
-rather than against a table written here.
+`normpath`, `isabs`, `splitdrive`, `commonprefix`, `splitroot_root` — is
+CPython's `posixpath`/`genericpath` algorithm for a POSIX target, transcribed,
+and `test_formal_os.py` checks it against CPython's own answers on the same
+inputs rather than against a table written here.
 
 `os.path` also carries the four predicates CPython re-exports from
 `genericpath` (`exists`, `isfile`, `isdir`, `getsize`) and the `os` module
@@ -230,6 +230,49 @@ def splitext(p):
     return (root, p + di)
 
 
+def splitroot_root(p) -> str:
+    """CPython's `posixpath.splitroot(p)[1]`: the ROOT of `p`, as ONE WORD.
+
+    CPython's `splitroot` answers `(drive, root, tail)`, and on this target the
+    DRIVE is `""` for every path, so the whole of what is left is a string of
+    slashes — which is why this is a function here and the three-element tuple
+    is not (`splitdrive`'s entry, and this module's header, give the tuple's
+    problem: a tuple's first word is a COUNT).
+
+    **Three tests, in this order, and `isabs` is not one of them.**
+
+        splitroot_root("a/b")     ->  ""
+        splitroot_root("/a/b")    ->  "/"
+        splitroot_root("//a/b")   ->  "//"
+        splitroot_root("///a")    ->  "/"
+        splitroot_root("////")    ->  "/"
+        splitroot_root("/")       ->  "/"
+        splitroot_root("")        ->  ""
+
+    POSIX reserves a path that begins with EXACTLY TWO slashes for
+    implementation-defined meaning and CPython honours it; three or more is an
+    ordinary root. So `isabs` is wrong here on the two-slash case — it answers
+    `1` for `//a/b` and there is no way to ask it WHICH root — and every
+    function here that has to act on the root asks this instead.
+
+    `normpath` KEEPS a `//` root because CPython's does, and `realpath` DROPS
+    it because CPython's does; both answers come from here, which is what stops
+    the two from disagreeing about which paths are the POSIX case.
+
+    A literal, so nothing here is allocated on the three answers. `posixpath`'s
+    own `splitroot_root` forwards to this rather than carrying a second copy of
+    the three tests.
+    """
+    if str_starts(p, "/") == 0:
+        return ""
+    if str_len(p) > 1 and str_at(p, 1, "/") == 1:
+        # Two slashes, and not three: the POSIX case. `str_at` is in range for
+        # every index here because each test is behind the length above it.
+        if str_len(p) == 2 or str_at(p, 2, "/") == 0:
+            return "//"
+    return "/"
+
+
 def normpath(path) -> str:
     """CPython's `posixpath.normpath`, rule for rule.
 
@@ -247,7 +290,10 @@ def normpath(path) -> str:
         `"//a"` is `"//a"` and `"///a"` is `"/a"`. That is POSIX's
         implementation-defined leading-double-slash, and CPython keeps it, so
         a transcription that collapses every run of separators to one is wrong
-        on two inputs out of the thirty-two in this module's test.
+        on two inputs out of the thirty-two in this module's test. Which
+        paths those are is `splitroot_root`'s question and this function asks
+        it rather than repeating the tests; `realpath` is the one function here
+        that DROPS the `//` root, and CPython's does too.
 
     The result is a fresh buffer, except for the degenerate answers: `"."`,
     `"/"` and `"//"` are literals.
@@ -256,13 +302,10 @@ def normpath(path) -> str:
     if n == 0:
         return "."
     # How many leading separators to write back: one, or two when the path
-    # starts with exactly two. The third is what makes it one again.
-    lead = 0
-    if str_starts(path, "/") == 1:
-        lead = 1
-        if n > 1 and str_at(path, 1, "/") == 1:
-            if n == 2 or str_at(path, 2, "/") == 0:
-                lead = 2
+    # starts with exactly two. The third is what makes it one again. The RULE is
+    # `splitroot_root`'s and this is its only other consumer, so the two
+    # functions cannot disagree about which paths are the POSIX case.
+    lead = str_len(splitroot_root(path))
     out = str_alloc(n + 2)
     used = 0
     if lead == 2:
@@ -615,10 +658,42 @@ def realpath(p) -> str:
     closer to CPython than an empty string would be, and closer than pretending
     the resolution succeeded. A caller that needs to know whether the path
     exists should ask `exists`.
+
+    **A LEADING `//` IS COLLAPSED, and it is the only rule here CPython's
+    `realpath` and `normpath` disagree about.** CPython does not call
+    `realpath(3)` at all: it resolves component by component and joins the
+    answers with one separator, so its answer can never begin with `//` — while
+    `normpath` keeps that root, because POSIX reserves it and CPython's
+    `normpath` honours the reservation. Measured on this tree, both backends:
+
+        realpath("//a")     CPython  /a        here, before  //a
+        realpath("//a/b")   CPython  /a/b      here, before  //a/b
+        realpath("//tmp")   CPython  /private/tmp   here, the same
+
+    **The divergence was the FALLBACK and not the C library call**, which is
+    worth stating because the opposite reading is the obvious one and the
+    measurement rejects it: `realpath(3)` on this target already collapses the
+    double slash, so every path that RESOLVES was always CPython's answer
+    (`//tmp` and `//usr//bin` measured). What leaked the `//` was the branch
+    that answers `abspath(p)`, whose `normpath` keeps the root for the reason
+    above. So the collapse is applied to the input of BOTH branches and the two
+    cannot disagree about it: `q` below is the path with the POSIX root
+    collapsed, and it is what the kernel is asked about and what `abspath` is
+    given.
+
+    Only the EXACTLY-TWO case collapses: `///a` and `//` are already `/` in both
+    CPython functions, and `//` and `//a/b` are the two shapes
+    `splitroot_root` exists to name.
     """
-    r = fs_realpath(p)
+    q = p
+    if splitroot_root(p) == "//":
+        # `/` followed by everything after the two leading slashes. `p + 2` is
+        # BYTE arithmetic, which is right for a `char *`: the same spelling
+        # over a wider pointee is not a slice, and `str_at`'s docstring says so.
+        q = str_build("/", "", p + 2)
+    r = fs_realpath(q)
     if r == 0:
-        return abspath(p)
+        return abspath(q)
     return r
 
 

@@ -106,8 +106,9 @@ WHAT IS NOT HERE, AND WHY
     "carry no return annotation, and it is not an oversight" for exactly that
     reason. Answering it as a two-element tuple would be a plausible wrong
     answer about the drive part. `splitroot_root` below is the ONE piece that is
-    one word, and it is that because on a POSIX target the root is either `""`
-    or `"/"` — see its own docstring.
+    one word, and it is that because on a POSIX target the root is `""`, `"/"`
+    or `"//"` — see its own docstring, and note that it is a forward rather
+    than an implementation, because `os.path` owns that rule now.
   * `commonpath`, `ismount`, `normcase`, `expandvars`, `isdevdrive`,
     `isjunction`, `sameopenfile`, `samestat`, `getatime`, `getctime`,
     `getmtime` — CPython has these and `os/path/__init__.mojo` here does not,
@@ -305,24 +306,18 @@ def splitroot_root(p) -> str:
     cannot be mistaken for the tuple it is one third of: a caller that wants
     CPython's `splitroot` is refused, which is the honest outcome rather than a
     two-element answer that silently drops the drive part.
+
+    **THE RULE LIVES IN `os.path`, HERE, SINCE 2026-10-03.** This used to carry
+    its own copy of the three tests — the two `if` chains over `p`, `p + 1` and
+    `p + 2` — and there is now one of them,
+    `os/path/__init__.mojo`'s `splitroot_root`, because the same question has
+    three consumers and two of them are in `os.path`: `normpath` asks it to
+    decide how many leading separators to write back, and `realpath` asks it to
+    decide whether to collapse CPython's POSIX `//` root. A second copy here
+    would be three answers to one question, and `posixpath`'s answer would be
+    the one no other function could see.
     """
-    var n = strlen(p)
-    if n == 0:
-        return ""
-    var q: Pointer[UInt8] = p
-    if q.value() != 47:              # not `/`
-        return ""
-    if n == 1:
-        return "/"
-    var q2: Pointer[UInt8] = p + 1
-    if q2.value() != 47:             # exactly one `/`
-        return "/"
-    if n == 2:
-        return "//"
-    var q3: Pointer[UInt8] = p + 2
-    if q3.value() == 47:             # three or more: not the POSIX case
-        return "/"
-    return "//"
+    return os.path.splitroot_root(p)
 
 
 # ── the four predicates CPython re-exports from `genericpath` ───────────────
