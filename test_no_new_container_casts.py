@@ -148,7 +148,18 @@ def strip_comments(src: str) -> str:
 # read as a list, and then wrote down what it had removed. 17 is the count of
 # casts that exist, and lowering the baseline is what makes the next one a
 # regression rather than a new normal.
-BASELINE_COUNT = 17
+# 17 -> 19 (2026-10-04, merge of ten branches).  NOT two new ad-hoc
+# coercions: both new matches are PROSE, and both are in emit_calls.py's own
+# notes about this very chokepoint — `int64_t f(MojoList *)` in the comment
+# explaining why a lambda's forward declaration and its definition have to
+# agree, and `(MojoList *)x` in `_carry_elem_types`'s docstring, which names
+# the bare cast whose missing element typing that function exists to carry.
+# A file that explains the chokepoint cannot be written without spelling a cast,
+# which is the metric's known weakness (it greps TEXT; see the note above the
+# scanner) and not a second reason to stop recording the number. No Python-level
+# cast was added: `strip_comments` output differs from master's only on those
+# two lines.
+BASELINE_COUNT = 19
 
 
 def count_casts() -> int:

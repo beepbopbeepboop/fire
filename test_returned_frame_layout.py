@@ -27,6 +27,7 @@ Usage:
     python3 test_returned_frame_layout.py [-v]
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -244,6 +245,17 @@ def main(argv):
     #    that makes a returned frame correct on both or wrong on both. This
     #    asserts it structurally: both backends call the shared function and
     #    neither computes its own offsets.
+    #
+    #    The shared entry point is `model.struct_constructor_sites`, and it is
+    #    named here rather than the pair of symbols this used to name because
+    #    the block arithmetic MOVED under it: `struct_frame_block_bytes` became
+    #    `struct_frame_block_layout` (which returns `(nested, total_bytes)` and
+    #    is what `struct_constructor_sites` now calls to fill each site's
+    #    `nested` row), so both backends stopped calling the byte-count helper
+    #    directly. Pinning the old pair would have called a correct tree wrong
+    #    for a rename that moved the work a level down rather than duplicating
+    #    it — so the property is stated as the two things it actually means:
+    #    each backend reads the shared layout, and neither defines one.
     for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
                            ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
         path = os.path.join(HERE, backend)
@@ -251,8 +263,19 @@ def main(argv):
             src = fh.read()
         check(f'{os.path.basename(backend)}_shares_the_frame_layout',
               'M.struct_constructor_sites' in src
-              and 'M.struct_frame_block_bytes' in src,
-              'this backend does not read the shared frame layout')
+              and not re.search(r'\n\s*def struct_(?:constructor_sites|frame_block'
+                                r'_layout|frame_block_bytes)\b', src),
+              'this backend either does not read the shared frame layout or '
+              'computes one of its own')
+    # ...and the arithmetic really is in the shared model, so "neither backend
+    # defines one" is a fact about the layout and not about where it moved to.
+    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
+        msrc = fh.read()
+    check('the_block_layout_lives_in_the_shared_model',
+          'def struct_frame_block_layout' in msrc
+          and 'struct_frame_block_layout(st, structs_by_name)' in msrc,
+          'model.struct_constructor_sites no longer calls the shared block '
+          'layout, so the per-site block size is computed somewhere else')
 
     # 6. The convention refusal, which is the decision this whole item turns
     #    on, is reachable and says the thing that matters.
