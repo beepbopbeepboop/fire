@@ -400,6 +400,31 @@ CAUSES = (
     # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
     ("a bracketed specialization of a callee this unit does not compile",
      (("so the brackets cannot be bound",),)),
+    # A CALL to a name the DEFINING module does not export, which is the largest
+    # row in the corpus and had NO row at all until 2026-10-04: 170 of the 710
+    # files on the b10 sweep, 55% of every codegen finding in the tree, all of
+    # them carrying ONE sentence from `formal/model.py::imported_callee_refusal`
+    # — and `other refusal`, the bucket this table's own docstring defines as
+    # "nobody has looked", was how the ranking reported them.
+    #
+    # It is the row the per-edge export gate (`formal/imports.py::library_free_edges`)
+    # emptied INTO: at `-9` those files were 125 on `module exports no public
+    # functions` and 43 on `Optional unwrap`, both NAMED; fixing the gate in front
+    # of them moved them one refusal further on, to a refusal this table could not
+    # name. So the fix that made the backend build more files also made the
+    # instrument blind, which is the shape of that defect in general — the same one
+    # `…_b9.md` §5.1 fixed for the `with`.
+    #
+    # THE MARKER IS THE FACT, NOT THE ADVICE. Two clauses of the message are
+    # load-bearing and stable: the call "has to bind a symbol `M` exports", and
+    # "That module does not export it". The sentence that USED to follow them —
+    # "spell it as `name[<a type>](…)`" — is advice, and `work/formal19-1`
+    # deletes it because it is wrong about correct Mojo (a bare template call is
+    # the spelling the stdlib uses). Keying on that would have taken 170 files
+    # silently back to `other refusal` the day a branch nobody is waiting for
+    # landed, which is the failure the comments above this table warn about twice.
+    ("a call to a name the defining module does not export",
+     (("does not export it",),)),
     # ── a call through a VALUE: three shapes, three rows, and the distinction
     #    is which DECLARATION is missing. They used to be one refusal, so all
     #    three sat in `other refusal`, which is the bucket that means nobody has
