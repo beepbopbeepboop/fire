@@ -2561,15 +2561,24 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         # this was the false claim the whole bug is about.
         self.assertRegex(text, r"have hrip : s\d+\.rip = 0 := by")
 
-    def test_a_chain_that_crossed_a_frame_is_admitted_at_the_closing_read(self):
-        """The cost side, stated as text so it cannot be forgotten.
+    def test_a_chain_that_crossed_a_frame_EVALUATES_its_closing_read(self):
+        """The closing read is computed, not simplified, and the crossed case is
+        the one that needs it.
 
         A chain that returned into its caller has more than one frame's worth of
         register file for the closing `simp` to reconstruct, and that `simp` does
         not finish: measured on `wide_recv` it is 1190 s and then a heartbeat
         timeout, which is B21's lesson from the other side — an unaffordable
-        attempt reported as a FAILURE is worse than an admitted gap. So a crossed
-        chain takes the cheap route at `hrip` and says so with a `sorry`.
+        attempt reported as a FAILURE is worse than an admitted gap.
+
+        What replaced it is not a bigger budget. Every address on the path is a
+        literal — `X86State.init` gives `rsp` a literal and the backend's stores
+        and loads address memory through `rsp`/`rbp` — so the read is a CLOSED
+        term and `native_decide` evaluates it in linear time where the simplifier
+        took exponential. That is the assertion here: the crossed closing block
+        evaluates, and it does not carry the peel at all (the peel is measured
+        unaffordable at 112 steps, so attempting it would take the file down
+        rather than admitting one fact).
         """
         text = self._emitted()
         i = text.index("have hrip :")
@@ -2582,8 +2591,18 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         # instruction two arms away.  The block ends at the `rw` that consumes
         # the fact, which is the last thing emitted before the next path starts.
         closing = text[i:text.index("rw [", i)]
-        self.assertIn("simp only [hs", closing,
-                      "a crossed chain must not pay for the full closing simp")
+        self.assertIn("try (first | native_decide | decide)", closing,
+                      "a crossed chain must EVALUATE its closing read: the "
+                      "simplifier does not finish on it at 112 steps")
+        self.assertIn("x86_set_reg_mem", closing,
+                      "…which needs the model's own lemma that a register write "
+                      "leaves memory alone, or the projection stops at the "
+                      "first `x86_set_reg` and drags `rdi` — the program's "
+                      "input — into a term `native_decide` refuses")
+        self.assertNotIn("have key", closing,
+                         "the memory-separation peel is NOT attempted on a "
+                         "crossed chain: 1190 s and a heartbeat timeout, which "
+                         "no `try` can catch")
         # The EXPENSIVE closing block, named by its own simp set rather than by
         # one lemma in it. `x86_flags_add` on its own is not that block's
         # marker: it is also what `x86_step_add_rsp_imm32`'s successor equation
@@ -2594,6 +2613,148 @@ class TestX86EndToEndEmitter(unittest.TestCase):
         # (`simp [hs…, i0, X86State.init, x86_flags_sub, x86_flags_add,`).
         self.assertNotIn("x86_flags_sub, x86_flags_add", closing,
                          "…which is what makes it the expensive one")
+
+    def test_every_state_wrapper_the_successor_table_quotes_is_unfoldable(self):
+        """The class of bug this fix had, pinned so it cannot come back quietly.
+
+        `_concrete_read`'s term is only CLOSED because every state-valued wrapper
+        the successor table applies has a `_mem` lemma in `lib/X86.lean` — a
+        `.mem` projection through a `match` or an opaque `def` stops there and
+        brings the whole register file with it. A wrapper added to `_SUCCS`
+        without one would not fail: the evaluation would simply be refused, the
+        guard would admit, and the report would say "proved with a sorry" about a
+        read that is computable. So this reads `_SUCCS` and asks for each name.
+        """
+        import formal.x86_64_endtoend_test as E
+        import re as _re
+        # A name is applied to a STATE when it is the head of the record the
+        # successor updates (`{ x86_set_reg s i v with … }`), which is read off
+        # the table rather than off a list -- `x86_cond` and `x86_sign_extend8`
+        # are named there too and neither returns a state.
+        applied = set()
+        for succ in E._SUCCS.values():
+            for m in _re.finditer(
+                    r"\{\s*(x86_[A-Za-z_0-9]+)[^}]*\bwith\b", succ):
+                applied.add(m.group(1))
+        named = set(E._MEM_LEMMAS) | set(E._WRAPPER_DEFS)
+        missing = sorted(n for n in applied
+                         if n + "_mem" not in named and n not in named)
+        self.assertEqual(missing, [],
+                         "these are applied to a STATE by the successor table "
+                         "and neither they nor their `_mem` lemma is in the "
+                         f"closing read's simp set: {missing}")
+
+    def test_every_rex_byte_a_path_uses_has_a_named_decoding(self):
+        """`simp only` does not use the default simp set, so the sixteen `[simp]`
+        REX decodings in `lib/X86.lean` have to be NAMED — and a REX byte the
+        name list misses leaves `5 + x86_rex_b 0x4c` unreduced, which leaves every
+        write address through `rbp` a match on a non-literal, which leaves the
+        evaluated term open and the read admitted. The set is computed from the
+        path's bytes, so this asks whether that computation sees them all.
+        """
+        import formal.x86_64_endtoend_test as E
+        _, _, _, shapes = self._source_plan()
+        names = set(E._rex_byte_lemmas(shapes))
+        wanted = {b for _i, _f, raw in shapes for b in raw if 0x40 <= b <= 0x4F}
+        self.assertTrue(wanted, "the fixture has REX bytes; if it stops having "
+                         "any this test is measuring nothing")
+        for b in sorted(wanted):
+            for bit in ("w", "r", "b"):
+                self.assertIn("x86_rex_%s_%02x" % (bit, b), names,
+                              "REX 0x%02x occurs in the body and its %s "
+                              "decoding is not named" % (b, bit))
+
+    def test_the_side_condition_guard_is_the_shape_that_actually_admits(self):
+        """B23's shape, and the measurement that says it does not work.
+
+        `try (…) <;> all_goals sorry` was every side condition in every
+        generated file, on the strength of B23's second point — and
+        `try t1 <;> t2` does not run `t2` when `t1` throws. So a firing side
+        condition was an `unsolved goals` error and the whole file died, which is
+        the exact failure B23 exists to prevent. It stayed hidden because no side
+        condition in the corpus failed, so nothing could tell a working guard from
+        a broken one. The two-line form admits, and this pins that the broken
+        shape is gone rather than that it stopped happening.
+        """
+        import re as _re
+        for source in (None, self.STRAIGHT):
+            text = self._emitted(source)
+            self.assertNotIn("<;> all_goals sorry", text,
+                             "`try (…) <;> all_goals sorry` never reaches its "
+                             "`sorry`: a firing side condition kills the file")
+            # Every inline `sorry` sits inside a `(by` … `)` whose only tactics
+            # are a `try` and the admission, in that order.
+            for m in _re.finditer(
+                    r"\(by\n((?:  [^\n]*\n)+?)  all_goals sorry\)", text):
+                self.assertRegex(m.group(1), r"^  try \(",
+                                 "a side condition must attempt before it "
+                                 f"admits, and this one does not:\n{m.group(0)}")
+
+    def test_a_dead_lean_is_not_reported_as_a_proof(self):
+        """`_run_lean` looked at `: error` lines only, so `rc != 0` with none was
+        a pass — and `lean` dies that way.
+
+        `lean::memory_exception` ABORTS rather than reports, so the process
+        prints `libc++abi: terminating due to uncaught exception of type
+        lean::memory_exception` on stdout and exits `-6` with no `: error` line
+        anywhere. Measured on this emitter's own 8-argument fixture: `rc=-6`,
+        `errors: 0`, 6.5 GB — and the report said `terminates: PROVED`, which is
+        a statement about a file that was never checked.
+
+        Lean-free by monkeypatching the launcher, because the point is what the
+        function does with a return code and not what Lean does: a 100-second
+        proof is a very expensive way to learn that a guard reads the wrong
+        field.
+        """
+        import collections as _c
+        import formal.lean as L
+        import formal.x86_64_endtoend_test as E
+        real = L.run_lean
+        seen = {}
+
+        def fake(lean, args, **kw):
+            seen["called"] = True
+            return _c.namedtuple(
+                "R", "returncode stdout stderr exceeded wall_s cpu_s peak_rss "
+                "pgid")(-6, "libc++abi: terminating due to uncaught exception "
+                            "of type lean::memory_exception", "", None,
+                       1.0, 1.0, 6.5e9, 0)
+
+        L.run_lean = fake
+        try:
+            ok, admitted, fired, err = E._run_lean("theorem t : True := by\n"
+                                                   "  trivial\n")
+        finally:
+            L.run_lean = real
+        self.assertTrue(seen.get("called"), "the launcher was not reached")
+        self.assertFalse(ok, "a `lean` that exited non-zero must not be `ok`: "
+                             "the caller reads `ok` as \"the file elaborates\"")
+        self.assertFalse(fired, "…and must not report the file as fully proved")
+        self.assertIn("lean::memory_exception", err,
+                      "the reason has to name the cause, not the exit code: "
+                      "`lean::memory_exception` aborts instead of reporting, so "
+                      f"the exit code alone says nothing. Got: {err!r}")
+
+    def test_the_two_sorry_shapes_are_the_two_classes(self):
+        """`admitted_facts`' discriminator, which is the LINE and nothing else.
+
+        A fact's own admission is `all_goals sorry` alone; a side condition's
+        shares its line with the `)` that closes the inline `by`. That is only
+        exact because those are the only two shapes the emitter writes, so it is
+        asserted here rather than assumed: the census is what NAMES a hole in the
+        report, and a name that is a step's side condition is not a name.
+        """
+        import formal.x86_64_endtoend_test as E
+        text = ("theorem t : True := by\n"
+                "  have h : True := by\n"
+                "    trivial\n"
+                "    all_goals sorry\n"
+                "  have hstep : True := exact (by\n"
+                "  try (trivial)\n"
+                "  all_goals sorry)\n")
+        facts = E.admitted_facts(text)
+        self.assertEqual([(n, k) for n, _l, k in facts],
+                         [("h", "admitted"), ("hstep", "guarded")])
 
     def test_a_chain_that_never_left_its_frame_is_untouched(self):
         """The other half, and the one that must NOT change: 32 of the 45 examples

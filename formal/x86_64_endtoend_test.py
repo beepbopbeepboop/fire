@@ -118,17 +118,20 @@ skipped silently -- the point is to know what is and is not proved.
     * `group3:div` is skipped wherever it appears, for the same reason the
       per-instruction certificates skip it: the step is not total.
 
-    * A path that RETURNS INTO A CALLER is declined, and it is the one limit
-      here that is not a gap in the proof but a falsehood in it.  `call` pushes
-      a return address and `ret` pops one, so a function that calls another does
-      not finish where the callee finishes; the tree used to make every `ret`
-      the end of the run, the chain stopped at the callee's return, and the
-      closing `hrip : s_N.rip = 0` claimed the exit sentinel where the machine
-      has the address after the `call`.  Reported as `no tree: the run
-      continues into the caller after the callee's ret`, and `wide_recv` is the
-      only example in the corpus it applies to.  Following the return is the fix
-      and it needs the separation at each `ret`; see
-      `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+    * A path that RETURNS INTO A CALLER used to be declined, and it was the one
+      limit here that was not a gap in the proof but a falsehood in it.  `call`
+      pushes a return address and `ret` pops one, so a function that calls
+      another does not finish where the callee finishes; the tree used to make
+      every `ret` the end of the run, the chain stopped at the callee's return,
+      and the closing `hrip : s_N.rip = 0` claimed the exit sentinel where the
+      machine has the address after the `call`.  The return is followed now
+      (`_tree`, B26) and the read at each followed return is PROVED rather than
+      admitted (`_concrete_read`): the popped address is a closed term, so the
+      proof evaluates it instead of simplifying it into one.  What it cost when
+      it was admitted is in
+      `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`,
+      which is where the boundary and the measurement behind the fix both live.
+
 
 Usage: python3 formal/x86_64_endtoend_test.py [file.mojo ...]
 """
@@ -829,24 +832,47 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
     """
     lemma, takes_imm, conds = _FORMS[form]
     imm = int.from_bytes(raw[3:7], "little", signed=True) if takes_imm else None
-    # Each side condition is `try (<attempt>) <;> all_goals sorry`, so one that
-    # does not go through is admitted rather than fatal, and Lean reports the
-    # file as using `sorry`.
+    # Each side condition is a `try (<attempt>)` and then an `all_goals sorry`
+    # ON ITS OWN LINE, so one that does not go through is admitted rather than
+    # fatal, and Lean reports the file as using `sorry`.
     #
-    # Two things about that shape, both learned the hard way here.  The guard
-    # must be INSIDE the inline `by`: an unsolved goal inside `(by simp [hs12])`
-    # is an ELABORATION error, not a tactic failure, so neither an enclosing
-    # `try` nor `first | exact ... | sorry` around the whole step catches it and
-    # the file dies.  And it must be `try ... <;> all_goals sorry` rather than
-    # `first | simp ... | all_goals sorry`: `first` commits to the first
-    # alternative that does not THROW, not the first that closes the goal, so a
-    # `simp` that runs and simplifies nothing is taken as a success and the
-    # `sorry` alternative is never reached.
+    # Three things about that shape, all learned the hard way here, and the
+    # third is the one that was wrong for as long as it was written down.
+    #
+    #  * The guard must be INSIDE the inline `by`: an unsolved goal inside
+    #    `(by simp [hs12])` is an ELABORATION error, not a tactic failure, so
+    #    neither an enclosing `try` nor `first | exact ... | sorry` around the
+    #    whole step catches it and the file dies.
+    #  * It must not be `first | simp ... | all_goals sorry`: `first` commits to
+    #    the first alternative that does not THROW, not the first that closes the
+    #    goal, so a `simp` that runs and simplifies nothing is taken as a
+    #    success and the `sorry` alternative is never reached.
+    #  * **And the `all_goals sorry` must NOT be chained with `<;>`.** It was,
+    #    for every side condition in every generated file, on the strength of
+    #    B23's second point -- and `try t1 <;> t2` does not run `t2` when `t1`
+    #    throws. Measured, on the two-line form and the chained form of the same
+    #    guard over the same unsatisfiable goal:
+    #
+    #        exact (by try (first | native_decide | decide) <;> all_goals sorry)
+    #          -> `unsolved goals ... ⊢ a + 1 = 4`, and the file dies
+    #        exact (by
+    #          try (first | native_decide | decide)
+    #          all_goals sorry)
+    #          -> `declaration uses sorry`, and the file builds
+    #
+    #    So the guard never admitted anything: it reported the hole as a build
+    #    failure instead, which is the exact failure B23 exists to prevent and
+    #    which it was introduced to fix. It stayed hidden because no side
+    #    condition in the corpus FAILED -- every one of the 542 guarded facts in
+    #    the 24-argument program closes -- so the broken arm was never taken, and
+    #    `terminates proved with no sorry` could not tell the difference. The
+    #    first guard that can fire is `_concrete_read`'s, which is why the two
+    #    had to be fixed together.
     #
     # This is what let `imul` mask an unrelated gap in the `rsp + disp8` load:
     # 8 examples read "no tree" instead of "tree, one step unproved".
     def sc_(tactic):
-        return "(by try (%s) <;> all_goals sorry)" % tactic
+        return "(by\n  try (%s)\n  all_goals sorry)" % tactic
 
     sc = []
     for c in conds:
@@ -1771,6 +1797,165 @@ def _byte_list(insns, code, base):
     return out
 
 
+#: The five `lib/X86.lean` lemmas that say a state-valued wrapper leaves memory
+#: alone, named here because this is the one consumer that needs them.  See the
+#: section "A register write does not change memory" in that file for why they
+#: exist at all and why they are not `@[simp]`.
+_MEM_LEMMAS = ("x86_set_reg_mem", "x86_set_xmm_mem", "x86_flags_logic_mem",
+               "x86_flags_add_mem", "x86_flags_sub_mem")
+
+#: The five state-valued wrappers' DEFINITIONS, which the same file needs
+#: unfolded for a different projection.  `_MEM_LEMMAS` gets `.mem` through a
+#: wrapper without unfolding it, which is cheaper; but a REGISTER read out of a
+#: wrapper's result is a projection the simplifier can only reduce if the
+#: wrapper is a constructor in the term, and it is not until it is unfolded.
+#: So a write address like `(Int.ofNat (x86_get_reg s (5 + x86_rex_b 0x48)).toNat
+#: + -8).toNat` -- every frame-relative store and load this backend emits -- needs
+#: all three steps: `x86_rex_b` decoded, `x86_get_reg`'s `match` reduced to one
+#: arm, and the wrapper unfolded so the selected field projects.
+#:
+#: **These are names in a `simp only` set and nothing else.** The whole point of
+#: the route is that the simplifier UNFOLDS structure and `native_decide`
+#: EVALUATES arithmetic; the old closing block handed the same definitions to a
+#: full `simp`, which also ran the default set over every register's arithmetic,
+#: and that is the 1190 s the bug doc measured. Nothing here decides an
+#: inequality or folds a literal.
+_WRAPPER_DEFS = ("x86_get_reg", "x86_set_reg", "x86_set_xmm", "x86_mem_addr",
+                 "x86_flags_logic", "x86_flags_add", "x86_flags_sub")
+
+
+def _rex_byte_lemmas(shapes):
+    """The `[simp]` REX decodings for the bytes that actually occur on a path.
+
+    `lib/X86.lean` states all sixteen REX bytes' `w`/`r`/`b` decodings as proved
+    `[simp]` facts, and `simp only` does not use the default set, so they have to
+    be named. Naming all forty-eight would work and would also print a linter
+    warning for each of the forty-odd that no chain uses; naming the ones the
+    path contains keeps the set to what the term can mention. A REX byte outside
+    `0x40..0x4f` is not a REX byte, and one inside has all three lemmas.
+    """
+    used = {b for _i, _f, raw in shapes for b in raw if 0x40 <= b <= 0x4F}
+    return tuple("x86_rex_%s_%02x" % (bit, b)
+                 for b in sorted(used) for bit in ("w", "r", "b"))
+
+
+def _unfold(hs_path, rex=()):
+    """The `simp only` set that replaces a state variable by the term it is.
+
+    `hs{k} : s{k} = <the model's successor for step k>`, and `i0` is the entry
+    state, so `hs1 .. hs{k}` plus `i0` describe `s{k}` completely: after
+    `simp only` with this set a state PROJECTION is a closed term, and only
+    the projections the goal actually mentions have been computed.  `hs_path` is
+    the walker's own list, which at node `k` is exactly `hs1 .. hs{k}` and is
+    empty only for the first step -- where `i0` alone is the whole chain.
+
+    **The two projection lemmas at the end are what make the result CLOSED**,
+    and they are not tidiness. `x86_set_reg` and `x86_set_xmm` are the only two
+    functions in `lib/X86.lean` that return a state through a `match`, so a
+    `.mem` projection stops there and drags the sixteen register fields with it
+    -- one of which is `rdi`, where `X86State.init` puts the program's input.
+    `native_decide` refuses a term with a free variable in it, so without them
+    the evaluation is refused on any chain long enough to contain a register
+    write: measured on `const2`, a 16-step chain whose read is at the initial
+    stack and whose answer is 0. `x86_set_reg_mem` says the memory is unchanged
+    without unfolding the `match`, and the projection walks on down.
+    """
+    return ", ".join(("i0, X86State.init",) + tuple(hs_path)
+                     + _MEM_LEMMAS + _WRAPPER_DEFS + tuple(rex))
+
+
+#: **How many successor equations the closing read may UNFOLD, and why it is a
+#: number and not an always.**
+#:
+#: The evaluation is right and it is affordable at the sizes the corpus has --
+#: but "the sizes the corpus has" is doing real work in that sentence, and
+#: measured the other way round the cost is not affordable: what the read costs
+#: is the SIZE OF THE UNFOLDED CHAIN, once per fact, and at the length a call
+#: with a stack argument produces the file stops elaborating altogether.
+#:
+#: Measured, one program at a time, each under `tools/memslot.py` with the
+#: generated file exactly as emitted (the number is the largest `simp only` set
+#: in the file, i.e. the longest path's closing read):
+#:
+#: | fixture | longest unfold | wall | peak | verdict |
+#: |---|---|---|---|---|
+#: | `const2` | **19** | 3.9 s | 1.4 GB | `rc=0`, and the read is CLOSED: with the two `hrip` admissions deleted the file still checks |
+#: | a 3-argument call | 77 | 127.3 s | 5.2 GB | `rc=0`, but a `sorry` is still live -- the evaluation did not go through |
+#: | an 8-argument call | 113 | 222.6 s | 6.5 GB | **`rc=-6`**: `lean::memory_exception`, `excessive memory consumption detected at 'interpreter'` |
+#: | a 24-argument call | 184 | 258.8 s | 6.0 GB | the same abort, and the PRE-CHANGE emitter aborts on it too |
+#:
+#: So the boundary is between 19 and 77 for "the evaluation closes the read" and
+#: between 77 and 113 for "the file elaborates at all", and 64 is inside both
+#: gaps. **It is an interpolation and not a crossover measurement**: the exact
+#: point was not found, and a reader who wants it should bisect
+#: `w3np`/`w8np` rather than trust the number. What the number is FOR is that a
+#: chain past it keeps the pre-change shape, which is measured to check --
+#: `rc=0`, 225.5 s, 6.0 GB on the 8-argument fixture -- and a hole is a better
+#: outcome than an elaboration that never finishes, because it is countable.
+#:
+#: The fix that makes this constant unnecessary is the per-step separation
+#: invariant `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+#: names: one cheap fact per step, so the read costs O(1) in the chain's length
+#: instead of O(length) once per crossing. That needs an emitter-side
+#: stack/frame tracker to make each write's address a literal, and it is not
+#: landed.
+_MAX_UNFOLD = 64
+
+
+def _concrete_read(hs_path, rex=()):
+    """The two lines that ATTEMPT a memory read out of a CONCRETE state.
+
+    **This is the fix for the boundary
+    `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    names, and it is a change of what gets EVALUATED rather than of what gets
+    simplified.**  The read at a `ret` -- the popped return address when it
+    returns into a caller, the zero `X86State.init` leaves on the stack when it
+    does not -- is `(mem_read_bytes s{k}.mem (s{k}.rsp.toNat) 8)`, and the doc's
+    measurement was that going after it with the simplifier costs more than
+    1500 s of wall and does not finish: `s{k}.mem` is a `mem_write_bytes` chain
+    one link per instruction of the path, every link's ADDRESS is an expression
+    in an earlier `s`, and `simp` reduces all of it symbolically.  The emitter
+    knows, however, that every address on the path is a literal:
+    `X86State.init` gives `rsp` the literal `0xfffffffffffffff0`, and every
+    instruction this backend emits that writes memory addresses it through `rsp`
+    or `rbp`, both of which are literal sums of literal frame sizes from there.
+    So the term is CLOSED, and `native_decide` compiles and evaluates it -- which
+    is linear in the chain instead of exponential in it, and does not care how
+    the address got to be a literal.
+
+    So this is not "a bigger budget" and not "the same proof, split differently":
+    it replaces a simplification that cannot be paid for with an evaluation that
+    can.
+
+    **The caller supplies the `all_goals sorry`**, so this is an ATTEMPT and not
+    a whole proof: the closing read also has the memory-separation peel as a
+    second, more expensive attempt for a chain whose term is not closed, and
+    where there is no peel (`hpop`, and a closing read on a chain that crossed
+    a frame -- the peel is measured unaffordable there) this is the only one.
+
+    **And past `_MAX_UNFOLD` it is not attempted at all**, which is a bound and
+    not a preference -- see that constant's own table for the three measurements
+    it is the interpolation of, and for what happens on the wrong side of it.
+
+    `hs_path` is the walker's own list of the successor equations in scope,
+    which must include the equation for the state the GOAL is about: at the
+    closing `hrip` that is `hs{k+1}` (the state after the outermost `ret`), not
+    `hs{k}`, and the site passes the list with that one appended.  Getting it
+    wrong is not a wrong proof, it is a `simp` that makes no progress and an
+    error -- so the `simp` is `try`-guarded and the fact is admitted, which is
+    the same treatment every other attempt in this emitter gets.
+    """
+    if len(hs_path) > _MAX_UNFOLD:
+        # The single equation that writes memory, and no evaluation: this is the
+        # shape the emitter used before `_concrete_read` existed, it costs one
+        # `simp` whatever the chain's length, and the guard admits the rest. It
+        # is what keeps a long chain CHECKED rather than unaffordable, which is
+        # the whole difference between a hole and an aborted elaboration.
+        return ["  try (simp only [%s])" % hs_path[-1]]
+    return ["  try (simp only [%s])" % _unfold(hs_path, rex),
+            "  try (first | native_decide | decide)"]
+
+
 def _header(code, insns, base, steps):
     """The import, the code function, and every byte as a fact.
 
@@ -1797,6 +1982,15 @@ def _header(code, insns, base, steps):
     out = ["import X86\n",
            "set_option maxHeartbeats 4000000\n",
            "set_option maxRecDepth %d\n" % depth,
+           # The closing read's `simp only` set names every REX decoding the
+           # body's bytes can call for and every wrapper the successor table
+           # quotes, and a chain that mentions none of some of them is the norm
+           # rather than the exception -- so `unusedSimpArgs` would print a
+           # warning per unmentioned name, hundreds of them, and say nothing.
+           # This is the emitter's own emission being deliberately a superset;
+           # a genuine unused simp argument inside `lib/` is still reported,
+           # because the option is scoped to this file.
+           "set_option linter.unusedSimpArgs false\n",
            "def rc (addr : Nat) : UInt8 :=",
            "  if addr < %d then 0 else" % base,
            "  ([%s].getD (addr - %d) 0)\n"
@@ -2029,6 +2223,14 @@ def emit_terminates(path):
     out.append("  have hb := all_bytes")
     out.append("  let i0 : X86State := X86State.init n %d" % entry)
 
+    # The REX decodings the closing reads' `simp only` sets have to name, from
+    # the bytes of the instructions ON THE PATH -- which is every decoded
+    # instruction of the body, since `insns` is the body and `shapes` is its
+    # decode. Computed once and closed over: the set is the same for every fact
+    # in the file, and recomputing it per fact would be the kind of per-fact
+    # bookkeeping this file's other numbers exist to avoid.
+    rex = _rex_byte_lemmas(shapes)
+
     counter = [0]
     # Whether this path has returned out of a callee and back into its caller.
     # Read at the closing `hrip`, where it decides whether the exit-slot read is
@@ -2131,12 +2333,11 @@ def emit_terminates(path):
             # The number is a bound and not a count of holes (which is what
             # bugs/FORMAL_x86_64_end_to_end_proof.md concluded about it
             # independently), and these holes are countable by NAME in the
-            # generated file: `hpop{k}`, one per returned-to. Closing them is the
-            # per-step separation invariant the bug doc names as the remaining
-            # work.
+            # generated file: `hpop{k}`, one per returned-to.
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
                  " = %d := by" % (k, state, state, ret_to))
-            emit("  simp only [hs%d]" % k)
+            for line in _concrete_read(hs_path, rex):
+                emit(line)
             emit("  all_goals sorry")
         emit("have hstep%d : x86_step %s rc = some %s := by"
              % (k, state, succ) if ret_to is not None
@@ -2217,63 +2418,73 @@ def emit_terminates(path):
             # "made no progress" on a set that looks complete.
             hs = ", ".join(hs_path + ("hs%d" % (k + 1),))
             emit("have hrip : %s.rip = 0 := by" % nxt)
-            if crossed[0]:
-                # **A chain that came back through a `ret` cannot afford the
-                # closing `simp`, and the admission is the honest answer.**
-                #
-                # The block below proves `s.rip = 0` by unfolding EVERY successor
-                # equation on the path at once, with `x86_set_reg` and
-                # `x86_get_reg` in the set so that the register-derived write
-                # addresses reduce. Measured on the 45-example corpus that is
-                # 93 s for `wide_recv`'s 40-step chain — and the chain that
-                # follows the return is 112 steps, because the caller's
-                # continuation is now part of it and the register file has to be
-                # reconstructed across the frame boundary. At 112 it does not
-                # finish: 1190 s of wall and then `(deterministic) timeout at
-                # `whnf``, which is B21's lesson arriving from the other side —
-                # an unaffordable attempt reported as a FAILURE is worse than an
-                # admitted gap, because the failure is 20 minutes that say
-                # nothing and the gap is one number.
-                #
-                # So the crossing is what selects the treatment, and it is a
-                # fact about the PATH rather than a guess about its size: a
-                # chain that never left its own frame has one frame's worth of
-                # register file to reduce, and one that has is the case the
-                # attempt is not for. What is admitted here is exactly the
-                # separation fact, and the report counts it like any other.
-                emit("  simp only [hs%d]" % (k + 1))
-                emit("  all_goals sorry")
-                full = rules + [step_rule,
-                                "x86_exec_go_exit_at (by decide) hrip"]
-                emit("rw [%s]" % ",\n    ".join(full))
-                emit("simp")
-                return
-            # The separation step is the genuinely hard part -- its side
-            # condition is an inequality over a `mem_write_bytes` chain, closed
-            # for a function that spills at literal stack offsets and not
-            # otherwise.  So it is attempted and admitted where it does not go
-            # through, rather than failing the file.  Lean says which by
-            # reporting "declaration uses `sorry`", so the gap stays countable
-            # instead of becoming either a build failure or a silent omission.
+            # **ONE closing read, two attempts, and the order is the cheap one
+            # first.**  `_concrete_read` EVALUATES the closed term; the block
+            # after it SIMPLIFIES the same read into a closed term with the
+            # memory-separation peel.  They are two routes to one goal and the
+            # emitter used to have only the second, which is why:
             #
-            # Every step below is one that CANNOT fail: `simp` succeeds even
-            # when it simplifies nothing, and the rest are `try`.  So the block
-            # always reaches `all_goals sorry`, which admits what is left.
-            # `first | (...) | sorry` expresses the same thing but its layout
-            # is fragile -- a `| sorry` one column out is read as an
-            # alternative of the enclosing tactic and the file stops parsing.
-            emit("  have key : ∀ (m : Nat → UInt8) (a : Nat) (v : UInt64)"
-                 " (b : Nat),")
-            emit("    a + 8 ≤ b → mem_read_bytes (mem_write_bytes m a v 8) b 8"
-                 " = mem_read_bytes m b 8 :=")
-            emit("  fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
-            emit("  simp [%s, i0, X86State.init, x86_flags_sub, x86_flags_add,"
-                 % hs)
-            emit("    x86_set_reg, x86_get_reg, x86_rex_b, x86_rex_r%s] <;>"
-                 % case_simp)
-            emit("  try (repeat rw [key _ _ _ _ (by first | decide | omega)]) <;>")
-            emit("  try (simp only [mem_read_bytes, ite_true]) <;>")
-            emit("  first | decide | omega")
+            #  * on a chain that CROSSED a frame the peel was measured
+            #    unaffordable -- 93 s for `wide_recv`'s 40-step chain, and at the
+            #    112 steps a followed return makes it does not finish at all
+            #    (1190 s, then a heartbeat timeout, which is NOT catchable by
+            #    `try`), so that path could only be admitted; and
+            #  * on a chain that did not, the peel left a hole on its own: the
+            #    `const2` control closed as `proved, 1 admitted (hrip)` with
+            #    every one of its 251 side conditions proved, because the read
+            #    is at `X86State.init`'s `rsp` and the peel's `a + 8 ≤ b` peels
+            #    run out of writes before they run out of read.
+            #
+            # The second is the more interesting half, because it says the peel
+            # was never the cheap route: it is a general argument about
+            # `mem_write_bytes` that happens to be stated over the wrong read.
+            # Both are now attempted, the affordable one first, and the peel is
+            # dropped where it is known to be unaffordable.
+            #
+            # `hs_path` plus this step's OWN equation, because the goal is about
+            # `s{k+1}` and not `s{k}` -- the same off-by-one the peel below
+            # needed, and the reason `hs` is built above.
+            for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex):
+                emit(line)
+            if not crossed[0]:
+                # The separation step, for a chain whose term is NOT closed --
+                # a store through a register the program computed from its input
+                # puts `n` in an address, and `native_decide` cannot evaluate a
+                # term with a free variable in it. Its side condition is an
+                # inequality over a `mem_write_bytes` chain, and it is stated
+                # with `repeat rw` because `rw` peels ONE layer and the chain is
+                # N deep -- see the B18 entry in
+                # bugs/FORMAL_x86_64_end_to_end_proof.md for the measurement.
+                #
+                # Every step below is one that CANNOT fail: `simp` succeeds even
+                # when it simplifies nothing, and the rest are `try`. So the
+                # block always reaches `all_goals sorry`, which admits what is
+                # left. `first | (...) | sorry` expresses the same thing but its
+                # layout is fragile -- a `| sorry` one column out is read as an
+                # alternative of the enclosing tactic and the file stops parsing.
+                #
+                # **The whole peel is inside one `try`, `have key` included,
+                # because the attempt above it can CLOSE the goal** and a `have`
+                # with nothing left to prove is `No goals to be solved`. That is
+                # not a hypothetical: `const2`'s closing read is at
+                # `X86State.init`'s stack and the evaluation closes it, so
+                # `have key` was the next line and the file died with two
+                # errors naming a lemma rather than the attempt that had
+                # already succeeded.
+                emit("  try")
+                emit("    have key : ∀ (m : Nat → UInt8) (a : Nat)"
+                     " (v : UInt64) (b : Nat),")
+                emit("      a + 8 ≤ b → mem_read_bytes (mem_write_bytes m a v 8)"
+                     " b 8")
+                emit("        = mem_read_bytes m b 8 :=")
+                emit("    fun m a v b h => mem_read_bytes_write_above m a v 8 8 b h")
+                emit("    simp [%s, i0, X86State.init, x86_flags_sub," % hs)
+                emit("      x86_flags_add, x86_set_reg, x86_get_reg, x86_rex_b,"
+                     " x86_rex_r%s] <;>" % case_simp)
+                emit("      try (repeat rw [key _ _ _ _ (by first | decide |"
+                     " omega)]) <;>")
+                emit("      try (simp only [mem_read_bytes, ite_true]) <;>")
+                emit("      first | decide | omega")
             emit("  all_goals sorry")
             full = rules + [step_rule, "x86_exec_go_exit_at (by decide) hrip"]
             emit("rw [%s]" % ",\n    ".join(full))
@@ -2368,7 +2579,9 @@ _ERR = re.compile(r"^\S*\.lean:\d+:\d+: ")
 #: `have <name> … :=` — with or WITHOUT a `by`.  Both spellings open a proof, and
 #: the one without matters: every step lemma is emitted as
 #:     have hstep7 : x86_step s6 rc = some { … } :=
-#:       x86_step_leave s6 rc … (by try (…) <;> all_goals sorry) …
+#:       x86_step_leave s6 rc … (by
+#:         try (…)
+#:         all_goals sorry) …
 #: so requiring `by` left `cur` on the PREVIOUS fact and charged every guarded
 #: side condition to it — 118 named holes on `wide_recv` where there are 9, every
 #: `hs` and `hstep` in the chain wrongly named as an admission.
@@ -2381,20 +2594,53 @@ _SORRY = re.compile(r"\b(?:all_goals\s+)?sorry\b")
 #:     have hpop3 : … := by
 #:       simp only [hs3]
 #:       all_goals sorry
-#: The inline form — `(by try (…) <;> all_goals sorry)` — is a GUARD, and is a
-#: different fact entirely: the tactic is attempted first and the `sorry` is
-#: reached only if it does not close the goal. Whether it fired is known only to
-#: Lean, and Lean does not say, so counting the inline form as a hole
-#: OVER-counts (measured: 118 "admissions" on `wide_recv` where there are 5) and
-#: not counting it UNDER-counts. They are reported as two numbers because they
-#: are two facts, which is B21's whole subject.
+#: The GUARDED form — a tactic attempted immediately above it — is a different
+#: fact entirely: the attempt runs first and the `sorry` is reached only if it
+#: does not close the goal. Whether it fired is known only to Lean, and Lean
+#: does not say, so counting a guarded `sorry` as a hole OVER-counts (measured:
+#: 118 "admissions" on `wide_recv` where there are 5) and not counting it
+#: UNDER-counts. They are reported as two numbers because they are two facts,
+#: which is B21's whole subject.
 _SORRY_ALONE = re.compile(r"^\s*(?:all_goals\s+)?sorry\s*$")
 #: A `/- … -/` block comment, replaced by blank lines so the line numbers the
 #: check reports still point at the source.
 _BLOCK_COMMENT = re.compile(r"/-.*?-/", re.S)
-#: The guard's own shape, so a guarded side condition is counted rather than
-#: lumped in with an admission.
-_GUARD = re.compile(r"\(\s*by\s+try\b")
+#: **A `sorry` that shares its line with other syntax is inside an inline `by`,
+#: and one alone on its line is a named fact's own admission.**  That is the
+#: whole discriminator, and the emitter's two shapes are what makes it work:
+#:
+#:     have hstep7 : x86_step s6 rc = some { … } :=
+#:       x86_step_leave s6 rc … (by
+#:         try (…)
+#:         all_goals sorry) (by …)          <- guarded: a SIDE CONDITION
+#:
+#:     have hrip : s16.rip = 0 := by
+#:         try (simp only […])
+#:         try (first | native_decide | decide)
+#:         all_goals sorry                   <- admitted: this FACT's proof
+#:
+#: It used to be `(by try\b`, which matched the single-line side condition the
+#: emitter used to write and nothing else — so a fact whose `try` chain closed
+#: the goal and whose `all_goals sorry` then sat alone was counted as a hole
+#: even when it was not one. That turned out to be the right answer for a wrong
+#: reason, and it is kept: the count is only ever PRINTED when Lean says some
+#: `sorry` in the file is load-bearing (`_run_lean`'s `fired`), and by then a
+#: closed attempt is not in the printed set. Widening the regex to "an attempt
+#: sits above it" instead — the other reading of the same two classes — was
+#: measured and is worse: it makes every one of the 5171 guarded facts of the
+#: 24-argument program a candidate and the report's answer to "which fact is the
+#: hole" becomes `unattributed`.
+#: …and one that SHARES its line with other syntax, which is a `sorry` inside
+#: an inline `(by …)` — a step lemma's per-hypothesis argument.  The two shapes
+#: the emitter writes are
+#:
+#:     all_goals sorry) (by          the first of three side conditions
+#:     all_goals sorry)              the last one, where the `)` closes it
+#:
+#: so the discriminator is the LINE and nothing else: a fact's own admission is
+#: `all_goals sorry` alone, a side condition's is never alone.  That is only
+#: exact because those are the only two shapes emitted, which is what
+#: `test_the_two_sorry_shapes_are_the_two_classes` pins.
 
 
 def admitted_facts(text):
@@ -2403,21 +2649,26 @@ def admitted_facts(text):
     `kind` is `"admitted"` or `"guarded"`, and the two are counted separately by
     every caller because they answer different questions:
 
-      `admitted`  the emitter WROTE `all_goals sorry` as a fact's whole proof.
-                  A hole, always. Nothing was attempted.
+      `admitted`  a NAMED FACT's own last line: `have hpop{k} : … := by` and
+                  then `all_goals sorry`. A hole in the file's scaffolding, and
+                  the NAME is one a reader can go and look at.
 
-      `guarded`   a side condition written `(by try … <;> all_goals sorry)`. The
-                  tactic runs first; the `sorry` is reached only if it does not
-                  close the goal. So this is a fact about the EMISSION, not
-                  about the proof: the fact may be fully proved and Lean says
-                  nothing either way, because it reports "declaration 'terminates'
-                  uses 'sorry'" once per DECLARATION and
+      `guarded`   a SIDE CONDITION — a `sorry` inside an inline `(by …)`, which
+                  is every step lemma's per-hypothesis argument. The tactic runs
+                  first; the `sorry` is reached only if it does not close the
+                  goal. So this is a fact about the EMISSION, not about the
+                  proof: the fact may be fully proved and Lean says nothing
+                  either way, because it reports "declaration 'terminates' uses
+                  `sorry`" once per DECLARATION and
                   `formal/lean.py::_census_from_output` de-duplicates by name.
-                  A chain with four admitted `hpop`s and one with a single gap
-                  read identically — `bugs/FORMAL_x86_64_end_to_end_proof.md`
-                  reaches the same conclusion about `augassign` from the other
-                  end, and this is a statement about the CENSUS rather than the
-                  proof.
+                  `bugs/FORMAL_x86_64_end_to_end_proof.md` reaches the same
+                  conclusion about `augassign` from the other end, and this is a
+                  statement about the CENSUS rather than the proof.
+
+    **Neither count decides the verdict** — `_run_lean` asks Lean, which is the
+    only thing that knows whether any of these `sorry`s is load-bearing. The
+    counts are for NAMING a hole once Lean has said there is one, and a name is
+    only worth printing next to a verdict that is already true.
 
     Counted off the generated TEXT rather than kept in a counter beside it, for
     the reason the rest of this file's numbers are: a tally maintained next to
@@ -2442,21 +2693,36 @@ def admitted_facts(text):
         if _SORRY_ALONE.match(line):
             out.append((cur if cur is not None else ("_body", n), "admitted"))
         elif _SORRY.search(line):
-            kind = "guarded" if _GUARD.search(line) else "admitted"
-            out.append((cur if cur is not None else ("_body", n), kind))
+            out.append((cur if cur is not None else ("_body", n), "guarded"))
     return [(nm, ln, kind) for (nm, ln), kind in out]
 
 
 def _run_lean(text):
-    """`(ok, n_sorries, first_error)` for one generated Lean file.
+    """`(ok, n_admitted, fired, first_error)` for one generated Lean file.
 
-    `n_sorries` is `admitted_facts`' count — the holes THIS emitter opened —
-    and not Lean's `declaration uses 'sorry'` line count. Both are called a
-    "sorry" and they are not the same number; see `admitted_facts` for why the
-    one Lean reports cannot be used here. Lean's is kept as a cross-check that
-    the two do not DISAGREE, because they must: a `sorry` this emitter did not
-    write would mean a library hole had leaked into a generated file, and a
-    count of zero with Lean's non-zero is that.
+    `n_admitted` is `admitted_facts`' count of the holes THIS emitter opened
+    with nothing attempted above them, and `fired` is the one number only Lean
+    has: whether any `sorry` in this file is LOAD-BEARING, which it reports as
+    `declaration 'terminates' uses 'sorry'`, once per DECLARATION. `fired` is
+    0 or 1 here and that is all the caller needs — it is the difference between
+    "the guards all held" and "at least one did not", and no text census can
+    see it.
+
+    **The verdict is driven by `fired` and not by `n_admitted`, and that is the
+    fix rather than a detail.** It was driven by `n_admitted`, which is a fact
+    about what was EMITTED: so the 2815 guarded `sorry`s in the 8-argument
+    program counted as zero holes whether or not their tactics closed their
+    goals, and a single one of them falling through would have been reported as
+    `PROVED`. The cross-check below would have caught it — by turning an admitted
+    gap into a `FAIL`, which is B21's conflation from the other side, so it was
+    a check that could only report the wrong answer. Asking Lean removes the
+    question.
+
+    The cross-check is still here and is still worth having, with the total
+    (`n_admitted` + guarded) as its denominator: a `sorry` this emitter did not
+    write at all would mean a library hole had leaked into a generated file, and
+    a file with no `sorry` in it that Lean still calls `uses sorry` is exactly
+    that.
     """
     with tempfile.NamedTemporaryFile("w", suffix=".lean", delete=False) as f:
         f.write(text)
@@ -2471,29 +2737,53 @@ def _run_lean(text):
             # element as the reason a theorem did not hold. Returning it there
             # would put "we stopped watching" in the output where a reader is
             # looking for "the model disagrees".
-            return (False, 0, p.exceeded)
+            return (False, 0, False, p.exceeded)
         out = p.stdout + p.stderr
+        if p.returncode != 0:
+            # **A non-zero exit is not a PROOF, and it used to read as one.**
+            # This function looked at `: error` lines and at nothing else, so a
+            # `lean` that died without printing one came back `ok` — and the
+            # caller reads `ok` as "the file elaborates". Measured on this
+            # emitter's own 24-argument fixture: `(deterministic) timeout`-free,
+            # zero `: error` lines, `sorry: []`, and `rc=-6` with
+            #
+            #     libc++abi: terminating due to uncaught exception of type
+            #       lean::memory_exception: excessive memory consumption
+            #       detected at 'interpreter'
+            #
+            # on stdout, from Lean's own allocator giving up at its default
+            # `maxMemory`. Every number in the report was then a statement about
+            # a file that was never checked, and `terminates: PROVED` was one of
+            # them. This is the doc's own sentence about a check that is worse
+            # than no check, arrived at from the other end: the guard was not
+            # reporting a false proof, it was reporting no proof.
+            #
+            # The reason is the C++ runtime's own line where there is one,
+            # because `lean::memory_exception` aborts rather than reports and
+            # "exited -6" alone names the symptom rather than the cause.
+            reason = next((l for l in out.splitlines()
+                           if "memory_exception" in l or "libc++abi" in l), "")
+            return (False, 0, False,
+                    "lean exited %s: %s" % (p.returncode, reason
+                                           or "no error message"))
         # Drop the temp path and the line:col, which would otherwise eat the
         # whole message under the `[:60]` slice below and print as a filename.
         errs = [_ERR.sub("", l) for l in out.splitlines() if ": error" in l]
-        sorries = sum(1 for _n, _l, k in admitted_facts(text)
-                      if k == "admitted")
-        if not errs:
-            lean_sorries = sum(1 for l in out.splitlines()
-                               if "declaration uses" in l)
-            if lean_sorries and not sorries:
-                errs.append(
-                    "Lean reports %d declaration(s) using `sorry` and this "
-                    "emitter admitted no fact of its own: a library hole has "
-                    "leaked into a generated file, and counting only ours "
-                    "would have reported it as clean" % lean_sorries)
-        return (not errs), sorries, (errs[0] if errs else "")
+        facts = admitted_facts(text)
+        sorries = sum(1 for _n, _l, k in facts if k == "admitted")
+        fired = any("declaration uses" in l for l in out.splitlines())
+        if not errs and fired and not facts:
+            errs.append(
+                "Lean reports this declaration as using `sorry` and the "
+                "generated file contains no `sorry` at all: a library hole has "
+                "leaked into it, and reporting it as clean would be worse")
+        return (not errs), sorries, fired, (errs[0] if errs else "")
     finally:
         os.unlink(tmp)
 
 
 def _check(path, expected):
-    """`(proved, n_sorries, first_error)` for the value theorem."""
+    """`(proved, n_admitted, fired, first_error)` for the value theorem."""
     return _run_lean(emit(path, expected))
 
 
@@ -2552,7 +2842,7 @@ def main(argv):
         if 0 <= expected <= 255:
             uncovered = None
             try:
-                good, val_sorries, msg = _check(t, expected)
+                good, val_sorries, val_fired, msg = _check(t, expected)
                 val_holes = sorted({n for n, _l, k in admitted_facts(
                     emit(t, expected)) if k == "admitted"})
             except ValueError as exc:
@@ -2561,7 +2851,7 @@ def main(argv):
                 # failed.  Reporting it as a failure is how "36 failing" happened
                 # earlier.
                 good, msg, uncovered = None, "", str(exc)
-            if good and not val_sorries:
+            if good and not val_fired:
                 val_ok += 1
                 vs = "  value:     rax = %d, every input" % expected
             elif good:
@@ -2594,7 +2884,7 @@ def main(argv):
         # --- the termination theorem ---
         try:
             text = emit_terminates(t)
-            ok, sorries, err = _run_lean(text)
+            ok, sorries, fired, err = _run_lean(text)
             # The NAMES, not just the number, because the number alone cannot be
             # acted on: `admitted_facts`' docstring has the measurement that Lean
             # reports one line per DECLARATION, so four `hpop`s read as one gap.
@@ -2629,10 +2919,17 @@ def main(argv):
                 noform += 1
             ts = _no_tree_line(kind, detail)
         else:
-            if ok and not sorries:
+            if ok and not fired:
                 term_ok += 1
                 ts = "  terminates: PROVED"
             elif ok:
+                # Lean's own answer, not the census's: a guarded `sorry` that
+                # fell through is a hole and `fired` is what says so. The names
+                # are the census's best attribution and they can be empty — a
+                # guard that fires names the FACT it is inside, which is a step's
+                # side condition about a tenth of the time — so "unattributed"
+                # is a real answer here rather than a placeholder, and the
+                # guarded count beside it is the size of the search.
                 term_gap += 1
                 hole_total += sorries
                 guard_total += guarded

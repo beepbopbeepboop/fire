@@ -1,5 +1,68 @@
 # FORMAL_x86_64_end_to_end_proof: a vacuous step lemma, a form proved as the wrong instruction, and the end-to-end theorem that hides both
 
+## Status (2026-10-04 — B30/B31: the guard did not admit, and a dead `lean` read as a proof)
+
+Two more of the same kind, both from making the emitter's own largest fixture
+checkable, and both about the machinery rather than about the model. **The
+45-example sweep is NOT re-measured** — it is a heavy run — so every table below
+stands as written and the prediction to check first is unchanged:
+`terminates proved with no sorry` must still read 32, which
+`test_formal_sweep_truth.py::TestX86EndToEndEmitter` pins Lean-free.
+
+**B30. `try (…) <;> all_goals sorry` — the shape B23 introduced — never admitted
+anything.** B23's second point is right and its instrument was not: `first`
+commits to the first alternative that does not throw rather than the first that
+closes the goal, so `first | simp … | all_goals sorry` takes a `simp` that
+simplifies nothing. The replacement written here was
+`try (simp …) <;> all_goals sorry`, and `try t1 <;> t2` does not run `t2` when
+`t1` throws either — measured, both spellings of the same guard over the same
+unsatisfiable goal:
+
+    exact (by try (first | native_decide | decide) <;> all_goals sorry)
+      -> `unsolved goals ... ⊢ a + 1 = 4`   -- an elaboration error; the file dies
+    exact (by
+      try (first | native_decide | decide)
+      all_goals sorry)
+      -> `declaration uses sorry`          -- the hole, and the file builds
+
+So every one of the guarded side conditions in every generated file reported its
+hole as a BUILD FAILURE, which is the failure B23 exists to prevent and which it
+was introduced to fix. It was invisible because no side condition in the corpus
+FAILED: all 542 of the 24-argument program's close, so `terminates proved with no
+sorry` could not tell a working guard from a broken one. The two-line form is
+what `_resolve`'s `sc_` writes now. **The lesson is B23's own and it is about
+the guard rather than the lemma: a guard that has never fired has never been
+tested, and the way to test it is to write one that fires.**
+
+**B31. A `lean` that DIED was reported as a PROVED theorem.** `_run_lean` decided
+`ok` from `: error` lines and nothing else, and `lean::memory_exception` ABORTS
+rather than reports — on this emitter's own 8-argument fixture, `rc=-6`, zero
+error lines, `libc++abi: terminating due to uncaught exception of type
+lean::memory_exception` on stdout, and the report said `terminates: PROVED`.
+That is B21 arriving from the opposite direction: not three outcomes conflated
+as failures, but the absence of an outcome conflated as a proof. The verdict is
+now driven by `declaration uses sorry`, which is the only thing that knows
+whether a guard's `sorry` is load-bearing — the census counts holes for NAMING
+one and no longer decides whether there is one — and a non-zero exit is a
+failure whose reason is the C++ runtime's line rather than the exit code.
+
+**And the read at a `ret` is now EVALUATED, where the chain is short enough.**
+`_concrete_read` unfolds the path's successor equations with `simp only` and lets
+`native_decide` evaluate the result, because every write address on the path is
+a literal and the term is therefore closed; the simplifier's route is what the
+companion doc measured at 1500 s and never finished. It needed a fact
+`lib/X86.lean` did not have — no lemma said a register or flag write leaves
+memory alone, so a `.mem` projection stopped at the first `x86_set_reg` and
+dragged `rdi`, the program's input, into a term `native_decide` refuses — and
+five `_mem` lemmas now say it. Measured: `const2` at 19 equations of chain
+closes the read (3.4 s, 1.4 GB, `rc=0`, and the file still checks with the
+admission deleted); 77 equations leaves a hole; 113 makes the file ABORT on
+`lean::memory_exception`, so `_MAX_UNFOLD = 64` gates the attempt and a longer
+chain keeps the pre-change shape. The full table, the bisect that would find the
+crossover, and the per-step separation invariant that makes the bound
+unnecessary are in
+`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+
 ## Status (2026-10-03 — B26/B27: the return is followed, and the byte facts are computed)
 
 Two more of the same kind of bug, both found by making the prover handle a
@@ -270,7 +333,7 @@ analysis. Two bugs below (`FORMAL`-numbered B16, B17) were *found* by running
 the generator across the repo rather than over `formal/examples`, but what is
 recorded is the bug and its fix, not the sweep.
 
-Bug numbers (`B1`…`B23`) are this doc's own, for cross-reference.
+Bug numbers (`B1`…`B31`) are this doc's own, for cross-reference.
 
 ## Status (2026-10-01 — the uncovered-form work is done; B1–B23 recorded below)
 
@@ -668,25 +731,33 @@ as soon as the side conditions were admitted.
 `694433c` — the last thing to get right, and both failures are silent
 
 Guarding a proof so an unclosed step is *admitted and reported* rather than
-fatal, in the user's words "use sorries for anything hard", has exactly two
-non-obvious requirements. Getting either wrong takes the whole suite from 23
-proved to 0.
+fatal, in the user's words "use sorries for anything hard", has exactly three
+non-obvious requirements, and the third was found to be wrong in 2026-10-04 (see
+B30 above). Getting any of them wrong takes the whole suite from 23 proved to 0
+— or, for the third, leaves it looking green while every firing guard is a build
+failure.
 
 1. **The guard must be inside the inline `by`.** An unsolved goal inside
    `(by simp [hs12])` is an **elaboration error**, not a tactic failure. Nothing
    enclosing it catches it: not an enclosing `try (exact …)`, not
    `first | exact … | sorry` around the whole step. The file dies.
-2. **It must be `try (… ) <;> all_goals sorry`, not `first | … | …`.** `first`
-   commits to the first alternative that does not **throw**, not the first that
-   **closes the goal**. A `simp` that runs and simplifies nothing counts as a
-   success, so the `sorry` alternative is never reached and the goal is reported
-   unsolved at the `sorry`.
+2. **It must be `try (… )` and then `all_goals sorry`, not `first | … | …`.**
+   `first` commits to the first alternative that does not **throw**, not the
+   first that **closes the goal**. A `simp` that runs and simplifies nothing
+   counts as a success, so the `sorry` alternative is never reached and the goal
+   is reported unsolved at the `sorry`.
+3. **…and the `all_goals sorry` must be its own LINE, not chained with `<;>`.**
+   **This one was wrong here for as long as it was written down** — point 2's
+   replacement WAS `try (… ) <;> all_goals sorry`, and `try t1 <;> t2` does not
+   run `t2` when `t1` throws, so a firing guard reported its hole as the same
+   elaboration error point 1 is about. Measured both spellings of one guard over
+   one unsatisfiable goal; see B30 at the top for the output. The two-line form
+   has no such failure mode and is what `_resolve`'s `sc_` writes now.
 
 A third, purely layout: `first | ( … ) | sorry` written across lines is
 fragile in a way that is not worth the risk — a `| sorry` one column out is read
 as an alternative of the *enclosing* tactic and the file stops parsing with
-`unexpected token '|'`. The sequential `try … <;> all_goals sorry` form has no
-such failure mode.
+`unexpected token '|'`. The sequential two-line form has no such failure mode.
 
 A fourth, and it is not a guard at all: a **heartbeat timeout is not catchable
 by `try`**. `elif3`'s closing separation `simp` exceeded the 800 000 budget and
