@@ -59,8 +59,8 @@ CANONICAL_ELEM_TYPES = (F.IntLiteral, F.BoolLiteral, F.StringLiteral)
 #
 # The count is a PAIR count for a dict, which is why scanning one at the
 # element stride only ever reaches the first half of it (slot i of a pair blob
-# alternates key, value). `membership_stride` is the rule that keeps a
-# membership test from making that mistake.
+# alternates key, value). `walk_stride` is the rule that keeps a walk over a
+# blob — a `for` target, a membership test — from making that mistake.
 
 BLOB_HEADER_BYTES = 8      # the i64 count
 ELEM_STRIDE = 8            # list element / pair slot stride
@@ -68,13 +68,31 @@ PAIR_STRIDE = 16           # key+value pair stride (also the key-address step)
 VALUE_OFFSET = 8           # key -> value within a pair
 
 
-def membership_stride(is_dict: bool) -> int:
-    """Byte step between candidate elements of a `in` / `not in` scan.
+def walk_stride(is_dict: bool) -> int:
+    """Byte step between the things a walk over a blob YIELDS.
 
-    A dict is a pair blob, so a membership test must walk KEYS at the pair
-    stride; at the element stride it would walk keys and values alternately
-    and, bounded by the pair count, could only ever see half the dict."""
+    One word per COUNT for a list, one KEY per COUNT for a dict — so a dict is
+    a pair blob and a walk over it steps by the pair.  At the element stride a
+    walk alternates keys and values, which is wrong in two ways at once: it
+    binds half the values, and bounded by the pair count it can only ever see
+    half the dict.  Every walk that yields ONE THING per count asks this, which
+    is a `for x in …` target and a `x in …` membership needle and nothing else;
+    the emitters that also want the address of pair `i`'s VALUE want
+    `pair_value_offset` and are not asking this question.
+    """
     return PAIR_STRIDE if is_dict else ELEM_STRIDE
+
+
+def walk_shift(is_dict: bool) -> int:
+    """`walk_stride` as the SHIFT an emitter that scales an index uses.
+
+    `index << walk_shift(is_dict)` is the byte offset the walk advances per
+    step, and both strides are powers of two, so the shift is exact rather
+    than rounded.  This is the same rule in the unit an instruction encodes it
+    (`LSL #3` / `LSL #4`, `SHL $3` / `SHL $4`) and it lives beside the strides
+    so the two cannot drift.
+    """
+    return walk_stride(is_dict).bit_length() - 1
 
 
 def element_offset(index: int) -> int:
@@ -14060,6 +14078,27 @@ def dict_literal_key_value_kind(node, index):
     return kinds.pop()
 
 
+def dict_literal_key_kind(node) -> str | None:
+    """What walking a dict LITERAL `node` yields — the kind of its KEYS.
+
+    The KEY half of `dict_literal_key_value_kind`, which answers the VALUE
+    under one subscripted key: a pair blob is `[count][k0][v0]…`, so a walk
+    over one (`for k in d`) yields `k0, k1, …` and a subscript yields the
+    value under a key it scanned for. Two different words of the same blob, and
+    asking for one with the other's rule is how a loop target over string keys
+    came to be classified as an integer and printed as an address.
+
+    Same gate as its twin: only a LITERAL states which words were written, so
+    a comprehension (whose pairs are built at run time) answers nothing. Keys
+    rather than pairs, and unanimity over all of them — every key is walked, so
+    a table mixing string and integer keys claims nothing and the caller keeps
+    its conservative fallback.
+    """
+    if not isinstance(node, F.DictExpr):
+        return None
+    return _kind_of_elements([p[0] for p in (node.pairs or []) if p])
+
+
 def container_literal_elem_kind(node) -> str | None:
     """What a subscript of the container LITERAL `node` yields, or None.
 
@@ -14793,10 +14832,49 @@ class ValueKinds:
             return _pair_value_kind(iterable.element)
         if isinstance(iterable, F.CallExpr) and _flat_callee(iterable) == "range":
             return INT_KIND
+        keyed = self._iterable_dict_key_kind(iterable)
+        if keyed is not None:
+            return keyed
         if isinstance(iterable, F.IdentExpr):
             kind = self.name_kind(iterable.name)
             if is_list_kind(kind or ""):
                 return list_elem_kind(kind)
+        return None
+
+    def _iterable_dict_key_kind(self, iterable):
+        """The kind of the KEYS a walk over the dict `iterable` yields, or None.
+
+        A dict is a pair blob, so what a `for k in d` binds is pair `i`'s KEY —
+        never its value — and the key is what the walk addresses
+        (`walk_stride`). This is the kind half of that; the stride half is the
+        emitters'. Measured before this arm existed, on both architectures: for
+        `d = {"ab": 1, "cde": 2}`, `print(k)` printed `4329047400` where
+        CPython prints `ab` (a loop target classified as an integer is a
+        `char *` formatted as a word, which is a plausible number rather than a
+        fault), and `len(k)` was REFUSED as "an integer has no length" about a
+        string the source plainly wrote.
+
+        The same evidence `dict_literal_key_value_kind` insists on, and for the
+        same reason: only the INITIALIZER states which words were written, so a
+        dict literal answers for itself and a name answers through the
+        `_dict_inits` statement that bound it. Every key the literal wrote is
+        walked, so unanimity is over all of them and a mixed table claims
+        nothing — the conservative direction, and the one the word fallback
+        already took. A dict COMPREHENSION has no initializer to ask
+        (`_iterable_own_shape` above answers it its own way), and neither has a
+        dict that arrives from a call or a `Dict[…]` parameter, so those keep
+        the fallback.
+        """
+        if is_dict_expr(iterable):
+            return dict_literal_key_kind(iterable)
+        if isinstance(iterable, F.IdentExpr):
+            # `_dict_inits` and not `is_dict_value`: the latter reads
+            # `_dict_names`, which a plain `d = {…}` ASSIGNMENT never reaches
+            # (`_bind_dictness` is called from `_bind_value`, the `VarDecl`
+            # arm), and what this needs is the INITIALIZER rather than the
+            # dict-ness — the keys are what states their kind. A name with no
+            # literal initializer answers None either way.
+            return dict_literal_key_kind(self._dict_inits.get(iterable.name))
         return None
 
     def _return_kind(self, fn) -> str | None:

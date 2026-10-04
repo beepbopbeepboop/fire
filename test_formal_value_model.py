@@ -590,6 +590,178 @@ FIXED_CASES = [
      "    printf(\"z=%d\", s.size())\n"
      "    return 0\n",
      "z=0"),
+    # ── walking a DICT, which is not walking a list ──
+    #
+    # A dict is a PAIR blob: `[count][k0][v0][k1][v1]…`, one COUNT per PAIR.
+    # A list is `[count][e0][e1]…`, one COUNT per WORD, and every walk over a
+    # blob until now stepped one word — so `for k in d` read `k0, v0, k1`,
+    # bound half the values, skipped half the keys, and exited 0. Measured on
+    # both architectures for `{10: 100, 20: 200}`: `10 100` where CPython
+    # prints `10 20`; and for `{30: 1, 10: 2, 20: 3}`, `30 1 10`. The keys
+    # are printed, so the values cannot pass for them.
+    #
+    # Keys AND values are made distinguishable by magnitude: the old walk
+    # printed a value in the second slot of a table, so a table whose values
+    # equal their keys would hide it. This one cannot.
+    ("for_in_a_dict_yields_every_key_and_no_value",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    for k in d:\n"
+     "        print(\"k:\", k)\n"
+     "    return 0\n",
+     "k: 10\nk: 20\nk: 30\n"),
+    # The same walk with the keys ACCUMULATED rather than printed: a body that
+    # only counts cannot see which keys it saw, so this is the shape that turns
+    # a skipped key into a wrong number instead of a wrong line — and a
+    # three-pair table is where the element stride reads `k0, v0, k1` and the
+    # pair stride reads `k0, k1, k2`.
+    ("for_in_a_dict_summed_over_keys_is_the_key_sum",
+     "def main(n):\n"
+     "    var d = {10: 100, 20: 200, 30: 300}\n"
+     "    var s = 0\n"
+     "    for k in d:\n"
+     "        s = s + k\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n",
+     "s=60"),
+    # A STRING-keyed dict, which is the SECOND half of the same fix and was
+    # wrong in its own way. The target's kind came from the container's element
+    # kind, and a dict classifies as a bare `list`, so a loop target was an
+    # INTEGER: `print(k)` printed the key's own `char *` as a plausible ten-digit
+    # address, and `len(k)` was refused as "an integer has no length" about a
+    # string the source plainly wrote. Measured before the fix on both
+    # architectures: `4329047400` where CPython prints `bb`.
+    #
+    # `len` is the observation rather than `print` because it is the stronger
+    # one — it needs the target's kind to be a string, and a fix that only
+    # taught `print` to guess would leave it refused.
+    ("for_in_a_dict_of_strings_binds_a_string_target",
+     "def main(n):\n"
+     "    var d = {\"ab\": 1, \"cde\": 2}\n"
+     "    for k in d:\n"
+     "        print(\"n:\", len(k))\n"
+     "    return 0\n",
+     "n: 2\nn: 3\n"),
+    # The dict as a LITERAL iterable, which is a different reader of the same
+    # question (no binding statement at all) and a different spelling of it.
+    ("for_in_a_dict_literal_binds_a_string_target",
+     "def main(n):\n"
+     "    for k in {\"ab\": 1, \"cde\": 2}:\n"
+     "        print(\"s:\", k)\n"
+     "    return 0\n",
+     "s: ab\ns: cde\n"),
+    # And a dict that arrives as a PARAMETER, where the shape is stated by an
+    # annotation rather than by a literal: the one case `_iterable_dict_key_kind`
+    # deliberately answers nothing for (no initializer to read keys out of),
+    # and the one where the STRIDE still has to be right — a wrong stride over
+    # an annotated parameter is the same silent wrong answer as over a literal.
+    ("for_in_a_dict_parameter_yields_every_key",
+     "def total(d: dict):\n"
+     "    var s = 0\n"
+     "    for k in d:\n"
+     "        s = s + k\n"
+     "    return s\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"t=%d\", total({10: 1, 20: 2}))\n"
+     "    return 0\n",
+     "t=30"),
+    # A LIST is the control: the walk over a one-word-per-count blob steps one
+    # word, and a fix that moved it to the pair stride would read past the end
+    # of this table and print whatever the frame holds next.
+    ("for_in_a_list_still_steps_one_word",
+     "def main(n):\n"
+     "    var xs = [10, 20, 30]\n"
+     "    var s = 0\n"
+     "    for x in xs:\n"
+     "        s = s + x\n"
+     "    printf(\"s=%d\", s)\n"
+     "    return 0\n",
+     "s=60"),
+    # ── a membership test, which is the same walk with a needle ──
+    #
+    # `k in haystack` scans the blob the same way a `for` does, and it had its
+    # OWN two defects, both of them silent on arm64 and both measured on x86-64
+    # — which is why these cases check BOTH backends: one architecture being
+    # right is not a passing row.
+    #
+    # THE REGISTER CLOBBER. The scan held the COUNT in R10 and reloaded the
+    # needle into R10 inside the loop, so from the second iteration the bound
+    # was the needle's own value: `i >= needle` is false for every index a blob
+    # has, and a MISS walked straight out of the blob into the frame. Measured
+    # on x86-64 with arm64 answering the same text correctly: this case died
+    # with SIGSEGV (exit 139) on the FIRST test and printed nothing.
+    #
+    # The needle is a string here, so the runaway bound is an address — the scan
+    # had to walk four billion words before it could stop, and it faulted long
+    # before that. A HIT was right by luck, because the runaway scan reaches
+    # the NEXT element on the way past the end; that is why this case is a
+    # MISS and why the hit/miss pair is the shape that shows the defect.
+    ("membership_a_missing_string_needle_in_a_list",
+     "def main(n):\n"
+     "    var xs = [\"ab\", \"cde\"]\n"
+     "    print(\"hit:\", 1 if \"ab\" in xs else 0)\n"
+     "    print(\"miss:\", 1 if \"zz\" in xs else 0)\n"
+     "    return 0\n",
+     "hit: 1\nmiss: 0\n"),
+    # …and over a DICT, which is the same bound bug reached through a pair blob.
+    # arm64 had the pair stride here from the start and answered both lines.
+    ("membership_a_missing_string_needle_in_a_dict",
+     "def main(n):\n"
+     "    var d = {\"a\": 10, \"b\": 20}\n"
+     "    print(\"hit:\", 1 if \"b\" in d else 0)\n"
+     "    print(\"miss:\", 1 if \"zz\" in d else 0)\n"
+     "    return 0\n",
+     "hit: 1\nmiss: 0\n"),
+    # THE INTEGER NEEDLE, and the half of the clobber that is a WRONG ANSWER
+    # rather than a crash: the bound became the needle's value, so a miss read
+    # that many words of adjacent frame and called the result "not found" —
+    # which is only right while none of them equals the needle. Measured on
+    # x86-64 before the fix: `999 in [10, 20]` returned 0 having read 999
+    # words past the end. The needle is 99 here and the table is longer, so the
+    # scan cannot stop early even by accident.
+    ("membership_a_missing_integer_needle_in_a_list",
+     "def main(n):\n"
+     "    var xs = [10, 20, 30]\n"
+     "    print(\"hit:\", 1 if 30 in xs else 0)\n"
+     "    print(\"miss:\", 1 if 99 in xs else 0)\n"
+     "    return 0\n",
+     "hit: 1\nmiss: 0\n"),
+    # `not in` over the same blobs, because the inversion is applied at the two
+    # exits and a scan that leaves the loop the wrong way shows up in exactly
+    # one of them.
+    ("membership_not_in_over_a_list_and_a_dict",
+     "def main(n):\n"
+     "    var xs = [\"ab\", \"cde\"]\n"
+     "    var d = {\"a\": 1, \"b\": 2}\n"
+     "    print(\"a:\", 1 if \"zz\" not in xs else 0)\n"
+     "    print(\"b:\", 1 if \"ab\" not in xs else 0)\n"
+     "    print(\"c:\", 1 if \"zz\" not in d else 0)\n"
+     "    print(\"d:\", 1 if \"a\" not in d else 0)\n"
+     "    return 0\n",
+     "a: 1\nb: 0\nc: 1\nd: 0\n"),
+    # A membership test over a dict whose VALUES are what the element stride
+    # would compare: at the element stride this scan reads `k0, v0, k1`, so it
+    # answers for a key that is not there whenever a VALUE matches the needle,
+    # and misses a key that is there whenever the value in front of it does not
+    # match. Values are chosen to collide with the key set on purpose.
+    ("membership_over_a_dict_compares_keys_and_not_values",
+     "def main(n):\n"
+     "    var d = {10: 20, 30: 40}\n"
+     "    print(\"key:\", 1 if 30 in d else 0)\n"
+     "    print(\"value:\", 1 if 40 in d else 0)\n"
+     "    print(\"absent:\", 1 if 20 in d else 0)\n"
+     "    return 0\n",
+     "key: 1\nvalue: 0\nabsent: 0\n"),
+    # A TUPLE haystack, so the fix is not a list-only one: a tuple is the same
+    # one-word-per-count blob spelled differently.
+    ("membership_over_a_tuple",
+     "def main(n):\n"
+     "    var t = (4, 5, 6)\n"
+     "    print(\"hit:\", 1 if 5 in t else 0)\n"
+     "    print(\"miss:\", 1 if 99 in t else 0)\n"
+     "    return 0\n",
+     "hit: 1\nmiss: 0\n"),
 ]
 
 # ── what a holder MAY be assigned, which is what the refusal above is about ──

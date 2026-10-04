@@ -1206,6 +1206,97 @@ CASES = [
     # Both spellings of each comparison are in the case, and the variable form
     # (`a - b < c` with a variable) is the control: that one was already
     # signed, which is why the defect needed arithmetic on LITERALS to show.
+    # A COMPREHENSION inside an `elif` ARM, and this is a refusal rather than a
+    # wrong answer — which is the shape this file exists for in its other
+    # direction.  arm64 built and ran it; x86-64 refused with
+    #
+    #     main: '_cb0' has no home: the register allocator collected no home
+    #     for it, so the emitter and the allocation walk disagree about this
+    #     function's locals
+    #
+    # `_cb{d}` is a comprehension's per-generator temp, and the walk that
+    # reserves them (`x86_64_codegen._collect_var_names`'s `walk_compr`) reached
+    # an `if`/`else` body through the dataclass-field walk — which iterates a
+    # LIST's items — but an `elif` body arrives as the second item of a TUPLE
+    # in `IfStmt.elifs`, and the tuple branch handed that bare LIST to
+    # `walk_compr`, which found no `__dataclass_fields__` and returned.  So the
+    # comprehension reserved no temps at all.  arm64's `walk_compr_temps` has
+    # had a `isinstance(node, list)` arm for exactly this reason since the
+    # comprehension-temp bug it documents; this backend's copy did not.
+    #
+    # Found by `tools/formal_fuzz.py`'s `containers` mix, seeds 1000-1499.
+    # Both arms are here because only the `elif` one failed, and a list
+    # comprehension in the `if` arm is the control for "the walk reaches an
+    # `if` body".
+    ("comprehension_in_an_elif_arm_reserves_its_temps",
+     "def main():\n"
+     "    var n = 0\n"
+     "    if 1 > 0:\n"
+     "        var t = [10 + i for i in range(3)]\n"
+     "        for x in t:\n"
+     "            n = n + x\n"
+     "    elif 2 > 3:\n"
+     "        var t = [10 + i for i in range(3)]\n"
+     "        for x in t:\n"
+     "            n = n + x\n"
+     "    else:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d\", n)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    n = 0\n"
+     "    if 1 > 0:\n"
+     "        t = [10 + i for i in range(3)]\n"
+     "        for x in t:\n"
+     "            n = n + x\n"
+     "    elif 2 > 3:\n"
+     "        t = [10 + i for i in range(3)]\n"
+     "        for x in t:\n"
+     "            n = n + x\n"
+     "    else:\n"
+     "        n = n + 1\n"
+     "    sys.stdout.write(\"n=%d\" % n)\n"
+     "    return 0\n"),
+    # A DICT comprehension in the same position, because the two walk the same
+    # way but lower through different emitters, and a fix that covered only the
+    # list form would leave the dict one reserved-and-unused.  Its KEYS are
+    # summed rather than its length read, for the reason the case above walks
+    # the list instead of subscripting it: `len` and `t[0]` of a name a
+    # comprehension bound are both refused on both architectures (\"len() of a
+    # value classified as 'int'\" and \"print() cannot tell whether SubscriptExpr
+    # is a string or a number\"), so an observation through either would be a
+    # case that cannot run.
+    ("dict_comprehension_in_an_elif_arm_reserves_its_temps",
+     "def main():\n"
+     "    var n = 0\n"
+     "    if 1 > 0:\n"
+     "        var d = {10 + i: 100 + i for i in range(3)}\n"
+     "        for k in d:\n"
+     "            n = n + k\n"
+     "    elif 2 > 3:\n"
+     "        var d = {10 + i: 100 + i for i in range(3)}\n"
+     "        for k in d:\n"
+     "            n = n + k\n"
+     "    else:\n"
+     "        n = n + 1\n"
+     "    printf(\"n=%d\", n)\n"
+     "    return 0\n",
+     "import sys\n\n"
+     "def main():\n"
+     "    n = 0\n"
+     "    if 1 > 0:\n"
+     "        d = {10 + i: 100 + i for i in range(3)}\n"
+     "        for k in d:\n"
+     "            n = n + k\n"
+     "    elif 2 > 3:\n"
+     "        d = {10 + i: 100 + i for i in range(3)}\n"
+     "        for k in d:\n"
+     "            n = n + k\n"
+     "    else:\n"
+     "        n = n + 1\n"
+     "    sys.stdout.write(\"n=%d\" % n)\n"
+     "    return 0\n"),
     ("negative_literal_spelled_with_an_operator",
      "def main():\n"
      "    var a = 17\n"

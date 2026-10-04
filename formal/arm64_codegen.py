@@ -2889,11 +2889,23 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit_label_rel(false_label, here_offset=-4)
 
                 self.asm.emit(encode_add_xd_xn_imm(2, 9, 8))
+                # `LSL #4` on a dict pair blob, `LSL #3` on a list blob: the
+                # x86-64 `_emit_for_list` comment is the measurement, and this
+                # is the same question on the same terms.  A dict is
+                # `[npairs][k0][v0][k1][v1]…`, so one COUNT is one PAIR and the
+                # `#3` walk reads `k0, v0, k1` — `for k in d` binding half the
+                # values.  The decision is `M.walk_stride`'s (the same rule a
+                # membership test asks); `lsl3`/`lsl4` are two hand-encoded
+                # instructions, so the stride is compared rather than shifted.
+                lsl = (encode_add_xd_xn_xm_lsl4
+                       if M.walk_stride(self._is_dict_subscript(it))
+                       == M.PAIR_STRIDE
+                       else encode_add_xd_xn_xm_lsl3)
                 if fi_reg is not None:
-                    self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, fi_reg))
+                    self.asm.emit(lsl(2, 2, fi_reg))
                 else:
                     self._load_var(fi_name, 0)
-                    self.asm.emit(encode_add_xd_xn_xm_lsl3(2, 2, 0))
+                    self.asm.emit(lsl(2, 2, 0))
                 self.asm.emit(encode_ldr_xt_xn_imm(0, 2, 0))
 
                 if is_tuple_target:
@@ -6773,9 +6785,10 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         self.asm.emit(encode_add_xd_xn_imm(5, 9, M.BLOB_HEADER_BYTES))
         # A dict is a pair blob, so membership walks KEYS at the pair stride
-        # (formal/model.membership_stride) — at the element stride it would
+        # (formal/model.walk_stride) — at the element stride it would
         # walk keys and values alternately and stop at the pair count.
-        self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3) if is_dict
+        self.asm.emit(encode_add_xd_xn_xm_lsl4(5, 5, 3)
+                      if M.walk_stride(is_dict) == M.PAIR_STRIDE
                       else encode_add_xd_xn_xm_lsl3(5, 5, 3))
         self.asm.emit(encode_ldr_xt_xn_imm(5, 5, 0))  # elem / key
         if key_pushed:
