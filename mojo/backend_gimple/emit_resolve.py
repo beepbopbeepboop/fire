@@ -3355,14 +3355,18 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._ptr_helpers_needed.add('char')
-    # `mojo_char_at`, for _gen_for_cstr's reason in full: gimple rejects a
+    # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
     # `char` argument ("invalid argument to gimple call"), so the slice stood
     # in for `mojo_char_to_str` and allocated a two-byte buffer per character
     # of every character comprehension. It reaches the same shared immortal table
     # through an int64_t INDEX instead. The result is deliberately absent from
     # the codegen's `_FRESH_STRING_RETURNS`, so no generated path frees it.
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at ({_iv}, {idx64});")
+    #
+    # No `_ptr_helpers_needed.add('char')`: the helper is called through the
+    # runtime and never through `_mojo_at_char`, so requesting that one emits a
+    # `static` definition with no call site (master's note beside
+    # `_gen_for_cstr` says the same).
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

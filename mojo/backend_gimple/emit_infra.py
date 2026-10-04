@@ -1254,7 +1254,7 @@ _OWNS_STR_ELEMS = frozenset([
 # mojo_char_to_str is absent on purpose: it returns one of 256 shared IMMORTAL
 # one-character strings (a malloc per character of every string scan was the
 # bulk of the self-hosted tokenizer's memory), so a free() of it would crash.
-# mojo_char_at is absent for the same reason and is the entry point a string
+# mojo_char_at_str is absent for the same reason and is the entry point a string
 # SUBSCRIPT and `for c in s` are lowered to (a `char`-typed argument is not a
 # legal gimple argument, so `mojo_char_to_str` itself is not callable from
 # generated code -- see its own comment in fire_runtime.c). Both return

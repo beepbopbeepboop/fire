@@ -175,14 +175,6 @@ def _gmi_iter_calls(stmts, _seen=None):
                     stack.append(sub)
 
 
-# The marker an argument the recogniser DECLINED contributes to
-# `_gmi_apply_call_site_param_evidence`'s evidence set. A string, so it is a
-# member of the same set the ctypes are and needs no second table; named so a
-# reader of that set can tell it from a real ctype. See that function's
-# evidence-collection loop for why an unrecognised argument must be counted.
-_UNDECLINED_ARG = '<an argument _gmi_literal_ctype declined>'
-
-
 def _gmi_apply_call_site_param_evidence(gen, stmts):
     """Ground an unannotated parameter in what its CALLERS actually pass.
 
@@ -234,36 +226,13 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             continue
         for pname, arg in zip(params, args):
             ctype = _gmi_literal_ctype(arg)
-            _ev = evidence.setdefault((fname, pname), set())
             if ctype is not None:
-                _ev.add(ctype)
-            else:
-                # An argument the recogniser DECLINED is still an argument, and
-                # it has to be counted or `len(ctypes) == 1` below does not
-                # mean what it says. `_gmi_literal_ctype` answers None for
-                # everything context-dependent (an identifier, an arithmetic
-                # expression, a call result) -- a `FloatLiteral` among them --
-                # so `f(2.5)` and `f([1, 2])` produced the ONE-member set
-                # `{'MojoList *'}`, which reads as unanimous and is not: the
-                # double was never weighed. A consumer that believes it types
-                # the parameter as a list pointer, and the OTHER call site
-                # then fails to compile:
-                #
-                #     prog.py:5:3: error: cannot convert to a pointer type
-                #     5 | f(2.5)
-                #
-                # So the sentinel is recorded, and the guard below
-                # treats it as "not unanimous" -- which is what this function's
-                # own contract already says ("One ambiguous or absent call site
-                # leaves the inference exactly as it was").
-                _ev.add(_UNDECLINED_ARG)
+                evidence.setdefault((fname, pname), set()).add(ctype)
 
     containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
     for (fname, pname), ctypes in evidence.items():
         if len(ctypes) != 1:
             continue  # not unanimous
-        if _UNDECLINED_ARG in ctypes:
-            continue  # every call site's argument was declined: silence, not agreement
         # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
         # of the self-host closure, and `next` is not one of the runtime
         # symbols the compiled path links (caught by `selfhost` as an
@@ -319,6 +288,32 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # "conflicting types" that produces.
         _ann_for = (getattr(gen, '_annotated_params', {}) or {}).get(fname)
         if cur is None and not (_ann_for and _ann_for.get(pname)):
+            # ...but ONLY for the two shapes this pass exists to choose
+            # between. A CONTAINER member is not one of them: `char *` and
+            # `double` are the scalar resolutions and a container is a
+            # different KIND, and `bugs4-4-c`'s Pass-1.3d records `void *` for
+            # a container literal at a call site precisely so its whitelist
+            # REJECTS the pair and drops the slot to the `int64_t` box. This
+            # arm runs BEFORE that pass, so without the veto it wrote the
+            # container ctype into `_inferred_param_types` and the parameter
+            # was declared `MojoList *`:
+            #
+            #     def f(x): print(x)
+            #     f(2.5)
+            #     f([1, 2])
+            #
+            #     prog.py:5:3: error: cannot convert to a pointer type
+            #     5 | f(2.5)
+            #
+            # Note it is the container that is declined here, never a scalar:
+            # `_gmi_literal_ctype` answers None for `2.5`, `5`, `None` and an
+            # identifier alike, and a declined SCALAR is not evidence against
+            # anything — `pct('s')` + `pct(5)` must still resolve to `char *`,
+            # which is `test_gimple.py`'s
+            # `a_forwarded_string_argument_keeps_its_type`. So the veto is on
+            # the member's shape, not on how many members there are.
+            if call_type not in ('char *', 'double'):
+                continue
             ipt.setdefault(fname, {})[pname] = call_type
             continue
         if not ((cur in containers and call_type == 'char *')
