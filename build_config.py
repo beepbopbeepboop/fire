@@ -1,6 +1,31 @@
 import os
-import shutil
 import platform
+
+
+def _which(name):
+    """`shutil.which`, by hand, and the reason is the self-hosted binary.
+
+    `shutil` is not one of the modules compiled into it, and a call on an
+    uncompiled module RAISES (`emit_methods`' module-marker rule), so the
+    `_which('gcc-15')` below took `mojoc` down on its first `find_gcc()`
+    with `NotImplementedError: shutil.which: module 'shutil' is not compiled
+    into this binary` — after the Python path had been answering it with a bare
+    0, which is not `which`'s answer and only worked because the MacPorts
+    fallback below it happens to be the right compiler on the machine that
+    measured it.
+
+    `os` IS compiled, so the PATH walk is spelled here: an empty entry and `.`
+    both mean the current directory, per `shutil`'s own POSIX behaviour, and a
+    non-executable file is not a match.
+    """
+    for d in (os.environ.get('PATH', '') or os.defpath).split(os.pathsep):
+        if not d:
+            d = '.'
+        candidate = os.path.join(d, name)
+        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
 
 def find_gcc() -> str:
     """Find gcc binary: prefer gcc-15 in PATH, fallback to MacPorts gcc-mp-15, then gcc.
@@ -22,7 +47,7 @@ def find_gcc() -> str:
     annotation makes the scanner agree with the body.  Anything added to this
     module needs one for the same reason.
     """
-    if shutil.which('gcc-15'):
+    if _which('gcc-15'):
         return 'gcc-15'
     if platform.system() == 'Darwin':
         gcc_mp15 = '/opt/local/bin/gcc-mp-15'
@@ -39,7 +64,7 @@ def find_gxx() -> str:
     generator codegen path (see BACKLOG-CODEGEN.md / the generator-support
     milestones), which emits real C++20 `co_yield` code compiled by g++ and
     linked into an otherwise all-C -fgimple program."""
-    if shutil.which('g++-15'):
+    if _which('g++-15'):
         return 'g++-15'
     if platform.system() == 'Darwin':
         gxx_mp15 = '/opt/local/bin/g++-mp-15'

@@ -1190,6 +1190,31 @@ def _uncompiled_module_marker(gen, node) -> str:
     # `test_silent_noop_iter.py::finditer_still_lowered`.
     if gimple_ctypes.compile_time_call_module(name):
         return ''
+    # A module THIS compile emitted is not a marker, whatever the filesystem
+    # says. `can_resolve_module_path` below answers "is there Mojo SOURCE for
+    # this name under std*/test*", which is false for every PYTHON module of
+    # the compiler itself — `ownership_check`, `ownership_destruct`,
+    # `regex_compile` — yet those are compiled into the binary (they are
+    # `_COMPILER_SOURCES`, hashed into the CAS key for exactly that reason) and
+    # their calls are real extern calls into emitted code. Without this the
+    # raise fired on them, and the self-hosted compiler died on its first
+    # compile with
+    #
+    #   NotImplementedError: ownership_check.check_module: module
+    #   'ownership_check' is not compiled into this binary
+    #
+    # naming a module that was, from a call site (`gimple_codegen.
+    # _check_ownership`) that has been in the compiler since 2026-09-15 and
+    # whose diagnostics every compile depends on.
+    #
+    # `_compiled_modules` is the emission record itself, so this asks the
+    # question that matters — did I write this module's code — rather than a
+    # proxy for it. The two exemptions answer opposite halves and neither
+    # subsumes the other: `compile_time_call_module` is for a module that is
+    # NOT compiled and whose value nobody reads, this one for a module that IS
+    # compiled.
+    if name in (getattr(gen, '_compiled_modules', None) or ()):
+        return ''
     cache = getattr(gen, '_uncompiled_marker_cache', None)
     if cache is None:
         cache = {}

@@ -93,15 +93,58 @@ _COMPILER_SOURCES = [
     # ownership_check's diagnostics gate real emission paths.
     'ownership_check.py', 'ownership_destruct.py', 'regex_compile.py',
 ]
-import glob as _glob
-for _p in sorted(_glob.glob(os.path.join(HERE, 'gimple_*.py'))):
+def _list_py_files(root, prefix=None, suffix=None, recursive=True):
+    """Every `*.py` under `root`, recursively, via `os.listdir`.
+
+    NOT `glob.glob`, and the reason is the self-hosted binary rather than
+    taste. `glob` is not one of the modules compiled into it, and a call on an
+    uncompiled module is a RAISE (`emit_methods`' module-marker rule: a program
+    that computes with a marker where it named an object deserves to be told).
+    So a `glob.glob` at module scope here took the self-hosted compiler down at
+    import — `NotImplementedError: glob.glob: module 'glob' is not compiled into
+    this binary`, before it compiled anything.
+
+    It was survivable for exactly the wrong reason, which is what made it worth
+    changing rather than documenting: the old call answered 0 SILENTLY, so both
+    lists below came out EMPTY in that binary and the fingerprints were
+    computed over no sources at all — the same silently-stale-cache failure this
+    enumeration exists to prevent, hiding behind a green run. `os.listdir` is
+    what the tree already uses for the same reason (`gimple_codegen.
+    _selfhost_impl_py_files`, whose docstring records the measurement).
+
+    `prefix`/`suffix` are the literal ends of the name (`'gimple_'`, `'.py'`),
+    spelled literally because `fnmatch` is another uncompiled module and
+    `startswith`/`endswith` is the whole of what the globs did.
+
+    `recursive=False` for the top-level `gimple_*` scan, because the glob it
+    replaces was `'gimple_*.py'` — THIS directory only. Recursing found six more
+    matches under the worktrees this repo is worked from (`.tmp/` holds other
+    checkouts, each with its own `gimple_codegen.py`), which is the second half
+    of why the lists must match a glob: a key that hashes a file in a
+    neighbouring worktree is a key that changes when someone else's checkout
+    does.
+    """
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for n in names:
+        full = os.path.join(root, n)
+        if os.path.isdir(full):
+            if not recursive or n == '__pycache__':
+                continue
+            out.extend(_list_py_files(full, prefix, suffix))
+        elif n.endswith('.py') and (not prefix or n.startswith(prefix)):
+            out.append(full)
+    return out
+
+
+for _p in _list_py_files(HERE, prefix='gimple_', recursive=False):
     _COMPILER_SOURCES.append(os.path.basename(_p))
 # The actual compiler implementation (post-2026-09 package split). Paths are
 # repo-relative with forward slashes so the fingerprint is host-OS-stable.
-for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', '**', '*.py'),
-                            recursive=True)):
-    if '__pycache__' in _p.split(os.sep):
-        continue
+for _p in _list_py_files(os.path.join(HERE, 'mojo')):
     _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
@@ -545,14 +588,9 @@ def runtime_fingerprint() -> str:
 # globbed because formal/*.py reaches into it (boundnames, closures, and their
 # own imports) — it is a subtree rather than an enumeration for that reason.
 _FORMAL_SOURCES = ['fire.py', 'fire_compiler.py']
-for _p in sorted(_glob.glob(os.path.join(HERE, 'formal', '**', '*.py'),
-                            recursive=True)):
-    if '__pycache__' in _p.split(os.sep):
-        continue
+for _p in _list_py_files(os.path.join(HERE, 'formal')):
     _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
-for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', 'middle', '*.py'))):
-    if '__pycache__' in _p.split(os.sep):
-        continue
+for _p in _list_py_files(os.path.join(HERE, 'mojo', 'middle')):
     _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 _formal_fp_cache = None

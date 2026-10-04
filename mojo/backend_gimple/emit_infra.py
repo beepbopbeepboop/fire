@@ -1489,8 +1489,32 @@ def _elem_of(gen, name: str) -> str:
 
 
 def _dict_val_of(gen, name: str) -> str:
-    """Value C type for a dict variable."""
-    return gen._dict_val_types.get(name, 'int64_t')
+    """Value C type for a dict variable, normalized to a type this runtime has.
+
+    `'int'` is an INTERNAL marker — `TypeLattice.join` returns it when a `_Bool`
+    and an `int` meet, and `_SCALAR_INT_TYPES` lists it beside `int64_t` — but
+    it is not a C type this compiler emits: C's `int` is 32-bit, so declaring a
+    temp `int` and assigning it a 64-bit word TRUNCATES rather than widens, and
+    under `-fgimple`'s verifier it is a hard error before that:
+    `non-trivial conversion in 'var_decl'`.
+
+    It reached a declaration through `dict.get`'s result type. Measured on
+    `selfhost` after the merge of ten branches, one such temp per `.get` on
+    `_NODE_TYPE_CODES`, whose value type is `join('_Bool', 'int') == 'int'`:
+
+        int64_t _t5 = mojo_dict_get_int(...);
+        int      _t9 = _t5;          // ← ast_rewriter.py:137
+
+    The fix belongs HERE rather than at the `.get` that first saw it, because
+    this is the chokepoint every reader of a recorded dict value type goes
+    through, and `int` is this runtime's word type in every spelling — which is
+    also what `_cast` has always done (see `types.py`, where `int` and
+    `int64_t` are interchangeable for a cast). A reader that genuinely wants
+    the marker asks `_dict_val_types` directly; a reader that wants to DECLARE
+    a C variable comes through here.
+    """
+    vt = gen._dict_val_types.get(name, 'int64_t')
+    return 'int64_t' if vt == 'int' else vt
 
 
 def _dict_val_is_known(gen, name: str) -> bool:
