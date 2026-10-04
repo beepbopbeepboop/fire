@@ -645,6 +645,30 @@ CAUSES = (
     # this message carries.
     ("a handler arm with a body (no unwinder to emit it into)",
      (("is a handler arm with a body this path cannot put in the image",),)),
+    # The SAME missing edge, seen from the raise site rather than from the arm,
+    # and it is a second row rather than a wider marker on the one above because
+    # the two messages describe different programs: that one is an arm whose
+    # BODY would be missing, this one is a `try` whose SUCCESSOR would be. The
+    # shape is `except: pass` around a call that raises — the arm loses nothing
+    # by being dropped (which is why that row does not fire) and the control
+    # flow after the `try` loses everything, because the raise ends the process
+    # where CPython runs the arm and continues. Landed 2026-10-05
+    # (`formal/model.py`'s `uncatchable_raise` / `refuse_uncatchable_raise`).
+    #
+    # Keyed on a clause only THIS message carries, for the reason the row above
+    # gives: both messages say "no edge runs from a raise site into an arm", so
+    # a marker on that shared clause would swallow this row's files into the one
+    # above and make a census read as a target.
+    #
+    # **Cost: zero files, measured.** Asking the question over this repository's
+    # 479 `.py`/`.mojo` files and the stdlib's 252 `.mojo` takes 43 files, and
+    # every one of the 43 is already refused for another reason on this tree
+    # (25 of them by an import: `fire_compiler`, `formal.build`, `collections`,
+    # `socket`; the rest behind the row above or a module that exports nothing).
+    # That is the number to re-measure if this row ever grows: a refusal that
+    # takes files nothing else had is a different kind of row from this one.
+    ("a `try` that can reach a raise, whose arm cannot catch it",
+     (("cannot catch it, so the `try` is refused",),)),
     # `field(default_factory=F)` — the dataclass transform needs one value per
     # instance, and this path has nowhere to keep it: not module-global
     # storage, and a local in the constructor's frame dies with the

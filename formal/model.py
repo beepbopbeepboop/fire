@@ -7910,9 +7910,12 @@ def interpolated_literal_refusal(node, where: str = "") -> str:
         f"(the field may be a runtime value) or at run time (there is no "
         f"heap); this is the same missing buffer that keeps string "
         f"concatenation and the length-dependent methods refused (see "
-        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Print the "
-        f"parts as separate operands, or build the text with `+` once that is "
-        f"lowered.")
+        f"`string_concat_refusal` and LENGTH_DEPENDENT_METHODS). Pass the "
+        f"interpolated value to `printf` as an ARGUMENT — "
+        f"`printf(\"n=%d\", n)` — which is the same text and is what this "
+        f"path lowers; `print(\"n=\", n)` is NOT the same program, because "
+        f"`print` inserts a space between its operands, and building the text "
+        f"with `+` is the same missing buffer refused under another name.")
 
 
 def refuse_interpolated_literals(stmts) -> None:
@@ -32579,6 +32582,256 @@ def unemitted_handler_arm(fn):
     return None
 
 
+def _emitted_nodes(node):
+    """`iter_nodes` minus every `handlers` list, whatever node it hangs off.
+
+    A `handlers` list is never emitted — both `_emit_try`s skip the arms — so a
+    walk that descends into one finds statements the image does not contain and
+    reasons about a program nobody wrote. That is the whole difference from
+    `iter_nodes`, and it is why this is a function rather than a filter: the
+    arms are the one subtree whose absence is load-bearing.
+    """
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            yield from _emitted_nodes(x)
+        return
+    if not hasattr(node, "__dataclass_fields__"):
+        return
+    yield node
+    for name in _node_field_names(node):
+        if name == "handlers" and isinstance(node, F.TryStmt):
+            continue
+        yield from _emitted_nodes(getattr(node, name))
+
+
+def _emitted_regions(try_stmt) -> tuple:
+    """The three statement lists of a `TryStmt` that reach the image.
+
+    `body`, `else_body`, `finally_body` — everything but `handlers`, which is
+    the arm the emitters skip. A `raise` in any of the three leaves the image
+    the same way, so all three are one question; `else_body` counts because it
+    is emitted inline on the success path and a `raise` in it is just as
+    terminal.
+    """
+    return (getattr(try_stmt, "body", None),
+            getattr(try_stmt, "else_body", None),
+            getattr(try_stmt, "finally_body", None))
+
+
+def _call_keys(node) -> tuple:
+    """The distinct callee KEYS of an emitted subtree: `("plain"|"method", name)`.
+
+    `("plain", "boom")` for `boom(…)` and `("method", "get")` for `x.get(…)`,
+    deduplicated because the question is "can this region reach a raise", not
+    "how many times". A callee that is neither shape gets the key
+    `("other", "")`, and `external_call[…]` gets none at all: it is a C symbol
+    by construction, it returns, and there is no frame of ours for it to raise
+    into.
+    """
+    out = set()
+    for n in _emitted_nodes(node):
+        if not isinstance(n, F.CallExpr):
+            continue
+        func = getattr(n, "func", None)
+        if is_external_call_template(func):
+            continue
+        if isinstance(func, F.IdentExpr):
+            out.add(("plain", func.name))
+        elif isinstance(func, F.MemberExpr):
+            out.add(("method", func.member))
+        else:
+            out.add(("other", ""))
+    return tuple(sorted(out))
+
+
+class RaiseGraph:
+    """Which calls in one image can reach a `raise`, resolved as far as it goes.
+
+    **A `raise` is not an exception on this path, it is `exit(1)`.**
+    `_emit_diverge` flushes the pending `finally` clauses and then traps, from
+    WHATEVER function contains the statement — so no frame anywhere can catch
+    one, not even across a call into a linked library, whose own `raise` exits
+    that library's process just the same. That single fact is what this whole
+    class exists to propagate: which of an image's functions can end the
+    process, so that a `try` with arms can be told before it is emitted that
+    its arms are unreachable.
+
+    The set is a fixed point over the image's own call graph rather than one
+    sweep, because `a()` calling `b()` calling `raise` is the ordinary shape and
+    a single pass would miss it; a cycle cannot hide a raise behind itself,
+    because membership only ever grows.
+
+    **A callee this pass cannot see is NOT counted as raising**, and that is a
+    measured decision rather than the safe-looking one. A bare name with no
+    definition in this unit and no C prototype, a method name nothing here
+    declares (`dict.get`, `Path.is_file`, a hostmod entry point), and a callee
+    that is an expression rather than a name are all UNKNOWN, and an unknown
+    callee inside a `try` with arms is exactly where the conservative answer
+    would refuse. Measured over this repository's 479 `.py`/`.mojo` files by
+    asking this question and nothing else (parse-only, no codegen): the definite
+    answer is 14 files, the unknown answer is 82 — a five-fold over-refusal of
+    the whole corpus, nearly all of it `try: … except OSError:` around I/O this
+    path cannot raise from, bought against a POSSIBILITY rather than a fact.
+    So the question is asked of what can be resolved, the residual is written
+    down where a taker will find it
+    (`bugs/FORMAL_a_try_around_a_callee_this_pass_cannot_resolve.md`), and the
+    rule the pair of them obeys is: refuse on a FACT, and say so where the fact
+    is missing.
+    """
+
+    def __init__(self, functions, externs=()):
+        by_name = {}
+        for fn in functions or ():
+            name = getattr(fn, "name", None)
+            if isinstance(name, str):
+                by_name.setdefault(name, fn)
+        self.externs = frozenset(externs or ())
+        self.defined = frozenset(by_name)
+        # Method dispatch on this path is BY NAME — a call site carries no
+        # receiver type — so `x.f(…)` is answered by every method of that name,
+        # which is the same over-approximation the dispatch itself makes.
+        self.methods = frozenset(
+            name.partition("_")[2] for name in by_name
+            if name.partition("_")[2])
+        edges, lexical = {}, set()
+        for name, fn in by_name.items():
+            plain, method, other = set(), set(), False
+            for kind, callee in _call_keys(getattr(fn, "body", None)):
+                if kind == "plain":
+                    plain.add(callee)
+                elif kind == "method":
+                    method.add(callee)
+                else:
+                    other = True
+            # A method name resolves to every lifted name `<Struct>_<method>`,
+            # and a dotted/module call (`mod.f`) is as unresolved here as it is
+            # in the emitter until the link resolves it — so `other` seeds the
+            # unknown set for this function, not just for the region.
+            edges[name] = plain | {n for n in by_name
+                                   if n.partition("_")[2] in method}
+            if other:
+                edges[name] |= {_UNRESOLVED}
+            if any(isinstance(n, F.RaiseStmt)
+                   for n in _emitted_nodes(getattr(fn, "body", None))):
+                lexical.add(name)
+        self.raising = set(lexical)
+        changed = True
+        while changed:
+            changed = False
+            for name, callees in edges.items():
+                if name in self.raising:
+                    continue
+                # Only DEFINITE reachability propagates here. `_UNRESOLVED` in
+                # `callees` says "some callee this pass cannot see", which is
+                # not by itself evidence that this function raises; the
+                # image-wide question is `may_reach_raise`'s, asked per call
+                # site, where the reader's own spelling is in hand.
+                if callees & self.raising:
+                    self.raising.add(name)
+                    changed = True
+        self.raising_methods = frozenset(
+            attr for attr in self.methods
+            if any(other.partition("_")[2] == attr and other in self.raising
+                   for other in by_name))
+        self.any_raising = bool(self.raising)
+
+    def _callee_raises(self, kind, name) -> bool:
+        """Can this callee end the process? `False` for everything unresolved.
+
+        Both branches answer `False` for a name they cannot place, which is the
+        decision the class docstring measures: a refusal on an unresolvable
+        callee would take 82 of this repository's files against a possibility,
+        and the 14 it can prove are worth having on their own.
+        """
+        if kind == "plain":
+            if name in self.externs:
+                return False
+            return name in self.defined and name in self.raising
+        if kind == "method":
+            if name in self.raising_methods:
+                return True
+            return False
+        return False
+
+    def may_reach_raise(self, node) -> tuple:
+        """`(kind, name)` for a callee in `node` that can end the process, else None.
+
+        The first one found, in the region's own order, so the message can name
+        the call the reader wrote rather than the callee set.
+        """
+        for key in _call_keys(node):
+            if self._callee_raises(*key):
+                return key
+        return None
+
+
+#: The sentinel an unresolved callee contributes to the edge set. A string a
+#: program cannot spell as a function name, so it cannot collide with one.
+_UNRESOLVED = "\x00unresolved\x00"
+
+
+def uncatchable_raise(fn, graph=None) -> tuple:
+    """The first `raise` a `try` in `fn` cannot deliver to any of its arms.
+
+    `(raise_stmt_or_None, try_stmt, handler, callee)` — the first arm is named
+    because the message is about the arm the reader wrote, the same reason
+    `unemitted_handler_arm` returns the handler beside the statement. The
+    statement is `None` and the `callee` key is set when the raise is reached
+    THROUGH a call rather than written inside the `try`, which is the shape
+    almost every instance of this has.
+
+    **This is the other half of `unemitted_handler_arm`, and it is about
+    CONTROL FLOW rather than about an arm's body.** That check asks whether an
+    arm holds a statement whose absence would be visible; it says nothing about
+    what happens to the `raise` that was supposed to REACH the arm, so
+    `except: pass` passed it — correctly, since there is nothing in the arm to
+    drop — and the program still came out wrong. Measured on both
+    architectures:
+
+        class MyErr(ValueError): ...
+        def boom():
+            raise MyErr("the message")
+        def main(n):
+            try:
+                boom()
+            except:
+                pass
+            print("caught")
+            return 0
+
+    built, exited 1, and printed NOTHING; CPython prints `caught` and exits 0.
+    The arms are not the loss — an empty arm loses nothing — the loss is that
+    the `raise` ends the process where CPython runs the arm and CONTINUES, so
+    every statement after the `try` is unreachable in the image and reachable in
+    the program. That is the wrong-but-exit-0 artifact CLAUDE.md names as the
+    failure this backend exists to make impossible, wearing an exit status of 1.
+
+    Note where the `raise` is: in ANOTHER FUNCTION. That is why this asks
+    `RaiseGraph` and not a lexical walk — `try: boom()` contains no `raise` at
+    all, and a walk would have called this program fine. A try with NO arms is
+    not asked about, and neither is a raise outside any try, because there
+    `_emit_diverge` is exactly CPython's answer for an exception nothing catches
+    (status 1). The refusal is about the one shape where this path silently
+    computes something else.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        handlers = getattr(node, "handlers", None) or []
+        if not handlers:
+            continue
+        for region in _emitted_regions(node):
+            for inner in _emitted_nodes(region):
+                if isinstance(inner, F.RaiseStmt):
+                    return (inner, node, handlers[0], None)
+            if graph is not None:
+                hit = graph.may_reach_raise(region)
+                if hit is not None:
+                    return (None, node, handlers[0], hit)
+    return None
+
+
+
 def exception_type_spelling(handler) -> str:
     """`ValueError`, `(TypeError, KeyError)`, `except:`, `except E as e`.
 
@@ -32648,6 +32901,73 @@ def refuse_dropped_handler_arm(fn, found) -> str:
         f"leaving it out. Otherwise: move the work into the `try` body or after "
         f"the statement (a `finally` if it is cleanup for the success path), or "
         f"end the arm with `raise` if the program is meant to fail there.")
+
+
+def refuse_uncatchable_raise(found) -> str:
+    """Why this `raise` cannot be caught by the arm written above it.
+
+    `found` is `uncatchable_raise`'s `(raise_stmt, try_stmt, handler, callee)`.
+    The last element names the CALL when the raise is reached through one,
+    because "this `try` cannot catch its own exceptions" sends the reader
+    looking at the arms while the thing that ends the process is a function two
+    frames away.
+
+    **It reuses the arm refusal's own facts rather than stating new ones**,
+    because there is one reason here and not two: this path has no exception
+    unwinder, so no edge runs from a raise site into an arm. `refuse_dropped_
+    handler_arm` says that when the arm holds a statement whose absence is
+    visible; this says it when the arm holds nothing and the `raise` still goes
+    past it — which is the shape `except: pass` is, and the commonest one in the
+    corpus (`_HANDLER_ARM_NO_EFFECT`'s comment says so and is right about the
+    ARM, which loses nothing, while saying nothing about the control flow that
+    follows).
+
+    The symptom is a build that succeeds and a program that is not the one
+    written, and the exit status makes it worse rather than better: CPython
+    enters the arm and continues, so the statements after the `try` are part of
+    the program's answer; here the `raise` leaves the image with status 1 and
+    those statements are not in it at all. The two halves of the old behaviour —
+    the arm skipped, the raise terminal — were each defensible alone. Together
+    they are a `try` that catches nothing and a program that stops where CPython
+    does not.
+
+    The ways out are the three that are true of this path, and the first is the
+    one most of these programs want: **nothing in the `try` can raise**, so drop
+    the `except` and keep the `try` for its `finally` — which IS emitted, on
+    every path out including the one that raises.
+    """
+    stmt, _try, handler, callee = found
+    line = getattr(stmt, "line", 0) or 0
+    where = f"line {line}: " if line else ""
+    if stmt is not None:
+        how = "this `raise` is inside the `try`"
+    else:
+        kind, name = callee
+        if kind == "plain":
+            how = f"the `try` body calls `{name}(…)`"
+        elif kind == "method":
+            how = f"the `try` body calls the method `{name}(…)`"
+        else:
+            how = ("the `try` body calls something this pass cannot resolve to a "
+                   "definition")
+        how += ", which can end the process"
+    return (
+        f"{where}{how}, and the arm written as "
+        f"{exception_type_spelling(handler)} cannot catch it, so the `try` is "
+        f"refused rather than silently ignored: `formal` has no exception "
+        f"unwinder, so no edge runs from a raise site into an arm. A `raise` "
+        f"here flushes the enclosing `finally` clauses and exits the process "
+        f"with status 1, which is what CPython does for an exception nothing "
+        f"catches — but CPython DOES catch this one and goes on to the "
+        f"statements after the `try`, so the image would build, print nothing "
+        f"and exit 1 where the program prints its answer and exits 0. Nothing "
+        f"is lost by leaving the ARM out (an arm of `pass`, `raise`, `continue` "
+        f"or `break` is not refused for its body), and that is exactly why this "
+        f"shape was missed: the arm loses nothing, the control flow after it "
+        f"loses everything. If nothing in the `try` can raise, drop the arm and "
+        f"keep the `finally`, which is emitted on every path. If the program "
+        f"means to fail here, let the `raise` stand on its own outside any "
+        f"`try` — that is emitted and is CPython's own answer.")
 
 
 def call_result_frame_struct(call, functions: dict, decls: dict):

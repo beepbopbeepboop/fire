@@ -110,6 +110,61 @@ def _string_composition_messages():
 
 _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
+
+# The family and cause label for the `try`-around-a-raise refusal, spelled
+# independently here and in the two instruments, so that agreeing is a
+# measurement rather than an import.
+TRY_AROUND_RAISE_FAMILY = "a `try` that can reach a raise, whose arm cannot catch it"
+TRY_AROUND_RAISE_CAUSE = "a `try` that can reach a raise, whose arm cannot catch it"
+
+#: The program the sample below is built from. `boom` raises and `main` wraps
+#: the call in `try/except: pass`, which is the shape the refusal exists for:
+#: the arm has nothing to drop, so the arm refusal does not fire, and the raise
+#: ends the process where CPython continues.
+_TRY_AROUND_RAISE_SOURCE = """\
+def boom():
+    raise ValueError("the message")
+
+def main(n):
+    try:
+        boom()
+    except:
+        pass
+    print("caught")
+    return 0
+"""
+
+
+def _try_around_raise_message():
+    """The uncatchable-raise refusal, BUILT: parsed, walked, refused.
+
+    Built rather than copied for the reason the two above are: the message names
+    a CALL (`boom`) and an arm spelling, both of which come out of the parse,
+    so a hand-copy would be a sentence the backend cannot produce — and this one
+    is the refusal a whole class of silently-wrong programs now stops building,
+    so a sample that stopped matching its marker would empty a row nobody was
+    watching.
+    """
+    import formal.build as FB
+    stmts = FB.parse_module(_TRY_AROUND_RAISE_SOURCE, filename="<taxonomy>")
+    fns = [n for n in FM.iter_nodes(stmts)
+           if type(n).__name__ == "FunctionDef"]
+    graph = FM.RaiseGraph(fns, externs=FM.BARE_C_RETURN_KINDS)
+    for fn in fns:
+        found = FM.uncatchable_raise(fn, graph)
+        if found is not None:
+            return FM.refuse_uncatchable_raise(found)
+    raise AssertionError(
+        "formal/model.py no longer refuses a `try` whose arm cannot catch a "
+        "raise it can reach: `uncatchable_raise` answered None for every "
+        "function of a program whose `except: pass` arm provably cannot be "
+        "entered. Either the refusal was removed — in which case the programs "
+        "it was written for build again and print nothing — or it stopped "
+        "seeing the raise, and this sample is here to notice.")
+
+
+_TRY_AROUND_RAISE_REFUSAL = _try_around_raise_message()
+
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
     # The frame-address families. All one design defect, five costumes; the
@@ -416,6 +471,14 @@ CAUSE_SAMPLES = [
      "this path cannot put in the image, so it is refused rather than "
      "dropped: `formal` has no exception unwinder, so no edge runs from a "
      "raise site into an arm"),
+    # …and the SAME missing edge seen from the raise site, which is a separate
+    # family because it describes a different wrong program: that one loses the
+    # arm's BODY, this one loses everything the `try` was supposed to continue
+    # into. It cannot be a wider marker on the row above — both messages say "no
+    # edge runs from a raise site into an arm", and `_refusal_family` is
+    # first-match, so a shared marker would swallow this family into that one.
+    # BUILT, not copied (see `_try_around_raise_message`).
+    (TRY_AROUND_RAISE_FAMILY, _TRY_AROUND_RAISE_REFUSAL),
     # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather    # The ORDER half. Cut from `model.module_slot_unreadable_refusal` rather
     # than from a sweep log, because the shape it refuses did not exist as a
     # distinct message until a module body was recognised as the module's own
@@ -810,6 +873,12 @@ CAUSE_SAMPLES = [
     # spellings still agree.
     (STRING_COMPOSITION_CAUSE, _FSTRING_REFUSAL),
     (STRING_COMPOSITION_CAUSE, _CONCAT_REFUSAL),
+    # The `try`-around-a-raise refusal, in the PLANNER's table as well as the
+    # family's: its marker is the clause `formal/model.py` writes for it and
+    # the arm refusal's message cannot contain, so the two rows cannot shadow
+    # each other — and the built sample is what proves that, rather than a
+    # reading of the two markers.
+    (TRY_AROUND_RAISE_CAUSE, _TRY_AROUND_RAISE_REFUSAL),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

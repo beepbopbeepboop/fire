@@ -2647,6 +2647,37 @@ CASES = [
      "    printf(\"[%s]\\n\", f\"n={k}\")\n"
      "    return 0\n",
      "refuse:an f-string literal", None),
+    # THE ADVICE, and it is here because the refusal NAMES a rewrite and a
+    # rewrite nobody has run is a guess. The message used to say "print the
+    # parts as separate operands, or build the text with `+`", and both halves
+    # are wrong about this path: `print("n=", n)` inserts a SPACE between its
+    # operands, so it prints `n= 7` where the f-string printed `n=7` — a
+    # wrong-but-exit-0 answer, which is the one failure this suite exists to
+    # catch and the worst thing a refusal can advise — and `+` on two strings
+    # is refused by `str_concat_refused` for the same missing buffer, so it is
+    # not a way round it.
+    #
+    # What the message says instead is `printf("n=%d", n)`, and THIS is that
+    # case: the advice, spelled as the program it names, required to build and
+    # to print CPython's text on both architectures. If a future change makes
+    # `printf` with a composed-looking format stop being the same text, this
+    # fails rather than the advice quietly becoming a lie.
+    ("fstring_the_advice_works_printf_takes_the_value_as_an_argument",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    printf(\"n=%d\\n\", k)\n"
+     "    return 0\n", 0, "n=7\n"),
+    # …and the anti-rot half, in the same program: the advice says `print` is
+    # NOT the rewrite, and this is what it does instead. `n= 7` against CPython's
+    # `n= 7` — same, because CPython's `print` inserts the same space, which is
+    # the point: the two languages AGREE here and neither is the f-string's
+    # text. A reader who followed the old advice got a different answer from
+    # CPython; a reader who follows this one does not.
+    ("fstring_print_of_two_operands_is_not_the_rewrite",
+     "def main(n):\n"
+     "    k = 7\n"
+     "    print(\"n=\", k, end=\"\")\n"
+     "    return 0\n", 0, "n= 7"),
     # The t-string, which is the OTHER prefix that keeps its token and the same
     # reader: one case each, because the two are different literals with
     # different messages and a rule that caught only `f` would leave `t` printing
@@ -10467,6 +10498,15 @@ CONSTRUCTION_CASES = [
     # enclosing `finally` clauses and exits). What this row pins is that the
     # BUILD accepts the construction at all — before the merge this was a
     # refusal on both architectures, byte for byte.
+    #
+    # The `try`/`except` this used to carry is gone for the same measured
+    # reason as (3)'s: an arm that cannot be entered is now refused before
+    # anything is emitted, and this row's subject is where the MESSAGE goes
+    # (`Plain5(Exception)` inherits `args`, so `Plain5("m")` carries it) rather
+    # than what an unreachable arm does with it. `want_stdout=None` because a
+    # raise prints nothing here and CPython's traceback goes to stderr, which
+    # this suite does not compare: the claim is the exit status, which is 1 in
+    # both languages for an exception nothing catches.
     ("constr_an_exception_carries_its_message",
      "struct Plain5(Exception):\n"
      "    \"\"\"no fields at all\"\"\"\n"
@@ -10475,10 +10515,7 @@ CONSTRUCTION_CASES = [
      "    raise Plain5(\"the message\")\n"
      "\n"
      "def main(n):\n"
-     "    try:\n"
-     "        boom5()\n"
-     "    except:\n"
-     "        pass\n"
+     "    boom5()\n"
      "    return 0\n", 1, None),
     # The same with a field of its own, which is the boundary the doc measured:
     # `args` is inherited FIRST, so the message goes where CPython puts it and
@@ -11727,7 +11764,40 @@ CONSTRUCTION_REFUSALS = [
     # about a class whose missing fields are not the problem: it INHERITS them.
     # The needle is the base's NAME, because that is what the reader has to go
     # and look for.
+    #
+    # The `try`/`except` this program used to carry is GONE, and that is a
+    # measured consequence rather than tidying: `formal/build.py` refuses a
+    # `try` that can reach a raise BEFORE anything is emitted (the same place,
+    # and for the same reason, as the handler-arm refusal beside it), while the
+    # construction arity is decided per call site during code generation — so
+    # the arm's sentence used to arrive first and this row stopped testing the
+    # base clause it exists for. `constr_the_arm_refusal_precedes_the_base_clause`
+    # below is that ordering, pinned; this row keeps the base clause's coverage.
     ("constr_refuse_an_undeclared_base_by_name",
+     "class MyErr(Widget):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    boom()\n"
+     "    return 0\n",
+     "refuse:derives from 'Widget', which this image does not declare", None),
+    # The ORDERING, and it is a decision rather than an accident of where two
+    # checks happen to sit. This program is (3) with the `try` left in, and it
+    # was (3)'s row until the arm refusal landed and took it: the class still
+    # cannot be constructed, and a reader who is told about the arm first has to
+    # read a second message to learn that. Both sentences are TRUE of the
+    # program, and the more useful one is the one that names the class.
+    #
+    # So the arm's refusal is asked FIRST — it is a fact about CONTROL FLOW that
+    # holds whatever the callee is, while the arity is a fact about one call
+    # site — and the base clause keeps its own row for the program that has no
+    # `try` in it. Reordering the two checks would put the base sentence first
+    # here and cost the arm refusal its pre-emption over every OTHER
+    # construct-time refusal, which is the same trade with a worse direction.
+    ("constr_the_arm_refusal_precedes_the_base_clause",
      "class MyErr(Widget):\n"
      "    \"\"\"no fields at all\"\"\"\n"
      "\n"
@@ -11740,7 +11810,7 @@ CONSTRUCTION_REFUSALS = [
      "    except:\n"
      "        pass\n"
      "    return 0\n",
-     "refuse:derives from 'Widget', which this image does not declare", None),
+     "refuse:cannot catch it, so the `try` is refused", None),
     # (3a) The NEGATIVE half of (3), and it is what keeps (3) from being a
     # blanket rule. `ValueError` is an UNRESOLVED base by exactly the test that
     # makes `Widget` one — nothing in this image declares it — and it must still
@@ -11757,8 +11827,9 @@ CONSTRUCTION_REFUSALS = [
     # directly, which is the point twice over: the two differ by one name and
     # must not come to the same verdict, and what is pinned here is the ARITY
     # path (the subject of (3)) rather than what a raised exception does at run
-    # time — `bugs/FORMAL_an_exception_subclass_of_a_builtin_base_builds_and_
-    # then_dies.md` is that separate subject, measured.
+    # time. That separate subject was measured and is (3b) below: a RAISED
+    # `MyErr(ValueError)` is not a construction question at all, and the answer
+    # it needed was about a control-flow edge rather than about the base.
     ("constr_an_unresolved_BUILTIN_base_still_constructs",
      "class MyErr(ValueError):\n"
      "    \"\"\"no fields at all\"\"\"\n"
@@ -11767,6 +11838,96 @@ CONSTRUCTION_REFUSALS = [
      "    var e = MyErr(\"the message\")\n"
      "    print(\"built\")\n"
      "    return 0\n", 0, "built"),
+    # (3b) What a RAISED exception does at run time, which (3a) deliberately does
+    # not pin. The program is (3)'s, and it BUILT and then died: `exit=1`, no
+    # output, the arm never entered, against CPython's `caught` / 0. The arm is
+    # `except: pass`, so `refuse_dropped_handler_arm` does not fire on it (there
+    # is nothing in the arm to drop) and the `try` was emitted with its arms
+    # skipped — the two halves of that are each defensible alone and together
+    # they are a `try` that catches nothing and a program that stops where
+    # CPython does not.
+    #
+    # The subject is the MISSING EDGE and not the base: `raise` is
+    # `_emit_diverge` — flush the pending `finally` clauses, `exit(1)` — from
+    # whatever function holds it, so no frame anywhere can catch one, and the
+    # statements after the `try` are simply not in the image. The refusal is
+    # asked through the module's own call graph, because the `raise` is in
+    # `boom` and `try: boom()` contains no `raise` at all.
+    #
+    # (3c) is the half that says so: the same program with the base DECLARED
+    # here, which is the shape `MyErr(Widget)` above is refused for and which
+    # used to be the natural suspect. It answers identically, so the cause is
+    # not the base's visibility and no `struct_unresolved_bases` clause belongs
+    # in the message.
+    ("constr_refuse_a_raise_a_try_arm_cannot_catch",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:cannot catch it, so the `try` is refused", None),
+    ("constr_refuse_a_raise_a_try_arm_cannot_catch_with_a_declared_base",
+     "class Base:\n"
+     "    var msg: String\n"
+     "\n"
+     "class MyErr(Base):\n"
+     "    var code: Int\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\", 7)\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        boom()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"caught\")\n"
+     "    return 0\n",
+     "refuse:cannot catch it, so the `try` is refused", None),
+    # (3d) The NEGATIVE half of (3b), and the reason (3b) is a refusal about a
+    # CONTROL-FLOW EDGE rather than about exceptions: with no arm in the picture
+    # `exit(1)` IS what CPython does, and this program agrees with it exactly —
+    # no output, status 1, on both backends, against the same text run by
+    # CPython (which writes its traceback to stderr, which this suite does not
+    # compare; stdout and the status are the whole of the claim).
+    #
+    # A fix that refused every `raise` would pass (3b) and fail this one, and
+    # would take every `raise` in the corpus with it.
+    ("constr_an_uncaught_raise_outside_a_try_is_status_1",
+     "class MyErr(ValueError):\n"
+     "    \"\"\"no fields at all\"\"\"\n"
+     "\n"
+     "def boom():\n"
+     "    raise MyErr(\"the message\")\n"
+     "\n"
+     "def main(n):\n"
+     "    boom()\n"
+     "    printf(\"v=%d\", n)\n"
+     "    return 0\n", 1, ""),
+    # (3e) And the other negative: an arm around a call that CANNOT raise is
+    # still emitted, arms and all, because there is nothing to catch and nothing
+    # to lose. Without this row the refusal above reads as "a `try` with an arm
+    # is refused", which is a different and much larger rule — `except OSError:`
+    # around I/O is the commonest shape in the corpus.
+    ("constr_a_try_arm_around_a_call_that_cannot_raise_still_builds",
+     "def helper(n):\n"
+     "    return n * 2\n"
+     "\n"
+     "def main(n):\n"
+     "    try:\n"
+     "        printf(\"v=%d\", helper(n))\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(\"after\")\n"
+     "    return 0\n", 0, "v=20after"),
     # (4) What the merge CANNOT do, and the reason this is a refusal and not a
     # gap in the merge: a method is compiled against the layout of the class
     # that DECLARES it, and a call site carries no receiver type to check with,
