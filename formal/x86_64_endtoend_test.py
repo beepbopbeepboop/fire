@@ -3716,8 +3716,28 @@ def admitted_facts(text):
 
     **Neither count decides the verdict** — `_run_lean` asks Lean, which is the
     only thing that knows whether any of these `sorry`s is load-bearing. The
-    counts are for NAMING a hole once Lean has said there is one, and a name is
-    only worth printing next to a verdict that is already true.
+    counts are for NAMING a hole once Lean has said there is one, and **a name
+    here is a CANDIDATE and not an identification**, which is why the report
+    says `admitted candidate` and why this docstring's sentence needed the other
+    half of its claim.
+
+    The attribution is the nearest `have … := by` ABOVE the `sorry`, and that is
+    exact for a fact's own admission and approximate for a side condition's: a
+    side condition belongs to the step application that encloses it, and a step
+    lemma is emitted WITHOUT a `by` (`have hstep7 : … := x86_step_…`), so `cur`
+    is still the previous named fact when the side condition is read. Measured on
+    `formal/examples/const2.mojo` — 16 steps, no `call`, so its closing read is
+    the one at `X86State.init`'s stack — the census names `hrip`, and deleting the
+    two `hrip` blocks' admissions and nothing else leaves the file checking
+    with `returncode 0` and no errors while Lean still reports `declaration uses
+    sorry`. **So the live hole is in one of the guarded side conditions and the
+    name is the nearest enclosing fact, not the hole's owner.** Retiring that
+    needs Lean's own positions — `set_option trace.Meta.Tactic.sorryAx`, which
+    the tool this doc's next step names, DOES NOT EXIST in the pinned 4.32.2
+    (`error: Unknown option`), and the real mechanism is a labeled sorry
+    (`Lean.Meta.mkLabeledSorry`) read back with `Declaration.forEachSorryM`,
+    which is a probe over the elaborated term and therefore a cost question
+    rather than a flag.
 
     Counted off the generated TEXT rather than kept in a counter beside it, for
     the reason the rest of this file's numbers are: a tally maintained next to
@@ -3744,6 +3764,30 @@ def admitted_facts(text):
         elif _SORRY.search(line):
             out.append((cur if cur is not None else ("_body", n), "guarded"))
     return [(nm, ln, kind) for (nm, ln), kind in out]
+
+
+def admitted_phrase(n_admitted, names, n_guarded=None):
+    """The one wording for "proved, and something in it is not proved".
+
+    **The word `candidate` is load-bearing and is in this function because both
+    report lines use it.** A name here is the nearest `have … := by` above a
+    `sorry`, which is exact for a fact's own admission and is NOT the owner of a
+    side condition's — a step lemma is emitted without a `by`, so a guard that
+    fires inside one is charged to the fact before it. Measured on
+    `formal/examples/const2.mojo`: the census named `hrip`, and deleting the two
+    `hrip` blocks' admissions and nothing else left the file checking with
+    `returncode 0` and no errors while Lean still reported `declaration uses
+    sorry`. So the name is where the search STARTS. `admitted_facts` has the rest.
+
+    Both theorems report through here so the two lines cannot drift into
+    different claims about the same number, and a test can ask the wording a
+    question without running Lean at all.
+    """
+    out = "%d admitted candidate (%s)" % (
+        n_admitted, ", ".join(names) or "unattributed")
+    if n_guarded is not None:
+        out += ", %d guarded" % n_guarded
+    return out
 
 
 def _run_lean(text):
@@ -3912,8 +3956,8 @@ def main(argv):
                 # failed proof are different facts and conflating them is how
                 # this suite once read as 36 failing when 2 were.
                 val_gap += 1
-                vs = "  value:     rax = %d, every input, %d admitted (%s)" % (
-                    expected, val_sorries, ", ".join(val_holes) or "none")
+                vs = "  value:     rax = %d, every input, %s" % (
+                    expected, admitted_phrase(val_sorries, val_holes))
             elif uncovered is not None:
                 vs = "  value:     -  (%s)" % (
                     uncovered if uncovered.startswith(BRANCHING)
@@ -3973,17 +4017,31 @@ def main(argv):
                 ts = "  terminates: PROVED"
             elif ok:
                 # Lean's own answer, not the census's: a guarded `sorry` that
-                # fell through is a hole and `fired` is what says so. The names
-                # are the census's best attribution and they can be empty — a
-                # guard that fires names the FACT it is inside, which is a step's
-                # side condition about a tenth of the time — so "unattributed"
-                # is a real answer here rather than a placeholder, and the
-                # guarded count beside it is the size of the search.
+                # fell through is a hole and `fired` is what says so.
+                #
+                # **The names are CANDIDATES, and the word says so.** They are
+                # the nearest `have … := by` above each `sorry`, which is exact
+                # for a fact's own admission and is NOT the owner of a side
+                # condition's: a step lemma is emitted without a `by`, so a
+                # guard that fires inside one is charged to the previous fact.
+                # Measured on `formal/examples/const2.mojo` (16 steps, no call):
+                # the census names `hrip`, and deleting the two `hrip` blocks'
+                # admissions and nothing else leaves the file checking with
+                # `returncode 0` and no errors while Lean still reports
+                # `declaration uses sorry` — so the live hole is one of the
+                # guarded side conditions and `hrip` is where the search
+                # starts. `admitted_facts` has the whole measurement; the
+                # alternative is a probe over the elaborated term, and the
+                # trace option this project would have reached for does not
+                # exist in the pinned Lean.
+                #
+                # "unattributed" stays a real answer rather than a placeholder:
+                # a `sorry` before any `have` has no name at all.
                 term_gap += 1
                 hole_total += sorries
                 guard_total += guarded
-                ts = "  terminates: proved, %d admitted (%s), %d guarded" % (
-                    sorries, ", ".join(holes) or "unattributed", guarded)
+                ts = "  terminates: proved, %s" % admitted_phrase(
+                    sorries, holes, guarded)
             else:
                 fails += 1
                 ts = "  terminates: FAIL %s" % err.strip()[:60]
@@ -3995,10 +4053,14 @@ def main(argv):
           % (term_ok, term_gap))
     # What the sorry COUNT is, since it is not Lean's and the two disagree: these
     # are the holes THIS emitter opened, counted off the generated text by the
-    # name the emitter gave them. `admitted_facts` has why Lean cannot supply it.
+    # name the emitter gave them. `admitted_facts` has why Lean cannot supply it
+    # — and why the name is a candidate and not the hole's owner, which is the
+    # one thing about these numbers a reader must not take as settled.
     print("               %d admitted fact(s) and %d guarded side condition(s) "
           "in the proved-with-a-sorry files, counted by name from the generated "
-          "text" % (hole_total, guard_total))
+          "text; the name is the nearest enclosing fact, so a live `sorry` in a "
+          "guarded side condition is charged to the step before it"
+          % (hole_total, guard_total))
     print("               %d no finite tree (%d loop, %d uncovered form, "
           "%d returns into a caller, %d too large to prove)"
           % (notree + noform + nocall + nosize, notree, noform, nocall, nosize))

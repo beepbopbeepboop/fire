@@ -13155,25 +13155,36 @@ def dereference_operands_refusal(dotted: str, method: str, args) -> str | None:
 # backends on one wording.
 
 
-def pointer_store_receiver(target):
-    """The ADDRESS a store through a dereference writes to, or `None`.
+def deref_receiver(expr):
+    """The RECEIVER of a dereference EXPRESSION — `p` in `p.value()` — or None.
 
-    `p.value() = v` and `p.unsafe_value() = v`, and nothing else.  The same
-    `DEREFERENCE_TRY_NAMES` the LOAD intercepts on, read from the model's own
-    table rather than from a list spelled out here — a store recogniser with its
-    own two names is a third list to keep in step with the other two, and the
-    cost of it being wrong is a program refused for a spelling the load accepts.
+    One recogniser for both intercepts, because they are the same question asked
+    of the same node: `p.value() = v` is a STORE through a pointee and
+    `return p.value()` is a LOAD, and the spelling that decides it is
+    `DEREFERENCE_TRY_NAMES` — the model's own table, read here rather than from
+    a list spelled out again, because a third copy is a third thing to keep in
+    step and the cost of it being wrong is a program refused for a spelling the
+    other intercept accepts.
 
-    `None` means "this target is not a store through a pointee", which is the
-    common case: every other assignment target is a plain name, a subscript, a
-    slice or a field, and each of those has its own emitter.
+    `None` means "this is not a dereference", which is the common case: a plain
+    name, a subscript, a field, an arithmetic expression.
     """
-    if not isinstance(target, F.CallExpr) or target.args or target.kwargs:
+    if not isinstance(expr, F.CallExpr) or expr.args or expr.kwargs:
         return None
-    func = getattr(target, "func", None)
+    func = getattr(expr, "func", None)
     if isinstance(func, F.MemberExpr) and func.member in DEREFERENCE_TRY_NAMES:
         return func.obj
     return None
+
+
+def pointer_store_receiver(target):
+    """The ADDRESS a store through a dereference writes to, or `None`.
+
+    `p.value() = v` and `p.unsafe_value() = v`, and nothing else — the store
+    half of `deref_receiver`, which is the same recogniser over the same node and
+    is where the reason for having one lives.
+    """
+    return deref_receiver(target)
 
 
 def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
@@ -13635,6 +13646,164 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── the builtins this path does NOT lower ───────────────────────────────────
+#
+# `EMITTER_BUILTINS` above is three names and `BUILTIN_FUNCTIONS` is two, and
+# between them they are the whole of what a bare-name call to a CPython builtin
+# lowers to on this path. The rest of CPython's builtin namespace is NOT
+# lowered, and until this table existed that fact lived in three places that
+# could disagree: the link audit's refusal (a name nothing provides), a
+# construct refusal further back, and — for the names the C library happens to
+# define — NOTHING AT ALL.
+#
+# So the table is a MEASUREMENT with one sentence per name, and the sentences
+# say what lowering each one would take, because "the census cannot say which
+# builtin is missing" is the complaint this answers: the finding was that of the
+# 33 names `tools/formal_proof_breadth.py` lets a candidate read, the path
+# lowers 11 and refuses 22, and nothing said which was which (fixed in
+# c8d877e9 + af313965; the doc is deleted with its fix). Every row was measured
+# on BOTH architectures on 2026-10-04 with
+# `def main(n): return <call>` and CPython as the arbiter, and the measurement
+# is pinned by `test_formal_value_model.py`'s builtin group — one differential
+# case per name that lowers, one refusal case per name that does not, on both
+# backends, which is also what makes a row's removal a test failure rather than
+# a stale sentence.
+#
+# `int`, `len`, `print`, `range` and `str`-of-text are NOT here because they
+# lower (`EMITTER_BUILTINS`, `INT_TYPE_CTORS`, `IDENTITY_TYPE_CTORS`); `abs`,
+# `pow` and `round` ARE here and are called out again below, because for those
+# three the absence was silent.
+NOT_LOWERED_BUILTINS = {
+    "abs": "a compare against zero and a select of the operand or its "
+           "negation — and the C library's `abs` is NOT it, see "
+           "FOREIGN_ABI_BUILTINS",
+    "all": "a fold over a sequence with a short circuit, which is a run-time "
+           "sequence this one-word value model cannot carry",
+    "any": "a fold over a sequence with a short circuit, the same shape as "
+           "`all`",
+    "bin": "a base-2 rendering into a buffer: a digit table and a loop, and "
+           "the ANSWER is a run-time string, which is "
+           "`bugs/FORMAL_string_value_model.md`",
+    "bool": "a compare against zero and a normalize — but the name is also in "
+            "`FRAME_VALUE_ONLY_CALLS`, so the frame-address half of the answer "
+            "is settled and the value half is not",
+    "chr": "a code point to a one-character string: an integer-to-text "
+           "conversion this path does not have",
+    "divmod": "a division and a remainder returning a PAIR, and a pair is more "
+             "than one word (`FORMAL_the_value_model_is_one_word`)",
+    "enumerate": "a generator of pairs; both halves are out of reach "
+                 "(`FORMAL_listdir_no_run_time_sequence`)",
+    "float": "a double, and every value on this path is one 64-bit INTEGER "
+             "word",
+    "hex": "a base-16 rendering, the same shape as `bin`",
+    "list": "a counted blob this path CAN lay out (`BLOB_TYPE_CTORS`) but "
+            "cannot COPY from another blob at run time — a copy is the tagged-"
+            "value work `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_"
+            "time.md` is about",
+    "max": "a compare and a select; both emitters already have the select "
+           "(`MLIR_SELECT_OP`'s `TernaryExpr` is one `CSEL`)",
+    "min": "a compare and a select, the same shape as `max`",
+    "oct": "a base-8 rendering, the same shape as `bin`",
+    "ord": "a one-character string to a code point — the inverse of `chr`, and "
+           "the string half is the same gap",
+    "pow": "integer exponentiation — a loop, or a libm call whose result is a "
+           "double (see FOREIGN_ABI_BUILTINS)",
+    "repr": "a rendering whose spelling depends on the VALUE's type, and the "
+            "type is not in a value",
+    "reversed": "a reversed copy of a sequence, so the same two gaps as "
+                "`list`",
+    "round": "a compare-and-select for an integer operand and a rounding rule "
+             "for a real one; the C library's `round` is a double (see "
+             "FOREIGN_ABI_BUILTINS)",
+    "sorted": "a sort — a comparison call per element, and a call through a "
+              "value is not a thing this path can express",
+    "sum": "a fold over a sequence, the same shape as `all`",
+    "tuple": "a counted blob, the same gap as `list`, and a two-element tuple "
+             "is a list blob this path cannot copy at run time either",
+}
+
+# The three names whose absence was SILENT, and the only reason this table has
+# to be read as a safety property rather than a census.
+#
+# A bare-name call to a name nothing provides is refused by the bind audit with
+# a sentence that names the builtin (`ee704916`). These three are different: the
+# C library DEFINES all of them, so the audit's provider check — "asked the C
+# library (dlsym)" — finds a provider and the image links. What it binds is a
+# different function:
+#
+#     double pow(double, double)      two doubles in, one double out, and this
+#                                     path's ABI reads the result from the
+#                                     INTEGER return register
+#     double round(double)             the same, and x86-64's SysV varargs area
+#                                     is not even the same memory arm64 leaves
+#                                     the result in
+#     int    abs(int)                  a 32-BIT argument, so the low half of the
+#                                     word this path passes is all it sees
+#
+# Measured, both architectures, 2026-10-04, against CPython's own answers:
+#
+#     def main(n): return pow(n, 2)     n=10 -> 0     (CPython 100)
+#                                         n=3  -> 0     (CPython 27)
+#     def main(n): return round(n)      n=7  -> 7 arm64, 0 x86-64 (CPython 7)
+#     def main(n): return abs(n)        n=2**40+5 -> 5 on BOTH (CPython
+#                                         1099511627781); n=-(2**40+5) -> 5 on
+#                                         both (CPython 1099511627781)
+#
+# An image that answers a different number is the failure this project treats
+# as worse than a refusal everywhere else, so these three are refused BY NAME at
+# the same chokepoint the other builtin intercepts use
+# (`builtin_binding_refusal`), which is what turns a wrong answer into a
+# sentence a reader can act on. Nothing in the corpus loses: no `.mojo` file in
+# `formal/` or `std/` spells any of them outside a docstring, and the PROOF
+# layer already refuses all three by name — "model: call to `abs` has no model
+# in this image" — so no generated proof changes either. What a census row over
+# a function that reads `pow` now reports is the truth: the code generator does
+# not lower it, and here is what lowering it would take.
+FOREIGN_ABI_BUILTINS = frozenset({"abs", "pow", "round"})
+
+
+def builtin_binding_refusal(name: str):
+    """Why a bare-name call to `name` must not bind to a C symbol, or None.
+
+    The one question `FOREIGN_ABI_BUILTINS` exists to be asked at, and it is
+    asked at the same point in both emitters as `emitter_lowers` and
+    `builtin_function` — beside the intercepts that DO lower a name, because a
+    name this path compiles itself and a name it must refuse are the same
+    decision read from two sides, and reading them in two places is how
+    `FRAME_VARIADIC_BUILTIN_CALLS` came to disagree with the emitters about
+    `debug_assert`.
+    """
+    if name not in FOREIGN_ABI_BUILTINS:
+        return None
+    table = {
+        "abs": "`int abs(int)` — a 32-BIT argument, so it sees the low half of "
+               "the 64-bit word this path passes and answers a different "
+               "number: `abs(n)` with n = 2**40+5 returned 5 where CPython "
+               "returns 1099511627781, on both architectures. A compare "
+               "against zero and a select of the operand or its negation is "
+               "the whole of what CPython's `abs` is, and both emitters "
+               "already have the select",
+        "pow": "`double pow(double, double)` — two doubles in and one double "
+               "out, and this path's ABI reads an integer result out of the "
+               "return register, so `pow(n, 2)` with n = 10 answered 0 where "
+               "CPython answers 100 (both architectures). CPython's `pow` on "
+               "two integers is INTEGER exponentiation, which is a loop",
+        "round": "`double round(double)` — a double in and a double out, read "
+                 "here as an integer, so `round(n)` with n = 7 answered 7 on "
+                 "arm64 and 0 on x86-64 where CPython answers 7: the two "
+                 "architectures did not even agree with each other. On an "
+                 "integer operand CPython's `round` is the identity",
+    }
+    return (
+        f"{name}(...) is refused on this path rather than bound to the C "
+        f"library's function of that name: {table[name]}. Write the operation "
+        f"out, or reach a library that provides it — that is the same advice "
+        f"the bind audit gives for a name nothing provides, and the reason it "
+        f"is the same advice is that the outcome is the same class of thing: "
+        f"an answer about a program this path did not compile."
+    )
 
 
 # ── `debug_assert` ──────────────────────────────────────────────────────────
@@ -19729,6 +19898,92 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
         f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
         f"nothing defines is not the alternative — that built and then failed "
         f"to load.)")
+
+
+def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
+    """Why `String(x)` / `str(x)` is refused when `x` is KNOWN not to be text.
+
+    `IDENTITY_TYPE_CTORS` above makes `str(x)` the IDENTITY on the operand,
+    which is right for exactly one operand: a value that already IS a `char *`.
+    That is the whole of the property the comment there states ("a string
+    already IS a `char *`, so constructing one is a no-op"), and an identity is
+    a claim about the OPERAND's kind rather than about the callee's name — so
+    the identity was applied to every operand, including an integer, and the
+    integer came out of the conversion still an integer while every later step
+    believed it was a pointer.
+
+    **The consequence is a segfault, not a wrong number**, which is why this is
+    a refusal and not a conversion. Measured on both architectures, 2026-10-04:
+
+        def main(n): return len(str(n))       # n = 10: exit -11 (SIGSEGV)
+
+    `len` of a string is `strlen` over the operand's bytes, and the operand is
+    the integer 10, so libc walked the bytes at address 10. The same source with
+    a string operand is right (`len(str("abcd"))` is 4 on both), and the same
+    source with the conversion deleted is right (`len(bin(n))` is refused at
+    build time, because an unlowered call's result is classified `int` and
+    `len`'s integer row catches it — so the gap was reachable through the ONE
+    name the model resolves as a type constructor).
+
+    `operand_kind` is the emitter's own reader (`_expr_str_kind`, which is
+    flow-sensitive and consults a parameter's annotation, a `comptime` binding
+    and a struct field's declared type), and **only POSITIVE evidence refuses**:
+    a kind that is not None and is not `STR_KIND`. A kind of None is the
+    permissive direction, and it is load-bearing rather than convenient:
+
+        String(unsafe_from_utf8_ptr=p.value())
+
+    is how a raw pointer becomes a `char *` on this path
+    (`nullable_pointer_unwrap`'s docstring has the measured history of that
+    shape), `p.value()` classifies as nothing this build can name, and the
+    identity is CORRECT there — a pointer already is what a string is. Refusing
+    an unclassifiable operand would break that shape to catch a different one,
+    and `int`'s parse asks the same question and reads the same direction
+    permissively for the same reason (`_conversion_operand_is_text`).
+
+    **The residual hole is named rather than papered over**: an operand this
+    build cannot classify that turns out to hold a number at run time —
+    `str(<call>)` whose result kind is unknown — is still the identity, and
+    still faults at its first use. Closing that is not this rule's job: it needs
+    the value model to classify call results, which is
+    `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
+    """
+    spelled_operand = member_chain_text(operand)
+    if operand_kind is None or string_operand_is_string(operand_kind):
+        return None
+    if deref_receiver(operand) is not None:
+        # …and a DEREFERENCE is exempt, which is the one exemption and it is a
+        # fact about the kind rather than about the spelling.  `p.value()` is a
+        # LOAD, and the kind table's answer for a load is the "a word is an
+        # integer" DEFAULT rather than a classification of the pointee — the
+        # same reason `_own_shape_of` refuses to take a call result's word as
+        # evidence — while the identity is exactly right for the one shape that
+        # needs it:
+        #
+        #     String(unsafe_from_utf8_ptr=p.value())
+        #
+        # is how a raw C string becomes a `char *` on this path, and
+        # `nullable_pointer_unwrap` carries the measured history of it (a
+        # `char *` built out of the first BYTE of a string, SIGSEGV, before the
+        # unwrap was taught to be the identity).  Refusing a load would break
+        # that shape to catch a different one, and the difference between them is
+        # whether the word is a pointer — which is the pointee's business and not
+        # this table's.
+        return None
+    return (
+        f"{callee_name}({spelled_operand}) is refused on this path: "
+        f"{callee_name} is a string type constructor, and a string on this "
+        f"path IS a `char *` — an interned, NUL-terminated literal — so "
+        f"constructing one is the identity on a value that is already text and "
+        f"nothing at all on one that is not, and this build classifies "
+        f"{spelled_operand} as {operand_kind!r}. It used to pass the value "
+        f"through unchanged, which is a number where every later step expects "
+        f"a pointer: `len(str(n))` with n = 10 built, ran and died of SIGSEGV "
+        f"(exit -11) on both architectures, inside `strlen` walking the bytes "
+        f"at address 10. Give the value a spelling this path has — a literal, "
+        f"or a value another step built as text — and the conversion is a "
+        f"no-op that compiles and is right."
+    )
 
 
 def type_constructor_kind(callee_name: str):

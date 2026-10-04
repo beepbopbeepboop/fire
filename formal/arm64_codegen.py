@@ -7575,6 +7575,21 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"(got {len(operands)} argument(s))")
         self._emit_expr(operands[0])
         if kind == "identity":
+            # …and a STRING type constructor is the identity only on an
+            # operand that already IS text.  Asked through the same three-way
+            # question `int`'s parse asks, and refused in both the negative
+            # directions: `model.string_conversion_refusal` has the measurement
+            # (`len(str(n))` with n = 10 was a SIGSEGV on both architectures,
+            # `strlen` walking the bytes at address 10) and the reason an
+            # identity asserts what the operand IS while `int`'s permissive
+            # direction interprets it.  `Pointer(p)` is untouched: it is an
+            # identity type constructor and NOT a string one, which is the
+            # distinction `STRING_TYPE_CTORS` exists to keep.
+            if name in M.STRING_TYPE_CTORS:
+                refusal = M.string_conversion_refusal(
+                    name, operands[0], self._expr_str_kind(operands[0]))
+                if refusal:
+                    raise CodegenError(refusal)
             return
         width, signed = info
         self._emit_extend(0, 0, IntType(width, signed))
@@ -8357,6 +8372,22 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # A BUILTIN WHOSE C NAMESAKE IS A DIFFERENT FUNCTION.  Asked here, at the
+        # same chokepoint as the three intercepts above and for the same reason:
+        # this is the last point where a bare name is still a NAME, and after it
+        # the extern path would bind whatever the C library happens to export
+        # under it.  `abs`, `pow` and `round` are all defined by libSystem, so
+        # the bind audit's provider check finds one and the image links — into a
+        # 32-bit `abs`, and two `double`-returning functions whose results this
+        # path reads out of an integer register.  Measured on both
+        # architectures: `pow(10, 2)` answered 0, `round(7)` answered 7 here and
+        # 0 on x86-64, and `abs(2**40+5)` answered 5 on both, where CPython
+        # answers 100, 7 and 1099511627781.  The refusal, the table and the
+        # measurement are `model.builtin_binding_refusal`'s; the x86-64 chain
+        # asks the same question at the same line for the same reason.
+        refusal = M.builtin_binding_refusal(name) if not is_extern_call else None
+        if refusal:
+            raise CodegenError(refusal)
         # A FORMAT STRING THIS CALL CANNOT USE — a `%s` conversion handed
         # something that is not text, or a conversion with no argument behind
         # it.  Asked here for the same reason `print` is intercepted two lines

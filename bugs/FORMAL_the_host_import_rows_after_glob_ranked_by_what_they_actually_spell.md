@@ -5,6 +5,36 @@
 which is the number every host-import row in this project predicts. §5 items 2-5
 remain and each is named below with why it is not this wave's.
 
+**Status 2026-10-04 (`work/formal25-6`): §5 item 2, `random`, is REACHABLE —
+measured, both architectures — and is a real module-sized job, not an afternoon.
+The three pieces a Mersenne Twister needs were each measured on this path and
+all three are correct:**
+
+    # 1. the STATE: a 624-word list literal
+    var s = [1, 1, … 624 …];  printf("len=%d", len(s))          # len=624, BOTH
+    # 2. the MUTATION: a loop storing through the loop counter's index
+    for i in range(624): s[i] = s[i] + 1                          # last=2 first=2, BOTH
+    # 3. the ARITHMETIC MT is made of
+    var x = 1812433253; x = x ^ (x >> 30); printf("%d", x % 100000)
+    # v=33252 on both, and CPython says 33252
+
+That is the whole of "a Mersenne Twister is integer arithmetic" made concrete,
+and the doc's §2.1 claim that only the two module-level spellings are in reach
+still stands (a `Random` INSTANCE is 624 words behind a pointer, which is
+`FORMAL_module_state_no_storage`). What is NOT an afternoon is the module:
+`init_by_array` (CPython seeds from the key's WORDS, not from a scalar), the
+`genrand_res53` shift, and `randrange`'s `getrandbits` rejection loop, each of
+which has to agree with CPython to the bit for the two callers'
+differential checks to be worth anything.
+
+**One shape is unavailable on x86-64 and worth knowing before the module is
+written: growing the state.** `s = s + [x]` inside a loop is correct on arm64
+and prints NOTHING on x86-64 past 65 elements (exact: 65 works, 66 exits 1) —
+filed as `bugs/FORMAL_x86_64_a_list_grown_in_a_loop_answers_nothing_past_65_elements.md`.
+A fixed-size LITERAL state works on both, so a 624-word literal is the way to
+write this; a state built by filling 624 slots in a loop is not, on one
+architecture today.
+
 **Claim** `sweep20:hostmods-wave3` on `work/formal20-hostmods-wave3`. Written
 2026-10-04 after `formal/hostmods/glob.mojo` landed (commit `d2edb1aa`). The
 ranking is `tools/formal_sweep_causes.py --host bugs/sweeps/sweep-arm-9.txt`,

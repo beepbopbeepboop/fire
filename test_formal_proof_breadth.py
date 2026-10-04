@@ -543,6 +543,155 @@ class TestClassifier(unittest.TestCase):
         self.assertEqual(self._class_of(src), "codegen-refused")
 
 
+class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
+    """`BUILTIN_NAMES` is a set of NAMES; the backend's answer about each of them
+    is a separate fact, and this class is what holds the two together.
+
+    The finding this class exists for: of the 33 names the census lets a
+    candidate read, the path lowers 11 and refuses 22, and nothing said which was
+    which — so six items were reported as "the image would bind 1 symbol(s) that
+    nothing provides", which is a fact about SYMBOLS and not an answer to the
+    question a reader of a proof census is asking (is the frontier the proof
+    layer or the code generator, and what would it take to move?).  Fixed in
+    c8d877e9 (the model's measured table) + af313965 (this census reading it),
+    with the doc deleted alongside.
+
+    The fix has two halves and this class is both of them. The census now reads
+    the ONE table `formal/model.py` publishes (`NOT_LOWERED_BUILTINS`) and
+    classifies a refusal that names one of those builtins into a class of its
+    own, and the partition is asserted here so that a name added to
+    `BUILTIN_NAMES` without a measured verdict fails a test instead of becoming
+    a frontier nobody reported. The MEASUREMENT half — one differential case per
+    builtin against CPython, on both architectures — is
+    `test_formal_value_model.py`'s `BUILTIN_CASES` / `BUILTIN_REFUSALS`, because
+    that is the file whose stated job is "build, run, and require the same
+    bytes CPython prints", and a table of sentences is not a measurement.
+    """
+
+    def test_every_allowed_name_is_either_lowered_or_named_as_missing(self):
+        allowed = set(B.BUILTIN_NAMES)
+        lowered = set(B.LOWERED_BUILTINS)
+        missing = set(B.NOT_LOWERED_BUILTINS)
+        self.assertEqual(allowed & lowered & missing, set(),
+                         "a name is claimed both lowered and not lowered, so "
+                         "one of the two halves is a stale sentence")
+        self.assertEqual(
+            allowed - lowered - missing, set(),
+            "these names are in the census's allow-list and in NEITHER half: "
+            "nobody has measured whether the formal path lowers them, which is "
+            "the state this file's docstring says produced the finding")
+        self.assertEqual(
+            lowered | missing, allowed,
+            "these names are measured and are not in the allow-list, so the "
+            "census will disqualify a candidate for reading a name the "
+            "measurement says is fine")
+
+    def test_every_missing_name_says_what_lowering_it_would_take(self):
+        for name, why in sorted(B.NOT_LOWERED_BUILTINS.items()):
+            self.assertTrue(why.strip(), f"{name} has no sentence")
+            self.assertGreater(len(why), 40,
+                               f"{name}'s sentence is too short to be a "
+                               f"measurement: {why!r}")
+
+    def test_the_three_names_whose_absence_was_silent_are_in_the_table(self):
+        """`abs`, `pow` and `round` are the ones that were not refused by
+        anything: the C library defines all three, so the image bound
+        libSystem's `int abs(int)`, its `double pow(double, double)` and its
+        `double round(double)` and answered a different number.
+
+        They are in `NOT_LOWERED_BUILTINS` because that is what the table means
+        now, and in `formal/model.py`'s `FOREIGN_ABI_BUILTINS` because that is
+        what the EMITTER asks: a name nothing provides is already refused by the
+        bind audit, so only the subset that would otherwise BIND needs a refusal
+        at the call site. If one of the three is lowered later it leaves both
+        sets and this test is what says so."""
+        import formal.model as M
+        self.assertEqual(M.FOREIGN_ABI_BUILTINS, {"abs", "pow", "round"})
+        self.assertTrue(M.FOREIGN_ABI_BUILTINS <= set(B.NOT_LOWERED_BUILTINS),
+                        "a name the emitter refuses by name must also be in "
+                        "the census's table, or the two halves disagree about "
+                        "what is missing")
+        for name in sorted(M.FOREIGN_ABI_BUILTINS):
+            self.assertIn(name, M.builtin_binding_refusal(name),
+                          "the refusal has to NAME the builtin")
+        self.assertIsNone(M.builtin_binding_refusal("len"),
+                          "a name the path lowers must not be refused as one "
+                          "it cannot bind")
+
+    def test_a_builtin_refusal_is_its_own_class_and_names_the_builtin(self):
+        """Both architectures, because the link audit's message is one message
+        and the class must not depend on which emitter produced it."""
+        src = ("def f(n):\n"
+               "    return max(n, 1)\n"
+               "def main(x):\n"
+               "    return f(x)\n")
+        for arch in ("arm64", "x86_64"):
+            self.assertEqual(self._class_of(src, arch),
+                             "refused-builtin")
+        detail = B.builtin_refusal_detail(B._unlowered_builtins_in(src),
+                                          "f.mojo: the image would bind 1 "
+                                          "symbol(s) that nothing provides")
+        self.assertTrue(detail.startswith(B.BUILTIN_DETAIL_MARK), detail)
+        self.assertEqual(B._builtins_named_in_detail(B._first_line(detail)),
+                         ["max"],
+                         "the names have to survive `_first_line`'s 300-"
+                         "character cut, because the frontier section reads "
+                         "them back out of the ledger row")
+
+    def test_a_refusal_that_names_no_builtin_stays_where_it_was(self):
+        """The marker says what KIND of refusal it is; the table says which
+        builtin. A refusal carrying the marker with no name from the table — a
+        method call on a frame, say — must not be reported as a missing
+        builtin, because that would be reporting a name the census did not
+        read."""
+        marker = ("`append` is a call this build emitted and nothing provides "
+                  "it, so that call is not lowered on this path")
+        src = ("def f(n):\n"
+               "    return max(n, 1)\n")          # a call, but not THE call
+        src_without_call = "def f(n):\n    return n + 1\n"
+        self.assertEqual(B._refusal_class(marker, src_without_call),
+                         "codegen-refused")
+        self.assertEqual(B._refusal_class(marker, src),
+                         "refused-builtin")
+
+    def test_the_report_prints_the_frontier_the_run_reached(self):
+        """Counted from the ITEMS, not from the table: a builtin no item called
+        is not in this run's frontier, and one four items called is worth four
+        times the sentence."""
+        src = ("def f(n):\n"
+               "    return max(n, 1)\n"
+               "def main(x):\n"
+               "    return f(x)\n")
+        import shutil
+        import tempfile as tf
+        tmp = tf.mkdtemp(prefix="pb-frontier-")
+        try:
+            item = B.Workload(ident="t", origin="repo", source=src,
+                              detail="", weight=0)
+            v = B.run_item(item, "arm64", timeout=60, workdir=tmp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        text = B.report([v], ["arm64"])
+        self.assertIn("the builtins that stopped an item", text, text)
+        self.assertIn("`max`", text, text)
+        self.assertNotIn("`pow`", text,
+                         "the frontier is what this run reached; `pow` stopped "
+                         "nothing here and is printed as if it had")
+        self.assertIn("a compare and a select", text,
+                      "the frontier section without the sentence is the "
+                      "allow-list assertion this file is about")
+
+    def _class_of(self, source, arch="arm64"):
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="pb-builtin-")
+        try:
+            item = B.Workload(ident="t", origin="repo", source=source,
+                              detail="", weight=0)
+            return B.run_item(item, arch, timeout=60, workdir=tmp).cls
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestAReplayedVerdictSaysSo(unittest.TestCase):
     """A verdict the cache answered is a fact about the measurement, and the
     ledger has to carry it.

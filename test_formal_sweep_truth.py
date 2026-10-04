@@ -2872,6 +2872,79 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                            "has collapsed to the admitted count the guard is no "
                            "longer being recognised")
 
+    def test_a_side_condition_is_charged_to_the_fact_before_it(self):
+        """The measurement behind the word `candidate` in the report.
+
+        A step lemma is emitted as `have hstep7 : T := x86_step_…` — WITHOUT a
+        `by` — so the census's "last `have … := by`" cursor is still the PREVIOUS
+        fact when it reads a `sorry` inside that step's inline `(by …)`. So a
+        guard that fires in a side condition is charged to the fact above it, and
+        the name in the report is where the search STARTS rather than the hole's
+        owner.
+
+        Measured on `formal/examples/const2.mojo` (16 steps, no `call`, so its
+        closing read is the one at `X86State.init`'s stack): the report named
+        `hrip`, and deleting the two `hrip` blocks' `all_goals sorry` lines and
+        nothing else left the file checking with `returncode 0` and NO errors
+        while Lean still reported `declaration uses sorry`. That is what moved
+        the report from "1 admitted (hrip)" to "1 admitted candidate (hrip)",
+        and this case is what keeps the two apart if the attribution is ever
+        fixed: when it is, this assertion fails and the wording goes back to
+        `admitted`.
+        """
+        import formal.x86_64_endtoend_test as E
+        # The emitter's own two-line step shape, which is the point: the `:=` is
+        # on the CONTINUATION line, so `_HAVE_BY` — `^\s*have NAME … :=` — does
+        # not see it and the cursor is still the previous fact when the side
+        # condition is read.
+        text = ("theorem t : True := by\n"
+                "  have hprev : True := by\n"
+                "    trivial\n"
+                "    all_goals sorry\n"          # hprev's own admission
+                "  have hstep157 : x86_step s157 rc = some\n"
+                "    { s157 with rip := 0 } := x86_step_ret s157 rc 42 (by\n"
+                "  try (trivial)\n"
+                "  all_goals sorry)\n")           # a side CONDITION of hstep157
+        facts = E.admitted_facts(text)
+        self.assertEqual([(n, k) for n, _l, k in facts],
+                         [("hprev", "admitted"), ("hprev", "guarded")],
+                         "the side condition is charged to hprev, which is the "
+                         "defect the word `candidate` admits; if this is now "
+                         "hstep157, the attribution is fixed and the report's "
+                         "wording should stop hedging. A `have` whose `:=` is on "
+                         "its OWN line is charged correctly, which is why this "
+                         "fixture is two lines and the previous one was not")
+
+    def test_the_report_says_candidate_and_never_claims_an_identified_hole(self):
+        """One wording for both theorems, and the word is the claim.
+
+        The value line and the termination line are the same sentence about two
+        different theorems, so they go through `admitted_phrase` and a test asks
+        the wording a question without running Lean — which is the only way to
+        ask it at all, since the lines are printed from inside `main`'s Lean
+        loop.
+        """
+        import formal.x86_64_endtoend_test as E
+        self.assertEqual(E.admitted_phrase(1, ["hrip"], 249),
+                         "1 admitted candidate (hrip), 249 guarded")
+        self.assertEqual(E.admitted_phrase(5, ["hpop39", "hrip"], 112),
+                         "5 admitted candidate (hpop39, hrip), 112 guarded")
+        self.assertEqual(E.admitted_phrase(1, [], 9),
+                         "1 admitted candidate (unattributed), 9 guarded",
+                         "a `sorry` before any `have` has no name, and "
+                         "`unattributed` is that answer rather than a "
+                         "placeholder")
+        for phrase in (E.admitted_phrase(1, ["hrip"], 249),
+                       E.admitted_phrase(1, [], 9)):
+            self.assertNotIn("admitted (", phrase,
+                             "the old wording asserted an identification; the "
+                             "hole it named was a candidate")
+        # …and no form of it survives anywhere in the emitter's report strings.
+        import inspect
+        src = inspect.getsource(E.main)
+        self.assertNotIn("admitted (%s)", src,
+                         "a report line still claims an identified hole")
+
     def test_a_sorry_in_a_comment_is_not_an_admission(self):
         """Both comment forms, and the theorem's OWN docstring is the case.
 
