@@ -442,8 +442,8 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
             # self-host closure: 0 real generator/async defs before lowering,
             # 0 after — `test_selfhost.py::closure_coroutines_are_lowerable`
             # pins the second), so this costs no `skip` line today. It is
-            # `mojo dylib` over a project's own Python-family modules where it
-            # bites, which is a tree whose `.py` files are not in either list.
+            # `fire.py dylib` over a project's own Python-family modules where
+            # it bites, which is a tree whose `.py` files are in neither list.
             # See bugs/CODEGEN_dylib_module_path_drops_generated_cpp.md.
             if box.get('cpp'):
                 raise _DylibGeneratedCppError(
