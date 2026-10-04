@@ -6848,18 +6848,44 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     _cset_bi = bi
                 _cset_blk = blocks[_cset_bi]
                 _cnd = _cset_cond(_cset_blk, words)
-                _fl_map = {0: "arm64_flag_eq", 1: "arm64_flag_ne", 2: "arm64_flag_ge",
-                           3: "arm64_flag_lt", 8: "arm64_flag_gt", 9: "arm64_flag_le",
-                           10: "arm64_flag_ge_s", 11: "arm64_flag_lt_s",
-                           12: "arm64_flag_gt_s", 13: "arm64_flag_le_s"}
-                _fls = [_fl_map.get(c) for c in _cset_conds(_cset_blk, words)]
+                # **ONE table, `_COND_LEMMA`, and it was a DUPLICATE until
+                # 2026-10-04.**  This block carried a private copy under the name
+                # `_fl_map` whose ten entries were `_COND_LEMMA`'s ten entries,
+                # key for key and string for string — so "which table answers
+                # this condition code" had two answers in one file and nothing
+                # said they had to agree.  `_COND_LEMMA` is the one `_cond_flag_lines`
+                # reads for a LOOP's exit test, and a conditional branch's flag
+                # predicate is the same question, so the local copy is gone rather
+                # than reconciled.
+                _fls = [_COND_LEMMA.get(c) for c in _cset_conds(_cset_blk, words)]
                 _fls = [f for f in _fls if f is not None]
-                _fl = _fl_map.get(_cnd)
+                _fl = _COND_LEMMA.get(_cnd)
+                # **A `B.cond` BLOCK HAS NO CSET, so `_fls` came out EMPTY for it
+                # while `_fl` did not — and that asymmetry is the whole of
+                # `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`.**
+                # `_cset_cond` reads the raw hardware condition field off the
+                # block's terminator when it finds no CSET (its own docstring says
+                # so, and it is what `_fl` above is derived from), while
+                # `_cset_conds` enumerates CSETs and finds none.  The guard below
+                # therefore PASSED — `_fl` was not None — and the emitted chain's
+                # `simp` set carried no flag lemma at all, so the raw
+                # `arm64_matches_condition 11 (arm64_subs_flags …) = true` never
+                # reduced to an order and `bv_decide` was handed an expression with
+                # an opaque register in it and reported a "potentially spurious
+                # counterexample" that was an artefact of its own abstraction.
+                #
+                # So the flag predicate is read off the TERMINATOR when the block
+                # holds no CSET.  A block that DOES hold one keeps its CSET-derived
+                # list: that one names the operands a short-circuit `and`/`or`
+                # cset-ed, and mixing the branch's own field in would claim a flag
+                # the predicate is not.
+                if not _fls and _fl is not None:
+                    _fls = [_fl]
                 # A BIT TEST is the fourth question and the only one with no
                 # flag half at all: `TBZ`/`TBNZ` read one bit of a register and
                 # branch, so there is no cset that wrote the register (the
                 # search above finds nothing and falls back to this block) and
-                # no flags for `_fl_map` to name — which is why both guards
+                # no flags for `_COND_LEMMA` to name — which is why both guards
                 # below used to refuse it. Neither guard is about the bit test:
                 # `_fl is None` is the absence of a flag lemma, and `_Xs` empty
                 # is a path that spills nothing, so there are no frame reads to

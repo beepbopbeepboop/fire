@@ -1038,9 +1038,10 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
     parameter that lowers today, because the parameter's own annotation
     (`keys: List[T]`) classifies the subscript base and the substitution puts a
     list literal there.  A read that goes through `len()` instead does not (see
-    `bugs/FORMAL_a_value_typed_bracket_argument_is_refused_as_a_subscript.md`
-    §"What is not the cause" and the next step below), which is why this case
-    reads element zero.
+    the bug doc deleted with the consumer-side fix, `§"What is not the cause"`
+    and the wall it stopped at, now
+    `bugs/FORMAL_a_value_bracket_parameter_cannot_be_read_in_the_template.md`),
+    which is why this case reads element zero.
 
     Both spellings of a display and two different values of it, so the
     distinctness the mangling has to provide is exercised rather than asserted:

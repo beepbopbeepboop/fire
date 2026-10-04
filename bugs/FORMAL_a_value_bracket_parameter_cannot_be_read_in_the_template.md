@@ -3,9 +3,10 @@
 **Area:** `formal/imports.py::_instantiated_sources` (why the template is
 compiled at all) and the two refusals in `formal/model.py` that fire on the
 template's own body. Found 2026-10-04 on `work/formal25-1`, immediately after
-`bugs/FORMAL_a_value_typed_bracket_argument_is_refused_as_a_subscript.md` was
-fixed — that fix makes a value bracket ARGUMENT a demand and binds the boundary
-symbol, and this is the wall immediately behind it.
+the consumer-side gate for a value bracket ARGUMENT was fixed on
+`work/formal25-1` (commit e12b0005: `type_arg_text` reads a LITERAL DISPLAY) —
+that fix makes the argument a demand and binds the boundary symbol, and this is
+the wall immediately behind it.
 
 ## What I ran
 
@@ -115,9 +116,9 @@ Two spellings, in order of cost:
    the export rule's answer for "a template is not an API" to be asked before
    the body is compiled rather than after.
 
-Whichever is taken, `bugs/FORMAL_a_value_typed_bracket_argument_is_refused_as_a_subscript.md`
-stays deleted either way: its subject is the CONSUMER-side gate, which is
-fixed, and this is a different refusal with a different owner.
+Whichever is taken, the consumer-side gate stays closed either way: its
+subject was the bracket ARGUMENT, which is fixed, and this is a different
+refusal with a different owner.
 
 ## Reproducing
 
