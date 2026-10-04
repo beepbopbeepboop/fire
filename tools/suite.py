@@ -560,6 +560,26 @@ MEASURED_PEAK_GB = {
     # have been a permanent UNREGISTERED entry for a test that costs less than
     # `formal-core-hostmods`'s 25 s.
     'formal-monomorph':      (0.1,  'measured'),   # 9 s, 11 cases
+    # …and the five the estate check caught on the formal6 merge (2026-10-03),
+    # which is the largest it has ever named at once: the eleven branches that
+    # merge brought in landed five test FILES with no registration and no
+    # excuse, so `suite-self-test` went red naming exactly those five and
+    # nothing else — which is the check working, and is why the receipt is here
+    # rather than in a doc.
+    #
+    # Measured the same way as every row above (one at a time under
+    # `tools/memslot.py --gb 8`, this tree, python 3.14.7), and with the same
+    # instrument for the same reason: `tools/memcap.py`'s own report rounds to
+    # 0.1 GB and all five are under it, so the peak is `procrun.tree_rss`
+    # polled every 20 ms. `formal-shutil`'s 34.5 s is the largest wall time of
+    # the five and it is still a tenth of what `formal-hashlib` costs cold, so
+    # the deciding number for every one of them is the same: `tiny`, and not
+    # `UNREGISTERED`.
+    'formal-admitted': (0.13, 'measured'),   # 10.5 s, 10 groups + the ratchet
+    'formal-fcntl':    (0.07, 'measured'),   # 7.0 s, 5 groups, 30 constants
+    'formal-math':     (0.09, 'measured'),   # 18.7 s, 8 groups, 20204 isqrts
+    'formal-shutil':   (0.09, 'measured'),   # 34.5 s, 9 groups
+    'formal-stat':     (0.10, 'measured'),   # 10.4 s, 4 groups, 65547 modes
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -2707,6 +2727,69 @@ test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
             'monomorphize.py', 'elaborate.py', 'reflect.py'] + FORMAL_BUILD_INPUTS,
      desc="a generic's instantiations are its boundary symbols, differentially")
 
+# ── the five the estate check named on the formal6 merge, 2026-10-03 ─────────
+# The same check, the same hole, and the largest it has named at once: the eleven
+# branches that merge brought in landed five test FILES
+# (`test_formal_{admitted,fcntl,math,shutil,stat}.py`) with no registration and
+# no entry in `UNREGISTERED`, so `suite-self-test` — registered in `check`,
+# `gate` and `smoke`, and re-run for a change to ANY `**/test_*.py` — went red
+# naming exactly those five and nothing else. The transcript and the reasoning
+# are the two sections above; this paragraph is the receipt, for the same reason
+# theirs is: a check that fires is worth a receipt, because "registered, not
+# excused" is a decision somebody has to be able to audit later.
+#
+# Registered, not excused, and the deciding number is cost again. 7.0 s, 10.4 s,
+# 10.5 s, 18.7 s and 34.5 s at 0.07-0.13 GB, against the line `UNREGISTERED`
+# exists for ("minutes per job", and the formal suites it already excuses are
+# minutes each). The nearest registered neighbour for the shape is
+# `formal-core-hostmods` at 25 s, which is in `proofs` only, and these are the
+# same kind of thing: a host module's ANSWERS, each computed twice — once
+# through `fire.py build --formal` and executed, once through this process's own
+# CPython — so `formal/build.py` is in the key and `FORMAL_BUILD_INPUTS` with it.
+#
+# `test_formal_dylib.py` and `test_formal_json.py` are in three of these keys
+# because the file IMPORTS them (`run_fire`/`check`, and `Failure`), so a change
+# to either changes what these observe; naming the import is the whole of the
+# "one failure type, not two" discipline those two files' headers argue for.
+test('formal-admitted', [PY, 'test_formal_admitted.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_admitted.py', 'test_formal_dylib.py',
+            'test_formal_json.py',
+            # The ratchet walks EVERY `formal/hostmods/` module for its count, so
+            # the whole tree is this test's subject and a directory is the only
+            # honest key: a named file would be a list that rots on the next
+            # module. 14 contracts across 4 modules, 14 counted `sorry`.
+            'formal'] + FORMAL_BUILD_INPUTS,
+     desc='the ADMITTED host-contract ratchet, and everything not admitted')
+test('formal-fcntl', [PY, 'test_formal_fcntl.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_fcntl.py', 'test_formal_dylib.py',
+            'formal/hostmods/fcntl.mojo',
+            'formal/hostmods/os/_syscalls.mojo',   # `fs_open_ro`, `fs_close`
+            'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='fcntl: flock(2) and CPython\'s whole constant surface, both backends')
+test('formal-math', [PY, 'test_formal_math.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_math.py', 'test_formal_dylib.py',
+            'formal/hostmods/math.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='math: the integer-valued surface, against CPython on both backends')
+test('formal-shutil', [PY, 'test_formal_shutil.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_shutil.py', 'test_formal_dylib.py',
+            'formal/hostmods/shutil.mojo',
+            'formal/hostmods/os/_syscalls.mojo',   # the 8 fs_* it calls
+            'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='shutil: copy, move, rmtree, copytree and which, over the real filesystem')
+test('formal-stat', [PY, 'test_formal_stat.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_stat.py', 'formal/hostmods/stat.mojo',
+            'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='stat: the mode vocabulary, all 65547 modes against CPython')
+
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
 # character model in pure Python, with hand-written Metal kernels and a bench C
@@ -2940,7 +3023,7 @@ BUCKETS = {
                 # formal image per group and its subject is a host module's
                 # answers rather than a static shape; 25 s and 0.1 GB measured,
                 # which is the cost class of `formal-json` above.
-                'formal-core-hostmods',
+'formal-core-hostmods',
                 # …and the one the estate check named on the merge of
                 # `work/formal8-4` (2026-10-03): `test_formal_typed_flag.py`
                 # came with that branch and was named by no bucket and by no
@@ -2969,7 +3052,21 @@ BUCKETS = {
                 # `prove=True` over 60 items, so 22 of them build an image and
                 # the `proof-crash` vs `proof-refused` distinction it pins is
                 # only observable with the generator actually running.
-                'formal-proof-breadth-tool'],
+                'formal-proof-breadth-tool',
+                # …and the five the estate check named on the formal6 merge,
+                # which is the same reason stated once more because it is now
+                # the fourth time: four host-module differentials and the
+                # admitted-contract ratchet, 7.0-34.5 s and 0.07-0.13 GB
+                # measured. `proofs`, for the shape `formal-core-hostmods`
+                # above gives — an image per group, executed, against CPython —
+                # and not for the clock, because the clock does not agree: a
+                # 34.5 s `formal-shutil` argues for `proofs` on cost and a
+                # 7.0 s `formal-fcntl`, cheaper than the `formal-sys` that is
+                # in both buckets, argues for `check`. What a test costs and
+                # what it is ABOUT are different questions, and only the second
+                # one should decide where it lives.
+                'formal-admitted', 'formal-fcntl', 'formal-math',
+                'formal-shutil', 'formal-stat'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

@@ -3117,12 +3117,10 @@ UNREGISTERED = {
     # table's own comment is where a reader looks for what these have in
     # common.
     'test_formal_returned_frame.py': _FORMAL_SUITE_REASON,
-    'test_formal_admitted.py': _FORMAL_SUITE_REASON,
     'test_formal_bracketed_method_field_set.py': _FORMAL_SUITE_REASON,
     'test_formal_cross_module.py': _FORMAL_SUITE_REASON,
     'test_formal_debug_assert.py': _FORMAL_SUITE_REASON,
     'test_formal_eval_eq_mojo_bridge.py': _FORMAL_SUITE_REASON,
-    'test_formal_fcntl.py': _FORMAL_SUITE_REASON,
     'test_formal_fnmatch.py': _FORMAL_SUITE_REASON,
     'test_formal_frame_return_overloads.py': _FORMAL_SUITE_REASON,
     'test_formal_libc_symbol.py': _FORMAL_SUITE_REASON,
@@ -3171,7 +3169,17 @@ UNREGISTERED = {
         'Measured 2026-10-03: ~25 s wall, 0.3 GB peak. Declared rather than '
         'registered for the reason `test_formal_fuzz.py` is: a fuzzer\'s '
         'heavier settings are a sweep, not a check.',
-    'test_formal_math.py': _FORMAL_SUITE_REASON,
+    # `test_formal_{admitted,fcntl,math,shutil,stat}.py` were listed here when
+    # they landed on the formal6 merge (2026-10-03), and are REGISTERED now
+    # (`formal-admitted`, `formal-fcntl`, `formal-math`, `formal-shutil`,
+    # `formal-stat`, all `tiny` in the `proofs` bucket) — for
+    # `formal-tempfile`/`formal-textwrap`'s reason below: 7.0-34.5 s and
+    # 0.07-0.13 GB measured one at a time, so an excuse was a permanent one and
+    # these are the only coverage that diffs those five host modules' answers
+    # against CPython on both backends.  `proofs` rather than `check` because
+    # what they are ABOUT decides it: each builds and executes a formal image
+    # per group, and a 34.5 s `formal-shutil` and a 7.0 s `formal-fcntl` do
+    # not agree about the clock.
     'test_formal_manifest_atomic.py': _FORMAL_SUITE_REASON,
     # The same shape, and here for the same reason. `posixpath` is a SPELLING
     # of `os.path` — every one of its thirty functions is a one-line forward —
@@ -3225,9 +3233,7 @@ UNREGISTERED = {
     'test_formal_platform.py': _FORMAL_SUITE_REASON,
     'test_formal_recursion_contract.py': _FORMAL_SUITE_REASON,
     'test_formal_short_circuit_cond.py': _FORMAL_SUITE_REASON,
-    'test_formal_shutil.py': _FORMAL_SUITE_REASON,
     'test_formal_specialized_method_call.py': _FORMAL_SUITE_REASON,
-    'test_formal_stat.py': _FORMAL_SUITE_REASON,
     'test_formal_sweep_cache_key.py': _FORMAL_SUITE_REASON,
     # `test_formal_tempfile.py` and `test_formal_textwrap.py` were listed here
     # when they landed on 2026-10-03, and are REGISTERED now (`formal-tempfile`
