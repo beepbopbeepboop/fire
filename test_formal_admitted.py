@@ -225,9 +225,10 @@ def group_scope(tmpdir, cas_root, verbose):
 # Everything above checks that an admission is SCOPED (it constrains the answer
 # and not the host's behaviour) and that it is COUNTED.  Neither of those can
 # tell a TRUE admission from a FALSE one, and the difference is the whole subject
-# of `bugs/FORMAL_trust_audit_2026-10-04.md`: on 2026-10-04, eight of the
-# nineteen contracts asserted something the host does not do, and all nineteen
-# were green in every other group in this file.
+# of `bugs/FORMAL_trust_audit_2026-10-04.md`: on 2026-10-04, FIFTEEN of the
+# nineteen contracts asserted something the host does not do (three more were
+# true only under a reading the audit had to choose), and all nineteen were green
+# in every other group in this file.
 #
 # The shape of the check is deliberately the shape of the existing differential
 # groups: ask CPython, or the OS, and compare its answer with the model's.  What
@@ -278,11 +279,13 @@ def _forbidden(c, *phrases):
 def _status_probes():
     """`(label, status)` over the ways a child's status can come out.
 
-    Five rows and every one of them is needed: `exit 0` and `exit 3` are the
-    ordinary answers, and the three signals are the ones that make the answer
-    NEGATIVE.  `SIGHUP` is in the table because it is the one that collides with
-    a sentinel — CPython reports a SIGHUP death as `-1`, which is the value the
-    `popen_poll` model used to answer with.
+    Six rows and every one of them earns its place.  `0`, `3` and `255` are the
+    ordinary answers, and `255` is the top of the range the old admission
+    claimed, so a probe without it could not tell "the contract admits the whole
+    range" from "it admits 0..3".  The three signals are the rows that make the
+    answer NEGATIVE, and `SIGHUP` is in the table for a second reason: CPython
+    reports a SIGHUP death as `-1`, which is the value the `popen_poll` model
+    used to answer "not collected" with.
     """
     out = []
     for label, script in (("normal exit 0", "exit 0"),
