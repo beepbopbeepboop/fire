@@ -9,11 +9,18 @@ Found 2026-10-03 on `work/formal13-3` while doing the `CSEL` step that
 prescribes. **OPEN, measured, NOT fixed here** — and it is the reason that step's
 CSEL model row is not landed even though it is three lines and it builds.
 
-**Re-read 2026-10-03: nothing here has moved, and the OWNERSHIP has.** The CSEL
-model row is `formal16-2`'s (`bug:FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
-whose §next step names this doc as the blocker), so what this doc owes is the
-COST half and the modelling half is not duplicated here. Re-confirmed on this
-tree, cheaply, without a Lean run:
+**Status: the PRESCRIPTION in §"the next step" is measured to be aimed at the
+wrong goal, 2026-10-03.** Everything this doc assumes about where the cost lives
+was checked against the generated proof on this tree, and the `hx30` goal this
+doc says is "the last place in this walk that still re-unfolds the whole chain"
+is inside a **23.1-second, 2.5 GB** check of everything up to the final theorem.
+The cost is the `hprior_*` value-flow facts, which are exponential in the number
+of conditional branches and which this doc never mentions. §"The measurement
+that decides it" has the numbers and what they say about the CSEL row; the model
+row's own half is still `formal16-2`'s, as below.
+
+**Re-read 2026-10-03 (second pass): nothing about the MODEL side has moved, and
+the cost half now has a measurement that is not the one this doc predicted.**
 
 * `_STEP_CONDS` has **no** CSEL row and `arm64_step` has no CSEL branch, and the
   comment where the row used to be says why the row is absent rather than
@@ -21,7 +28,9 @@ tree, cheaply, without a Lean run:
   unlanded, not a stale memory of one experiment;
 * the `hx30_{bi}` goal is still the whole-chain shape §"Where the cost is"
   quotes, verbatim: `simp only [qS…, qT…, arm64_reg, arm64_set_reg,
-  Arm64State.init]` then `simp (disch := decide) […]` over the composed state;
+  Arm64State.init]` then `simp (disch := decide) […]` over the composed state —
+  **and it is also still CHEAP**, which is the new fact and the reason the §"next
+  step" below should not be followed as written;
 * the technique the next step prescribes is in the file and unchanged —
   `hpc_{bi}` at the top of a run is `by rfl` when the pc is decided, and
   `hpc_s_{bi}` is its sibling for the composed state.
@@ -110,7 +119,61 @@ threshold is characterised; nothing here should be read as "row 3 is over the
 line and row 4 is under it" — both are within a factor of a couple of
 instructions of each other and the margin is not understood.
 
-## The next step, and it is the same shape as §1 of the sibling document
+## The measurement that decides it, and it is not this one (2026-10-03)
+
+Taken on this tree against a generated three-conditional-branch proof, through
+`formal/lean.py::run_lean`, under an 8 GB ceiling. The full method is in
+`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` §2 and §6;
+what belongs here is what it says about the prescription below.
+
+| what | result |
+|---|---|
+| the generated proof with the final theorem REMOVED — every block cert, every `qS`/`qT` chain, **all 32 `hx30` goals**, all 144 `hprior` goals' statements | **rc=0, 23.1 s, 2.5 GB** |
+| the theorem's STATEMENT alone, on top of that | rc=0, 22.1 s — `runProg`'s reduction is free |
+| the whole file | kernel OOM at 6.1–6.4 GB, 202–299 s |
+
+**So the `hx30` goal is not where the 14 GB goes.** All thirty-two of them, each
+one the whole-chain `simp only […qS0, …qT23, …]` this doc quotes, are inside
+23 seconds. Rewriting them as per-step `rfl`s — the move §"the next step" and its
+sibling §1 of `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` both
+prescribe, and which this doc calls "the identical move" — would be real work
+against a goal that is not the cost.
+
+**What is the cost, and it has nothing to do with `CSEL`.** The generated proofs
+of four programs differing only in their number of `if`s, counted with the proof
+check stubbed out so no Lean run is involved:
+
+| branches | `hprior_*` | `hx30_*` |
+|---:|---:|---:|
+| 2 | 48 | 16 |
+| 3 | **144** | 32 |
+| 4 | **384** | 64 |
+| 5 | **960** | 128 |
+
+`hprior` grows ×3.0, ×2.67, ×2.5 per branch — the only row that is not a doubling
+— while `hx30` merely doubles. The `hprior_*` facts are emitted at
+`formal/arm64_proof_gen.py:6143`, once per (PATH, prior block, variable), each
+proved by unfolding that block's whole composed state. **A conditional VALUE
+(`CSEL`) makes the composed state a function of the flags, so it makes EVERY one
+of those facts more expensive — but it does not make more of them, and there are
+already 9 of them per `hx30` at three branches without any `CSEL` in the image.**
+
+**What this does to the CSEL row, precisely.** This doc's premise was "modelling
+`CSEL` turns a NAMED OBLIGATION into a BUILD FAILURE". That is still what the
+five-row table measured, and the row is still `formal16-2`'s to land. What
+changes is the reason it is expensive: it is not that the `hx30` chain becomes
+unresolvable, it is that a conditional value makes each of the already-exponential
+`hprior` simplifications carry one more case. So **the thing to land before the
+CSEL row is the `hprior` sharing**, and the thing that doc should be read
+together with is
+`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` §3 and §5 —
+a 24-instruction export with no `CSEL` in it at all already fails the same way.
+
+## The next step as it was written, and why not to follow it
+
+**Kept verbatim below, because the reasoning is correct and the target is wrong,
+and both of those are worth being able to see at once.** Do not read it as a
+prescription; read it as the shape of a fix once `hprior` is no longer the cost.
 
 Make `x30`'s invariance a PER-STEP fact instead of a whole-chain simplification.
 `x30` is written by exactly one modelled instruction (`BL`, `_regs_written`'s
@@ -123,9 +186,13 @@ cost stops depending on how conditional the body's VALUES are.
 
 That is the identical move §1 records: fifteen `simp only` blocks re-unfolding
 the composed state became fifteen `omega`s off one per-step `pc` lemma, and the
-per-step `pc` lemma is what made `arm64_runs`'s own `if` resolvable. The `hx30`
-goal is the last place in this walk that still re-unfolds the whole chain, and
-it is the only one left.
+per-step `pc` lemma is what made `arm64_runs`'s own `if` resolvable. The claim
+this doc ends on — "the `hx30` goal is the last place in this walk that still
+re-unfolds the whole chain, and it is the only one left" — **is false**, and the
+§"measurement that decides it" table above is what says so: `hprior`'s proofs
+are `simp only [_pb_defs …]` over a composed state too, there are nine of them
+per `hx30` at three branches, and they are the ones the kernel runs out of
+memory on.
 
 **What to check before starting**, so the next reader does not re-derive it:
 

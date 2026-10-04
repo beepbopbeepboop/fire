@@ -261,22 +261,31 @@ on where a subject about a module is not.
 
 ## The next step, in the order the ranking gives
 
-(Re-measured 2026-10-03; item 1's blocker is now LOCATED and item 2's is deeper
+(Re-measured 2026-10-03; item 1's blocker is now FIXED and item 2's is deeper
 than this list said. Everything else stands.)
 
 1. **`glob` — 7 files, and the only real row.** §3 says why it is not taken
    here; whoever takes it needs §3's four bullets and the two ownership
-   questions answered first. **Both ownership questions are now answered**: no
+   questions answered first. **Both ownership questions are answered**: no
    claim in `tools/control.py claims` names `glob`, and
    `formal/hostmods/glob.mojo` is still not in this tree (it lives uncommitted on
-   `work/formal8-7-r2`'s working tree). **And the blocker is located**:
-   `bugs/FORMAL_container_returning_export_whose_body_calls_helpers_breaks_the_CALLERS_image.md`
-   now names it — `model.subscript_base_lowering`'s two index conventions, which
-   make `_split`'s write of element 0 land eight bytes from where `glob` reads
-   element 0 — and it belongs to `formal13-1`'s claim. So `glob`'s next step is
-   no longer "write the module" or "find the bug": it is "wait for
-   `subscript_base_lowering`, then annotate `glob`'s blob parameters", which is a
-   mechanical edit to a module that is not committed yet.
+   `work/formal8-7-r2`'s working tree). **And the blocker is GONE — fixed at the
+   root 2026-10-03**, in `model.subscript_base_lowering`, the one decision both
+   emitters read: a subscript through an unannotated parameter now takes the
+   convention its CALL SITES use on that argument, so one value has one
+   convention wherever the name is written, and call sites that disagree are
+   refused by name rather than silently mismatched. Measured inert on this corpus
+   (3 713 unannotated-parameter subscripts over 459 `.mojo` files, none of them
+   changes answer) and pinned by `test_formal_run.py`'s
+   `both_arch_an_untyped_parameter_indexes_the_same_pointer_as_an_annotated_one`
+   and `test_formal_cross_module.py`'s
+   `a_container_returning_export_whose_helpers_take_the_buffer` — which is
+   `glob`'s own shape in miniature, a `-> List[Int]` export whose private helper
+   takes the buffer it is handed through an untyped parameter. So **`glob`'s next
+   step is no longer "wait for `subscript_base_lowering`, then annotate the blob
+   parameters"**: the annotation is no longer what chooses, so those parameters do
+   not need it. What is left is §3's real difficulty, which nothing in that round
+   touched — the run-time-length LIST, and a blob the CALLERS can iterate.
 2. **`shlex` — reachable, and blocked behind `glob` AND `signal`.** `quote`,
    `split` and `join` are pure computation over bytes a value already is
    (`formal/imports.py` says so). The three files that want it stop on `glob`

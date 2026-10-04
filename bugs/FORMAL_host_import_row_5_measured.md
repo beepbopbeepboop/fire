@@ -80,10 +80,18 @@ the module would have been.** This document sized `glob` as "0 to PASS and about
 mechanical. The measurement is that `**` was not the hard part: the two halves
 this document already called mechanical (the listing, the matcher) really are
 mechanical, and what stands in the way is neither of them. Filed with a
-statement-level bisect and the list of shapes that are NOT the trigger as
-`bugs/FORMAL_container_returning_export_whose_body_calls_helpers_breaks_the_CALLERS_image.md`.
-Whoever fixes that gets `glob` by deleting that doc's blocker, and this row's
-number becomes the one written here.
+statement-level bisect and the list of shapes that are NOT the trigger as a
+dedicated doc, since deleted with its fix. **That blocker is FIXED (2026-10-03),
+at the root and not in the caller:** the
+cause was `model.subscript_base_lowering` choosing between a pointer index and a
+blob walk from the CALLEE's annotation, and it now derives the convention from
+the call sites, so one value has one convention wherever it is named — pinned by
+`test_formal_run.py`'s `both_arch_an_untyped_parameter_indexes_the_same_pointer_
+as_an_annotated_one` and `test_formal_cross_module.py`'s
+`a_container_returning_export_whose_helpers_take_the_buffer`, which is `glob`'s
+shape in miniature. So the blocker doc is deleted and this row's number becomes
+the one written here. What is left for `glob` is the run-time-length LIST and a
+blob the callers can iterate, which this document's `**` bullet already names.
 
 ## What landed from this claim
 

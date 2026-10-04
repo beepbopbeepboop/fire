@@ -7246,6 +7246,70 @@ BOTH_ARCH_CASES = [
      "def main(n: Int) -> Int:\n"
      "    printf(\"%ld\", (n + 48) & ~31)\n"
      "    return 0\n", 0, "32"),
+    # ONE POINTER, TWO SPELLINGS, and the callee that reads it the same way
+    # from each — the answered half of the pair in `SUBSCRIPT_CASES`. The
+    # cheapest regression anybody could have written for this: a helper with an
+    # annotated parameter and one without, called on the SAME pointer, both
+    # storing, both read back.
+    #
+    # Both helpers store `43` at index 1 of a `Pointer[Int64]` buffer. The
+    # annotated one writes `b + 8`; the unannotated one used to write `b + 16`
+    # and bounds-check index 1 against a count word that was never written, so
+    # on the old tree this image exited 1 from a raw `exit(1)` syscall — one
+    # whole ELEMENT out, and a plausible number rather than a fault on a
+    # program that got that far. `7` and `3` as the two failure exits are
+    # deliberate: the trap answers 1, which is the value most exit-status
+    # assertions use, so an expectation of 1 here would have passed against the
+    # very bug this row exists to hold down.
+    #
+    # Both readings are asserted twice — the exit status AND the printed line —
+    # so a lowering that fabricated a plausible pair of numbers would have to
+    # fabricate both, and `b[1]` in `main` is a declared-pointer READ, which is
+    # the same decision the callee now inherits.
+    ("both_arch_an_untyped_parameter_indexes_the_same_pointer_as_an_annotated_one",
+     "def fill_ann(p: Pointer[Int64]) -> int:\n"
+     "    p[1] = 42\n"
+     "    return 0\n"
+     "def fill_u(p) -> int:\n"
+     "    p[1] = 43\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Int64] = malloc(32)\n"
+     "    memset(b, 0, 32)\n"
+     "    fill_ann(b)\n"
+     "    var first = b[1]\n"
+     "    fill_u(b)\n"
+     "    var second = b[1]\n"
+     "    printf(\"annotated=%d untyped=%d\", first, second)\n"
+     "    if first == 42:\n"
+     "        if second == 43:\n"
+     "            return 7\n"
+     "    return 3\n", 7, "annotated=42 untyped=43"),
+    # The GUARD for the row above, and the reason it means something: the same
+    # program with the SECOND helper's parameter annotated is the behaviour that
+    # was always right. If the inherited convention were silently picking a
+    # different answer than the declared one, this row would still pass while the
+    # row above failed, and vice versa — so the two together are the assertion
+    # "the annotation and the call sites agree", which is the whole claim.
+    ("both_arch_the_same_two_helpers_with_both_parameters_annotated",
+     "def fill_ann(p: Pointer[Int64]) -> int:\n"
+     "    p[1] = 42\n"
+     "    return 0\n"
+     "def fill_u(p: Pointer[Int64]) -> int:\n"
+     "    p[1] = 43\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Int64] = malloc(32)\n"
+     "    memset(b, 0, 32)\n"
+     "    fill_ann(b)\n"
+     "    var first = b[1]\n"
+     "    fill_u(b)\n"
+     "    var second = b[1]\n"
+     "    printf(\"annotated=%d untyped=%d\", first, second)\n"
+     "    if first == 42:\n"
+     "        if second == 43:\n"
+     "            return 7\n"
+     "    return 3\n", 7, "annotated=42 untyped=43"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -11503,6 +11567,64 @@ SUBSCRIPT_CASES = [
      "    var c = show([[1, 2], [3, 4]])\n"
      "    printf(\"%d %d %d\", a, b, c)\n"
      "    return a + b + c\n", 36, "30 2 4"),
+    # A base DECLARED to be an integer, which is the row above's question with
+    # the answer written down instead of inferred. `a = 5` is refused by the
+    # emitter-side rule keyed on `own_shape_kind` — a statement of THIS function
+    # bound the name — and `var a: Int = 5` is bound by a statement too, so it
+    # is refused there as well. This row is the shape that rule cannot see: a
+    # PARAMETER declared `Int` has no binding statement, `own_shape_kind` has
+    # nothing to say about it, and before the model-side rule it answered the
+    # blob header's neighbour (7 where the caller held 53) on both
+    # architectures. CPython raises TypeError, so there is no reading of it that
+    # is right.
+    #
+    # It is a REFUSAL on both backends and the needle is the EVIDENCE clause
+    # rather than the word "integer", for two reasons. The clause is what says
+    # this is the same construct as the row above rather than a new one — it is
+    # the one message both now answer with — and "an integer" appears in the
+    # body of the message for reasons that have nothing to do with the base's
+    # kind, so a needle on it would pass against a message that had stopped
+    # blaming the right thing.
+    #
+    # The rule asks about `INT_TYPE_CTORS` alone: 198 corpus subscripts have a
+    # base some declaration calls a non-pointer and none of them declares an
+    # integer — they are `SIMD[…]`, `Span`, `Some`, `Tuple`, `List[Int]`, all
+    # real containers whose element walk is right — and this row is what would
+    # notice if it grew to ask about "not a pointer" instead.
+    ("sub_on_a_parameter_declared_integer_is_refused",
+     "def head(e: Int) -> int:\n"
+     "    return e[0]\n"
+     "def main(n):\n"
+     "    var b: Pointer[Int64] = malloc(16)\n"
+     "    b[0] = 53\n"
+     "    printf(\"a=%d\", head(b))\n"
+     "    return 0\n",
+     "refuse:is declared 'Int', which is an integer", None),
+    # ONE PARAMETER, TWO CONVENTIONS — the disagreement half of
+    # `model.parameter_pointee_disagreement_refusal`, which is
+    # `frame_holder_disagreement_refusal` one layer down. One call site hands
+    # the parameter a declared `Pointer[Int64]` and reads it as MEMORY; the
+    # other hands it an unannotated local and reads it as a CONTAINER. The
+    # callee gets one convention and both call sites are right about their own,
+    # so any single answer is wrong somewhere — and the offset between the two
+    # readings is a whole ELEMENT, so the wrong answer is a plausible number
+    # rather than a fault.
+    #
+    # This row cannot exist without the fix above it, which is why it is here
+    # and not in a doc: with the annotation choosing the convention, both call
+    # sites compiled fine and disagreed at RUN time instead of at build time.
+    # The needle is the clause that says a parameter's kind is a property of the
+    # whole image, because "two kinds of value" alone would also be produced by
+    # a rule that refused every ambiguous parameter.
+    ("sub_parameter_reached_two_ways_is_refused",
+     "def peek(p) -> int:\n"
+     "    return p[0]\n"
+     "def main(n):\n"
+     "    var b: Pointer[Int64] = malloc(16)\n"
+     "    var c = malloc(16)\n"
+     "    printf(\"%d\", peek(b) + peek(c))\n"
+     "    return 0\n",
+     "refuse:One parameter, two kinds of value", None),
 ]
 
 

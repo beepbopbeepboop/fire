@@ -816,6 +816,33 @@ def main(n):
     return 0
 """
 
+# The SAME hook on a MULTI-FIELD class, and the case that pins the
+# `__post_init__` rule rather than a contest between two refusals. `POST_INIT`
+# above is refused by `dataclass_transform`'s `post_init_refusal` AND by
+# `formal/model.py`'s `one_field_dropped_receiver_stores` (its receiver IS the
+# field, and `self.x = …` is a dropped store), so the sentence it gets is a
+# property of WHICH CHECK RUNS FIRST — `one_field_dropped_receiver_stores`
+# excludes `__post_init__` precisely so the specific message wins. On two fields
+# that second rule cannot fire at all (`struct_is_one_field` gates it), so this
+# case reaches the dataclass refusal with nothing to out-rank it: if the hook
+# stopped being refused, or its sentence stopped naming the sequence, only THIS
+# row would say so.
+POST_INIT_MULTI = """
+from dataclasses import dataclass
+
+@dataclass
+class Point:
+    x: int
+    y: int
+
+    def __post_init__(self):
+        self.x = self.x + 1
+        self.y = self.y + 2
+
+def main(n):
+    return 0
+"""
+
 UNKNOWN_OPTION = """
 from dataclasses import dataclass
 
@@ -913,7 +940,21 @@ REFUSE_CASES = [
     ("inheritance_is_refused_with_its_reason", INHERITANCE,
      ["inherits from", "own class body"]),
     ("post_init_is_refused_with_its_reason", POST_INIT,
-     ["__post_init__", "no point in that sequence"]),
+     ["__post_init__", "no point in that sequence"],
+     # A one-field receiver also makes `self.x = …` a DROPPED STORE, and that
+     # refusal is a different and less useful sentence for a hook that is never
+     # called at all. `one_field_dropped_receiver_stores` excludes
+     # `__post_init__` so the dataclass rule is the one that speaks here; the
+     # forbidden column is what holds that exclusion in place, because both
+     # messages mention a store and a needles-only check cannot tell them apart.
+     ["would keep the old one"]),
+    ("a_post_init_on_a_multi_field_class_is_refused_with_its_reason",
+     POST_INIT_MULTI,
+     ["__post_init__", "no point in that sequence"],
+     # Two fields, so `one_field_dropped_receiver_stores` has nothing to fire on
+     # and the needle above is the ONLY refusal available. This is the row that
+     # pins the hook rule itself.
+     ["would keep the old one"]),
     ("an_unknown_option_is_refused_by_name", UNKNOWN_OPTION,
      ["whatever", "not ignored"]),
     ("kw_only_is_refused_with_its_reason", KW_ONLY,
