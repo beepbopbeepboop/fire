@@ -1089,6 +1089,60 @@ CASES = [
      "    printf(\"%d\", show())\n"
      "    return 0\n", 0, "3"),
 
+    # THE FOLD, and the one shape `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md`
+    # §5 item 2 measured as the whole of what was left: `len(<a display the
+    # instantiation supplied>)` is a closed-form function of a constant, and
+    # `fold_literal_expr` — the ONE folder — now has that arm. The two rows
+    # around it are the guards, and they are here because the arm READS A NAME
+    # (`len`) and a folder with a free name in it is what produced a fabricated
+    # word before (`fold_literal_expr`'s own `names` note).
+    #
+    # It is a LITERAL display and not `len(keys)`, which is the row two above and
+    # is still its own refusal: a parameter's value belongs to an
+    # INSTANTIATION, and the class body has no instantiation.
+    ("comptime_len_of_a_literal_display_folds",
+     "struct Box:\n"
+     "    comptime length = len([1, 2, 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.length\n"
+     "\n"
+     "def show() -> Int:\n"
+     "    return Box.length\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    printf(\"%d\", show())\n"
+     "    return 0\n", 0, "3"),
+    # A `len` this class body BINDS shadows the builtin, and the class body can
+    # spell a shadow three ways — a field, a class-level constant and a bracket
+    # parameter are three tables in the tree, and `model.struct_bound_names` is
+    # the one reader of their union. Measured: with the shadow spelled as a
+    # class-level constant the fold fired and the program answered 0.
+    ("a_len_the_class_body_binds_is_not_the_builtin",
+     "struct Box:\n"
+     "    len: Int = 2\n"
+     "    comptime width = len([1, 2, 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.width\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    return 0\n",
+     "refuse:has no comptime evaluator to run one", None),
+    # …and a display whose length is not knowable here: a starred element's
+    # count is whatever the sequence it names holds, so `len([*[1, 2], 3])` is 3
+    # only for that value. Refused rather than counted, because the elements are
+    # counted rather than folded.
+    ("comptime_len_of_a_starred_element_is_refused",
+     "struct Box:\n"
+     "    comptime width = len([*[1, 2], 3])\n"
+     "\n"
+     "    def size(self) -> Int:\n"
+     "        return Self.width\n"
+     "\n"
+     "def main(n) -> Int:\n"
+     "    return 0\n",
+     "refuse:has no comptime evaluator to run one", None),
     # The `refuse:` sibling above with the needle this tree raises: it quotes the
     # VALUE, which is what sends a reader to the class body rather than to the
     # read, where the generic "is a class-level constant of Table" did not.

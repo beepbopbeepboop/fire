@@ -10283,13 +10283,20 @@ def _constant_literal(struct_def, name: str, structs_by_name: dict = None):
     about the constant alone. Without the table every caller below it is
     exactly where it was, because a reference to a class this unit does not
     declare has no answer here either way."""
+    # The names THIS class body binds, which is `fold_literal_expr`'s `bound`:
+    # a field, a bracket parameter or a class constant named `len` shadows the
+    # builtin here, and a fold that read it as the builtin would put a number
+    # where the source computed something else. `struct_bound_names` is the one
+    # reader of that union and `struct_field_default` asks the same one.
+    bound = M.struct_bound_names(struct_def)
     for const_name, default in M.struct_class_constants(struct_def):
         if const_name != name:
             continue
         if structs_by_name is None:
-            kind, payload = M.class_constant_word(const_name, default)
+            kind, payload = M.class_constant_word(const_name, default, bound)
         else:
-            kind, payload = M.class_constant_word_in(structs_by_name, default)
+            kind, payload = M.class_constant_word_in(structs_by_name, default,
+                                                    bound=bound)
         if kind == M.DEFAULT_INT:
             return F.IntLiteral(value=int(payload)), default
         if kind == M.DEFAULT_STRING:

@@ -20028,6 +20028,29 @@ def _split_declaration(struct_def):
 # the same merge had to resolve a conflict here. The bodies were identical, so
 # Python quietly used the later one and the earlier was unreachable; the pair is
 # gone rather than left for the next reader to find.
+def struct_bound_names(struct_def) -> frozenset:
+    """Every name this class body binds: fields, parameters and constants.
+
+    **The scope `fold_literal_expr`'s `bound` needs**, and the reason it is a
+    function here rather than `struct_field_names` at each call site: the two
+    tables are not the same set. A class-level `NAME = value` and a
+    `comptime NAME = …` are class CONSTANTS (`_split_declaration`), a declared
+    or assigned `var` is a FIELD, and a bracket parameter is a field too
+    (`_parse_struct_params_as_fields`) — so a shadow of a builtin can be spelled
+    in any of the three ways and a reader that asked only one of the tables
+    would read it as the builtin and fold over it.
+
+    Measured: `struct Box: var len: Int = 2` plus `comptime width =
+    len([1, 2, 3])` puts `len` in the CONSTANT table and `width` in neither the
+    field table nor the constants it is asking about, so a `bound` built from
+    `struct_field_names` alone was empty and the fold fired on a name the class
+    had bound. That is the fabricated word this reader exists to refuse.
+    """
+    names = set(struct_field_names(struct_def) or ())
+    names.update(name for name, _default in struct_class_constants(struct_def))
+    return frozenset(names)
+
+
 def struct_comptime_aliases(struct_def) -> dict:
     """The struct's `comptime NAME = …` bindings: `{name: value node}`.
 
@@ -24157,19 +24180,27 @@ def struct_field_default(struct_def, name,
     word, was a wrong answer rather than a missing one. A name the subclass
     re-declares is answered from the subclass's own body above, which is
     CPython's rule for a re-declared field."""
+    # The names THIS struct binds, which is what `fold_literal_expr`'s `bound`
+    # is for: a field or a bracket parameter named `len` shadows the builtin
+    # inside this class body, and a fold that read it as the builtin would put a
+    # number in a slot the source never computed. Derived here rather than
+    # threaded because a field default IS this struct's own initializer.
+    bound = struct_bound_names(struct_def)
     for field in struct_fields(struct_def):
         if struct_field_name(field) == name:
             value = getattr(field, "value", None)
             if structs_by_name is None:
-                return class_constant_word(name, value)
-            kind, payload = class_constant_word_in(structs_by_name, value)
+                return class_constant_word(name, value, bound)
+            kind, payload = class_constant_word_in(structs_by_name, value,
+                                                   bound=bound)
             return (kind, name if kind == DEFAULT_OPAQUE else payload)
     inherited = getattr(struct_def, "_inherited_field_defaults", None) or {}
     if name in inherited:
         value = inherited[name]
         if structs_by_name is None:
-            return class_constant_word(name, value)
-        kind, payload = class_constant_word_in(structs_by_name, value)
+            return class_constant_word(name, value, bound)
+        kind, payload = class_constant_word_in(structs_by_name, value,
+                                               bound=bound)
         return (kind, name if kind == DEFAULT_OPAQUE else payload)
     return (DEFAULT_NONE, None)
 
@@ -28416,7 +28447,7 @@ def struct_default_word(struct_def, decls: dict = None) -> tuple:
     return (kind, field_name if kind == DEFAULT_OPAQUE else payload)
 
 
-def literal_default_word(value) -> tuple:
+def literal_default_word(value, bound=()) -> tuple:
     """`(kind, payload)` for a class-body initializer — the ONE reading of it.
 
     A literal has no free names, so its value is the same at every read site in
@@ -28454,7 +28485,7 @@ def literal_default_word(value) -> tuple:
     (DEFAULT_OPAQUE, None), which are two different facts about the slot."""
     if value is None:
         return (DEFAULT_NONE, None)
-    folded = fold_literal_expr(value)
+    folded = fold_literal_expr(value, None, bound)
     if isinstance(folded, bool):
         return (DEFAULT_INT, int(folded))
     if isinstance(folded, int):
@@ -28544,7 +28575,7 @@ def enum_member_accessor(struct_defs, struct_name: str, member: str):
     return member if struct_is_enum(struct_defs, struct_name) else None
 
 
-def class_constant_word(name: str, default) -> tuple:
+def class_constant_word(name: str, default, bound=()) -> tuple:
     """`(kind, payload)` — what a read of the class constant `name` yields.
 
     The same contract as `struct_default_word`, for the other kind of class-body
@@ -28557,7 +28588,7 @@ def class_constant_word(name: str, default) -> tuple:
     storage on this path (see the backends' handling of `global NAME`), so a
     bare `S.NAME` read has nothing to bind to, and 0 would be a plausible-
     looking wrong number rather than a crash."""
-    kind, payload = literal_default_word(default)
+    kind, payload = literal_default_word(default, bound)
     return (kind, name if kind == DEFAULT_OPAQUE else payload)
 
 
@@ -28593,7 +28624,7 @@ def class_constant_reference(node) -> tuple | None:
 
 
 def class_constant_word_in(structs_by_name: dict, node,
-                           seen=frozenset()) -> tuple:
+                           seen=frozenset(), bound=()) -> tuple:
     """`(kind, payload)` for a class-body initializer that may NAME a constant.
 
     `class_constant_word` first — a literal answers there and the reference
@@ -28628,7 +28659,7 @@ def class_constant_word_in(structs_by_name: dict, node,
     about it, and this function's `literal_default_word` short-circuit answers
     first when it is not.
     """
-    kind, payload = literal_default_word(node)
+    kind, payload = literal_default_word(node, bound)
     if kind != DEFAULT_OPAQUE or not isinstance(structs_by_name, dict):
         return (kind, payload)
     ref = class_constant_reference(node)
@@ -28644,7 +28675,7 @@ def class_constant_word_in(structs_by_name: dict, node,
         if name != const_name:
             continue
         return class_constant_word_in(structs_by_name, default,
-                                      seen | {(owner, const_name)})
+                                      seen | {(owner, const_name)}, bound)
     return (kind, payload)
 
 
@@ -29259,7 +29290,7 @@ _FOLD_UNARY = {"-": lambda v: -v,
                "~": lambda v: ~v}
 
 
-def fold_literal_expr(node, names=None):
+def fold_literal_expr(node, names=None, bound=()):
     """The value of `node` when it is literal-only, else None.
 
     None means "the build does not know this", which is a refusal and not a
@@ -29279,7 +29310,19 @@ def fold_literal_expr(node, names=None):
     module-level table `collect_module_symbols` builds in source order. A
     literal folder with a free name in it is the thing that produced a
     fabricated word, so the parameter is deliberately narrow rather than a
-    general "resolve names" hook."""
+    general "resolve names" hook.
+
+    **`bound` is the second, and it exists for the one arm that reads a NAME.**
+    `len(<display>)` is the only shape below whose value is a function of the
+    expression rather than of the expression itself, and it is here because the
+    value the corpus's class bodies compute is `len(<the literal an
+    instantiation supplied>)` — a closed-form function of a constant, and the
+    one thing `bugs/FORMAL_a_generic_structs_parameters_are_never_bound.md` §5
+    item 2 measured as missing. `bound` is the names the ENCLOSING SCOPE binds,
+    so a `len` that is a field, a bracket parameter or a module symbol refuses
+    rather than being read as the builtin; a reader with a scope passes it and a
+    reader without one passes nothing, which is the same default the rest of
+    this function has always had."""
     if isinstance(node, F.IdentExpr) and names:
         known = names.get(node.name)
         if isinstance(known, (int, str)) and not isinstance(known, bool):
@@ -29298,19 +29341,32 @@ def fold_literal_expr(node, names=None):
             and isinstance(node.value, str):
         return node.value
     if isinstance(node, F.UnaryOp) and node.op in _FOLD_UNARY:
-        v = fold_literal_expr(node.operand, names)
+        v = fold_literal_expr(node.operand, names, bound)
         if isinstance(v, int) and not isinstance(v, bool):
             return _FOLD_UNARY[node.op](v)
         return None
     if isinstance(node, F.BinaryOp) and node.op in _FOLD_BINOPS:
-        a = fold_literal_expr(node.left, names)
-        b = fold_literal_expr(node.right, names)
+        a = fold_literal_expr(node.left, names, bound)
+        b = fold_literal_expr(node.right, names, bound)
         if isinstance(a, int) and isinstance(b, int) \
                 and not isinstance(a, bool) and not isinstance(b, bool):
             try:
                 return _FOLD_BINOPS[node.op](a, b)
             except (TypeError, ValueError, ZeroDivisionError):
                 return None
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr) \
+            and node.func.name == "len" and node.func.name not in bound \
+            and not (node.kwargs or []):
+        # `len(<a display>)`, and ONLY over a display: a name's length is not
+        # knowable here and a starred element's is not knowable at all, so both
+        # refuse. The elements' own values do not matter — `len([x, y])` is 2
+        # whatever `x` and `y` are — which is why the count is over the
+        # ELEMENTS and not over a fold of them.
+        arg = node.args[0] if len(node.args or []) == 1 else None
+        if isinstance(arg, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+            elements = list(getattr(arg, "elements", None) or ())
+            if not any(isinstance(e, F.UnaryOp) and e.op == "*" for e in elements):
+                return len(elements)
     return None
 
 
