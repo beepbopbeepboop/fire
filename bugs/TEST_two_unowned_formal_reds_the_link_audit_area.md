@@ -56,6 +56,27 @@ line ("every HOSTMOD_NON_C_CALLEES entry is a name the census found; stale:
 str_alloc") shows the table is already carrying a stale entry, which is the same
 class of drift one row over.
 
+## 3. A third kind of hole, found in the same run: two test files nothing runs
+
+`test_suite.py`'s own estate check, on `master`:
+
+    $ python3 tools/memslot.py --gb 8 --label t -- python3 test_suite.py
+    Results: 298 passed, 1 failed
+      - the estate: every test file is run by something, or says why not: not
+        run by any registered spec and not in UNREGISTERED:
+        test_formal_field_walk.py, test_formal_glob.py
+
+Two `test_formal_*.py` files are not in any bucket and not in `UNREGISTERED`, so
+**nothing runs them and nothing says why not.** That is the shape
+`bugs/TEST_registered_tests_in_no_bucket_never_run.md` was about for registered
+tests; these are not even registered, so they are worse — they are files nobody
+claimed and the estate check is the only thing that can see them.
+
+**Next step:** register both in `tools/suite.py` with their measured `mem=`,
+or add them to `UNREGISTERED` with the reason. Both were green when this was
+measured (`test_formal_field_walk.py` OK, and `test_formal_glob.py` is a glob
+census), so the first is a table row and the second is a judgement.
+
 ## Why they are filed together rather than fixed here
 
 Both fixes are small, and the reason they are not made is worth recording
