@@ -2828,7 +2828,12 @@ class GimpleGen:
         # (`_record_home_def_return_type`), only `_func_csym` reads it, and it
         # reads it keyed by the very qualifier that call site built its symbol
         # from — so both halves of one mangled symbol name the same definition.
-        # See bugs/CODEGEN_two_private_functions_of_one_name_share_one_return_type.md.
+        # `_quick_type`'s bare read was the second reader (return-type
+        # INFERENCE compounds: a forwarder's own return type is inferred from
+        # the callee), and it reaches this store through
+        # `_func_return_type_for_call` below. Regression coverage:
+        # `test_gimple.py`'s
+        # `two_modules_one_same_named_function_keep_their_own_return_types`.
         self._home_def_return_types: dict[str, str] = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}

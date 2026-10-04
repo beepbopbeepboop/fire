@@ -10206,8 +10206,9 @@ walk_span()
         declared its call temp `MojoList *`, ran `mojo_list_len` on a bool, and
         gcc failed the whole self-host build on exactly one
         `-Wint-conversion` — `assignment to 'MojoList *' from 'int'` at
-        generated line 885606 (bugs/CODEGEN_two_private_functions_of_one_name_
-        share_one_return_type.md).
+        generated line 885606, which was the self-host build's last gcc error
+        (doc deleted with the fix; the store it needed is
+        `GimpleGen._home_def_return_types`).
 
         FOUR details of the fixture are load-bearing, and each was measured
         rather than guessed — earlier versions of this test PASSED against the
