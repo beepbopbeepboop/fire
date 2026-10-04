@@ -509,6 +509,31 @@ TUPLE_STORE_CASES = [
      "    printf(\"a=%d b=%d c=%d\", a, b, c)\n"
      "    return 0\n",
      "a=1 b=2 c=3"),
+    # A DICT on the right, which is the fifth shape and the only one whose blob
+    # is a PAIR blob.  CPython unpacks a mapping's KEYS, so `k, v = d` binds
+    # `"ab"` and `"cde"` — and before this fix the images bound the key and then
+    # the VALUE (`v` printed 100 where CPython prints `cde`), because both
+    # emitters' blob unpack stepped at the ELEMENT stride: the same
+    # `model.walk_stride` question `for k in d` already asked, in the one
+    # construct that walks a dict without a `for`.  Measured before the fix, on
+    # both architectures: `k` printed an interned string's ADDRESS (and a
+    # DIFFERENT one per architecture), because the name's value kind was the
+    # container's and `print` had no kind to choose a conversion from.
+    #
+    # So this one case pins both halves — the stride (the emitters) and the kind
+    # (`ValueKinds._unpacked_element_kind`'s dict arm) — because either alone
+    # leaves a wrong answer: the stride fix reads the right words into names
+    # nothing can classify, and the kind fix alone prints the key correctly and
+    # the value as an address.
+    ("tuple_store_from_a_dict_binds_keys",
+     "def main(n):\n"
+     "    var d = {\"ab\": 100, \"cde\": 200}\n"
+     "    var k = \"\"\n"
+     "    var v = \"\"\n"
+     "    k, v = d\n"
+     "    print(\"k=\", k, \"v=\", v)\n"
+     "    return 0\n",
+     "k= ab v= cde\n"),
     # A SUBSCRIPT element target, the FOURTH shape and the one this backend used
     # to refuse by node type (`got SubscriptExpr`) while arm64 lowered it.  Two
     # targets on purpose, and in this order: the subscript store computes an

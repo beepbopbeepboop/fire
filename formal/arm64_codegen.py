@@ -2603,8 +2603,21 @@ dylib_exports: list = None, globals_base: int = None,
         self.asm.emit(encode_svc(0x80))
         self.asm.label(ok_label)
         # Push e0..e(n-1); pop assigns last target first.
+        #
+        # The STRIDE is `M.walk_stride`'s, not the element stride, and this is
+        # the same bug `for k in d` had and `M.walk_stride` was written for: a
+        # dict is `[npairs][k0][v0][k1][v1]…`, so CPython's `k, v = d` binds the
+        # two KEYS and an element-stride read binds the key and the value — the
+        # second target answers the first VALUE. Measured on both architectures
+        # before this line: `d = {"a": 1, "b": 2}; k, v = d; print(k); print(v)`
+        # printed `4376687999` and `1` on x86-64 and `4328785236` and `1` on
+        # arm64 — two DIFFERENT addresses for the same key, so the two
+        # architectures disagreed as well as disagreeing with CPython, all of
+        # it exit 0. The count check above is already the right one (a dict's
+        # count field holds its pair count), which is why only the loads move.
+        stride = M.walk_stride(self._is_dict_subscript(value))
         for i in range(n_t):
-            self._emit_blob_load(9, 8 * (i + 1))
+            self._emit_blob_load(9, 8 + stride * i)
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for i in range(n_t - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))

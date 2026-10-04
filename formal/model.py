@@ -15176,8 +15176,21 @@ class ValueKinds:
             kinds = {self.kind_of(el) for el in (value.elements or [])}
             kinds.discard(None)
             elem = kinds.pop() if len(kinds) == 1 else None
-        elif is_list_kind(kind or ""):
-            elem = list_elem_kind(kind)
+        else:
+            # `k, v = d` binds two KEYS — CPython unpacks a mapping's keys and
+            # nothing else — so the element kind here is the dict's KEY kind,
+            # read by the same reader a `for k in d` uses
+            # (`_iterable_dict_key_kind`, whose own docstring carries the
+            # measurement: before it existed a dict walk's target classified as
+            # an integer and `print(k)` printed an ADDRESS). It answers None for
+            # anything that is not a dict with a stated initializer, which is
+            # what makes it its own gate — asking `is_dict_value` first is
+            # wrong, and measurably so: that reader works from `_dict_names`,
+            # which a plain `d = {…}` ASSIGNMENT never reaches, so the arm
+            # below it never ran and `len(k)` still said "classified as 'int'".
+            elem = self._iterable_dict_key_kind(value)
+            if elem is None and is_list_kind(kind or ""):
+                elem = list_elem_kind(kind)
         if elem is None or elem == kind:
             return kind, own
         return elem, elem
