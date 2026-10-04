@@ -13,6 +13,67 @@ not have, so the row is not a queue of small modules any more — it is a queue 
 six missing capabilities with 20 names on them.** The table in §3 says which is
 which, per name, with the spelling census that decides it.
 
+## 0. What landed afterwards (2026-10-05, `work/formal27-6`): the walk is a TOOL,
+## and the `unittest` row is re-measured
+
+**§6's third bullet is closed: the walk is `tools/formal_host_import_wall.py`,
+not scratch, and its readers are pinned by `test_formal_host_import_wall.py`
+(17 rows, 0.7 s, no build and no Lean).** §5 below is the promotion note and now
+points at the tool rather than restating it; §3's numbers are the tool's, and
+three of them are corrections rather than drift.
+
+* **`sweep` was an UNDERCOUNT, by exactly the rows no tier classifies.**
+  `formal/imports.py::unresolvable_import_error` has three arms and two of them
+  name a host module, and the reader this doc's `sweep` column used knew only
+  the first: "is a host module (CPython standard library)". The other — "is a
+  CPython standard-library module, which has no Mojo source in this tree and no
+  tier …" — is `FORMAL_stdlib_module_names_are_not_classified.md`'s own fix.
+  Measured: **4 of the 203 lines, and all four are that arm**, so the table
+  below said `tokenize` 0 / `plistlib` 0 / `sqlite3` 0 where the log says 2 / 1 /
+  1. A column that drops the no-tier wording is silent about the rows
+  classification is for, which is the one bias worth naming. The tool matches
+  both and prints its own coverage (`203 of 203`).
+* **The corpus grew, so `reach` is a different number and `alone` mostly is
+  not.** 735 files walked against this doc's 203-file corpus, so `importlib`
+  reads 236 where this table says 170 — the closure behind it grew. The `alone`
+  column is the one that survives a corpus change, because it is a property of a
+  file rather than of a total, and it barely moved: `unittest` 7, `builtins` 2,
+  `random` 2, `datetime` 2.
+* **Four rows are here that this table did not have**, all of them small and all
+  of them from the corpus growing: `importlib.util` (10 reach / 1 alone,
+  `test_arm64_encoders.py`), `pwd` (1 / 1, `test_formal_os.py`), `token` and
+  `html.parser` (1 / 0 each). `pwd` and `tokenize` print as **`unclassified`** in
+  the tool's `tier` column, which is §"the next step" of
+  `FORMAL_stdlib_module_names_are_not_classified.md` arriving as a real row with
+  a real file behind it: `pwd` is the password database, so it is
+  `HOST_UNREACHABLE` by the rule this tree states, and `tokenize` is the one that
+  §6 below left for a duplicate-table argument.
+
+**And the re-measurement §6 asked for, on `unittest`, which it said was the
+largest honestly-modellable-looking row: it is not one.** A spelling census over
+all **18** files that reach it, on this tree:
+
+| the spelling | files | what it is |
+|---|---:|---|
+| `unittest.TestCase` | **18 of 18** | a base class with ~15 assertion METHODS and no fields — inheritance across a dylib boundary, and the field half of that is fixed (`5cf72641`) |
+| `unittest.main()` | **17 of 18** | enumerate every `test*` method of a class and call it: a run-time type walk |
+| `unittest.SkipTest` | 4 | an exception the runner catches |
+| `unittest.skipUnless` | 2 | a decorator whose predicate is evaluated at class-construction time |
+| `unittest.mock` | 1 | a recorded object |
+
+**The 7 `alone` files spell `TestCase` and `main` and nothing else** — named:
+`test_formal_declared_param_census.py`, `test_formal_frame_field_census.py`,
+`test_formal_frame_slot_subscript_census.py`, `test_formal_proof_breadth.py`,
+`test_formal_returnless_census.py`, `test_formal_sweep.py`,
+`test_llm/test_llm.py`. So the row this doc called "the largest
+honestly-modellable-looking row" is **17 files wanting the interpreter's own
+namespace walk** — `abc`'s missing capability and `builtins`' — and only 4 files
+wanting anything past `TestCase` + `main`. That is not a module somebody can
+write; it is `abc` (165 reach, 0 alone) wearing a different name, and the
+"inheritance plus method dispatch" cause this table named was the wrong one for
+the same reason the field bug was: it was the first thing that looked like a
+blocker, and it was fixed, and the row did not move.
+
 ## 1. How the ranking was measured, and the correction it forced
 
 Two instruments, and the first one was wrong in a way worth writing down.
@@ -81,27 +142,39 @@ build" is a true statement about — the `alone` column of
 table is the same measurement of four waves later.
 `sweep` = files the 2026-10-04 sweep reported **on this name specifically**.
 
+**The three numeric columns are RE-MEASURED (2026-10-05, `work/formal27-6`) by
+`tools/formal_host_import_wall.py`, which is §5's promotion, so they are a
+reading rather than a re-derivation. `reach` is over the tool's own corpus — the
+735 files the sweep walks, this repository and the stdlib — where this table's
+were over the 203 host-import files, so a bigger `reach` is a bigger corpus and
+not a bigger wall; `alone` and `sweep` are the two that are corpus-independent
+and both are within ±1 of what this table said, except where §0 says otherwise.**
+
 | name | reach | alone | sweep | what it needs, and who has it |
 |---|---:|---:|---:|---|
-| `importlib` | 170 | 1 | 90 | **a host process.** `importlib.metadata` reads a distribution's metadata by running that distribution; `import_module` executes a module. The 90 is almost all closure — the swept files spell `importlib.metadata` **once** and `importlib.import_module` **once** between them, and reach it through `fire_compiler.py`. |
-| `copy` | 166 | 1 | 13 | **a cloneable value.** `copy`/`deepcopy` of a container, which is a blob in the frame that built it. Owned and documented: `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` (`formal8-1`). |
-| `abc` | 165 | 0 | 0 | **an interpreter.** `abc` is a metaclass and a registry; nothing here builds a type at run time. |
-| `collections` | 92 | 6 | 29 | **CLAIMED** — `hostmods-platform`, `module:platform+fnmatch+collections-rest`. Not touched here. |
-| `types` | 57 | 0 | 6 | **a namespace object.** `SimpleNamespace` (20 spellings) and `ModuleType` (3) are both run-time-constructed records, same missing thing as `copy` above. |
-| `resource` | 25 | 0 | 0 | `getrlimit` answers a **pair**, and `setrlimit` wants a pair to hand back — `bugs/FORMAL_time_struct_shaped_answers.md`'s shape. The `RLIMIT_*` constants alone would be a module with no consumer. |
-| `itertools` | 17 | 1 | 14 | **a lazy sequence.** `combinations` (the only name the swept files spell) is a generator of tuples; neither half is representable. |
-| `unittest` | 17 | 7 | 16 | **inheritance across a dylib boundary, and method dispatch on a value.** `class T(unittest.TestCase)` is 113 of the 16 files' spellings. This row blamed a subclass dropping its base's fields, and that bug is FIXED — a subclass's fields are now its base's fields followed by its own (commit `5cf72641`, which also gave CPython's exceptions their `args`) — so the 7 and the 16 are a BEFORE measurement and the cause named here is not established for them. Re-measure before reading this row as a blocker. |
-| `builtins` | 16 | 2 | 2 | **the interpreter's own namespace.** `set(dir(builtins))` — measured in `formal/imports.py`'s own comment, which is why `builtins` is a `HOST_UNREACHABLE` entry. |
-| `inspect` | 7 | 0 | 4 | **the source text.** `getsource` reads a file and returns its text; `signature` reads a frame's code object. `HOST_UNREACHABLE`'s own comment says the subset that reads attributes off live values is reachable and the frame-walking half is not. |
-| `random` | 5 | 1 | 5 | **module state.** `Random`/`seed`/`randrange`: a generator's whole meaning is that successive calls differ, and a value here is one word with no storage between calls. `HOST_MODELLED`, correctly. |
-| `datetime` | 3 | 2 | 2 | **a `struct tm`.** Every swept file spells `datetime.now().isoformat()` — a returned struct with a method chain on it. `formal/hostmods/time.mojo` already says why its own `localtime`/`strftime` are absent. |
+| `importlib` | 236 | 0 | 90 | **a host process.** `importlib.metadata` reads a distribution's metadata by running that distribution; `import_module` executes a module. The 90 is almost all closure — the swept files spell `importlib.metadata` **once** and `importlib.import_module` **once** between them, and reach it through `fire_compiler.py`. |
+| `copy` | 237 | 1 | 13 | **a cloneable value.** `copy`/`deepcopy` of a container, which is a blob in the frame that built it. Owned and documented: `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` (`formal8-1`). |
+| `abc` | 236 | 0 | 0 | **an interpreter.** `abc` is a metaclass and a registry; nothing here builds a type at run time. |
+| `collections` | 129 | 10 | 29 | **CLAIMED** — `hostmods-platform`, `module:platform+fnmatch+collections-rest`. Not touched here. |
+| `types` | 83 | 0 | 6 | **a namespace object.** `SimpleNamespace` (20 spellings) and `ModuleType` (3) are both run-time-constructed records, same missing thing as `copy` above. |
+| `resource` | 34 | 0 | 0 | `getrlimit` answers a **pair**, and `setrlimit` wants a pair to hand back — `bugs/FORMAL_time_struct_shaped_answers.md`'s shape. The `RLIMIT_*` constants alone would be a module with no consumer. |
+| `itertools` | 21 | 1 | 14 | **a lazy sequence.** `combinations` (the only name the swept files spell) is a generator of tuples; neither half is representable. |
+| `unittest` | 18 | 7 | 16 | **RE-MEASURED in §0, and this row's cause was the wrong one.** `TestCase` in 18 of 18 and `main()` in 17 of 18; the 7 `alone` files spell those two and nothing else. `main()` is a run-time type walk, so this is `abc`'s capability, not a module. |
+| `builtins` | 18 | 2 | 2 | **the interpreter's own namespace.** `set(dir(builtins))` — measured in `formal/imports.py`'s own comment, which is why `builtins` is a `HOST_UNREACHABLE` entry. |
+| `inspect` | 8 | 0 | 4 | **the source text.** `getsource` reads a file and returns its text; `signature` reads a frame's code object. `HOST_UNREACHABLE`'s own comment says the subset that reads attributes off live values is reachable and the frame-walking half is not. |
+| `random` | 8 | 2 | 5 | **module state.** `Random`/`seed`/`randrange`: a generator's whole meaning is that successive calls differ, and a value here is one word with no storage between calls. `HOST_MODELLED`, correctly. |
+| `datetime` | 4 | 2 | 2 | **a `struct tm`.** Every swept file spells `datetime.now().isoformat()` — a returned struct with a method chain on it. `formal/hostmods/time.mojo` already says why its own `localtime`/`strftime` are absent. |
 | `socket` | 2 | 1 | 2 | **a host object.** `socketpair()` returns a pair of descriptors that are also objects; `socket()` is one. |
-| `tokenize` / `token` | 3 | 1 | 0 | **a generator of named tuples.** `generate_tokens` yields `(type, string, start, end, line)`. The **constants** are answerable (`COMMENT`, `OP`, `FSTRING_START`, `FSTRING_END`, `TSTRING_START`, `TSTRING_END`) and `formal/hostmods/ast.mojo` already numbers them internally — but shipping them as a second table would be the duplicate `CLAUDE.md` warns about, and the two files that want them also want `generate_tokens`, so the constants alone move **0** files. |
+| `tokenize` / `token` | 3 | 1 | 3 | **a generator of named tuples.** `generate_tokens` yields `(type, string, start, end, line)`. The **constants** are answerable (`COMMENT`, `OP`, `FSTRING_START`, `FSTRING_END`, `TSTRING_START`, `TSTRING_END`) and `formal/hostmods/ast.mojo` already numbers them internally — but shipping them as a second table would be the duplicate `CLAUDE.md` warns about, and the two files that want them also want `generate_tokens`, so the constants alone move **0** files. |
 | `atexit` | 2 | 0 | 1 | **a callback.** `register(f)` stores a callable to run at exit. |
 | `uuid` | 2 | 0 | 1 | `uuid4()` is 122 bits of randomness with no state to draw from. `HOST_UNREACHABLE`, correctly. |
 | `asyncio` | 1 | 0 | 1 | **an event loop and a thread.** `run`/`sleep`/`gather`. |
 | `functools` | 1 | 1 | 1 | **CLAIMED** — `formal25-3`, `bug:FORMAL_functools_is_unbuildable_as_a_host_module`. Not touched here. |
-| `plistlib`, `sqlite3`, `fractions` | 1 each | 0 | 0 | a parsed file, a database handle, a rational — all run-time-constructed records. |
+| `importlib.util` | 10 | 1 | 4 | `spec_from_file_location`/`find_spec` are the same host-process capability as `importlib` above, under a name the corpus grew into since this table was written; `test_arm64_encoders.py` is the one file it is alone for.
+| `pwd` | 1 | 1 | 0 | **the password database.** `test_formal_os.py` is alone for it. It is `HOST_UNREACHABLE` by the rule this tree states — the file is not something a freestanding image has — and it is in NO tier today, so the tool prints it as `unclassified`.
+| `tokenize` / `token` again, separately | 2 / 1 | 1 / 0 | 2 / 0 | §"What is cheap and NOT in the table" below, which says why the constants alone move 0 files; `token`'s own row is its `INFO`/`ENDMARKER` vocabulary and nothing reaches it alone.
+| `html.parser` | 1 | 0 | 0 | a parsed file, like `plistlib`.
+| `plistlib`, `sqlite3`, `fractions` | 1 each | 0 | 1 / 1 / 0 | a parsed file, a database handle, a rational — all run-time-constructed records. The two `1`s are the no-tier wording §0 is about: the b11 log reported them on that sentence and this table's reader did not see it. |
 
 **Six capabilities, twenty names.** A run-time-length container that outlives the
 frame that made it (`collections`, `copy`, `types`, `itertools`, `fractions`,
@@ -133,34 +206,49 @@ Two things this wave found that are not walls and are worth having:
   classifies a file by the refusal it prints, and a file whose only remaining
   wall is a constant vocabulary prints nothing at all.
 
-## 5. Reproducing this
+## 5. Reproducing this — it is a TOOL now, and it keeps the one thing scratch had
 
-The walk is scratch, and it is scratch for a reason this file should not hide:
-it is the third description of one measurement (§1, and the closing judgement of
-`bugs/FORMAL_sweep_work_map_2026-10-04_b11.md` §6, and
-`bugs/FORMAL_eleven_of_thirteen_host_import_rows_are_closure.md`'s own
-re-measurement). It reads:
+```console
+$ python3 tools/formal_host_import_wall.py                       # the table above
+$ python3 tools/formal_host_import_wall.py --json                # machine-readable
+$ python3 tools/formal_host_import_wall.py --unmodelled glob     # "before this module landed"
+$ python3 test_formal_host_import_wall.py                        # 17 rows, 0.7 s
+```
 
-* `formal.build.parse_module` for the file's statements;
-* `formal.imports.imported_modules(stmts)` for the module names — the reader
-  that filters front-end-provided names and skips `if`/`try` bodies;
-* `formal.imports.resolve_module_path(name, relative_to=path)` for each, which
-  is the resolver the build itself uses, and which therefore has
-  `formal/hostmods/` among its search roots;
-* `formal.imports.host_module_tier` and `sys.stdlib_module_names -
-  formal.imports.INERT_MODULES` to decide whether a name is a WALL.
+`tools/formal_host_import_wall.py` is the walk, promoted, and it reads with the
+BACKEND's readers for the reason §1 gives — `formal.build.parse_module`,
+`formal.imports.imported_modules`, `formal.imports.resolve_module_path` — and
+with `formal.imports.host_module_tier` / `is_cpython_stdlib` / `INERT_MODULES` /
+`is_frontend_provided` to decide what a WALL is. It reuses `tools/formal_sweep.py`
+for the corpus (`find_source_files`, `default_roots`), for the class prefix and
+for `_split_chain`, rather than owning a second copy of any of them.
 
-**It should become a tool rather than a fourth document**, and the three
-documents that describe it should read it instead of restating it. What it must
-keep is the ability to pretend a module is unmodelled, because that is the only
-way to measure a delta on one tree — a before/after across two checkouts is a
-measurement of the merge, not of the change.
+**The ability §5 used to ask for is the tool's `--unmodelled`, and it is the
+reason a delta is measurable on ONE tree**: a module landing unmasks the row
+behind it and never grows one, so a before/after across two checkouts measures
+the merge. `test_formal_host_import_wall.py` pins it on a real file —
+`tools/suite.py` imports `glob`, `formal/hostmods/glob.mojo` answers it, so
+`tools/suite.py` has no wall today and exactly one (`glob`) with the flag.
 
-`§3`'s `sweep` column is read out of `bugs/sweeps/sweep-arm-11.txt` with the
-same peel `tools/formal_sweep_causes.py::rank` does (the LAST `imports '…'` in
-the chain that names a host module), and the spelling census in §3 is a regular
-expression count of `module.name` and `from module import name` over each row's
-own files.
+Three things the promotion changed about the measurement, each of them a
+correction rather than a refactor:
+
+* **the `sweep` column lost a blind spot** (§0): both wordings of
+  `unresolvable_import_error`'s host-module arm are matched, and the header
+  prints how many of the log's host-import lines were attributed at all
+  (`203 of 203`);
+* **"the backend cannot read this file" stopped meaning "this file imports
+  nothing"**: one file in the corpus is unreadable — `test_formal_libc_symbol.py`,
+  whose own source this tokenizer refuses, because an f-string replacement field
+  with a newline in it is PEP 701 and `fire_compiler.py`'s tokenizer predates it.
+  The tool prints that count rather than folding it into the corpus;
+* **a name CPython ships that no tier classifies is a row with its own label**
+  (`unclassified`) rather than a row the table left out, which is what put `pwd`
+  and `tokenize` on it.
+
+§3's spelling census is a regular expression count of `module.name` and
+`from module import name` over each row's own files; §0's `unittest` census is
+the same count over the 18 files the tool says reach it.
 
 ## 6. Not done, and why
 
@@ -168,12 +256,33 @@ own files.
   `ast.mojo` already holds the numbers and a second table would be a duplicate,
   and because the two files that want them also want `generate_tokens`, which
   moves 0 either way. It is the one piece of §3 this wave could have written and
-  chose not to.
-* **`unittest` is the largest honestly-modellable-looking row** (7 alone, 16
-  sweep). It was written as blocked on a claimed bug — a subclass dropping its
-  base's fields — and that is FIXED (commit `5cf72641`), so the blocker named
-  here is gone and the row needs a re-measure rather than a re-read. Nothing
-  here should touch it either way; whoever picks it up starts from the numbers.
-* **The walk itself** — see §5. Promoting it is a separate, small piece of work
-  and it is what would make the next wave's numbers a reading rather than a
-  re-derivation.
+  chose not to. **STILL TRUE, and now measured rather than argued:** the tool
+  says `tokenize` reaches 2 files with 1 `alone` and `token` reaches 1 with 0
+  `alone`, so the constants still move 0 files and the duplicate table would
+  still be a duplicate.
+* **`unittest`** — **the re-measurement is DONE (§0) and the answer is that this
+  row is not modellable at all**: 17 of its 18 files spell `unittest.main()`,
+  which is a run-time type walk, so the row is `abc`'s and `builtins`'
+  capability under a second name. Nothing further to pick up here, and the
+  "inheritance plus method dispatch" cause this doc carried is withdrawn.
+* **The walk** — DONE. §5's promotion note is now a tool, a test and a usage
+  line, and this document no longer describes a walk.
+
+## What is left that is genuinely next, and it is not a module
+
+The six capabilities in §3's closing paragraph are the whole remaining queue, and
+after §0's re-measurement one of them has lost its own row and folded into
+another:
+
+1. **a run-time-length container that outlives the frame that made it** —
+   `collections` (129 reach / 10 alone, and CLAIMED by `hostmods-platform`),
+   `copy`, `types`, `itertools`. This is the largest *honest* row left and the
+   one `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` (`formal8-1`)
+   owns.
+2. **an interpreter's own namespace** — `abc` (236 reach), `builtins` (18 / 2),
+   `inspect` (8), and now `unittest`'s 17. The biggest row by `reach` and
+   **0 files** by `alone` before `unittest`, which is the shape that says "no
+   module will ever move these".
+3. module state (`random`, 8 / 2); a host process (`importlib`, 236 / 0);
+   a first-class callable (`atexit`, `functools`, `itertools`' helpers); a
+   `struct tm` (`datetime`, 4 / 2).

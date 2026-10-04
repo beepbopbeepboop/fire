@@ -545,14 +545,26 @@ terminal message with the sweep's own `_split_chain` / `_terminal_reason`) plus 
 set difference on the printed `CLASS: path` lines. `.tmp/analyze11.py` is that
 computation, **scratch and not committed** (`.tmp/` is git-ignored, and
 `…_b7.md`/`…_b8.md`/`…_b9.md`/`…_b10.md` each described their scratch the same
-way). **§5.3's ceiling is nine single-file builds**, one command each, listed in
+way).
+
+**The HOST-IMPORT half of that closing judgement is closed (2026-10-05).** The
+"second tool rather than a fourth description of one" it asks for is
+`tools/formal_host_import_wall.py`, with `test_formal_host_import_wall.py` pinning
+its readers; the three documents that described the walk now read it, and
+`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §0 carries the
+re-measurement it enabled — including that this doc's own host-import row was
+undercounted by 4 of 203 lines, all four of them the no-tier wording. The
+`.tmp/analyze11.py` above is the part that is still scratch, and it is a different
+measurement: two LOGS compared, rather than one tree's closures walked. **§5.3's ceiling is nine single-file builds**, one command each, listed in
 `bugs/FORMAL_string_composition_has_no_buffer.md` §1; the inputs are scratch
 copies in `.tmp/ceiling/` and the whole point is that they are semantically wrong.
 
 `…_b10.md` §6 ends on the right judgement and it is still the right one: *"the
 honest reading of that is that §2.3/§2.4's scratch should have become a second
-tool rather than a fourth description of one."* **It still has not**, and this is
+tool rather than a fourth description of one."* **It still has not for the log-comparison half** (the
+`.tmp/analyze11.py` above), and this is
 the second map to repeat that judgement — which is itself the argument for it.
+The closure-walk half it also names did become a tool.
 
 **≤ 26 minutes of wall for both arms together** at `-j 4` each, on a box at load
 8.8 — against `-10`'s 86 minutes, whose difference was 16 minutes of `flock` wait

@@ -69,9 +69,10 @@ CPython. Without the guard a fix that refused everything would pass this file.
   * `encode` and `decode` are refused as VALUE METHODS before any question
     about encoding arises — `formal/model.py`'s `BUILTIN_VALUE_METHODS` has
     neither name. Both are string→bytes and bytes→string, so on this path they
-    would be a blob's element width (the undecided half of
-    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`) and a
-    one-object buffer respectively; neither is modelled and neither is
+    would be a blob's element width — an axis `model.blob_elem_stride` now reads
+    off the value's kind, so a byte blob exists and is one byte wide, which is
+    what `encode` would have to build — and a one-object buffer respectively;
+    neither is modelled and neither is
     approximated. Not pinned here because the refusal is about the METHOD TABLE
     and not about text.
   * ITERATION over a string is `string_iteration_refusal`, which fires on the
