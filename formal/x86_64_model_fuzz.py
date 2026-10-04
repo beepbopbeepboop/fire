@@ -110,6 +110,22 @@ its disassembly-by-encoder-name, and it is what belongs in a regression test.
 
 Run: python3 formal/x86_64_model_fuzz.py [-n N] [--seed S] [--batch B] [-v]
 Exit: 0 iff there is no WRONG and no NORUN.
+
+**The arm64 sibling, and why this is a second file.**
+`tools/formal_model_fuzz.py` asks the same question of `lib/ProofLib.lean`'s
+`arm64_step`, and the two were measured rather than assumed to be one program
+wearing two hats: of this file's 747 non-comment source lines, **8 are
+byte-identical to a line in that one** (1.1%), and they are `memset`,
+`printf` and two Lean `match` arms. Everything that decides a verdict is
+different — the pool is `formal/x86_64.py`'s encoders rather than
+`formal/arm64.py`'s, the address model is one `MAP_FIXED` region rather than a
+translated window, the verdict set has `HARNESS` and `NORUN` where that one has
+`ENC-MISMATCH` and `NOSTEP`, and the two Lean halves are launched differently.
+The shareable part is an argument parser and a reporting loop, and
+`tools/tu_grind.py` is already that; neither harness carries its own copy of the
+scratch-directory policy. `tools/formal_model_fuzz.py`'s docstring says the same
+thing from its side, so neither file is the one you have to read to know there
+are two.
 """
 
 import argparse

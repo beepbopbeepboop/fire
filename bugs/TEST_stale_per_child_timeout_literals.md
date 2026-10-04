@@ -25,8 +25,11 @@ that makes the rest mechanical.
   and the walk still agree — so an exemption cannot outlive the need.
 
   Measured with this tree's predicate (a `timeout=` KEYWORD off the AST, over
-  both file spellings, derived trees skipped): **205 sites over 57 files**,
-  after the 8 above. That is smaller than the 217/63 below for two measurable
+  both file spellings, derived trees skipped): **207 sites over 57 files**,
+  after the 8 above, and after `test_formal_proof_breadth.py` grew two more
+  sites of its existing `timeout=60` shape (`work/formal25-6`) and its census row
+  moved 3 -> 5 with them. The file count did not move: a file that gains a
+  literal is a file already in the table. That is smaller than the 217/63 below for two measurable
   reasons: a grep counts `timeout=NN` occurrences that are not call keywords,
   and it walks `build/` and the other derived trees.
 

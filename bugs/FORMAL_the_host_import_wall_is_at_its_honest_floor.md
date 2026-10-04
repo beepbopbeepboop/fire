@@ -90,7 +90,7 @@ table is the same measurement of four waves later.
 | `types` | 57 | 0 | 6 | **a namespace object.** `SimpleNamespace` (20 spellings) and `ModuleType` (3) are both run-time-constructed records, same missing thing as `copy` above. |
 | `resource` | 25 | 0 | 0 | `getrlimit` answers a **pair**, and `setrlimit` wants a pair to hand back — `bugs/FORMAL_time_struct_shaped_answers.md`'s shape. The `RLIMIT_*` constants alone would be a module with no consumer. |
 | `itertools` | 17 | 1 | 14 | **a lazy sequence.** `combinations` (the only name the swept files spell) is a generator of tuples; neither half is representable. |
-| `unittest` | 17 | 7 | 16 | **inheritance across a dylib boundary, and method dispatch on a value.** `class T(unittest.TestCase)` is 113 of the 16 files' spellings. `bugs/FORMAL_a_subclass_drops_the_bases_fields.md` is open and claimed (`formal16-2`), and it is the whole of this row. |
+| `unittest` | 17 | 7 | 16 | **inheritance across a dylib boundary, and method dispatch on a value.** `class T(unittest.TestCase)` is 113 of the 16 files' spellings. This row blamed a subclass dropping its base's fields, and that bug is FIXED — a subclass's fields are now its base's fields followed by its own (commit `5cf72641`, which also gave CPython's exceptions their `args`) — so the 7 and the 16 are a BEFORE measurement and the cause named here is not established for them. Re-measure before reading this row as a blocker. |
 | `builtins` | 16 | 2 | 2 | **the interpreter's own namespace.** `set(dir(builtins))` — measured in `formal/imports.py`'s own comment, which is why `builtins` is a `HOST_UNREACHABLE` entry. |
 | `inspect` | 7 | 0 | 4 | **the source text.** `getsource` reads a file and returns its text; `signature` reads a frame's code object. `HOST_UNREACHABLE`'s own comment says the subset that reads attributes off live values is reachable and the frame-walking half is not. |
 | `random` | 5 | 1 | 5 | **module state.** `Random`/`seed`/`randrange`: a generator's whole meaning is that successive calls differ, and a value here is one word with no storage between calls. `HOST_MODELLED`, correctly. |
@@ -170,8 +170,10 @@ own files.
   moves 0 either way. It is the one piece of §3 this wave could have written and
   chose not to.
 * **`unittest` is the largest honestly-modellable-looking row** (7 alone, 16
-  sweep) and it is blocked on a claimed bug, `formal16-2`'s
-  `FORMAL_a_subclass_drops_the_bases_fields`. Nothing here should touch it.
+  sweep). It was written as blocked on a claimed bug — a subclass dropping its
+  base's fields — and that is FIXED (commit `5cf72641`), so the blocker named
+  here is gone and the row needs a re-measure rather than a re-read. Nothing
+  here should touch it either way; whoever picks it up starts from the numbers.
 * **The walk itself** — see §5. Promoting it is a separate, small piece of work
   and it is what would make the next wave's numbers a reading rather than a
   re-derivation.

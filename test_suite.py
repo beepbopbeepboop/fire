@@ -1961,7 +1961,7 @@ STALE_PER_CHILD_BUDGETS = {
     'test_formal_frame_return_overloads.py': 1,
     'test_formal_imports.py': 4,
     'test_formal_link_accounting.py': 2,
-    'test_formal_proof_breadth.py': 3,
+    'test_formal_proof_breadth.py': 5,
     'test_formal_runtime_link.py': 1,
     'test_formal_specialization.py': 2,
     'test_formal_sweep_cache_key.py': 2,
