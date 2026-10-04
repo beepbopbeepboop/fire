@@ -222,7 +222,10 @@ def test_the_survey_does_not_count_an_encoder_nothing_emits():
     filter. Pinning the exact set here would make this test a maintenance tax on
     every encoder that lands before its lowering, which is the ordinary order of
     work; pinning the direction makes it impossible for the number to go back to
-    reading the table.
+    reading the table. **Which is also why no encoder is named below** — `blr`
+    was the named example until the call through a function value emitted it,
+    and a name is a claim about which encoders have no caller, so it goes stale
+    the moment a lowering lands rather than when the survey is wrong.
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -238,17 +241,45 @@ def test_the_survey_does_not_count_an_encoder_nothing_emits():
           f"the covered bases are not a subset of the bases in the table: "
           f"{sorted(covered - every)}")
     dead = every - covered
-    check(dead <= {audit.base_of(n) for n in unwired},
-          f"these bases are reported uncovered but have no unwired encoder to "
-          f"explain it: {sorted(dead - {audit.base_of(n) for n in unwired})}")
-    # The two that a survey of THIS tree must get right, in both directions:
-    # `blr` is an encoder nobody emits (so not covered, and printed), and
-    # `b.eq`-shaped conditionals are emitted (so covered). Pinned by name
-    # because they are the pair the defect produced.
-    check("blr" in dead,
-          "blr has an unwired encoder and must therefore be reported as NOT "
-          "covered; if it reads as covered again, encoder_bases is reading the "
-          "table instead of the callers")
+    # A base is uncovered EXACTLY when EVERY encoder for it is unwired, and the
+    # "every" is the half that is easy to get wrong: `cset`, `ldr`, `str` and
+    # `ldp` each have an unwired encoder here AND a wired one (the register
+    # forms), so their base is covered. Stated as the two sets agreeing, which
+    # is `encoder_bases`'s definition rather than a measurement of it — pinned
+    # because a definition can be edited, and an `encoder_bases` that covered a
+    # base because one encoder with that name happens to be unwired is the same
+    # defect one level down: a report that cannot be reproduced from the two
+    # sets it prints.
+    explained = {audit.base_of(n) for n in unwired} - covered
+    check(dead == explained,
+          "the uncovered bases are not the bases ALL of whose encoders are "
+          f"unwired, so the two halves of the report disagree: reported "
+          f"uncovered {sorted(dead)}, explained by {sorted(explained)}")
+    # The direction, as a statement about the SURVEY and not about any one
+    # encoder: if every base reads as covered then `covered == every`, and a
+    # survey that reports every mnemonic it can encode as an instruction one
+    # real image contains is reading the table. This is the assertion the
+    # named example used to carry, and it is deliberately NOT a named example
+    # any more.
+    #
+    # It WAS `blr`, from the day the survey stopped reading the table, and it
+    # stopped being an example on its own: the call through a function VALUE
+    # (`formal/arm64_codegen.py`, the `through_value` arm of a call) emits
+    # `encode_blr_xn(16)`, so `blr` moved from "encoded, never emitted" to
+    # emitted and the pin went stale rather than wrong —
+    # `bugs/FORMAL_stdlib_tile_row_is_a_specialization_through_a_function_value.md`
+    # records the move as this survey's own measurement. A pin that names an
+    # encoder is a claim that that encoder has no caller, and it is a claim
+    # about the ORDER WORK LANDS IN: every lowering that arrives before the
+    # survey is re-run flips one. The direction survives all of them.
+    check(dead,
+          "every base mnemonic reads as covered, so encoder_bases is reporting "
+          "the TABLE rather than the callers: an encoder no lowering emits is "
+          "not an instruction any image can contain, and a survey that cannot "
+          f"say so of even one of the {len(unwired)} unwired encoders "
+          f"({unwired}) has stopped measuring images")
+    # …and one name for the OTHER direction, which is about a real lowering and
+    # not about the audit: every conditional branch emits `B.cond`.
     check("b" in covered,
           "B.cond is emitted by every conditional branch and must stay covered")
 
