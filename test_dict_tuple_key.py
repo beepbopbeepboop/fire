@@ -124,7 +124,7 @@ CASES = [
         '    print(get("b"))')),
     # `pop` WITHOUT a default, for two reasons. A default argument is ignored
     # for a missing key on the compiled path whatever the key's type — see
-    # bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md, which this deliberately
+    # “CODEGEN: `d.pop(k, default)` returns 0 on a MISS”, which this deliberately
     # does not depend on, so a fix there cannot be mistaken for a change here.
     # And a bare `pop` on a MISSING key raises in CPython, which is a refusal,
     # not a value.

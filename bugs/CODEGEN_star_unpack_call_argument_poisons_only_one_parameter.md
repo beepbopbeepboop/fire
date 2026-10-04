@@ -24,7 +24,7 @@ compiled: '0\n'
 No diagnostic, exit 0, and the string comes out as the integer `0` — the
 value a pointer's word is when the slot that should have held it was never
 given a type. This is the same class
-`bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md` exists for, in
+`CODEGEN_coro_yield_kind_unresolved_callsite` exists for, in
 the direction that record says was left: a `None` hole is now a refusal, but
 a parameter the scan never *looks at* is neither a hole nor a kind, so it
 is invisible to both halves of the rule.

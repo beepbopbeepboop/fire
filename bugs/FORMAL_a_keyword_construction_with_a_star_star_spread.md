@@ -56,7 +56,7 @@ So the exact next step is the variadic ABI, not the key set: **a `**kwargs`
 parameter has to become a dict blob the callee can read by literal key**, and only
 then is there a value to take a key set from. That is one feature with two
 consequences (the callee can read it; the caller's spread can be answered from
-it), and it is the same question `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md`
+it), and it is the same question `“`struct` keyword arguments are silently dropped”`
 asks on the gimple side — the two should share an answer, as this doc already said.
 
 Until then the two ways out of the original §"The exact next step" are unchanged:
@@ -153,7 +153,7 @@ Two ways out, and they are different jobs:
    case refused. `formal/build.py` already has a literal-dict key reader for
    `formal/hostmods` work; the missing piece is keeping the set through a
    `**`-parameter, which is the same flow question
-   `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` asks on the gimple
+   `“`struct` keyword arguments are silently dropped”` asks on the gimple
    side and should share an answer with.
 
 ## Why it is in no list

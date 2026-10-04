@@ -18,7 +18,7 @@ files reached master through the `formal5-hostmods-*` / `formal6-*` batches
 (`test_formal_math.py` arrived in `63fe3b21`, "shutil: copy, move, rmtree,
 copytree and which, over the real filesystem"). `test_suite.py`'s
 `UNREGISTERED` table has a row for the older instance of this same check
-(`bugs/TEST_estate_check_red_on_two_form3_test_files.md`, two files) and these
+(`TEST_estate_check_red_on_two_form3_test_files`, two files) and these
 five were never added to it. Confirmed pre-existing rather than inferred:
 `git merge-base --is-ancestor` puts every one of them in this branch's history,
 i.e. they came in with the base commits, and the working tree change that

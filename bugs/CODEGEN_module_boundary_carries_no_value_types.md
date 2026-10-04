@@ -76,7 +76,7 @@ things are missing for `mod.f(...)`:
    its C written — from inside the importer's own pass, so the importer's
    observations cannot reach it by sharing a dict; that is the same reason
    `_elem_types` is per-function. The doc that covered that half,
-   `bugs/hard/CODEGEN_cross_function_container_element_type.md`, was removed
+   `“Container element types do not survive a function boundary”`, was removed
    2026-10-02 with its fix — container ELEMENT types now cross a function
    boundary — so this wall is narrower than it was: the `char *` case above is
    the one still standing, and the container-element case beside it is not.

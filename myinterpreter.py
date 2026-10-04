@@ -207,14 +207,14 @@ class MojoFunction:
         self.comptime_param_defaults = comptime_param_defaults or {}
         if param_defaults:
             self._pd = param_defaults
-        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # mirrors FunctionDef.is_generator (see fire_compiler.py) — copied
         # onto the MojoFunction at construction time (see
         # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
         # `_invoke` can branch to the generator-construction path without
         # needing the original FunctionDef node around at call time.
         self.is_generator = is_generator
-        # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 3b of INTERP_generator_yield_entirely_unimplemented:
         # mirrors FunctionDef.is_async (see fire_compiler.py) exactly the
         # same way is_generator mirrors FunctionDef.is_generator above —
         # copied onto the MojoFunction at construction time so `_invoke`
@@ -343,7 +343,7 @@ class MojoFunction:
             # protocol from both the sync-generator protocol
             # (MojoGeneratorObject: __iter__/__next__/send/throw) and the
             # coroutine protocol (MojoCoroutine: __await__) built for this
-            # milestone — see bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # milestone — see INTERP_generator_yield_entirely_unimplemented's
             # Milestone 3b report. Deliberately NOT built here: rather than
             # silently picking one of the two existing wrappers (either
             # would behave subtly wrong under `async for`), fail loudly so
@@ -380,7 +380,7 @@ class MojoFunction:
             # unification that got confused by two differently-shaped
             # return statements in the same function (a boxed generic value
             # vs. a directly-constructed local struct type) — see
-            # bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # INTERP_generator_yield_entirely_unimplemented's
             # Milestone 2 report for the concrete compile errors this
             # produced before the fix.
             result = MojoGeneratorObject(interpreter, func_scope, self.body)
@@ -921,7 +921,7 @@ class MojoCoroutine:
     real-asyncio-compatible: `asyncio.run(mojo_coro)`,
     `asyncio.gather(mojo_coro1, mojo_coro2)`, and `await mojo_coro` from
     ordinary real Python `async def` code all work, validated empirically
-    (see bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+    (see INTERP_generator_yield_entirely_unimplemented's Milestone
     3b report) — including a Mojo body that internally does
     `await asyncio.sleep(...)`, which really suspends on the real event
     loop and really takes real wall-clock time, and `asyncio.gather` of
@@ -1804,7 +1804,7 @@ class MojoComplex:
     the complex values that result from combining one with a real number via
     `+`/`-`. This deliberately does NOT implement the full Python `complex`
     API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
-    bugs/PARSE_FAIL_complex_number_literal.md's scope guidance, construction
+    PARSE_FAIL_complex_number_literal's scope guidance, construction
     + printing + `+`/`-` against int/float/other MojoComplex is enough to
     cover the two real stdlib patterns that motivated this (a complex value
     sitting in a set/list literal, never used in further arithmetic).
@@ -1859,7 +1859,7 @@ class MojoComplex:
         # ("undefined symbol _hash" at link time), and a `int(float_expr)`
         # replacement hit an unrelated existing gimple_codegen miscompile
         # (int() return type inferred as `char *` in this context). Per
-        # bugs/PARSE_FAIL_complex_number_literal.md's scope guidance this
+        # PARSE_FAIL_complex_number_literal's scope guidance this
         # class isn't meant to support full value-equality hashing (e.g.
         # collapsing `{1, 1+0j}` into `{1}` the way real Python's `complex`
         # does) — just construct/print/`+`/`-` without crashing.
@@ -2899,7 +2899,7 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
-        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # Milestone 2 of INTERP_generator_yield_entirely_unimplemented:
         # per-OS-thread storage for "the yield_fn of the generator whose body
         # is currently running on THIS thread" — see MojoGeneratorObject
         # (each generator body runs on its own dedicated worker thread, so
@@ -4520,7 +4520,7 @@ class Interpreter:
         methods`) is invisible to plain `hasattr`/`getattr`. Route through
         the class's own method table instead for MojoInstance; fall back to
         plain `hasattr` for everything else (native Python-backed runtime
-        objects). See bugs/INTERP_with_as_binding_for_loop_keyerror.md:
+        objects). See INTERP_with_as_binding_for_loop_keyerror:
         `with SomeInterpretedClass() as x:` never actually called the
         interpreted `__enter__`, silently using the un-entered instance
         itself instead — found via a KeyError inside `MojoInstance.
@@ -4870,7 +4870,7 @@ class Interpreter:
         `await asyncio.sleep(...)`), or anything else implementing
         `__await__`, matching real Python `await`'s own actual protocol
         (bytecode-level, not type-based — see
-        bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+        INTERP_generator_yield_entirely_unimplemented's Milestone
         3b report for why this is genuinely real-asyncio-compatible).
 
         This method itself runs on the current Mojo coroutine's OWN worker
@@ -5418,7 +5418,7 @@ class Interpreter:
         short-circuits to False (without evaluating any remaining operands)
         the moment one `operands[i] ops[i] operands[i+1]` link fails, and is
         True only if every link holds — `(a < b) and (b < c)`, never `(a <
-        b) < c`. See bugs/CHAINED_COMPARISON_WRONG_RESULT.md."""
+        b) < c`. See CHAINED_COMPARISON_WRONG_RESULT."""
         left = self.eval_expr(expr.operands[0])
         for op, operand_expr in zip(expr.ops, expr.operands[1:]):
             right = self.eval_expr(operand_expr)

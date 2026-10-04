@@ -437,7 +437,7 @@ $ python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-b3.txt    # identi
 30 s timeout per file over 630, and this question does not need one: the
 refusal fires in `_prepare_functions`' holder-use walk, so parse plus one
 method walk answers it — the same instrument
-`bugs/FORMAL_read_before_store_what_is_left.md` used, and for the same reason
+`“read-before-store: the shapes that still decide wrongly”` used, and for the same reason
 (a file refused for an import never reaches this check).
 
     `recv.field = <a name that can hold a multi-field frame>`:

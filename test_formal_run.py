@@ -1504,7 +1504,7 @@ CASES = [
     # case asserted that, in a comment that gave the representation as the
     # reason. Both `fire.py run` and `fire.py build` decode a literal's escapes,
     # so the formal backends were the odd one out;
-    # bugs/FORMAL_string_literal_escape_is_not_decoded.md measured it and the
+    # FORMAL_string_literal_escape_is_not_decoded measured it and the
     # decode now happens in `_intern_string`. CPython returns "" here too, so
     # this is the third engine agreeing with the other two rather than a new
     # answer: `lstrip` on a tab is "" on every engine in this repository now.
@@ -2121,7 +2121,7 @@ CASES = [
      # `print("v = %d\n", …)` — the EXPECTED stdout carries a real NEWLINE,
      # because a string literal is decoded before it is interned and
      # `fire.py run` / `fire.py build` both print a real newline there too
-     # (bugs/FORMAL_string_literal_escape_is_not_decoded.md). It used to carry
+     # (FORMAL_string_literal_escape_is_not_decoded). It used to carry
      # a literal backslash-n, which was this suite asserting the bug.
      0, "v = %d\n 7"),
     # GUARD, and it is here because the case above is not enough on its own:
@@ -2141,7 +2141,7 @@ CASES = [
      # `print("v = %d\n", …)` — the EXPECTED stdout carries a real NEWLINE,
      # because a string literal is decoded before it is interned and
      # `fire.py run` / `fire.py build` both print a real newline there too
-     # (bugs/FORMAL_string_literal_escape_is_not_decoded.md). It used to carry
+     # (FORMAL_string_literal_escape_is_not_decoded). It used to carry
      # a literal backslash-n, which was this suite asserting the bug.
      0, "v = %d\n 7"),
     # A name on the list that this image has NO declaration of is still
@@ -2182,7 +2182,7 @@ CASES = [
      # The expected stdout carries a real NEWLINE: a string literal is
      # decoded before it is interned, so `print`'s `\n` is the newline printf
      # writes. It used to carry a LITERAL backslash-n, which was this suite
-     # asserting the bug (bugs/FORMAL_string_literal_escape_is_not_decoded.md).
+     # asserting the bug (FORMAL_string_literal_escape_is_not_decoded).
      0, "len=%d\n 0"),
 
     # ── wave 5 (E4): `in` on a string, `+=` on a string, and the rest of
@@ -2277,7 +2277,7 @@ CASES = [
      # REWRITTEN, because the claim in the comment it replaces was FALSE: it
      # said a string literal is stored UNESCAPED on this path, so `"\t"` is a
      # BACKSLASH and a `t`. That was true until
-     # bugs/FORMAL_string_literal_escape_is_not_decoded.md, which measured the
+     # FORMAL_string_literal_escape_is_not_decoded, which measured the
      # opposite — the formal backends intern the RAW source text because they
      # are the one engine here that does not hand a literal to a C compiler to
      # decode it, so `len("\t")` was 4-spelled-2 and a printed line ending came
@@ -2361,7 +2361,7 @@ CASES = [
     # repository that does not hand the literal's text to a C compiler to
     # decode for it. So `len("a\nb")` was 4 where every other engine says 3,
     # and `print("a\nb")` wrote a backslash and an `n`. See
-    # bugs/FORMAL_string_literal_escape_is_not_decoded.md for the measurement;
+    # FORMAL_string_literal_escape_is_not_decoded for the measurement;
     # these are the cases that pin the fix, and each one is a different way to
     # get the decode wrong rather than a restatement of the first.
     #
@@ -2451,7 +2451,7 @@ CASES = [
 
     # ── ITERATING a string is refused, and the refusal is measured ──────────
     #
-    # `bugs/FORMAL_string_iteration_reads_a_count.md`. The loop family — `for x
+    # `“FORMAL: iterating a string reads its first eight bytes as an element COUNT”`. The loop family — `for x
     # in s` and `[x for x in s]` — walks its iterable as a BLOB, and a blob's
     # first word is its element COUNT. A `char *` has no header word, so the
     # count is the first eight bytes of TEXT: on the tree this was measured on,
@@ -4273,7 +4273,7 @@ CROSS_MODULE_CASES = [
     # reached only the program path would leave the module refusing with
     # "'PAT_DASH' has no home" — a diagnostic whose subject is a line in
     # somebody else's module, reported against the program that merely imported
-    # it. `bugs/FORMAL_argparse_memset_constants_comment_is_stale.md` is the
+    # it. `FORMAL_argparse_memset_constants_comment_is_stale` is the
     # measurement, and its step 3 is this row: the reproducer had to be a module
     # dylib because that is the shape in which it was found.
     #
@@ -5676,7 +5676,7 @@ ASSIGNED_TYPE_CASES = [
 # refuses and the other BUILDS-and-lies is not caught by it either, since the
 # refusal half fails; and a positive row runs one, so x86-64 refusing what arm64
 # lowers is a green run.  That combination is exactly what
-# `bugs/FORMAL_x86_64_tuple_assignment_member_target.md` measured: arm64 lowered
+# `“FORMAL_x86_64_tuple_assignment_member_target: arm64 lowers `self.a”` measured: arm64 lowered
 # a member tuple target, x86-64 refused it by name, and nothing in the suite
 # noticed for the whole life of the divergence.
 BOTH_ARCH_CASES = [
@@ -5791,7 +5791,7 @@ BOTH_ARCH_CASES = [
     #
     # WHY 0, and why only for one field: a struct's field is lowered three ways
     # and which applies is decided by the BINDING of the base, not by a type
-    # (bugs/FORMAL_method_param_field_access.md). A ONE-FIELD struct's receiver
+    # (“FORMAL_method_param_field_access: a method parameter's field”). A ONE-FIELD struct's receiver
     # IS its field — there is no storage of its own to point at — so for
     # `One20()` the one-word path evaluated the construction's value. Both
     # backends asked `model.struct_construction_plan` only when the call carried
@@ -6187,8 +6187,8 @@ BOTH_ARCH_CASES = [
     # They were refusals until 2026-10-02 (arm64) and were refused on BOTH
     # backends for the nine-argument rows until the x86-64 stack area landed the
     # same day; the history and the measurement are in
-    # `bugs/FORMAL_x86_64_argument_registers.md` (deleted — it asked for exactly
-    # this) and `bugs/FORMAL_struct_pack_over_eight_arguments.md`.
+    # `FORMAL_x86_64_argument_registers` (deleted — it asked for exactly
+    # this) and `“`struct.pack` for a format naming 8 values was refused at the CALL SITE”`.
     #
     # `seven` is the row the whole subject is: `a6` is the FIRST stack argument
     # on x86-64 and the LAST register argument on arm64, and the answer is built
@@ -6369,7 +6369,7 @@ BOTH_ARCH_CASES = [
     #
     # which is what this path answers on both architectures. It was filed as a
     # silent wrong answer against a table saying CPython gives `a=2 b=2`
-    # (bugs/FORMAL_receiver_copied_to_another_name_does_not_take_effect.md,
+    # (FORMAL_receiver_copied_to_another_name_does_not_take_effect,
     # deleted): the multi-field receiver IS an address, and rebinding it is
     # precisely what Python does with the local name, so the arithmetic in
     # every later `self.<field>` is right AND the caller's frame is right. The
@@ -6515,7 +6515,7 @@ BOTH_ARCH_CASES = [
      "    return c + d + 11\n", 5, None),
     # A `while` BODY's store read after the loop, where the condition is
     # decidable on entry because the preheader states it.  This is the shape
-    # `bugs/FORMAL_while_body_store_refused_though_the_loop_runs.md` is about,
+    # `“A name stored only in a `while` body is refused, though the loop provably ran”` is about,
     # and the reason the row is here and not only in
     # `test_formal_read_before_store.py` is that the analysis answering `ok` and
     # the EMITTED image printing 1 are two different claims: the analysis runs
@@ -8175,7 +8175,7 @@ INIT_FIELD_TYPE_REFUSALS = [
     # the spelling `formal/arm64_codegen.py` uses, and it is the one that keeps
     # `helper` out of the class's field set, which is why that file was refused
     # rather than lowered. It is also the shape behind
-    # `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` — read that
+    # `FORMAL_field_set_method_name_and_kwarg_blind_spot` — read that
     # before changing `_self_field_names`.
     ("method_reference_is_not_a_frame_slot",
      "class Outer:\n"
@@ -8421,7 +8421,7 @@ INIT_FIELD_TYPE_REFUSALS = [
 #
 # Filed as "the two passes disagree about `struct_is_framed`", with an offer to
 # stop the demotion that produced the one-field struct as its semantically honest
-# repair; the filing was `bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`
+# repair; the filing was `FORMAL_class_level_default_flips_a_nested_frames_width`
 # and it is deleted, its defect fixed. The trigger is not the demotion: the same
 # refusal, byte-identical, comes out of a `struct Inner` that declares exactly ONE
 # field and no class-level default at all — which is why the second case below is
@@ -9217,7 +9217,7 @@ CONSTRUCTION_CASES = [
     # (2a-ter) A PARTIAL fill: `Pd(1)` on three fields, the two it leaves out
     # having class-level defaults. This is CPython's generated `__init__` and the
     # language's rule for a `@dataclass` field default, and it is the shape
-    # `bugs/FORMAL_dataclass_partial_construction.md` measured.
+    # `FORMAL_dataclass_partial_construction` measured.
     #
     # The DEFAULT is what makes it a program, and the case says so by reading
     # the unfilled field back: a `0` there would be a value the source never
@@ -9594,7 +9594,7 @@ CONSTRUCTION_CASES = [
     # ── a DECLARED `__init__`: `S(a, b)` is a CALL, and the call is INLINED ──
     #
     # This whole block is the construction family's last remaining refusal,
-    # closed — the family was `bugs/FORMAL_struct_construction_shapes.md` and
+    # closed — the family was `“FORMAL_struct_construction_shapes: `S()`, `S(a, b, …)` and `S(x)`”` and
     # that doc is deleted now that every shape lowers, so the cases here are what
     # stands in its place.  `Slice` — the case that found it — declares
     # TWO `__init__` overloads against three fields and the corpus writes all
@@ -14021,7 +14021,7 @@ WAVE6_NAME_CASES = [
      "    return raw(o)\n",
      "refuse:is a field access through 'h'", None),
     # ── the same fall-through through a base that is not a NAME ──
-    # (`bugs/FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero.md`)
+    # (`FORMAL_an_attribute_read_through_an_unclassified_base_reads_zero`)
     #
     # A name is only half of what can be a base, and the other half used to
     # answer 0 on arm64 while x86-64 refused: `(7).foo` and `C.A.value` both
@@ -14634,7 +14634,7 @@ WAVE7_G2_CASES = [
      123, None),
     # ── a module-level literal as `memset`'s BYTE argument ──
     #
-    # `bugs/FORMAL_folded_module_constant_as_memset_argument.md`. A module-level
+    # `FORMAL_folded_module_constant_as_memset_argument`. A module-level
     # name whose value the build FOLDS is substituted at every read BEFORE any
     # emitter runs (`build._substitute_module_constants`), so it never needs a
     # register, a spill slot or a `__DATA` slot of its own. That is what makes
@@ -16377,7 +16377,7 @@ TYPE_ARGUMENT_LIST_ABSENT_CASES = [
 # they no longer say what this paragraph says about them; they are here
 # because the diagnosis they record is a diagnosis about a refusal.
 # `int(s)` and `int(s, base)` — a PARSE, not a conversion. See
-# bugs/FORMAL_two_argument_int_is_refused.md (deleted by the commit that landed
+# “FORMAL: `int(s, base)` is refused as a conversion with two operands” (deleted by the commit that landed
 # this) for the two-operand refusal that used to fire; what is here is the
 # one-operand half, which was WORSE and silent: the arity test did not fire, so
 # a string was read as the NUMBER its bit pattern is and `int("41")` answered the

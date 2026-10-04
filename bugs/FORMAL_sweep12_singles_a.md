@@ -84,7 +84,7 @@ reader should not have to re-derive it.
   **kw)`, found by clearing §4 of §2 above. Not in any list; the refusal is
   correct and the doc carries the minimal reproduction, both architectures, and
   the two ways out.
-- `bugs/FORMAL_an_enum_typed_parameters_field_has_no_layout.md` — `base.value`
+- `FORMAL_an_enum_typed_parameters_field_has_no_layout` — `base.value`
   on a `base: Reg` parameter, which is my §3.2 row for `formal/x86_64.py`.
   Measured at **1 file in 668**, with the four-step design written out, because
   the design is the deliverable and the sizing is what a reader needs first.

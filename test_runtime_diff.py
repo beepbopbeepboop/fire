@@ -376,7 +376,7 @@ BUILTIN_PROGRAMS = {
     # question every consumer asked — could not tell them apart, and BOTH
     # engines bound the whole item: `for (a,) in [(1,), (2,)]` printed `1` / `2`
     # where CPython prints `(1,)` / `(2,)`, exit 0, no diagnostic
-    # (bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md).
+    # (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name).
     # CPython-comparable because the two engines were wrong in the SAME
     # direction here, which is exactly the case a plain engine-vs-engine diff
     # cannot see.
@@ -424,7 +424,7 @@ BUILTIN_PROGRAMS = {
     #     variable and this runtime has no repr for a pair-valued variable — the
     #     compiled path prints the MojoList pointer (it was wrong before this fix
     #     too, differently: the paren test unpacked the pair's slot 0). See
-    #     bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    #     CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
     "for_target_one_tuple_dict_and_nested": textwrap.dedent("""\
         def main():
             d = {"a": 1, "b": 2}
@@ -490,7 +490,7 @@ BUILTIN_PROGRAMS = {
     # `_compr_list_loop` declared the target without
     # `force=_compr_target_is_shadowed(...)`, the argument its three sibling
     # comprehension loops pass, so first-decl-wins kept whatever was already
-    # live under that name (bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    # live under that name (CODEGEN_comprehension_target_shadows_struct_local).
     # With a `struct` pointer live under the name the shape did not compile at
     # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
     # found; with a `char *` live it compiled and printed string ADDRESSES.
@@ -500,7 +500,7 @@ BUILTIN_PROGRAMS = {
     # its own case below
     # (`comprehension_result_elem_type_across_a_branch`), which is what the
     # branch-shaped reproducer for
-    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md
+    # “A comprehension inside an `if` body loses its RESULT list's element type”
     # turned out to be measuring.
     "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
         class Token:
@@ -598,7 +598,7 @@ BUILTIN_PROGRAMS = {
     # whole function and `print(...)` of its result routed to
     # `mojo_repr_list_ints`, which reads each slot with the integer accessor —
     # a `char *` slot came back as a heap-address decimal. Measured in
-    # bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md,
+    # “A comprehension inside an `if` body loses its RESULT list's element type”,
     # whose own diagnosis ("the ReturnStmt walk does not descend into an
     # `if`") was wrong on both counts: `_collect_return_elems` has always
     # descended, and the program WITHOUT the trailing `return []` was right.
@@ -1230,7 +1230,7 @@ BUILTIN_PROGRAMS = {
     # callback at all — `sorted(key=lambda a: -a)` and `sorted(key=k)` for a
     # plain `def k(a)` fail the same way — so this harness could not compare
     # anything. Tracked in
-    # bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md.
+    # CODEGEN_interpreter_user_function_as_builtin_callback_crashes.
     "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
         def add(a, b):
             return a + b

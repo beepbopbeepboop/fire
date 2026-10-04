@@ -104,7 +104,7 @@ session's to touch**: `CODEGEN_lambda_bool_return_prints_as_int.md`,
 `CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` all belong
 to `bugs3-codegen-1-r2`. The fourth, found while running that matrix on
 2026-10-02, is a NEW doc written this session and is unclaimed:
-`bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md` — a
+`CODEGEN_nested_def_capturing_lambda_env_field_types_disagree` — a
 capturing lambda inside a nested `def`, whose env-struct field types disagree
 with the stores into them (a hard `non-trivial conversion in 'var_decl'` for an
 `int` capture, a silent pointer decimal with exit 0 for a `char *` or `double`
@@ -220,15 +220,15 @@ Four rows as of 2026-10-02; the three 2026-09-29 rows are unchanged.
 
 | shape | CPython | compiled | doc |
 |---|---|---|---|
-| `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `bugs/CODEGEN_lambda_bool_return_prints_as_int.md` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
-| a lambda inside a **nested `def`** | correct | link error, body never emitted | `bugs/CODEGEN_lambda_in_nested_def_body_never_emitted.md` — the lifted function is declared and referenced, never defined. |
-| a **capturing** lambda inside a **nested `def`** (a second, distinct defect in the same shape, found 2026-10-02) | correct | **build failure** for an `int` capture, and a **silent pointer decimal, exit 0** for a `char *` or `double` one | `bugs/CODEGEN_nested_def_capturing_lambda_env_field_types_disagree.md` — the body IS emitted and the program links; the env struct's FIELD types disagree with the stores that fill them (`int z;` field against an `int64_t` store, `-fgimple`'s "non-trivial conversion in 'var_decl'"). The same program with the `def` at module scope is correct, so the trigger is the extra nesting level. Not the row above: that one never emits the body at all. |
-| `sorted(key=<any user function>)` | correct | interpreter crash | `bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` — so the compiled path cannot be diffed against the interpreter for that shape. |
+| `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `“CODEGEN: a lambda whose body is a bool returns int64 0/1”` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
+| a lambda inside a **nested `def`** | correct | link error, body never emitted | `“CODEGEN: a lambda inside a nested `def` is lifted but never DEFINED”` — the lifted function is declared and referenced, never defined. |
+| a **capturing** lambda inside a **nested `def`** (a second, distinct defect in the same shape, found 2026-10-02) | correct | **build failure** for an `int` capture, and a **silent pointer decimal, exit 0** for a `char *` or `double` one | `CODEGEN_nested_def_capturing_lambda_env_field_types_disagree` — the body IS emitted and the program links; the env struct's FIELD types disagree with the stores that fill them (`int z;` field against an `int64_t` store, `-fgimple`'s "non-trivial conversion in 'var_decl'"). The same program with the `def` at module scope is correct, so the trigger is the extra nesting level. Not the row above: that one never emits the body at all. |
+| `sorted(key=<any user function>)` | correct | interpreter crash | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` — so the compiled path cannot be diffed against the interpreter for that shape. |
 
 Two more were found and filed while measuring, and are also not this doc's:
 `bugs/CODEGEN_call_through_subscript_callee_stubbed.md` (a callable reached
 through a subscript, `d['k'](2, 3)`, prints `0`) and
-`bugs/CODEGEN_lambda_bool_return_prints_as_int.md`'s sibling, a named function
+`“CODEGEN: a lambda whose body is a bool returns int64 0/1”`'s sibling, a named function
 with `*args` taken as a value — which WAS this defect and IS fixed, see
 `gimple_variadic_named_function_through_a_value`.
 
@@ -472,7 +472,7 @@ whose body contains a `lambda` with a starred or defaulted parameter is
 refused, falling through to the cpp path's own honest refusal instead
 of emitting broken/wrong C. Closing occurrence #2 for real needs the
 separate variadic-forwarding work tracked in
-`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md` —
+`CODEGEN_args_kwargs_signature_assumed_forwarding_only` —
 and, per the 2026-08-24 note below, `iter_files` has five further
 independently-refused generators regardless, so this alone would not
 unblock that file.
@@ -483,7 +483,7 @@ doc's scope: a `lambda` with a default parameter (garbage for the
 default), and `sorted(iterable, key=lambda ...)` silently ignoring
 `key=`. A bound-method value stored in a local then called
 (`getpos = self.tell; getpos()`) is likewise codegen-wide — tracked in
-`bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md` #3.
+`“CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found”` #3.
 
 ## Status (re-verified 2026-08-26, independent check against current master `e60b9cd` — unchanged)
 
@@ -812,7 +812,7 @@ file at all for the file).
   A lambda with `*args`/`**kwargs` forwarding params, calling a
   module-level function (`_walk`) with those forwarded args plus an
   extra keyword. This shape additionally overlaps
-  `bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+  `CODEGEN_args_kwargs_signature_assumed_forwarding_only`
   (task #142, deliberately held back for separate dedicated attention)
   — even if `LambdaExpr` itself were supported, this specific
   occurrence would likely still need that separate fix too.

@@ -290,7 +290,7 @@ def uses_typed_model(fn: F.FunctionDef, call_types: dict = None) -> bool:
 
     Measured over `formal/examples/` on this tree — 45 functions, and this is
     what settled the question the flag's own docstring kept re-asking
-    (`bugs/FORMAL_default_int_type_typed_flag_collapse.md`, item 1):
+    (`“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”`, item 1):
 
     | source | functions | `uses_typed_model` |
     |---|---|---|

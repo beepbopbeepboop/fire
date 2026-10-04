@@ -43,7 +43,7 @@ cause for a single one of the 143.**
 | 1 each | `fire_compiler` (via `importlib`), `traceback`, `resource`, `copy`, `functools` |
 | 3 | an `except` arm with a body (`test_cli_usage_text.py`, `test_native_dumpfull.py`, `tools/tu_grind.py`) — FORMAL.md phase 7, `bugs/FORMAL_except_arm_is_never_emitted` |
 | 1 | `stat.S_IXUSR` read as a value — `bugs/FORMAL_module_state_no_storage.md` |
-| 2 | a module whose API is its top-level statements (`module_loader.py`, `memslot.py`) — `bugs/FORMAL_dylib_module_body_has_no_load_time_entry_point.md` |
+| 2 | a module whose API is its top-level statements (`module_loader.py`, `memslot.py`) — `FORMAL_dylib_module_body_has_no_load_time_entry_point` |
 
 The order matters and is the whole finding: **`formal/imports.py` refuses an
 unresolvable import before the build ever lowers a call**, so for 136 of the 143
@@ -246,7 +246,7 @@ is the same one; these two are what it looks like from here.
 | `unittest`, `functools`, `shlex`, `traceback`, `uuid`, `warnings`, `unittest.mock` | 1-7 | 1-2 | see `HOST_MODELLED` | `formal10-3` for `functools` |
 
 **`glob` is next by 4x and it is already someone's** —
-`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` is claimed by
+`“FORMAL_glob_copy_collections_io_not_attempted: `glob`”` is claimed by
 `formal10-3`, whose claim names glob, copy, collections and io together. It is
 also the row the recorded recommendation points at, and that recommendation is
 now one step further along than when it was written: the keyword capability it
@@ -263,7 +263,7 @@ Two things this row cost that are worth knowing before the next one:
 
   * **`mkstemp` is reachable and is NOT written**, because its only failure
     check cannot be trusted on this tree today.
-    `bugs/FORMAL_a_bare_c_call_returning_a_32_bit_int_is_compared_as_a_zero_extended_word.md`
+    `FORMAL_a_bare_c_call_returning_a_32_bit_int_is_compared_as_a_zero_extended_word`
     has the measurement: a bare C call whose C return type is `int` arrives with
     the high 32 bits of the register unspecified, and this backend models every
     bare call's return as a full word, so `mkstemps(...) < 0` is FALSE for the
@@ -304,7 +304,7 @@ slice containing all five): `not-answerable/host-import` 95 → 92,
 `not-answerable/system-module-call` 9 → 11, answerable denominator 21 → 22.
 
 **What is left on this row is `glob`, and it is not mine to take**:
-`bugs/FORMAL_glob_copy_collections_io_not_attempted.md` is claimed by
+`“FORMAL_glob_copy_collections_io_not_attempted: `glob`”` is claimed by
 `formal10-3`, whose claim covers glob, copy, collections and io together, and
 its recorded recommendation is now one step further along than when it was
 written — the keyword capability it was waiting on landed in `6189ec2f`, so

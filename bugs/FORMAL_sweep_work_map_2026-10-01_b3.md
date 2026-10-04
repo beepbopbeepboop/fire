@@ -197,7 +197,7 @@ codegen coverage: 0/12 = 0.0%
 
 **12 of 12 moved, every one onto `binary_heap.mojo: formal dylib has no public
 functions`** — the export gate, whose own doc
-(`bugs/FORMAL_dylib_export_gate_ceiling.md`) records a measured ceiling of 0
+(`“FORMAL_dylib_export_gate_ceiling: the 38-file row is not 38 problems”`) records a measured ceiling of 0
 files for every candidate, because 34 of its 35 blocked files do not contain
 the string `BinaryHeap`. So the 93-file row is real work (a builtin with no
 lowering at all, `FORMAL_debug_assert_bracket_has_no_lowering.md`) and it is
@@ -371,7 +371,7 @@ is the answer a planner needs and it is the opposite of the usual outcome:
 * **The value-model change is still real** (`formal/model.py:5879`'s comment
   says what it is: Optional needs a niche, a discriminant or a tag word) and it
   is owned: `formal2-re-and-slice` holds `builtin_slice.mojo`, and
-  `bugs/FORMAL_struct_construction_shapes.md` recorded the landing of the same
+  `“FORMAL_struct_construction_shapes: `S()`, `S(a, b, …)` and `S(x)`”` recorded the landing of the same
   line when its refusal changed from a false reason to a true one (that doc was
   `git rm`'d 2026-10-03 with the construction family).
 * Read the two rows together, exactly as §5 says to: the bracket row and the
@@ -474,7 +474,7 @@ python3 test_formal_sweep.py → Ran 75 tests, OK
 ## 14. One bug found by running the floor: the cross-image frame contract is not published for a free function
 
 **Filed here as
-`bugs/FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function.md`,
+`FORMAL_cross_image_frame_contract_is_not_published_for_a_free_function`,
 since fixed and since deleted — `_export_frame_contract` publishes a contract
 for every export, and `test_formal_cross_module.py` pins it.** Four of the
 floor's five failures were ONE construct, and it is a

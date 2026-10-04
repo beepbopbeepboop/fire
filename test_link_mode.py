@@ -9,7 +9,7 @@ pipeline, which is link-mode: per-import dylibs + CAS + reflection,
 registration is invisible to every other gate step. This test exercises
 `driver.compile_program` directly against real multi-file packages on
 disk, so a regression here can't hide behind the inline-path gate the way
-`bugs/COMPILE_FAIL_asyncio_futures.md` did.
+`“COMPILE_FAIL: asyncio/futures.py”` did.
 
 Each case builds a real executable via `driver.compile_program` and runs
 it, checking both compile success (rc == 0, binary produced) and runtime
@@ -104,7 +104,7 @@ def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str
 
 
 def test_bare_submodule_import_value_read() -> bool:
-    """Regression test for bugs/COMPILE_FAIL_asyncio_futures.md (FIXED,
+    """Regression test for “COMPILE_FAIL: asyncio/futures.py” (FIXED,
     commit 94cc04c): a bare `from . import SUBMODULE` marker's own
     top-level function, read later as a plain VALUE (not called) and
     bound to a module-level name — `isfuture = base_futures.isfuture` —
@@ -138,7 +138,7 @@ def test_bare_submodule_import_call() -> bool:
     """A CALL through a bare `from . import SUBMODULE` marker
     (`base2.doubleval(21)`, real: `base_futures.isfuture(...)`-shaped
     calls) — used to silently return 0 instead of the real value (see
-    bugs/CODEGEN_link_mode_module_qualified_call_silent_wrong_value.md,
+    “CODEGEN (link-mode): a CALL through an imported module marker”,
     now fixed and removed). A first attempt (2026-08-28, reverted)
     resolved purely by bare method NAME with no module qualification
     and broke self-hosting via a real cross-module collision. The
@@ -284,7 +284,7 @@ _INSP_PY = (
 # The `import insp` sibling of `_INSP_PY`, with a METHOD so the
 # module-qualified-constructor case below also exercises a method call
 # through a free-function parameter — the shape of
-# bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md's last
+# CODEGEN_method_call_on_struct_param_mistyped's last
 # remaining row (that doc is deleted as of this fix; see the 2026-09-30
 # section of bugs/hard/README.md).
 _LABEL_PY = (
@@ -789,7 +789,7 @@ def test_builtin_open_is_not_ambiguous_from_transitive_siblings() -> bool:
     compression.zstd._zstdfile, tarfile) each define one, and the file's
     OWN compile unit is clean — the whole program was refused by this one
     message. See
-    bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md.
+    COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.
 
     The sibling bodies here PRINT when called, so "the builtin was used"
     is asserted by their absence and not merely by the build succeeding —
@@ -859,7 +859,7 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     through a forwarding hop.
 
     **In this file, not `test_gimple_runner.py`, which is where
-    `bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md` said
+    `CODEGEN_polymorphic_unannotated_param_vacuous_unanimity` said
     this belonged.** Measured, and the reason is structural: that runner's
     `compile_to_gimple` is the single-translation-unit path, where the whole-
     program call-site walk never runs and the parameter is left at `int64_t`

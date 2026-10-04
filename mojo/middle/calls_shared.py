@@ -182,7 +182,7 @@ def _callable_param_ret_types(gen, fn_node) -> dict:
     bound-method default, an imported default and a `None` default are all
     unanswered — `func_return_types` has no entry for a lambda's materialised
     value until one is materialised, and the other three are the padding-site
-    question bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md
+    question CODEGEN_unresolved_imported_callable_default_null_pointer
     is about. A param absent from the answer is exactly today's behaviour.
 
     `void` is excluded: `mojo_fnptr_call_N`'s result for a void callee is not

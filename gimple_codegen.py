@@ -91,7 +91,7 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
 # NAME referencing a module-level `comptime NAME: Int = <int-literal-or-
 # foldable-expr>` constant (the common real-world shape, e.g. box.3d/game's
 # `comptime MAX_BLOCKS: Int = 4096`) — see GimpleGen._module_const_int.
-# See bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case.
+# See BUG-2026-008 (box.3d/game) for the real-world motivating case.
 _FIXED_ARRAY_ANN_RE = re.compile(
     r'^\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*;\s*([A-Za-z_0-9]+)\s*\]$')
 
@@ -109,7 +109,7 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
-# bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md Step 4) instead
+# “setting/getting an arbitrary attribute on a generically-typed object” Step 4) instead
 # of a direct `->member` access GCC would reject outright ("has no member
 # named ..."). Confirmed real instance: `inner.__name__ = 'read_nonlocal'`
 # / `f.__name__` on a `MojoBoundMethod` (Tools/scripts/var_access_
@@ -1013,7 +1013,7 @@ class GimpleGen:
         # unannotated ctor argument stayed the `int64_t` default (a scalar
         # mismatch is a hard `gcc -fgimple` "non-trivial conversion"
         # failure; a container mismatch is the silent SIGSEGV
-        # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md fixed for
+        # “the constructor-call-site field-typing pass understood only scalars” fixed for
         # the SAME-module case — that fix's new pass runs per-gen and so
         # already covers an imported module's OWN internal call sites, but
         # not a call from a DIFFERENT module reaching in). Applied by the
@@ -1237,7 +1237,7 @@ class GimpleGen:
         self._struct_generator_method_names: dict[str, set[str]] = {}
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
-        # (see bugs/hard/CODEGEN_generator_struct_typed_param_refused.md).
+        # (see CODEGEN_generator_struct_typed_param_refused).
         # This codegen's structs are plain C structs (no real C++ member
         # functions) — a method call must go through the method's own
         # mangled C symbol (`obj_ptr, args...`), exactly like an ordinary
@@ -1491,7 +1491,7 @@ class GimpleGen:
         # `obj.field[i]` on such a field into real C array indexing
         # (`&obj->field[i]` via array-decay + `_mojo_at_` helper) instead of
         # falling through to the MojoList*/generic-pointer paths, neither of
-        # which understands this shape. See bugs/BUG-2026-008.md (box.3d/game).
+        # which understands this shape. See BUG-2026-008 (box.3d/game).
         self._array_field_sizes: dict[str, dict[str, tuple[str, int]]] = {}
         # Module-level GLOBAL container element/value types: global_name ->
         # elem/value C type. Populated once by gen_module's Phase 1.7
@@ -1524,7 +1524,7 @@ class GimpleGen:
         # the same shapes that are correct for a lambda bound to a LOCAL,
         # because the local store propagates _callable_ret_types through
         # the name (see _gen_stmt_AssignStmt). See
-        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._global_callable_ret_types: dict[str, str] = {}
         self._global_container_callable_ret: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
@@ -1585,7 +1585,7 @@ class GimpleGen:
         # type — `f = mk()` then `f()` reads `_root_globals.f`, and
         # `mk()()` casts the result into a fresh temp — so a value-keyed
         # table cannot match it. See
-        # bugs/CODEGEN_lambda_bool_return_prints_as_int.md.
+        # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
@@ -1726,7 +1726,7 @@ class GimpleGen:
         # single-string-argument "opaque constructor" fallback, which
         # returns the argument unchanged — `x` became the literal `"a"` and
         # `x.widgetName` then dispatched getattr on a `char *`
-        # (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+        # (“OPEN: `from mod import Class as Alias”).
         # Populated by `_note_struct_import_alias`, which is the single
         # writer for BOTH the module-scope (`_register_sym`) and the
         # function-scoped (`_gen_stmt_FromImportStmt`) spelling.
@@ -1852,7 +1852,7 @@ class GimpleGen:
         # {method}` C symbols. Historically that string was just
         # `StructDef.name`, so two same-bare-named classes in different
         # modules collided on it (see
-        # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+        # CODEGEN_same_bare_name_struct_collision_across_modules
         # — the loser's field table, its `self->field` accesses and its
         # `__init__` call sites all resolved against the WINNER's, so a `str`
         # field was silently stored into the winner's `int64_t` slot). These
@@ -2024,7 +2024,7 @@ class GimpleGen:
         # `_funcptr_builtins_needed` below already do) actually lowered an
         # `obj.__dict__`/`vars(obj)` expression (see `_lower_MemberExpr`'s
         # `__dict__` case and `_lower_call`'s `vars` case — Step 0 of
-        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md). Gates
+        # “setting/getting an arbitrary attribute on a generically-typed object”). Gates
         # whether `_mojo_dispatch_asdict`/the per-struct `_mojo_asdict_<sn>`
         # helpers get emitted at all: unlike `_mojo_dispatch_getattr`/
         # `_mojo_dispatch_setattr`/`_mojo_dispatch_fields`/`_mojo_dispatch_
@@ -2380,7 +2380,7 @@ class GimpleGen:
         # `_mangled_signature_ctypes`, which is only ever populated for
         # struct methods, this covers plain free functions — see
         # `_lower_call`'s own trailing-keyword-only-param packing fix and
-        # bugs/COMPILE_FAIL_importlib__bootstrap.md's `_verbose_message`
+        # “COMPILE_FAIL: Lib/importlib/_bootstrap.py”'s `_verbose_message`
         # instance.
         self._vararg_trailing_param_types: dict[str, list] = {}
         # (struct_name, method_name) -> list of candidate overloads, each a dict:
@@ -2515,7 +2515,7 @@ class GimpleGen:
         # generated code is textually concatenated into one translation unit
         # for the self-hosted build, gcc rejects the duplicate top-level
         # static as a redefinition. See
-        # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md's quality-gate
+        # CODEGEN_set_list_ctor_ignores_iterable_arg's quality-gate
         # notes: fixing set()/list() to actually walk their iterable argument
         # (reusing the comprehension iteration machinery) let previously
         # mid-lowering-abandoned functions in myinterpreter.py/
@@ -2658,7 +2658,7 @@ class GimpleGen:
         # from) never reached the root's own attribute, so a coroutine unit
         # discovered only that deep silently never flipped the root's
         # `needs_cxx` -- confirmed by the SAME repro this list was added to
-        # fix (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's lexer.py/
+        # fix (“COMPILE_FAIL: Tools/cases_generator/parser.py”'s lexer.py/
         # tokenize()): the root's own top-level `import lexer as lx` never
         # appears in parser.py itself, only transitively (parsing.py's own
         # `import lexer as lx`, itself reached through parser.py's `from
@@ -3167,7 +3167,7 @@ class GimpleGen:
         # holding the call result defaulted to int64_t (this dict's absence is
         # exactly what BUG-2026 CODEGEN_map_over_untyped_param_arg's "assignment
         # ... from void * makes integer from pointer" GCC error came from) —
-        # see bugs/CODEGEN_map_over_untyped_param_arg.md.
+        # see CODEGEN_map_over_untyped_param_arg.
         'mojo_map':              ('void *',    ['void *', 'void *']),
         'mojo_filter':           ('void *',    ['void *', 'void *']),
         'mojo_shlex_join':       ('char *',    ['MojoList *']),
@@ -3382,7 +3382,7 @@ class GimpleGen:
         # POSIX / C stdlib functions with non-int64_t returns (util stubs table)
         # NOTE: bare `isdir` (as opposed to `int_isdir`, the real os.path.isdir
         # runtime helper just below) is intentionally NOT listed here — see
-        # bugs/COMPILE_FAIL_Modules_getpath.md. Being "known" here forced
+        # COMPILE_FAIL_Modules_getpath. Being "known" here forced
         # `_lower_named_call`'s `_is_unknown` check permanently False for the
         # literal name `isdir`, which skipped the safe, lazy, per-file weak-
         # stub fallback every other CPython-getpath.c-injected-and-never-
@@ -6032,7 +6032,7 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     extended with the CAS object paths `_compile_imported_module` built for
     TRANSITIVELY-IMPORTED sibling modules' own top-level coroutine units
     (the 4th coroutine-code source — see its call site in gimple_gen_
-    resolve.py and bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    resolve.py and “COMPILE_FAIL: Tools/cases_generator/parser.py”).
     `compile_linked` returns the same paths to driver.compile_program for
     the link-mode pipeline; this out-param gives the inline (do_imports=
     True) build_executable pipeline access to them too, so a root module
@@ -6126,7 +6126,7 @@ def compile_linked(mojo_src: str, filename: str = "",
     # temp_gen, not `gen` itself) sets this shared box rather than `gen`'s
     # own `_link_needs_cxx` attribute directly — see the box's own
     # declaration and `_compile_imported_module`'s matching write site for
-    # the full reasoning (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    # the full reasoning (“COMPILE_FAIL: Tools/cases_generator/parser.py”).
     needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),

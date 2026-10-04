@@ -230,7 +230,7 @@ PARSERS = [
     ),
     # ── the three places help text is FOLDED ─────────────────────────────────
     #
-    # `bugs/FORMAL_argparse_help_wrapping_not_implemented.md`: the layout was
+    # `FORMAL_argparse_help_wrapping_not_implemented`: the layout was
     # reproduced and nothing was folded, so a help string past the column came
     # out on one line and a usage line past the width came out on one line. These
     # three parsers are the shapes that reach each of the three algorithms, which
@@ -242,7 +242,7 @@ PARSERS = [
     # Every help string here avoids `;` and `|`, which are this module's spec's
     # record and field separators — a help string containing one is truncated at
     # it, which CPython allows and this representation cannot hold
-    # (`bugs/FORMAL_argparse_spec_separators_in_a_help_string.md`) — and every
+    # (`“A `;` or a `|` in a help string truncates it”`) — and every
     # description avoids `"` and `\`, which the generated program embeds
     # verbatim.
     dict(
@@ -336,7 +336,7 @@ PARSERS = [
         # THE THREE BYTES A FIELD HAS TO ESCAPE, all in ONE help string, and the
         # reason this parser exists.
         #
-        # `bugs/FORMAL_argparse_spec_separators_in_a_help_string.md`: a spec is a
+        # `“A `;` or a `|` in a help string truncates it”`: a spec is a
         # `;`-separated record string with `|`-separated fields, so a help string
         # containing a `;` ended there and everything after it in the same string
         # parsed as MORE RECORDS — the observed symptom was two EMPTY
@@ -865,7 +865,7 @@ def test_the_module_builds_on_its_own(tmp, _shared):
 
     The build is a cold one: this file points GMOJO_HOME at a private CAS per
     process, so a dylib published by an earlier run cannot answer for this
-    module's source (bugs/FORMAL_sweep_cache_ignores_imports.md is the
+    module's source (FORMAL_sweep_cache_ignores_imports is the
     measurement of what happens when something keyed on the importer is served
     from a cache that does not know about it).
     """
@@ -1166,7 +1166,7 @@ def test_every_field_of_every_spec_survives_the_escaping(tmp, _shared):
     """The encoding is TOTAL and REVERSIBLE over the whole corpus, and the only
     backward-compatibility claim this rule needs is a measured one.
 
-    `bugs/FORMAL_argparse_spec_separators_in_a_help_string.md` picked the
+    `“A `;` or a `|` in a help string truncates it”` picked the
     escaping scheme on the condition that **no field of an existing spec contains
     a backslash**, and said that condition has to be "asserted by a test over the
     corpus rather than asserted here". This is that test, and it is three claims:

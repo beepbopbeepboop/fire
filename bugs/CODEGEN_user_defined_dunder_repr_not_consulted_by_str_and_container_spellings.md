@@ -239,7 +239,7 @@ different problem from the container repr:
   for any of this to consult. The doc's own original reproducer is in this
   shape, which is why its `repr([p])` row is fixed only for the shapes listed
   above.
-* `bugs/CODEGEN_struct_typed_field_reprs_as_an_integer.md` — a struct-typed
+* `CODEGEN_struct_typed_field_reprs_as_an_integer` — a struct-typed
   FIELD inside another struct's generated field dump (`Holder(p=P(...))` prints
   `Holder(p=4381809120, ...)`). `struct_field_types` says `int64_t` for that
   field and `struct_boxed_fields` does not list it, so the dump's

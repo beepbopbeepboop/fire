@@ -1924,5 +1924,5 @@ failing on x86-64 and are now reported on arm64, because arm64 now gets past
 the layout and read wall this round fixed and reaches the pre-existing
 returned-frame fault underneath it. Neither number changed, so this is not a
 regression and not a fix; it is the returned-frame convention
-(`bugs/FORMAL_returned_frame_caller_owned_block.md`) being the next thing in
+(`“FORMAL_returned_frame_caller_owned_block: `return <frame>` lowers”`) being the next thing in
 the chain, and these two rows are where it will show up first.

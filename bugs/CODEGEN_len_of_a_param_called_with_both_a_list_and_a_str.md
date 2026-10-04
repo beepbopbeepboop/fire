@@ -1,7 +1,7 @@
 # CODEGEN: `len(x)` on a parameter whose call sites are BOTH a list and a string reads a MojoList header as a C string
 
 Found 2026-10-02 while writing the regression case for
-`bugs/CODEGEN_string_arg_type_lost_across_forwarding_hop.md` (fixed and
+`“CODEGEN: a string argument's type is lost across a forwarding hop”` (fixed and
 deleted). It is a different slot — the answer is decided by what the
 PARAMETER is typed, not by who forwards it — and it is non-deterministic,
 which is how it stayed invisible.

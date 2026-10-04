@@ -90,4 +90,4 @@ found). See the commit message on this branch for the full red list; the other
 two rows in it are `gimple_tuple_dict_key_is_content_keyed` (pre-existing,
 `bugs/CODEGEN_dict_content_key_aliases_a_string_key.md`) and
 `gimple_char_scan_allocates_nothing_per_character` (a peak-RSS tripwire, 246.7 MB
-against a 60 MB limit — `bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md`).
+against a 60 MB limit — `“PERF: the per-character `str` scan allocated one `malloc(2)` per character”`).

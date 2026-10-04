@@ -201,7 +201,7 @@ neither a narrow whitelist add. Not attempted; no code change.
 
 This session implemented real loop-as-expression codegen for `list(x)`/
 `set(x)`/comprehension-as-value inside a compiled generator/coroutine
-body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+body (see `“CODEGEN_generator_function: Lib/codecs.py”`'s entry of the
 same date for the implementation writeup). This file's own two refusals
 are `_convert_egg_info_reqs_to_simple_reqs` (nested-`def`-as-callee,
 `url_req_space(...)`) and `Sectioned.read` (`map(...)`, categorically
@@ -533,7 +533,7 @@ returned value/type. This generically fixes `self.prop[key]` for any
 0-arg property/method (inherited or not) followed by a subscript,
 without touching `_signature_ctypes`/call-argument-packing machinery at
 all (a deliberately different, narrower code path from the held-back
-`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+`CODEGEN_args_kwargs_signature_assumed_forwarding_only`
 task #142 — NOT the same fix, NOT touching the same function).
 
 Verification: both `Distribution.name`/`Distribution.version`'s

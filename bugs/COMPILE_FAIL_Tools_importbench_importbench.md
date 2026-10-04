@@ -12,7 +12,7 @@ refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
 `cache_from_source(...)`) and `from_cache` (non-plain assignment target
 `module.__file__ = ...`). Both remain the tracked structural gaps
 (re-export-chain tracing into CPython's frozen bootstrap modules;
-`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+`CODEGEN_generator_non_plain_assignment_target_refused`'s
 unfixed heap-object attribute-write case). Not attempted; no code
 change.
 
@@ -22,7 +22,7 @@ Fresh safety-wrapped repro against current tree past d3e758a: identical
 refusal naming exactly `benchmark_wo_bytecode` (unresolved callee
 `cache_from_source(...)`) and `from_cache` (non-plain assignment target
 `module.__file__ = ...`). Cross-checked against
-`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+`CODEGEN_generator_non_plain_assignment_target_refused`'s
 own fresh 2026-08-26 re-verification: that family is still structurally
 unfixed (no heap-object attribute model), so no partial-fix outcome is
 available even if `cache_from_source` were resolvable (it would require
@@ -35,7 +35,7 @@ Fresh repro against current tree: identical two-function refusal,
 byte-for-byte the same as 2026-08-25 (`benchmark_wo_bytecode` on
 `cache_from_source(...)`, `from_cache` on the non-plain-assignment-
 target `module.__file__ = ...`). Cross-checked against
-`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+`CODEGEN_generator_non_plain_assignment_target_refused`'s
 own fresh 2026-08-26 re-verification: that doc's non-self/non-sys
 MemberExpr-target gap (exactly `from_cache`'s shape) is confirmed still
 structurally unfixed (no heap-object attribute model exists). No
@@ -131,7 +131,7 @@ the note's gap-3 (`sys.dont_write_bytecode` elision widening) moot for this
 file's outcome, exactly as that note predicted. `from_cache` remains refused
 for the documented reason only: `module.__file__ = '<test>'` /
 `module.__package__ = ''` on a real, later-read `types.ModuleType` instance —
-`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+`CODEGEN_generator_non_plain_assignment_target_refused`'s
 unfixed case, correctly still refused rather than silently elided. No new root
 cause; no code change made.
 

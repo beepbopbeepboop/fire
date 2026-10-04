@@ -46,7 +46,7 @@ successfully and answered **0** where the source says 101, 103, 213, 73, 21, 7,
 203 and 7 — and the SAME programs, rebuilt afterwards, answer all eight
 correctly. No refusal, no stderr, exit 0: a **silent wrong answer**, where the
 documented failure mode for that race is a loud `json.decoder.JSONDecodeError`
-in the `tool` class (`bugs/FORMAL_sweep_tool_json_decode_error.md`, superseded
+in the `tool` class (`FORMAL_sweep_tool_json_decode_error`, superseded
 by `FORMAL_dylib_manifest_written_in_place.md`, which is on another branch and
 not in this tree). **Not reproducible on demand** — it did not recur once this
 worker stopped sharing the directory — so it is filed here as an observation
@@ -140,7 +140,7 @@ has no proof — let alone a seven-argument one.)*
 this map for.** `base ** <computed exponent>` is **0 on arm64** and correct on
 x86-64: `2 ** 10` → 0 where the source says 1024, `3 ** y` → 0 where it says 27,
 while the literal exponent (`2 ** 4` → 16) is right on both. It is
-`bugs/FORMAL_variable_exponent_is_zero_on_arm64.md`, filed from this slice and
+`“FORMAL_variable_exponent_is_zero_on_arm64: `2 ** n` answers 0”`, filed from this slice and
 unfixed, and it is the direction that matters because `test_formal_run.py` builds
 **the host's** architecture for a positive case — on this project's machines,
 the one that gets it wrong.
@@ -183,7 +183,7 @@ divide-by-zero trap that no CPython oracle can express, by one
 
 ## 6. Filed, not fixed
 
-* **`bugs/FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64.md`** — `del a[i]`
+* **`FORMAL_del_of_a_subscript_is_a_silent_no_op_on_arm64`** — `del a[i]`
   and `del a[i:j]` build, run, exit 0 and **remove nothing** on arm64
   (`3 10` where CPython prints `2 20`), because the SubscriptExpr arm of
   `_emit_del` sits below an unconditional `continue`; the four helpers that
@@ -191,7 +191,7 @@ divide-by-zero trap that no CPython oracle can express, by one
   disagree about the answer. 39 uses in this repository, **0 in the stdlib**, so
   it moves no rate in either direction — it is a correctness defect, which is
   exactly why the sweep cannot find it.
-* **`bugs/FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero.md`**
+* **`“FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero”`**
   — a **one-field** struct's field assigned in a **zero-argument** `__init__`
   reads back as 0 in every other method, on both backends. Two fields work, a
   parameterised `__init__` works, a tuple store works, a method that stores the

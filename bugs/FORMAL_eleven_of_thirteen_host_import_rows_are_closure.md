@@ -180,7 +180,7 @@ on where a subject about a module is not.
    **sequencing** answer, not a capability one: write `glob` and `shlex` becomes
    the next wall for `test_suite.py` and `tools/suite.py`.
 3. **`shlex` has an open QUESTION of its own**, and it is not a module:
-   `bugs/FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source.md`
+   `FORMAL_link_accounting_shlex_entered_the_host_set_with_no_source`
    records that `shlex` was added to `HOST_MODULES` with no source, which fails
    `formal-link-accounting` in the everyday gate, and the doc asks which of two
    rules governs a sourceless standard-library name. Writing

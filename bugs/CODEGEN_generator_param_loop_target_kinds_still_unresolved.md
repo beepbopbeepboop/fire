@@ -4,7 +4,7 @@
 measured against CPython. Not fixed.**
 
 Found while closing item 8 of
-`bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md`. That work typed
+`CODEGEN_coro_yield_kind_unresolved_callsite`. That work typed
 the loop target when a generator's list parameter has positive list evidence
 (`_mojo_coro_param_elem_kinds` -> `_param_elem_types` -> `_elem_types` ->
 `_boxed_list_ptr`). These three shapes are the ones that evidence does not
@@ -175,7 +175,7 @@ def main():
     compiled:  -104 25 -20 -40 25 -20      (garbage)
 
 The generator-side twin of
-`bugs/CODEGEN_nested_list_loop_target_loses_inner_elem_type.md`, and the same
+`CODEGEN_nested_list_loop_target_loses_inner_elem_type`, and the same
 fix: the outer loop's target is typed `MojoList *` but never inherits the
 iterable's **nested** element ctype, so the inner loop reads the inner lists
 through `mojo_list_get_int`. That doc's "next step" applies unchanged, with

@@ -315,7 +315,7 @@ def test_resolution_authority(wd):
     finally:
         os.environ.clear(); os.environ.update(old)
 
-    # bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md: `_find` probed
+    # “The compiler has no way to see CPython's `Lib/` from an entry file outside it”: `_find` probed
     # only the two `.mojo` spellings, so `$PYTHONPATH` — which the search path
     # DOES honour — was silently useless for pointing at a CPython `Lib/`:
     # `$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at None.

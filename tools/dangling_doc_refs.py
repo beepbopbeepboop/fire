@@ -108,8 +108,9 @@ def candidates():
         if ls.returncode == 0 and ls.stdout:
             names = [n for n in ls.stdout.split('\0') if n.endswith(SUFFIXES)]
             return [n.replace(os.sep, '/') for n in sorted(names)
-                    if not any(checked_run.is_derived_dir(part)
-                               for part in n.replace(os.sep, '/').split('/'))]
+                    if n.replace(os.sep, '/') != SELF_PATH
+                    and not any(checked_run.is_derived_dir(part)
+                                for part in n.replace(os.sep, '/').split('/'))]
         print(f'warning: `git ls-files` exited {ls.returncode}; walking the '
               f'filesystem instead, so this run also sees untracked files',
               file=sys.stderr)
@@ -176,11 +177,27 @@ Two entries are deliberate rather than unfixed, and are the reason this ledger
 is a `.py` and not a JSON:
 
 `test_suite.py` names documents that do not exist (`NEVER_WRITTEN.md`,
-`NO_SUCH_DOC_ANYWHERE.md`) to PROVE the marker checks can fail. A walk for
-missing files is guaranteed to find one there.
+`NO_SUCH_DOC_ANYWHERE.md`, `DELETED_ONCE.md`, `SOME.md`) to PROVE the marker
+checks can fail. A walk for missing files is guaranteed to find one there. That
+also makes them the one thing in this tree a citation SWEEP must not rewrite:
+they are the negative controls, so "this name does not resolve" is the property
+under test, and a sweep that turned them into prose would silently delete the
+proof while leaving the check green. `tools/suite.py` cites a `.md` path as a
+fixture for the same reason.
 
-`tools/suite.py` cites a `.md` path as a fixture for the same reason.
+THE LEDGER ITSELF (`tools/dangling_refs_baseline.py`) is EXCLUDED from the
+walk, and it is excluded rather than entered because an entry for it cannot
+mean anything. Its whole content is the set of doc names other files still
+cite, so its own dangling-citation count is a function of what every OTHER
+file has been cleaned up to — it moves when a sweep lands, it moves when the
+compiler changes which docs exist, and `--write-baseline` would have to record
+its own pre-write number. That is not a ceiling, it is a snapshot of the
+ledger in the ledger. `test_suite.py` and `tools/suite.py` stay IN, because
+their fixtures are a fixed, small, intentional number that a ceiling can
+honestly bound.
 """'''
+SELF_PATH = os.path.relpath(BASELINE_PATH, os.path.dirname(HERE)).replace(
+    os.sep, '/')
 
 
 def load_baseline():

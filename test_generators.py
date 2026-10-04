@@ -1,5 +1,5 @@
 """Interpreter tests for real generator execution — Milestone 2 of
-bugs/INTERP_generator_yield_entirely_unimplemented.md.
+INTERP_generator_yield_entirely_unimplemented.
 
 Milestone 1 (already landed) added PARSER-ONLY support: real
 YieldExpr/YieldFromExpr AST nodes and FunctionDef.is_generator /

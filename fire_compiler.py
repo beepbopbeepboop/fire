@@ -340,7 +340,7 @@ class CompareChain:
     `operands[i] ops[i] operands[i+1]` link fails, without ever feeding a
     comparison's boolean RESULT into the next comparison as an operand
     (that was the original bug this node exists to avoid — see
-    bugs/CHAINED_COMPARISON_WRONG_RESULT.md). `len(operands) ==
+    CHAINED_COMPARISON_WRONG_RESULT). `len(operands) ==
     len(ops) + 1`."""
     operands: list
     ops: list
@@ -468,7 +468,7 @@ class YieldExpr:
     single TupleExpr `value` by the parser, matching how `return a, b` is
     represented). `value` is None for a bare `yield`. Milestone 1: parser +
     static generator-detection only — no interpreter/codegen execution
-    support yet (see bugs/INTERP_generator_yield_entirely_unimplemented.md).
+    support yet (see INTERP_generator_yield_entirely_unimplemented).
     """
     value: object = None
     line: int = 0
@@ -487,7 +487,7 @@ class AwaitExpr:
     """`await expr` — Milestone 3a: parser + AST only, matching how
     Milestone 1 handled YieldExpr/YieldFromExpr (no interpreter/codegen
     execution support yet — see FunctionDef.is_async and
-    bugs/INTERP_generator_yield_entirely_unimplemented.md for the sibling
+    INTERP_generator_yield_entirely_unimplemented for the sibling
     generator precedent this mirrors)."""
     value: object = None
     line: int = 0
@@ -654,7 +654,7 @@ class FunctionDef:
         # Lets a later milestone's generator-execution pass cheaply ask "does this specific
         # node need generator-aware handling" without re-walking the whole tree at runtime.
     is_async: bool = False  # True if declared `async def` — Milestone 3a
-        # (bugs/INTERP_generator_yield_entirely_unimplemented.md's async/await
+        # (INTERP_generator_yield_entirely_unimplemented's async/await
         # sibling). Detection is trivial (just "was `async` seen before this
         # `def`/`fn`"), unlike is_generator's body tree-walk. A function CAN be
         # both is_async AND is_generator (`async def f(): yield x` — a real,
@@ -901,7 +901,7 @@ class ComptimeVarStmt:
 #     CPython prints `(1,)`, exit 0, no diagnostic. `_parse_unpack_target`
 #     now emits `"(a,)"` for the 1-tuple and keeps `"(a)"` for the
 #     parenthesised name, and `for_target_is_tuple` is the only reader of
-#     that difference. (bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md)
+#     that difference. (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name)
 #   * A TRAILING comma used to leave an EMPTY name at every site that split
 #     the string independently. `split_top_level_commas` drops empty slots,
 #     so a trailing comma is now expressible and no consumer has to know it.
@@ -1030,7 +1030,7 @@ def for_target_single_name(target: object) -> object:
     C IDENTIFIER, and for `'(a)'` the target text is not one. Without it every
     lowering would either declare a variable literally named `"(a)"` or keep
     its own paren test — and its own paren test is the bug
-    (bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md), because
+    (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name), because
     a paren test cannot see the trailing comma that makes a 1-tuple unpack.
 
     Returns the input unchanged for a bare name, for a tuple target (the
@@ -1115,7 +1115,7 @@ def _string_prefix_start(source: str, quote_pos: int) -> int:
     opaque unit) and `py_tokenize`'s `replace_multiline_strings` (which
     needs the same prefix boundary for triple-quoted strings). Extracted
     here instead of duplicated per CLAUDE.md's "consolidate duplicates"
-    rule — see bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    rule — see PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
     """
     # Explicit `==` comparisons, not `c in 'fFrRbBuUtT'`: this codegen's
     # compiled `in`-for-char* path is a documented stub (always returns
@@ -1213,7 +1213,7 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
         # `t` in `r"\t"`'s `\t`), treating the *original* string's own
         # closing quote as the *opening* quote of a brand-new bogus t-string
         # and scanning for the next unrelated quote later in the statement.
-        # See bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+        # See PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
         if stmt[i] in ('"', "'"):
             qch = stmt[i]
             pstart = _string_prefix_start(stmt, i)
@@ -1226,7 +1226,7 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
             # own delimiter (legal since PEP 701 / Python 3.12, e.g.
             # `f'result: {g('a', 'b')}'`) would otherwise be truncated at
             # the first reused quote by the plain simple-scan branch below.
-            # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md.
+            # See PARSE_FAIL_fstring_same_quote_reuse.
             needs_brace_aware_scan = any(c in ('t', 'T', 'f', 'F') for c in prefix)
             if needs_brace_aware_scan:
                 # A real t/f-string prefix: use the brace-depth-aware scan
@@ -1324,7 +1324,7 @@ def _split_on_separators(s: str) -> list[str]:
     (never even reaching the token stream, unlike a real SEMICOLON token —
     see py_tokenize's `kind in ("WS", "UNK", "XFER"): continue`), losing the
     array's size entirely with no way to recover it downstream. See
-    bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case."""
+    BUG-2026-008 (box.3d/game) for the real-world motivating case."""
     parts, buf, in_str, depth = [], [], None, 0
     i = 0
     while i < len(s):
@@ -1426,7 +1426,7 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
 
     The rule is CPython's, and it is worth stating exactly because getting it
     wrong is the bug this function exists to make impossible
-    (bugs/CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file.md).
+    (CODEGEN_triple_quoted_literal_ending_in_a_backslash_swallows_the_rest_of_the_file).
     (That doc's examples spell quote runs out longhand from here on: a literal
     triple quote inside this docstring would close it.)
 
@@ -1492,7 +1492,7 @@ def decode_c_escapes(s: str) -> str:
     consolidate duplicates rather than maintaining parallel implementations — the
     interpreter and the compiled path each carried their own copy and the formal
     backends had none, which is
-    bugs/FORMAL_string_literal_escape_is_not_decoded.md).
+    FORMAL_string_literal_escape_is_not_decoded).
 
     Why a consumer has to call it at all: the parser strips a string literal's
     outer quotes and hands the body on as RAW SOURCE TEXT, because the compiled
@@ -1859,7 +1859,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # Shared with _process_nested_tstrings via
                 # `_string_prefix_start` (module-level helper) rather than
                 # duplicated here — see
-                # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+                # PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
                 start = _string_prefix_start(src, i)
                 # A triple-quote opener is three of the quote character `c`
                 # that opened this position, i.e. `src[i:i+3] == c * 3`,
@@ -3745,7 +3745,7 @@ class Parser:
                     # `class _Dialog(commondialog.Dialog):` in
                     # tkinter/filedialog.py, whose Dialog IS a real,
                     # compiled struct from the imported commondialog
-                    # module) — see bugs/COMPILE_FAIL_tkinter_filedialog.md.
+                    # module) — see COMPILE_FAIL_tkinter_filedialog.
                     last_name = t.value
                     self._advance()
                     while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
@@ -4395,7 +4395,7 @@ class Parser:
         # is `in`, `:`, or `,`). This site previously had no guard at all —
         # it unconditionally swallowed any _CONV_KWS token, misparsing
         # `comptime for var in ...` and `comptime for var, j in ...`
-        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md).
+        # (PARSE_FAIL_var_as_for_loop_target_comma).
         if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
                 and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
                 and self._peek(1).kind != "COLON"
@@ -5294,7 +5294,7 @@ class Parser:
             # is always exactly `(CONV_KW name)` -- the keyword, one name-like
             # token, then the closing RPAREN -- so also require peek(2) to be
             # RPAREN before committing to the convention-prefix reading.
-            # Without this, `(var not in lst)` (bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md)
+            # Without this, `(var not in lst)` (PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in)
             # wrongly swallowed `var` as a bogus prefix (peek(1)=KW('not')
             # satisfied the old NAME-or-KW check), leaving `not in lst`
             # dangling and eventually failing with "Expected RPAREN got
@@ -5629,7 +5629,7 @@ class Parser:
         # path below — otherwise `{**a, **b}` gets misclassified as a set of
         # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
         # instead of building a dict (see
-        # bugs/INTERP_dict_double_star_unpack_runtime.md).
+        # INTERP_dict_double_star_unpack_runtime).
         if isinstance(first, UnaryOp) and first.op == "**":
             pairs = [(first, None)]
             while self._peek().kind == "COMMA":
@@ -6148,7 +6148,7 @@ class Parser:
         # branch below, falls through to the shared continuation tail (dotted-
         # name loop / call-parens / subscript loop / trailing-op consumption)
         # instead of returning immediately — see
-        # bugs/PARSE_FAIL_annotation_paren_then_dot.md for why an early return
+        # PARSE_FAIL_annotation_paren_then_dot for why an early return
         # here left a trailing `.attr`/`|`/`&` continuation dangling.
         if self._peek().kind == "LPAREN":
             name = prefix + "("
@@ -6263,7 +6263,7 @@ class Parser:
             # downstream, so the literal string "..." is a safe, sufficient
             # representation. Also route through _finish_type_ann_tail
             # for consistency with every other branch (e.g. `g: ... | None`).
-            # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+            # See PARSE_FAIL_annotation_ellipsis.
             self._advance(); self._advance(); self._advance()
             return self._finish_type_ann_tail(prefix + "...")
         else:
@@ -6274,7 +6274,7 @@ class Parser:
             # the NAME/KW path, consume any trailing operator continuing the
             # expression (e.g. `radd: 1 + a` — a NUMBER-shaped prefix followed
             # by a binary op; see
-            # bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md).
+            # PARSE_FAIL_annotation_leading_literal_trailing_op).
             return self._finish_type_ann_tail(prefix + self._advance().value)
         return self._finish_type_ann_tail(name)
 
@@ -6294,7 +6294,7 @@ class Parser:
         instead of returning its own opaquely-captured text directly. This
         was added as the fix for the fourth in a chain of annotation-parsing
         gaps found in one session (see
-        bugs/PARSE_FAIL_annotation_paren_then_dot.md): each earlier fix
+        PARSE_FAIL_annotation_paren_then_dot): each earlier fix
         (6ee8291, 6e6020f, bb28e80, c2933a7) patched exactly one branch to
         handle exactly one missing continuation shape (a trailing binary
         op, then specifically `|`/`&`, then LPAREN/LBRACKET/LBRACE routing
@@ -6471,7 +6471,7 @@ class Parser:
     def _capture_opaque_annotation_tail(self) -> str:
         """Consume the remainder of an arbitrary (non-type) expression that
         continues past a type-shaped annotation prefix, e.g. the `obj)` in
-        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
+        `gamma: some < obj)` — see PARSE_FAIL_annotation_trailing_binary_op.
         Python's grammar permits any expression in an annotation position
         with zero semantic type-checking, and nothing downstream re-parses
         the annotation string assuming real type syntax (traced in commit
@@ -6518,7 +6518,7 @@ class Parser:
            permits an arbitrary expression in an annotation position (PEP
            649), so the operator and its RHS are captured as opaque text via
            `_capture_opaque_annotation_tail` instead of raising. See
-           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
+           PARSE_FAIL_annotation_trailing_binary_op. `?` is
            deliberately excluded here — it's the optional-type suffix
            handled by the caller, `_parse_type_ann`."""
         while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
@@ -7733,7 +7733,7 @@ class Parser:
         # `peek(1) != COMMA` guards the same collision for a plain
         # tuple-unpack target starting with the identifier `var`/etc.,
         # e.g. `for var, other_var in pairs:`
-        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
+        # (PARSE_FAIL_var_as_for_loop_target_comma) — without it,
         # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
         # neither existing exclusion), leaving `_parse_unpack_target()` to
         # start from the comma itself and misparse everything after.

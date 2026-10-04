@@ -1334,7 +1334,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                     # defaulting to int64_t, which produces a real GCC
                     # -Wint-conversion error at the mojo_map call site (passing
                     # an int64_t where mojo_map expects void*) — see
-                    # bugs/CODEGEN_map_over_untyped_param_arg.md.
+                    # CODEGEN_map_over_untyped_param_arg.
                     if func_name == 'map' and arg_index == 1:
                         inferred[pname] = 'MojoList *'
                         break

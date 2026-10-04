@@ -245,7 +245,7 @@ is stale for these two; see the report.
    SIGSEGV — `os` is an imported-symbol marker but its `walk` is never in
    `func_return_types` at all (measured: zero entries containing
    `"walk"`). Filed separately, with the repro and the two design options:
-   `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`.
+   `CODEGEN_unresolved_imported_callable_default_null_pointer`.
    This is the exact case `_walk_tree`/`glob_tree` would hit if their
    eligibility gate were simply relaxed, which is why it is not.
 3. **`iter_files`' `lambda *a, **k: _walk(*a, walk=_files, **k)`** — the

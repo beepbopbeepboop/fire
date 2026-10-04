@@ -372,7 +372,7 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     work in some shapes, but `Int(UnsafePointer[T].alloc(n))` read the
     bogus temp (0) and any round-trip of that handle through `Int()` back
     into a pointer produced a null deref. See
-    `bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md`.
+    `CODEGEN_int_of_alloc_struct_pointer_returns_zero`.
 
     Lowered to a per-element-type `_alloc_n_<T>` helper (plain C, emitted in
     the preamble alongside `_alloc_<T>` / `_mojo_at_<T>`): a `calloc(n,
@@ -684,7 +684,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # codegen represents a deque as a plain MojoList * (append / popleft /
     # appendleft lower onto mojo_list_* in gimple_gen_methods.py). asyncio
     # (queues.py, locks.py) uses deque as a FIFO of Future handles
-    # (bugs/COMPILE_FAIL_asyncio_queues.md gap 2). Route it to the same
+    # (“COMPILE_FAIL: asyncio/queues.py” gap 2). Route it to the same
     # builtin lowering as list().
     _deque_base = node.func
     if isinstance(_deque_base, gimple_ctypes.SubscriptExpr):
@@ -2276,7 +2276,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return rt, gen._call_expr(rt, fn, pairs)
     # `vars(obj)` — same real MojoDict* field view as `obj.__dict__` just
     # above in `_lower_MemberExpr` (see that call site's own comment; this
-    # is Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md,
+    # is Step 0 of “setting/getting an arbitrary attribute on a generically-typed object”,
     # `vars()`/`__dict__` are the same operation in real Python).
     #
     # `_mojo_dispatch_asdict(void *obj)` (gimple_module_gen.py) is ALREADY
@@ -2510,7 +2510,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # missed every struct table and fell into `_lower_opaque_ctor`, which
     # returns a lone string argument unchanged — `x` became the literal
     # `"a"` and `x.widgetName` then dispatched getattr on a `char *`
-    # (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+    # (“OPEN: `from mod import Class as Alias”).
     # Applied AFTER the keyword rename because `_struct_import_aliases`
     # already records the renamed name (see `_note_struct_import_alias`).
     _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
@@ -3285,7 +3285,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
           or at.endswith(' *')):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —
-        # see bugs/CODEGEN_all_any_dict_set_miscompile.md) shares
+        # see CODEGEN_all_any_dict_set_miscompile) shares
         # _materialize_as_list with enumerate()/str.join()/bytes.join()/
         # shlex.join(); a genuinely-unknown boxed handle is now also
         # runtime-guarded (mojo_is_registered_dict/_set) there instead of
@@ -3383,7 +3383,7 @@ def _bind_callable_element_param(gen, fn_expr, kelem_t: str) -> dict:
       module-level list of strings printed the input order, because each
       key was `mojo_str_from_int(<address>) + "!"` and every key therefore
       compared as a different decimal of a different address. See
-      bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+      CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.
 
     The stamp is a node attribute rather than a `gen` side table because the
     value belongs to THIS reference of the lambda, not to the lambda: the
@@ -4023,7 +4023,7 @@ def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str
     # An unrecognized argument type (a Mojo container struct with its own
     # `__reversed__`, a struct pointer, …). A real general fix is
     # `__reversed__` dispatch + the struct iterator protocol (see
-    # bugs/CODEGEN_generator_function_Lib_collections___init__.md's
+    # CODEGEN_generator_function_Lib_collections___init__'s
     # `reversed()` discussion). Until then, fall through to the generic
     # dynamic-dispatch value the pre-`reversed()`-lowering code produced —
     # the consuming `for` loop then takes its own generic path. NOT a
@@ -4146,7 +4146,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     MojoStr*/MojoDict*(keys)/MojoSet*, plus the int64_t-boxed-pointer
     resolution `_lower_comprehension` already does) as real
     comprehensions and `for x in <iterable>:` loops, instead of a third,
-    narrower iteration scheme. See bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md.
+    narrower iteration scheme. See CODEGEN_set_list_ctor_ignores_iterable_arg.
 
     NB: first param is named `gen` (not `_g`) so the self-hosted backend
     types it `GimpleGen *` — an unrecognized name is typed `int64_t`, and
@@ -4506,7 +4506,7 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
     # comment) gets compiled by the ordinary strict C frontend instead,
     # which correctly flags a mismatched arg (e.g. int64_t passed where
     # a struct pointer is declared) as a hard error. See
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md.
+    # “setting/getting an arbitrary attribute on a generically-typed object”.
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     env_type = gen.func_param_types.get(lifted, ['void *'])[0]
     full_arg_pairs = [(env_type, env_var)] + arg_pairs
@@ -4776,7 +4776,7 @@ def _ast_walk(body):
     these a name the body really does read:
 
       - `condition` (a TernaryExpr's test) — `lambda k: d[k] if p else 0`,
-        the shape bugs/CODEGEN_captured_string_local_reads_falsey.md reports
+        the shape “CODEGEN: a captured `char *` local reads as falsey inside the closure body” reports
         as "a captured string reads falsey". It read as 0 because it was
         never captured at all; the truthiness coercion was never involved.
       - `index` — `lambda k: d[p]`, a captured name used as a subscript key.
@@ -5201,7 +5201,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # a module-level list of strings is the measured case: each key came out
     # `mojo_str_from_int(<address>) + "!"`, so every key was a distinct
     # decimal of a distinct address and the sort returned the INPUT order.
-    # See bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+    # See CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.
     ci.call_site_param_types = getattr(node, '_call_site_param_types', None) or {}
     # Register return type and param types now so call sites resolve correctly
     ret_type = gen._infer_return_type(syn_body)
@@ -7332,7 +7332,7 @@ def _array_field_elem_ptr(gen, member_expr) -> tuple[str, str] | None:
     pointer-arithmetic helpers, and the existing whole-struct-array-
     element assignment field-by-field-copy branch) already handles it
     correctly with no further special-casing needed. See
-    bugs/BUG-2026-008.md (box.3d/game) for the motivating real-world case
+    BUG-2026-008 (box.3d/game) for the motivating real-world case
     (`World.blocks: [Block; MAX_BLOCKS]`)."""
     if not isinstance(member_expr, gimple_ctypes.MemberExpr):
         return None

@@ -48,7 +48,7 @@ builds on both architectures and dies with **SIGSEGV (exit 139)**. With
 So lifting `Box().get()` would put the same unbuilt nested frame behind the call,
 and the crash would arrive one step later rather than not at all. Filed, with the
 four-row boundary table and the direction to take, as
-`bugs/FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_nothing_built.md`;
+`FORMAL_a_method_of_a_one_field_holder_reads_a_nested_frame_nothing_built`;
 that document's step 2 (place the frame at the construction site) is what would
 make this document's step 2 landable, so they are one piece of work and not two.
 

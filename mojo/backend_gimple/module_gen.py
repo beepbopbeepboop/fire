@@ -465,7 +465,7 @@ def _returns_kinds_valued(gen, node, param_kinds=None) -> bool:
 wrong-static-answer failure the whole table exists to avoid.
 
     The list-literal arm was MISSING, and the omission is what
-    `bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md` is:
+    `CODEGEN_list_element_read_defaults_to_str_across_a_call` is:
     `_lower_list_literal` records the per-slot kinds of a heterogeneous
     literal on the value (`mojo_list_set_kinds`) and marks it in
     `gen._maybe_kinds_vals` — but only while THAT function is being
@@ -3501,7 +3501,7 @@ def gen_module_impl(self, stmts):
     # AST-node struct layouts below (`Scope`, `Token`, `Parser`, ...). That
     # was a 355-line difference in the generated C for a program with no AST
     # in it at all, changing only because of where the file was written. See
-    # bugs/CODEGEN_selfhost_source_dir_claims_any_file_under_the_checkout.md.
+    # CODEGEN_selfhost_source_dir_claims_any_file_under_the_checkout.
     _is_selfhost_file = _is_selfhost_source_file(_cur_file)
     if _is_selfhost_file:
         self.struct_field_types['Scope'] = {
@@ -4510,7 +4510,7 @@ def gen_module_impl(self, stmts):
                     _obs_conflict[_okey] = True
 
         # CONTEXT-TRACED container evidence (residue recorded in
-        # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md): an
+        # “the constructor-call-site field-typing pass understood only scalars”): an
         # argument that is a LOCAL bound to a container literal
         # (`def mk(src): return Ident(src)` after `src = [1, 2, 3]`), or a
         # `self.<field>` read of a field the caller's OWN struct sets to a
@@ -5598,7 +5598,7 @@ def gen_module_impl(self, stmts):
     # every special case to the generic dynamic-dispatch fallback, which
     # raises a genuine (uncaught) runtime `AttributeError: Token` the
     # instant that assignment executes — see
-    # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md. Must run BEFORE
+    # “COMPILE_FAIL: Tools/cases_generator/parser.py”. Must run BEFORE
     # `_gen_toplevel` (this scan does; a second, later, defensive-only
     # copy of this same registration also lives in this file's toplevel
     # global-declaration scan, which runs AFTER `_gen_toplevel` and so
@@ -9947,7 +9947,7 @@ def gen_module_impl(self, stmts):
         whatever default 'not seen at all' implies (int64_t, via the
         unconditional "Globals are stored at C level as int64_t"
         fallback), even for an obviously-pointer-typed RHS. See
-        bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
+        CODEGEN_multi_assign_local_var_type_not_inferred
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
         _phase17_set_gtype(_gname, _phase17_value_type(_value), _own)
@@ -10062,7 +10062,7 @@ def gen_module_impl(self, stmts):
         defaulting through the generic int64_t/`int` fallback,
         producing an invalid `char *`-field-assigned-from-`int`
         mismatch at both branches. See
-        bugs/CODEGEN_generator_function_Lib_tarfile.md.
+        “CODEGEN_generator_function: Lib/tarfile.py”.
 
         Deliberately NOT self-recursive for the same reason
         `_phase17_scan_try_branches` isn't (a nested function calling
@@ -11619,7 +11619,7 @@ def gen_module_impl(self, stmts):
                 # shape exactly; guarded so it never overwrites a
                 # richer/already-correct entry (e.g. one a FromImportStmt
                 # or nested-body import already set for this exact name).
-                # See bugs/COMPILE_FAIL_Tools_cases_generator_parser.md.
+                # See “COMPILE_FAIL: Tools/cases_generator/parser.py”.
                 if local_name not in self.imported_symbols:
                     self.imported_symbols[local_name] = {
                         'module': _tm,
@@ -11657,7 +11657,7 @@ def gen_module_impl(self, stmts):
         `_global_c_decl_types[gname]` from the MODULE-LEVEL RHS — re-freezing
         the narrow kind the join had just reconciled. The two scans are the
         re-derivation sites the analysis in
-        `bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md` named, and this
+        `“COMPILE_FAIL: Mac/BuildScript/build-installer.py”` named, and this
         is the second one; the first (the field-freeze loop's
         `_own_overlay_global_ctype`) already prefers the own-overlay
         conclusion, which only helps once this scan stops overwriting it.
@@ -12723,7 +12723,7 @@ def gen_module_impl(self, stmts):
         # module whose functions are reachable through this path needs real
         # return annotations. That is what build_config.find_gcc/find_gxx now
         # carry, and why
-        # bugs/CODEGEN_optional_runtime_units_not_linked.md records the
+        # CODEGEN_optional_runtime_units_not_linked records the
         # unannotated case as a hazard rather than fixing it here.
         #
         # Separately, and NOT fixed here: the emitting line below guards with
@@ -12818,7 +12818,7 @@ def gen_module_impl(self, stmts):
     # `self._generator_api` alone is not covered by `_supported_generators`/
     # `_generator_method_api`: a NESTED `async def` (create_task's
     # wrapper idiom, or the detached-async `var coro = wrapper()` idiom --
-    # see bugs/hard/CODEGEN_coro_detached_async_take_handle.md) is
+    # see CODEGEN_coro_detached_async_take_handle) is
     # deliberately keyed straight into `_generator_api` under its qualified
     # base name (register()'s own comment on why: there's no top-level def
     # with its bare name for `_supported_generators` to skip emitting), so
@@ -13429,7 +13429,7 @@ def gen_module_impl(self, stmts):
             # emit_struct_defs=False (e.g. a transitively-imported
             # sibling's own top-level generator, compiled standalone via
             # _compile_imported_module -> _compile_link_inline_cpp_unit —
-            # see bugs/COMPILE_FAIL_Tools_cases_generator_parser.md) never
+            # see “COMPILE_FAIL: Tools/cases_generator/parser.py”) never
             # populated THIS gen's own `_struct_typedef_texts` (that dict
             # is per-instance, only ever filled by the emit_struct_defs=
             # True pass above, which such a temp_gen never runs) even

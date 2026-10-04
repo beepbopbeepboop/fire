@@ -106,7 +106,7 @@ repository was changed.
 ## Original report (2026-09-2x)
 
 **State: OPEN. NOT fixed. Found while re-verifying
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_datafiles.md`; a separate bug
+`“COMPILE_FAIL: Tools/c-analyzer/c_parser/datafiles.py”`; a separate bug
 from that one, which is now fixed.**
 
 The compiled path's `stat` module exposes none of the `S_I*`/`S_IW*` mode

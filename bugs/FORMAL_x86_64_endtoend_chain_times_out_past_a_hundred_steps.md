@@ -4,7 +4,7 @@
 and the premise was the bug. What is left is one real boundary, named exactly,
 with the measurement that says so.** Found 2026-10-02 while finishing the SysV
 stack-argument convention's proof half
-(`bugs/FORMAL_x86_64_stack_argument_past_the_twentieth_needs_a_disp32_lemma.md`,
+(`“`x86_step_mov_rm64_mem_disp32` does not exist”`,
 deleted with its fix — the lemmas it asked for are in `lib/X86.lean` and wired in
 `formal/x86_64_endtoend_test.py`). Re-opened and rewritten 2026-10-02 on
 `work/formal8-14`.

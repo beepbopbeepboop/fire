@@ -293,7 +293,7 @@ Confirmed by reading the source: every one of these four generators
 `yield (pyop_name, pyop_value)`), and `parse_location_table` does
 `yield addr, end_addr, None` (a 3-tuple). This is the SAME well-known,
 already-documented, deliberately-out-of-scope limitation as
-`bugs/CODEGEN_generator_function_Lib_weakref.md` (`WeakValueDictionary
+`“CODEGEN_generator_function: Lib/weakref.py”` (`WeakValueDictionary
 .items`/`WeakKeyDictionary.items` both `yield key, value`) and several
 other `bugs/CODEGEN_generator_function_Lib_*.md` docs: the C++20
 coroutine codegen this compiler uses for generator functions only

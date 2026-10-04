@@ -1,5 +1,5 @@
 """REAL behavioral tests for the two closure-capture bugs documented in
-bugs/CODEGEN_device_context_captured_function_parameter_closures_broken.md,
+CODEGEN_device_context_captured_function_parameter_closures_broken,
 blocking std/gpu/host/device_context.mojo independent of async:
 
 Repro 1 — a comptime FUNCTION-TYPED bracket parameter on a struct method,

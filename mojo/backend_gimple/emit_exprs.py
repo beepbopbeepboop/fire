@@ -1742,7 +1742,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # raising a genuine (uncaught) `AttributeError: Token` the
         # instant this assignment executes — not merely an unresolved
         # stub value, an actual fatal exception. See
-        # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's runtime
+        # “COMPILE_FAIL: Tools/cases_generator/parser.py”'s runtime
         # `AttributeError: Token` gap (parser.py -> parsing.py -> `from
         # plexer import PLexer` -> plexer.py's `Token = lx.Token`).
         # Same "class access unimplemented, stub rather than crash"
@@ -1879,7 +1879,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # object itself, which has no `.parent` — silent wrong
         # runtime behavior (AttributeError) rather than a compile
         # error, since the struct-name fallback further below (Step
-        # 4, bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
+        # 4, “setting/getting an arbitrary attribute on a generically-typed object”)
         # already routes unknown MojoBoundMethod fields through
         # runtime dispatch instead of a hard GCC error. See bugs/
         # COMPILE_FAIL_zipfile__path___init__.md.
@@ -2225,7 +2225,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     op = '->' if '*' in ot else '.'
     struct_name = gimple_exprtypes._struct_name_of(ot)
     # `obj.__dict__` on a value whose struct type is statically known
-    # (Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
+    # (Step 0 of “setting/getting an arbitrary attribute on a generically-typed object”)
     # — a real MojoDict* view of the struct's OWN already-known fields,
     # matching Python's `obj.__dict__` semantics (distinct from the
     # Sub-cases A-C dynamic-storage problem that same doc's later steps
@@ -2372,7 +2372,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # field — falling through to the generic "unknown struct field"
     # handling below used to blindly emit an invalid `{ov}->{member}`
     # access (`'C' has no member named 'b'` from the C compiler; see
-    # bugs/CODEGEN_bound_method_as_value_not_resolved.md). Recognize the
+    # CODEGEN_bound_method_as_value_not_resolved). Recognize the
     # method case first and produce a real bound-method value instead.
     if struct_name in gen.struct_field_types and (
             f"{struct_name}_{node.member}" in gen.func_return_types
@@ -2567,7 +2567,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # the boxed result back to char * here is what makes
             # `print(err.filename)` show the real string instead of raw
             # pointer bits as a number. See `_is_except_as_member_target`
-            # /bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+            # /“setting/getting an arbitrary attribute on a generically-typed object”'s
             # "Residual gap: caught exception objects" section.
             _boxed_ft = 'char *'
         if _boxed_ft is not None and _boxed_ft != 'int64_t':
@@ -2595,7 +2595,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     elif struct_name in gimple_ctypes._FIXED_RUNTIME_STRUCT_NAMES:
-        # Step 4 (bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md):
+        # Step 4 (“setting/getting an arbitrary attribute on a generically-typed object”):
         # `ot` resolved to one of THIS codegen's own fixed-layout runtime
         # structs (MojoBoundMethod, ...), and `node.member` isn't one of
         # its real, hardcoded C fields — the generic "Unknown struct
@@ -2933,7 +2933,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # method to disambiguate the two intents. Mirrors the identical
     # fix already applied to _lower_subscript's `self.prop[key]` and
     # the MemberExpr chain's `self.prop.attr` (see those comments /
-    # bugs/COMPILE_FAIL_zipfile__path___init__.md) — this is the
+    # “COMPILE_FAIL: Lib/zipfile/_path/__init__.py”) — this is the
     # third and, with `is`/`is not` excluded, final direct-consumer
     # context that had no such handling. Found via Tools/
     # cases_generator/cwriter.py's CWriter.set_position: `gap =
@@ -3060,7 +3060,7 @@ def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
 # `while nxt != proven:` / `if cache == proven:` convergence test, since each
 # round builds a fresh one. With no GC the loop never ends and leaks a set per
 # round (the 43 GB two-line compile in
-# bugs/CODEGEN_container_eq_is_pointer_identity.md). `is` / `is not` keep
+# “CODEGEN: `==` / `!=` between two containers is POINTER identity”). `is` / `is not` keep
 # pointer identity below, which is what they are for.
 
 # The C type a container operand has, or its `_actual_types` recovery of it,

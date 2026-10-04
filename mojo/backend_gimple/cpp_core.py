@@ -87,7 +87,7 @@ def _cpp_short_circuit_bool(gen, node) -> bool | None:
     operand once the left side already decides the result, so the right
     operand's own resolvability (here, a top-level enum class name this
     codegen doesn't thread into a generator's coroutine scope — see
-    bugs/CODEGEN_generator_function_Lib_test_libregrtest_runtests.md)
+    CODEGEN_generator_function_Lib_test_libregrtest_runtests)
     is irrelevant to the branch's real, correct-for-this-host truth
     value. Returns True/False only when the ENTIRE condition is decided
     this way; None otherwise (ordinary runtime-dependent condition, or
@@ -632,7 +632,7 @@ def _cpp_string_literal_expr(gen, val: str) -> str:
     C string literal's contents, so the compiled generator printed the
     literal text `f"===== {text} "` instead of interpolating `text` —
     found via Apple/__main__.py's `group()` `@contextmanager` generator
-    (bugs/COMPILE_FAIL_Apple___main__.md). Builds a nested
+    (“COMPILE_FAIL: Apple/__main__.py”). Builds a nested
     `mojo_str_cat(...)` expression tree exactly like `_cpp_percent_format`
     does for `%`-formatting, since this expression-only emitter has no
     statement side channel to build the value up incrementally in
@@ -6089,7 +6089,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # anything else (a dict/list `.items()`-shaped call, a struct
         # __iter__, ...) falls through to the pre-existing
         # single-bogus-identifier path below unchanged (see
-        # bugs/CODEGEN_generator_function_Lib_weakref.md for that
+        # “CODEGEN_generator_function: Lib/weakref.py” for that
         # separate, still-open gap).
         if not s.else_body and gen._cpp_iterable_is_delegatable_generator_call(s.iterable):
             return gen._cpp_for_generator_delegate(_names, s.iterable, s.body,
@@ -6948,7 +6948,7 @@ def _cpp_async_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[
     (`self._async_gen_api` -- same source-order-dependent "callee
     already compiled" constraint `_is_async_call_to_known_fn` documents
     for plain async-awaits-async composition). As of the follow-up fix
-    to bugs/hard/CODEGEN_async_gen_params_silent_regression.md, the
+    to CODEGEN_async_gen_params_silent_regression, the
     call MAY carry real positional arguments -- threaded through to
     `{base}_impl(...)` exactly like the sibling async-awaits-async
     composition call site (`_cpp_expr`'s `AwaitExpr` case, `call_args

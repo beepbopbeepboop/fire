@@ -177,7 +177,7 @@ candidate table, or a NAME in the one-word table. A call to a FUNCTION is none
 of the three, and `mk` is not a class name. So `mk(1)` is invisible to it, in
 exactly the case where the rewrite has just failed to fire.
 
-`bugs/FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works.md` (deleted
+`FORMAL_dataclass_own_eq_is_still_refused_though_dispatch_works` (deleted
 by `work/formal8-4` with its fix) measured the audit at 0 of 13 and this is the
 row it did not have. Note the audit does fire when the rewrite has ALREADY
 replaced the comparison node — it cannot see it, which is the safe direction —
@@ -228,6 +228,6 @@ print(mk(1) == mk(2), end=' ')"                   # True
 ## Not in a test, and why
 
 A row asserting `0` would make a known-wrong answer the expectation, which is
-what `bugs/FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary.md` declines to
+what `FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary` declines to
 do for the same family and for the same reason. The measurement belongs here
 until the answer is 1.

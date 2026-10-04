@@ -26,7 +26,7 @@ crashes and the other declines" is the shape that must not survive.
 
 The first construct here is the read-modify-write through a subscript
 (`q[0] += 5`), which arm64 had as `_emit_subscript_aug` and x86-64 refused
-outright — bugs/FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused.md.
+outright — FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused.
 The refusal beside it is the same construct over a list of strings, where both
 backends used to reach the integer ALU with two `char *` operands.
 
@@ -203,7 +203,7 @@ CASES = [
     # symbol that does not exist.  Both backends therefore returned whatever
     # the call left in the return register — measured, -6 for `len(range(10))`
     # on BOTH — and one architecture being right would have been as much a bug
-    # as both being wrong.  (`bugs/FORMAL_x86_64_formal_backend_gaps.md`.)
+    # as both being wrong.  (`FORMAL_x86_64_formal_backend_gaps`.)
     #
     # Four operand shapes in one line, because the fix is not one rule and the
     # four are the four ways to be wrong about it:
@@ -229,7 +229,7 @@ CASES = [
     # x86-64 passed six integer arguments in registers, so a seven-value
     # `printf` was refused on x86-64 and built on arm64, and a case that tripped
     # it would have reported that filing instead of this one
-    # (`bugs/FORMAL_x86_64_argument_registers.md`, now deleted).  It is one call
+    # (`FORMAL_x86_64_argument_registers`, now deleted).  It is one call
     # again now that
     # both conventions have a stack area, and
     # `a_variadic_printf_with_an_argument_in_the_frame` below is the row that
@@ -476,7 +476,7 @@ CASES = [
     # than a frame address (`model.struct_fits_one_word` says the same thing in
     # its own words), and on this backend a field stored by a zero-argument
     # `__init__` of a one-field struct reads back as 0
-    # (`bugs/FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero.md`),
+    # (`“FORMAL_one_field_struct_field_stored_in_a_zero_arg_init_reads_as_zero”`),
     # so a one-field spelling of this case would be measuring that bug and not
     # this construct.
     ("aug_division_through_a_frame_slot",
@@ -516,7 +516,7 @@ CASES = [
     # the other.  Both conventions are implemented now
     # (`formal/x86_64_codegen.py`'s `_load_home_from_stack`/`_emit_call` and
     # `_MAX_INCOMING_ARGS` on both backends), which is what
-    # `bugs/FORMAL_x86_64_argument_registers.md` asked for, and which is deleted;
+    # `FORMAL_x86_64_argument_registers` asked for, and which is deleted;
     # before that x86-64
     # REFUSED the program and arm64 answered it, which is the two-architecture
     # disagreement about one source file this file exists to end.
@@ -1017,7 +1017,7 @@ CASES = [
     #
     # The two that were not correct are the interesting half, and they are in
     # `test_formal_list_splat.py` (arm64 built `[*a]` as an EMPTY list) and in
-    # bugs/FORMAL_arm64_set_union_result_blob_has_the_wrong_count.md.
+    # FORMAL_arm64_set_union_result_blob_has_the_wrong_count.
     ("read_slice_of_a_list",
      "def main():\n"
      "    var a = [10, 20, 30, 40, 50]\n"

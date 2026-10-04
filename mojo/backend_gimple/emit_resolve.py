@@ -236,7 +236,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
     # entry file and `import argparse` used to degrade to a receiver stub with
     # the source tree sitting right there on disk. Detection itself (and its
     # memo) lives in `imports.py` because this resolver's own `_find` needs the
-    # same answer — see bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md.
+    # same answer — see “The compiler has no way to see CPython's `Lib/` from an entry file outside it”.
     try:
         import imports as _imp_cpy
         _cpython_lib = _imp_cpy.cpython_lib_root(importer_dir) if importer_dir else None
@@ -306,7 +306,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # name's LEADING component, also try the dotted path's
         # remaining suffix directly under that dir (treating the dir
         # as already representing that first package level). See
-        # bugs/COMPILE_FAIL_tkinter_filedialog.md.
+        # COMPILE_FAIL_tkinter_filedialog.
         if len(_dotted_parts) > 1:
             _suffix_parts = _dotted_parts[1:]
             _rel_suffix_flat = '/'.join(_suffix_parts)
@@ -910,7 +910,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # `_link_needs_cxx_box`'s own declaration for the fuller
                 # story, and this method's own cpp-unit-compile call
                 # site below for the concrete case that surfaced this —
-                # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+                # “COMPILE_FAIL: Tools/cases_generator/parser.py”).
                 # `_link_dylibs` shared for the identical reason (a
                 # nested import's own further imports recording a
                 # dylib). Harmless, unread dead data for a do_imports=
@@ -1285,7 +1285,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
       * `import insp` + `def show(p): return p.label()` +
         `show(insp.Parameter('v', 7))` printed `0`, exit 0 — a silent wrong
         value, and the reason the last remaining row of
-        bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md was still
+        CODEGEN_method_call_on_struct_param_mistyped was still
         red (the identical program spelled `from insp import Parameter`
         printed `v` in the SAME build; that doc is deleted as of this fix —
         see the 2026-09-30 section of bugs/hard/README.md);
@@ -3633,7 +3633,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
         # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # bugs/CODEGEN_tuple_dict_key_hashed_by_address.md for the subscript
+        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values

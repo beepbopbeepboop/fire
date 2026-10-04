@@ -763,7 +763,7 @@ class TestSystemModuleCall(unittest.TestCase):
 # `formal/imports.py`'s `unresolvable_import_errors` reports every blocker in
 # one message, one indented line per module, instead of raising on whichever
 # came first in the statement list. The measurement that asked for it is
-# `bugs/FORMAL_admitted_contracts_sweep_measurement.md`, and the part of it that
+# `“What the admitted contracts did and did NOT move in the sweep”`, and the part of it that
 # matters to THIS file is that a per-module breakdown drawn from a diagnostic
 # naming one of a file's blockers is a sample of how the file's imports are
 # written: fixing `subprocess` on eight files moved them from "refused for

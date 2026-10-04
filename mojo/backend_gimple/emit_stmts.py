@@ -624,7 +624,7 @@ def _gen_stmt_VarDecl(gen, node):
         # is never actually allocated, so the first `.append()`/
         # subscript/read dereferences whatever garbage bits happen to
         # be sitting in that slot: a deterministic SIGSEGV (bisected
-        # via box.3d/game/bugs/DYLIB_string_copy_append_return_segv.md
+        # via box.3d/game/DYLIB_string_copy_append_return_segv
         # -- despite the bug report's title, this reproduces identically
         # in `fire build`'s linked-executable path too, nothing to do
         # with dylib mode; the report's own p2/global-`list()` repro
@@ -1262,7 +1262,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # actual value just lowered is a real pointer. Declaring `y` as
             # int64_t against that pointer value would truncate/reinterpret
             # it as an integer at the coercion below. See
-            # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
+            # CODEGEN_untyped_param_string_passthrough_wrong.
             if _pin_to_ground_truth and ctype in ('int', 'int64_t') \
                     and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
@@ -1335,7 +1335,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # on that stale int64_t type as a STRING iteration
             # (mojo_strlen/_mojo_at_char on an int64_t list pointer) —
             # "makes pointer from integer without a cast". See
-            # bugs/COMPILE_FAIL_Tools_check-c-api-docs_main.md.
+            # COMPILE_FAIL_Tools_check-c-api-docs_main.
             if v in gen._tuple_slot_types:
                 gen._tuple_slot_types[tname] = gen._tuple_slot_types[v]
         if dst == 'MojoDict *':
@@ -1558,7 +1558,7 @@ def _gen_stmt_AssignStmt(gen, node):
             # `char *` in general, which would also match every ordinary
             # string variable in this codegen. Confirmed real instance:
             # Lib/pathlib/_os.py's `err.filename = source_f.name`. See
-            # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+            # “setting/getting an arbitrary attribute on a generically-typed object”'s
             # "Residual gap: caught exception objects" section.
             gen._emit_dynattr_setattr_dispatch(node.target.member, vtype, v, ot, ov)
         else:
@@ -1885,7 +1885,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # insert `y`'s elements at `start`, growing/shrinking the list).
         # Before this branch existed the trailing `else: pass` below
         # silently dropped the whole store — no error, no mutation
-        # (bugs/CODEGEN_slice_assignment_silently_noops.md). The bounded
+        # (“CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”). The bounded
         # case shares the exact bound-normalization (`_lower_slice_bounds`)
         # of slice READS and `del x[a:b]`, and the same MojoList*-or-assume
         # ambiguity handling as `del x[a:b]`.
@@ -2134,7 +2134,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # in 'var_decl'"), since -fgimple requires an explicit
             # narrowing cast, unlike ordinary C. Real repro: Tools/
             # i18n/pygettext.py's `Message.add_location`. See
-            # bugs/COMPILE_FAIL_Tools_i18n_pygettext.md.
+            # COMPILE_FAIL_Tools_i18n_pygettext.
             op = '->' if '*' in ot else '.'
             struct_name = gimple_exprtypes._struct_name_of(ot)
             field_type = gen.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
@@ -3201,7 +3201,7 @@ def _gen_stmt_ForStmt(gen, node):
     # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
     # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
     # DOES unpack (fire_compiler.py's "Unpacking-target representation"; see
-    # bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md). Peel the
+    # CODEGEN_for_loop_target_one_tuple_vs_paren_single_name). Peel the
     # redundant parens HERE, once, so every `_gen_for_*` below — and every
     # `_declare_var` they call — sees a bare C identifier for a one-name
     # target.
@@ -4059,7 +4059,7 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         # exposed as a hard "-Wint-conversion" error only once the
         # calling method genuinely lost `__GIMPLE` for an unrelated,
         # correct reason (containing its own real `setjmp`). See
-        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+        # “setting/getting an arbitrary attribute on a generically-typed object”'s
         # "Segfault root-caused" section for the full mechanism.
         had_var_type = bind_name in gen.var_types
         restore_var_type = gen.var_types.get(bind_name)

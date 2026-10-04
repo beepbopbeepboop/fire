@@ -12,9 +12,9 @@ classified; one (`gimple_codegen.py`) is unmeasured because the sweep cannot
 finish it in 90 minutes (§4).** The fixes are
 `7b1f2643` (a backend CRASH, `backend-crash` 1 → 0) and `91db24b9`
 (`codegen/dependency` 2 → 0, and `re.mojo` from "does not build" to 994/1008).
-The first deleted `bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md`;
+The first deleted `FORMAL_frame_receivers_is_handed_the_method_name_table`;
 the second exposed 14 wrong answers in `re.mojo`, filed as
-`bugs/FORMAL_re_word_boundary_never_matches.md`.
+`“FORMAL: `re.mojo`'s `\b` never matches”`.
 
 ## 1. The run
 
@@ -239,7 +239,7 @@ which is the only way it could have lost a refusal.
 `test_re_formal.py` had never run. Seven of them are wrong answers in the regex
 engine (`` never matches in any position; `re.VERBOSE` is accepted and
 ignored; `\` is refused as unsupported), on both architectures identically.
-Filed as `bugs/FORMAL_re_word_boundary_never_matches.md` with the localised next
+Filed as `“FORMAL: `re.mojo`'s `\b` never matches”` with the localised next
 step, and **not fixed here**: `re.mojo` is not this slice's file and the fix is a
 diagnosis rather than a patch.
 
@@ -284,7 +284,7 @@ is one of:
    taking < 600 s is not a constant factor. `formal/build.py` walks the module's
    AST repeatedly per pass and `_frame_receivers` iterates its fixpoint over the
    whole function list; the AST-walk-per-pass shape is the first thing to
-   profile, and `bugs/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+   profile, and `PERF_nested_module_compile_walk_ast_quadratic_rescan`
    is a claim (`bugs3-hard`) for a shape in this neighbourhood — **that doc does
    not exist on this tree either**, so this may be the second stale claim in the
    area. **I did not make this measurement**: I have the two endpoints and no
@@ -460,7 +460,7 @@ failure is `a_mutated_module_global_is_refused` — the backend now BUILDS a
 program the row expects to be refused for `G is declared global in bump()`. It is
 **not** from this change: reverting `formal/build.py` to `master`'s bytes and
 running that one case alone fails identically. It is already documented as a
-stale expectation in `bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`,
+stale expectation in `TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed`,
 which states the behaviour belongs to the `bug:FORMAL_module_state_no_storage`
 claim. **Left alone**, and re-verified here rather than assumed, because a red
 row in the file a change touches is exactly the thing that gets misattributed.

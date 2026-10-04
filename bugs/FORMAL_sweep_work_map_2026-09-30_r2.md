@@ -206,7 +206,7 @@ one file, and the decision about whether the sweep's denominator should move
 like that belongs to whoever owns the sweep's semantics.
 
 The measurement is the deliverable; the fix is two lines and is in
-`bugs/FORMAL_argparse_blocked_on_unannotated_callee_comparison.md`.
+`FORMAL_argparse_blocked_on_unannotated_callee_comparison`.
 
 ### 3.2 Row 2 — the dylib export gate, 38 files, **audited, not fixed**
 
@@ -308,7 +308,7 @@ not in `cas._FORMAL_SOURCES` (it globs `formal/**/*.py`), so editing a hostmod
 moves no key. The run looked like a result and was a copy of the previous one.
 Forcing a cold store (`GMOJO_HOME` pointed at an empty directory) is the only way
 to measure a fix that lands in a Mojo module. This is
-`bugs/FORMAL_sweep_cache_ignores_imports.md`, still open; **its closing warning is
+`FORMAL_sweep_cache_ignores_imports`, still open; **its closing warning is
 the one that applies here** — a sweep over a tree where a module source changed
 is not evidence about anything that imports it, and the tool has no `--no-cache`.
 

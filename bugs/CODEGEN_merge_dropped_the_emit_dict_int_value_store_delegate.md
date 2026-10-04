@@ -95,13 +95,13 @@ to), then re-run `test_gimple_runner.py` and confirm the four
 Worth checking alongside it, because the same merge is the suspect: the
 other six failures in that run are
 `gimple_sorted_string_key_runtime_built`
-(`bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md`),
+(`CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address`),
 `gimple_tuple_dict_key_is_content_keyed`
 (`bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md`),
 `gimple_bool_annotated_struct_field` ×2
 (`bugs/CODEGEN_bool_annotated_struct_field_prints_as_int.md`) and
 `gimple_char_scan_allocates_nothing_per_character`
-(`bugs/PERF_char_scan_leak_residual_21_bytes_per_char.md`),
+(`“PERF: the per-character `str` scan allocated one `malloc(2)` per character”`),
 `gimple_dict_of_bool_values`. Each has a doc, so each is a separate
 question — but `gimplerunner` carries no `expect=` marker in
 `tools/suite.py`, so all ten are currently red against a gate that reports

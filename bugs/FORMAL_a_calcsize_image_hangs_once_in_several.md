@@ -6,7 +6,7 @@ by exhaustion; a THIRD candidate for the neighbourhood was found and filed.**
 The hang itself is unexplained and this document stays open for it.
 
 Found 2026-10-01 while re-running `test_struct_formal.py` to settle
-`bugs/CODEGEN_test_struct_formal_is_flaky.md`. **NOT MINE and NOT FIXED** —
+`“CODEGEN_test_struct_formal: the struct suite is FLAKY”`. **NOT MINE and NOT FIXED** —
 `formal/hostmods/struct.mojo`, `formal/arm64_codegen.py` and the image are
 another worker's area; the harness that observes it is mine and is fixed
 separately. Filed because `formal-struct` is a registered `proofs` job, a hang is
@@ -118,7 +118,7 @@ dylibs — "missing code signature", `SIGABRT`, exit 134 — because
 the whole of a `codesign -s -` subprocess while every already-linked image on the
 machine loads that path with no lock at all. Reproduced deterministically, with a
 verified fix and one failed attempt recorded, in
-`bugs/FORMAL_dylib_is_unsigned_at_its_shared_path_while_codesign_runs.md`.
+`FORMAL_dylib_is_unsigned_at_its_shared_path_while_codesign_runs`.
 
 It is **not** this document's cause — `SIGABRT` is neither a timeout nor a
 `SIGKILL`, and the image in this document's report ran for 60 s rather than
@@ -152,6 +152,6 @@ worth taking only with the image in hand.**
 Before this, `TimeoutExpired` propagated out of the `for fmt in CORPUS_FORMATS`
 loop, so the run reported 122/127 with nothing saying 21 checks had been
 skipped, and a `build_and_run` that discarded `run.returncode` reported a
-process that exited 3 as a PASS. `bugs/CODEGEN_test_struct_formal_is_flaky.md`
+process that exited 3 as a PASS. `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`
 has that in full; the upshot here is that the next occurrence of this will name
 the signal, name the image, and cost the rest of the suite nothing.

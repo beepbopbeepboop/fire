@@ -3548,7 +3548,7 @@ dylib_exports: list = None, globals_base: int = None,
         bytes carried a literal backslash, on both architectures, while
         `fire.py run` and `fire.py build` both printed a real newline. See
         `fire_compiler.decode_c_escapes` and, for the measurement,
-        `bugs/FORMAL_string_literal_escape_is_not_decoded.md` — deleted, since
+        `FORMAL_string_literal_escape_is_not_decoded` — deleted, since
         that is fixed.
 
         Decoding BEFORE the intern lookup is what makes interning by content
@@ -4078,7 +4078,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # the image exited 1 from a build that was green. Measured on both
             # architectures, for an annotated callee and for an unannotated one
             # whose `return` states a dict literal. See
-            # bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md
+            # “FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”
             # (deleted with the fix). The same shape as the `M.is_dict_expr`
             # arm above, so it clears the other two marks the same way.
             self._dict_vars.add(name)
@@ -4155,7 +4155,7 @@ ctor_field_value=self._ctor_field_value_for(name),
           Dict[String, Int]): d["a"]` exited 1 with nothing printed on both
           architectures, because a parameter is bound by the signature and
           `_note_binding` never sees it. See
-          `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`.
+          `“FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”`.
         """
         if isinstance(obj, F.IdentExpr):
             if obj.name in self._dict_vars:
@@ -4188,7 +4188,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         `"AB"` walks off the string and returns a text-section address. Measured
         before the fallback: `f(s: String): return s[0]` on `f("AB")` printed
         -8070450326089498624, where 65 is the answer. See
-        bugs/CODEGEN_string_parameter_subscript_reads_count_field.md.
+        “`s[i]` on a `String`-annotated PARAMETER reads the blob's count field”.
         """
         if isinstance(obj, F.StringLiteral):
             return True
@@ -4583,7 +4583,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # A string index against a base whose shape nothing states: the one
         # spelling of this subscript that neither the dict path nor the byte
         # path can answer, and the residue after
-        # `bugs/FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults.md`'s
+        # `“FORMAL_container_from_a_call_has_no_shape_so_a_string_subscript_faults”`'s
         # other three (a module slot, a call result and a `Dict[…]`-annotated
         # parameter all have evidence now). Asked here — after the dict
         # dispatch and before the blob fallback — because those two are the
@@ -4628,7 +4628,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # "ab" returned -1879048144 (0x9002_2E68 = "ab" plus the next two
             # bytes of __TEXT) and the same spelling on a `malloc`'d buffer
             # exited 1 with no message, because the count there is 0. See
-            # bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md and
+            # FORMAL_subscript_of_a_pointer_reads_a_blob_count and
             # `model.subscript_base_lowering`, which owns the decision.
             self._sub_width = width
             self._emit_expr(e.obj)                    # X0 = the address
@@ -9988,7 +9988,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         # disagreed between the literal fold and the same expression with a name
         # in it. `fire_compiler.decode_c_escapes` is the one decoder, the same
         # one `_intern_string` below uses — see
-        # bugs/FORMAL_string_literal_escape_is_not_decoded.md.
+        # FORMAL_string_literal_escape_is_not_decoded.
         if isinstance(left, F.StringLiteral) and isinstance(right, F.StringLiteral):
             # The EMPTY needle is TRUE, which is Python's rule and what
             # `strstr` returns for it (the haystack itself, non-NULL). Folding

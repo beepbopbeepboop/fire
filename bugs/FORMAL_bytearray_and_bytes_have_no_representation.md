@@ -92,7 +92,7 @@ whether to keep doing it deliberately. Two honest answers:
    carried in the kind). Then `b"abc"` is three bytes and `b + b` concatenates
    correctly, and `memoryview` / `struct.pack_into` become reachable — which is
    what `formal/hostmods/struct.mojo` needs and what
-   `bugs/FORMAL_a_pointer_through_a_variadic_argument.md` is blocked behind.
+   `FORMAL_a_pointer_through_a_variadic_argument` is blocked behind.
 
 Option 2 is the one that makes `struct.mojo` and the corpus move, and it is a
 new element-width axis on a value model that currently has none — so it is a

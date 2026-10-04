@@ -12,7 +12,7 @@ one walk per method, over this repository and the stdlib.
 wrong question for a check that is one of six late checks in a pipeline: a file
 refused for a host import never reaches the holder-use walk, and a file refused
 by an earlier check is invisible to it. The same reasoning, and the same
-instrument, as `bugs/FORMAL_read_before_store_what_is_left.md`'s census.
+instrument, as `“read-before-store: the shapes that still decide wrongly”`'s census.
 
 **What counts as a site.** `formal/build.py`'s `_refuse_holder_use` fires when a
 field store's right-hand side is a BARE NAME that holds a frame. "Holds a frame"

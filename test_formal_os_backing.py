@@ -12,16 +12,16 @@ each of them was a SILENT WRONG ANSWER rather than a refusal:
     the string as a list blob's element count and then loaded at
     `base + 8 + 8*count` — a text-section address. `f("AB")[0]` returned
     -8070450326089498624 where 65 is the answer
-    (bugs/CODEGEN_string_parameter_subscript_reads_count_field.md).
+    (“`s[i]` on a `String`-annotated PARAMETER reads the blob's count field”).
   * `p[i]` on a `Pointer[UInt8]` was the same question `p.value()` already
     answered, asked in a spelling only one of the two was routed: -1879048144
     for the first four characters of a string read as a little-endian word, and
     a bare `exit 1` with no message for a `malloc`'d buffer whose count is 0
-    (bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md).
+    (FORMAL_subscript_of_a_pointer_reads_a_blob_count).
   * `stat(2)`'s out-parameter could not be read at all, so `isfile` was
     `exists and not isdir` — 1 for `/dev/null` where CPython says 0 — and
     `islink`, `lexists` and `samefile` did not exist
-    (bugs/FORMAL_stat_out_parameter_is_unreadable.md).
+    (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”).
   * `readdir(3)`'s `d_name` is a `char[]` inside a struct the source never
     declares, so there was no name to read and therefore no `listdir`
     (bugs/FORMAL_listdir_no_run_time_sequence.md — the name half of it).

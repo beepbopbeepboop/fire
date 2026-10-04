@@ -144,7 +144,7 @@ CASES = [
     # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and the reason
     # reading through one stays refused. That OTHER question has its own table,
     # `model.NULLABLE_POINTER_UNWRAP_ALIASES`, named for it; the two were one
-    # name until `bugs/FORMAL_nullable_pointer_aliases_is_defined_twice.md` was
+    # name until `“`NULLABLE_POINTER_ALIASES` is defined twice, and the first definition is dead”` was
     # fixed, and the model's `no_module_level_name_is_bound_twice` case below is
     # what keeps them from becoming one name again.
     #
@@ -154,7 +154,7 @@ CASES = [
     # (`OptionalPointer[UInt8, ImmUntrackedOrigin]`, `OpaquePointer[mut=False]`),
     # and a multi-parameter generic application is currently refused EARLIER, as
     # a subscript whose index is a tuple — which is
-    # `bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`, owned
+    # `FORMAL_external_call_a_multiparameter_type_in_the_bracket`, owned
     # by another lane, and the same wall `env_round_trip` below is sitting on. So
     # this row pins the classification the moment that wall comes down, and until
     # then it is the only spelling of a nullable pointer this path can be asked
@@ -933,7 +933,7 @@ def model_cases():
     # pointer IS the absent answer, there is no tag in a second register), and
     # `.value()` on one of them is the UNWRAP rather than a load of its first
     # byte. One name answered both before
-    # (`bugs/FORMAL_nullable_pointer_aliases_is_defined_twice.md`), so the two
+    # (`“`NULLABLE_POINTER_ALIASES` is defined twice, and the first definition is dead”`), so the two
     # tables had to be read together and the dead first one won.
     out.append(("nullable_alias_is_one_word_at_a_c_boundary",
                 [M.external_call_return_kind(spelling)

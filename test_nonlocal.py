@@ -8,7 +8,7 @@ classified the name as a plain assigned-local of the inner function. The
 compiled program therefore exited 0 with the WRONG closure value: the write
 went to a local that vanished when the inner function returned, and the
 enclosing frame read back its own untouched initial value. See
-bugs/COMPILE_FAIL_Tools_wasm_wasi___main__.md.
+“COMPILE_FAIL: Tools/wasm/wasi/__main__.py”.
 
 The fix is one rule expressed twice, because the two paths represent a cell
 differently:

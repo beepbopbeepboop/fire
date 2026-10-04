@@ -675,7 +675,7 @@ def _generator_value_kind(fn: N.FunctionDef,
     # all of them and landed on the `int64_t` default, which is the identical
     # silent truncation the call-site half of this slot's contract was fixed
     # for (see `_scan_callsite_param_kinds` and
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    # CODEGEN_coro_yield_kind_unresolved_callsite).
     if None in kinds and (kinds - {None, 'i'}):
         return None, ('a `yield` whose value kind could not be resolved, '
                       'beside one that requires a non-int64_t value slot '
@@ -1351,7 +1351,7 @@ _PLAIN_CALLSITE_PARAM_KINDS: dict[str, dict[str, str]] = {}
 # stack-switch ABI fixes one C type per generator, so the default would
 # silently truncate a float to int64_t or print a `char *` as its address.
 # `_eligible` refuses those rather than emitting wrong code — see
-# bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md, which recorded
+# CODEGEN_coro_yield_kind_unresolved_callsite, which recorded
 # that the "or include one the static scan could not type at all" half of the
 # sentence above was specified here but not implemented: a `None` used to
 # EMPTY the kind set, so it was neither resolved nor a conflict and the slot
@@ -1392,7 +1392,7 @@ _ASYNC_FN_NAMES: set = set()
 # unpacked from its `__mojo_gen_arg` slot with a `(<T> *)` cast (structs
 # cross the C boundary as `T *` -- BUG-2026-030) and passed to the body as
 # a real typed `<T> *` C param, instead of collapsing to an opaque
-# int64_t. See bugs/COMPILE_FAIL_asyncio_queues.md gap 2.
+# int64_t. See “COMPILE_FAIL: asyncio/queues.py” gap 2.
 _STRUCT_NAMES: set = set()
 
 # Names (bare and `__mgco_<outer>_<name>`-qualified) of nested async
@@ -2393,7 +2393,7 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # exits, and since the runtime has no garbage collector each round's
     # fresh `resolvable` set and dict-items list are never freed either:
     # measured, a TWO-LINE program drove it past 8 GB of resident memory in
-    # under two minutes (see bugs/CODEGEN_container_eq_is_pointer_identity.md).
+    # under two minutes (see “CODEGEN: `==` / `!=` between two containers is POINTER identity”).
     # So the termination test here is the worklist draining, never a `==`.
     dirty: dict = {}
     queue: list = seeds                # the seeds ARE the initial worklist
@@ -2779,7 +2779,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     element type reaches `_elem_types` through the ordinary cross-call
     element-type contract (`module_gen`'s `_param_elem_types` ->
     `emit_funcs.gen_func`), so the loop takes the list path directly.
-    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md ("Item 8").
+    See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
     Only LIST params are recorded, and only a scalar element kind: a
     container-of-container has no single C type either (it needs the nested
@@ -3346,7 +3346,7 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
         parameter's consumer is `for r in data:` / `d[0]`, and both of those
         read the `('list', k)` entry.
 
-    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md."""
+    See CODEGEN_coro_yield_kind_unresolved_callsite."""
     k = _literal_kind(expr)
     if isinstance(k, (str, tuple)):
         return k
@@ -3549,7 +3549,7 @@ def _scan_callsite_param_kinds(stmts: list) -> None:
                 # include one the static scan could not type at all" half of
                 # `_CALLSITE_PARAM_CONFLICTS`' own docstring, which was
                 # specified there and never implemented; see
-                # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+                # CODEGEN_coro_yield_kind_unresolved_callsite.
                 if None in kinds:
                     conflicted.add(pname)
                     continue
@@ -5141,7 +5141,7 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_close', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_destroy', 'void')
-    # "Detached async" (bugs/hard/CODEGEN_coro_detached_async_take_handle.md)
+    # "Detached async" (CODEGEN_coro_detached_async_take_handle)
     # -- the resume_fn half of the `_coro_resume_fn`/`_coro_destroy_fn`
     # pair BUILTIN_VALUE_MAP substitutes this for under MOJO_CORO=
     # stackswitch (gimple_codegen.GimpleGen.__init__); `__mojo_gen_destroy`
@@ -5183,7 +5183,7 @@ def register(gen, meta: list) -> None:
     # fire_coro_gen.c — a hard gcc error, not a silent wrong answer.
     gen.func_param_types.setdefault('__mojo_async_iscoroutine', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_iscoroutine', '_Bool')
-    # Eager task scheduling (bugs/COMPILE_FAIL_asyncio_queues.md gap 3).
+    # Eager task scheduling (“COMPILE_FAIL: asyncio/queues.py” gap 3).
     gen.func_param_types.setdefault('__mojo_async_task_schedule', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_async_task_schedule', 'void')
     gen.func_param_types.setdefault('__mojo_async_await_task', ['int64_t', 'int64_t'])

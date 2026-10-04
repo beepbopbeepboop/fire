@@ -36,7 +36,7 @@ differs is the `double`/pointer the lambda hands back.
 
 Note the third row: an ANNOTATED `float` parameter is wrong too, so this is not
 the unannotated-parameter ABI gap
-(`bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md`).
+(`CODEGEN_polymorphic_unannotated_param_vacuous_unanimity`).
 
 ## Mechanism
 
@@ -72,7 +72,7 @@ dispatch's `_get_actual_type` re-derives `char *` and prints the string. A
 `double` has no `int64_t` spelling — `(int64_t)5.0` is `5`, and nothing left
 in the tables can tell that from a genuine 5. So this is the same
 "a value crossing a call boundary is homogenized to `int64_t`" family as
-`bugs/CODEGEN_lambda_bool_return_prints_as_int.md` (which has the `bool`
+`“CODEGEN: a lambda whose body is a bool returns int64 0/1”` (which has the `bool`
 flavour and is owned elsewhere) — this doc has the `double` and pointer
 flavours, including the nested-`def` row, and notes the one recovery that
 already works so the next reader does not re-derive it.
@@ -211,7 +211,7 @@ different fix from teaching inference about the `double`.
   the parameter's inferred ctype is `MojoList *`, so `_lower_builtin_sorted`
   dispatches to `mojo_sorted(void *)` and a MojoDict is read as a MojoList.
   Already documented, with its own mechanism, in
-  `bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md`.
+  `CODEGEN_polymorphic_unannotated_param_vacuous_unanimity`.
 - A closure that mutates an enclosing local without `nonlocal` — which
   CPython rejects with `UnboundLocalError` — instead compiles and mutates
   something, silently:

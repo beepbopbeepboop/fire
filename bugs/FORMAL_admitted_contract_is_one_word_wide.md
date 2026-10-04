@@ -90,7 +90,7 @@ signatures, so this is a library change with a full `ProofLib` rebuild (measured
 27 MB / ~80 s) — not a generator change.
 
 **Why it is worth doing anyway.** It is the same change that closes
-`bugs/FORMAL_lean_model_call_semantics.md` for the decidable half: the AST model
+`“[3] The Lean model — what landed, and what did not”` for the decidable half: the AST model
 carrying two arguments is what a *computable* two-argument call needs too, and
 today a call to a two-argument `formal/hostmods/` function whose value is used is
 refused by `_call_go` for exactly the same reason — there is no model for it

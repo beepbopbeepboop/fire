@@ -264,7 +264,7 @@ will not see for `_assembly.mojo`, though the defect it describes is unchanged
 and is still reachable elsewhere.
 
 **That message is false about the file, and the defect it named is FIXED
-(was `bugs/FORMAL_imported_generic_reported_as_a_module_level_name.md`, deleted
+(was `FORMAL_imported_generic_reported_as_a_module_level_name`, deleted
 with the fix).** `_get_kgen_string` IS a function
 (`std/collections/string/string_slice.mojo:2564`,
 `def _get_kgen_string[string: StaticString, *extra: StaticString]()`), so the

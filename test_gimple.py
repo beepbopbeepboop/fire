@@ -131,7 +131,7 @@ def test_raises(name: str, mojo_src: str, expected_substr: str):
     message containing expected_substr) instead of either crashing gcc on
     broken generated C or silently emitting wrong code. Used for shapes this
     codegen deliberately does not (yet) support — see
-    bugs/CODEGEN_conditional_toplevel_def_name_collision.md."""
+    CODEGEN_conditional_toplevel_def_name_collision."""
     global _PASS, _FAIL
     try:
         compile_to_gimple(mojo_src)
@@ -530,7 +530,7 @@ def run_tests():
     # is opaque" branch, and emitted `t = (int64_t)mojo_list_get_str (...)`
     # into a `struct Token *`. That is gcc's "non-trivial conversion in
     # 'var_decl'", which is how this was found (fire_compiler.py's own
-    # `_parse_comptime`; bugs/CODEGEN_comprehension_target_shadows_struct_local.md),
+    # `_parse_comptime`; CODEGEN_comprehension_target_shadows_struct_local),
     # and it took out `make mojoc`, `selfhost` and `bootstrap-stage2-cc` at
     # once.
     #
@@ -1232,7 +1232,7 @@ def set_missing(x: Int) -> Int:
 """)
 
     # 56b. set(iterable) constructor — see
-    # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md: this used to
+    # CODEGEN_set_list_ctor_ignores_iterable_arg: this used to
     # silently produce an EMPTY set (the constructor arg's value was
     # discarded). Behavioral (len/iteration) coverage is in
     # test_gimple_runner.py; this just checks it compiles.
@@ -1611,7 +1611,7 @@ def splice(a: List, b: List):
 """)
 
     # 93c. x[a:b:k] = y → extended-slice store (mojo_list_assign_step);
-    # bugs/CODEGEN_slice_assignment_silently_noops.md.
+    # “CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”.
     test("list_slice_assign_stepped", """\
 def strided(a: List, b: List):
     a[::2] = b
@@ -1978,7 +1978,7 @@ def nth_elem(p: UnsafePointer[Float64], n: Int) -> Float64:
     # Regression: the `UnsafePointer[T]` type-subscript receiver used to be
     # lowered as an ordinary value subscript and `.alloc(n)` fell through
     # to the generic scalar-method stub, so `Int(...)` of the result read
-    # 0 (bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    # 0 (CODEGEN_int_of_alloc_struct_pointer_returns_zero).
     test("unsafepointer_alloc_struct", """\
 struct Rec:
     var tag: Int64
@@ -2310,7 +2310,7 @@ def main():
 
     # 159. str.find(needle, start) — the 2-arg form must lower to
     #      mojo_str_find_from (not mojo_str_find, which silently drops the
-    #      start argument — see bugs/CODEGEN_str_find_start_arg_dropped.md).
+    #      start argument — see “CODEGEN: `str.find(needle”).
     #      Also locks in that the 1-arg form keeps calling mojo_str_find.
     _find_src = """\
 def main():
@@ -2355,7 +2355,7 @@ def test():
 """)
 
     # 160. Multi-name import `import a, b, c` must bind *every* name, not
-    # just the first (bugs/INTERP_multi_name_import_only_binds_first.md).
+    # just the first (INTERP_multi_name_import_only_binds_first).
     # gimple_codegen.py's ImportStmt lowering used to declare a module-marker
     # global only for node.module/node.alias; any comma-separated target
     # past the first (node.extra) was undeclared, so referencing it here
@@ -2370,7 +2370,7 @@ def main():
 """)
 
     # 161. map(str, param) over a plain/unannotated parameter, used inside
-    # another expression (str.join(...)) — bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # another expression (str.join(...)) — CODEGEN_map_over_untyped_param_arg.
     # Before the fix this failed to even compile (GCC -Wint-conversion: `args`
     # defaulted to int64_t instead of MojoList*, and the temp holding
     # mojo_map(...)'s pointer result was declared int64_t too), AND the
@@ -2409,7 +2409,7 @@ def join_strs(args) -> String:
     # 162. A convention/ownership keyword (`var`, `ref`, `read`, etc.) used
     # as a plain parameter name inside `assert(x not in y)` must NOT be
     # misparsed as a parenthesized ownership-prefix binding target — see
-    # bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md. Real Python
+    # PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in. Real Python
     # has no such keywords, so they're common ordinary identifiers; the old
     # `_parse_primary` LPAREN carve-out for `(var x), (ref y) = ...` only
     # checked that the token after the keyword was NAME/KW-shaped, which
@@ -2439,7 +2439,7 @@ def main():
     # 164. `var` used as a plain identifier (Python compat: real Python has
     # no `var` keyword) followed by member access/assignment, a method
     # call, or as one of several tuple-unpack targets must NOT be misparsed
-    # as a var declaration — see bugs/PARSE_FAIL_var_as_identifier_member_access.md.
+    # as a var declaration — see PARSE_FAIL_var_as_identifier_member_access.
     # The statement-level `_parse_stmt` dispatch for `var` only special-cased
     # the `var = expr` shape; anything else (`.`, `,`, etc. right after
     # `var`) unconditionally committed to `_parse_var_decl()` and crashed on
@@ -2485,7 +2485,7 @@ def main():
     # 167. `var`/etc. as the FIRST element of a plain tuple-unpack for-loop
     # target (`for var, other_var in pairs:`) must NOT be misparsed as a
     # bogus convention-keyword prefix — see
-    # bugs/PARSE_FAIL_var_as_for_loop_target_comma.md. `_parse_for`'s
+    # PARSE_FAIL_var_as_for_loop_target_comma. `_parse_for`'s
     # convention-keyword carve-out already excluded peek(1) == KW('in') and
     # peek(1) == COLON, but not COMMA, so this real-stdlib shape
     # (Tools/cases_generator/stack.py:606) swallowed `var` as a bogus prefix
@@ -2524,7 +2524,7 @@ def main():
     # ending right before its own closing quote), followed later in the
     # same statement by another quoted string, must not corrupt the token
     # stream — see
-    # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    # PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.
     # `_process_nested_tstrings`'s ordinary-string-skip guard used to check
     # only the single character immediately before a quote for
     # alphanumeric-ness, so `r"..."` (prefix letter `r` IS alphanumeric)
@@ -2560,7 +2560,7 @@ def main():
     # plain `f`-prefixed string (no `t`/`T`) fell into the plain
     # simple-scan-to-matching-quote branch, which has no `{...}` awareness
     # and truncated the string at the first reused quote inside the braces.
-    # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md. Covers both quote
+    # See PARSE_FAIL_fstring_same_quote_reuse. Covers both quote
     # characters, since the bug was quote-character-specific in the sense
     # that a DIFFERENT nested quote already worked.
     test("fstring_nested_same_single_quote_reused", """\
@@ -2612,7 +2612,7 @@ def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta:
     # mirrors CPython's own Lib/test/test_annotationlib.py test_reverse_ops,
     # which exercises a whole battery of reverse-dunder-shaped binary-op
     # annotations (all NUMBER-literal prefixes) in one signature.
-    # See bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md.
+    # See PARSE_FAIL_annotation_leading_literal_trailing_op.
     test("annotation_leading_literal_trailing_op_battery", """\
 a = 1
 def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rmod: 1 % a, rlshift: 1 << a, rrshift: 1 >> a, ror: 1 | a, rxor: 1 ^ a, rand: 1 & a, rfloordiv: 1 // a, rpow: 1**a):
@@ -2631,7 +2631,7 @@ print("ok")
     # test_literals, which exercises a battery of literal annotations
     # (NUMBER, STRING, bytes, bool, None, Ellipsis, complex) in one
     # signature — `g: ...` is the Ellipsis case.
-    # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+    # See PARSE_FAIL_annotation_ellipsis.
     test("annotation_literals_battery", """\
 def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
     pass
@@ -2657,7 +2657,7 @@ print("ok")
     # session (6ee8291 -> 6e6020f -> bb28e80 -> c2933a7 -> this one), so a
     # structural fix was chosen over a fifth narrow patch. Mirrors CPython's
     # own Lib/test/test_annotationlib.py test_shenanigans.
-    # See bugs/PARSE_FAIL_annotation_paren_then_dot.md.
+    # See PARSE_FAIL_annotation_paren_then_dot.
     test("annotation_paren_then_dot_battery", """\
 x = 1
 def f(x: x | (1).__class__, y: (1).__class__):
@@ -2677,7 +2677,7 @@ print("ok")
     # unrelated to the real problem). Since there's no runtime-dispatch
     # mechanism to represent "whichever branch executes wins" as distinct C
     # symbols, this must be refused honestly rather than silently miscompiled
-    # — see bugs/CODEGEN_conditional_toplevel_def_name_collision.md.
+    # — see CODEGEN_conditional_toplevel_def_name_collision.
     test("conditional_toplevel_def_name_collision", """\
 import sys
 if sys.platform == 'win32':
@@ -2699,7 +2699,7 @@ f()
     # must still be refused clearly (RuntimeError from
     # gen_module/compile_to_gimple) rather than silently miscompiled into a
     # single straight-line C function that just drops the yield. Milestone 1
-    # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # of INTERP_generator_yield_entirely_unimplemented — see
     # fire_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
     # and gimple_codegen.py's gen_module pre-pass. A generator taking a
     # plain scalar parameter (`def f(n): yield n`) is now COMPILED, not
@@ -2735,7 +2735,7 @@ def f(s: String):
     # populated self._inferred_param_types, so the unannotated `s` fell
     # straight through to _resolve_type(None)'s naive int64_t default with
     # no cross-call-site evidence at all — see
-    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md.
+    # CODEGEN_compiled_generator_unannotated_string_param_mistyped.
     # The fix reuses the exact same cross-call scalar-contract mechanism
     # that already protects ordinary (non-generator) unannotated parameters
     # (e387af9/8799ec4) by deferring the generator compile attempt until
@@ -4054,7 +4054,7 @@ def main():
     test_generator_assign_then_for_loop_compiles_via_cpp_path()
 
     # Same step: `next(g)` called directly on an assigned generator variable
-    # — bugs/CODEGEN_compiled_generator_not_first_class_value.md's SECOND
+    # — CODEGEN_compiled_generator_not_first_class_value's SECOND
     # failure (previously an undefined-symbol LINK error, since the generic
     # `next()` builtin had no case for MojoGenerator* at all — only a
     # variadic FIXME extern stub with no definition anywhere). Asserts the
@@ -4286,7 +4286,7 @@ def main():
     test_generator_returned_from_function_compiles_via_cpp_path()
 
     # A `for` loop over a generator whose body does `in`/`not in` membership
-    # tests — bugs/CODEGEN_compiled_generator_not_first_class_value.md-adjacent
+    # tests — CODEGEN_compiled_generator_not_first_class_value-adjacent
     # .cpp emission. Python's `in`/`not in` operators are NOT emitted as infix
     # tokens in the C++20-coroutine body (that would spell Python keywords
     # `in`/`not in` directly into C++ — invalid: `not` is a C++ keyword and
@@ -4313,7 +4313,7 @@ def main():
     # used to fall through to the generic struct-field lookup and emit an
     # invalid `self->b` field access (`'C' has no member named 'b'` from the
     # C compiler, since `b` is a method, not a data field) — see
-    # bugs/CODEGEN_bound_method_as_value_not_resolved.md. Real stdlib
+    # CODEGEN_bound_method_as_value_not_resolved. Real stdlib
     # trigger: Lib/cmd.py's `readline.set_completer(self.complete)` passes a
     # bound method as a callback value the same way.
     test("bound_method_as_value", """\
@@ -4364,7 +4364,7 @@ def main():
 """)
 
     # 178. Untyped-parameter identity function called with a string argument
-    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # — CODEGEN_untyped_param_string_passthrough_wrong. `a` has no
     # body-usage evidence at all (just returned unchanged), so the parameter
     # and the function's inferred return type used to default to int64_t;
     # the real char* argument then got silently truncated/reinterpreted as
@@ -4938,7 +4938,7 @@ async def f(x: String) -> String:
     return x
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_queues.md gap 2: a STRUCT-typed param on a
+    # “COMPILE_FAIL: asyncio/queues.py” gap 2: a STRUCT-typed param on a
     # top-level (non-method) async def is now supported -- unpacked from
     # its __mojo_gen_arg slot with a `(T *)` cast (structs cross as `T *`,
     # BUG-2026-030) and threaded to the coroutine body as a real `T *` C
@@ -4977,7 +4977,7 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_futures.md items (1)-(3): the native Future
+    # “COMPILE_FAIL: asyncio/futures.py” items (1)-(3): the native Future
     # handle now carries an exception slot (set_exception/exception), a
     # cancelled state (cancel/cancelled/set_running_or_notify_cancel) and a
     # done-callback list (add_done_callback/remove_done_callback). These
@@ -5015,7 +5015,7 @@ def main():
     print(asyncio.run(main_co()))
 """)
 
-    # bugs/COMPILE_FAIL_asyncio_futures.md (3), callback-kind tag: a
+    # “COMPILE_FAIL: asyncio/futures.py” (3), callback-kind tag: a
     # bound-method callback (`self.on_done`, asyncio's own shape) and a
     # capturing-closure callback must lower through the MojoBoundMethod*
     # path (tag 1), not as a bare fn pointer. Behavioral proof:
@@ -5695,7 +5695,7 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md, Step 5.4:
+    # “setting/getting an arbitrary attribute on a generically-typed object”, Step 5.4:
     # a genuinely NEW dynamic attribute read on an opaquely-typed receiver
     # (an unannotated param whose static type can't be resolved to a known
     # struct) must lower to the real runtime dispatch chain that raises a
@@ -5761,7 +5761,7 @@ class Slot:
     # MojoDict* operand — the "invalid operands to binary % (have
     # 'int64_t' and 'MojoDict *')" hard-error class in real argparse.py /
     # Mac/BuildScript/build-installer.py closures (see
-    # bugs/COMPILE_FAIL_Mac_BuildScript_build-installer.md root cause 2).
+    # “COMPILE_FAIL: Mac/BuildScript/build-installer.py” root cause 2).
     # Now routed to runtime/fire_runtime.c's mojo_str_format_dict, which
     # resolves %(key)... specs against the dict AT RUNTIME.
     _dictfmt_src = """\
@@ -6389,7 +6389,7 @@ def root_cas_hash_call(parts) -> str:
         statically-known kind has no sound lowering. Both backends used to
         pick int64_t anyway and silently print a truncated float or a
         string's ADDRESS. Now both refuse, naming the parameter. See
-        bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+        CODEGEN_coro_yield_kind_unresolved_callsite.
 
         That doc's residual -- "the refusal only fires on PROVABLE
         disagreement; a call site the static scan cannot type is a separate,
@@ -6457,7 +6457,7 @@ def main():
     # did not: reading a genuinely conflicting param is the cross-cutting
     # one-C-type-per-slot limitation, and asserting a value for it would
     # assert the wrong answer. That limitation is
-    # bugs/CODEGEN_polymorphic_unannotated_param_vacuous_unanimity.md, still
+    # CODEGEN_polymorphic_unannotated_param_vacuous_unanimity, still
     # OPEN; the `int64_t`-is-not-evidence rule in `_record_param_elem` is the
     # part of it that is fixed, and this case is where that rule earns its
     # keep.
@@ -6798,7 +6798,7 @@ def main():
         _PASS += 1
 
     # ------------------------------------------------------------------
-    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md's residue: a
+    # “the constructor-call-site field-typing pass understood only scalars”'s residue: a
     # container reached the constructor through one extra hop -- a LOCAL
     # bound to a container literal, or a `self.<field>` read of a field the
     # caller's own struct sets to a container literal -- instead of the
@@ -6860,7 +6860,7 @@ def main():
         _PASS += 1
 
     # ------------------------------------------------------------------
-    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md item 2: a field
+    # “the constructor-call-site field-typing pass understood only scalars” item 2: a field
     # value round-tripped through a LOCAL lost its type, so
     # `t = self.v; return t` inferred an `int64_t` return and `print`
     # rendered the `char *` as a decimal address. The three sites that seed
@@ -6917,7 +6917,7 @@ def main():
     # check passed and the only symptom was the RENDERED TEXT -- `print`
     # dispatches on the slot's C type (`emit_infra`'s `_Bool` branch calls
     # `mojo_repr_bool`), so an `int64_t` slot prints `1`. Its doc
-    # (bugs/hard/CODEGEN_generator_value_slot_loses_bool.md) was DELETED on
+    # (CODEGEN_generator_value_slot_loses_bool) was DELETED on
     # fix, per CLAUDE.md's "Bug docs" rule — the two decisions it left open
     # (mixed bool/int yields, unannotated call-site params) are recorded in
     # `_generator_value_kind`'s comment and pinned by
@@ -7509,7 +7509,7 @@ main()
         and `%s` use.
 
         The doc's repro is a struct method returning one of its own `str`
-        fields (`bugs/CODEGEN_method_returning_self_str_field_segfaults.md`,
+        fields (`“A struct method that returns one of its own `str` fields SEGFAULTs”`,
         removed with this fix), and it is reproduced here — including the
         imported-sibling spelling, since the field read off the object and
         the read back out of the method are two separate lowerings and a fix
@@ -7649,7 +7649,7 @@ main()
         unknown-element default `str`, so EVERY read of it went through
         `mojo_list_get_str` — and `a[0]` holds `2.5`'s IEEE-754 bit pattern
         `0x4004000000000000`, which `strlen` walked to and died on
-        (bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md).
+        (CODEGEN_list_element_read_defaults_to_str_across_a_call).
 
         Both halves are asserted. The indexed reads need the per-slot kinds to
         cross the boundary (the new `_return_value_slot_kinds`); the
@@ -7940,7 +7940,7 @@ print("%r" % p)
           `Alias("s")` fell into the generic one-string-argument "opaque
           constructor" and returned the ARGUMENT — `x` became the literal
           `"a"` and `x.widgetName` raised AttributeError
-          (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+          (“OPEN: `from mod import Class as Alias”).
         * The same class reached THROUGH a re-export then lost its field
           TYPES: the cross-module constructor-hint pass looked the struct
           up in the RE-EXPORTING module, which has no `class`, so
@@ -9354,7 +9354,7 @@ print(one([3, 9, 2]), two(3, 9), three(1, 7, 4), R().read1(3))
         """An unannotated parameter that only FORWARDS its arguments must
         still be typed from what its own callers pass.
 
-        `bugs/CODEGEN_string_arg_type_lost_across_forwarding_hop.md`'s repro:
+        `“CODEGEN: a string argument's type is lost across a forwarding hop”`'s repro:
 
             def sink(x, y, z): return '%s and %s' % (x, y)
             def mid(a, b):     return sink(a, b, None)

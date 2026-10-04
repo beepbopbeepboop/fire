@@ -3,7 +3,7 @@
 **Area:** CODEGEN (the GIMPLE backend's per-slot unpack in
 `mojo/backend_gimple/emit_loops.py::_gen_for_list`). Found 2026-10-01 on
 `work/bugs3-codegen-2-r2` while fixing
-`bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md` — a different
+`CODEGEN_for_loop_target_one_tuple_vs_paren_single_name` — a different
 defect in the SAME target representation, found by the same test program, and
 **not fixed there** because it is a new feature rather than a wrong answer to
 a question the compiler already answers.

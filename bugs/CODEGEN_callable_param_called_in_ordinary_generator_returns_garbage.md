@@ -125,7 +125,7 @@ this document's to re-litigate:
   `CODEGEN_callable_return_type_lost_at_more_hops.md`'s #3, and the fix there
   (`_actual_types` overlay for a global) does not transfer to a slot;
 * an **imported** default is the padding-site question
-  `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md` is
+  `CODEGEN_unresolved_imported_callable_default_null_pointer` is
   about, which the original write-up already names as a different bug.
 
 ## Two adjacent defects found while measuring, both filed or already claimed
@@ -170,7 +170,7 @@ def go():
 go()
 ```
 
-Distinct from `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`,
+Distinct from `CODEGEN_unresolved_imported_callable_default_null_pointer`,
 which is about the **padding** site (what symbol gets passed for a callable
 default). This is about the **call** site inside a body the ordinary GIMPLE
 generator path lowered, and it is reached by a default that this compile CAN
@@ -209,7 +209,7 @@ local spelling already used.
 
 ## Note the interaction the original doc recorded, still open
 
-`bugs/CODEGEN_next_generator_value_truncated_in_return_position.md`: that
+`CODEGEN_next_generator_value_truncated_in_return_position`: that
 one is the *same class* one level up — a value of a non-`int64_t` kind
 travelling through an `int64_t` slot in a compiled generator context. Both
 are "this scalar body model has no way to say what KIND of thing this is", in

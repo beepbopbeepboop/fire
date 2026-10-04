@@ -408,7 +408,7 @@ return type resolves to `void` — and `print(<void-typed-expr>)` is
 invalid C, producing the two errors above.
 
 This is a variant of the SAME underlying gap already tracked for
-`ctypes/__init__.py` itself (bugs/COMPILE_FAIL_ctypes___init__.md, task
+`ctypes/__init__.py` itself (COMPILE_FAIL_ctypes___init__, task
 #39) — that file's own compile has multiple unresolved issues
 (`__ctype_le__`/`__ctype_be__` dynamic attributes, the CFUNCTYPE varargs-
 packing bug), any of which could be why `ctypes/__init__.py`'s own

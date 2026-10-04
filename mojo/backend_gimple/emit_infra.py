@@ -456,7 +456,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # require -- confirmed via a hand-reduced, Mojo-independent C
     # repro that `longjmp` into a `__GIMPLE`-tagged function's
     # `setjmp` frame reads back all-zero and segfaults. See
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    # “setting/getting an arbitrary attribute on a generically-typed object”'s
     # "Segfault root-caused" section. gen_func (free functions) has
     # always deliberately been non-`__GIMPLE` (LENIENT) already, so
     # this flag only matters for the two `__GIMPLE`-tagged code
@@ -720,7 +720,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # route it through the dynamic-attribute dispatch machinery, without
     # broadening the type-keyed dispatch condition to match `char *` in
     # general (which is used pervasively for ordinary strings — see
-    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    # “setting/getting an arbitrary attribute on a generically-typed object”'s
     # "Residual gap: caught exception objects" section for why that
     # broader fix was rejected as too risky).
     gen._except_as_names: set          = set()
@@ -1506,7 +1506,7 @@ def _dict_val_is_known(gen, name: str) -> bool:
     `int64_t`, so `d = {"a": 1}; d.get("a", "y")` emitted `mojo_dict_get_str`
     on an int-valued dict and `print` called `strlen(1)`. Same shape for
     `d.pop(k, default)`'s value accessor — see
-    bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md. Callers that
+    “A dict's value accessor is guessed from the DEFAULT argument”. Callers that
     only compare against a concrete type (`double`, `char *`, a container) are
     unaffected by the ambiguity and should keep reading `_dict_val_of`.
     """
@@ -2588,7 +2588,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         # _C[k] = 2` printed `0 0 0 / 3` where CPython prints `0 1 1 / 1`,
         # and the misses grew the dict once per lookup (the ~16 GB of
         # `mojoc --dump-full fire.py` in
-        # bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). Passing the WORD
+        # CODEGEN_tuple_dict_key_hashed_by_address). Passing the WORD
         # instead lets `mojo_cstr_or_int_str` ask what it is and render a
         # container by VALUE, which is what makes the key agree with the tuple's
         # own `==` (`mojo_list_eq`, a by-value compare) and with the key the
@@ -3253,7 +3253,7 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     handle (int64_t/void*/other pointer — the real kind isn't statically
     known), guard with the runtime kind registries
     (`mojo_is_registered_dict`/`_set`) instead of blindly assuming list —
-    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented
+    the exact gap CODEGEN_all_any_dict_set_miscompile documented
     (that doc is gone, closed by this change).
     Fixing it here, once, closes it for all 5 call sites at once."""
     if src_type == 'MojoList *':
@@ -3432,7 +3432,7 @@ def _fstring_sub_exprs(gen, node) -> list:
     with no intermediate variable) invisible to _collect_calls and thus
     to Pass 1.3d's cross-call scalar contract below: only the
     `y = g(...)` shape, a genuine AssignStmt.value CallExpr, was ever
-    observed. See bugs/CODEGEN_untyped_param_string_direct_fstring_call.md.
+    observed. See CODEGEN_untyped_param_string_direct_fstring_call.
     Mirrors _lower_StringLiteral's own fresh-parse-from-text handling of
     these so both paths agree on what a call site looks like."""
     val, is_fstring = gen._decode_str_literal_text(node.value)
@@ -3671,7 +3671,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     # container branches (emit_infra.py's print-args loop). Without this,
     # f"{struct.unpack(...)}" / str(a_call_result()) fell straight to the
     # generic `mojo_str` branch below and read the container's header bytes
-    # as a C string (bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md).
+    # as a C string (“`f"{a_list}"` and `str(a_list)` print the container's raw header bytes”).
     if et in ('int', 'int64_t', 'void *'):
         _real = gen._get_actual_type(et, ev)
         if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
@@ -4472,7 +4472,7 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     #      gcc's "non-trivial conversion in 'var_decl'", which is how this was
     #      found (fire_compiler.py's own `_parse_comptime`, whose multi-target
     #      comprehension named `t` while a `Token *` local `t` was live;
-    #      bugs/CODEGEN_comprehension_target_shadows_struct_local.md).
+    #      CODEGEN_comprehension_target_shadows_struct_local).
     #
     # False in the common case — a target name that is not already live — so
     # the single-comprehension program is byte-identical to before.
@@ -6591,7 +6591,7 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
       that IS stack-allocated, because `[]` is an empty constructor — lost
       the one piece of type information its own annotation carried, and a
       list filled only from a callee read back as ints
-      (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
+      (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
       closed and removed with the annotation-seeding fix)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     candidates = gen._owned_free_candidates

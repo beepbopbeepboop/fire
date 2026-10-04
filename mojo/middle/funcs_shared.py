@@ -744,7 +744,7 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     wherever the mismatch is a field/inference key rather than a symbol
     name (bugs/CODEGEN_reexported_function_import_qualifier_names_the_
     wrong_module.md, and the struct-through-a-re-export shape
-    bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md sits
+    “OPEN: `from mod import Class as Alias” sits
     next to).
 
     Each hop matches on the LOCAL name the importing module binds, and
@@ -1036,7 +1036,7 @@ def _local_sibling_module_exports(gen, module: str):
     """(exports_dict, qualifier) for a `from module import ...` that
     module_loader.load_module() can't resolve because it isn't a
     tracked stdlib/test module — i.e. a LOCAL project sibling file (see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md, box.3d/game
+    DYLIB_sibling_import_calls_bind_to_weak_stubs, box.3d/game
     repo). (None, None) when `module` genuinely can't be found anywhere
     (a real external/unmodeled package, or a bare relative import), in
     which case the caller falls back to the existing weak-stub/

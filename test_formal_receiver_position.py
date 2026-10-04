@@ -618,7 +618,7 @@ REFUSALS = [
     #
     # **This case used to be the same program as `bs = [Box(), Box()]`, and the
     # CAPABILITY is what changed (2026-10-02, the now-deleted
-    # `bugs/FORMAL_method_call_on_a_subscripted_receiver.md`): a list literal of
+    # `FORMAL_method_call_on_a_subscripted_receiver`): a list literal of
     # `Box()` names its element type in its own right, and a parameter declared
     # `List[Box]` names it outright, so both now lift and run. What is left is
     # the shape the source does not answer, and it is still the same refusal

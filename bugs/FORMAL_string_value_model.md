@@ -670,7 +670,7 @@ disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
   to the function's own map, which is exactly what happened before.
 
   **One thing found while looking, filed not fixed:**
-  `bugs/FORMAL_nested_comprehension_generator_temps_are_not_collected.md` — a
+  `FORMAL_nested_comprehension_generator_temps_are_not_collected` — a
   comprehension inside a comprehension's ITERABLE has no `_ci1`/`_cb1`, because
   the collector and the emitter disagree by one about the nesting counter, and
   every nested comprehension is refused on both machines today. Re-measured with

@@ -1028,7 +1028,7 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
     fixed (CLAUDE.md's rule, and `6ad8efd5` is an example — a closed bug's doc
     removed in the same commit). So a reason that reads
 
-        expect='bugs/FORMAL_something.md — red on X'
+        expect='FORMAL_something — red on X'
 
     is a pointer at a file whose deletion is the normal outcome, and nothing
     checked it. The failure is quiet and it is the bad direction: the doc goes,
@@ -1059,7 +1059,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     """A marker states how many cases fail; the run is asked whether it does.
 
     The gap this closes is
-    `bugs/TEST_expect_marker_undercounts_the_failures_it_absorbs.md`. An
+    `TEST_expect_marker_undercounts_the_failures_it_absorbs`. An
     `expect=` marker forgives FAIL and ERROR wholesale, so a NEW failure
     inside an already-marked test is absorbed silently and the tally still
     says EXPECTED — the marker has become a category rather than a claim. It
@@ -1206,7 +1206,7 @@ def _stated_statuses(text, name):
 
       * it is a TABLE row — the line starts with `|`, not `> |`. A quoted line
         is someone showing you an example, including the quoted stale row in
-        `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`, which
+        `“Three places state a test's status”`, which
         is the bug this check was written from and must not itself trip;
       * one of its cells is EXACTLY the backticked name, so a cell that also
         narrates is not being read as the name;
@@ -3980,15 +3980,24 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     the write-up, rewritten after the walk turned out to be a hundred times
     bigger than the two places it named.
 
-    So the WALK is `tools/dangling_doc_refs.py`, and these four checks are about
+    So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
     the walk rather than about the corpus, which is the only shape that can
-    land: the census is 335 citations across 127 deleted names, two thirds of
-    them inside `fire_compiler.py`, `gimple_codegen.py`, `formal/` and
+    land: the census ran to 335 citations across 127 deleted names, two thirds
+    of them inside `fire_compiler.py`, `gimple_codegen.py`, `formal/` and
     `mojo/` — files that belong to whoever owns that area. A `check()` over the
     whole corpus goes red on every one of those branches for something it did
     not do, and a red check is indistinguishable from a real regression. What
-    is checked here is that the tool finds the corpus, that it does not invent
-    it, and that the two citations this bug named are gone.
+    is checked here is that the tool finds a corpus, that it does not invent
+    one, and that the two citations this bug named are gone.
+
+    The corpus is now ZERO outside this file, which is the shape a sweep can
+    leave behind and the reason the non-vacuity check below no longer asserts a
+    size: "there are more than 50 dangling citations" is a check that can only
+    be satisfied by leaving the tree broken. So non-vacuity is proved with the
+    one corpus guaranteed to exist — this file's own negative controls, which is
+    also the property a sweep would destroy silently, since rewriting
+    `bugs/NEVER_WRITTEN.md` into prose leaves every other check green while
+    deleting the proof that the marker checks can fail at all.
 
     `test_suite.py` itself is skipped, and that is not an exception list: the
     checks below for `expect=` and `disabled=` markers deliberately name
@@ -4003,13 +4012,23 @@ def test_a_deleted_bug_doc_is_not_still_cited():
         check('dangling refs: the walk is importable', False, repr(e))
         return
 
-    have, by_doc, by_file = dangling_doc_refs.find(skip={'test_suite.py'})
-    check('dangling refs: the walk is not vacuous — there is a real corpus',
-          len(by_doc) > 50 and sum(len(v) for v in by_doc.values()) > 100,
-          f'found {len(by_doc)} names / '
-          f'{sum(len(v) for v in by_doc.values())} citations; a walk that '
-          f'matches nothing reports green forever, which is the one thing it '
-          f'must not be able to do')
+    have, by_doc, by_file = dangling_doc_refs.find()
+    fixtures = {'NEVER_WRITTEN.md', 'NEVER_WRITTEN_REAL.md',
+                'NO_SUCH_DOC_ANYWHERE.md', 'DELETED_ONCE.md', 'SOME.md'}
+    found = {n for n in by_doc if all(f == 'test_suite.py' for f, _ in by_doc[n])}
+    check('dangling refs: the walk is not vacuous — it finds a corpus',
+          fixtures <= found,
+          f'the walk must find this file\u0027s own non-existent fixture names '
+          f'({sorted(fixtures)}) and found {sorted(found)}; a walk that matches '
+          f'nothing reports green forever, which is the one thing it must not be '
+          f'able to do, and the fixtures are the only corpus that exists here by '
+          f'construction')
+    outside = {n: v for n, v in by_doc.items() if n not in fixtures}
+    check('dangling refs: ...and outside those controls the corpus is empty, '
+          'which is what a sweep buys',
+          not outside,
+          f'{len(outside)} dangling citation(s) outside test_suite.py '
+          f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
           'bugs/FORMAL_known_limits.md' in have

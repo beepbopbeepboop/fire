@@ -104,7 +104,7 @@ default-valued callable parameter). One fix, three files — that doc's
 
 The imported-module floor (`c_parser.info` / `._func_body` / `c_parser.match`)
 is also unchanged, and is now filed on its own rather than carried here:
-`bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md`.
+`“The compiler has no way to see CPython's `Lib/` from an entry file outside it”`.
 
 ## Status 2026-09-30 — two of three of this file's own blockers gone; one remains, and is shared with two other files
 

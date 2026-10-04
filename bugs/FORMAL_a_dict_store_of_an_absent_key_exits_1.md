@@ -3,7 +3,7 @@
 **Area:** FORMAL / codegen (shared — both backends behave identically, because
 both emitters have one `_emit_dict_lookup_addr` and it is lookup-only). Found
 2026-10-03 while landing the dict-KIND half of a frame field's subscript
-(`bugs/FORMAL_a_dict_field_of_a_module_level_frame_still_has_no_key_kind.md`,
+(`FORMAL_a_dict_field_of_a_module_level_frame_still_has_no_key_kind`,
 deleted by that commit), whose own reproducer is a STORE and therefore runs into
 this one the moment the field is recognised as a dict.
 
@@ -69,7 +69,7 @@ arm", it is three facts the path does not have:
 ## The exact next step
 
 Decide the direction first, the way
-`bugs/FORMAL_a_comprehension_over_a_spliced_literal_exits_1.md` had to, and write
+`FORMAL_a_comprehension_over_a_spliced_literal_exits_1` had to, and write
 it down:
 
 1. **A reservation.** The cheapest honest answer is for a dict LITERAL to

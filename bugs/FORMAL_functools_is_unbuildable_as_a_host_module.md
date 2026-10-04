@@ -137,7 +137,7 @@ both honest and exportable.
 A `functools.mojo` exporting `lru_cache`, `wraps` and `reduce` would build, and
 `version.py` would then build too — with a dropped decorator and a refused
 callable, i.e. two of the three ways this tree produces a plausible program that
-is not the one the source says. `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`
+is not the one the source says. `FORMAL_hashlib_sha3_and_blake2s_absent`
 filed a decision of exactly this shape rather than shipping one, and the same
 argument applies here.
 

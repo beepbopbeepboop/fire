@@ -46,7 +46,7 @@ def cpython_lib_root(start_dir):
     `Tools`, not an ancestor, so no upward walk from `Tools/c-analyzer/` ever
     arrives there — the whole reason `import argparse` used to degrade to a
     receiver stub from inside a CPython checkout (see
-    bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md).
+    “The compiler has no way to see CPython's `Lib/` from an entry file outside it”).
 
     One definition, used by both consumers that need the answer: this
     resolver's `_find` (which can only look along MOJO_PATH, so the directory
@@ -177,7 +177,7 @@ class Resolver:
         (`$PYTHONPATH=<checkout>/Lib` left `resolve_source('argparse')` at
         None), which is half of why a build whose entry file sits in a CPython
         checkout could not see `Lib/` at all: see
-        bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md.
+        “The compiler has no way to see CPython's `Lib/` from an entry file outside it”.
 
         Extension is the INNER priority and LOCATION the outer one, so a real
         match in a closer directory still wins over an unrelated same-named

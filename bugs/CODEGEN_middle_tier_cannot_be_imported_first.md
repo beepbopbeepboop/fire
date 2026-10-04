@@ -75,7 +75,7 @@ nobody can see in the file that caused it. It is also, right now, a RED in a
 gate: `suite-self-test` is `cache=True` and in `check`, so the first person to
 run `make check` after this lands sees a failure whose two other candidate
 causes (this doc, and
-`bugs/TEST_estate_check_red_on_two_form3_test_files.md`, the estate half of the
+`TEST_estate_check_red_on_two_form3_test_files`, the estate half of the
 same run) are different bugs.
 
 ## Exact next step

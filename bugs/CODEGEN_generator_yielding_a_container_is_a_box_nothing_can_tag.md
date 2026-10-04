@@ -1,7 +1,7 @@
 # CODEGEN: a generator that yields a CONTAINER has a boxed `int64_t` value, and nothing at the consumer can tell
 
 **State: OPEN, measured 2026-10-02, not fixed.** Found while fixing
-`bugs/CODEGEN_next_generator_value_truncated_in_return_position.md` (deleted by
+`CODEGEN_next_generator_value_truncated_in_return_position` (deleted by
 its fix), whose own scope table lists this row. It is NOT the same bug and the
 table did not say so, which is worth stating first because it is why this doc
 exists rather than a line in that commit: the return type there was **already

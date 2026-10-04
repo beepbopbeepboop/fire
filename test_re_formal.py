@@ -345,7 +345,7 @@ def mojo_str(s):
     So the doubling is not a spelling preference: without it the engine is
     handed bytes the pattern never contained. `re.mojo` itself is right —
     given the right bytes it answers every one of those cases as CPython does,
-    which is why `bugs/FORMAL_re_word_boundary_never_matches.md` is gone rather
+    which is why `“FORMAL: `re.mojo`'s `\b` never matches”` is gone rather
     than acted on. `test_mojo_str_round_trips_through_the_decoder` is what now
     makes the un-doubled state impossible to reach again, and it costs no
     build: it runs every string this file writes through the one decoder and
@@ -1251,7 +1251,7 @@ def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
 
     The container is asserted against `default_format(arch)` and NOT hardcoded,
     for `test_struct_formal.py`'s reason and because this check used to carry
-    the premise `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` was
+    the premise `“An x86-64 module dylib is a Mach-O, so no x86-64 program can import anything”` was
     filed on and that doc's own author measured to be FALSE: on a macOS host an
     x86-64 image is a Mach-O, because an x86-64 binary that RUNS here has to be
     one Rosetta 2 will load and `fire.py`'s `_formal_run_argv` is what runs it.

@@ -1,7 +1,7 @@
 # CODEGEN: a list-of-lists parameter reached from BOTH a `list[list[int]]` and a `list[list[str]]` call site prints every row as an address
 
 Found 2026-10-02 while fixing
-`bugs/CODEGEN_nested_list_loop_target_loses_inner_elem_type.md` (deleted by
+`CODEGEN_nested_list_loop_target_loses_inner_elem_type` (deleted by
 its fix). Its test program has to give the string and the integer cases
 DIFFERENT enclosing functions, because this is what happens when they share
 one, and that is why the doc's subject looked narrower than it is. Verified

@@ -83,7 +83,7 @@ def _cpp_struct_ptr_local(gen, name: str) -> str | None:
     (e.g. 'ArgResolver *'), return the bare struct name; else None.
     Used to pick `->` vs `.` for a non-self member access/method call,
     and to find the struct a method call on `name` belongs to — see
-    bugs/hard/CODEGEN_generator_struct_typed_param_refused.md."""
+    CODEGEN_generator_struct_typed_param_refused."""
     if gen._cpp_declared is None:
         return None
     ct = gen._cpp_declared.get(name)
@@ -426,7 +426,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # own `_eligible` refuses them; this is the same refusal for the C++
     # backend, so neither can silently miscompile what the other rejects. The
     # message is built by the same helper so the two cannot drift. See
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+    # CODEGEN_coro_yield_kind_unresolved_callsite.
     _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
     if _bad:
         raise gimple_exprtypes._UnsupportedGeneratorShape(

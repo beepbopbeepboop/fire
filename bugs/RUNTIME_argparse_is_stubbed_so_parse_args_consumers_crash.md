@@ -146,7 +146,7 @@ in `dbpickle.md`.
 
 ## Why this is its own doc and not folded into the COMPILE_FAIL one
 
-`bugs/COMPILE_FAIL_Apple___main__.md` is retired: the file's compile stage is
+`“COMPILE_FAIL: Apple/__main__.py”` is retired: the file's compile stage is
 clean, and what remains is not a compile failure at all — it is an unimplemented
 runtime feature for which the honest, correct behaviour is a stub. Keeping a
 COMPILE_FAIL doc open for it would file a known-and-accepted stub as an open

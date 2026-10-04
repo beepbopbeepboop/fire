@@ -567,7 +567,7 @@ def main() -> Int:
 
     # 10. set(iterable) / list(iterable) constructors actually populate the
     # collection from the argument, instead of silently producing an empty
-    # one — see bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md. This is
+    # one — see CODEGEN_set_list_ctor_ignores_iterable_arg. This is
     # a genuine behavioral check (len() + a sum over the iterated elements),
     # not just "does it compile": the bug compiled clean and returned 0 for
     # everything below before the fix.
@@ -597,7 +597,7 @@ def main() -> Int:
     # 10. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Compiling
     # this used to fail outright (a C compiler error, not just a wrong
-    # answer — see bugs/CODEGEN_bound_method_as_value_not_resolved.md), so
+    # answer — see CODEGEN_bound_method_as_value_not_resolved), so
     # this is a real behavioral round-trip check, not just "it compiles":
     # confirms the stored value actually calls back into the right method
     # WITH the right `self`, not merely that gcc accepts the generated C
@@ -622,7 +622,7 @@ def main() -> Int:
     # (mojo_maybe_bound_call_N). Previously the join collapsed the slot to
     # void* and the call unconditionally used mojo_fnptr_call_0, so the
     # bound-method branch called the MojoBoundMethod struct as code (bus
-    # error). See bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md
+    # error). See “CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found”
     # #3. Reproduces in a plain (non-generator) method — this is the
     # codegen-wide check; the generator twin is in
     # test_gimple_generator_runner.py.
@@ -1076,7 +1076,7 @@ def main():
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),
     # so the tuple branch was dead. See
-    # bugs/hard/CODEGEN_coro_stackswitch_body_semantics_gaps.md #4.
+    # “CODEGEN (A3 stack-switch): 4 further generator-body semantic gaps found” #4.
     test_gimple_stdout("gimple_isinstance_tuple_on_heterogeneous_pop", """\
 fn walk():
     stack = [(1, 2)]
@@ -1117,7 +1117,7 @@ def main() -> Int:
     # literal reusing the SAME quote character as the f-string's own
     # delimiter (legal since PEP 701 / Python 3.12) — this used to truncate
     # the f-string at the first reused quote (see
-    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md), producing a "could not
+    # PARSE_FAIL_fstring_same_quote_reuse), producing a "could not
     # be compiled" warning (falling back to mangled literal text). This is
     # a real behavioral round-trip check (VALUE, not just "it compiles"):
     # `len('ab')` interpolates to `2`, and the surrounding f-string text
@@ -1132,7 +1132,7 @@ def main() -> Int:
 """, expected_return=len("value: 2"))
 
     # 12. Untyped-parameter identity function called with a string argument
-    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # — CODEGEN_untyped_param_string_passthrough_wrong. `a` has no
     # body-usage evidence at all (just returned unchanged), so the
     # parameter and the function's inferred return type used to default to
     # int64_t; the real char* argument was silently reinterpreted as an
@@ -1157,7 +1157,7 @@ print(g("ab"))
     # 14. Two-untyped-parameter shape (`a + b`, both strings) — the shape
     # that originally surfaced via an f-string interpolating a run-time-
     # computed string value from a function just like this one (see
-    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md's verification pass).
+    # PARSE_FAIL_fstring_same_quote_reuse's verification pass).
     test_gimple_stdout("gimple_untyped_param_string_concat_passthrough", """\
 def g(a, b):
     return a + b
@@ -2286,7 +2286,7 @@ print(sorted(names, key=lambda s: s + "!"))
     #   sorted(words, key=len)   SEGFAULTED (exit -11): the key loop read a
     #                            list that was never materialized
     #
-    # See bugs/CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.md.
+    # See CODEGEN_sorted_key_of_runtime_built_strings_sorts_by_address.
     test_gimple_stdout("gimple_sorted_module_level_string_list", """\
 words = ["pear", "fig", "apple"]
 print(sorted(words, key=len))
@@ -2578,7 +2578,7 @@ main()
 """, "9\n7\n")
 
     # A capture DISCOVERY gap, not a truthiness gap, which is what
-    # bugs/CODEGEN_captured_string_local_reads_falsey.md reported it as. The
+    # “CODEGEN: a captured `char *` local reads as falsey inside the closure body” reported it as. The
     # lambda-capture scan walked a hand-grown list of AST child fields, and a
     # field that was not on it was an UNDER-approximation of what the body
     # reads: the name never reached the env struct, and the body read a hard
@@ -3937,7 +3937,7 @@ def main():
 """, "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
 
     # ── A CONTAINER used as a dict key keys by its VALUE
-    # (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). A tuple word reached
+    # (CODEGEN_tuple_dict_key_hashed_by_address). A tuple word reached
     # the dict as a bare address: `(p, os.path.getmtime(p))` built twice hit
     # twice as often as it missed never, so every lookup grew the dict and the
     # self-hosted `mojoc --dump-full fire.py` carried ~16 GB of it.
@@ -4180,7 +4180,7 @@ main()
 """, _P_REPR * 100000, 14)
 
     # ── `with C():` with no `as` target still runs `__exit__`
-    # (bugs/CODEGEN_with_no_as_target_drops_exit.md, deleted with that fix).
+    # (“`with C():` with no `as` target never calls `__exit__` in the compiled path”, deleted with that fix).
     # The five index-parallel lists `_gen_stmt_WithStmt` accumulates per with
     # item were appended from inside `if item.alias is not None:`, so the
     # no-`as` spelling registered nothing: `__enter__` was called, the body ran,
@@ -4230,7 +4230,7 @@ main()
        "enter B 1\nloop body 1\nexit B 0\n"
        "enter B 1\nloop body 2\nexit B 0\n")
 
-    # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
+    # ── An unannotated integer local is 64-bit (“CODEGEN: an unannotated integer local is a 32-bit `int`, not a 64-bit `Int`”).
     # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
     # `var b: Int = 0` and CPython both reached 6000000000.
     test_gimple_stdout("gimple_unannotated_integer_local_is_64_bit", """\
@@ -4505,7 +4505,7 @@ def main():
     print(b[0])
 """, "2\nalpha1\nbeta1\nalpha2\n")
 
-    # ── Iterating a Dict[Int, V] yields integer keys (bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md).
+    # ── Iterating a Dict[Int, V] yields integer keys (“CODEGEN: iterating a `Dict[Int, V]` yields the keys as strings”).
     # The keys used to come back as decimal STRINGS typed `char *`, so `ks += k` added
     # pointers. Covers `for k in d`, `.keys()`, `.items()` (pair and unpacked forms, a
     # parameter) and a string-keyed dict reusing the loop name (which must stay strings).
@@ -4566,7 +4566,7 @@ print({"a": 1}.items())
     # the two spellings that already worked and must keep working, so they are
     # in the same program: a fix to the variable's repr that broke either would
     # show up here. See
-    # bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
     test_gimple_stdout("gimple_dict_items_pair_var_prints_as_a_pair", """\
 def ints():
     d = {"a": 1, "b": 2}
@@ -4595,8 +4595,8 @@ def main():
     # 0. `d.pop(k)` with no default is correct today (it raises KeyError), so
     # this is specifically the two-argument form; and a str-valued dict needs
     # the `mojo_dict_pop_str` reader or its value pops as a pointer decimal.
-    # See bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md and
-    # bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md.
+    # See “CODEGEN: `d.pop(k, default)` returns 0 on a MISS” and
+    # “A dict's value accessor is guessed from the DEFAULT argument”.
     test_gimple_stdout("gimple_dict_pop_default_on_a_miss", """\
 def main():
     d = {}
@@ -4636,7 +4636,7 @@ print(String(7))
 
     # 16. Same two-param concat shape, but called DIRECTLY inline inside the
     # f-string's `{...}` interpolation — no intermediate variable at all.
-    # bugs/CODEGEN_untyped_param_string_direct_fstring_call.md: an f-string
+    # CODEGEN_untyped_param_string_direct_fstring_call: an f-string
     # interpolation's `{expr}` sub-expression is raw source text kept inside
     # the StringLiteral node, only parsed at actual codegen time — it was
     # invisible to the earlier cross-call scalar-contract call-site scan
@@ -4728,7 +4728,7 @@ def main():
 main()
 """, "read_nonlocal\n11\n")
 
-    # 19. (bugs/CODEGEN_keyword_only_ctor_call_skips_earlier_default.md) A
+    # 19. (CODEGEN_keyword_only_ctor_call_skips_earlier_default) A
     # keyword-only constructor call must fill every SKIPPED earlier param
     # with its own declared default, not 0. Before the fix: `Derived(b=99)`
     # emitted a=0, b=99, c=3 -- a silent wrong value, invisible to any
@@ -4923,7 +4923,7 @@ def main():
 
     # Slice-assignment really mutates the list in place (full + bounded,
     # growing and shrinking, pure insert, negative bounds) — this is the
-    # regression guard for bugs/CODEGEN_slice_assignment_silently_noops.md
+    # regression guard for “CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”
     # (compiled `x[a:b] = y` used to be a silent no-op).
     test_gimple_stdout("gimple_slice_assign_mutation", """\
 def main():
@@ -8587,7 +8587,7 @@ def main():
     f({"x": 2})
 ''', 'f', False)
 
-    # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
+    # CODEGEN_function_scoped_import_module_not_inlined: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
     # `Parameter` defined in a SIBLING module) left the field `int64_t` in
@@ -8848,7 +8848,7 @@ def main():
 
     test_c_accessor_helpers_emitted_once_across_modules()
 
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # CODEGEN_same_bare_name_struct_collision_across_modules
     # §4 ("module.Class(...) construction is unresolved on every path"):
     # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE
     # object rather than its bare name — lowered to a generic "method call"
@@ -8961,7 +8961,7 @@ def main():
 
     test_cross_module_iterator_struct_protocol_symbols()
 
-    # bugs/CODEGEN_unannotated_init_param_field_type_int64_residue.md (deleted
+    # “An unannotated `__init__` param still types its field `int64_t`” (deleted
     # with that fix): the cross-module constructor evidence above types a PARAM,
     # but the `_xmod_ctor_field_hints` merge applied it to the FIELD whose name
     # MATCHES the param. So a constructor that stores one param in two fields —
@@ -9021,7 +9021,7 @@ def main():
             print(f"FAIL  {name}: expected {want!r}, got {out!r}")
             _FAIL += 1
     _test_cross_module_ctor_param_types_every_field()
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
+    # CODEGEN_same_bare_name_struct_collision_across_modules:
     # two REAL classes sharing a bare name across two modules. The single
     # string this codegen used as a struct's C identity was the bare
     # `StructDef.name`, so whichever module was processed first owned the
@@ -9607,7 +9607,7 @@ def main():
         'fgn_a.py': "import fgn_b\n\ndef main():\n    print(fgn_b.make())\nmain()\n",
     }, 'fgn_a.py')
 
-    # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
+    # “`f"{a_list}"` and `str(a_list)` print the container's raw header bytes”: f"{container}"
     # and str(container) read the container's raw header bytes as a C
     # string (`_stringify_value` had no container branch at all, unlike
     # `print`'s dispatch, which was already correct for the same values).

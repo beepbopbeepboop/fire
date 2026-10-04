@@ -102,7 +102,7 @@ test_gimple.py is 372/0 with it.
 
 ## What is NOT this bug
 
-The sibling `bugs/CODEGEN_struct_typed_field_reprs_as_an_integer.md` (a struct
+The sibling `CODEGEN_struct_typed_field_reprs_as_an_integer` (a struct
 held in a FIELD, whose `struct_boxed_fields` table is populated from observed
 boxing rather than from the declared field type) is a different table and is
 untouched here — the global case no longer reaches it.

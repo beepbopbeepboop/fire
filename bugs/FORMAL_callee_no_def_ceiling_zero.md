@@ -31,7 +31,7 @@ lines), so the build walks past this refusal and reports the next one:
 
 A cold CAS is not optional here: `cas.formal_build_key` does not fold in the
 sources of the modules a file imports
-(`bugs/FORMAL_sweep_cache_ignores_imports.md`), and nine of the twelve import
+(`FORMAL_sweep_cache_ignores_imports`), and nine of the twelve import
 most of the standard library. Run twice — before the change and after it, on two
 different cold CAS directories — and the second cause is identical in all
 twelve.
@@ -314,7 +314,7 @@ file that changed from `codegen` to `not-answerable/host-import`.
   this row's.
 
 **Found in passing, not fixed, not this row's to fix:**
-`bugs/FORMAL_aliased_reexport_publishes_the_wrong_name.md` — the sibling reader
+`“An aliased re-export is published under the DEFINING module's name”` — the sibling reader
 this change added (`imported_bound_names`) records the name a `from … import`
 BINDS, and `reexported_names` records the name the defining module gave it, so
 `from leaf import base as aliased` in a package `__init__` publishes `base` and
@@ -470,7 +470,7 @@ and why it can be re-run on someone else's branch without touching it):
 
 Run it under a **cold CAS** (`env GMOJO_HOME=$PWD/.tmp/gmojo_nc`) — nine of the
 twelve import most of the standard library, and `cas.formal_build_key` does not
-fold a module's sources in (`bugs/FORMAL_sweep_cache_ignores_imports.md`), so a
+fold a module's sources in (`FORMAL_sweep_cache_ignores_imports`), so a
 warm CAS replays verdicts about those modules' old contents.
 
 **The minimal programs** are `test_formal_run.py`'s `byref_refuse_*` cases —

@@ -2218,7 +2218,7 @@ def _locally_binds_name(gen, bare_name: str) -> bool:
     2-argument handling) purely because some unrelated module
     elsewhere in the same whole-program build happens to define a
     function with the same bare name. See
-    bugs/CODEGEN_generator_function_Lib_symtable.md's `with open(path,
+    “CODEGEN_generator_function: Lib/symtable.py”'s `with open(path,
     'rb') as f:` repro (symtable.py imports tokenize transitively but
     never binds its `open`)."""
     if bare_name in getattr(gen, '_local_top_level_func_names', ()):
@@ -2915,7 +2915,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     # wrapper (unchanged, pre-existing), PLUS (library/dylib modules
     # only, see gen_module) an automatic `__attribute__((constructor))`
     # AND a publicly-exported `<module>_init()` a C host may call
-    # directly (bugs/DYLIB_module_scope_never_executes.md). Whichever
+    # directly (DYLIB_module_scope_never_executes). Whichever
     # combination of those actually fires at runtime, module-scope code
     # must run exactly once — the guard lives HERE, inside the single
     # underlying function every caller funnels through, rather than in
@@ -2987,7 +2987,7 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
     function `f` (e.g. `from base.chest import chest_total_count` where
     chest_total_count's own signature takes a `Chest`, but this file
     never imports `Chest` itself) — see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "struct-
+    DYLIB_sibling_import_calls_bind_to_weak_stubs's "struct-
     typed function parameter" gap and
     bugs/hard/... crash-repro writeup for why a bare int64_t placeholder
     there is unsafe (a caller-side `S()`/field-write on that placeholder
@@ -3313,7 +3313,7 @@ def _register_imported_structs(gen, stmts) -> None:
     dynamic `_mojo_dispatch_setattr` on that placeholder — a crash, not
     merely a missed optimization (the exact shape a reverted symbol-hash-
     only fix for a related gap was found to reintroduce; see
-    bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+    DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
     attempt #2" section). Tightly scoped beyond that to avoid disturbing
     the many imported structs a module merely passes through untouched."""
     if gen.do_imports or not getattr(gen, '_current_filename', None):
@@ -3357,7 +3357,7 @@ def _register_imported_structs(gen, stmts) -> None:
     # call on that null placeholder — a crash, not merely imprecise
     # codegen (the exact shape a reverted symbol-hash-only fix for a
     # related gap was found to reintroduce; see
-    # bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+    # DYLIB_sibling_import_calls_bind_to_weak_stubs's "follow-on
     # attempt #2"). Combined with the existing _field_accessed check
     # below (which already requires an actual `name.field` textual
     # access, not just an assignment), this only pulls in structs that

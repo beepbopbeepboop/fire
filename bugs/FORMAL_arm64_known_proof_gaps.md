@@ -5,7 +5,7 @@
 changed reaches a proof: two `formal/model.py` walks were made iterative (both
 proved answer-preserving by a differential over all 733 function bodies in
 this worktree's 107 `.mojo` files (none of which failed to parse) and 1,463
-generated statement lists — see `bugs/FORMAL_arm64_slice_concat_and_with_refusal.md`
+generated statement lists — see `FORMAL_arm64_slice_concat_and_with_refusal`
 and the commits behind them), a `with … as y:` alias is now stored before the
 body is walked, and two `call_callee_name` guards in
 `struct_returned_frame_sites` / `_frame_return_status` close a specialization

@@ -1070,7 +1070,7 @@ def own_eq_refusal(name: str, comparison: str, why: str) -> str:
       `==` did not dispatch by name at all on this path, so accepting the class
       would have meant building an image that runs the comparison as an address
       compare. That reason was FIXED (the dispatch landed,
-      `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`), and a refusal
+      `FORMAL_eq_does_not_dispatch_to_a_user_dunder`), and a refusal
       whose stated reason has been fixed is a refusal nobody looks at again.
     * the transform's own half then became the stated reason: `rewrite_equality`
       DESUGARS `==` into a field-wise chain, which would silently replace the

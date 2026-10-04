@@ -48,7 +48,7 @@ def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
     only from a callee came back as ints, because the element type of a
     list is otherwise recorded by the `append` sites, and a caller that
     only sees the list through a call has none
-    (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
+    (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
     closed and removed when this helper landed).
     """
     if ctype not in ('MojoList *', 'MojoSet *'):

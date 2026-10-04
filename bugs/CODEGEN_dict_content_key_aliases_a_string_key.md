@@ -6,7 +6,7 @@ while working on `CODEGEN_dict_comprehension_repr_is_separately_broken.md`,
 and one more repr defect was located here — it is item 2's runtime half.**
 
 Found 2026-10-01 while fixing
-`bugs/CODEGEN_tuple_dict_key_hashed_by_address.md` (deleted with that fix).
+`CODEGEN_tuple_dict_key_hashed_by_address` (deleted with that fix).
 **NOT the address bug** — a container key is now keyed by its VALUE, which is
 the fix; these are the four properties of that value-keying that remain, all of
 them reachable from ordinary code and none of them a crash.

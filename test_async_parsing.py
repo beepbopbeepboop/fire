@@ -1,5 +1,5 @@
 """Parser-only unit tests for `async def`/`await`/`async for`/`async with` —
-Milestone 3a of bugs/INTERP_generator_yield_entirely_unimplemented.md (the
+Milestone 3a of INTERP_generator_yield_entirely_unimplemented (the
 async/await sibling of Milestone 1's `yield`/`yield from` parsing).
 
 These tests construct `Parser(py_tokenize(src)).parse_module()` directly and

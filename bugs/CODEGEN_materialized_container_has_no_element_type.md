@@ -1,6 +1,6 @@
 # CODEGEN: `list(<a boxed dict>)` reads every key as the decimal of its own address
 
-Found 2026-10-01 while fixing `bugs/CODEGEN_list_of_pairs_iterated_as_dict.md`
+Found 2026-10-01 while fixing `“CODEGEN: `list(x)` of an erased tuple element is an empty list”`
 (removed with that fix). That fix made `list(x)` dispatch an argument whose
 kind is not statically knowable through `_materialize_as_list`, which is the
 right chokepoint and answers list / dict-keys / set correctly **by count and

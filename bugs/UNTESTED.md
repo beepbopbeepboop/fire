@@ -88,11 +88,11 @@ is an input), 67/67.
 
 The 2 undeclared are `test_formal_read_before_store.py` and
 `test_formal_receiver_spelling.py`, which arrived with a merged branch and are
-`bugs/TEST_estate_check_red_on_two_form3_test_files.md` — another worker's
+`TEST_estate_check_red_on_two_form3_test_files` — another worker's
 claim, and pre-existing on this branch's base.
 
 The census also now counts **both spellings** of "test file", which is
-`bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md` (closed and
+`“The estate check only sees files named `test_*.py`”` (closed and
 deleted with the fix). Four files were outside the inventory entirely before
 that, and one of them — `formal/x86_64_model_test.py`, the only check on
 `lib/X86.lean` that EXECUTES a machine model instead of typechecking it — ran

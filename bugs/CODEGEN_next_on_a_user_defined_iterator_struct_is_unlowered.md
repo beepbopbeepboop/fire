@@ -616,7 +616,7 @@ is not a guess.
       `std_itertools_itertools_count_…`. Measured as pre-existing (the
       unmodified tree emits the same `std_itertools___init___count_2dbb98`),
       and it is filed separately as
-      `bugs/CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md`
+      `CODEGEN_reexported_function_import_qualifier_names_the_wrong_module`
       (`bugs/hard/README.md`). Not fixed here: `_func_qualifier`'s tier-2
       `_own_imported_func_home` is load-bearing for two documented miscompiles,
       and re-deriving it reaches every `from <pkg> import f` across the 51

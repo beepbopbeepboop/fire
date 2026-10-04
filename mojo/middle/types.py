@@ -413,7 +413,7 @@ def _is_empty_container_literal(node) -> bool:
     `_gen_ReturnStmt`'s publish of `_return_elem_types`, where treating that
     storage default as evidence routed a str-valued result through
     `mojo_repr_list_ints` and printed its slots as pointer decimals — see
-    bugs/CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
+    “A comprehension inside an `if` body loses its RESULT list's element type”.
     """
     if isinstance(node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
         return not (getattr(node, 'elements', None)
@@ -1638,7 +1638,7 @@ def _module_toplevel_name(module_name: str) -> str:
 
 def _module_init_name(module_name: str) -> str:
     """Public, documented C symbol name for a *library* module's module-scope
-    initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
+    initializer (DYLIB_module_scope_never_executes, box.3d/game repo).
 
     A `fire dylib` build (emit_entry_points=False) never emits any `main()` —
     there is nothing in the produced .dylib's ABI that calls the module's own

@@ -133,7 +133,7 @@ def run(out):
 # is not in their source. `literal_default_word` now folds with
 # `fold_literal_expr`, the folder a module-level constant already used, so an
 # enum member and a module constant are decided by one rule. (Filed as
-# `bugs/FORMAL_a_negative_class_constant_is_not_a_literal.md`, deleted by the
+# `“FORMAL_a_negative_class_constant_is_not_a_literal: `-3` is an `UnaryOp`”`, deleted by the
 # commit that landed it; this table is the assertion that it landed, and it is an
 # ORACLE row — `_cpython_expected` builds the same class through CPython's own
 # `enum`, so `-3` is compared against `-3` rather than against a number written

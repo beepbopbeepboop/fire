@@ -150,7 +150,7 @@ only — was filed with its own measurements and next step and is now FIXED, so
 its doc is deleted with it; what it cost is recorded by
 `test_formal_returned_frame.py`'s four arrangements of two live returned
 frames. It is in the same neighbourhood as
-`bugs/FORMAL_x86_64_a_field_of_a_returned_frame_in_an_argument_position_segfaults.md`
+`FORMAL_x86_64_a_field_of_a_returned_frame_in_an_argument_position_segfaults`
 (thirteen `test_formal_returned_frame.py` cases, all x86-64), which is a SIGSEGV
 where this one is a wrong number; if they turn out to be one emitter bug, fix that
 first and this clause becomes landable immediately, because everything else here is

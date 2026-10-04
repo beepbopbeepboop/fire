@@ -465,7 +465,7 @@ assumed:**
    ~21253-21254 — at least four `inner.split(',')`/`var[1:-1].split(',')`
    sites doing this same un-paren-aware tuple-target parsing for different
    loop/comprehension shapes). This project has documented history (see
-   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s "fourth call
+   `“setting/getting an arbitrary attribute on a generically-typed object”`'s "fourth call
    site found during verification") of a fix scoped to only one or two of
    several near-identical duplicated sites compiling clean for the obvious
    repro while silently missing the same shape elsewhere. A real fix needs

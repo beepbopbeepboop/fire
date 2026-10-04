@@ -4,7 +4,7 @@ done with the result.
 
     python3 tools/formal_string_subscript_census.py
 
-The measurement `bugs/FORMAL_percent_s_of_a_string_byte_segfaults.md` names as
+The measurement `“FORMAL_percent_s_of_a_string_byte_segfaults: `%s` of `s[i]` walks bytes at 97”` names as
 the thing its own author did not do: "whether any stdlib module subscripts a
 string and relies on the element being unclassified". Done WITHOUT a sweep,
 for the reason `tools/formal_frame_field_census.py` gives: a sweep answers "does

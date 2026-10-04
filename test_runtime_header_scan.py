@@ -221,7 +221,7 @@ def test_every_declaration_is_seen():
     # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
     # are declared here rather than in their container's own section because
     # unlike every other comparison primitive all three container types have to
-    # be complete first -- see bugs/CODEGEN_container_eq_is_pointer_identity.md.
+    # be complete first -- see “CODEGEN: `==` / `!=` between two containers is POINTER identity”.
     #
     # 479 -> 521 (2026-10-01): three finished branches merged over this tree,
     # each of which added runtime entry points -- the bytes/memoryview surface
@@ -360,8 +360,8 @@ def test_every_declaration_is_seen():
     # signature rather than adding a parallel `..._dflt` name; the four new
     # names are the str and double readers the same family needed, so that a
     # str-valued dict pops its value as a `char *` instead of a pointer
-    # decimal (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md,
-    # bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md). Read off the CALL
+    # decimal (“A dict's value accessor is guessed from the DEFAULT argument”,
+    # “CODEGEN: `d.pop(k, default)` returns 0 on a MISS”). Read off the CALL
     # on the MERGED header (550 = this side's 546 plus those four), which is
     # the point the ledger exists to record: bugs4-2 counted from its own
     # base's 543, so its `547` was right for its tree and wrong for this one.

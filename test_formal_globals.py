@@ -298,7 +298,7 @@ CASES = [
     # (`model.module_body`'s own classification, and the only exemption from it
     # is a binding that folds). The module body is therefore the entry, and
     # `main` runs only if the body calls it — which is what CPython does with
-    # this file, and which `bugs/FORMAL_toplevel_statements_dropped.md`'s own
+    # this file, and which `FORMAL_toplevel_statements_dropped`'s own
     # case 3 pins ("a body that never calls `main` exits 0, and so does this").
     # Without the call these three cases print nothing and both backends are
     # right; they were written before the body existed, when a module-level
@@ -1344,7 +1344,7 @@ FRAME_CASES = [
     # `__init__` is declared and assigns BOTH fields, and that is not
     # decoration: `fire.py run` answers `None` for a field read of a fresh
     # instance of a struct that declares no `__init__`
-    # (`bugs/INTERPRETER_a_fresh_instance_of_a_struct_with_no_init_reads_none.md`),
+    # (`INTERPRETER_a_fresh_instance_of_a_struct_with_no_init_reads_none`),
     # so without it this row's interpreter comparison would be comparing against
     # a known-wrong reference. `y = 0` is what makes `e` a real zero rather than
     # a missing value on both sides.

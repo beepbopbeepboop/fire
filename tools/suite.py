@@ -2117,7 +2117,7 @@ test('prooflib', [PY, '-c',
           'registration allowed to be in no bucket')
 
 # The eight gate tests that typecheck generated Lean were `disabled=` against
-# `bugs/FORMAL_gate_lean_proof_checks_have_no_time_bound.md` from 2026-10-02 to
+# `“The formal Lean proof checks in the gate have no time bound”` from 2026-10-02 to
 # 2026-10-03, and the markers are gone.  The doc named two conditions and both
 # are met:
 #
@@ -2276,7 +2276,7 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # well-typed — so this is the only thing on `lib/X86.lean` that can fail, and
 # it ran by NOTHING: the file is spelled `*_test.py`, and the estate check's
 # walk only counted `test_*.py`, so it was in no spec and in no `UNREGISTERED`
-# (bugs/UNTESTED_estate_check_only_sees_test_prefixed_files.md).
+# (“The estate check only sees files named `test_*.py`”).
 #
 # `tiny` from a MEASUREMENT, not from the shape: one run alone under
 # `tools/memslot.py --gb 8`, 1.4 GB peak across the whole tree (`procrun`'s own
@@ -2405,7 +2405,7 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 # subtly wrong byte packer produces a malformed binary that still links.
 #
 # GREEN, and it was registered RED. It carried
-# `expect='bugs/FORMAL_struct_pack_over_eight_arguments.md …'` because the two
+# `expect='“`struct.pack` for a format naming 8 values was refused at the CALL SITE” …'` because the two
 # 8-value formats produced a 9-argument `pack()` call, which a formal arm64 call
 # cannot make — the call was refused above `struct.mojo`'s own "return an empty
 # list" decline, so the decline was unreachable. That test now hands the call
@@ -2549,7 +2549,7 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 # which brackets sit in a TYPE position instead of asking what they mean at
 # runtime. A marker on a passing test is reported as a FAILURE, so it had to go;
 # and the doc it cited was gone already, which is the other half of the same
-# signal (`bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md`
+# signal (`FORMAL_external_call_a_multiparameter_type_in_the_bracket`
 # is not in the tree, and `suite-self-test`'s "every bug doc a registered
 # reason cites exists" is what said so).
 test('formal-external-call', [PY, 'test_formal_external_call.py'],

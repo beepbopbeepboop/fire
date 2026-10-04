@@ -366,7 +366,7 @@ def _layout(code_size: int, external_syms: list[str], needed: list[str],
     # stranger image than either convention alone. Making both congruent with
     # p_align is a change to the existing `_layout` arithmetic and to every ELF
     # image the tree already builds; it is not this change's, and it is recorded
-    # as an observation in `bugs/FORMAL_elf_globals_segment.md` rather than
+    # as an observation in `FORMAL_elf_globals_segment` rather than
     # half-applied here.
     globals_off = off
     off += globals_size

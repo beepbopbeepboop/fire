@@ -1226,7 +1226,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # collections.Counter special case in `_lower_call` documents), so
     # `x = mod_a.Dialog("a")` bound `x` to the MODULE HANDLE itself and a
     # later `x.widgetName` raised a genuine runtime `AttributeError`. See
-    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # CODEGEN_same_bare_name_struct_collision_across_modules
     # §4 ("module.Class(...) construction is unresolved on every path").
     #
     # The receiver is the disambiguating signal for a same-bare-named class:
@@ -1234,7 +1234,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `mod_b.Dialog(...)` constructs mod_b's `Dialog` and not whichever of two
     # same-named classes won the bare-name race. With nothing colliding this
     # returns the bare name verbatim, i.e. the pre-existing behaviour exactly
-    # (bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md).
+    # (CODEGEN_same_bare_name_struct_collision_across_modules).
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
@@ -1287,7 +1287,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # before the receiver is lowered: lowering `UnsafePointer[T]` as an
     # ordinary subscript yields a bogus `mojo_list_get_int` temp and
     # `.alloc()` then falls through to the generic scalar-method stub (see
-    # bugs/CODEGEN_int_of_alloc_struct_pointer_returns_zero.md).
+    # CODEGEN_int_of_alloc_struct_pointer_returns_zero).
     if (func.member == 'alloc'
             and isinstance(func.obj, gimple_ctypes.SubscriptExpr)
             and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
@@ -1310,7 +1310,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # getfilesystemencoding()`) is invalid C ("assignment to 'char *'
     # from 'int' makes pointer from integer without a cast") — a hard
     # compile failure, not just an imprecise stub. Found via
-    # bugs/CODEGEN_generator_function_Lib_tarfile.md.
+    # “CODEGEN_generator_function: Lib/tarfile.py”.
     if (isinstance(func.obj, gimple_ctypes.IdentExpr) and func.obj.name == 'sys'
             and func.member in ('getfilesystemencoding', 'getdefaultencoding')):
         for a in node.args: gen.lower_expr(a)
@@ -1606,7 +1606,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # rather than falling through to the generic obj.method() dispatch below,
     # which would try to evaluate `super()` as an ordinary call to a bare
     # function named `super` (undefined symbol at link time — see
-    # bugs/consolidated/COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md).
+    # COMPILE_FAIL_cc_error_ld_returned_n_exit_status).
     # Mirrors myinterpreter.py's eval_IdentExpr/_eval_super: `super()` means
     # "the first base class of the struct the enclosing method belongs to".
     if (isinstance(func.obj, gimple_ctypes.CallExpr) and isinstance(func.obj.func, gimple_ctypes.IdentExpr)
@@ -2352,7 +2352,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # itself as the separator string — `mojo_str_join(NULL, parts)`
         # returns "" unconditionally regardless of `parts`, silently
         # dropping every element. See
-        # bugs/CODEGEN_map_over_untyped_param_arg.md (the `shlex.join(map(str,
+        # CODEGEN_map_over_untyped_param_arg (the `shlex.join(map(str,
         # args))` repro this surfaced in) — mojo_shlex_join is a real
         # runtime helper (space-joins its parts, POSIX-quoting each one
         # via shlex.quote's own rule) rather than reusing str.join's
@@ -2555,7 +2555,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # (reverted) eager-execution branch briefly did, now correctly
         # gated behind this EXPLICIT driver call instead of firing on
         # every value-consuming reference to `f()` (see
-        # bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md
+        # CODEGEN_compiled_async_eager_execution_semantic_mismatch
         # — that bug's fix, 9a3a62b, deliberately left bare `x = f()`
         # (no `asyncio.run`) refused, and this still does not touch
         # that: `fname_raw in self._async_api` in _lower_call, a few
@@ -3444,7 +3444,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `_lower_set_method`, which has no 'remove' case at all and
         # silently no-op'd instead of removing the element. Runtime-
         # dispatch via the kind registries instead (DESIGN.html R5). See
-        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md, closed and
+        # CODEGEN_boxed_method_name_list_set_ambiguity, closed and
         # removed with the runtime kind registries.
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
@@ -4072,7 +4072,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         # program died. The MISS rows passed because the absent-key path never
         # reads the slot at all, which is what made this look like a
         # default-type question rather than an evidence question. See
-        # bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md.
+        # “A dict's value accessor is guessed from the DEFAULT argument”.
         if not gen._dict_val_is_known(ov) and default_ty == 'char *':
             val_type = 'char *'
         # The runtime keeps a bytes key in its own domain, so the VALUE
@@ -4260,10 +4260,10 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         #   `-1` the source wrote was never lowered and a MISS answered 0 — a
         #   real value in this model, so a "remove if present, else report
         #   absence" idiom got a plausible number with exit 0
-        #   (bugs/CODEGEN_dict_pop_default_ignored_on_a_miss.md);
+        #   (“CODEGEN: `d.pop(k, default)` returns 0 on a MISS”);
         # * the VALUE accessor. Only the int spelling existed, so a str-valued
         #   dict popped its value as a raw pointer decimal
-        #   (bugs/CODEGEN_dict_value_accessor_guessed_from_the_default.md).
+        #   (“A dict's value accessor is guessed from the DEFAULT argument”).
         #
         # Both are one implementation now: the runtime carries the same three
         # value domains in both key domains, and this picks the domain and
@@ -4402,7 +4402,7 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
     # the runtime's typed insert helpers; element type comes from the same
     # _elem_of tracking every other list method uses.
     # collections.deque methods on the MojoList * representation
-    # (bugs/COMPILE_FAIL_asyncio_queues.md gap 2): a deque field
+    # (“COMPILE_FAIL: asyncio/queues.py” gap 2): a deque field
     # (`self._getters = deque()`) is typed MojoList *, and asyncio
     # round-trips Future handles through popleft/append/appendleft.
     if method == 'popleft' and not args:
@@ -4847,7 +4847,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
     # side effects (e.g. `map(str, args)` inside `sep.join(map(str, args))`)
     # this duplicated the entire mojo_map(...) call and left the first,
     # unused copy's temp with a mismatched/dead type. See
-    # bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # CODEGEN_map_over_untyped_param_arg.
     arg_pairs = [gen.lower_expr(a) for a in args]
     loaded_args = []
     for at, av in arg_pairs:
@@ -5660,7 +5660,7 @@ def _repack_method_call_spread_args(gen, mangled: str, struct_name: str,
     `f(self.interpreter, self.instance, *args, **kwargs)` where `f` is
     a `MojoFunction` whose own `__call__(self, interpreter, *args,
     **kwargs)` has exactly ONE real fixed param (`interpreter`) — see
-    bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+    “setting/getting an arbitrary attribute on a generically-typed object”'s
     "Segfault root-caused" section. Invisible under a `__GIMPLE`-
     tagged caller (raw GIMPLE bypasses gcc's normal call-argument
     arity/type checking); surfaced once the caller genuinely lost

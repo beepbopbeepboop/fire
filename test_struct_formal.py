@@ -80,7 +80,7 @@ def check(ok, what, detail="", tally=None, announce=True):
 
     The detail is KEPT in the record, not just printed: a suite that reports
     "FAIL <what>" and throws away the only sentence that says why has thrown
-    away the evidence, and `bugs/CODEGEN_test_struct_formal_is_flaky.md` is the
+    away the evidence, and `“CODEGEN_test_struct_formal: the struct suite is FLAKY”` is the
     write-up of a run whose output could not be attributed for exactly that
     reason. It is also what the harness self-test below asserts on, so a record
     that dropped it would make that check pass for the wrong reason.
@@ -186,7 +186,7 @@ def expect_lines(tmpdir, name, source, expected, what, tally=None,
 
     **TWO checks are recorded in every outcome, and that is the point.** This
     used to `return` from a failed length check, so the suite's own DENOMINATOR
-    moved with its own verdicts — `bugs/CODEGEN_test_struct_formal_is_flaky.md`
+    moved with its own verdicts — `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`
     recorded 144, 145, 147 and 148 checks on an unchanged tree, and read that
     as "some checks did not run", which is a claim about the tree and not about
     the tally. It is about the tally: a case that fails on length used to cost
@@ -699,7 +699,7 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
     # the right one: it failed on "the x86-64 module dylib is an ELF object"
     # while the x86-64 EXECUTABLE beside it was a Mach-O, so the dylib and the
     # thing linking it had to agree on the container and the test said they
-    # must not. `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` reported
+    # must not. `“An x86-64 module dylib is a Mach-O, so no x86-64 program can import anything”` reported
     # the same wrong premise, and its real content — that `fmt` was accepted
     # and ignored, and that an x86-64 module dylib with an extern call could
     # not be signed — was two separate real defects, now fixed.

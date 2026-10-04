@@ -90,7 +90,7 @@ after the 2026-09-30 merge), then the compiler sources last.
 
 ## SECOND INSTANCE, 2026-10-01 — eleven places, and this one hid a real bug
 
-`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md` is cited **11
+`FORMAL_x86_64_dylib_with_an_extern_call_does_not_load` is cited **11
 times** and **does not exist**:
 
     $ ls bugs/ | grep x86_64_dylib
@@ -108,8 +108,8 @@ times** and **does not exist**:
     test_formal_argparse.py:705
     test_formal_x86_64_dylib.py:179
     tools/suite.py:2138
-    (+ bugs/FORMAL_no_elf_shared_object_emitter.md:38,
-       bugs/FORMAL_x86_64_hostmods_that_do_not_build.md:15,53)
+    (+ FORMAL_no_elf_shared_object_emitter:38,
+       “CENSUS: which `formal/hostmods` modules build, per backend”:15,53)
 
 Seven of those are in `formal/hostmods/`, and **every one of them uses the
 citation to justify the claim that a module dylib which calls the C library is
@@ -204,7 +204,7 @@ Both places the original write-up named, and two more found while doing it:
   precisely to be durable, and which was citing two deleted docs. (That doc is
   itself deleted now, so the receipt names the file and the section rather than
   a line number into something that is not there.)
-* `bugs/FORMAL_cross_module_call_arity_is_never_checked.md:148` and the
+* `FORMAL_cross_module_call_arity_is_never_checked:148` and the
   negative-shift doc (also deleted now) — found by the walk, both in the same
   "not this one" shape, both rewritten.
 

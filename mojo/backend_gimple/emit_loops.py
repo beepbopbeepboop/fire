@@ -1061,7 +1061,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # floating-point was expected"). The element ctype reaches
             # `_elem_types` via `_mojo_coro_param_elem_kinds` ->
             # `_param_elem_types` -> `gen_func`. See
-            # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+            # CODEGEN_coro_yield_kind_unresolved_callsite.
             _lp_known = _boxed_list_ptr(gen, it_type, it_val)
             if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
@@ -1634,7 +1634,7 @@ def _gen_for_enumerate(gen, node):
     # shape of this same gap showed up separately in the
     # comprehension-embedded `for` clause form; see
     # `_lower_comprehension`'s `is_enumerate` handling and
-    # bugs/CODEGEN_generator_function_Lib_gettext.md root cause #2).
+    # “CODEGEN_generator_function: Lib/gettext.py” root cause #2).
     # `idx_t` below stays the 0-based list-access index (used for
     # every `mojo_list_get_*` call); only the user-visible `cidx_var`
     # gets the start offset added.
@@ -1706,7 +1706,7 @@ def _gen_for_enumerate(gen, node):
         # `mojo_list_get_int` and printed a list of floats as their raw
         # IEEE-754 bit patterns -- even though the identical program with a
         # bare `for v in xs:` was correct. See
-        # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
+        # CODEGEN_coro_yield_kind_unresolved_callsite.
         _lp_known = _boxed_list_ptr(gen, lst_type, lst_val)
         if _lp_known is not None:
             list_ptr = _lp_known
@@ -2161,7 +2161,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # bootstrap's stage2-vs-stage3 byte-identity check. Recording the two slot
     # ctypes is the same evidence a tuple literal records, and it is what
     # routes the value to the kinds-aware `mojo_repr_list_kinds`. See
-    # bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
     _pcv = gen._cname(var) if _is_pair_var else ''
     _saved_pc = ((gen._elem_types.get(_pcv),
                   gen._struct_slot_kinds.get(_pcv),
@@ -2175,7 +2175,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # bootstrap's stage2-vs-stage3 byte-identity check. Recording the two slot
     # ctypes is the same evidence a tuple literal records, and it is what
     # routes the value to the kinds-aware `mojo_repr_list_kinds`. See
-    # bugs/CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.md.
+    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
     #
     # STR-KEYED dicts only. An Int-keyed dict's pair slot 0 is an integer word,
     # so both slots come out `'int'` and `_struct_slot_kind_bytes` declines a

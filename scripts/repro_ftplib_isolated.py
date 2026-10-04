@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated compile repro for bugs/CODEGEN_generator_function_Lib_ftplib.md.
+"""Isolated compile repro for “CODEGEN_generator_function: Lib/ftplib.py”.
 
 GimpleGen(do_imports=False, relaxed_imports=True) on ftplib.py, then
 g++-mp-15 -std=c++20 -fsyntax-only both the .ci (gcc -fgimple) and the

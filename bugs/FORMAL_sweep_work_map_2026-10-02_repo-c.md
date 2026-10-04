@@ -149,7 +149,7 @@ Not a backend change — the module-global `__DATA` slot landed
 (`formal-module-globals`) and `formal-module-globals`' own gate
 (`writable = declared_globals & assigned - set(M.module_slots() or ())`) stopped
 reporting a name that has a slot, but this row was left behind.
-`bugs/TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed.md`
+`TEST_a_mutated_module_global_is_refused_is_stale_after_the_slot_landed`
 recorded it as stale on `master` too and named two consistent outcomes; this
 took outcome (1) and asserts the measured answer: **exit 12 on arm64 AND on
 x86-64**, which is CPython's.
@@ -287,7 +287,7 @@ container case is its own question and should not be bundled: `_static_container
 says why it gave up, and that message is the thing to read first.
 
 **The doc that owns this measurement is stale and should be corrected:**
-`bugs/FORMAL_module_global_string_elements_is_a_storage_decision.md` states as
+`FORMAL_module_global_string_elements_is_a_storage_decision` states as
 fact that "there is no `GlobalDataImage`, no lazy initializer, and no `__DATA`
 block". All three now exist. That is not this branch's doc to delete (the claim
 is `FORMAL_module_state_no_storage`'s), but a reader following its four-step next
@@ -324,7 +324,7 @@ change to the frame layout both backends and the ~40 passing Lean proofs share;
 or (b) `x.extra` is read through a method that consults the class-level default
 when the instance slot is empty, which changes `dataclass_transform` and the
 field-slot evidence machinery rather than the layout. **Read
-`bugs/FORMAL_dataclass_partial_construction.md` and
+`FORMAL_dataclass_partial_construction` and
 `bugs/FORMAL_dataclass_runtime_reflection.md` before starting** — one of them may
 already have made the decision.
 
@@ -342,7 +342,7 @@ CPython in this repo's own slice; a different name for the word, or copying the
 value out first, is the documented repair and is a one-line change. It is listed
 here rather than fixed because it moves one file and nothing else, and a source
 change to a live compiler module is the integrator's call. Note
-`bugs/FORMAL_holder_rebound_from_a_word.md` does **not** exist on this tree even
+`FORMAL_holder_rebound_from_a_word` does **not** exist on this tree even
 though `model.holder_rebound_from_a_word_refusal` does, so the refusal's evidence
 lives only in the function's docstring.
 
@@ -368,7 +368,7 @@ lives only in the function's docstring.
   `formal4-sweep-*` workers held the arm64 lock for the whole run. The lock is
   `flock` on `~/.gmojo/cas/formal-sweep-arm64.lock` and the documented hazard is
   a half-written JSON manifest — which is the `tool` class
-  `bugs/FORMAL_sweep_tool_json_decode_error.md` is about. **No
+  `FORMAL_sweep_tool_json_decode_error` is about. **No
   `json.decoder.JSONDecodeError` appeared in 211 files**, and all 47 `tool` rows
   are timeouts, so the race did not fire here. It is still a real race with
   another worker's run on the line.

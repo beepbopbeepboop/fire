@@ -29,7 +29,7 @@ $ test_gimple_runner.py's compile_mojo_to_gimple_exe, then run
 0
 ```
 
-**No crash.** `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`
+**No crash.** `CODEGEN_unresolved_imported_callable_default_null_pointer`
 recorded this as `SIGSEGV` — exit 139, nothing on stdout — and that doc is gone,
 so whatever fixed it did stop the fault. What it did not do is make the answer
 right. The program prints `0`: address 0 was called, and this runtime's

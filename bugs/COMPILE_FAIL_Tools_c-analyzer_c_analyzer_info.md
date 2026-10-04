@@ -160,7 +160,7 @@ against **`c_common.tables`'** globals struct. So:
 
 Two modules sharing one bare name, each reference resolving through whichever
 slot won — that is
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`, which
+`CODEGEN_same_bare_name_struct_collision_across_modules`, which
 is **claimed by another worker** (`hard-same-name-struct`). Per the parallel-work
 rules I did not edit it. It also correctly predicts the symptom: the loser's
 access resolves against the winner's slot.

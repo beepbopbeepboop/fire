@@ -163,7 +163,7 @@ rather than a limit of the language, and it is never cached, so it re-runs and
 re-fails on every sweep until the cause is gone.
 
 **This is already documented and the next step is already written:**
-`bugs/FORMAL_frame_receivers_is_handed_the_method_name_table.md` — `_prepare_functions`
+`FORMAL_frame_receivers_is_handed_the_method_name_table` — `_prepare_functions`
 passes `owners` (`{method_name: struct_name}`, strings) into `_frame_receivers`'s
 `method_owners` parameter, which its own docstring says it wants as
 `{function name: struct}` (`M.method_owner_names(structs)`), and the collision

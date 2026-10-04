@@ -1623,7 +1623,7 @@ def list_elements_owned(fn_body, name: str) -> bool:
     leaking on purpose") and for a dict/set's `key_views_consumed` above; this
     is the LIST-element counterpart, and the leak it does close — the
     ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
-    400k iterations in bugs/CODEGEN_call_result_container_never_freed.md — is
+    400k iterations in CODEGEN_call_result_container_never_freed — is
     the `len()`-and-drop shape, which is the common one."""
     return _list_str_uses_ok(fn_body, name)
 

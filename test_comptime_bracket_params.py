@@ -1,6 +1,6 @@
 """REAL behavioral test for the comptime bracket-parametrized function call
 fix (`f[N](...)`) — see
-bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md.
+CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.
 
 Before the fix, `gimple_codegen.py`'s `_type_expr_to_ann` returned '' for any
 literal-valued bracket argument (IntLiteral/BoolLiteral/negative-int), which

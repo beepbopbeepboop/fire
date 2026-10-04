@@ -1,8 +1,8 @@
 # CODEGEN: one function's return ELEMENT type is inferred once for the whole
 # program, and every other call site of it inherits that one answer
 
-Found 2026-10-01 while fixing `bugs/CODEGEN_list_of_pairs_iterated_as_dict.md`.
-It is the reason `bugs/CODEGEN_list_element_read_defaults_to_str_across_a_call.md`
+Found 2026-10-01 while fixing `“CODEGEN: `list(x)` of an erased tuple element is an empty list”`.
+It is the reason `CODEGEN_list_element_read_defaults_to_str_across_a_call`
 cannot be closed with a two-line fixture: a fixture that exercises both the
 fixed shape and a second container shape at the same call site is itself this
 bug. Not mine — filed here with the measurement, because a reader of the two

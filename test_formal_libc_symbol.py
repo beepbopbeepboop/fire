@@ -22,7 +22,7 @@ one is not a link error. The image builds, loads, runs and answers. It answered
 `os.listdir("…")` as `cc.txt` where CPython says `ccc.txt`, with a count one
 too high; it answered `os.path.isfile(…)` as 0, `getsize` as 0 and `st_mode` as
 41572, none of which is a number any program should have believed
-(`bugs/FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes.md`,
+(`FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`,
 whose three candidate causes — the byte read, the element read, the copy — were
 each measured and each wrong).
 

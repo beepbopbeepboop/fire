@@ -1017,7 +1017,7 @@ def gen():
     # the static scan could not type, sitting beside one it could, sailed
     # through all of them and landed on the `int64_t` default — the identical
     # silent truncation the CALL-SITE half of the same one-slot contract was
-    # fixed for (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    # fixed for (CODEGEN_coro_yield_kind_unresolved_callsite).
     # Both of these compiled, ran, exit 0, and printed wrong values:
     #   `for i, x in enumerate(xs): yield i; yield "s"`  -> `(null)` then `s`
     #   `for k, v in d.items(): yield v; yield "s"`      -> nothing at all
@@ -1503,7 +1503,7 @@ def main():
     # non-generator compiled-function path per e387af9/8799ec4) now compiles
     # correctly end-to-end as `double`, not the naive int64_t default —
     # the positive counterpart to the honest-refusal fix in
-    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md
+    # CODEGEN_compiled_generator_unannotated_string_param_mistyped
     # (an unannotated param unanimously called with a NON-scalar argument,
     # e.g. a string, is refused instead; this one is unanimously called
     # with a scalar double argument, so it's positively confirmed safe to
@@ -1927,7 +1927,7 @@ def main():
 """, "1.5\n2.5\n3.5\n")
 
     # Milestone C step 4 (this step): compiled generators as first-class
-    # values — bugs/CODEGEN_compiled_generator_not_first_class_value.md's
+    # values — CODEGEN_compiled_generator_not_first_class_value's
     # exact repro. Before this step `python3 fire.py build` failed with a
     # genuine gcc compile error ("invalid use of void expression") the
     # moment a generator call's result was assigned to a variable before
@@ -2019,7 +2019,7 @@ def main():
 """, "0\n1\n2\nend\n")
 
     # ── Milestone C final: generators crossing function-call boundaries ────
-    # bugs/CODEGEN_compiled_generator_not_first_class_value.md's stated
+    # CODEGEN_compiled_generator_not_first_class_value's stated
     # remaining scope: a stored generator passed AS AN ARGUMENT to a
     # function whose (unannotated) param is consumed by `for x in g:`.
     # Before Pass 1.3f-gen, the call-site scalar contract observed `g`'s
@@ -3012,7 +3012,7 @@ def main():
         print(v)
 """, "7\n999\n")
 
-    # bugs/hard/CODEGEN_coro_stackswitch_iterator_protocol_gaps.md — the A3
+    # “CODEGEN (A3 stack-switch): ordinary-codegen `next()`/`enumerate()` don't” — the A3
     # stack-switch cutover routes a generator BODY through the ordinary
     # codegen, which never had a real iter()/next() over a plain list
     # (only the old cpp-path emitter did, in gimple_cpp_core.py). Below:
@@ -3088,7 +3088,7 @@ def main():
 """, "1\n2\n3\n4\n")
 
     # ── yield-kind inference for identifier / self.field / list-local refs ──
-    # (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md)
+    # (CODEGEN_coro_yield_kind_unresolved_callsite)
     # The Layer-1 pre-pass's _yield_kind() used to have no case for a bare
     # IdentExpr / `self.<field>` / `<list-local>[idx]` reference, so a
     # Float64/String value yielded through one of those silently defaulted
@@ -3154,7 +3154,7 @@ def main():
 """, "0.5\n1.5\n2.5\n")
 
     # ── non-plain assignment targets inside a generator body ──────────
-    # (bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md)
+    # (CODEGEN_generator_non_plain_assignment_target_refused)
     # The A3 stack-switch path routes the desugared body through ordinary
     # codegen, which handles self-field write, subscript write, and
     # tuple/list-pattern unpack -- shapes the old cpp eligibility gate
@@ -4337,7 +4337,7 @@ asyncio.run(run())
 """)
 
     # ── call-site yield-kind evidence: the holes and the fixes ─────────
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md. A call
+    # CODEGEN_coro_yield_kind_unresolved_callsite. A call
     # site the static scan cannot type used to leave the slot neither
     # resolved nor conflicting, so the yield slot defaulted to int64_t and
     # truncated (or printed an address) with exit 0. It now propagates
@@ -4825,7 +4825,7 @@ def main() raises:
     outer()
 """, "cannot compile module")
 
-    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md "Item 8", the
+    # CODEGEN_coro_yield_kind_unresolved_callsite "Item 8", the
     # GENERATOR half: `for <t> in <list param>:` inside a generator. A
     # generator's params cross the stack-switch ABI as untyped `int64_t`
     # slots, so the loop reached the ordinary lowering as a boxed handle with

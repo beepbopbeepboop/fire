@@ -14,7 +14,7 @@
 None of that is true any more. 9023031b ("formal: a string literal's escapes
 are decoded, on this path too") moved the decoder into
 `fire_compiler.decode_c_escapes` and gave the formal backends the one every
-other engine already used; `bugs/FORMAL_string_literal_escape_is_not_decoded.md`
+other engine already used; `FORMAL_string_literal_escape_is_not_decoded`
 went with it, and `formal/hostmods/sys.mojo`'s matching note and
 `test_formal_sys.py`'s two assertions were updated with it. This one was missed,
 because nothing fails on it: the function still builds the set a byte at a time,

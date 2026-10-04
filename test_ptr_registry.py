@@ -613,7 +613,7 @@ static void test_boxed_str_discrimination(void) {
 }
 
 /* A CONTAINER used as a dict key keys by its VALUE
- * (bugs/CODEGEN_tuple_dict_key_hashed_by_address.md). This is the runtime
+ * (CODEGEN_tuple_dict_key_hashed_by_address). This is the runtime
  * half of that fix and it is here rather than only in the gimple runner
  * because two of its properties are invisible to a stdout comparison: the
  * key string must be RELEASABLE (`mojo_cstr_or_int_release` has to tell a

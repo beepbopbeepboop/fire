@@ -40,7 +40,7 @@ reader time.
 resolver layers are `.mojo`-only for PATH-based lookup and no ancestor walk
 from `Modules/_decimal/tests/` reaches `Lib/`. That is now filed on its own,
 with the two halves it needs and the blast-radius warning, in
-`bugs/COMPILE_FAIL_cpython_lib_is_invisible_outside_it.md`. `func`/`func1` are
+`“The compiler has no way to see CPython's `Lib/` from an entry file outside it”`. `func`/`func1` are
 the same class: a callable value stored in a container and called through a
 loop variable, which no lowering resolves statically.
 
@@ -305,8 +305,8 @@ single scalar (int/decimal-string handle); every one of the 14 refused
 functions has at least one `yield a, b` / `yield a, b, c` site.
 
 This is the SAME structural gap already root-caused and documented in
-`bugs/CODEGEN_generator_function_Lib_test_libregrtest_save_env.md` and
-`bugs/CODEGEN_generator_function_Lib_test_test_exception_group.md`:
+`“CODEGEN_generator_function: Lib/test/libregrtest/save_env.py”` and
+`“CODEGEN_generator_function: Lib/test/test_exception_group.py”`:
 `gimple_codegen.py`'s compiled-generator ABI (`_gen_cpp_generator_unit`)
 represents a generator's suspended state as a `std::coroutine_handle`
 plus a promise whose `yield_value` accepts exactly ONE scalar
