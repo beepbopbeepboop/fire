@@ -129,8 +129,30 @@ def samples():
             X.encode_mov_rm64_r64(base, disp, R.RAX))
     add("mov_rm32_r32", "mov eax, edx", X.encode_mov_r32_r32(R.RAX, R.RDX))
     add("mov_rm32_r32", "mov r8d, r9d", X.encode_mov_r32_r32(R.R8, R.R9))
-    add("movsxd_r64_r32", "movsxd rax, edx",
+# More of the 32-bit `mov` forms with an r8-r15 register, which is the case
+    # that carries a REX byte WITHOUT REX.W -- and the case whose length
+    # `lib/X86.lean` computed as if there were no REX byte, so every 32-bit access
+    # through an r8-r15 register resumed inside its own ModRM. `mov r8d, r9d` was
+    # already sampled above; these two are the REX.R and REX.X halves of the same
+    # family (r15 needs both, esi needs neither), which is what a decoder whose
+    # length arithmetic is a single `+ 1` will get wrong in the two directions
+    # that are not the same direction.
+    # `formal/x86_64_model_fuzz.py --census` found it; this list is what should
+    # have. The MEMORY half of the same family, the byte and halfword STORES
+    # (`88 /r`, `66 REX 89 /r`) and the memory widen/narrow loads cannot be added
+    # until `formal/x86_64_decode.py` stops refusing them -- see
+    # `bugs/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
+    add("mov_rm32_r32", "mov r15d, r13d", X.encode_mov_r32_r32(R.R15, R.R13))
+    add("mov_rm32_r32", "mov esi, edi", X.encode_mov_r32_r32(R.RSI, R.RDI))
+
+    add("movsxd_r64_r32", "mov rax, edx",
         X.encode_movsx_r64_r32(R.RAX, R.RDX))
+    # `x86_sign_extend32` tested bit 63 of a value it had just masked to 32 bits,
+    # so `movsxd` was the identity; a destination with a dirty upper half is what
+    # shows it, and `movsxd` from a REGISTER is the only form that reaches it
+    # with one. The row above is that row; a destination that is not already zero
+    # in its upper half is what makes it bite, and the harness initialises the
+    # register file to non-zero, so it does.
     add("movzx_r64_r8", "movzx rax, dl", X.encode_movzx_r64_r8(R.RAX, R.RDX))
     add("movsx_r64_r8", "movsx r10, r11b", X.encode_movsx_r64_r8(R.R10, R.R11))
     add("movzx_r64_r16", "movzx rax, dx", X.encode_movzx_r64_r16(R.RAX, R.RDX))

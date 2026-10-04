@@ -110,6 +110,55 @@ def _string_composition_messages():
 
 _FSTRING_REFUSAL, _CONCAT_REFUSAL = _string_composition_messages()
 
+
+def _frame_slot_message():
+    """The FRAME-SLOT container refusal, built not copied.
+
+    The third built sample, and the only one of the three that is not a
+    COMPOSITION message.  It has to be built for the same reason the pair above
+    is: the sample's whole job is to prove that a marker matches the sentence
+    the backend emits, and `model.frame_slot_element_refusal` is the function
+    that decides and words this one — a hand-copy of a 900-character message is
+    exactly the rot this file exists to catch, and this message is the longest
+    in the family.
+
+    **It is asked of `frame_slot_element_refusal` and NOT of
+    `scalar_container_base_evidence`, and that is the arrangement
+    `model.NON_CONTAINER_SLOT_KINDS` records.**  The scalar gate is asked
+    before the dict and string readings and its whole frame row in the stdlib
+    corpus is `self._dict[key]` in `std/collections/dict.mojo` — the one base
+    whose dict reading is dispatched first and works — so `FRAME_KIND` is not
+    in that set and the frame refusal is asked one step later, where the dict
+    and string paths have already declined.  A sample built from the wrong
+    function would pass while the backend emits the other sentence, which is the
+    failure this file exists to catch rather than the one it would.
+
+    Nothing has to be parsed to ask it: `frame_slot_element_refusal` takes the
+    op, the kind and the SPELLING, and a parsed `w.d[0]` would need a `Wrap` in
+    scope to build for no coverage this does not already have.
+    """
+    why = FM.frame_slot_element_refusal("a subscript", FM.FRAME_KIND, "w.d")
+    if why is None:
+        raise AssertionError(
+            "formal/model.py no longer refuses a subscript over a field whose "
+            "kind is FRAME_KIND (FRAME_SLOT_ELEMENT_KINDS is "
+            f"{FM.FRAME_SLOT_ELEMENT_KINDS!r}, and FRAME_KIND is "
+            f"{FM.FRAME_KIND!r}). A sample of a message the backend cannot "
+            "produce is a sample that can only rot — see this file's docstring, "
+            "point 3 — so it goes with the refusal rather than outliving it.")
+    return why
+
+
+_FRAME_SLOT_REFUSAL = _frame_slot_message()
+
+# The planner's spelling of the same cause, and it is spelled here independently
+# of `formal_sweep_causes.py::CAUSES` for the reason `STRING_COMPOSITION_CAUSE`
+# is: the two tables are keyed on different things, so the pair of samples below
+# is what proves the two spellings still agree.  A label that drifted would make
+# `check_cause_table` report a cause that matches nothing while reading as one
+# that blocks nothing.
+FRAME_SLOT_CAUSE = "container operation on a frame slot"
+
 # (family, a real message, truncated only at a clause boundary)
 SAMPLES = [
     # The frame-address families. All one design defect, five costumes; the
@@ -153,6 +202,15 @@ SAMPLES = [
     ("container operation on a non-container",
      "a subscript of `a` asks for a container element, and `a` is a value this "
      "function bound to an integer"),
+    # The FRAME SLOT, the fourth member of the family.  Its own row because its
+    # KIND clause is "declared to hold a FRAME" — which the scalar row's
+    # marker DOES match, so without this one it would be filed as a scalar slot
+    # and a planner would be sent after an annotation that is not the problem
+    # — and because its fix ("a subscript of a struct is `__getitem__`") is not
+    # the scalar row's.  BUILT, not copied: `_frame_slot_message` calls the
+    # function that decides and words this refusal, so a reword cannot leave the
+    # sample behind (see the docstring's point 3 and the pair above).
+    ("container operation on a frame slot", _FRAME_SLOT_REFUSAL),
     ("container operation on a frame address",
      "xs is a CONTAINER operation on a Opt FRAME ADDRESS, and a frame is not a "
      "container"),
@@ -810,6 +868,13 @@ CAUSE_SAMPLES = [
     # spellings still agree.
     (STRING_COMPOSITION_CAUSE, _FSTRING_REFUSAL),
     (STRING_COMPOSITION_CAUSE, _CONCAT_REFUSAL),
+    # The PLANNER's row for the frame slot, from the same built message as its
+    # family row above, and for the reason the pair above gives: the two tables
+    # are keyed on different things, so a build change that reached one without
+    # the other would show up here as a message the family claims and the cause
+    # does not — which is the disagreement a reader of either table has to be
+    # able to see.  `model.frame_slot_element_refusal` decides and words both.
+    (FRAME_SLOT_CAUSE, _FRAME_SLOT_REFUSAL),
 ]
 
 # The causes no arm64 message above exercises. Each one is named here with WHY,

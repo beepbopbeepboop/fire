@@ -509,10 +509,13 @@ files in-file  cause
 ```
 
 `test_formal_sweep.py` was run too, since it owns the family table's consumers:
-**124 tests, 1 failure, identical with and without this branch's diff** — it is
-`bugs/TEST_sweep_dyld_probe_asserts_its_precondition_over_exit_too.md`, open,
-measured on `master` at `3c3516db`, and proved pre-existing here by reverting the
-diff and re-running.
+**124 tests, 1 failure, identical with and without this branch's diff** — it was
+`TestDyldProbe.test_a_bind_name_that_itself_begins_with_an_underscore_resolves`
+failing its own FIXTURE precondition, measured on `master` at `3c3516db` and
+proved pre-existing here by reverting the diff and re-running. Fixed since
+(2026-10-04): the precondition is now asked of the binds the fixture's imported
+library exports rather than of every bind on the link line, and the file is
+124/124 green. Its doc is deleted with that fix.
 
 ---
 

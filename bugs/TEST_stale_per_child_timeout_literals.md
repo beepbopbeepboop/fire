@@ -2,6 +2,48 @@
 
 ## Status
 
+**Partly landed 2026-10-04.** Two things changed, and the second is the one
+that makes the rest mechanical.
+
+* `test_formal_sweep.py` (7 sites) and `test_formal_libc_symbol.py` (1, which
+  also had its own file-local `BUILD_TIMEOUT = 300` / `RUN_TIMEOUT = 60`) are
+  converted. Each site is classified where it is called, and the two in the
+  sweep file that are **not** a child budget — the `communicate()` windows after
+  a SIGTERM, and `codesign` — are named (`SIGTERM_DRAIN_S`, `SIGTERM_REAP_S`)
+  with the reason at the declaration rather than forced into a constant that
+  does not describe them. Both files re-run green
+  (`test_formal_sweep.py` 124 tests OK; `test_formal_libc_symbol.py` 10/10).
+
+* **Step 3 of "the next step" — the widening — is done, as a ratchet.**
+  `test_suite.py`'s budget check now also asks the other direction, over every
+  test file rather than only the importers, and
+  `STALE_PER_CHILD_BUDGETS` is the census it compares against: a file that is
+  converted loses its row (or the stale count fails), and a file that grows a
+  literal fails until it is added with its count. `BUDGET_IS_THE_SUBJECT` holds
+  the two files where a literal IS the subject (`test_memslot.py`,
+  `test_suite.py`), each with its reason, and a row asserts the exemption list
+  and the walk still agree — so an exemption cannot outlive the need.
+
+  Measured with this tree's predicate (a `timeout=` KEYWORD off the AST, over
+  both file spellings, derived trees skipped): **207 sites over 57 files**,
+  after the 8 above, and after `test_formal_proof_breadth.py` grew two more
+  sites of its existing `timeout=60` shape (`work/formal25-6`) and its census row
+  moved 3 -> 5 with them. The file count did not move: a file that gains a
+  literal is a file already in the table. That is smaller than the 217/63 below for two measurable
+  reasons: a grep counts `timeout=NN` occurrences that are not call keywords,
+  and it walks `build/` and the other derived trees.
+
+**Still to do, and it is per-file reading in the owning area's lane:** the
+remaining 54 rows, cheapest first, `test_gimple.py` (51) first — it alone is a
+quarter of the residue. Each row is the same four steps: read each `timeout=`,
+decide which of `COMPILE_TIMEOUT_S` / `LINK_TIMEOUT_S` / `RUN_TIMEOUT_S` /
+`SWEEP_TIMEOUT_S` the child is, name the site where the answer is "none of
+these", add the import, delete the literals, and delete the file's row here in
+the same commit. The census is the checklist and the check now enforces that it
+and the tree agree.
+
+## Original status
+
 Open. Census measured 2026-10-03 on `99cdb9b7` with python3 3.14.
 
 **This is the residue of a fix that is now half-landed, not a new proposal.**

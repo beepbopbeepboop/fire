@@ -1639,7 +1639,7 @@ CASES = [
      "    w.clear()\n"
      '    sys.stdout.write(" after %d" % w.size())\n'
      "    return 0\n"),
-    # A BYTE BLOB is `[count][byte 0][byte 1]…` — one header word and ONE-BYTE
+# A BYTE BLOB is `[count][byte 0][byte 1]…` — one header word and ONE-BYTE
     # elements — and this case is the whole of that claim, on both machines.
     # Read `b[1]` and a word-stride blob answers 0 where CPython says 98, so
     # the expected output is a number only a one-byte-element lowering can
@@ -1661,6 +1661,46 @@ CASES = [
      "    b[0] = 65\n"
      "    b[1] = 66\n"
      "    print(len(b), b[0], b[1], b[2], b[3])\n"
+     "    return 0\n"),
+    # THE CONTROL for the FRAME-slot refusal in `REFUSALS`
+    # (`subscript_of_a_frame_slot_refused_identically`), and it is here rather
+    # than there because it is ANSWERED, not refused: the gate is a KIND and a
+    # field declared a CONTAINER is a container.  If the frame row had been
+    # written as "a subscript of a field whose declared type is a struct of this
+    # module, whatever it is", THIS is the row it would break — and it is the
+    # same struct, the same frame and the same program with one field changed.
+    # So the assertion is the number, and 22 is CPython's.
+    ("subscript_of_a_list_slot_is_still_a_container_read",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var xs: List[Int]\n"
+     "\n"
+     "def main():\n"
+     "    var w = Wrap()\n"
+     "    w.d.x = 3\n"
+     "    w.d.y = 4\n"
+     "    w.xs = [11, 22, 33]\n"
+     '    printf("%d", w.xs[1])\n'
+     "    return 0\n",
+     "import sys\n"
+     "\n"
+     "class Deep:\n"
+     "    def __init__(self):\n"
+     "        self.x = 3\n"
+     "        self.y = 4\n"
+     "\n"
+     "class Wrap:\n"
+     "    def __init__(self):\n"
+     "        self.d = Deep()\n"
+     "        self.xs = [11, 22, 33]\n"
+     "\n"
+     "def main():\n"
+     "    w = Wrap()\n"
+     '    sys.stdout.write("%d" % w.xs[1])\n'
      "    return 0\n"),
 ]
 
@@ -1919,6 +1959,78 @@ REFUSALS = [
      '    printf("%d", s.d[0])\n'
      "    return 0\n",
      "is a struct field declared to hold a TYPE TAG"),
+    # ── the FRAME slot, which is the same family and the one whose wrong answer
+    # is a NUMBER rather than a fault. `FRAME_KIND` was deliberately kept OUT of
+    # `model.NON_CONTAINER_SLOT_KINDS` until 2026-10-04, on the reasoning that a
+    # frame is a wrong ANSWER rather than a fault and therefore its own defect.
+    # The reasoning was right and the exclusion was untenable: the answer was
+    # measured, it is a number, and the two machines do not even agree on it.
+    #
+    #   struct Deep:  var x: Int;  var y: Int
+    #   struct Wrap:  var d: Deep;  var t: Int
+    #   w.d.x = 3 ; w.d.y = 4 ; printf("%d", w.d[0])
+    #
+    # | | arm64 | x86-64 |
+    # |---|---|---|
+    # | `w.d[0]` | 4, exit 0 | 4, exit 0 |
+    #
+    # and 4 is `Deep`'s SECOND field, which is the arithmetic rather than an
+    # accident: `count = mem_read_u64(w + 0)` is the first field, so the walk
+    # bound-checks the index against `x` and then reads `w + 8 + 8·x`.  The
+    # needle is the base's SPELLING for the reason the two rows above give, and
+    # the KIND clause differs from all three of theirs, so it is a separate row.
+    ("subscript_of_a_frame_slot_refused_identically",
+     "struct Deep:\n"
+     "    var x: Int\n"
+     "    var y: Int\n"
+     "\n"
+     "struct Wrap:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main():\n"
+     "    var w = Wrap()\n"
+     "    w.d.x = 3\n"
+     "    w.d.y = 4\n"
+     '    printf("%d", w.d[0])\n'
+     "    return 0\n",
+     "a subscript of `w.d` asks for a container element"),
+    # THE CONTROL, and it is the row that carries the decision: when the
+    # declared struct declares `__getitem__` the subscript is a METHOD CALL and
+    # not a slot load, so `w.d[i]` cannot be given the answer `w.d.x` already has
+    # without one spelling meaning two things.  This program is the corpus's own
+    # shape — `std/collections/dict.mojo`'s `StringDict.__getitem__` is
+    # `return self._dict[key]` — and it is the ONLY row in the corrected
+    # `scalar_container_base_evidence` census that reaches FRAME_KIND (2 of 537
+    # `X.<field>[i]` sites, both this one).  Measured before the refusal, from a
+    # GREEN build, exit 0 on both:
+    #
+    # | | arm64 | x86-64 |
+    # |---|---|---|
+    # | `h.d[1]` | 0 | **-1927469536** |
+    #
+    # Two architectures, two different wrong answers, neither of which is a slot
+    # load — so a refusal is strictly better than either lowering, and the
+    # alternative the doc weighed (`base + 8i`) is not one lowering but two.
+    ("subscript_of_a_frame_slot_with_getitem_refused_identically",
+     "struct Deep:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __getitem__(self, k: Int) -> Int:\n"
+     "        return self.a + k\n"
+     "\n"
+     "struct Hold:\n"
+     "    var d: Deep\n"
+     "    var t: Int\n"
+     "\n"
+     "def main():\n"
+     "    var h = Hold()\n"
+     "    h.d.a = 3\n"
+     "    h.d.b = 4\n"
+     '    printf("%d", h.d[1])\n'
+     "    return 0\n",
+     "a subscript of `h.d` asks for a container element"),
     # …and the one that CRASHED ON BOTH, which is its own row because it is the
     # only one of the three whose kind is not established by a DECLARATION: the
     # slot holds a tag because the CONSTRUCTOR put one there, so

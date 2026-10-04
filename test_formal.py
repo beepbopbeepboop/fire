@@ -156,6 +156,45 @@ EXPECTED_FAILURES = {
                  "value model (an environment rather than one word), shared by "
                  "both backends and by the Lean proof",
 
+    # `count(n) = count(n-1)` and `pow2(n) = 2 * pow2(n-1)`: TREE RECURSION,
+    # like `fib` above, and both were UNDECLARED reds until 2026-10-04 -- three
+    # of the corpus's heaviest examples with no proving case and no marker,
+    # which is the shape of hole the `expect=`-marker discipline exists to
+    # close.  Measured, arm64, byte-identical on both:
+    #
+    #   count_proof.lean:5330  Tactic `rfl` failed: mem_read_u64
+    #     (mem_write_u64 … (UInt64.ofNat 4294968008 -
+    #       (UInt64.ofNat 4294968008 % 4096 -
+    #         ((if False then UInt64.ofNat 1024 - UInt64.ofNat (2 ^ 21)
+    #           else UInt64.ofNat 1024) * 4096 + UInt64.ofNat 8))).toNat
+    #       (st.sp - UInt64.ofNat 1984))
+    #     (st.sp - UInt64.ofNat 8).toNat is not definitionally equal to st.x30
+    #
+    # which is the return frame's `x30` read, and the ADDRESS is the whole of
+    # it: the slot was written through an ADRP/ADD-materialised pointer (the
+    # `arm64_set_reg 17 s (page(pc) + 1024 * 4096)` successor two hundred lines
+    # above), so the read is at a LITERAL rather than at `sp - K` and the
+    # `mem_read_after_write_u64_slot` peel in the `simp only` set has nothing to
+    # match.  The emitter chose that address because it IS `sp - 1984`; nothing
+    # emitted says so.  (The `if False` in the middle is a dead arm, not the
+    # cause: `simp` normalises it and the tactic that fails is `rfl`.)
+    #
+    # The obligation is a canonicalisation from a materialised address back to
+    # the frame slot, and the frame-address machinery that owns it is claimed
+    # (`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
+    # `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
+    # the declaration, not the fix.  `pow2` is the same goal: same address, same
+    # two error sites, and its example is the multiplication rather than the
+    # bare tail call.
+    "count": "tree recursion whose return frame reads x30 back through an "
+             "ADRP/ADD-materialised address, so the read is at a literal rather "
+             "than at sp - K and mem_read_after_write_u64_slot cannot peel it; "
+             "the address is sp - 1984 and nothing emitted says so",
+    "pow2": "the same return-frame read as count, on the multiplication's "
+            "example: the epilogue reads x30 from a slot whose address was "
+            "materialised by adrp/add, so the read is at a literal rather than "
+            "at sp - K and the slot peel cannot match it",
+
 }
 
 

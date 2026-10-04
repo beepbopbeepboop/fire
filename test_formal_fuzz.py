@@ -245,9 +245,80 @@ def check_generator(mix, indexes, verbose=False):
 
     failures += _check_generation(mix, indexes, verbose)
     failures += _check_features(mix, indexes, verbose)
+    failures += _check_unbound_reads(mix, indexes, verbose)
 
     print(f"formal fuzz: generator {mix:9} PASS={indexes - failures} "
           f"FAIL={failures} ({indexes} indexes, no compiler)")
+    return failures
+
+
+# Why this is a property and not a style rule: a name the body reads with no
+# binding on every path is a `NameError` in CPython, which `check_one` reports as
+# `generator-error` — its EARLY RETURN, so the program is never built and every
+# construct in it goes unmeasured while the tally counts it. Measured on
+# `--mix limits`, seed `sweepG` 8000-8009: 2 of 10 programs, one
+# `AttributeError: 'int' object has no attribute 'items'` and one `TypeError`
+# from `d.keys()` against a name still bound to its declared `0`. The pools
+# themselves are `Gen._POOLS`; this check reads the audit's own third field
+# rather than keeping a second copy of that list.
+
+
+def _check_unbound_reads(mix, indexes, verbose=False):
+    """The control first, then the corpus: every readable name is bound.
+
+    The control is a detector that finds nothing makes this row a green light
+    over an unexamined generator, so it is built rather than hoped for: a `Gen`
+    whose pool holds a name nothing declared must be REPORTED. And the corpus
+    half is two-sided — no violation, AND at least one program in the range whose
+    pools are non-empty, because "no violation" over a corpus that never binds a
+    string, a list or a dict is the same answer for the wrong reason.
+    """
+    failures = 0
+    import random as _random
+    probe = F.Gen(_random.Random("control"), "core", (5, 12))
+    probe.decls = [(n, v) for n, v in probe.decls if n != "NAMESNOTBOUND"]
+    probe.strings.append("NAMESNOTBOUND")
+    reported = dict(probe.unbound_reads())
+    if reported.get("NAMESNOTBOUND") != "strings":
+        failures += _fail(
+            "the_unbound_read_audit_finds_a_name_nothing_declared",
+            f"a name appended to `strings` with no `declare` reads as "
+            f"{reported!r}; the row below would then be reporting nothing for "
+            f"the wrong reason", verbose)
+    # …and the other direction, so the audit is not just "every pool name is
+    # reported": a DECLARED name must not be.
+    ok = F.Gen(_random.Random("control"), "core", (5, 12))
+    ok.declare("BOUNDNAME", "0")
+    ok.words.append("BOUNDNAME")
+    ok.emit_top("MODULELEVEL = 1")
+    ok.smalls.append("MODULELEVEL")
+    if ok.unbound_reads():
+        failures += _fail(
+            "the_unbound_read_audit_ignores_a_declared_name",
+            f"declared names reported: {ok.unbound_reads()!r}; a preamble "
+            f"initialiser and a module-level binding are both unconditional",
+            verbose)
+
+    reachable = 0
+    for index in range(indexes):
+        audit = F.audit_generation("suite", index, mix)
+        if audit.unbound:
+            failures += _fail(
+                f"{mix}_index_{index}_reads_a_name_bound_on_no_path",
+                "no binding on every path for "
+                + ", ".join(f"{n} ({p})" for n, p in audit.unbound)
+                + " — bind it through declare(), whose initialiser is emitted "
+                  "once at the top of main", verbose)
+        if audit.readable:
+            reachable += 1
+    if not reachable:
+        failures += _fail(
+            f"{mix}_has_nothing_for_the_unbound_read_audit_to_look_at",
+            f"none of {indexes} programs bound a name any later statement "
+            f"reads, so the audit above is reporting an empty subject set "
+            f"rather than an empty answer", verbose)
+    print(f"formal fuzz: binds     {mix:9} PASS=1 FAIL={failures} "
+          f"({indexes} indexes audited, {reachable} with a readable name)")
     return failures
 
 

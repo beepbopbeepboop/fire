@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Does lib/ProofLib.lean's arm64 machine model agree with an arm64 CPU?
 
+**THE SIBLING, and there are two of these on purpose.**
+`formal/x86_64_model_fuzz.py` asks the same question of `lib/X86.lean` against
+an x86-64 CPU, and the two are NOT one program with a `--arch` flag. That was
+measured rather than assumed: of the x86 file's 747 non-comment source lines,
+**8 are byte-identical to a line here** (1.1%), and they are `memset`,
+`printf` and two Lean `match` arms. The pools are different encoders from
+different modules (`formal/arm64.py` vs `formal/x86_64.py`), the address models
+differ (a translated window versus one `MAP_FIXED` region at a fixed base), the
+verdict sets differ (`ENC-MISMATCH`/`NOSTEP` here, `HARNESS`/`NORUN` there), and
+so do the Lean halves and their launch strategies. What a single shared
+implementation would actually be is an argument-parser and a reporting loop —
+which is what `tools/tu_grind.py` already is, and why neither harness grew its
+own copy of the scratch-directory policy. So: two files, one question, and this
+paragraph so that the next reader does not spend an hour trying to merge them.
+
 Every proof in this repository is a theorem about `arm64_step`. A model that
 disagrees with the machine makes all of them vacuous, and nothing in the tree
 can see it: `lib/ProofLib.lean`'s definitions are trivially well-typed, so a

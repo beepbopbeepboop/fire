@@ -3,7 +3,7 @@
 
     python3 test_formal_libc_symbol.py [-v] [group ...]
 
-Groups: `table`, `binding`, `dirent`, `stat`. With no argument, all of them.
+Groups: `table`, `retkind`, `builtin_abi`, `binding`, `dirent`, `stat`, `retvalue`. With no argument, all of them.
 
 WHAT THIS IS ABOUT. `readdir` is one function in a C header and TWO in macOS's
 C library: `_readdir` fills a `struct dirent` with a 32-bit `ino_t` (4-byte
@@ -35,11 +35,16 @@ Emitting the `$INODE64` spelling on arm64 would trade a silent wrong answer for
 a link failure, so `target_libc_symbol` is asked with the target and answers per
 target.
 
-THE THREE GROUPS, and why there are three. `table` asks the DECISION as a
+THE GROUPS, and why there are several. `table` asks the DECISION as a
 function, which is cheap and pins the two halves that could drift (the table and
-the suffix; the Mach-O-only, x86_64-only gate). `binding` reads the built
-image's own dyld bind stream, so what is asserted is the symbol the LOADER will
-look up rather than what a function returned — the two were the same decision
+the suffix; the Mach-O-only, x86_64-only gate). `builtin_abi` is the same kind of
+question with the opposite answer — the three builtins whose C NAMESAKE EXISTS,
+so the bind audit's provider check waves them through and an image calling one
+links into a function of a different signature (`double pow(double, double)`,
+`int abs(int)`); `formal/model.py::FOREIGN_ABI_BUILTINS` refuses them at the call
+and this group is what says that refusal is load-bearing rather than redundant.
+`binding` reads the built image's own dyld bind stream, so what is asserted
+is the symbol the LOADER will look up rather than what a function returned — the two were the same decision
 until they were not. `dirent` and `stat` then BUILD and EXECUTE, and compare
 against CPython in this process: 32 bytes of each of the first `readdir`
 entries against `ctypes`' own `readdir`, and six `struct stat` fields read at the
@@ -64,8 +69,12 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-BUILD_TIMEOUT = 300
-RUN_TIMEOUT = 60
+# The per-child budgets are `exec_budget`'s, for the reason its docstring gives:
+# a wall clock sized for "much more than a tiny program needs" fires on a loaded
+# machine, and a timeout inside a test file is reported as an ordinary FAIL of
+# the COMPILER. This file used to spell its own (300 and 60), which is the same
+# number in a place no reader can check against the others.
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # The record terminator, for the reason every other formal test file gives
 # (`test_formal_dylib.py` states it): a separator this suite can read back
@@ -113,8 +122,12 @@ def rosetta():
     if sys.platform != "darwin":
         return None
     try:
+        # A host probe, not compiled code: `arch` running `/usr/bin/true`, whose
+        # answer is whether this host can run an x86-64 image at all. The RUN
+        # budget because it is the cheapest child in this file, and a comment
+        # because the same number as an image run would otherwise be ambiguous.
         p = subprocess.run(["arch", "-x86_64", "/usr/bin/true"],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=RUN_TIMEOUT_S)
         return p.returncode == 0
     except Exception:
         return False
@@ -124,7 +137,7 @@ def build(src, out, arch):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
     p = subprocess.run(cmd, capture_output=True, text=True,
-                       timeout=BUILD_TIMEOUT, cwd=HERE)
+                       timeout=COMPILE_TIMEOUT_S, cwd=HERE)
     return p.returncode, (p.stderr or p.stdout or "")
 
 
@@ -142,9 +155,9 @@ def run(out, arch):
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=RUN_TIMEOUT)
+                           timeout=RUN_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return 124, "", f"the image did not finish within {RUN_TIMEOUT}s"
+        return 124, "", f"the image did not finish within {RUN_TIMEOUT_S}s"
     return p.returncode, p.stdout, p.stderr
 
 
@@ -374,6 +387,7 @@ def group_table(verbose):
 
 BINDING_PROGRAM = """\
 from os._syscalls import fs_opendir, fs_readdir, fs_stat, str_alloc
+import glob
 
 def main(n):
     var d = fs_opendir("@@DIR@@")
@@ -381,6 +395,8 @@ def main(n):
     printf("dirent=%d@@", e != 0)
     var buf: Pointer[UInt8] = str_alloc(256)
     printf("stat=%d@@", fs_stat("formal/model.py", buf) == 0)
+    var p = glob.glob("*.mojo", 0, 0)
+    printf("glob=%d@@", p != 0)
     return 0
 """
 
@@ -393,6 +409,22 @@ BINDING_EXPECTED = {
                "stat": "stat$INODE64"},
     "arm64": {"readdir": "readdir", "opendir": "opendir", "stat": "stat"},
 }
+
+# The host module's own exports the `glob` dylib must bind, by PREFIX, because
+# the hash suffix is a function of the module's path and identity and is not the
+# claim. `glob.mojo` calls `basename`/`dirname` without importing them, which is
+# what put them in the `retkind` census's unclassified list; which library
+# answers them is a whole-image fact, so it is read here out of the bind stream
+# rather than argued in a comment — see `HOSTMOD_NON_C_CALLEES`. libc's
+# `basename(3)`/`dirname(3)` are the wrong answer and a plausible one: both
+# names resolve in this very process (`ctypes.CDLL(None)`), so nothing about the
+# spelling separates them, and libc's `dirname` strips trailing slashes where
+# CPython's does not.
+HOSTMOD_EXPORT_BINDS = ("os_path_basename", "os_path_dirname")
+# …and the C-library spellings that must NOT appear, for the same reason the
+# `$INODE64` check above is two-sided: a bind of the bare name would be the
+# wrong library answering, and nothing else in this file would notice.
+HOSTMOD_C_SPELLINGS = ("basename", "dirname")
 
 
 def group_binding(tmpdir, arch, verbose):
@@ -438,6 +470,39 @@ def group_binding(tmpdir, arch, verbose):
             fails.append(f"the {arch} module ALSO binds {other}, the other "
                          f"function of that name — both exist on x86-64, so "
                          f"nothing but this check would notice")
+
+    # The same build, read a second time: the `glob` dylib's stream, for the two
+    # names `retkind`'s census could not classify until somebody asked which
+    # library answers them. One build per architecture serves both, because both
+    # questions are about bind streams and a second build would buy a second
+    # chance for the same linker to disagree with itself.
+    glob_libs = [n for n in linked_dylibs(out)
+                 if os.path.basename(n).startswith("glob.")]
+    if len(glob_libs) != 1:
+        fails.append(f"expected exactly one glob dylib on the {arch} link "
+                     f"line, got {[os.path.basename(n)
+                                  for n in linked_dylibs(out)]}")
+        return fails
+    try:
+        gnames = bind_symbols(glob_libs[0])
+    except ValueError as e:
+        fails.append(str(e))
+        return fails
+    if verbose:
+        print(f"      {os.path.basename(glob_libs[0])} binds: {sorted(gnames)}")
+    for prefix in HOSTMOD_EXPORT_BINDS:
+        if not any(n.startswith(prefix) for n in gnames):
+            fails.append(f"the {arch} glob module binds no {prefix}_<hash> "
+                         f"export, so `basename`/`dirname` in "
+                         f"HOSTMOD_NON_C_CALLEES is a claim about a binding "
+                         f"that is not there; it binds {sorted(gnames)}")
+    for spelling in HOSTMOD_C_SPELLINGS:
+        if spelling in gnames:
+            fails.append(f"the {arch} glob module binds libc's `{spelling}`, "
+                         f"which strips trailing slashes where CPython's "
+                         f"`os.path.{spelling}` does not — and "
+                         f"`HOSTMOD_NON_C_CALLEES` says this call reaches "
+                         f"os.path's own")
     return fails
 
 
@@ -603,16 +668,42 @@ def group_stat(tmpdir, arch, verbose):
 # and why each is not one. An exact list rather than a filter, so a new one has
 # to be classified here instead of being quietly skipped: the census below is
 # only meaningful if the exceptions are a list somebody maintains on purpose.
-# `str_alloc` and `str_copy` are the pair that makes the export gate in
-# `bare_c_return_kind` load-bearing — both are this project's own, reached by
-# `_syscalls.mojo` and `tempfile.mojo` WITHOUT an import statement, and both
-# spell names a C library has no business exporting.
+# `str_copy` is the row that makes the export gate in
+# `bare_c_return_kind` load-bearing — it is this project's own, reached by
+# `os/__init__.mojo` WITHOUT an import statement, and it spells a name a C
+# library has no business exporting.
+#
+# `basename` and `dirname` are the same shape and were found by the census when
+# `formal/hostmods/glob.mojo` grew calls to them without importing them. They
+# are NOT the POSIX `basename(3)`/`dirname(3)`, which is the reading the spelling
+# invites and the one this list would have carried had nobody measured: MEASURED,
+# the `glob` dylib binds `os_path_basename_<hash>` and `os_path_dirname_<hash>`
+# from the `os.path` dylib — ordinal 3 on its link line, next to the
+# `os_path_isdir`/`os_path_join` it imports explicitly — and binds no bare
+# `basename` or `dirname` at all. `formal/hostmods/os/path/__init__.mojo` is
+# where both are defined, and they answer CPython's rules (an ALIAS into the
+# input for a non-empty basename), which libc's `dirname(3)` does not: it strips
+# trailing slashes, so `basename("a/b/")` would be `"b"` where CPython says `""`.
+# That is also why the row cannot go in `BARE_C_RETURN_KINDS` even though both
+# names exist in libSystem — and they do, measured with `ctypes.CDLL(None)`, so
+# the "every table entry names a symbol this host's C library defines" check
+# below would NOT have caught the mistake. The `binding` group asserts the bind
+# stream itself, on both architectures, so the classification is pinned by the
+# image rather than by this comment.
+#
+# `str_alloc` WAS here and stopped being a bare callee: `os/__init__.mojo` now
+# writes `from ._syscalls import str_alloc, …`, so the census — which skips
+# imported names — no longer finds it, and the anti-rot check below requires the
+# entry to go. `str_copy` is still bare there, and the two are called side by
+# side, which is what makes the pair worth naming.
 HOSTMOD_NON_C_CALLEES = {
     "admitted": "`@admitted` is a contract decorator "
                 "(formal/admitted.py::ADMITTED_DECORATOR), not a call",
-    "str_alloc": "`os._syscalls`' own allocator, called from tempfile.mojo with "
-                 "no import statement — a Mojo export reached through the link "
-                 "line's flat table, not a C symbol",
+    "basename": "`os.path`'s own, reached by `glob.mojo` with no import "
+                "statement — it binds `os_path_basename_<hash>` from the "
+                "os.path dylib, measured in the `binding` group",
+    "dirname": "`os.path`'s own, the same shape and the same measurement as "
+               "`basename`",
     "str_copy": "`os._syscalls`' own byte copy, called from os/__init__.mojo "
                 "the same way",
 }
@@ -666,6 +757,76 @@ def hostmod_bare_callees():
                 continue
             out.setdefault(name, set()).add(os.path.relpath(p, HERE))
     return out
+
+
+def group_builtin_abi(verbose):
+    """`FOREIGN_ABI_BUILTINS`: three builtins the C library DEFINES, so the
+    bind audit cannot be what refuses them.
+
+    This file is about "the symbol an unbound C callee binds to on THIS target",
+    and the three names in `formal/model.py`'s `FOREIGN_ABI_BUILTINS` are the
+    case where that question has a SURPRISING answer: the provider check asks the
+    C library (`dlsym`) and the C library has all three, so an image calling
+    `pow`, `round` or `abs` links, loads and runs — into a function of a
+    different signature.  Measured, both architectures, 2026-10-04, with CPython
+    as the arbiter: `pow(10, 2)` answered 0 where CPython answers 100,
+    `round(7)` answered 7 on arm64 and 0 here, and `abs(2**40+5)` answered 5 on
+    both where CPython answers 1099511627781 — libSystem's `abs` is
+    `int abs(int)`, so it sees the low half of the 64-bit word this path passes.
+
+    So the refusal has to happen at the CALL (`model.builtin_binding_refusal`,
+    asked by both emitters beside the intercepts that DO lower a name), and this
+    group is what makes that refusal load-bearing rather than redundant: it asks
+    the host's own C library whether these symbols exist, which is the fact that
+    says the bind audit would wave them through.  The differential half — the
+    wrong answers, and the refusal that replaced them — is
+    `test_formal_value_model.py`'s `BUILTIN_REFUSALS`, which builds and runs;
+    this group is the host fact and costs no build.
+    """
+    import formal.model as M
+    fails = []
+
+    def check(cond, msg):
+        if not cond:
+            fails.append(msg)
+        elif verbose:
+            print(f"      ok: {msg}")
+
+    names = sorted(M.FOREIGN_ABI_BUILTINS)
+    check(names == ["abs", "pow", "round"],
+          f"the three names whose C namesake is a different function: {names}")
+    # NOTHING lowers them, so the refusal at the call site is not shadowed by a
+    # lowering that arrived later — the intercepts the emitters consult come
+    # first, so a name in any of those tables would never reach
+    # `builtin_binding_refusal` and this table would be dead code.
+    for name in names:
+        check(name not in M.EMITTER_BUILTINS
+              and M.builtin_function(name) is None
+              and name not in M.INT_TYPE_CTORS
+              and name not in M.IDENTITY_TYPE_CTORS,
+              f"{name} is lowered by nothing, so the refusal is reached")
+    # …and the C library HAS them, which is the whole reason the bind audit does
+    # not catch them.  Darwin-only for the same reason `group_retkind`'s ctypes
+    # check is: the provider check the build performs is a `dlsym` against this
+    # host's library, so the fact worth asserting is the fact about THIS one.
+    if sys.platform == "darwin":
+        import ctypes
+        lib = ctypes.CDLL(None)
+        for name in names:
+            try:
+                getattr(lib, name)
+                check(True, f"libSystem defines `{name}`, so a call to it "
+                            f"would bind rather than dangle")
+            except AttributeError:
+                check(False,
+                      f"libSystem does NOT define `{name}` here, so the bind "
+                      f"audit would have refused it and the emitter refusal is "
+                      f"redundant on this host — and the measured wrong answers "
+                      f"this table records could not have happened")
+    elif verbose:
+        print("NOTE: not Darwin, so the provider check's own question cannot "
+              "be asked of this host's C library here")
+    return fails
 
 
 def group_retkind(verbose):
@@ -832,6 +993,8 @@ GROUPS = {
     # wrong, and a check that is not run is not a check.
     "table": (lambda tmpdir, arch, verbose: group_table(verbose), False),
     "retkind": (lambda tmpdir, arch, verbose: group_retkind(verbose), False),
+    "builtin_abi": (lambda tmpdir, arch, verbose: group_builtin_abi(verbose),
+                    False),
     "binding": (group_binding, True),
     "dirent": (group_dirent, True),
     "stat": (group_stat, True),

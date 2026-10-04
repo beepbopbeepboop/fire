@@ -980,6 +980,145 @@ def test_a_value_typed_bracket_is_not_read_as_a_type(tmpdir):
           f"to line 0 sends the reader to the top of the file")
 
 
+def test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not(
+        tmpdir):
+    """The one value shape a bracket argument accepts is a LITERAL DISPLAY.
+
+    `TypeDict[T=Int, Trait=AnyType, [1,2,3], Int, String, Float64]` is
+    `std/collections/type_dict.mojo`'s own use site and every one of its
+    parameters is a VALUE, so the bracket has to be able to name one — but
+    naming a value is an ABI question, because the mangled name IS the boundary
+    symbol and two instantiations differing only in a value argument must be two
+    symbols or the second overwrites the first.
+
+    Three things are pinned here, and the second is the one that is easy to get
+    wrong in the direction of a wrong answer:
+
+    * **`[1, 2, 3]`, `(4, 5)`, `[-3, 5]`, `[True, 5]` and a nested
+      `[[1,2],[3,4]]` are demands**, and each mangles to its own symbol.  A
+      display of literals has exactly one closed-form spelling, so the rendering
+      is a FUNCTION of the value and `monomorphize.safe_suffix` (injective on
+      text) makes the mangling injective with it.
+    * **`Pair[2]` and `tile[2, 3]` are still NOT demands.**  A bare literal at
+      the top level of a bracket is the comptime-specialization case, which both
+      backends already answer through `mojo/middle/comptime.specialization_args`;
+      demanding `tile_2_3` for it as well would publish a boundary symbol for a
+      specialization the build already emits under its own name.  The asymmetry
+      is the whole design and it is what this case exists to hold.
+    * **A display with a computed element is refused WHOLE, not half.**  `keys[0]
+      + base` inside a display has no closed form, and a partial display would
+      substitute a body built from half the values the source wrote — the
+      fabricated-answer outcome every other refusal in this module exists to
+      avoid.  So is a display naming a name the reading scope binds as a value,
+      which is the same negation `type_arg_text` applies to a type argument.
+    """
+    from formal import monomorph as MM
+    prog = ("def main():\n"
+            "    var a = Box[Int, [1, 2, 3]]()\n"
+            "    var b = Box[Int, (4, 5)]()\n"
+            "    var c = Box[Int, [-3, 5]]()\n"
+            "    var d = Box[Int, [True, 5]]()\n"
+            "    var e = Box[Int, [[1, 2], [3, 4]]]()\n"
+            "    var f = Box[Int, [1, 2, 3 + base]]()\n"
+            "    var g = Box[Int, [1, t]]()\n"
+            "    var h = Pair[2]()\n"
+            "    var i = tile[2, 3](7)\n"
+            "    var t = Int\n")
+    found = MM.all_instantiation_calls(prog)
+    check(found.get("Box") == [("Int", "(4, 5)"), ("Int", "[-3, 5]"),
+                               ("Int", "[1, 2, 3]"), ("Int", "[True, 5]"),
+                               ("Int", "[[1, 2], [3, 4]]")],
+          f"the five displays of literals are demands and the two that are not "
+          f"displays, or hold a computed element, or name a value binding, are "
+          f"not: {found}")
+    check("Pair" not in found and "tile" not in found,
+          f"a bare literal bracket is `tile[2, 3]`'s shape and belongs to the "
+          f"local specialization machinery, not to a boundary symbol: "
+          f"{found}")
+
+    # The mangling is the ABI, so distinctness is asserted on the SYMBOLS rather
+    # than on the display strings, and the pair that could collide is the one
+    # the rendering could have flattened: a one-element tuple, a one-element
+    # list and the bare element all hold the same value.
+    src = ("def total[T: AnyType, keys: List[T]](base: Int) -> Int:\n"
+           "    return base + keys[0]\n")
+    mangled = {}
+    for args in (("Int", "[1, 2, 3]"), ("Int", "[3, 2, 1]"),
+                 ("Int", "(1, 2, 3)"), ("Int", "(1,)"), ("Int", "[1]")):
+        mangled[args] = MM.instantiate(src, "total", args)[0]
+    check(len(set(mangled.values())) == len(mangled),
+          f"two instantiations differing only in a VALUE argument share one "
+          f"symbol, so the second overwrites the first: {mangled}")
+
+    # …and the spelling is the text that goes into the body, so a consumer that
+    # reads the value has to get the value and not a mangled fragment.
+    _name, concrete = MM.instantiate(src, "total", ("Int", "[1, 2, 3]"))
+    check("base + [1, 2, 3][0]" in concrete,
+          f"the display was not substituted into the body as written: "
+          f"{concrete!r}")
+    import fire_compiler as FC
+    try:
+        FC.Parser(FC.py_tokenize(concrete)).parse_module()
+    except Exception as exc:                        # noqa: BLE001
+        raise TestFailure(
+            f"the instantiation does not parse, which is the whole defect: "
+            f"{exc!r}\n{concrete!r}") from None
+
+
+VALUE_BRACKET_LIB = """\
+def total[T: AnyType, keys: List[T]](base: Int) -> Int:
+    return base + keys[0]
+"""
+
+VALUE_BRACKET_PROG = """\
+from vlib import total
+
+def main():
+    print(total[Int, [1, 2, 3]](10))
+    print(total[Int, [7, 8, 9]](10))
+    print(total[Int, (4, 5)](10))
+"""
+
+VALUE_BRACKET_CPYTHON = """\
+def total(base, keys):
+    return base + keys[0]
+def main():
+    print(total(10, [1, 2, 3]))
+    print(total(10, [7, 8, 9]))
+    print(total(10, (4, 5)))
+"""
+
+
+def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
+    """`total[Int, [1, 2, 3]]` binds the library's symbol, and `keys[0]` is `1`.
+
+    The end-to-end half, and the reason the numbers are the assertion: a
+    mangling that collapsed two value arguments onto one symbol would build, run
+    and print the FIRST program's answer twice — a plausible answer, which is
+    the failure mode this whole file was written to catch.  `keys[0]` is what
+    makes the value observable at all: it is the one read of a bracket value
+    parameter that lowers today, because the parameter's own annotation
+    (`keys: List[T]`) classifies the subscript base and the substitution puts a
+    list literal there.  A read that goes through `len()` instead does not (see
+    the bug doc deleted with the consumer-side fix, `§"What is not the cause"`
+    and the wall it stopped at, now
+    `bugs/FORMAL_a_value_bracket_parameter_cannot_be_read_in_the_template.md`),
+    which is why this case reads element zero.
+
+    Both spellings of a display and two different values of it, so the
+    distinctness the mangling has to provide is exercised rather than asserted:
+    `[1, 2, 3]` and `[7, 8, 9]` are two libraries whose symbols differ, and
+    `(4, 5)` is a third spelling of a two-element display.
+    """
+    for arch in ARCHES:
+        got = run_pair_case(tmpdir, arch, "mm_valuedisp", VALUE_BRACKET_LIB,
+                            VALUE_BRACKET_PROG, VALUE_BRACKET_CPYTHON,
+                            libname="vlib.mojo")
+        check(got == "11\n17\n14\n",
+              f"[{arch}] printed {got!r} for three instantiations whose first "
+              f"elements are 1, 7 and 4 over a base of 10")
+
+
 # ── the artifact's identity ─────────────────────────────────────────────────
 
 
@@ -1495,7 +1634,7 @@ def test_the_census_answers_each_of_its_seven_questions(tmpdir):
           f"{sorted(n for n, b in want.items() if b == T.BUCKET_SOLVABLE)}")
 
 
-def test_the_census_reads_the_measured_shapes_out_of_the_corpus(tmpdir):
+def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
     `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
@@ -1508,6 +1647,13 @@ def test_the_census_reads_the_measured_shapes_out_of_the_corpus(tmpdir):
 
     Skipped, with the reason printed and counted, when there is no stdlib
     checkout beside this tree — see `_Skip` and `_stdlib_dir`.
+
+    The scratch directory is taken and unused (`_tmpdir`): this is a static
+    census over the stdlib's SOURCE, so it builds nothing. The parameter is
+    still declared because the runner's contract is that every case takes one —
+    see `_check_case_arities` — and a case that quietly took none raised
+    `TypeError` before its first assertion, which the runner reported as an
+    ERROR for a case whose whole subject is the corpus.
     """
     stdlib = FI._stdlib_dir()
     if stdlib is None:
@@ -1693,6 +1839,10 @@ TESTS = [
      test_a_value_typed_bracket_is_not_read_as_a_type),
     ("two demand sets are two libraries",
      test_two_demand_sets_are_two_libraries),
+    ("a literal display is a bracket argument and a bare literal is not",
+     test_a_literal_display_is_a_bracket_argument_and_a_bare_literal_is_not),
+    ("a value bracket argument reaches the boundary symbol",
+     test_a_value_bracket_argument_reaches_the_boundary_symbol),
     ("a bracketed parameter annotation instantiates",
      test_a_bracketed_parameter_annotation_instantiates),
     ("a stated mangled spelling is the one the mangler produces",
@@ -1708,6 +1858,37 @@ TESTS = [
 EXPECTED_FAILURES: dict = {}
 
 
+def _check_case_arities() -> None:
+    """Every case takes the run's scratch directory, and says so here.
+
+    The runner calls `fn(tmpdir)` unconditionally, which is the contract; this
+    is the one place that states it, so a case written without the parameter
+    fails at the START of the run naming itself instead of reaching its own
+    first assertion as a `TypeError` the runner reports as an ERROR — an
+    ERROR that reads like the case failed rather than like it never ran, which
+    is how `test_the_census_reads_the_measured_shapes_out_of_the_corpus` spent
+    a run reporting "the census answers each of the five questions" while the
+    case that asks the corpus had never been called.
+
+    An unused scratch directory is named `_tmpdir`, which is the convention the
+    census case above follows; it is not a second arity.
+    """
+    import inspect
+    wrong = []
+    for name, fn in TESTS:
+        params = list(inspect.signature(fn).parameters.values())
+        if len(params) != 1 or params[0].kind in (params[0].VAR_POSITIONAL,
+                                                 params[0].VAR_KEYWORD):
+            wrong.append(f"{fn.__name__} takes "
+                         f"{[p.name for p in params] or 'nothing'}")
+    if wrong:
+        raise SystemExit(
+            "every case in TESTS takes the scratch directory the runner passes "
+            "it, and these do not: " + "; ".join(wrong) +
+            "\n  add the parameter (named `_tmpdir` when the case builds "
+            "nothing) rather than letting the runner discover it at call time.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -1717,6 +1898,8 @@ def main():
         print(f"SKIP: formal output is arm64-only, host is "
               f"{platform.machine()}")
         return 0
+
+    _check_case_arities()
 
     passed = failed = expected = skipped = 0
     try:

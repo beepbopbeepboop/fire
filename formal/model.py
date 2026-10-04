@@ -6612,17 +6612,65 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
 #: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
 #: declaration is in another module.
 #:
-#: `FRAME_KIND` is absent here too, and for a different reason — a field whose
-#: declared type is a framed struct of this module holds an ADDRESS, and reading
-#: that as a container is a wrong ANSWER rather than a fault.  It is refused, but
-#: by `frame_slot_element_refusal` and NOT from this set, because this set is
-#: asked BEFORE the string and dict readings are dispatched and a frame-typed
-#: field is exactly what those two need to keep answering: `self._dict[k]` in
-#: `std/collections/dict.mojo` reads a dict because its DECLARATION says
-#: `Dict[...]`, and `declared_type_kind` resolves that annotation against the
-#: module's own `struct Dict`, so the emitter's kind for the base is a frame.
-#: Putting the kind here would refuse a dict lookup that works, which is the
-#: failure mode every other fix in this family is arranged to avoid.
+#: **`FRAME_KIND` was IN this set on 2026-10-04 and is deliberately OUT of it
+#: again, and both positions have a measurement.**  It went IN on the argument
+#: that a frame-valued field read as a container is a wrong ANSWER rather than a
+#: fault, and the argument was answered with numbers rather than with taste:
+#:
+#:     struct Deep:  var x: Int;  var y: Int
+#:     struct Wrap:  var d: Deep;  var t: Int
+#:     w.d.x = 3 ; w.d.y = 4 ; printf("%d", w.d[0])
+#:
+#: | | arm64 | x86-64 |
+#: |---|---|---|
+#: | `w.d[0]` | **4**, exit 0 | **4**, exit 0 |
+#: | `h.d[1]` where `Deep` declares `__getitem__` | **0**, exit 0 | **-1927469536**, exit 0 |
+#:
+#: Two architectures, two different wrong answers, exit 0. The arithmetic is why:
+#: the blob walk reads `count = mem_read_u64(w + 0)`, which is `Deep`'s FIRST
+#: FIELD, and then `addr = w + 8 + 8·count` — so which field an index reaches is
+#: decided by the values in the frame rather than by the index. (CPython refuses
+#: the shape outright, `TypeError: 'Deep' object is not subscriptable`, so there
+#: is no oracle number; that is the other half of why a refusal and not a better
+#: lowering. `frame_slot_element_refusal` below carries the full argument.)
+#:
+#: It is OUT because of the OTHER half of the same census, which is the one that
+#: was misattributed the first time. Every `X.<field>[i]` site classified by its
+#: SLOT's kind (`struct_field_kind`) rather than by its annotation alone, with a
+#: type name a shared table already classifies left out of the module's own
+#: struct table:
+#:
+#: | slot kind | sites |
+#: |---|---|
+#: | nothing reachable in the file (a module attribute, or a struct from another module) | 404 |
+#: | an IDENTITY type ctor (`String` / `Pointer` / `UnsafePointer` / …) | 65 |
+#: | a declared name this path has no kind for | 62 |
+#: | a container (`List` / `Dict` / `Tuple` / …) | 3 |
+#: | a frame | 2 |
+#: | a POINTER | 1 |
+#: | **an integer or a type tag** | **0** |
+#:
+#: 537 sites over 252 files, and **the whole frame row is two sites, both of them
+#: `self._dict[key]`** in `std/collections/dict.mojo`'s own
+#: `StringDict.__getitem__`/`__setitem__`. That is the same two sites the earlier
+#: 2 642-site reading put at 7, and the difference is a name collision rather
+#: than a corpus change: a `Dict[...]` annotation read through the module's own
+#: `struct Dict` — which is how the KIND axis classifies it, deliberately, because
+#: a field declared a struct of this module does hold that struct's address.
+#:
+#: **So widening this set refuses a dict lookup that WORKS, and that is the whole
+#: reason it stays out.**  The two axes disagree on `self._dict` and both are
+#: right: the kind axis (`struct_field_kind`) answers `FRAME_KIND` because the
+#: annotation names this module's `struct Dict`, while the dict axis
+#: (`ValueKinds::is_dict_value` → `frame_slot_field_is_dict` →
+#: `declared_type_is_dict`) answers "a dict" from the same annotation read
+#: against `DICT_TYPE_NAMES`. The dict axis is asked FIRST
+#: (`_is_dict_key_subscript`, then the string path), and this set is asked before
+#: both — so a `FRAME_KIND` member here fires on the two sites whose dict answer
+#: is the one that keeps `std/collections/dict.mojo` compiling. `h.d[1]`'s wrong
+#: numbers are real and are refused, one gate later, by
+#: `frame_slot_element_refusal` — which is why the `__getitem__` row in
+#: `test_formal_x86_64_parity.py` is refused under THIS arrangement too.
 NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
 
 #: The kinds the BLOB fallback may not read an element out of, asked AFTER the
@@ -6670,26 +6718,44 @@ def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | N
 
     **A REFUSAL and not a lowering, decided, with the alternatives named.**  A
     load at `base + 8i` is what `w.d.x` already is one level up, so it is
-    available; it is declined for two reasons.  First, the index is not a field
-    NAME: slot `i` of the frame is the struct's `i`-th declared field for
-    `i < len(fields)`, and past that it is a spill slot or scratch — a value with
-    no field behind it, so a lowering would have to invent the bound that makes
-    it an answer, and `w.d[i]` is not a program whose meaning is worth inventing
-    one for.  Second, the two sibling rules already refuse a non-container base
-    (a bare name holding a frame, and a field declared an integer or a type tag),
-    and a third answer for the same mistake is a decision this path would then
-    have to keep consistent.  Refusing also keeps the emitter side free of a new
-    arm on BOTH architectures, which is why the two cannot come to answer this
-    differently.
+    available; it is declined for two reasons that are both facts rather than
+    preferences.  First, CPython has no such operation
+    (`TypeError: 'Deep' object is not subscriptable`), so there is no oracle for
+    a lowering to be right about.  Second, and decisively: **when the declared
+    struct declares `__getitem__` the subscript is a METHOD CALL and not a slot
+    load**, so `base + 8i` is not one lowering but two, and the second is
+    dispatch — a mechanism this backend does not have for a field's declared
+    type.  Measured, and the measurement is why the alternative looks like a fix
+    at all: `h.d[1]` with `Deep.__getitem__` returning `a + k` printed **0** on
+    arm64 and **-1927469536** on x86-64, exit 0 on both.  Two architectures, two
+    different wrong answers, and neither of them is `base + 8i`.
+
+    The index is not a field NAME either, which is a third and weaker reason: slot
+    `i` of the frame is the struct's `i`-th declared field for `i < len(fields)`,
+    and past that it is a spill slot or scratch — a value with no field behind it,
+    so a lowering would have to invent the bound that makes it an answer.  And the
+    two sibling rules already refuse a non-container base (a bare name holding a
+    frame, and a field declared an integer or a type tag), so a third answer for
+    the same mistake is a decision this path would then have to keep consistent.
+    Refusing also keeps the emitter side free of a new arm on BOTH architectures,
+    which is why the two cannot come to answer this differently.
 
     **Asked AFTER the string and dict readings, and that placement is the
     corpus.**  `FRAME_KIND` is `frame_slot_element_refusal`'s only kind, and the
     emitters call it where the BLOB fallback begins — after
     `_is_dict_key_subscript` and after the string path.  It is not in
-    `NON_CONTAINER_SLOT_KINDS`, which is asked before both: a frame-typed field
-    is what a DICT lookup's base looks like.  Measured with
-    `tools/formal_frame_slot_subscript_census.py` over this repository and the
-    stdlib, every `X.<field>[i]` site classified by its field's declared type:
+    `NON_CONTAINER_SLOT_KINDS`, which is asked before both, and the two axes
+    disagree on the one base that makes that matter: `self._dict` is a FRAME on
+    the kind axis (`struct_field_kind` reads its `Dict[...]` annotation against
+    the module's own `struct Dict`) and a DICT on the dict axis
+    (`ValueKinds::is_dict_value` → `frame_slot_field_is_dict` →
+    `declared_type_is_dict` reads the same annotation against `DICT_TYPE_NAMES`).
+    The dict axis is the one asked first, and it is the one that keeps
+    `std/collections/dict.mojo`'s `StringDict` compiling.
+
+    Measured with `tools/formal_frame_slot_subscript_census.py` over this
+    repository and the stdlib, every `X.<field>[i]` site classified by its
+    field's declared type:
 
     | declared kind | sites |
     |---|---|
@@ -6701,13 +6767,14 @@ def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | N
     | **a framed struct of the module** | **2** |
 
     and **both of the two are the dict case**: `self._dict` in
-    `std/collections/dict.mojo`'s `__getitem__` and `__setitem__`, annotated
-    `Dict[...]`, which `declared_type_kind` resolves against that module's own
-    `struct Dict` — a NAME collision, and the only two sites in the corpus where
-    a frame kind is reached at all.  Which is why the set above is one kind and
-    not two, and why the placement after the dict dispatch is load-bearing
-    rather than tidier: the census says the corpus has nothing to lose, and the
-    placement is what makes that true rather than a claim about it.
+    `std/collections/dict.mojo`'s `__getitem__` and `__setitem__`.  Which is why
+    the set above is one kind and not two, and why the placement after the dict
+    dispatch is load-bearing rather than tidier: the census says the corpus has
+    nothing to lose, and the placement is what makes that true rather than a
+    claim about it.  `NON_CONTAINER_SLOT_KINDS` carries the SECOND reading of the
+    same corpus — classified by the slot's kind rather than by its annotation,
+    which is the reading that found the `h.d[1]` numbers above and still leaves
+    the frame row at the same two `self._dict[key]` sites.
     """
     if base_kind not in FRAME_SLOT_ELEMENT_KINDS:
         return None
@@ -6753,24 +6820,13 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         `NON_CONTAINER_SLOT_KINDS`, and the gate is the kind rather than the
         base's SPELLING because a kind is returned only where the source says
         what the slot holds. Why `None` is excluded from that tuple is measured
-        rather than argued: every `X.<field>[i]` in the 610-file stdlib corpus,
-        classified by its field's declared type —
-
-        | declared kind | sites |
-        |---|---|
-        | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
-        | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
-        | a declared name this path has no kind for | 66 |
-        | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
-        | a string | 1 |
-        | a framed struct of the module | 7 |
-        | **an integer or a type tag** | **0** |
-
-        So the refusal costs the corpus nothing, and the permissive `None` is
-        what the other 2 446 sites get — which is the right answer for them: an
-        unclassified slot is a word, a word is a container as far as this path
-        can tell, and the corpus's untyped parameter and module-attribute
-        subscripts are the bulk of the language.
+        rather than argued, and so is why `FRAME_KIND` is: the census, its
+        corrected reading and its earlier wrong one are all in
+        `NON_CONTAINER_SLOT_KINDS`' own comment, and the short version is that
+        the frame row is `self._dict[key]` in `std/collections/dict.mojo` — the
+        one base in the corpus whose dict reading is dispatched before this
+        function is asked. `frame_slot_element_refusal` owns the frame, asked
+        after those readings, which is why this is three arms and not four.
       * **A scalar LITERAL.** `5[0]`, `1.5[i]`, `True[0]`. The node IS the
         value, so there is no default and no declaration to disagree with, and
         nothing about it can be a container. This arm is why the shape reached
@@ -6785,6 +6841,18 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         no count. This is the one arm both halves of the family reach for the
         same construct, which is why it is asked once here rather than once in
         each.
+
+    **The frame is NOT refused here, and that is a placement rather than an
+    omission.** A field declared a framed struct of this module holds that
+    struct's ADDRESS, so reading it as a container is a wrong answer rather than
+    a fault (`w.d[0]` printed `Deep`'s SECOND field where a reader means its
+    first, on both architectures), and the whole of the reasoning for refusing it
+    — the arithmetic, the `__getitem__` measurement, and why a load at `base + 8i`
+    is not offered instead — is `frame_slot_element_refusal`'s. It is asked one
+    step later because `self._dict[key]` classifies as a frame on the KIND axis
+    and as a dict on the dict axis at the same time, and the dict reading is the
+    one that keeps the stdlib's `StringDict` compiling. See
+    `NON_CONTAINER_SLOT_KINDS`.
 
     **Not refused, and the reasons are the same two the rest of the family
     gives.** `None` for the kind — an unclassified base keeps the container
@@ -6808,8 +6876,8 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         return ("a struct field declared to hold an integer — a frame slot is "
                 "ONE word, and a subscript needs a pointer plus a stride, so "
                 "there is nothing in the slot to compute a stride from, which "
-                "is why this is a refusal rather than a cheaper index — and it "
-                "is classified as that because the SOURCE says so, not because "
+                "is why this is a refusal rather than a cheaper index — and it is "
+                "classified as that because the SOURCE says so, not because "
                 "the image could read it")
     if isinstance(expr, (F.IntLiteral, F.FloatLiteral, F.BoolLiteral)):
         return ("a number — the literal carries no count at offset 0 and no "
@@ -6879,6 +6947,8 @@ def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
             f"tuple you built, take the container as a PARAMETER of {function} "
             f"where the caller's value decides, or pass the value itself to the "
             f"function that wants it")
+
+
 
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.
@@ -13085,25 +13155,36 @@ def dereference_operands_refusal(dotted: str, method: str, args) -> str | None:
 # backends on one wording.
 
 
-def pointer_store_receiver(target):
-    """The ADDRESS a store through a dereference writes to, or `None`.
+def deref_receiver(expr):
+    """The RECEIVER of a dereference EXPRESSION — `p` in `p.value()` — or None.
 
-    `p.value() = v` and `p.unsafe_value() = v`, and nothing else.  The same
-    `DEREFERENCE_TRY_NAMES` the LOAD intercepts on, read from the model's own
-    table rather than from a list spelled out here — a store recogniser with its
-    own two names is a third list to keep in step with the other two, and the
-    cost of it being wrong is a program refused for a spelling the load accepts.
+    One recogniser for both intercepts, because they are the same question asked
+    of the same node: `p.value() = v` is a STORE through a pointee and
+    `return p.value()` is a LOAD, and the spelling that decides it is
+    `DEREFERENCE_TRY_NAMES` — the model's own table, read here rather than from
+    a list spelled out again, because a third copy is a third thing to keep in
+    step and the cost of it being wrong is a program refused for a spelling the
+    other intercept accepts.
 
-    `None` means "this target is not a store through a pointee", which is the
-    common case: every other assignment target is a plain name, a subscript, a
-    slice or a field, and each of those has its own emitter.
+    `None` means "this is not a dereference", which is the common case: a plain
+    name, a subscript, a field, an arithmetic expression.
     """
-    if not isinstance(target, F.CallExpr) or target.args or target.kwargs:
+    if not isinstance(expr, F.CallExpr) or expr.args or expr.kwargs:
         return None
-    func = getattr(target, "func", None)
+    func = getattr(expr, "func", None)
     if isinstance(func, F.MemberExpr) and func.member in DEREFERENCE_TRY_NAMES:
         return func.obj
     return None
+
+
+def pointer_store_receiver(target):
+    """The ADDRESS a store through a dereference writes to, or `None`.
+
+    `p.value() = v` and `p.unsafe_value() = v`, and nothing else — the store
+    half of `deref_receiver`, which is the same recogniser over the same node and
+    is where the reason for having one lives.
+    """
+    return deref_receiver(target)
 
 
 def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
@@ -13565,6 +13646,164 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── the builtins this path does NOT lower ───────────────────────────────────
+#
+# `EMITTER_BUILTINS` above is three names and `BUILTIN_FUNCTIONS` is two, and
+# between them they are the whole of what a bare-name call to a CPython builtin
+# lowers to on this path. The rest of CPython's builtin namespace is NOT
+# lowered, and until this table existed that fact lived in three places that
+# could disagree: the link audit's refusal (a name nothing provides), a
+# construct refusal further back, and — for the names the C library happens to
+# define — NOTHING AT ALL.
+#
+# So the table is a MEASUREMENT with one sentence per name, and the sentences
+# say what lowering each one would take, because "the census cannot say which
+# builtin is missing" is the complaint this answers: the finding was that of the
+# 33 names `tools/formal_proof_breadth.py` lets a candidate read, the path
+# lowers 11 and refuses 22, and nothing said which was which (fixed in
+# c8d877e9 + af313965; the doc is deleted with its fix). Every row was measured
+# on BOTH architectures on 2026-10-04 with
+# `def main(n): return <call>` and CPython as the arbiter, and the measurement
+# is pinned by `test_formal_value_model.py`'s builtin group — one differential
+# case per name that lowers, one refusal case per name that does not, on both
+# backends, which is also what makes a row's removal a test failure rather than
+# a stale sentence.
+#
+# `int`, `len`, `print`, `range` and `str`-of-text are NOT here because they
+# lower (`EMITTER_BUILTINS`, `INT_TYPE_CTORS`, `IDENTITY_TYPE_CTORS`); `abs`,
+# `pow` and `round` ARE here and are called out again below, because for those
+# three the absence was silent.
+NOT_LOWERED_BUILTINS = {
+    "abs": "a compare against zero and a select of the operand or its "
+           "negation — and the C library's `abs` is NOT it, see "
+           "FOREIGN_ABI_BUILTINS",
+    "all": "a fold over a sequence with a short circuit, which is a run-time "
+           "sequence this one-word value model cannot carry",
+    "any": "a fold over a sequence with a short circuit, the same shape as "
+           "`all`",
+    "bin": "a base-2 rendering into a buffer: a digit table and a loop, and "
+           "the ANSWER is a run-time string, which is "
+           "`bugs/FORMAL_string_value_model.md`",
+    "bool": "a compare against zero and a normalize — but the name is also in "
+            "`FRAME_VALUE_ONLY_CALLS`, so the frame-address half of the answer "
+            "is settled and the value half is not",
+    "chr": "a code point to a one-character string: an integer-to-text "
+           "conversion this path does not have",
+    "divmod": "a division and a remainder returning a PAIR, and a pair is more "
+             "than one word (`FORMAL_the_value_model_is_one_word`)",
+    "enumerate": "a generator of pairs; both halves are out of reach "
+                 "(`FORMAL_listdir_no_run_time_sequence`)",
+    "float": "a double, and every value on this path is one 64-bit INTEGER "
+             "word",
+    "hex": "a base-16 rendering, the same shape as `bin`",
+    "list": "a counted blob this path CAN lay out (`BLOB_TYPE_CTORS`) but "
+            "cannot COPY from another blob at run time — a copy is the tagged-"
+            "value work `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_"
+            "time.md` is about",
+    "max": "a compare and a select; both emitters already have the select "
+           "(`MLIR_SELECT_OP`'s `TernaryExpr` is one `CSEL`)",
+    "min": "a compare and a select, the same shape as `max`",
+    "oct": "a base-8 rendering, the same shape as `bin`",
+    "ord": "a one-character string to a code point — the inverse of `chr`, and "
+           "the string half is the same gap",
+    "pow": "integer exponentiation — a loop, or a libm call whose result is a "
+           "double (see FOREIGN_ABI_BUILTINS)",
+    "repr": "a rendering whose spelling depends on the VALUE's type, and the "
+            "type is not in a value",
+    "reversed": "a reversed copy of a sequence, so the same two gaps as "
+                "`list`",
+    "round": "a compare-and-select for an integer operand and a rounding rule "
+             "for a real one; the C library's `round` is a double (see "
+             "FOREIGN_ABI_BUILTINS)",
+    "sorted": "a sort — a comparison call per element, and a call through a "
+              "value is not a thing this path can express",
+    "sum": "a fold over a sequence, the same shape as `all`",
+    "tuple": "a counted blob, the same gap as `list`, and a two-element tuple "
+             "is a list blob this path cannot copy at run time either",
+}
+
+# The three names whose absence was SILENT, and the only reason this table has
+# to be read as a safety property rather than a census.
+#
+# A bare-name call to a name nothing provides is refused by the bind audit with
+# a sentence that names the builtin (`ee704916`). These three are different: the
+# C library DEFINES all of them, so the audit's provider check — "asked the C
+# library (dlsym)" — finds a provider and the image links. What it binds is a
+# different function:
+#
+#     double pow(double, double)      two doubles in, one double out, and this
+#                                     path's ABI reads the result from the
+#                                     INTEGER return register
+#     double round(double)             the same, and x86-64's SysV varargs area
+#                                     is not even the same memory arm64 leaves
+#                                     the result in
+#     int    abs(int)                  a 32-BIT argument, so the low half of the
+#                                     word this path passes is all it sees
+#
+# Measured, both architectures, 2026-10-04, against CPython's own answers:
+#
+#     def main(n): return pow(n, 2)     n=10 -> 0     (CPython 100)
+#                                         n=3  -> 0     (CPython 27)
+#     def main(n): return round(n)      n=7  -> 7 arm64, 0 x86-64 (CPython 7)
+#     def main(n): return abs(n)        n=2**40+5 -> 5 on BOTH (CPython
+#                                         1099511627781); n=-(2**40+5) -> 5 on
+#                                         both (CPython 1099511627781)
+#
+# An image that answers a different number is the failure this project treats
+# as worse than a refusal everywhere else, so these three are refused BY NAME at
+# the same chokepoint the other builtin intercepts use
+# (`builtin_binding_refusal`), which is what turns a wrong answer into a
+# sentence a reader can act on. Nothing in the corpus loses: no `.mojo` file in
+# `formal/` or `std/` spells any of them outside a docstring, and the PROOF
+# layer already refuses all three by name — "model: call to `abs` has no model
+# in this image" — so no generated proof changes either. What a census row over
+# a function that reads `pow` now reports is the truth: the code generator does
+# not lower it, and here is what lowering it would take.
+FOREIGN_ABI_BUILTINS = frozenset({"abs", "pow", "round"})
+
+
+def builtin_binding_refusal(name: str):
+    """Why a bare-name call to `name` must not bind to a C symbol, or None.
+
+    The one question `FOREIGN_ABI_BUILTINS` exists to be asked at, and it is
+    asked at the same point in both emitters as `emitter_lowers` and
+    `builtin_function` — beside the intercepts that DO lower a name, because a
+    name this path compiles itself and a name it must refuse are the same
+    decision read from two sides, and reading them in two places is how
+    `FRAME_VARIADIC_BUILTIN_CALLS` came to disagree with the emitters about
+    `debug_assert`.
+    """
+    if name not in FOREIGN_ABI_BUILTINS:
+        return None
+    table = {
+        "abs": "`int abs(int)` — a 32-BIT argument, so it sees the low half of "
+               "the 64-bit word this path passes and answers a different "
+               "number: `abs(n)` with n = 2**40+5 returned 5 where CPython "
+               "returns 1099511627781, on both architectures. A compare "
+               "against zero and a select of the operand or its negation is "
+               "the whole of what CPython's `abs` is, and both emitters "
+               "already have the select",
+        "pow": "`double pow(double, double)` — two doubles in and one double "
+               "out, and this path's ABI reads an integer result out of the "
+               "return register, so `pow(n, 2)` with n = 10 answered 0 where "
+               "CPython answers 100 (both architectures). CPython's `pow` on "
+               "two integers is INTEGER exponentiation, which is a loop",
+        "round": "`double round(double)` — a double in and a double out, read "
+                 "here as an integer, so `round(n)` with n = 7 answered 7 on "
+                 "arm64 and 0 on x86-64 where CPython answers 7: the two "
+                 "architectures did not even agree with each other. On an "
+                 "integer operand CPython's `round` is the identity",
+    }
+    return (
+        f"{name}(...) is refused on this path rather than bound to the C "
+        f"library's function of that name: {table[name]}. Write the operation "
+        f"out, or reach a library that provides it — that is the same advice "
+        f"the bind audit gives for a name nothing provides, and the reason it "
+        f"is the same advice is that the outcome is the same class of thing: "
+        f"an answer about a program this path did not compile."
+    )
 
 
 # ── `debug_assert` ──────────────────────────────────────────────────────────
@@ -19659,6 +19898,92 @@ def unrepresentable_type_ctor_refusal(callee_name: str) -> str:
         f"constructs. (Emitting a call to a symbol named {callee_name!r} that "
         f"nothing defines is not the alternative — that built and then failed "
         f"to load.)")
+
+
+def string_conversion_refusal(callee_name: str, operand, operand_kind) -> str:
+    """Why `String(x)` / `str(x)` is refused when `x` is KNOWN not to be text.
+
+    `IDENTITY_TYPE_CTORS` above makes `str(x)` the IDENTITY on the operand,
+    which is right for exactly one operand: a value that already IS a `char *`.
+    That is the whole of the property the comment there states ("a string
+    already IS a `char *`, so constructing one is a no-op"), and an identity is
+    a claim about the OPERAND's kind rather than about the callee's name — so
+    the identity was applied to every operand, including an integer, and the
+    integer came out of the conversion still an integer while every later step
+    believed it was a pointer.
+
+    **The consequence is a segfault, not a wrong number**, which is why this is
+    a refusal and not a conversion. Measured on both architectures, 2026-10-04:
+
+        def main(n): return len(str(n))       # n = 10: exit -11 (SIGSEGV)
+
+    `len` of a string is `strlen` over the operand's bytes, and the operand is
+    the integer 10, so libc walked the bytes at address 10. The same source with
+    a string operand is right (`len(str("abcd"))` is 4 on both), and the same
+    source with the conversion deleted is right (`len(bin(n))` is refused at
+    build time, because an unlowered call's result is classified `int` and
+    `len`'s integer row catches it — so the gap was reachable through the ONE
+    name the model resolves as a type constructor).
+
+    `operand_kind` is the emitter's own reader (`_expr_str_kind`, which is
+    flow-sensitive and consults a parameter's annotation, a `comptime` binding
+    and a struct field's declared type), and **only POSITIVE evidence refuses**:
+    a kind that is not None and is not `STR_KIND`. A kind of None is the
+    permissive direction, and it is load-bearing rather than convenient:
+
+        String(unsafe_from_utf8_ptr=p.value())
+
+    is how a raw pointer becomes a `char *` on this path
+    (`nullable_pointer_unwrap`'s docstring has the measured history of that
+    shape), `p.value()` classifies as nothing this build can name, and the
+    identity is CORRECT there — a pointer already is what a string is. Refusing
+    an unclassifiable operand would break that shape to catch a different one,
+    and `int`'s parse asks the same question and reads the same direction
+    permissively for the same reason (`_conversion_operand_is_text`).
+
+    **The residual hole is named rather than papered over**: an operand this
+    build cannot classify that turns out to hold a number at run time —
+    `str(<call>)` whose result kind is unknown — is still the identity, and
+    still faults at its first use. Closing that is not this rule's job: it needs
+    the value model to classify call results, which is
+    `bugs/FORMAL_string_value_model.md`'s subject and not a name in a table.
+    """
+    spelled_operand = member_chain_text(operand)
+    if operand_kind is None or string_operand_is_string(operand_kind):
+        return None
+    if deref_receiver(operand) is not None:
+        # …and a DEREFERENCE is exempt, which is the one exemption and it is a
+        # fact about the kind rather than about the spelling.  `p.value()` is a
+        # LOAD, and the kind table's answer for a load is the "a word is an
+        # integer" DEFAULT rather than a classification of the pointee — the
+        # same reason `_own_shape_of` refuses to take a call result's word as
+        # evidence — while the identity is exactly right for the one shape that
+        # needs it:
+        #
+        #     String(unsafe_from_utf8_ptr=p.value())
+        #
+        # is how a raw C string becomes a `char *` on this path, and
+        # `nullable_pointer_unwrap` carries the measured history of it (a
+        # `char *` built out of the first BYTE of a string, SIGSEGV, before the
+        # unwrap was taught to be the identity).  Refusing a load would break
+        # that shape to catch a different one, and the difference between them is
+        # whether the word is a pointer — which is the pointee's business and not
+        # this table's.
+        return None
+    return (
+        f"{callee_name}({spelled_operand}) is refused on this path: "
+        f"{callee_name} is a string type constructor, and a string on this "
+        f"path IS a `char *` — an interned, NUL-terminated literal — so "
+        f"constructing one is the identity on a value that is already text and "
+        f"nothing at all on one that is not, and this build classifies "
+        f"{spelled_operand} as {operand_kind!r}. It used to pass the value "
+        f"through unchanged, which is a number where every later step expects "
+        f"a pointer: `len(str(n))` with n = 10 built, ran and died of SIGSEGV "
+        f"(exit -11) on both architectures, inside `strlen` walking the bytes "
+        f"at address 10. Give the value a spelling this path has — a literal, "
+        f"or a value another step built as text — and the conversion is a "
+        f"no-op that compiles and is right."
+    )
 
 
 def type_constructor_kind(callee_name: str):

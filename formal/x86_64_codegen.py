@@ -4793,8 +4793,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         iteration all get this answer and the two architectures cannot come to
         disagree about which bases qualify.
         """
-        evidence = M.scalar_container_base_evidence(
-            obj, self._expr_str_kind(obj))
+        kind = self._expr_str_kind(obj)
+        evidence = M.scalar_container_base_evidence(obj, kind)
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
@@ -8635,6 +8635,17 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
+        # A BUILTIN WHOSE C NAMESAKE IS A DIFFERENT FUNCTION — arm64's rule, its
+        # reason, its measurement and its table, from the one shared function
+        # (`model.builtin_binding_refusal`).  It is asked HERE, beside the
+        # intercepts above, because this is the last point where a bare name is
+        # still a name and the next one binds whatever the C library exports
+        # under it: `pow` and `round` are `double`-returning there and this
+        # architecture's SysV varargs area is not even the memory arm64 leaves
+        # a result in, which is why `round(7)` answered 7 on arm64 and 0 here.
+        refusal = M.builtin_binding_refusal(name) if not is_extern_call else None
+        if refusal:
+            raise CodegenError(refusal)
         # A FORMAT STRING THIS CALL CANNOT USE — a `%s` conversion handed something
         # that is not text, or a conversion with no argument behind it.  Asked
         # here for the same reason `print` is intercepted two lines above: the
@@ -9375,6 +9386,16 @@ ctor_field_value=self._ctor_field_value_for(name),
                 f"(got {len(operands)} argument(s))")
         self._emit_expr(operands[0])
         if kind == "identity":
+            # …and a STRING type constructor is the identity only on an operand
+            # that already IS text: arm64's rule, its reason and its measurement,
+            # from the one shared function (`model.string_conversion_refusal`).
+            # `len(str(n))` built, ran and died of SIGSEGV on this architecture
+            # too, `strlen` walking the bytes at address 10.
+            if name in M.STRING_TYPE_CTORS:
+                refusal = M.string_conversion_refusal(
+                    name, operands[0], self._expr_str_kind(operands[0]))
+                if refusal:
+                    raise CodegenError(refusal)
             return
         width, signed = info
         self._emit_extend(Reg.RAX, IntType(width, signed))

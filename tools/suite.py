@@ -2783,17 +2783,13 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      extra=['test_formal_read_before_store.py', 'formal/model.py'],
      desc='read-before-store dominance, against CPython in both directions')
 # `iter_statement_nodes` against the full `iter_nodes`, over the three node
-# shapes that hid a store from a walk without `_STATEMENT_CONTAINERS`: a class
+# shapes that hid a store from a walk without `_STATEMENT_CONSTRUCTS`: a class
 # nested in a method, an `except` arm, a `match` arm. `struct_receiver_stores`
 # reads assignments through the cheap walk, so an assignment it cannot see is a
 # field this struct does not have — two real fields share one slot and every
 # read of the second returns the first's word. No image, no Lean, no sweep: a
-# parse and two walks, 0.08 s.
-test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
-     deps=['preflight'],
-     extra=['test_formal_field_walk.py', 'formal/model.py',
-            'tools/formal_field_walk_differential.py', 'fire_compiler.py'],
-     desc='the statement walk finds the assignments the full walk finds')
+# parse and two walks, 0.08 s. The registration is further down, beside
+# `formal-glob`, which arrived with it.
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
 # to compute the same thing, which is what stops the file from passing for the
 # wrong reason (a build that stopped taking ANY receiver would satisfy "the
@@ -2970,12 +2966,14 @@ test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
-test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
-     deps=['preflight'],
-     extra=['test_formal_glob.py', 'test_formal_dylib.py',
-            'formal/hostmods/glob.mojo', 'formal/build.py', 'formal/model.py',
-            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     desc='glob: CPython\'s own glob, both backends, 6 groups')
+# `glob`, differential against CPython's own. Registered rather than excused
+# twice over: this name was registered by two commits that each registered two
+# test files nobody had registered before (5b2e62c3 and 574d9135), and because
+# `test()` stores into a dict the FIRST call was dead code — a `Spec` computed
+# and thrown away, and a `desc` in the registry that was whichever landed last.
+# `test_suite.py::test_no_test_name_is_registered_twice` is what makes that
+# visible now; this is the row that survives, and it is the later one, so
+# nothing about any run changed when the earlier was deleted.
 test('formal-fcntl', [PY, 'test_formal_fcntl.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_fcntl.py', 'test_formal_dylib.py',
