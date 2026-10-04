@@ -544,6 +544,134 @@ def test_only_the_export_rule_says_what_is_a_template(tmpdir):
           f"{names}")
 
 
+def test_a_source_derived_answer_is_made_once_per_source_and_never_shared(tmpdir):
+    """One derivation per source TEXT, and each caller gets its own container.
+
+    Both `template_names` and `all_instantiation_calls` are functions of a
+    source string and nothing else, and both are asked once per module of an
+    import CLOSURE rather than once per source — measured on `std/simd.mojo`,
+    where the export rule ran 7 042 times over 160 modules and
+    `fire_compiler.py_tokenize` 7 335 times in total, 51% of an 84 s build.
+
+    So this pins three things, and the first is a COUNT rather than a timing
+    (a build that got slow again would be noticed by nobody, and one that got
+    fast by answering a different question would pass every refusal test in the
+    tree):
+
+      * the derivation behind each runs ONCE per distinct source — so a future
+        caller that reintroduces a per-module ask fails here;
+      * interleaving two sources keeps the two answers apart, which is what a
+        key that is not the source would get wrong;
+      * the value handed back is a FRESH container every call, so a caller that
+        mutates what it got cannot reach into the next caller's answer.
+    """
+    from formal import monomorph as MM
+    import reflect
+
+    lib = ("struct Pair[T]:\n"
+           "    var first: T\n"
+           "\n"
+           "def widen[T](v: T) -> T:\n"
+           "    return v\n")
+    other = ("struct Box[T]:\n"
+             "    var value: T\n")
+
+    # 1 + the count the caller itself causes, per distinct source.
+    seen = {"n": 0}
+    real_exclusions = reflect.export_exclusions
+
+    def counted(src, parsed=None):
+        seen["n"] += 1
+        return real_exclusions(src, parsed)
+
+    reflect.export_exclusions = counted
+    try:
+        names = [MM.template_names(lib) for _ in range(4)]
+        other_names = [MM.template_names(other) for _ in range(3)]
+        again = MM.template_names(lib)
+    finally:
+        reflect.export_exclusions = real_exclusions
+    check(seen["n"] == 2,
+          f"the export rule ran {seen['n']} times for two sources asked seven "
+          f"times between them; it is a whole-module tokenize+parse per call "
+          f"and it is what made `std/simd.mojo` cost 84 s")
+    check(all(n == names[0] for n in names) and again == names[0],
+          f"the same source gave different answers across calls: "
+          f"{names + [again]}")
+    check(all(n == other_names[0] for n in other_names),
+          f"the second source's own answers disagree: {other_names}")
+    check(set(names[0]) == {"Pair", "widen"},
+          f"the cached answer is not the export rule's: {names[0]}")
+    check(set(other_names[0]) == {"Box"},
+          f"a cached answer was served for the WRONG source, which is the "
+          f"failure a key that is not the source produces: {other_names[0]}")
+
+    # The container is the caller's, not the cache's.
+    names[0].append("Injected")
+    check(MM.template_names(lib) == ["Pair", "widen"],
+          f"a caller mutating the list it got back reached into the cached "
+          f"answer: {MM.template_names(lib)}")
+
+    parsed = {"n": 0}
+    real_statements = MM._consumer_statements
+
+    def counted_statements(src):
+        parsed["n"] += 1
+        return real_statements(src)
+
+    prog = ("def main():\n"
+            "    var a = Pair[Int]()\n"
+            "    var b = Pair[Float64]()\n")
+    other_prog = ("def main():\n"
+                  "    var c = Box[Bool]()\n")
+    MM._consumer_statements = counted_statements
+    try:
+        found = [MM.all_instantiation_calls(prog) for _ in range(5)]
+        other_found = [MM.all_instantiation_calls(other_prog) for _ in range(3)]
+    finally:
+        MM._consumer_statements = real_statements
+    check(parsed["n"] == 2,
+          f"the consumer source was parsed {parsed['n']} times for eight asks "
+          f"over two sources; `formal/imports.py::instantiation_demands` asks "
+          f"once per imported module over one unchanged consumer")
+    check(all(f == found[0] for f in found) and \
+        all(f == other_found[0] for f in other_found),
+          f"the same source gave different demand sets across calls: "
+          f"{found + other_found}")
+    check(found[0] == {"Pair": [("Float64",), ("Int",)]},
+          f"the cached demand set is not the derived one: {found[0]}")
+    check(other_found[0] == {"Box": [("Bool",)]},
+          f"a cached demand set was served for the WRONG consumer: "
+          f"{other_found[0]}")
+    found[0]["Pair"].append(("Injected",))
+    found[0]["Injected"] = [("Bool",)]
+    check(MM.all_instantiation_calls(prog) == {"Pair": [("Float64",), ("Int",)]},
+          f"a caller mutating the demand set it got back reached into the "
+          f"cached one: {MM.all_instantiation_calls(prog)}")
+
+    # 3. BOTH questions, ONE source — which is what
+    # `formal/imports.py::build_module_dylib` asks, since it hands the same
+    # `module_source_text(source_path)` to `template_names` (as
+    # `own_templates`) and to `instantiation_demands` (as `consumer_src`). One
+    # cache keyed on the source alone served one question's answer out of the
+    # other's slot, and the build died with `'tuple' object has no attribute
+    # 'items'` on 4 of the 43 files of the byte-comparison spread.
+    both = ("struct Pair[T]:\n"
+            "    var first: T\n"
+            "\n"
+            "def main():\n"
+            "    var a = Pair[Int]()\n")
+    check(MM.template_names(both) == ["Pair"],
+          f"the template set of a source that also has demands: "
+          f"{MM.template_names(both)}")
+    check(MM.all_instantiation_calls(both) == {"Pair": [("Int",)]},
+          f"the demand set of a source whose template set was just read: "
+          f"{MM.all_instantiation_calls(both)}")
+    check(MM.template_names(both) == ["Pair"],
+          f"and the template set again, after the demand set read its slot: "
+          f"{MM.template_names(both)}")
+
+
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -779,6 +907,8 @@ TESTS = [
      test_a_non_concrete_type_argument_is_still_refused),
     ("only the export rule says what is a template",
      test_only_the_export_rule_says_what_is_a_template),
+    ("a source-derived answer is made once per source and never shared",
+     test_a_source_derived_answer_is_made_once_per_source_and_never_shared),
     ("an instantiation substitutes the parameter and keeps the Self spelling",
      test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling),
     ("a type argument that is computed is not a demand",
