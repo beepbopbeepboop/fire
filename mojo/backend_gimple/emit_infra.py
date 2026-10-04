@@ -2274,6 +2274,18 @@ _KW_DICT_FNS = frozenset([
     'mojo_dict_contains', 'mojo_dict_pop_int', 'mojo_dict_pop_str',
     'mojo_dict_pop_double', 'mojo_dict_setdefault_int',
     'mojo_dict_setdefault_str',
+    # The bool / None / struct setters. Absent from this set they were not
+    # refused — `_apply_kw_keys` fell through to the "build the decimal string
+    # now" arm, which stores the entry in the plain char* key DOMAIN while the
+    # matching `_kw` READ looks it up in the content-keyed one. So
+    # `d[("a",)] = True; print(d[("a",)])` stored under the tuple's address as
+    # text and read the content key: two entries for one assignment, and the
+    # read saw neither. Every setter `emit_dict_int_value_store` can emit has
+    # to be here; a list and a membership test are how the next one gets
+    # noticed, and `test_runtime_header_scan.py` walks the header against this
+    # set's spelling.
+    'mojo_dict_set_bool', 'mojo_dict_set_none', 'mojo_dict_set_struct',
+    'mojo_dict_set_other_struct',
 ])
 
 

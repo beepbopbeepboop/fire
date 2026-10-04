@@ -10678,6 +10678,72 @@ void mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v)
     _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 2);
 }
 
+/* The remaining three VALUE KINDS' `_kw` twins, same three-arm shape as the
+ * three above and for the same reason: they were MISSING, and the codegen's
+ * `_KW_DICT_FNS` membership test answers per FUNCTION NAME, so a setter with
+ * no twin was not refused — it fell through to the "build the decimal string
+ * now" arm, which puts the entry in the plain char* key DOMAIN while the
+ * matching `_kw` READ looks it up in the content-keyed one. So
+ *
+ *     d = {}
+ *     d[("a",)] = True
+ *     print(d[("a",)])        ->  0, want True
+ *
+ * stored under the tuple's own address as a decimal string and read the
+ * content key: two entries for one source-level assignment whenever the value
+ * kind happened to be bool, None or a struct, and the read side saw neither.
+ * `_kw_kind`'s own comment names this exact failure mode ("the bug was a
+ * MISSING arm at every site, so adding the arm at one and not the others is
+ * precisely the failure mode this shape makes visible") — it was missing here
+ * too, on the setter side, for the same reason. */
+void mojo_dict_set_bool_kw(MojoDict *d, int64_t kw, int64_t v)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_bool(d, (char *)(intptr_t)kw, v); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_bool(d, ck, v);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    _dict_set_ik(d, kw, v, 3);
+}
+
+void mojo_dict_set_none_kw(MojoDict *d, int64_t kw)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_none(d, (char *)(intptr_t)kw); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_none(d, ck);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    _dict_set_ik(d, kw, 0, 4);
+}
+
+void mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_struct(d, (char *)(intptr_t)kw, v); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_struct(d, ck, v);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 5);
+}
+
+void mojo_dict_set_other_struct_kw(MojoDict *d, int64_t kw, void *v)
+{
+    char *ck; int k = _kw_kind(kw, &ck);
+    if (k == _KW_STR) { mojo_dict_set_other_struct(d, (char *)(intptr_t)kw, v); return; }
+    if (k == _KW_CONT) {
+        mojo_dict_set_other_struct(d, ck, v);
+        mojo_dict_key_free(ck);
+        return;
+    }
+    _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 6);
+}
+
 int mojo_dict_contains_kw(MojoDict *d, int64_t kw)
 {
     char *ck; int k = _kw_kind(kw, &ck);

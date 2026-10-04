@@ -401,7 +401,27 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 565),
+    # 565 -> 575 (2026-10-04, `work/bugs6-1`). FIVE names from this branch,
+    # and SIX that were already unaccounted for before it started — this
+    # ledger's last entry was written against a tree that measured 571, and
+    # the commits that took it there (`88f0e9dd`'s `mojo_open`/`mojo_close`
+    # and the `mojo_str_*_from` window helpers of `a35765a0`) added header
+    # declarations without updating this count. The total is written as
+    # MEASURED rather than as this branch's own arithmetic, because a count
+    # that reads as a formula when it is an observation is the failure this
+    # file exists to prevent. This branch's five:
+    #   +1  `mojo_dict_slot_repr`, the ONE implementation of "what a dict
+    #       slot's value looks like" from the (word, kind) pair the store
+    #       recorded. The codegen's emitted `_mojo_repr_dict` had its own
+    #       six-arm chain and `mojo_dict_items`' pairs had NO reader at all,
+    #       so `.items()` of a zero printed `None` and of a float SIGSEGV'd.
+    #   +4  `mojo_dict_set_bool_kw` / `_none_kw` / `_struct_kw` /
+    #       `_other_struct_kw`. `_KW_DICT_FNS` tests the setter's NAME, so a
+    #       setter with no `_kw` twin was not refused — it fell through to the
+    #       plain-char*-key arm and wrote the entry in a different key DOMAIN
+    #       from the `_kw` read that looks it up. `d[("a",)] = True` was one
+    #       source-level assignment and two dict entries.
+    for header, want in (('fire_runtime.h', 575),
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr

@@ -3978,6 +3978,52 @@ main()
 """, "one none none\ntuple1 ints none one\nagain 3\nlit2 1\n1 none\n"
        "1 1\n1 1\n1 1\n")
 
+    # The VALUE side of a container-keyed store, and specifically the value
+    # KINDS whose setter had no `_kw` twin. `_KW_DICT_FNS` tests the setter's
+    # NAME, so `mojo_dict_set_bool` / `_none` / `_struct` /
+    # `_other_struct` were not "unsupported": they fell through to the
+    # "materialise the key as a decimal string now" arm, which writes the
+    # entry in the plain char* key DOMAIN while the matching `_kw` READ looks
+    # it up in the content-keyed one. So a bool (or None, or struct) under a
+    # container key produced TWO entries for one source-level assignment, and
+    # the read saw neither:
+    #
+    #     d = {}
+    #     d[("a",)] = True
+    #     print(d[("a",)], len(d))       ->  0 1, want True 1
+    #
+    # `len(d) == 1` is in the assertion because it is what makes the defect
+    # visible rather than invisible: the store "worked", so a check that only
+    # looked at the value's shape saw a dict with an entry in it.
+    #
+    # The 3.5 under a container key is the DOUBLE setter, which DID have a
+    # twin, and it is here to pin that the fix did not disturb the arm that was
+    # already right. `d[("a",)] = "R"` (a str value) is here for the same
+    # reason. What `d[("a",)] = True` still prints — `1` rather than `True` —
+    # is the READ side's value kind, which is the remaining half of
+    # CODEGEN_dict_slot_read_loses_its_value_kind and is not what this row is
+    # about; the row asserts the entry is REACHABLE from every spelling, which
+    # is what the missing twin cost. `("a",) in n` is the `None` row's
+    # assertion for the same reason: `in` asks the key domain and nothing else,
+    # so it is the one spelling of the read that cannot be answered by the
+    # value's own accessor (a kind-4 slot's word IS 0).
+    test_gimple_stdout("gimple_container_keyed_store_reaches_its_own_read", """\
+def main():
+    b = {}
+    b[("a",)] = True
+    print(b[("a",)], len(b))
+    n = {}
+    n[("a",)] = None
+    print(("a",) in n, len(n))
+    f = {}
+    f[(1, 2)] = 3.5
+    print(f[(1, 2)], len(f))
+    s = {}
+    s[(1, 2)] = "R"
+    print(s[(1, 2)], len(s))
+main()
+""", "1 1\nTrue 1\n3.5 1\nR 1\n")
+
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live
     # set on `mojoc --dump-full fire.py` went (a cache keyed by

@@ -1244,6 +1244,14 @@ char       *mojo_dict_get_str_kw(MojoDict *d, int64_t kw);
 void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
 void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
 void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
+/* The bool / None / struct value kinds' twins. Their ABSENCE was not a
+ * refusal: `_KW_DICT_FNS` in the codegen tests the function NAME, so a setter
+ * with no twin fell through to the plain-char*-key arm and wrote the entry in
+ * a different key DOMAIN from the `_kw` read that looks it up. */
+void        mojo_dict_set_bool_kw(MojoDict *d, int64_t kw, int64_t v);
+void        mojo_dict_set_none_kw(MojoDict *d, int64_t kw);
+void        mojo_dict_set_struct_kw(MojoDict *d, int64_t kw, void *v);
+void        mojo_dict_set_other_struct_kw(MojoDict *d, int64_t kw, void *v);
 int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
 int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
 char       *mojo_dict_pop_str_kw(MojoDict *d, int64_t kw, char *dflt);
