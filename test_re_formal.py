@@ -353,35 +353,54 @@ def mojo_str(s):
 
     Two things are deliberately NOT doubled, because they are not escapes:
 
-    * a REAL newline or tab. Those arrive as real characters, which a literal
-      cannot carry, so they keep the `mk2`/`mk3` spelling below — two literals
-      and a `memset`, which is what `os/__init__.mojo` calls linesep.
     * an UNRECOGNIZED escape, of which the corpus has many (`\d`, `\w`, `\s`,
       `\(`, `\[`, `\*`). Doubling those is still right, and is what
       `decode_c_escapes`'s "an unknown escape keeps its backslash" rule needs:
       the doubled `\\d` decodes to `\d`, which is what the pattern means.
+    * a REAL newline or tab, which is the other way round: those are written as
+      the escape that DECODES to them, and that is what removed the last limit
+      this function had. It used to split the string on each real newline or tab
+      and compose `mk2`/`mk3` out of the pieces — one separator, two — so a
+      pattern with three tabs (`reflect.py:677`'s C-`typedef` finder, whose
+      `[ \t]` appears four times and which is in the corpus because
+      `corpus_patterns` walks this repository's own `re.compile` calls) raised
+      `AssertionError` out of the encoder and took two gate checks with it. The
+      fix is not a wider `mkN`; it is that `\n` and `\t` are RECOGNISED
+      escapes, in `decode_c_escapes`'s set and in the C compiler the compiled
+      path hands the body to, so `"a\\nb"` decodes to a, newline, b on every
+      path this tree has. Measured on the built-and-run image by
+      `test_mojo_str_round_trips_through_the_decoder`, which round-trips every
+      string in the corpus through the one decoder, and by
+      `test_a_literal_carrying_a_real_newline_and_tab_reaches_the_engine`,
+      which builds one and reads the bytes back off the image.
+
+    So there is ONE spelling per character now, and no composition at all: the
+    literal the function returns is the only thing a reader has to understand.
     """
-    for ch, code in (("\n", 10), ("\t", 9)):
-        if ch in s:
-            parts = s.split(ch)
-            assert len(parts) <= 3, s
-            seps = [str(code)] * (len(parts) - 1)
-            if len(parts) == 2:
-                return "mk2(%s, %s, %s)" % (mojo_str(parts[0]), seps[0],
-                                            mojo_str(parts[1]))
-            return "mk3(%s, %s, %s, %s, %s)" % (mojo_str(parts[0]), seps[0],
-                                                mojo_str(parts[1]), seps[1],
-                                                mojo_str(parts[2]))
     assert '"' not in s, s
-    return '"%s"' % s.replace("\\", "\\\\")
+    out = []
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+    return '"%s"' % "".join(out)
 
 
 # A `mojo_str` expression, read back the way the runtime builds it: the quoted
-# bodies and the byte values between them, in order.  A plain literal has one
-# body; `mk2`/`mk3` have two or three plus the separators a `memset` writes.
-# The `mk[23]\(` alternative is load-bearing: without it the `2` in `mk2` reads
-# as a separator byte and every two-part string comes back with a stray \x02 in
-# front of it.
+# bodies and the byte values between them, in order.  `mojo_str` returns ONE
+# literal now — a real newline and a real tab are written as the escapes that
+# decode to them — so the composed forms this used to parse are gone from the
+# producer. The `mk[23]\(` and `(\d+)` alternatives stay anyway, and the reason
+# is which way the mistake is visible: a reader that can read a composed
+# spelling DECODES it, while one that cannot reports a byte count nobody
+# produced and sends the next reader looking for a string that was never
+# written. (It also used to be load-bearing for the opposite reason — without
+# it the `2` in `mk2` read as a separator byte.)
 _MOJO_PIECE = re.compile(r'mk[23]\(|"((?:[^"\\]|\\.)*)"|(\d+)')
 
 
@@ -390,9 +409,9 @@ def mojo_literal_bytes(expr):
 
     The literals go through `fire_compiler.decode_c_escapes` — THE decoder
     every engine calls, and the one this file's encoder has to be the inverse
-    of — and a bare number between two literals is the separator `mk2`/`mk3`
-    write with `memset`, so `mk2("a", 10, "b")` reconstructs to `a` + newline
-    + `b`, which is the same three bytes the image gets.
+    of — so a body carrying `\\n` gives back the newline the Python string held,
+    which is the whole claim. A bare number between two literals is still read
+    as the separator the composed spelling wrote with `memset`.
     """
     import fire_compiler as _FC
     out = bytearray()
@@ -407,26 +426,13 @@ def mojo_literal_bytes(expr):
     return bytes(out)
 
 
+# `mk2`/`mk3` used to live here, to build a string that carried a real newline
+# or tab out of two or three literals and a `memset`. Nothing generates that
+# any more — `mojo_str` writes `\\n` and `\\t`, which every engine decodes — and a
+# helper nothing calls in a generated program is a second spelling of "how a
+# string is built" for the next reader to reconcile.
 PRELUDE = '''MARK = 0 - 99
-from os._syscalls import str_len, str_alloc, str_put
-
-
-def mk2(a: String, mid: Int, b: String) -> Pointer[UInt8]:
-    d = str_alloc(str_len(a) + 1 + str_len(b))
-    u = str_put(d, 0, a, str_len(a))
-    memset(d + u, mid, 1)
-    u = str_put(d, u + 1, b, str_len(b))
-    return d
-
-
-def mk3(a: String, m1: Int, b: String, m2: Int, c: String) -> Pointer[UInt8]:
-    d = str_alloc(str_len(a) + 1 + str_len(b) + 1 + str_len(c))
-    u = str_put(d, 0, a, str_len(a))
-    memset(d + u, m1, 1)
-    u = str_put(d, u + 1, b, str_len(b))
-    memset(d + u, m2, 1)
-    u = str_put(d, u + 1, c, str_len(c))
-    return d
+from os._syscalls import str_len, str_alloc
 
 
 def bat(p, i: Int) -> Int:
@@ -1100,21 +1106,23 @@ def test_the_corpus_reaches_the_module_as_the_bytes_python_holds(tmpdir=None):
     import fire_compiler as F
 
     def round_trips(s):
-        """True when what `mojo_str` writes DECODES to exactly `s`."""
+        """True when what `mojo_str` writes DECODES to exactly `s`.
+
+        ONE spelling, and the shape is part of what is checked rather than an
+        implementation detail: `mojo_str` returns a single literal for every
+        string, including one with real newlines and tabs in it, because those
+        are written as the escapes that decode to them. The assertion below is
+        the contract, and it is the assertion that was missing when the encoder
+        asserted `len(parts) <= 3` — a limit nobody could see from the outside,
+        which is how a corpus pattern with four `[ \\t]` in it took two gate
+        checks down inside a pure-Python function.
+        """
         lit = mojo_str(s)
-        if lit.startswith('"'):
-            return F.decode_c_escapes(lit[1:-1]) == s
-        # `mk2`/`mk3`: two or three literals with a `memset` of the
-        # separator's byte code between them, so the pieces are checked
-        # individually and the separator read back out of its own argument.
-        pieces = re.findall(r'"([^"]*)"', lit)
-        seps = [int(x) for x in re.findall(r", (\d+),", lit)]
-        out = []
-        for i, piece in enumerate(pieces):
-            out.append(F.decode_c_escapes(piece))
-            if i < len(seps):
-                out.append(chr(seps[i]))
-        return "".join(out) == s
+        if not lit.startswith('"') or not lit.endswith('"'):
+            check(False, "mojo_str returns one literal",
+                  "%r for %r" % (lit, s))
+            return False
+        return F.decode_c_escapes(lit[1:-1]) == s
 
     strings = set()
     for pat, subj, _flags, _note in CASES:
@@ -1133,6 +1141,82 @@ def test_the_corpus_reaches_the_module_as_the_bytes_python_holds(tmpdir=None):
                  [F.decode_c_escapes(p) for p in
                   (re.findall(r'"([^"]*)"', mojo_str(s)) or
                    [mojo_str(s)[1:-1]])]))
+
+
+def test_a_literal_carrying_real_newlines_and_tabs_reaches_the_engine(tmpdir):
+    """`mojo_str`'s spelling for a string with separators in it, on a real image.
+
+    The round trip above is decidable in microseconds because it runs the one
+    decoder in Python, and that is the right place for it — but it cannot see
+    whether the ENGINE agrees that a body carrying `\\n` is a newline, and that
+    is the half this spelling now depends on. `mojo_str` writes `\\n` and `\\t`
+    rather than composing `mk2`/`mk3`, so the claim is: `decode_c_escapes` is
+    what every engine calls, gcc decodes the same body the compiled path hands
+    it, and therefore the bytes the image holds are the bytes the Python string
+    held. Three tabs and two newlines is the shape that used to raise
+    `AssertionError` in the encoder.
+
+    So: one program, one string with three real tabs and one with two real
+    newlines, and three measurements per string — the length, every byte, and
+    a `re.search` whose span is compared with CPython's. The search is the part
+    that would catch a silent wrong answer: a tab that arrived as the two
+    characters `\\` and `t` is not a tab to the engine, so the pattern would
+    compile and match nothing, which is the shape of bug this file exists to
+    be right about.
+    """
+    import re as _re
+    cases = [
+        ("pat", "a\tb\tc\td"),
+        ("subj", "zz a\tb\tc\td zz"),
+        ("nl", "one\ntwo\nthree"),
+    ]
+    lines = [PRELUDE, "",
+             "def show(t: String) -> Int:",
+             "    printf(\"len=%d\", str_len(t))",
+             "    var i = 0",
+             "    while i < str_len(t):",
+             "        printf(\" %d\", bat(t, i))",
+             "        i = i + 1",
+             "    printf(\"\\n\")",
+             "    return 0",
+             "",
+             "def main(n: Int) -> Int:"]
+    for label, text in cases:
+        lines.append("    printf(\"%s\")" % label)
+        lines.append("    show(%s)" % mojo_str(text))
+    pat, subj = cases[0][1], cases[1][1]
+    lines += [
+        "    st = [0, 0, 0]",
+        "    p = %s" % mojo_str(pat),
+        "    s = %s" % mojo_str(subj),
+        "    r = re.search(st, 2, p, s, 0)",
+        "    emit(0, r)",
+        # `out` is `2 * (ngroups + 1)` values, so for a 0-group pattern it is
+        # group 0's START then its END (`re.mojo`'s `search`, and
+        # `case_function`'s own `st[0]`/`st[1]` reads).
+        "    emit(0, st[0])",
+        "    emit(0, st[1])",
+        "    printf(\"\\n\")",
+        "    return 0"]
+    try:
+        out = build_and_run(tmpdir, "separators", "\n".join(lines))
+    except AssertionError as e:
+        check(False, "a program whose literals carry real tabs and newlines "
+                     "builds and runs", str(e))
+        return
+    want = []
+    for label, text in cases:
+        want.append("%slen=%d %s" % (label, len(text),
+                                     " ".join(str(b) for b in
+                                              text.encode("utf-8"))))
+    m = _re.search(pat, subj)
+    want.append("%d %d %d" % (1, m.start(), m.end()))
+    # `emit` writes `"%d "`, so each line but the last ends in a space; the
+    # ENDS are what is compared, the interior spacing is the measurement.
+    got = [ln.rstrip() for ln in out]
+    check(got == want,
+          "the image holds the bytes Python holds, and its search agrees",
+          "got %r\nwant %r" % (got, want))
 
 
 def test_no_signature_is_wider_than_the_smaller_abi(tmpdir=None):
@@ -1337,6 +1421,7 @@ def main():
     tests = [
         test_module_resolves_and_host_modelled_is_gone,
         test_the_corpus_reaches_the_module_as_the_bytes_python_holds,
+        test_a_literal_carrying_real_newlines_and_tabs_reaches_the_engine,
         test_no_signature_is_wider_than_the_smaller_abi,
         test_mojo_str_round_trips_through_the_decoder,
         test_the_module_builds_as_a_dylib_on_both_backends,
