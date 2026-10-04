@@ -26,8 +26,8 @@ of them is instead is in §2's table, and there are only two features in it.
 `../new-modular/Mojo/stdlib/std/{os,io,pathlib,hashlib,base64,ffi,python,_gpu}`
 is **46 `.mojo` files** — `os` 11, `_gpu` 10, `python` 7, `io` 5, `hashlib` 5,
 `base64` 3, `ffi` 3, `pathlib` 2 — swept whole, `-j 2 -t 120`, both
-architectures, on this branch's base `3c3516db` (the three commits in §4 landed
-after the sweep and change no file it builds):
+architectures, on this branch's base `3c3516db` (this branch's four commits all
+land after the sweep, and §4's change no file a build reads):
 
 ```sh
 export PATH=/opt/homebrew/bin:$PATH
@@ -145,13 +145,14 @@ python3 tools/memslot.py --gb 12 --label probe -- \
   python3 -u tools/formal_chain_probe.py 6 arm64 $F
 ```
 
-**Link 2's owner is `FORMAL_a_comptime_explicit_parameter_list_is_a_specialization`**-class
-work, not a claim this scope can name: `std/sys/arg.mojo` is outside every
-package here and the refusal is about an explicit-parameter list on a generic,
-which is the shape `bugs/FORMAL_generic_monomorph_scope.md` §"what is not
-covered" already holds. **Link 4 is the tool's documented limit** — neutering a
-module removes the names its users call — and it is now detected and reported as
-such rather than as 42 files refusing a construct (§4).
+**Link 2 has NO bug doc and no claim: `std/sys/arg.mojo` is outside every package
+here, and the refusal — `Span[StaticString, ImmStaticOrigin] is a compile-time
+explicit-parameter list on a generic, not a subscript` — is the shape
+`bugs/FORMAL_generic_monomorph_scope.md` §"what is not covered" already holds. It
+is filed nowhere of its own, and 3 files of this scope sit behind it, so it is
+worth a doc rather than a mention. **Link 4 is the tool's documented limit** —
+neutering a module removes the names its users call — and it is now detected and
+reported as such rather than as 42 files refusing a construct (§4).
 
 **Read §2 before planning anything in this scope, and §2's owner column before
 working it.** Neither feature is in this scope's packages, and closing link 1
@@ -233,11 +234,20 @@ closes would be writing against a boundary that has not moved.
    Removing an import line whose only use was the only statement in an indented
    block is the limit; a stub that also removed the block would extend it. Not
    worth building until someone needs a fifth link.
+4. **`formal.imports.resolve_module_path` is wrong for one importer in this
+   scope**, and it is filed: `FORMAL_a_dotted_import_resolves_to_a_nearer_leaf.md`
+   — `std/_gpu/_utils.mojo` importing `std.format._utils` resolves to ITSELF,
+   because `_candidates` puts a root's leaf fallback in the same list as its
+   dotted path and the root loop is nearest-first. Measured inside a real build,
+   not only by direct call. It surfaced here because the probe now resolves the
+   module a refusal names with that same function, and it put three files of one
+   round under a group keyed on the IMPORTER.
 
 ## 7. Reproducing
 
 Every number above is one `fire.py build --formal --no-prove` per file behind
 `tools/memslot.py`, no Lean anywhere (`--no-prove`), and the two arms agree file
-for file. The three commits on `work/formal20-std-os-io-2` carry the probe fix
-and its 12 tests; the two sweep logs this section quotes are `.tmp/sweep_arm64.txt`
-and `.tmp/sweep_x86_64.txt` in that worktree.
+for file. The four commits on `work/formal20-std-os-io-2` are the three probe
+fixes of §4 and this document; the two sweep logs §1 quotes are
+`.tmp/sweep_arm64.txt` and `.tmp/sweep_x86_64.txt` in that worktree, and the
+chain walk's is `.tmp/probe3_arm64.txt`.
