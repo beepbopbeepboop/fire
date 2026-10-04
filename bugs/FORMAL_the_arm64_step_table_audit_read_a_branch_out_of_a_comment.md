@@ -3,8 +3,11 @@
 
 **Area:** FORMAL / proof generation — `formal/arm64_proof_gen.py`'s
 `audit_step_table`, and the census it was hiding.
-**Status: the AUDIT is fixed (same commit); the twelve examples it was hiding are
-NOT, and they are not fixed here.** Filed 2026-10-03 on `work/formal16-2`.
+**Status: the AUDIT is fixed (same commit). Of the twelve examples it was
+hiding, ELEVEN now generate and one (`sum_range`) still refuses — and that
+refusal belongs to another worker's claim. The remaining measurement is whether
+Lean accepts the eleven; see §4.1.** Filed 2026-10-03 on `work/formal16-2`,
+refreshed 2026-10-04.
 
 ## 1. What was wrong, and why it is a hole rather than a red test
 
@@ -84,20 +87,66 @@ check is satisfied and the count is the table's.
 
 ## 4. The exact next step
 
-1. Re-measure the four signatures one at a time with
-   `python3 test_formal.py <stem>` (each is 8.6 s – 297.8 s and 1.5–3.0 GB,
-   `FORMAL.md` §12), and put each one in `EXPECTED_FAILURES` with the reason its
-   own failure names — or fix it.
-2. The two generator `ValueError`s (`sum_range`, `wdiff`) are the cheapest of the
-   four: they are refusals, not failed proofs, so each is a missing `loop_test`
-   or `cond_branches` entry rather than a Lean problem, and
-   `bugs/FORMAL_arm64_known_proof_gaps.md` already names `wdiff` as "the same gap
-   as `countdown`".
-3. Family 3 (`both`, `either` failing on `ProofLib` itself) is the one to look at
-   FIRST and it is not about generated proofs at all: the message names the
-   library, so either a `.olean` is stale against `lib/*.lean` or the library
-   stopped typechecking, and both are one `formal/lean.py::ensure_library` away
-   from being distinguished.
+**Step 1 is DONE and it is pinned; step 2 is done and its owner is named; step
+3's premise is measured and the measurement says the library is fine. What is
+left is §4.1, and it is a sequence of Lean runs rather than a diagnosis.**
+
+Measured 2026-10-04, `compile_formal(prove=True, check=False)` on arm64 for every
+one of the twelve, plus one Lean run for `wdiff`:
+
+| the twelve | 2026-10-03 | 2026-10-04 |
+|---|---|---|
+| `count` `fact` `pow2` `sqsum` `sum` | Lean type mismatch on an ADRP page computation | **GENERATE** |
+| `sgt8` `sle8` `ug8` | a 30-field `Arm64State` literal mismatch | **GENERATE** |
+| `both` `either` | `build: proof check failed: ProofLib` — the LIBRARY | **GENERATE** |
+| `sum_range` | a generator `ValueError` out of `emit_block` | **still refuses**: `ValueError: unsupported cbz taken continuation to 0x100000330` |
+| `wdiff` | a generator `ValueError` out of `emit_block` | **PASSES** — `test_formal.py -j 1 wdiff` gives `PASS=1 KNOWN-GAP=0 FAIL=0`, `proof census: 0 admitted sorry` |
+
+**Eleven of the twelve reach a proof file and one does not.** `sum_range`'s
+refusal belongs to `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure`,
+another worker's claim, which names the cause exactly (the loop's back edge is a
+CONDITIONAL branch, so `emit_block`'s `tgt_bi is None or tgt_bi in path` fires)
+and cites a `wdiff`-loop-contract doc as "one arm away" — that doc has since been
+fixed and DELETED, and `wdiff` passing today is the measurement of it. So
+§4's original step 2 is closed by someone else and nothing here touches either
+file.
+
+Family 3's premise — "either a `.olean` is stale against `lib/*.lean` or the
+library stopped typechecking" — is measured FALSE by the same table: both stems
+generate, which they could not do against a library that does not typecheck, and
+`wdiff`'s Lean run typechecked a proof that imports it.
+
+**The census is pinned rather than recorded**, in
+`test_formal_call_proof_gen.py::TestTheRecursionFamiliesStillGenerate`: each of
+the eleven still generates AND writes a file carrying the arm64 end-to-end
+theorem `<fn>_compiles_correctly_universal`; `sum_range` still refuses and its
+message still carries the PREMISE (`cbz taken continuation`) rather than the
+layout's address; and every pinned refusal has a bug doc naming it, because a row
+that pins a refusal without naming its owner keeps a stale claim alive after the
+fix lands. That file's rule is GENERATION ONLY, no Lean, so the pin costs 0.5 s
+and runs every time.
+
+### 4.1 What is left, and it is a sequence of Lean runs
+
+**Whether Lean ACCEPTS each of the eleven.** Generation is not proof: an emitted
+file can still be rejected at typecheck, and families 1-3 failed exactly there.
+One stem at a time:
+
+```console
+$ python3 tools/memslot.py --gb 8 --label tf -- python3 test_formal.py -j 1 <stem>
+```
+
+`test_formal.py` with NO stem at `-j 2` breaches an 8 GB `memslot` reservation
+(peak observed 8.0 GB, killed); a single stem peaked at 3.2 GB. So this is one
+proof at a time by necessity as well as by the task's own rule, and it is the
+integrator's to run.
+
+A stem that FAILS gets an `EXPECTED_FAILURES` entry naming its own failure, as
+§4's original step 1 said. **A stem that PASSES is the better outcome and needs
+no entry** — and it is worth saying out loud that eleven generating is not eleven
+proved, so the honest reading of this table is "the generation half of the corpus
+is in far better shape than 2026-10-03 recorded, and the proof half is
+unmeasured here".
 
 ## Reproducing
 

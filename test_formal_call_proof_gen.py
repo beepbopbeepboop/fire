@@ -1768,6 +1768,112 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         self.assertIn("theorem main_runs_0 :", text)
 
 
+class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
+    """Which corpus examples REACH a proof file, pinned without Lean.
+
+    `bugs/FORMAL_the_arm64_step_table_audit_read_a_branch_out_of_a_comment.md`
+    recorded twelve red examples on 2026-10-03 and measured them one family at a
+    time, which is the right discipline and produced a list that has since gone
+    stale in BOTH directions: `wdiff` was on it and now passes with zero admitted
+    `sorry`, and `sum_range` is the only one of the twelve that still refuses at
+    generation — and its refusal belongs to
+    `bugs/FORMAL_sum_range_generation_refused_and_it_is_not_an_expected_failure`,
+    another worker's claim.
+
+    A census that has gone stale is worth exactly as much as the measurement
+    that refreshed it, and the refresh is cheap: **emission needs no Lean**, so
+    this file (whose rule is generation only, no Lean) can pin it on every run
+    and the doc's list cannot rot again between sessions. What it cannot do is
+    say whether Lean ACCEPTS each of the eleven — an emitted proof can still be
+    rejected at typecheck — and this class says so in its own name rather than
+    letting "generates" read as "is proved". The doc records the eleven's
+    acceptance as unmeasured here and names the command.
+
+    Two things are pinned per stem, because "did not raise" is the weaker claim:
+    a file was written AND it carries the end-to-end theorem. A generator that
+    emitted an empty file would pass the first and fail the second.
+    """
+
+    #: The twelve, grouped as the doc grouped them, so a reader can see which
+    #: family each is in and which of them is still refusing.
+    GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
+                "sgt8", "sle8", "ug8",                          # family 2
+                "both", "either",                               # family 3
+                "wdiff")                                        # family 4
+
+    #: The one that still refuses, and the WORDING pinned rather than the
+    #: address: the address is `sum_range.mojo`'s loop header in today's layout
+    #: and moves with any layout change, while "the CBZ's taken arm has no block
+    #: to go to" is the premise and is what a reader needs.
+    REFUSED = {
+        "sum_range": ("cbz taken continuation",
+                      "the refusal is about something else now — a stale "
+                      "wording pin that would pass while the shape changed"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.examples = os.path.join(HERE, "formal", "examples")
+
+    def _generate(self, stem, arch="arm64"):
+        path = os.path.join(self.examples, stem + ".mojo")
+        self.assertTrue(os.path.isfile(path), f"no example at {path}")
+        tmp = tempfile.mkdtemp(prefix="recfam-")
+        try:
+            r = _compile(path, os.path.join(tmp, stem + ".aout"), arch)
+            with open(r["proof_path"], encoding="utf-8") as f:
+                return f.read(), None
+        except Exception as e:                        # noqa: BLE001
+            return None, f"{type(e).__name__}: {e}"
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_every_one_of_them_still_generates(self):
+        for stem in self.GENERATE:
+            with self.subTest(stem=stem):
+                text, err = self._generate(stem)
+                self.assertIsNotNone(
+                    text, f"{stem} no longer generates: {err} — either the gap "
+                          f"closed (delete it here and say so) or it reopened")
+                # The arm64 generator's end-to-end theorem is
+                # `<fn>_compiles_correctly_universal` — `main_post_*` is the
+                # x86-64 generator's spelling and this class is arm64-only, so
+                # naming the wrong one would have made every row fail for a
+                # reason about a NAME.
+                self.assertIn("_compiles_correctly_universal", text,
+                              f"{stem} generated a file with no end-to-end "
+                              f"theorem in it; that is not a proof of anything")
+
+    def test_the_one_that_refuses_says_why(self):
+        for stem, (needle, why) in sorted(self.REFUSED.items()):
+            with self.subTest(stem=stem):
+                text, err = self._generate(stem)
+                self.assertIsNone(
+                    text, f"{stem} generates now ({err}); delete it from "
+                          f"REFUSED and say what closed it — the doc this row "
+                          f"cites names the owner of the fix")
+                self.assertIn(needle, err or "",
+                              f"{stem} refused, but not with the wording this "
+                              f"row pins: {err} ({why})")
+
+    def test_the_owner_of_the_one_refusal_still_exists(self):
+        """A refusal whose owning doc is gone is a doc to delete, not to keep.
+
+        The rule the whole `bugs/` queue rests on: a doc for a bug that is fixed
+        is deleted. So a row here that pins a refusal must also pin the document
+        that owns the repair, or the row becomes a way to keep a stale claim
+        alive after the fix has landed.
+        """
+        for stem in sorted(self.REFUSED):
+            owners = [n for n in os.listdir(os.path.join(HERE, "bugs"))
+                      if n.startswith(f"FORMAL_{stem}")]
+            self.assertTrue(
+                owners,
+                f"{stem} is pinned as refusing with no bug doc naming it; "
+                f"either the refusal is fixed (delete the row) or the doc that "
+                f"owns the repair is missing, and this row is what found that")
+
+
 class TestAPlaceholderModelClaimsNothing(unittest.TestCase):
     """A model the shared generator cannot write must be CLAIMED as unwritten.
 
