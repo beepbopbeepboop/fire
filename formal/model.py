@@ -13123,9 +13123,11 @@ def builtin_function(name: str):
 #
 # So the table is a MEASUREMENT with one sentence per name, and the sentences
 # say what lowering each one would take, because "the census cannot say which
-# builtin is missing" is the complaint this answers
-# (`bugs/FORMAL_the_proof_census_allow_list_names_builtins_the_path_does_not_
-# lower.md`). Every row was measured on BOTH architectures on 2026-10-04 with
+# builtin is missing" is the complaint this answers: the finding was that of the
+# 33 names `tools/formal_proof_breadth.py` lets a candidate read, the path
+# lowers 11 and refuses 22, and nothing said which was which (fixed in
+# c8d877e9 + af313965; the doc is deleted with its fix). Every row was measured
+# on BOTH architectures on 2026-10-04 with
 # `def main(n): return <call>` and CPython as the arbiter, and the measurement
 # is pinned by `test_formal_value_model.py`'s builtin group — one differential
 # case per name that lowers, one refusal case per name that does not, on both

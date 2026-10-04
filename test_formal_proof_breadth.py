@@ -542,13 +542,14 @@ class TestTheBuiltinAllowListIsAMeasurement(unittest.TestCase):
     """`BUILTIN_NAMES` is a set of NAMES; the backend's answer about each of them
     is a separate fact, and this class is what holds the two together.
 
-    `bugs/FORMAL_the_proof_census_allow_list_names_builtins_the_path_does_not_
-    lower.md` is the finding: of the 33 names the census lets a candidate read,
-    the path lowers 11 and refuses 22, and nothing said which was which — so six
-    items were reported as "the image would bind 1 symbol(s) that nothing
-    provides", which is a fact about SYMBOLS and not an answer to the question a
-    reader of a proof census is asking (is the frontier the proof layer or the
-    code generator, and what would it take to move?).
+    The finding this class exists for: of the 33 names the census lets a
+    candidate read, the path lowers 11 and refuses 22, and nothing said which was
+    which — so six items were reported as "the image would bind 1 symbol(s) that
+    nothing provides", which is a fact about SYMBOLS and not an answer to the
+    question a reader of a proof census is asking (is the frontier the proof
+    layer or the code generator, and what would it take to move?).  Fixed in
+    c8d877e9 (the model's measured table) + af313965 (this census reading it),
+    with the doc deleted alongside.
 
     The fix has two halves and this class is both of them. The census now reads
     the ONE table `formal/model.py` publishes (`NOT_LOWERED_BUILTINS`) and
