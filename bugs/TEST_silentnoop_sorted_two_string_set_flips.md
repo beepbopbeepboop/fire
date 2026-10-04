@@ -6,6 +6,66 @@ the baseline measurement below), and it is not the case's subject: the case is
 about container-kind tracking for a reassigned parameter, and what fails is the
 ORDER of a two-element string set after `sorted`.
 
+## Status (2026-10-04 — NOT reproduced in 16 further harness runs; the doc's own hypothesis is now MEASURED and ELIMINATED, and the missing evidence is now kept automatically)
+
+### What was re-measured, and what it rules out
+
+Sixteen faithful single-case runs of the harness (the case's own
+`_case`/`_compiled_stdout` path, fresh temp dir each time, so a fresh compile
+each time) on this tree: **16/16 correct**. Plus, on the same tree:
+
+| what | result |
+|---|---|
+| `fire.py --dump` of the case's source, 14 runs | the `.ci` is **byte-identical** every time |
+| the same, from three source paths of different length (2, 10, 70 chars) | byte-identical, and `mojo_set_sorted` emitted in all three |
+| `fire.py build` of the same source to two different `-o` paths | the two **binaries are byte-identical** (`cmp`) |
+| what `_mojo_sorted_str_ok`'s window admits, measured on this host | every address class: `strdup` `0x1052e9930`, a `static char *` literal `0x104c9864c`, `malloc(1 MiB)` `0x7ff480000`, `malloc(256 MiB)` `0xc28000000` — all inside `[0x1000, 2^47)` |
+
+**So the hypothesis this doc ranked first cannot be the mechanism.** The chain
+is: `mojo_set_sorted` finds a `tag == 1` slot, so `is_str` is set, so the list
+goes to `mojo_list_sorted_str(out)` with `MOJO_KIND_STR`, whose comparator is
+`_mojo_sorted_str_cmp` → `strcmp` on the set's own `strdup` copies. The
+comparator's "two slots that both fail the plausibility test compare EQUAL" arm
+needs a slot outside `[0x1000, 2^47)`, and **no user-space address this target
+can produce is outside it** — arm64 macOS user space ends at `2^47`, and the four
+classes measured above are four different ways of allocating inside it. For any
+two in-window slots the comparator is `strcmp`, which cannot call `"q"` and
+`"r"` equal. Whatever failed, it was not this.
+
+### What that leaves, and it is now a one-command question
+
+The observed output is exactly slot order for `{"q", "r"}`, so the last
+lexicographic pass did not happen or did not swap — from a *different runtime
+call* than the one above. The single discriminating measurement is
+`grep mojo_set_sorted <the failing build's own .ci>`: `mojo_sorted` (the generic
+int64-payload sort, which orders a list of strings by ADDRESS) instead of
+`mojo_set_sorted` produces this symptom and is decided by codegen's element-type
+evidence for `box` — a `MojoSet *` parameter reached through a set
+comprehension, which is the one shape in the case no other line exercises.
+
+**That measurement used to be impossible**, and that is the other half of what
+landed: every case built in a `TemporaryDirectory` and took its evidence with it
+— both stdouts, the compiler's own output, the generated C and the binary.
+`test_silent_noop_iter.py` now copies all of it into
+`.tmp/silentnoop-failures/<case>/` on ANY failure (source, both stdouts, the
+compiled stderr, the binary, and a `--dump` of the same source) and names the
+directory in the failure line. The next occurrence is self-diagnosing: the `.ci`
+is on disk next to the failure.
+
+Verified here by calling that path directly — it keeps
+`program.{py,ci,ast,tok,pyi}` and `stdout.txt`, and the kept `.ci` contains
+`mojo_set_sorted`. The two cases named above still pass.
+
+### Still open
+
+Which call the failing compile emitted, and why that compile differed from the
+ones measured above — given that the `.ci` is byte-identical per source on this
+tree, the variation is upstream of codegen (a stale cached module dylib or object
+served from `~/.gmojo/cas`, which is shared by every worktree on this box, is
+the obvious candidate and is exactly the question a kept `.ci` plus the CAS key
+answers). Nothing further is asserted here: it has not been reproduced, and the
+instrumentation to catch it now exists.
+
 ## Status (2026-10-02 — reproduced at a low rate on an unmodified tree; mechanism NOT established)
 
 ## The symptom

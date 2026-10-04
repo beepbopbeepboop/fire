@@ -132,7 +132,9 @@ def _case(name, src, expect_refusal_substring=None):
             return
         got, err = _compiled_stdout(src, tmpdir, name)
         if got is None:
-            check(name, False, err or 'no output')
+            check(name, False,
+                  (err or 'no output') + _keep_artifacts(name, src, tmpdir,
+                                                         None, None, None))
             return
         refused = 'mojo_unsupported_iter' in (err or '')
         if expect_refusal_substring is not None:
@@ -142,14 +144,75 @@ def _case(name, src, expect_refusal_substring=None):
             ok = refused and expect_refusal_substring in got
             check(name, ok,
                   f'expected a refusal naming {expect_refusal_substring!r}; '
-                  f'stdout={got!r} stderr={(err or "")[:300]!r}')
+                  f'stdout={got!r} stderr={(err or "")[:300]!r}'
+                  + ('' if ok else _keep_artifacts(name, src, tmpdir,
+                                                    None, got, err)))
             return
         if got == ref:
             check(name, True)
         else:
             check(name, False,
                   f'compiled {got!r} != reference {ref!r}'
-                  + (f'  [stderr: {(err or "")[:200]}]' if err else ''))
+                  + (f'  [stderr: {(err or "")[:200]}]' if err else '')
+                  + _keep_artifacts(name, src, tmpdir, ref, got, err))
+
+
+#: Where a FAILING case leaves what it had, and why that is worth code.
+#:
+#: The scratch directory every case builds in is a `TemporaryDirectory`, so a
+#: failure has historically taken its evidence with it: what the two engines
+#: printed, what the compiler said, and above all the generated C and the built
+#: binary — which are the only two things that can say WHY a compiled answer
+#: diverged. `TEST_silentnoop_sorted_two_string_set_flips` is what that cost: a
+#: ~5% divergence whose mechanism was still open after the author had
+#: re-measured it four ways, because the one artifact that would have settled
+#: it (`grep mojo_set_sorted` in the failing build's own `.ci`) was gone before
+#: anybody looked.
+#:
+#: `.tmp/` under the checkout, not `/tmp`: it is git-ignored, it is what the
+#: project's own workers write scratch to, and a failure's evidence is worth
+#: reading exactly once.
+FAILURE_ARTIFACTS = os.path.join(HERE, '.tmp', 'silentnoop-failures')
+
+
+def _keep_artifacts(name, src, tmpdir, ref, got, err):
+    """Copy a failing case's evidence out of the scratch dir; return where.
+
+    Everything it can cheaply produce: the source both engines ran, both
+    stdouts and the compiled stderr, the binary (so `otool -L` / `nm` can be
+    asked what it bound), and the generated C from an extra `--dump` of the
+    same source — which is the one that names the runtime call this compile
+    emitted. The dump is only worth its ~0.6 s when something has already
+    failed.
+    """
+    import shutil
+    out = os.path.join(FAILURE_ARTIFACTS, name)
+    try:
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, 'program.py'), 'w') as fh:
+            fh.write(src)
+        with open(os.path.join(out, 'stdout.txt'), 'w') as fh:
+            fh.write('--- compiled ---\n' + str(got) + '\n--- reference ---\n'
+                     + str(ref) + '\n--- compiled stderr ---\n' + str(err))
+        exe = os.path.join(tmpdir, name)
+        if os.path.exists(exe):
+            shutil.copy2(exe, os.path.join(out, name))
+        d = _run([sys.executable, MOJO, '--dump', os.path.join(out, 'program.py')])
+        ci = os.path.join(HERE, 'program.ci')
+        if os.path.exists(ci):
+            os.replace(ci, os.path.join(out, 'program.ci'))
+        for ext in ('.ast', '.tok', '.pyi'):
+            try:
+                os.replace(os.path.join(HERE, f'program{ext}'),
+                           os.path.join(out, f'program{ext}'))
+            except OSError:
+                pass
+        if d.returncode != 0 and not os.path.exists(os.path.join(out, 'program.ci')):
+            with open(os.path.join(out, 'dump.stderr'), 'w') as fh:
+                fh.write(d.stderr or '')
+    except OSError as e:
+        return f'  (could not keep the artifacts: {e})'
+    return f'\n  artifacts: {out}'
 
 
 # ── The cases ────────────────────────────────────────────────────────────
