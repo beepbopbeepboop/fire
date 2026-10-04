@@ -534,6 +534,22 @@ def run_on(backend, text, tmpdir, name):
                 "diag": "reported success and wrote no binary"}
     got, err = run(out, backend)
     if got is None:
+        # A TIMEOUT is a claim about the MACHINE as much as about the program,
+        # and this measurement is what made that cost a row: `--mix strfmt`,
+        # seed `sweep19c`, indexes 7400-7499, `--stmts 30 50` reported five
+        # `TIMEOUT` verdicts out of a hundred, and all five run in 0.58 s or less
+        # — every one of them re-ran as a `match` the moment the sweep was asked
+        # for those five indexes alone, on both architectures, repeatedly. The
+        # five were concurrent with other work on a shared box, and a 0.01 s
+        # program does not become a 30 s one.
+        #
+        # So a timeout is believed only after a SECOND run disagrees with the
+        # first, which costs one extra run per timeout and turns the verdict
+        # into a statement about the program rather than about the scheduler. A
+        # program that times out twice is still a timeout and is still not a
+        # finding (`classify` counts it apart), but it is now one.
+        got, err = run(out, backend)
+    if got is None:
         return {"verdict": "timeout", "rc": rc, "diag": err}
     exit_code, stdout = got
     if exit_code is not None and exit_code < 0:
@@ -737,7 +753,7 @@ MIXES = {
     "loopelse": (("loop_else", 6), ("loop_nested", 3), ("assign", 3),
                  ("if", 3), ("print", 2), ("augassign", 2), ("chain_cmp", 2)),
     "closures": (("closure_def", 5), ("closure_call", 6), ("assign", 2),
-                 ("if", 3), ("print", 3), ("augassign", 2)),
+                 ("if", 3), ("print", 3), ("augassign", 2), ("list_build", 2)),
     "argshape": (("arg_define", 4), ("arg_call", 7), ("assign", 2),
                  ("if", 3), ("print", 3), ("augassign", 2)),
     "slicing": (("slice_read", 7), ("slice_step", 3), ("list_build", 3),
@@ -825,6 +841,7 @@ class Gen:
         self.closure_defs = []   # the `def` lines, spliced into main's body
         self.argfuncs = []    # (name, params, required count, defaults)
         self.tryfuncs = []    # (name, param) helpers with a return in a try
+        self.closure_blobs = {}   # captured list name -> the index its body reads
         self.classes = []     # (name, fields, methods) definitions
         self.objs = []        # (var, class name, fields, methods) instances
         self.fields = []      # field names, inside a method body
@@ -2234,9 +2251,34 @@ class Gen:
                 return
             if not (self.words or self.smalls):
                 self.new_small(indent)
-            cap = self.rng.choice(self.words + self.smalls)
+            capture = self.rng.random() < 0.3
+            if capture and not self.lists:
+                # The captured container is built HERE rather than left to the
+                # mix's weights to have happened by now: a list that exists only
+                # when some other statement made it first would make the
+                # captured-container shape a function of statement order rather
+                # than of the draw, and the whole point of the shape is that it
+                # is always available to be measured.
+                self.new_list_of_two(indent)
+            cap = (self.rng.choice(self.lists)[0] if capture
+                   else self.rng.choice(self.words + self.smalls))
             name = self.fresh("cf")
             param = self.fresh("k")
+            if capture:
+                # The captured CONTAINER, and the body reads an ELEMENT of it —
+                # the closure half of the same question a tuple unpack asks
+                # (`_unpacked_element_kind`), at two levels of indirection: a
+                # rewrite that lifted the closure into a function of its own
+                # would have to carry the blob across, and a copy of the blob
+                # would answer the element from before the store.
+                idx = self.rng.randrange(dict(self.lists)[cap])
+                self.closure_blobs[cap] = idx
+                self.closures.append((name, [param], cap, None, False))
+                self.closure_defs.append(f"    def {name}({param}):")
+                self.closure_defs.append(
+                    f"        return {cap}[{idx}] + {param}")
+                self.new_word(indent)
+                return
             if self.rng.random() < 0.35:
                 # TWO levels, because the flattening is recursive and one level
                 # does not reach it: the inner `def` reads a name the middle
@@ -2263,6 +2305,25 @@ class Gen:
             # A nested closure is called through the OUTER one, which is the
             # only way its own body runs.
             self.emit(indent, f"print({outer}({self.rng.randint(0, 9)}))")
+            return
+        if cap in self.closure_blobs:
+            # A captured CONTAINER, which is the shape where "shares the slot"
+            # and "copied the value" cannot be told apart from an integer: the
+            # closure reads an ELEMENT, so a copy taken at definition time
+            # answers the old element while CPython — and this path, measured —
+            # answers the new one. The store goes through an index that is
+            # inside the list's length, so the two engines are comparing the
+            # same program and not one of them is faulting.
+            idx = self.closure_blobs[cap]
+            # The closure's own PARAMETER is not in scope here — it belongs to
+            # the `def`, and spelling it in `main`'s body is a NameError in the
+            # oracle. What the caller has is an integer literal, which is what
+            # makes the two answers differ at all: the second print sees the
+            # store only if the closure and the caller share the blob.
+            k = self.rng.randint(0, 9)
+            self.emit(indent, f"print({cap}[{idx}] + {k})")
+            self.emit(indent, f"{cap}[{idx}] = ({cap}[{idx}] + 9) & 0xFFFF")
+            self.emit(indent, f"print({cap}[{idx}] + {k})")
             return
         self.emit(indent, f"print({name}({self.rng.randint(0, 9)}))")
         if self.rng.random() < 0.6:
@@ -2362,18 +2423,34 @@ class Gen:
             sources = [pair for pair in self.lists if pair[1] >= 2]
         src, n = self.rng.choice(sources)
         step = self.rng.choice([None, None, 2, 3]) if kind == "slice_step" else None
-        lo = self.rng.randint(0, n - 2)
-        # `hi` is at least `lo + 1`, so the slice is never EMPTY: an empty slice
-        # has no element to read and its length is the one number a lowering
-        # could get right by accident, so a corpus that generated it would be
-        # measuring the degenerate case.
-        hi = self.rng.randint(lo + 1, n)
-        if step:
-            bound = f"{lo}:{hi}:{step}"
-            count = len(range(lo, hi, step))
+        # Bounds are SPELLED three ways, and the third is the one that is its
+        # own lowering: `xs[a:b]` names two offsets, `xs[a:]` runs to the end
+        # (which is a new blob whose count is `n - a`) and `xs[a:b:c]` walks.
+        # A NEGATIVE bound is generated too — CPython counts from the end, so
+        # `xs[-2:]` is the last two elements and an emitter that reads `-2` as
+        # an offset reads two words before the blob's header.
+        shape = self.rng.choice(["pair", "open", "negative"])
+        if shape == "negative" and n >= 3:
+            hi = self.rng.randint(1, n - 1)
+            bound = f"-{n - hi}:"
+            count = hi
+        elif shape == "open" and n >= 3:
+            lo = self.rng.randint(1, n - 2)
+            bound = f"{lo}:"
+            count = n - lo
         else:
-            bound = f"{lo}:{hi}"
-            count = hi - lo
+            lo = self.rng.randint(0, n - 2)
+            # `hi` is at least `lo + 1`, so the slice is never EMPTY: an empty
+            # slice has no element to read and its length is the one number a
+            # lowering could get right by accident, so a corpus that generated
+            # it would be measuring the degenerate case.
+            hi = self.rng.randint(lo + 1, n)
+            if step:
+                bound = f"{lo}:{hi}:{step}"
+                count = len(range(lo, hi, step))
+            else:
+                bound = f"{lo}:{hi}"
+                count = hi - lo
         # The PREAMBLE copy has the slice's own LENGTH, for the reason
         # `list_build` gives and because it is measurable: `S = []` classifies as
         # the BARE list prefix (`_kind_of_elements` of nothing is nothing), so the
