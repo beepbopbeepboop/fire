@@ -41,7 +41,9 @@ being red — it is now the RUN half that is red, and the sentence is what makes
 the job's own output misleading about which stage failed.
 
 Independently confirmed at the gcc level, on the same closure, with the exact
-recipe `bugs/CODEGEN_selfhost_closure_still_fails_gcc.md` gave:
+recipe a since-deleted doc gave (the `compile_to_gimple_cached` +
+`gcc -fgimple -fsyntax-only` one), which is the cheapest instrument for this
+question and is why the `grep` filter is the load-bearing part of it:
 
 ```
 $ python3 -c "import gimple_codegen; open('.tmp/fire_full.ci','w').write(
@@ -62,12 +64,11 @@ diagnostics inside the generated C (`gimple_codegen.py:4331`'s "internal
 compiler error: in build2", `mojo/middle/types.py`'s "compile error: the
 callee's C prototype carries no defaults", `fire.py`'s `print(f"JIT error: …")`)
 — which is precisely the counting trap
-`bugs/CODEGEN_selfhost_closure_still_fails_gcc.md` warned about, and why the
+the six docs this one replaces warned about, and why the
 filtered count is the one to read. The tree is clean.
 
 The same closure's companion, measured because
-`bugs/CODEGEN_refuse_dropped_companion_matches_a_prefix_nothing_emits.md`
-needed it and refused to guess:
+the companion-discard guard needed it and refused to guess:
 
 ```
 _run_pipeline(fire.py, do_imports=True) ->
