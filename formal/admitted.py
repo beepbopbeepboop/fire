@@ -287,7 +287,7 @@ def _line_for(path: str, name: str, index: int, admitted_lines: list) -> int:
     """
     if 0 <= index < len(admitted_lines):
         start = admitted_lines[index]
-        for j in range(start, min(start + 6, start + 40)):
+        for j in range(start, start + 8):
             try:
                 with open(path, encoding="utf-8") as f:
                     line = f.readlines()[j - 1]
@@ -700,7 +700,10 @@ def library_trust(lean_dir: str) -> dict:
         except OSError:
             continue
         code = lean_code_regions(raw)
-        line_of = lambda off: raw.count("\n", 0, off) + 1     # noqa: E731
+
+        def line_of(off, _raw=raw):
+            return _raw.count("\n", 0, off) + 1
+
         kinds = {}
         for kind, regex in (("axiom", _AXIOM_DECL_RE),
                             ("sorry", _SORRY_RE),

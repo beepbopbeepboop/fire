@@ -330,18 +330,20 @@ def _truth_call(c):
     bad = _truth_run(c)
     # `call` returns a failing child's status and raises nothing: the second half
     # of its admission, and the reason it is a separate contract from `run`.
-    p = subprocess.run(["/bin/sh", "-c", "exit 7"], capture_output=True)
     try:
-        subprocess.call(["/bin/sh", "-c", "exit 7"])
+        got = subprocess.call(["/bin/sh", "-c", "exit 7"])
         raised = None
     except BaseException as e:                             # noqa: BLE001
-        raised = type(e).__name__
+        got, raised = None, type(e).__name__
     if raised is not None:
         bad.append(f"{c.qualified}: CPython's `call` raised {raised} for a child "
                    f"that exited 7, so \"returned rather than raised\" is not "
                    f"what it does")
+    elif got != 7:
+        bad.append(f"{c.qualified}: CPython's `call` answered {got} for a child "
+                   f"that exited 7, so the status word it returns is not the "
+                   f"child's")
     bad += _missing(c, "returned rather than raised")
-    _ = p
     return bad
 
 
@@ -970,8 +972,13 @@ def test_the_truth_probes_reject_the_pre_audit_text(tmpdir=None):
     for name in sorted(PRE_AUDIT_TEXT):
         if name not in live or name not in TRUTH:
             continue
-        c = A.Contract(name.split(".")[0], name.split(".")[-1],
-                       PRE_AUDIT_TEXT[name], "<pre-audit>", 0)
+        # `rsplit`, not `split`: `concurrent.futures.executor_submit` is a
+        # DOTTED module name, and splitting on the first dot would build a
+        # contract whose own `qualified` says `concurrent.submit` -- a different
+        # name from the key, so every message it produced would name something
+        # that does not exist.
+        module, _, fn = name.rpartition(".")
+        c = A.Contract(module, fn, PRE_AUDIT_TEXT[name], "<pre-audit>", 0)
         try:
             out = TRUTH[name](c, tmpdir) if name in TRUTH_NEEDS_TMPDIR \
                 else TRUTH[name](c)
