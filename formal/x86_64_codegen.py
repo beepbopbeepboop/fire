@@ -34,7 +34,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, mask_of, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
-                          DTYPE_TYPE_NAMES)
+                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import fire_compiler as F
@@ -132,6 +132,37 @@ _CMP_CONDS = {
     "is": ("sete", "sete"),
     "is not": ("setne", "setne"),
 }
+# ── IEEE-754 binary64 ─────────────────────────────────────────────────────
+#
+# A `double` is ONE 64-bit word holding its bit pattern, in the general register
+# file between operations and in XMM0/XMM1 only ACROSS one.  XMM0..XMM7 are the
+# whole reachable set and not an arbitrary cut: SysV AMD64 allocates variadic
+# `double` arguments from exactly those eight, so the arithmetic registers and
+# the call's floating arguments are the same eight.
+#
+# `UCOMISD` reports UNORDERED as `ZF=1 PF=1 CF=1`, which is what makes this
+# table necessary rather than a re-spelling of `_CMP_CONDS`: `setb` and `setbe`
+# are TRUE for a NaN and `sete` calls it equal to everything, so four of the six
+# operators would be wrong. `LT` and `LE` are therefore read off the SWAPPED
+# compare with the two unsigned conditions that are false for unordered
+# (`seta`/`setae` read `CF=0`, and an unordered compare sets CF). `EQ` and `NE`
+# have no such condition at all — one condition cannot read `ZF=1 and PF=0` —
+# so they are the conjunction of two SETcc, which is what `_emit_float_cmp`
+# emits and why it takes a reading rather than a mnemonic.
+#
+# The operand ORDER is `formal/model.py`'s decision (`float_comparison`), not
+# this table's, so that arm64 and this backend cannot answer "what does `a > b`
+# mean with a NaN in it" separately. Here it is re-applied on top, because
+# `seta`/`setae` only read the swapped order; the net effect is that `>` and
+# `<` emit the same instruction sequence modulo the SETcc, which is correct on
+# both machines rather than a coincidence either.
+X86_FLOAT_READINGS = {
+    M.FLOAT_LT: ("seta", True),
+    M.FLOAT_LE: ("setae", True),
+    M.FLOAT_EQ: ("sete", False),
+    M.FLOAT_NE: ("setne", False),
+}
+
 _SETCC = {
     "sete": encode_sete, "setne": encode_setne, "setl": encode_setl,
     "setle": encode_setle, "setg": encode_setg, "setge": encode_setge,
@@ -2730,6 +2761,36 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_setcc_bool(reg, "setne")
             return
         how = M.truthy_lowering(self._expr_str_kind(expr), expr)
+        if how == M.TRUTHY_FLOAT:
+            # `if x:` on a double is `x != +0.0`, asked of the FP unit rather
+            # than tested as a word, and the one input the two disagree on is
+            # `-0.0`: its bit pattern is 0x8000000000000000, which a
+            # `test reg,reg` calls non-zero, and CPython calls `-0.0` false.
+            # Every other double — nonzero finite, both infinities, every NaN —
+            # has nonzero bits AND is truthy, so only a negation can see the
+            # difference.  The zero is `XORPD %xmm0, %xmm0`, which is zero for
+            # EVERY incoming pattern rather than a load.
+            self._emit_expr(expr)
+            self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+            # The ZERO goes in XMM1 and the VALUE stays in XMM0.  Zeroing
+            # XMM0 instead — which is the shorter-looking line — destroys the
+            # operand, and the compare then reads XMM0 against ITSELF and every
+            # double looks equal to zero: measured, all five truthiness probes
+            # answered 0 on this backend while arm64 answered CPython's four.
+            self.asm.emit(encode_xorpd_xmm(1, 1))
+            self.asm.emit(encode_ucomisd_xmm(0, 1))
+            # CPython's `!=` on doubles: SETNE gives "not ZF", which is false
+            # for an UNORDERED compare (where ZF is set), and SETP adds the
+            # unordered case back — so a NaN is truthy, which is what CPython
+            # says. The two-byte OR of them is `_emit_setcc_bool`'s shape and
+            # not a special case of it.
+            self.asm.emit(encode_setne(Reg.RAX))
+            self.asm.emit(encode_setp(Reg.RCX))
+            self.asm.emit(encode_or_r8_r8(Reg.RAX, Reg.RCX))
+            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+            if reg is not Reg.RAX:
+                self.asm.emit(encode_mov_r64_r64(reg, Reg.RAX))
+            return
         self._emit_expr(expr)
         if reg is not Reg.RAX:
             self.asm.emit(encode_mov_r64_r64(reg, Reg.RAX))
@@ -5927,8 +5988,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(expr, F.FloatLiteral):
-            # formal is int-only; truncate toward zero (matches a C cast).
-            self._emit_mov_imm(Reg.RAX, int(expr.value))
+            # The literal's IEEE BINARY64 PATTERN as a 64-bit immediate.  It
+            # used to be `int(expr.value)` — truncation toward zero, which is
+            # what a C cast does and which is exactly wrong here: `1.5` became
+            # the integer 1, so `printf("%f", 1.5)` printed `1.000000` and
+            # `1.5 + 2.25` was `ADD` of 1 and 2.  `_emit_mov_imm` already picks
+            # the ten-byte `MOVABS` form for a pattern with the high bit set,
+            # which every negative and every large double has — see
+            # `encode_mov_r64_imm64`'s own note on why that form is not optional.
+            self._emit_mov_imm(Reg.RAX, M.float_literal_bits(expr.value))
             return
 
         if isinstance(expr, F.StringLiteral):
@@ -6168,10 +6236,38 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_setcc_bool(Reg.RAX, "sete")
             return
         if expr.op == "-":
+            if self._expr_str_kind(expr.operand) == M.FLOAT_KIND:
+                # `XOR` with the sign mask, and NOT `NEG` on the bit pattern.
+                # `NEG` on 0xBFE0000000000000 (`-0.5`) produces the bit
+                # pattern of a DENORMAL — a different number that happens to be
+                # small, which is why the defect survives a test on ordinary
+                # values: `int(-0.5)` answered -8 where CPython answers 0,
+                # measured on both architectures before this arm.  Flipping the
+                # sign bit is what `-x` means, and it is the only way to get
+                # `-0.0` from `+0.0` — `0.0 - 0.0` is `+0.0`.
+                #
+                # There is no `FSUBPD`-free negation that is one instruction
+                # here the way `FNEG` is on arm64, so the mask is materialized:
+                # `MOVABS` of 0x8000000000000000 and an `XORPD`.  Two
+                # instructions, and `xorpd %xmm0, %xmm0` cannot be it — that
+                # XORs the two operands together, which for a mask built by a
+                # subtraction would zero it.
+                self._emit_expr(expr.operand)
+                self._emit_mov_imm(Reg.R11, 0x8000000000000000)
+                self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+                self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+                self.asm.emit(encode_xorpd_xmm(0, 1))
+                self.asm.emit(encode_movq_r64_xmm(Reg.RAX, 0))
+                return
             self._emit_expr(expr.operand)
             self.asm.emit(encode_neg_r64(Reg.RAX))
             self._emit_trunc(self._ttype(expr.operand))
             return
+        float_ureason = M.float_unary_refusal(
+            expr.op, self._expr_str_kind(expr.operand),
+            M.spelled(expr), expr.operand)
+        if float_ureason is not None:
+            raise CodegenError(float_ureason)
         if expr.op == "+":
             self._emit_expr(expr.operand)
             return
@@ -6234,14 +6330,32 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # one by where the allocator put the two objects.
             self._refuse_frame_order_operand(op, e.left)
             self._refuse_frame_order_operand(op, e.right)
-            if not self._emit_strcmp(e.left, e.right, op):
-                self._emit_cmp(e.left, e.right, unsigned, signed)
+            if op in ("==", "!=") and self._emit_strcmp(e.left, e.right, op):
+                return
+            if self._emit_float_cmp_or_none(e, op):
+                return
+            self._emit_cmp(e.left, e.right, unsigned, signed)
             return
 
         # Python `and`/`or` return the deciding OPERAND, not a bitwise mix
         # of the two, so they branch rather than hitting the ALU table.
         if op in ("and", "or"):
             self._emit_and_or(e.left, e.right, is_or=(op == "or"))
+            return
+
+        # IEEE-754 binary64.  Asked HERE, after the comparisons and the
+        # short-circuit operators and before the integer ALU, because the three
+        # claims overlap and this is the one place that knows both operand kinds
+        # before either lowering runs: `*` is a repetition for a blob and an
+        # `MULSD` for a double, `+` is a concat for a blob and an `ADDSD`, and
+        # `/` is a truncating integer divide for two words and a `DIVSD` for
+        # two doubles.  `model.float_binary_refusal` is the one decision both
+        # backends ask, and it REFUSES the two shapes that would otherwise be
+        # silently wrong: a mixed double/integer pair (there is no promotion
+        # here, and picking a side loses either a fraction or a rounding) and
+        # `//`/`%`/`**` on two doubles (the integer lowering of each is
+        # reachable, and truncating `7.0 // 2` to `3` is not CPython's `3.0`).
+        if self._emit_float_binary_or_refuse(e, op):
             return
 
         # List/set concat, either because we are under a container context (a
@@ -6398,6 +6512,165 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self._pop_slot(Reg.R11)
         self._pop_slot(Reg.R11)
         return True
+
+    def _emit_float_binary(self, op: str, l, r) -> None:
+        """`l op r` on two doubles as one SSE2 operation, RAX = the result.
+
+        Four instructions after the operand separation, and each is
+        load-bearing:
+
+        * the two `MOVQ`s put the operands in XMM0/XMM1, because the integer ALU
+          would add the PATTERNS — `1.5 + 2.25` was `ADD` of 0x3FF8000000000000
+          and 0x4002000000000000, which builds and answers a number CPython
+          never wrote.
+        * the SSE2 operation is what ROUNDS.  A double's bit pattern is not a
+          fixed-point number: `0.1 + 0.2` is not `0.3`'s pattern, and only the
+          unit's rounding produces the one CPython prints.
+        * the `MOVQ` back to RAX is this backend's contract — an expression
+          leaves its value in RAX — so without it every caller downstream reads
+          whatever word the last integer operation left there.
+
+        No truncation follows, and that is the difference from the integer ALU's
+        tail: a `double` has no declared narrower width to be cut to.
+        """
+        emit = {
+            "addsd": encode_addsd_xmm, "subsd": encode_subsd_xmm,
+            "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
+        }[M.FLOAT_BINARY_MNEMONICS[op][1]]
+        self._emit_float_operands(l, r)
+        self.asm.emit(emit(0, 1))
+        self.asm.emit(encode_movq_r64_xmm(Reg.RAX, 0))
+
+    def _emit_float_operands(self, l, r) -> None:
+        """Two doubles into XMM0 (left) and XMM1 (right), both surviving a call.
+
+        The same separation the integer compare does — push, evaluate the right
+        operand, move it out of the way, pop — and for the same reason: an
+        expression leaves its value in RAX and evaluating the right operand can
+        be a call that clobbers every caller-saved register, RAX included.
+
+        XMM0/XMM1 are caller-saved on SysV, so this window is as short as the
+        operation itself; between statements a double lives in a general
+        register like any other word, which is why nothing about this backend's
+        frame layout, spill code or register allocator changes.
+        """
+        self._emit_expr(l)
+        self._push_slot(Reg.RAX)
+        self._emit_expr(r)
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+        # XMM1 came out of R11's copy rather than RAX: the pop overwrote RAX
+        # with the left operand's word, and re-reading RAX there would load the
+        # LEFT double into both registers.
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+
+    def _emit_float_cmp_or_none(self, e: F.BinaryOp, op: str) -> bool:
+        """`e` as a floating comparison, or False to leave it to the integer path.
+
+        The narrow question "are these two operands doubles" is asked here and
+        nowhere else, so the comparison has exactly one entry point: this
+        backend has no separate branch-on-flags path (an `if` condition is
+        materialised as a 0/1 word and tested afterwards), so the value path
+        IS every path and a second one could only be a second answer.
+        """
+        if M.float_comparison(op, self._expr_str_kind(e.left),
+                              self._expr_str_kind(e.right)) is None:
+            return False
+        self._emit_float_cmp(op, e.left, e.right)
+        return True
+
+    def _emit_float_binary_or_refuse(self, e: F.BinaryOp, op: str) -> bool:
+        """`e` as a floating operation, or refuse it; False when it is not one.
+
+        Returns False ONLY when neither operand is a double, which is the
+        ordinary answer for every program without a `double` in it and the reason
+        the integer path below is untouched.  Every other shape — a mixed pair,
+        `//`/`%`/`**` on two doubles, a bitwise operator on a double — is a
+        REFUSAL rather than a fall-through, and the reason is that the integer
+        lowering of each of those is reachable and wrong: truncating `7.0 // 2`
+        to `3` and adding two bit patterns both build, run, and answer a number
+        CPython never wrote.
+        """
+        left_kind = self._expr_str_kind(e.left)
+        right_kind = self._expr_str_kind(e.right)
+        refusal = M.float_binary_refusal(op, left_kind, right_kind,
+                                         M.spelled(e), left=e.left,
+                                         right=e.right)
+        if refusal is not None:
+            raise CodegenError(refusal)
+        if not (op in M.FLOAT_BINARY_MNEMONICS
+                and left_kind == M.FLOAT_KIND
+                and right_kind == M.FLOAT_KIND):
+            return False
+        self._emit_float_binary(op, e.left, e.right)
+        return True
+
+    def _emit_float_cmp(self, op: str, l, r) -> None:
+        """`l <op> r` on two doubles as a 0/1 in RAX, CPython's NaN rules.
+
+        The compare is `UCOMISD` and the answer is built from the flags, but the
+        two equalities need TWO SETcc each and the two orderings need the
+        operands swapped:
+
+        * `==` is `ZF=1 and PF=0` — `sete` and `setnp` and one byte-wise `AND`,
+          because a NaN sets ZF as well as PF.  Without the `setnp` half,
+          `x == x` would be TRUE for a NaN, which is the single most famous
+          fact about IEEE comparisons and is what CPython reports.
+        * `!=` is the same conjunction under `OR`: `setne` gives "not equal
+          ORDERED" and `setp` adds the unordered case back, so a NaN is unequal
+          to everything.
+        * `<` and `<=` come off the SWAPPED compare with `seta`/`setae`
+          (`CF=0`), which an unordered compare sets — so both are FALSE for a
+          NaN, which is CPython's rule and the opposite of `setb`/`setbe`.
+
+        `formal/model.py::float_comparison` decides which reading each operator
+        means and in which order the operands are read; this is only how this
+        architecture spells a reading.  The whole point of that split is that
+        arm64's `FCMP` needs a different condition set for the same six
+        operators and the two must not be allowed to disagree about a NaN.
+        """
+        first_is_left, reading = M.float_comparison(
+            op, self._expr_str_kind(l), self._expr_str_kind(r))
+        first, second = (l, r) if first_is_left else (r, l)
+        mnem, reversed_reading = X86_FLOAT_READINGS[reading]
+        # WHICH operand goes in the compare's first slot, and it is not a detail
+        # of the encoding.  `UCOMISD dst, src` computes the flags for `dst ? src`
+        # and `seta`/`setae` read that as `dst > src`, so for the two orderings
+        # the operand the READING is about has to be the compare's SECOND one:
+        # `a < b` loads b into XMM0 and a into XMM1, which makes `seta` answer
+        # `b > a`.  For the two equalities the order does not matter at all, and
+        # the same `first, second` order is kept so that one call site decides it
+        # rather than two.
+        dst_operand, src_operand = ((second, first) if reversed_reading
+                                    else (first, second))
+        self._emit_float_operands(dst_operand, src_operand)
+        self.asm.emit(encode_ucomisd_xmm(0, 1))
+        self.asm.emit(_SETCC[mnem](Reg.RAX))
+        if reading in (M.FLOAT_EQ, M.FLOAT_NE):
+            # `==` is `ZF=1 and PF=0`: `SETE` alone calls a NaN equal to
+            # everything, because an unordered compare SETS ZF.  `!=` is the
+            # complement and is written the same shape from the other end —
+            # `SETNE` ("not equal ORDERED") OR `SETP` ("unordered") — so the two
+            # cannot disagree about a NaN: the `setp` half is what makes
+            # `x != x` true for one.
+            #
+            # **The parity bit is POLARITY-OPPOSITE between the two, and that is
+            # the whole subtlety.**  `setnp` is "ordered" and pairs with `setne`
+            # under AND; `setp` is "unordered" and pairs with `setne` under OR.
+            # Writing `setne` AND `setnp` instead — which is the tempting
+            # symmetric mistake — is a comparison that is FALSE for every NaN on
+            # both operands, and it builds, and every ordinary value still
+            # answers right.  Measured here: `inf - inf != inf - inf` printed 0
+            # where CPython prints 1.
+            if reading == M.FLOAT_EQ:
+                self.asm.emit(encode_setnp(Reg.RCX))
+                self.asm.emit(encode_and_r8_r8(Reg.RAX, Reg.RCX))
+            else:
+                self.asm.emit(encode_setp(Reg.RCX))
+                self.asm.emit(encode_or_r8_r8(Reg.RAX, Reg.RCX))
+        self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
     def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
         """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
@@ -7865,6 +8138,7 @@ preference.
             fn,
             int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES,
+            float_names=FLOAT_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
@@ -7944,12 +8218,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 if owner is not None and name in M.struct_receivers(owner):
                     return M.one_word_receiver_kind(
                         owner, TYPE_NAMES, STRING_TYPE_NAMES, structs,
-                        DTYPE_TYPE_NAMES)
+                        DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
                 cands = frame_candidates.get(name)
                 if cands:
                     return M.one_word_receiver_kind(
                         cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs,
-                        DTYPE_TYPE_NAMES)
+                        DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
                 return None
             if isinstance(expr, F.MemberExpr):
                 # ONE level only.  `a.b.c` is a load of a load and the outer
@@ -7966,12 +8240,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                     return None
                 return M.frame_slot_field_kind(
                     cands, expr.member, TYPE_NAMES, STRING_TYPE_NAMES,
-                    structs, DTYPE_TYPE_NAMES)
+                    structs, DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
             if isinstance(expr, F.CallExpr) and isinstance(expr.func,
                                                             F.IdentExpr):
                 return M.one_word_receiver_kind(
                     structs.get(expr.func.name), TYPE_NAMES,
-                    STRING_TYPE_NAMES, structs, DTYPE_TYPE_NAMES)
+                    STRING_TYPE_NAMES, structs, DTYPE_TYPE_NAMES,
+                    FLOAT_TYPE_NAMES)
             return None
 
         return kind_of_slot
@@ -8174,7 +8449,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             return None
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs,
-                                          dtype_names=DTYPE_TYPE_NAMES))
+                                          dtype_names=DTYPE_TYPE_NAMES,
+                                          float_names=FLOAT_TYPE_NAMES))
 
     def _aliased_export(self, name: str):
         """The manifest export a bare callee reaches THROUGH an import alias.
@@ -9452,6 +9728,20 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if verdict[0] == "refuse":
                 raise CodegenError(verdict[1])
+        # An integer/double conversion is decided by the OPERAND's kind rather
+        # than by the callee's name, because the same name means both
+        # directions: `Int(x)` truncates a double and widens an integer, and
+        # `float(x)` is the identity over a double and a rounding over an
+        # integer.  Asked here, before the arity arms below, so a refusal can
+        # still name the operand.
+        if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
+            direction, why = M.float_conversion_lowering(
+                name, self._expr_str_kind(operands[0]),
+                f"{name}({M.spelled(operands[0])})")
+            if why is not None:
+                raise CodegenError(why)
+            if direction is not None:
+                kind, info = direction, None
         if not operands:
             # The ONE zero-operand conversion this path can answer, and the
             # reason is a property of STRINGS and of nothing else: a literal
@@ -9491,6 +9781,30 @@ ctor_field_value=self._ctor_field_value_for(name),
                 if refusal:
                     raise CodegenError(refusal)
             return
+        if kind == M.FLOAT_FROM_INT:
+            # `float(x)` / `Float64(x)` over an integer: CVTSI2SD, which
+            # ROUNDS to the nearest representable double (ties to even).  A
+            # shift or a multiply would not: `float(2**53 + 1)` is
+            # `9007199254740992.0` and the integer below it is
+            # `9007199254740992.0` as well, so the rounding is not something any
+            # integer arithmetic reproduces.
+            self.asm.emit(encode_cvtsi2sd_xmm_r64(0, Reg.RAX))
+            self.asm.emit(encode_movq_r64_xmm(Reg.RAX, 0))
+            return
+        if kind == M.FLOAT_TO_INT:
+            # `Int(x)` over a double: CVTTSD2SI, which truncates TOWARD ZERO,
+            # and that is CPython's rule (`int(2.9)` is 2, `int(-2.9)` is -2).
+            # The `T` matters: `CVTSD2SI` consults MXCSR's rounding mode, which
+            # this backend cannot read or write, so it is the only form whose
+            # answer does not depend on state nothing here can see.  A plain
+            # `MOV` of the bits would be the exponent field as an integer;
+            # `model.float_int_conversion_note` records the one input where this
+            # differs from CPython — a NaN or an infinity, where the hardware
+            # saturates and CPython raises — and why no static check can tell
+            # them apart.
+            self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+            self.asm.emit(encode_cvttsd2si_r64_xmm(Reg.RAX, 0))
+            info = M.INT_TYPE_CTORS[name]
         width, signed = info
         self._emit_extend(Reg.RAX, IntType(width, signed))
 

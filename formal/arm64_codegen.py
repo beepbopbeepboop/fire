@@ -21,7 +21,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
                           common_type, infer_expr, resolve, cmp_signed,
                           parse_type_name, _range_args, TYPE_NAMES,
                           STRING_TYPE_NAMES, DICT_TYPE_NAMES,
-                          DTYPE_TYPE_NAMES)
+                          DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
 
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
@@ -45,6 +45,36 @@ from mojo.middle.boundnames import (
 # `_emit_imm_shift12`).
 _SCRATCH = M.ARM64_CONTAINER_BUDGET
 _SCRATCH_CHUNK = 4080
+
+
+# ── IEEE-754 binary64 ─────────────────────────────────────────────────────
+#
+# A `double` on this backend is ONE 64-bit word holding its bit pattern, in the
+# general register file between operations and in V0/V1 only ACROSS one.  The
+# encoders are `formal/arm64.py`'s; what is here is when each is emitted and,
+# for the compare, which condition reads it.
+#
+# **The scratch pair is V0/V1 and that is a claim about the ABI.**  AAPCS marks
+# V0..V7 caller-saved, so a window that spans a call would be wrong; the two
+# operands are separated into X0/X1 through the stack FIRST, exactly as
+# `_emit_binop`'s integer path does, and only then moved into the V file — so
+# neither operand is in a caller-saved register across a call.  D0/D1 are then
+# dead within one instruction.
+#
+# **The compare's conditions are not the integer ones**, and the reason is that
+# an unordered compare sets `NZCV = 0011` — so `HI` and `CS` are TRUE for it and
+# `a > b` (an `HI` condition) would be true for a NaN, where CPython says false.
+# Every condition below is chosen so that UNORDERED reads as FALSE, which is
+# CPython's rule for all four ordering comparisons; `formal/model.py` decides
+# WHICH reading each operator means, and this table is only how arm64 spells a
+# reading.  `mi` is `N==1` and `ls` is `C==0 or Z==1`, and both are false when
+# the sign flag is clear and carry is set, which is exactly the unordered case.
+ARM64_FLOAT_READINGS = {
+    M.FLOAT_LT: "mi",
+    M.FLOAT_LE: "ls",
+    M.FLOAT_EQ: "eq",
+    M.FLOAT_NE: "ne",
+}
 
 
 # The ONE CodegenError both backends raise (formal/model.py), bound here under
@@ -3431,10 +3461,29 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit(encode_cset_xd_cond(0, "eq"))
                 return
             if expr.op == "-":
+                if self._expr_str_kind(expr.operand) == M.FLOAT_KIND:
+                    # FNEG, and NOT `NEG` on the bit pattern.  `NEG` on
+                    # 0xBFE0000000000000 (`-0.5`) produces the bit pattern of a
+                    # DENORMAL — a different number that happens to be small,
+                    # which is why the defect survives a test on ordinary values:
+                    # `int(-0.5)` answered -8 where CPython answers 0, measured
+                    # on both architectures before this arm.  FNEG flips the sign
+                    # bit, which is what `-x` means, and it is the ONLY way to
+                    # get `-0.0` from `+0.0` — `0.0 - 0.0` is `+0.0`.
+                    self._emit_expr(expr.operand)
+                    self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+                    self.asm.emit(encode_fneg_dd_dn(0, 0))
+                    self.asm.emit(encode_fmov_v_to_gpr(0, 0))
+                    return
                 self._emit_expr(expr.operand)
                 self.asm.emit(encode_neg_xd_xn(0, 0))
                 self._emit_trunc(self._ttype(expr.operand))
                 return
+            float_ureason = M.float_unary_refusal(
+                expr.op, self._expr_str_kind(expr.operand),
+                M.spelled(expr), expr.operand)
+            if float_ureason is not None:
+                raise CodegenError(float_ureason)
             if expr.op == "+":
                 self._emit_expr(expr.operand)
                 return
@@ -3476,8 +3525,15 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(expr, F.FloatLiteral):
-            # formal is int-only; truncate toward zero (matches C cast).
-            self._emit_mov_imm("X0", int(expr.value))
+            # The literal's IEEE BINARY64 PATTERN, as an ordinary 64-bit
+            # immediate.  It used to be `int(expr.value)` — truncation toward
+            # zero, which is what a C cast does and which is exactly wrong here:
+            # `1.5` became the integer 1 and `2.25` became 2, so `printf("%f",
+            # 1.5)` printed `1.000000` and `1.5 + 2.25` was `ADD` of 1 and 2.
+            # `model.float_literal_bits` is the one reader of a literal's bits,
+            # and `_emit_mov_imm`'s MOVZ/MOVK chain is what carries a full 64-bit
+            # pattern, so nothing about a double needs storage this path lacks.
+            self._emit_mov_imm("X0", M.float_literal_bits(expr.value))
             return
 
         if isinstance(expr, F.SetExpr):
@@ -3731,6 +3787,7 @@ dylib_exports: list = None, globals_base: int = None,
             fn,
             int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES,
+            float_names=FLOAT_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
             slot_key=_member_slot_key,
             declared_kind=self._declared_kind_for(name),
@@ -3781,12 +3838,12 @@ ctor_field_value=self._ctor_field_value_for(name),
                 if owner is not None and name in M.struct_receivers(owner):
                     return M.one_word_receiver_kind(
                         owner, TYPE_NAMES, STRING_TYPE_NAMES, structs,
-                        DTYPE_TYPE_NAMES)
+                        DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
                 cands = frame_candidates.get(name)
                 if cands:
                     return M.one_word_receiver_kind(
                         cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs,
-                        DTYPE_TYPE_NAMES)
+                        DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
                 return None
             if isinstance(expr, F.MemberExpr):
                 # ONE level only.  `a.b.c` is a load of a load and the outer
@@ -3803,12 +3860,13 @@ ctor_field_value=self._ctor_field_value_for(name),
                     return None
                 return M.frame_slot_field_kind(
                     cands, expr.member, TYPE_NAMES, STRING_TYPE_NAMES,
-                    structs, DTYPE_TYPE_NAMES)
+                    structs, DTYPE_TYPE_NAMES, FLOAT_TYPE_NAMES)
             if isinstance(expr, F.CallExpr) and isinstance(expr.func,
                                                             F.IdentExpr):
                 return M.one_word_receiver_kind(
                     structs.get(expr.func.name), TYPE_NAMES,
-                    STRING_TYPE_NAMES, structs, DTYPE_TYPE_NAMES)
+                    STRING_TYPE_NAMES, structs, DTYPE_TYPE_NAMES,
+                    FLOAT_TYPE_NAMES)
             return None
 
         return kind_of_slot
@@ -4058,7 +4116,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             return None
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs,
-                                          dtype_names=DTYPE_TYPE_NAMES))
+                                          dtype_names=DTYPE_TYPE_NAMES,
+                                          float_names=FLOAT_TYPE_NAMES))
 
     def _aliased_export(self, name: str):
         """The manifest export a bare callee reaches THROUGH an import alias.
@@ -6835,7 +6894,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             "is not": ("ne", "ne"),
         }
         if op in cmp_conds:
-            u, s = cmp_conds[op]
             # A FRAME ADDRESS has no order, and the flag-setting compare below
             # would decide one by where the allocator put the two objects.
             self._refuse_frame_order_operand(op, e.left)
@@ -6844,7 +6902,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_cset_xd_cond(
                     0, "ne" if op == "!=" else "eq"))
                 return
-            self._emit_cmp(e.left, e.right, u, s)
+            left, right, u, s, reading = self._cmp_spec(op, e.left, e.right)
+            self._emit_cmp(left, right, u, s, float_reading=reading)
             return
 
         # Short-circuit `and`/`or` produce a value in X0 (Python semantics:
@@ -6853,6 +6912,31 @@ ctor_field_value=self._ctor_field_value_for(name),
         # ops stay in the ALU table below.
         if op in ("and", "or"):
             self._emit_and_or(e.left, e.right, is_or=(op == "or"))
+            return
+
+        # IEEE-754 binary64.  Asked HERE, after the comparisons and the
+        # short-circuit operators and before the integer ALU, because the three
+        # claims overlap and this is the one place that knows both operand kinds
+        # before either lowering runs: `*` is a repetition for a blob and an
+        # `FMUL` for a double, `+` is a concat for a blob and an `FADD`, and
+        # `/` is a truncating integer divide for two words and an `FDIV` for
+        # two doubles.  `model.float_binary_refusal` is the one decision both
+        # backends ask, and it REFUSES the two shapes that would otherwise be
+        # silently wrong: a mixed double/integer pair (there is no promotion
+        # here, and picking a side loses either a fraction or a rounding) and
+        # `//`/`%`/`**` on two doubles (the integer lowering of each is
+        # reachable, and truncating `7.0 // 2` to `3` is not CPython's `3.0`).
+        left_kind = self._expr_str_kind(e.left)
+        right_kind = self._expr_str_kind(e.right)
+        float_refusal = M.float_binary_refusal(
+            op, left_kind, right_kind, M.spelled(e), left=e.left,
+            right=e.right)
+        if float_refusal is not None:
+            raise CodegenError(float_refusal)
+        if (op in M.FLOAT_BINARY_MNEMONICS
+                and left_kind == M.FLOAT_KIND
+                and right_kind == M.FLOAT_KIND):
+            self._emit_float_binary(op, e.left, e.right)
             return
 
         # List/set concat under container context (for-iterable, membership
@@ -6993,18 +7077,125 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._signed = False
         return True
 
-    def _emit_cmp_flags(self, l, r, unsigned_cond: str, signed_cond: str) -> None:
-        """CMP only — no CSET.
+    def _emit_cmp_operands(self, l, r) -> None:
+        """`l` in X0 and `r` in X1, both surviving any CALL either one makes.
+
+        Split out of both compares — the integer `CMP` and the floating `FCMP`
+        — for the reason the integer one already did it inline: an expression
+        leaves its value in X0, and evaluating the right operand can be a call
+        that clobbers every caller-saved register.  The pair is therefore pushed
+        through the stack BEFORE the right operand is evaluated and popped after,
+        and the two compares share that so a `double` comparison cannot be the
+        one that forgets it.
+        """
+        self._emit_expr(l)
+        self.asm.emit(encode_stp_sp_pre(0, 2))
+        self._emit_expr_to(r, "X1")
+        self.asm.emit(encode_ldp_sp_post(0, 2))
+
+    def _emit_fcmp_flags(self, l, r) -> None:
+        """FCMP Dn, Dm on two doubles, flags only — no CSET.
+
+        The two operands arrive in X0/X1 and leave in D0/D1, which is the whole
+        window a double spends in the caller-saved V file: two `FMOV`s to get
+        there and one `FCMP` while it is there, with the result back in X0 for
+        whoever asked.  AAPCS marks V0..V7 caller-saved, so a V register is not a
+        place a value can live between statements — which is exactly why a
+        `double` needs no change to this backend's frame layout, its spill code
+        or its register allocator.
+        """
+        self._emit_cmp_operands(l, r)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self.asm.emit(encode_fcmp_dn_dm(0, 1))
+        # `_signed` selects between the two condition strings the CALLER passed,
+        # and for a double the caller passes the same one in both slots (see
+        # `_cmp_spec`), so which way this is set cannot change the answer.  It is
+        # set rather than left alone because leaving a stale value would make
+        # the value path pick the previous comparison's signedness.
+        self._signed = False
+
+    def _emit_float_binary(self, op: str, l, r) -> None:
+        """`l op r` on two doubles, as one FADD/FSUB/FMUL/FDIV, X0 = result.
+
+        The three instructions after the operand separation are the entire
+        lowering, and each is load-bearing:
+
+        * the two `FMOV`s put the operands in D0/D1, because the integer ALU
+          would add the PATTERNS — `1.5 + 2.25` was `ADD` of 0x3FF8000000000000
+          and 0x4002000000000000, which builds and answers a number CPython
+          never wrote.
+        * the FP operation is what ROUNDS.  A double's bit pattern is not a
+          fixed-point number: `0.1 + 0.2` is not `0.3`'s pattern, and only the
+          unit's rounding produces the one CPython prints.
+        * the `FMOV` back to X0 is this backend's contract — an expression leaves
+          its value in X0 — so without it every caller downstream reads whatever
+          word the last integer operation left there.
+
+        No truncation follows, and that is the difference from the integer ALU's
+        tail: a `double` has no declared narrower width to be cut to, and
+        `_emit_trunc`'s `common_type` over a `FloatLiteral` would have nothing
+        honest to say.
+        """
+        # `FLOAT_BINARY_MNEMONICS` is `(arm64, x86_64)` and this backend reads
+        # column 0; x86-64 reads column 1.  One table decides what each operator
+        # MEANS and each backend owns how it spells it, which is why adding an
+        # operator is one row and not two.
+        emit = {
+            "fadd": encode_fadd_dd_dn_dm, "fsub": encode_fsub_dd_dn_dm,
+            "fmul": encode_fmul_dd_dn_dm, "fdiv": encode_fdiv_dd_dn_dm,
+        }[M.FLOAT_BINARY_MNEMONICS[op][0]]
+        self._emit_cmp_operands(l, r)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self.asm.emit(emit(0, 0, 1))
+        self.asm.emit(encode_fmov_v_to_gpr(0, 0))
+
+    def _cmp_spec(self, op: str, l, r):
+        """`(left, right, unsigned_cond, signed_cond, float_reading)` for a compare.
+
+        One reader for BOTH compare paths — the value path through `_emit_cmp`
+        and the branch path through `_emit_branch_unless_cmp` — for the reason
+        `_cmp_conds` exists: they did once answer differently about what `<`
+        means, and a comparison that evaluates one way and branches the other is
+        a wrong branch with nothing to notice it.
+
+        For a double the answer also carries the OPERAND ORDER, because that is
+        the part of the decision with no local spelling: `a > b` is `FCMP b, a`
+        followed by the condition `<` uses, and the swap is in `model.py` so
+        that x86-64, whose compare has a different set of usable conditions, is
+        answering the same question rather than the same instruction.  For an
+        integer the order is untouched and the two conditions are the table's.
+        """
+        decided = M.float_comparison(op, self._expr_str_kind(l),
+                                     self._expr_str_kind(r))
+        if decided is not None:
+            first_is_left, reading = decided
+            cond = ARM64_FLOAT_READINGS[reading]
+            return (l, r, cond, cond, reading) if first_is_left else (
+                r, l, cond, cond, reading)
+        u, s = self._cmp_conds()[op]
+        return l, r, u, s, None
+
+    def _emit_cmp_flags(self, l, r, unsigned_cond: str, signed_cond: str,
+                        float_reading=None) -> None:
+        """CMP (or FCMP) only — no CSET.
 
         Split out of _emit_cmp so a conditional can branch on the flags
         directly. With the CSET in the middle, `if a < b` cost cmp + cset +
         cbz: the boolean was materialised into a register only for the very
         next instruction to read it back. B.cond reads the flags the compare
-        already set."""
-        self._emit_expr(l)
-        self.asm.emit(encode_stp_sp_pre(0, 2))
-        self._emit_expr_to(r, "X1")
-        self.asm.emit(encode_ldp_sp_post(0, 2))
+        already set.
+
+        `float_reading` is what `_cmp_spec` decided for this pair of operands;
+        a non-None value makes the compare `FCMP` instead of `CMP`, and the two
+        condition strings the caller passed are the FLOATING ones in that case
+        (the same one in both slots), which is why the `signed` selector below
+        cannot change the answer."""
+        if float_reading is not None:
+            self._emit_fcmp_flags(l, r)
+            return
+        self._emit_cmp_operands(l, r)
         self.asm.emit(encode_cmp_xn_xm(0, 1))
         self._signed = cmp_signed(common_type(self._ttype(l), self._ttype(r)))
 
@@ -7096,6 +7287,25 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_mov_zr_xn(_reg_num(reg), 0))
             return
         how = M.truthy_lowering(self._expr_str_kind(expr), expr)
+        if how == M.TRUTHY_FLOAT:
+            # `if x:` on a double is `x != +0.0`, and it is asked of the FP unit
+            # rather than tested as a word because the two disagree on exactly
+            # one input: `-0.0` has the bit pattern 0x8000000000000000, which a
+            # `CMP #0` test calls non-zero, and CPython calls `-0.0` false.
+            # Every other double — nonzero finite, both infinities, every NaN —
+            # has nonzero bits AND is truthy, so a differential test over
+            # ordinary values cannot see the difference; it takes a negation.
+            # The `FCMP` reads X0 against a `+0.0` that `FMOV D1, XZR`
+            # materialises, because the integer zero register IS the double
+            # zero's pattern.
+            self._emit_expr_to(expr, reg)
+            self.asm.emit(encode_fmov_gpr_to_v(0, _reg_num(reg)))
+            self.asm.emit(encode_fmov_gpr_to_v(1, 31))
+            self.asm.emit(encode_fcmp_dn_dm(0, 1))
+            self.asm.emit(encode_cset_xd_cond(
+                _reg_num(reg), ARM64_FLOAT_READINGS[M.FLOAT_NE]))
+            self._signed = False
+            return
         self._emit_expr_to(expr, reg)
         if how == M.TRUTHY_FROM_STRLEN:
             if reg != "X0":
@@ -7264,20 +7474,29 @@ ctor_field_value=self._ctor_field_value_for(name),
                 invert_cond("ne" if cond.op == "!=" else "eq"), 0))
             self.asm.emit_label_rel(false_label, here_offset=-4)
             return True
-        u, s = self._cmp_conds()[cond.op]
-        self._emit_branch_unless_cmp(cond.left, cond.right, u, s, false_label)
+        left, right, u, s, reading = self._cmp_spec(
+            cond.op, cond.left, cond.right)
+        self._emit_branch_unless_cmp(left, right, u, s, false_label,
+                                     float_reading=reading)
         return True
 
     def _emit_branch_if_cmp(self, l, r, unsigned_cond: str,
-                            signed_cond: str, label: str) -> None:
-        """CMP + B.cond to `label` when the comparison HOLDS, no CSET.
+                            signed_cond: str, label: str,
+                            float_reading=None) -> None:
+        """CMP (or FCMP) + B.cond to `label` when the comparison HOLDS, no CSET.
 
         The positive form, because a construct needs both polarities from one
         comparison and two independent copies of this is how they come to
         disagree: `_emit_loop`'s for-range test branches one way at the loop head
         and the other way at the bottom, and they must be the same comparison.
+
+        A DOUBLE branches on the same flags its value path CSETs from, so the
+        two paths cannot answer differently about a NaN: the branch path inverts
+        the floating condition (`invert_cond("mi")` is `pl`) and the value path
+        does not, and both of those are false for an unordered compare.
         """
-        self._emit_cmp_flags(l, r, unsigned_cond, signed_cond)
+        self._emit_cmp_flags(l, r, unsigned_cond, signed_cond,
+                             float_reading=float_reading)
         chosen = signed_cond if self._signed else unsigned_cond
         self._record_cond_branch()
         self.asm.emit(encode_b_cond(chosen, 0))
@@ -7285,7 +7504,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         return True
 
     def _emit_branch_unless_cmp(self, l, r, unsigned_cond: str,
-                                signed_cond: str, false_label: str) -> None:
+                                signed_cond: str, false_label: str,
+                                float_reading=None) -> None:
         """CMP + B.cond on two already-separated operands, no CSET.
 
         The operand-level half of `_emit_branch_unless`, for the callers that
@@ -7296,7 +7516,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         branch emission rather than two of each.
         """
         return self._emit_branch_if_cmp(l, r, invert_cond(unsigned_cond),
-                                       invert_cond(signed_cond), false_label)
+                                       invert_cond(signed_cond), false_label,
+                                       float_reading=float_reading)
 
     def _cmp_conds(self) -> dict:
         """Operator -> (unsigned condition, signed condition).
@@ -7686,6 +7907,20 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             if verdict[0] == "refuse":
                 raise CodegenError(verdict[1])
+        # An integer/double conversion is decided by the OPERAND's kind rather
+        # than by the callee's name, because the same name means both
+        # directions: `Int(x)` truncates a double and widens an integer, and
+        # `float(x)` is the identity over a double and a rounding over an
+        # integer.  Asked here, before the arity arms below, so a refusal can
+        # still name the operand.
+        if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
+            direction, why = M.float_conversion_lowering(
+                name, self._expr_str_kind(operands[0]),
+                f"{name}({M.spelled(operands[0])})")
+            if why is not None:
+                raise CodegenError(why)
+            if direction is not None:
+                kind, info = direction, None
         if not operands:
             if name in M.STRING_TYPE_CTORS:
                 # `String()` is `String("")`, and the reason it can be is the
@@ -7726,6 +7961,26 @@ ctor_field_value=self._ctor_field_value_for(name),
                 if refusal:
                     raise CodegenError(refusal)
             return
+        if kind == M.FLOAT_FROM_INT:
+            # `float(x)` / `Float64(x)` over an integer: SCVTF, which ROUNDS
+            # to the nearest representable double (ties to even).  A shift or a
+            # multiply would not: `float(2**53 + 1)` is `9007199254740992.0` and
+            # the integer below it is `9007199254740992.0` as well, so the
+            # rounding is not something any integer arithmetic reproduces.
+            self.asm.emit(encode_scvtf_dn_xn(0, 0))
+            self.asm.emit(encode_fmov_v_to_gpr(0, 0))
+            return
+        if kind == M.FLOAT_TO_INT:
+            # `Int(x)` over a double: FCVTZS, which truncates TOWARD ZERO, and
+            # that is CPython's rule (`int(2.9)` is 2, `int(-2.9)` is -2).  A
+            # plain `MOV` of the bits would be the exponent field as an
+            # integer; `model.float_int_conversion_note` records the one input
+            # where this differs from CPython — a NaN or an infinity, where the
+            # hardware saturates and CPython raises — and why no static check
+            # can tell them apart.
+            self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+            self.asm.emit(encode_fcvtzs_xn_dn(0, 0))
+            info = M.INT_TYPE_CTORS[name]
         width, signed = info
         self._emit_extend(0, 0, IntType(width, signed))
 
@@ -10227,11 +10482,22 @@ ctor_field_value=self._ctor_field_value_for(name),
     def _emit_trunc(self, t) -> None:
         self._emit_extend(0, 0, t)
 
-    def _emit_cmp(self, l, r, unsigned_cond: str, signed_cond: str) -> None:
-        self._emit_expr(l)
-        self.asm.emit(encode_stp_sp_pre(0, 2))
-        self._emit_expr_to(r, "X1")
-        self.asm.emit(encode_ldp_sp_post(0, 2))
+    def _emit_cmp(self, l, r, unsigned_cond: str, signed_cond: str,
+                  float_reading=None) -> None:
+        """A comparison's VALUE: the compare, then a 0/1 in X0.
+
+        The floating half is the three-instruction window `_emit_fcmp_flags`
+        documents plus the `CSET`, and the `CSET` is what makes the NaN
+        behaviour observable rather than a claim: `a == b` is `FCMP` then
+        `CSET eq`, and an unordered compare clears Z, so a NaN compares unequal
+        to everything — which is CPython's rule and the opposite of what the
+        integer `EQ` would have said had the operands been compared as words.
+        """
+        if float_reading is not None:
+            self._emit_fcmp_flags(l, r)
+            self.asm.emit(encode_cset_xd_cond(0, unsigned_cond))
+            return
+        self._emit_cmp_operands(l, r)
         self.asm.emit(encode_cmp_xn_xm(0, 1))
         if cmp_signed(common_type(self._ttype(l), self._ttype(r))):
             self.asm.emit(encode_cset_xd_cond(0, signed_cond))

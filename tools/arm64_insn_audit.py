@@ -102,6 +102,12 @@ FAMILIES = (
     # gap list is what somebody works through next.
     "blr",
     "ubfx", "bfi", "bfxil", "ubfiz", "sbfiz", "ldrsw", "ccmp", "csel",
+    # IEEE-754 binary64, scalar: the arithmetic that has to reach the FP unit
+    # for a `double` to round at all, the compare that decides CPython's
+    # comparison semantics (which are NOT the integer ones, because an
+    # unordered compare has its own flags), and the two conversions that no
+    # arithmetic on the bit pattern can express.
+    "fadd", "fsub", "fmul", "fdiv", "fneg", "fcmp", "fmov", "scvtf", "fcvtzs",
     # our own private helpers, not architectural mnemonics
     "_emit", "movz", "bl", "br",
 )

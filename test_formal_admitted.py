@@ -1192,6 +1192,22 @@ LIBRARY_TRUST = {
     "Refine": (0, 0, 0, 0),
     "X86": (0, 0, 3, 3),
     "work": (0, 0, 0, 0),
+    # The binary64 semantics, added 2026-10-04 with `lib/IEEE754.lean`.  Zero
+    # `sorry` and zero `axiom` is the load-bearing column and it is the whole
+    # reason this module is separate from `ProofLib.lean`: the COMPARISONS are
+    # `UInt64`/`Bool` functions and every theorem about them is closed under
+    # `decide`, which is why they can be counted at 0 axiom-tactic sites.  The
+    # fourth column is a CEILING and not a measurement because the arithmetic
+    # theorems are `native_decide` over ground values and the number of them is
+    # whatever the next person adds — raise it in the same commit as the theorem
+    # rather than letting it fail, which is what a ceiling is for.
+    # The 19 is a MEASUREMENT and not a guess: it is `AXIOM_CLOSURE`'s `reaches`
+    # column for this module, read out of a real `#print axioms` run over all 24
+    # of its declarations.  The 5 that are kernel-checked are the comparison
+    # section, which is `UInt64`/`Bool` only — the split between the two halves
+    # of this module is the finding, and it is why the arithmetic's cost is
+    # bounded while the comparisons' is zero.
+    "IEEE754": (0, 0, 19, 19),
 }
 
 #: What the CLOSURE census measured, per module: how many theorems were asked,
@@ -1228,6 +1244,15 @@ AXIOM_CLOSURE = {
     "Refine": (22, 0, 20, 0, 2, 0),
     "X86": (73, 2, 69, 1, 1, 0),
     "work": (18, 0, 17, 0, 1, 0),
+    # Read out of a real `#print axioms` run over all 24 declarations of
+    # `lib/IEEE754.lean`, on the pinned toolchain.  19 reach a decide axiom and
+    # 5 are kernel-checked, and the 5 are exactly the COMPARISON section — the
+    # half that is `UInt64`/`Bool` and therefore closed under `decide`.  Zero
+    # `text_only` and zero `closure_only` because every `native_decide` site is
+    # also in its own closure and no theorem reaches an axiom through another
+    # one, which is the opposite of `ProofLib`'s `arm64_cset_*` row and is
+    # recorded as a contrast rather than left for a reader to infer.
+    "IEEE754": (24, 19, 5, 0, 0, 0),
 }
 
 
@@ -1262,6 +1287,51 @@ NATIVE_DECIDE_ALLOWED = {
             "`runExport backward_branch_image … 0 = none`, and the file's own "
             "docstring (5587) records that this is the ground case "
             "`native_decide` is there for.",
+    },
+    # The binary64 ARITHMETIC theorems, 19 of them, and the reason is a
+    # measurement rather than a preference: `Float.ofBits` and `Float.toBits`
+    # are COMPILED PRIMITIVES, so `decide` cannot reduce them.  Measured on
+    # `lib/IEEE754.lean` before this row existed: `decide` on
+    # `Float.toBits (Float.ofBits p) = p` gets stuck at the `UInt64.decEq`
+    # instance and reports "reduction got stuck", while the same proposition
+    # closes under `native_decide`.  So the alternatives were a `decide` that
+    # does not run, or a from-scratch bit-level IEEE implementation to have
+    # something decidable to check — a second implementation of arithmetic both
+    # machines already perform, with its own rounding bugs.
+    #
+    # They are all GROUND VALUES and that is what keeps the count at 19 rather
+    # than at a number nobody can bound: `AXIOM_CLOSURE`'s IEEE754 row is the
+    # measured per-theorem split (24 asked, 19 reach a decide axiom, 5
+    # kernel-checked — the 5 are the pure `UInt64`/`Bool` COMPARISONS, which is
+    # why the comparisons are modelled bit-level and the arithmetic is not).
+    "IEEE754": {
+        "IEEE754." + name: (
+            "a ground binary64 value statement over `Float.ofBits`/`toBits`, "
+            "which `decide` cannot reduce because they are compiled primitives "
+            "(measured on this file); the kernel-checkable half of the model is "
+            "the COMPARISON section, which is `UInt64`/`Bool` only"
+        )
+        for name in (
+            "ofBits_toBits_normalises_a_nan_payload",
+            "ofBits_toBits_round_trips_the_zeroes_and_the_ordinaries",
+            "signed_zeros_are_equal",
+            "the_two_zeros_are_equal_and_neither_orders",
+            "a_nan_is_not_equal_to_itself",
+            "negative_zero_plus_negative_zero_is_negative_zero",
+            "negative_zero_plus_positive_zero_is_positive_zero",
+            "additive_identity_on_an_ordinary",
+            "one_and_a_half_plus_two_and_a_quarter",
+            "a_tenth_plus_a_fifth_rounds",
+            "zero_over_zero_is_a_nan",
+            "one_over_zero_is_an_infinity",
+            "overflow_is_an_infinity",
+            "underflow_is_a_subnormal",
+            "fneg_of_positive_zero_is_negative_zero",
+            "fneg_is_an_involution",
+            "fromIntBits_of_2_pow_53_plus_1",
+            "fromIntBits_of_a_tie_rounds_up",
+            "fromIntBits_agrees_with_the_machine_on_a_tie",
+        )
     },
 }
 

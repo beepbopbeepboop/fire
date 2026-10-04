@@ -5752,6 +5752,30 @@ FRAME_KIND = "frame"
 # — `len`, a string method, a container index — must keep saying no.
 TYPE_KIND = "type"
 
+# An IEEE-754 BINARY64 — a `double` — as a KIND, which is new and is the whole
+# of what a `double` is on this path: **one 64-bit word holding its bit
+# pattern.**  Not a new storage: a parameter, a frame slot, a struct field, a
+# list element and a return value are all already one word, and that is why a
+# `Float64` local, a `Float64` parameter and a `Float64` struct field all work
+# without a word of change to the frame layout, the register allocator or the
+# spill code.  What the kind adds is the refusal: before it, every one of those
+# positions held an `INT_KIND` word, so `1.5 + 2.25` was `ADD` on two truncated
+# zeros and `x < y` on a pair of bits, and both BUILT.
+#
+# It is its own kind and not a row of `INT_KIND` for the reason `TYPE_KIND` is:
+# the two claim opposite things about the same word.  A word is either an
+# integer or the pattern of a double, and `is_number_kind` — the one predicate
+# that decides how a value PRINTS — must say no for this one, or `%d` reads a
+# double's exponent field as a decimal.
+#
+# **Scope: binary64 only.**  A `Float32` is four bytes with a different
+# exponent bias, and its bits are NOT a sub-pattern of a double's, so a word
+# holding one cannot be a `FLOAT_KIND` here: `Float32` is deliberately not in
+# `formal.types.FLOAT_TYPE_NAMES` and is refused by name rather than accepted
+# and misread.  `float16`/`bfloat16` and the `float8_*` family are the same
+# story.  See `bugs/FORMAL_float_binary64_only.md`.
+FLOAT_KIND = "float64"
+
 
 def is_number_kind(kind) -> bool:
     """Whether a value of this kind is printed as a NUMBER.
@@ -5764,6 +5788,293 @@ def is_number_kind(kind) -> bool:
     reason (two private copies of a decision disagreed about what a string is).
     """
     return kind in (INT_KIND, TYPE_KIND)
+
+
+# ── IEEE-754 binary64: the arithmetic, the comparisons, the conversions ────
+#
+# Everything a `double` needs that an integer word does not, in ONE place, read
+# by both backends.  The reason it is one place and not two private tables is
+# the one every other shared table in this file exists for and the one this
+# subject makes sharper than most: **the two architectures' floating-point
+# compare instructions report UNORDERED differently, so a per-backend choice of
+# condition code is a per-backend choice of what `a < b` means when one operand
+# is a NaN.**  CPython says every ordering comparison with a NaN is false and
+# `!=` is true.  The integer conditions would get `>` and `>=` backwards on
+# both machines, and `==` too on x86-64, and both would still BUILD.
+#
+# So what lives here is the DECISION, expressed in vocabulary neither backend
+# spells natively, and each backend has a small map from these names to its own
+# condition codes.  There is deliberately no `COND_*` constant in this table:
+# `formal/x86_64.py` imports this module, so a table naming x86 condition codes
+# would make the dependency run the wrong way.
+
+#: Which operand is the compare's FIRST one.  `a > b` is not `b < a` in the
+#: instruction stream, it is `FCMP b, a` followed by the same condition `a < b`
+#: uses — which is the whole trick, because the unordered flags make `>` and
+#: `>=` FALSE and every "unsigned greater" condition TRUE for them.
+FLOAT_FIRST_OPERAND = "left"
+FLOAT_SECOND_OPERAND = "right"
+
+#: The four readings of a floating compare's flags this path needs, named for
+#: what they MEAN rather than for the bit that reads them.  `LT` and `LE` are
+#: the only two that are FALSE for an unordered compare on both machines — which
+#: is the property that makes them the only two usable for CPython's ordering
+#: comparisons, and why `==`/`!=` are not built from them.
+FLOAT_LT = "less"
+FLOAT_LE = "less-or-equal"
+FLOAT_EQ = "equal"
+FLOAT_NE = "not-equal"
+
+#: Comparison operator -> (which operand the compare reads first, reading).
+#:
+#: The two rows that are not the identity are `>` and `>=`, and the reason is
+#: arithmetic rather than taste.  On both machines an unordered compare sets
+#: flags that read as "greater or equal" (`arm64`: `C=1`; x86-64: `CF=1`,
+#: `ZF=1`, `PF=1`), so `a > b` cannot be tested by anything that means
+#: "greater": it would be TRUE for a NaN, where CPython says FALSE.  Reading
+#: `b` against `a` first and asking the LESS question instead makes the
+#: unordered case answer false, because an unordered compare also clears the
+#: sign flag both machines' `less` conditions read.
+FLOAT_COMPARISONS = {
+    "<": (FLOAT_FIRST_OPERAND, FLOAT_LT),
+    "<=": (FLOAT_FIRST_OPERAND, FLOAT_LE),
+    ">": (FLOAT_SECOND_OPERAND, FLOAT_LT),
+    ">=": (FLOAT_SECOND_OPERAND, FLOAT_LE),
+    "==": (FLOAT_FIRST_OPERAND, FLOAT_EQ),
+    "!=": (FLOAT_FIRST_OPERAND, FLOAT_NE),
+}
+
+#: Binary operator -> the arm64/x86-64 mnemonic pair for it.  Both backends
+#: consult this and each picks its own column, because `+` is `ADD` for an
+#: integer and `FADD` for a double and the difference is the entire subject: the
+#: integer one adds two PATTERNS, which builds and answers a different number.
+#:
+#: `*` and `+` are the two operators whose INTEGER reading this overrides for a
+#: double, and `/` is the third; `%`, `//` and `**` are absent, which is the
+#: honest answer — CPython's `7.0 % 2` is `1.0` and `7.0 // 2` is `3.0`, both
+#: FLOOR operations on doubles that neither FP unit has an instruction for and
+#: that this path would have to spell.  `float_binary_refusal` is what says so,
+#: in the words a reader needs, instead of falling through to an integer divide
+#: that computes a truncation.
+FLOAT_BINARY_MNEMONICS = {
+    "+": ("fadd", "addsd"),
+    "-": ("fsub", "subsd"),
+    "*": ("fmul", "mulsd"),
+    "/": ("fdiv", "divsd"),
+}
+
+
+def float_binary_refusal(op: str, left_kind, right_kind, spelled_expr: str,
+                         left=None, right=None) -> str | None:
+    # `spelled_expr`, not `spelled`: the module-level `spelled()` reader spells
+    # the two OPERANDS and this message names both of them, and a parameter that
+    # shadows it is a `TypeError` in the middle of building a diagnostic —
+    # measured, on both architectures, as `neg_mod` and `neg_div_rem` failing
+    # with `'str' object is not callable` once `float_binary_refusal` was
+    # reached from a program with no float in it at all.  The name follows
+    # `string_binary_refusal`'s `spelled_op`, which is the same reason.
+    """Why this binary operation is not a double operation here, or None.
+
+    Three shapes, and the first two are MIXED operands rather than unsupported
+    ones.  `1.5 + 2` has no type on this path — `infer_expr` answers
+    `DEFAULT_INT_TYPE` for a `FloatLiteral` because a `FloatLiteral` has never
+    reached an arithmetic instruction — and picking a side would be a silent
+    wrong answer: promoting the literal would change `1e308 * 10.0` from an
+    infinity to a finite number, and truncating the double would change
+    `2.5 + 1` from `3.5` to `3`.  So a mixed pair is REFUSED, by name, which is
+    also what Mojo does (`Int64 + Float64` is a type error there, so a program
+    that reaches this is not the program its author wrote).
+
+    The third is the operator list above reaching its end: `%`, `//`, `**` and
+    the bitwise operators on a double are refused BY NAME, because the integer
+    lowering of each is reachable and would compute a truncation.  `7.0 // 2`
+    answered `3` as an integer divide, where CPython answers `3.0`.
+    """
+    if left_kind != FLOAT_KIND and right_kind != FLOAT_KIND:
+        # Not a float operation AT ALL, whatever the operator.  The condition is
+        # about the OPERANDS and not about `op`: it used to be guarded by
+        # `op in FLOAT_BINARY_MNEMONICS`, which meant every operator outside that
+        # table reached the refusal below with two integers in hand and named
+        # them an integer and a double in the same sentence.  Measured on both
+        # architectures as `neg_div_rem` and `neg_mod` — `a // 2` over two
+        # `Int`s — failing with a message that says "one side is an IEEE double"
+        # and then prints "a is an integer, 2 is an integer".
+        return None
+    if left_kind == FLOAT_KIND and right_kind == FLOAT_KIND:
+        if op in FLOAT_BINARY_MNEMONICS:
+            return None
+        return (
+            f"`{spelled_expr}` is an operation on two IEEE doubles "
+            f"that this path does not lower: `+`, `-`, `*` and `/` are, "
+            f"and `{op}` is not, "
+            f"because neither floating-point unit has an instruction for it "
+            f"and CPython's `{op}` on doubles is not the integer `{op}` — "
+            f"`7.0 {op} 2` is a floating-point answer, not a truncated one. "
+            f"Spelled as one of the four, or compute the floor explicitly.")
+    where = ("one side is an IEEE double and the other is an integer"
+             if (left_kind == FLOAT_KIND) != (right_kind == FLOAT_KIND)
+             else "an operand is an IEEE double")
+    spelled_left = spelled(left) if left is not None else "the left operand"
+    spelled_right = spelled(right) if right is not None else "the right operand"
+    return (
+        f"`{spelled_expr}` mixes types this path does not promote: {where} "
+        f"({spelled_left} is "
+        f"{_float_operand_word(spelled_left, left_kind)}, {spelled_right} is "
+        f"{_float_operand_word(spelled_right, right_kind)}). There is no "
+        f"implicit conversion between them here — picking a side would be a "
+        f"silent wrong answer, since promoting the integer rounds and "
+        f"truncating the double loses the fraction. Convert explicitly: "
+        f"`float(n)` for the integer, or `Int(x)` for the double.")
+
+
+def _float_operand_word(spelled: str, kind) -> str:
+    """`a double` / `an integer` — one reader, so the two rows cannot differ."""
+    if kind == FLOAT_KIND:
+        return "an IEEE double"
+    return ("an integer" if kind in (INT_KIND, TYPE_KIND)
+            else "a value of unestablished kind")
+
+
+def float_comparison(op: str, left_kind, right_kind):
+    """`(first_operand_is_left, reading)` for a double comparison, or None.
+
+    None means "this is not a double comparison", which is the ordinary answer
+    for every program with no `double` in it — so a backend asks this BEFORE
+    its integer path and the integer path is untouched when it says None.
+    """
+    if not (left_kind == FLOAT_KIND or right_kind == FLOAT_KIND):
+        return None
+    if op not in FLOAT_COMPARISONS:
+        return None
+    first, reading = FLOAT_COMPARISONS[op]
+    return (first == FLOAT_FIRST_OPERAND, reading)
+
+
+def float_unary_refusal(op: str, operand_kind, spelled: str,
+                        operand=None) -> str | None:
+    """Why this unary operation is not a double operation here, or None.
+
+    `-x` is the one that IS lowered, and it is worth saying why it needs its own
+    instruction rather than being `0.0 - x`: that expression is `+0.0` where
+    CPython's `-0.0` is `-0.0`, and the two compare EQUAL — so a differential
+    test that only exercises arithmetic would pass on a negation that is wrong
+    on the one value where signed zero is observable.
+    """
+    if operand_kind != FLOAT_KIND:
+        return None
+    if op == "-":
+        return None
+    return (
+        f"`{spelled}` is a unary operation on an IEEE double that this path "
+        f"does not lower: unary `-` is, and `{op}` is not, because a `double`'s "
+        f"truthiness and its bitwise complement are both questions about IEEE "
+        f"special values (a NaN is truthy where a nonzero integer is too, and "
+        f"`~x` on a bit pattern is not what the source means). Spelled "
+        f"differently, or say what the double means first.")
+
+
+def float_int_conversion_note() -> str:
+    """The one documented divergence from CPython in a double→int conversion.
+
+    `FCVTZS` and `CVTTSD2SI` SATURATE: a NaN or an infinity converts to
+    `INT64_MIN` (`0x8000000000000000`) rather than trapping, and CPython raises
+    (`ValueError` for a NaN, `OverflowError` for an infinity).  This path has no
+    exception machinery a conversion can raise through, and refusing the
+    conversion in general would refuse the 99.99% of it that is finite — so the
+    finite answers are exact and the two special inputs get the hardware's
+    saturation.  The inputs are not visible to the build: whether a name holds a
+    NaN is a run-time fact, so no static check can separate them, and this is a
+    divergence on an input rather than an approximation of one.
+    """
+    return ("a NaN or an infinity converts to INT64_MIN (the hardware's "
+            "saturating answer) where CPython raises ValueError / "
+            "OverflowError; this path has no exception to raise through, and "
+            "every finite value is exact")
+
+
+#: Type constructors whose VALUE is an IEEE double — `float(x)`, `Float64(x)`.
+#:
+#: `float` is here for the reason `int` and `str` are in `INT_TYPE_CTORS` /
+#: `IDENTITY_TYPE_CTORS`: it is a name the model compiles rather than a symbol
+#: libSystem defines, and left to the extern path `float(2)` became `BL _float`
+#: — an image the LINKER refused ("the image would bind 1 symbol(s) that
+#: nothing provides"), which is the honest failure but not a usable one.  Both
+#: spellings of the TYPE are here and `float` the PYTHON spelling, for the
+#: reason `INT_TYPE_CTORS` carries both `int` and `Int`: one declaration written
+#: two ways, and a table that knew one would answer differently for the two.
+FLOAT_TYPE_CTORS = ("float", "Float64", "float64")
+
+#: What a conversion between an integer and a double is called, in both
+#: directions.  Named rather than inlined because both backends branch on the
+#: answer and neither should be the one deciding what it means.
+FLOAT_TO_INT = "from-float"
+FLOAT_FROM_INT = "to-float"
+
+
+def float_conversion_lowering(callee_name: str, operand_kind, spelled: str):
+    """`("from-float" | "to-float" | None, refusal)` for a conversion call.
+
+    Two directions, and the asymmetry between them is the whole answer:
+
+    * an INTEGER type constructor over a `double` — `Int(x)`, `int(x)` — is
+      `FCVTZS`/`CVTTSD2SI`, truncating toward zero, which is CPython's rule.
+    * `float(x)` / `Float64(x)` over an INTEGER is `SCVTF`/`CVTSI2SD`, and over
+      a `double` is the IDENTITY — the bits are already the right ones and a
+      conversion would round a value that is exactly representable, which is a
+      no-op that can only lose the one input that is not (`float(nan)` stays a
+      NaN either way, so the identity is safe in both directions).
+
+    `None` with no refusal means "this is not a float conversion", which is the
+    answer for every ordinary `Int(x)` over an integer and lets the integer path
+    run untouched.
+    """
+    if callee_name in INT_TYPE_CTORS:
+        if operand_kind == FLOAT_KIND:
+            return (FLOAT_TO_INT, None)
+        return (None, None)
+    if callee_name not in FLOAT_TYPE_CTORS:
+        return (None, None)
+    if operand_kind == FLOAT_KIND:
+        return (None, None)                     # the identity, per above
+    if operand_kind in (INT_KIND, TYPE_KIND, None):
+        return (FLOAT_FROM_INT, None)
+    return (None,
+            f"`{spelled}` converts a {operand_kind} to an IEEE double, and "
+            f"there is no conversion from that kind to one on this path: the "
+            f"only two are an integer (SCVTF) and a double (the identity). "
+            f"Convert to an integer first, or say what the value is.")
+
+
+def float_literal_bits(value) -> int:
+    """The 64-bit IEEE-754 binary64 pattern of a Python float, as an unsigned int.
+
+    The one reader of a literal's bits, for both backends, because a literal
+    reaches the FP unit as an ordinary 64-bit immediate (`MOVZ`/`MOVK` on arm64,
+    `MOVABS` on x86-64) and the two must not disagree about which pattern a
+    source literal denotes.  `struct.pack` is the oracle rather than a hand
+    layout for the same reason the encoders are checked against an assembler:
+    it is the platform's own conversion.
+
+    A literal `int` or `bool` is accepted so a caller need not re-test, and
+    because CPython's `float(2)` is `2.0` — so a source that writes `2.0` in a
+    shape that has already been folded to an integer is asking for the same
+    number.
+    """
+    import struct as _struct
+    if isinstance(value, bool):
+        value = float(value)
+    elif isinstance(value, int):
+        value = float(value)
+    elif not isinstance(value, float):
+        raise ValueError(f"{value!r} is not a float literal")
+    # A Python float is C double, so this packs exactly the 64 bits a `double`
+    # is.  Overflow is `struct.error`, which is a compiler crash rather than a
+    # refusal — so the finite range is checked here, where it can be a message.
+    # `inf` and `nan` pack without complaint and are values the format has to
+    # carry: `0.0 / 0.0` is a NaN on both architectures and `printf("%f", ...)`
+    # prints it, so refusing them here would refuse a RESULT rather than a
+    # literal anybody wrote.
+    return int.from_bytes(_struct.pack(">d", value), "big")
 
 
 # ── Calls that are not calls to a symbol ──────────────────────────────────
@@ -6604,8 +6915,8 @@ def non_ascii_strings_in(stmts: list, limit: int = 32) -> list:
 
     A BYTES literal (`b"…"`) is not one of these, and a RAW string is not
     scanned at all: `b"\\xff"`'s bytes are a blob's element width rather than a
-    string's — a bytes blob is not a string on this path, see
-    `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md` — and a raw
+    string's — a bytes blob is not a string on this path, its constructor
+    element is ONE byte (`model.blob_elem_stride`, commit 37056734) — and a raw
     string's backslashes are content, so decoding it would invent the escapes it
     deliberately did not ask for.
     """
@@ -6723,9 +7034,9 @@ def codepoint_refusal(construct: str, spelled: str) -> str:
 # All three are in `FRAME_VALUE_ONLY_CALLS` already — a frame address handed to
 # any of them is a category error — and all three reached the LINKER as a
 # dangling symbol instead, because none of them is in `EMITTER_BUILTINS`.  That
-# is the wrong message four stages late, and it is the same shape as
-# `bugs/FORMAL_bytearray_and_bytes_have_no_representation.md`'s §"why the
-# message is the wrong one to stop at":
+# is the wrong message four stages late, and it is the shape the bytearray/bytes
+# representation question was filed for and then closed (commit 37056734) —
+# "the message you get is not the one that tells you what to do":
 #
 #   build: the image would bind 1 symbol(s) that nothing provides, so it could
 #   not be loaded: ord. … (Provider check: asked the C library (dlsym).)
@@ -9864,6 +10175,7 @@ TRUTHY_FROM_STRLEN = LEN_FROM_STRLEN            # `char *`      → strlen(s)
 TRUTHY_FROM_BLOB_FIELD = LEN_FROM_BLOB_FIELD    # list/tuple    → its count
 TRUTHY_NONZERO = "nonzero"                     # int, frame address, anything
                                                 #   else: the word itself
+TRUTHY_FLOAT = "float-nonzero"                 # an IEEE double: `x != +0.0`
 
 
 def truthy_lowering(kind, expr=None) -> str:
@@ -9888,6 +10200,20 @@ def truthy_lowering(kind, expr=None) -> str:
     `if range(3):` must be FALSE and `if range(0):` must be too, and the answer
     depends on what it lowers to rather than on what the kind says.
     """
+    if kind == FLOAT_KIND:
+        # A double is the ONE kind for which the word's own zeroness is not the
+        # value's zeroness, and it is worth being exact about why, because
+        # "the bits are nonzero" is right for almost every double and wrong for
+        # exactly one: `-0.0` is the bit pattern 0x8000000000000000, which is
+        # nonzero, and CPython says `bool(-0.0)` is False.  Every other value —
+        # every nonzero finite double, both infinities, and every NaN — has
+        # nonzero bits AND is truthy, so `TRUTHY_NONZERO` would be accidentally
+        # right for all of them and observably wrong for signed zero, which is
+        # the value a sign-manipulating program produces most often.  So this
+        # asks the FP unit: `FCMP` against `+0.0` and the NE reading, which is
+        # also what makes a NaN truthy (CPython agrees, and an unordered
+        # compare is exactly the "not equal to anything" answer).
+        return TRUTHY_FLOAT
     how = len_operand_lowering(kind, expr)
     return how if how is not None else TRUTHY_NONZERO
 
@@ -10136,7 +10462,7 @@ def _frame_slot_string_refusal(spelled: str, ann) -> str:
 
 
 def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
-                       bool_names=(), dtype_names=()):
+                       bool_names=(), dtype_names=(), float_names=()):
     """The kind a DECLARED type annotation gives, or None for one we cannot map.
 
     The one question `struct_field_kind` and its callers ask, and it is
@@ -10171,6 +10497,15 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
     "is this holder / this export a TEXT value", where a type tag is not text
     and both already answer `None` for want of a vocabulary.
 
+    `float_names` is the FIFTH vocabulary and it DOES produce a kind of its own,
+    `FLOAT_KIND` — the first new one since `TYPE_KIND`, and the reason it is a
+    separate argument rather than another row of `int_names` is that a `double`
+    is a word that must NOT be read as an integer: `is_number_kind` has to say
+    no for it, or `%d` renders a double's exponent field as a decimal, and
+    every arithmetic site has to know it is looking at a pattern rather than a
+    value.  See `FLOAT_KIND` for the measurement that a `FloatLiteral` reading
+    as `INT_KIND` built and answered `0` where CPython answers `3.75`.
+
     `bool_names` is the THIRD vocabulary and it does not produce a kind of its
     own: a `Bool` on this path is a word holding 0 or 1, so its kind IS
     `INT_KIND` — which is what `_kind_of_simple` already says about a
@@ -10203,6 +10538,8 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None,
         return None
     if base in string_names:
         return STR_KIND
+    if base in float_names:
+        return FLOAT_KIND
     if base in bool_names:
         return INT_KIND
     if base in int_names:
@@ -10278,7 +10615,7 @@ def annotation_is_bool(ann, bool_names=()) -> bool:
 
 
 def struct_field_kind(struct_def, name, int_names=(), string_names=(),
-                      decls=None, dtype_names=()):
+                      decls=None, dtype_names=(), float_names=()):
     """The kind `struct_def`'s field `name` HOLDS, or None when it does not say.
 
     One `StructDef`, so there is no agreement to check: the declaration is the
@@ -10321,7 +10658,8 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     if base is None:
         return None
     kind = declared_type_kind(ann, int_names, string_names, decls,
-                              dtype_names=dtype_names)
+                              dtype_names=dtype_names,
+                              float_names=float_names)
     if kind is None or kind == FRAME_KIND:
         return kind
     default, _payload = struct_field_default(struct_def, name)
@@ -10530,7 +10868,7 @@ def frame_slot_field_is_dict(candidates, name, dict_names=(), decls=None):
 
 
 def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
-                          decls=None, dtype_names=()):
+                          decls=None, dtype_names=(), float_names=()):
     """The kind a FRAME SLOT's field holds, agreed over the holder's candidates.
 
     The agree-or-refuse rule, applied to the question the kind tables ask, and
@@ -10556,7 +10894,7 @@ def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
     if ann is None:
         return None
     kinds = {struct_field_kind(st, name, int_names, string_names, decls,
-                              dtype_names)
+                              dtype_names, float_names)
              for st in cands}
     kinds.discard(None)
     return kinds.pop() if len(kinds) == 1 else None
@@ -10586,7 +10924,7 @@ def method_owner_struct(structs, fn_name):
 
 
 def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
-                           decls=None, dtype_names=()):
+                           decls=None, dtype_names=(), float_names=()):
     """The kind a ONE-WORD struct's receiver word holds, or None.
 
     The receiver of a struct with exactly one field IS that field — `self.<f>`
@@ -10608,7 +10946,7 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     if only is None:
         return None
     return struct_field_kind(struct_def, only, int_names, string_names,
-                             decls, dtype_names)
+                             decls, dtype_names, float_names)
 
 
 def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
@@ -11684,10 +12022,27 @@ POINTEES_REFUSED = {
                "float kind distinct from an int, so the load would put float "
                "bits in a register the program then treats as an integer — a "
                "wrong answer, not an approximation",
-    "Float64": "a Float64 is eight bytes of IEEE binary64 and this path has no "
-               "float kind distinct from an int (the same absence that refuses "
-               "__mlir_bool__), so the load would put float bits in a register "
-               "the program then treats as an integer",
+    # **CORRECTED 2026-10-04.** This row said "this path has no float kind
+    # distinct from an int", which was true and is not any more: `FLOAT_KIND`
+    # landed with the binary64 arithmetic, and a `Pointer[Float64]` dereference
+    # is bit-exact — one word holding the bit pattern, loaded with the same
+    # `LDR` an integer pointee uses.  The load is therefore still REFUSED, and
+    # for a reason that is about the CALL SITE rather than about the value: what
+    # a pointer dereference yields here is a word, and whether that word is an
+    # integer or a double is decided by the CONTEXT it lands in, and a context
+    # that has established neither answers `int` — so `Int(p.value())` on a
+    # double would read the exponent field.  Answering it means making the
+    # pointee's kind flow into the dereference and every context around it,
+    # which is a separate change; `bugs/FORMAL_float_pointer_pointee.md` is that
+    # work and this row is its starting state.  A row whose stated reason is
+    # FALSE is worse than an absent one, because the reader who finds it cannot
+    # tell which half of it still holds.
+    "Float64": "a Float64 is eight bytes of IEEE binary64 and the LOAD is "
+               "bit-exact — one word holding the bit pattern — but this "
+               "dereference path yields a word whose KIND is decided by the "
+               "context it lands in, and a context that has established none "
+               "answers `int`, so `Int(p.value())` would read the exponent "
+               "field; see bugs/FORMAL_float_pointer_pointee.md",
     "SIMD": "a SIMD is n words and a formal value is one, so the load would "
             "have to drop n-1 of them; SIMD[dtype, 1] reduces to its scalar "
             "and is the only arity answerable here",
@@ -17346,9 +17701,25 @@ def _kind_of_call(callee: str, kind_int_call) -> str | None:
     return kind_int_call
 
 
-def _kind_of_elements(elems) -> str | None:
-    """The kind every element of a container literal has, or None."""
-    kinds = {_kind_of_simple(el) for el in elems}
+def _kind_of_elements(elems, resolve=None) -> str | None:
+    """The kind every element of a container literal has, or None.
+
+    `resolve` is an OPTIONAL second reader, asked only about an element that is
+    a bare NAME — which `_kind_of_simple` cannot classify because a name has no
+    shape. It is what makes `[a, b]` with `a`/`b` locals of known kind answer at
+    all, and the case that needs it is `FLOAT_KIND`: `rows = [zero, one, nan]`
+    classifies as a blob of UNKNOWN element, so `rows[0] > 1.0` compared two bit
+    patterns as unsigned integers and answered `nan > 1.0` TRUE, measured on
+    both architectures. The same hole was there for a list of strings and is why
+    this is a reader and not a `FLOAT` special case.
+    """
+    kinds = set()
+    for el in elems:
+        k = _kind_of_simple(el)
+        if k is None and resolve is not None and isinstance(el, F.IdentExpr):
+            k = resolve(el.name)
+        if k is not None:
+            kinds.add(k)
     kinds.discard(None)
     if not kinds:
         return None
@@ -17550,7 +17921,14 @@ def _kind_of_simple(e) -> str | None:
     """The kind of an expression that needs nothing but itself to classify."""
     if isinstance(e, F.StringLiteral):
         return STR_KIND
-    if isinstance(e, (F.IntLiteral, F.BoolLiteral, F.FloatLiteral)):
+    if isinstance(e, F.FloatLiteral):
+        # A float literal is the ONE expression whose kind is its own syntax:
+        # there is no declaration to read and no name to trace, so the literal
+        # is the only evidence there is.  It was `INT_KIND`, which is what made
+        # `1.5 + 2.25` an `ADD` of two truncated zeros — a green build
+        # answering `0` where CPython answers `3.75`.
+        return FLOAT_KIND
+    if isinstance(e, (F.IntLiteral, F.BoolLiteral)):
         return INT_KIND
     if isinstance(e, F.UnaryOp):
         if e.op == "not":
@@ -17771,16 +18149,33 @@ class ValueKinds:
         binding evidence has said nothing, and a `None` leaves every existing
         decision exactly where it was.  See `frame_slot_field_is_dict` for why
         this carries no value gate and `is_dict_value` for where it is read.
+      * `float_names` — the vocabulary that makes a FLOAT a float rather than
+        the word an integer is, and the only hook whose PRESENCE changes a
+        default rather than refining one: an annotated parameter whose type is
+        in it is `FLOAT_KIND`, where every other entry here either sets a kind
+        from None or refines `INT_KIND`.  An `x: Float64` parameter arrives from
+        the caller as one word, so the annotation is the only evidence there is
+        of what those bits mean — the same argument `string_names` makes for
+        `STR_KIND`.  Empty (the default) leaves every existing decision exactly
+        where it was, which is why it is a hook and not a derivation.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
                  param_kind=None, declared_is_dict=None,
-                 callee_returns_value=None):
+                 callee_returns_value=None, float_names=()):
         self._int_names = frozenset(int_names)
         self._fn = fn
         self._string_names = frozenset(string_names)
+        # The THIRD vocabulary, and the only one whose presence changes a
+        # default rather than refining one: an ANNOTATED parameter in
+        # `float_names` is `FLOAT_KIND` (below), while every other vocabulary
+        # entry here either sets a kind from None or refines `INT_KIND`. An
+        # `x: Float64` parameter arrives from the caller as one word, so the
+        # annotation is the only evidence there is of what those bits mean —
+        # the same argument `STR_KIND`'s seeding below makes.
+        self._float_names = frozenset(float_names)
         self._func_kind = func_kind or (lambda name: None)
         self._param_kind = param_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
@@ -17866,6 +18261,8 @@ class ValueKinds:
         # field's declared kind and not "a word, therefore an integer".  A name
         # the BODY bound is a different question: flow decided it, and flow
         # wins.
+        # The recursion cut-off `_element_kind_in_flow` uses; see that method.
+        self._resolving = False
         self._param_names: set = set()
         for pname, pann in _param_list(fn):
             self._param_names.add(pname)
@@ -17881,6 +18278,8 @@ class ValueKinds:
             # the calls — which is why the hook is asked only in the `else`.
             if pann in self._string_names:
                 self.locals[pname] = STR_KIND
+            elif pann in self._float_names:
+                self.locals[pname] = FLOAT_KIND
             elif pann:
                 self.locals[pname] = INT_KIND
             else:
@@ -18048,6 +18447,8 @@ class ValueKinds:
             return None
         if text in self._string_names:
             return STR_KIND
+        if text in self._float_names:
+            return FLOAT_KIND
         if text in self._int_names:
             return INT_KIND
         return None
@@ -18601,6 +19002,39 @@ class ValueKinds:
             return dict_literal_key_kind(self._dict_inits.get(iterable.name))
         return None
 
+    def _element_kind_in_flow(self, elems):
+        """The element kind of a container literal, resolving NAME elements.
+
+        The instance method `_kind_of_elements` needs, and the reason it exists
+        separately is the recursion: `kind_of` asks this, and this asks
+        `name_kind`, so a literal that mentions a name bound FROM a literal of
+        the same shape has to be cut off rather than followed. `_resolving` is
+        that cut-off, and an element that is being resolved contributes nothing
+        — which is the conservative direction, the same one `_kind_of_elements`
+        already takes for an element it cannot classify.
+        """
+        if self._resolving:
+            return _kind_of_elements(elems)
+        self._resolving = True
+        try:
+            return _kind_of_elements(elems, self._name_kind_not_in_flight)
+        finally:
+            self._resolving = False
+
+    def _name_kind_not_in_flight(self, name):
+        """`name_kind` for a name read WHILE a container literal is being typed.
+
+        A name this function's own statements have bound to two different kinds
+        is undecidable, and `name_kind` already answers None for it — so the
+        only thing this adds is the `_conflicts` check for the case where a name
+        is bound to a list of UNKNOWN element and to something else, and
+        answering a kind from the other binding would claim an element type the
+        container does not have.
+        """
+        if name in self._conflicts:
+            return None
+        return self.name_kind(name)
+
     def _return_kind(self, fn) -> str | None:
         ann = getattr(fn, "return_type", None)
         if ann in self._int_names:
@@ -18906,7 +19340,11 @@ class ValueKinds:
             # `_unify` is the same join every other two-armed form above uses.
             return _unify(self.kind_of(e.then_val), self.kind_of(e.else_val))
         if isinstance(e, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-            return list_kind(_kind_of_elements(e.elements))
+            # `self._element_kind_in_flow` and not `_kind_of_elements` bare, so a
+            # literal whose elements are NAMES is classified from this function's
+            # own bindings. Recursion-guarded, because `x = [x]` would otherwise
+            # ask a name's kind while that name's kind is being computed.
+            return list_kind(self._element_kind_in_flow(e.elements))
         if isinstance(e, F.SliceExpr):
             # A slice is a NEW BLOB holding the selected elements, so its kind
             # is the sliced expression's kind narrowed to its element kind —
@@ -20687,12 +21125,18 @@ def type_constructor_kind(callee_name: str):
     """How to lower a call whose callee is the bare name `callee_name`, or None.
 
     'int' -> (width, signed): normalize the single operand to that type.
+    'to-float' -> the value becomes an IEEE double (SCVTF over an integer); the
+      direction the operand's own kind then decides is
+      `float_conversion_lowering`'s, because "is this operand already a double"
+      is a question about the call SITE and not about the callee's name.
     'identity' -> pass the single operand through.
     'unsupported' -> a real type this path cannot represent; the backend turns
     that into a clear error rather than a dangling extern.
     None -> not a type constructor at all (a genuine function call)."""
     if callee_name in INT_TYPE_CTORS:
         return ("int", INT_TYPE_CTORS[callee_name])
+    if callee_name in FLOAT_TYPE_CTORS:
+        return (FLOAT_FROM_INT, None)
     if callee_name in IDENTITY_TYPE_CTORS:
         return ("identity", None)
     if callee_name in UNREPRESENTABLE_TYPE_CTORS:

@@ -154,6 +154,40 @@ def cases():
         # cannot be masked by the all-zero operand the sweep above uses.
         for (xd, xn, sh) in ((5, 7, 12), (30, 31, 63), (1, 2, 33)):
             c.append((f"{mn} x{xd}, x{xn}, #{sh}", enc(xd, xn, sh)))
+    # ── IEEE-754 binary64, scalar ────────────────────────────────────────
+    #
+    # Every operation over four register triples rather than one, because these
+    # are three-field encodings whose fields sit in different places from the
+    # integer ALU's: `fadd d0, d0, d1` and `fadd d0, d0, d1` differ in the
+    # RESULT only, so a base word with `Rm` in `Rn`'s slot produces exactly
+    # that instruction for every one of them and no single case sees it.
+    #
+    # The operand sets are chosen for what they are rather than for coverage:
+    # (0, 0, 0) is the all-zero operand a misplaced field hides behind, (8, 9,
+    # 10) is the high V-file triple where a field landing in bit 20..16 instead
+    # of bit 4..0 becomes visible as a wrong register, and XZR (31) is what
+    # makes `fmov d0, xzr` — the one-instruction `+0.0` — reachable at all.
+    for (dd, dn, dm) in ((0, 0, 0), (0, 0, 1), (8, 9, 10), (2, 31, 30)):
+        for enc, mn in ((A.encode_fadd_dd_dn_dm, "fadd"),
+                        (A.encode_fsub_dd_dn_dm, "fsub"),
+                        (A.encode_fmul_dd_dn_dm, "fmul"),
+                        (A.encode_fdiv_dd_dn_dm, "fdiv")):
+            c.append((f"{mn} d{dd}, d{dn}, d{dm}", enc(dd, dn, dm)))
+        # The destination-aliases-a-source case: two-operand read-before-write
+        # means `fadd d0, d0, d1` is the shape the emitter emits.
+        c.append((f"fadd d{dd}, d{dd}, d{dm}",
+                  A.encode_fadd_dd_dn_dm(dd, dd, dm)))
+    for (dd, dn) in ((0, 1), (0, 0), (8, 9), (5, 31)):
+        c.append((f"fneg d{dd}, d{dn}", A.encode_fneg_dd_dn(dd, dn)))
+        c.append((f"fcmp d{dd}, d{dn}", A.encode_fcmp_dn_dm(dd, dn)))
+    for (dd, xn) in ((0, 0), (0, 1), (0, 31), (8, 9), (7, 30)):
+        c.append((f"fmov d{dd}, x{xn}", A.encode_fmov_gpr_to_v(dd, xn)))
+    for (xd, dn) in ((0, 0), (0, 1), (31, 0), (9, 8), (30, 7)):
+        c.append((f"fmov x{xd}, d{dn}", A.encode_fmov_v_to_gpr(xd, dn)))
+    for (dn, xn) in ((0, 0), (0, 1), (8, 9), (1, 31)):
+        c.append((f"scvtf d{dn}, x{xn}", A.encode_scvtf_dn_xn(dn, xn)))
+    for (xd, dn) in ((0, 0), (0, 1), (9, 8), (30, 7)):
+        c.append((f"fcvtzs x{xd}, d{dn}", A.encode_fcvtzs_xn_dn(xd, dn)))
     return c
 
 

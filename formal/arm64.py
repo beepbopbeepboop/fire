@@ -1130,3 +1130,184 @@ def encode_add_xd_xn_imm_sh(xd: int, xn: int, imm12: int, sh: int = 0) -> bytes:
     assert 0 <= imm12 <= 0xFFF
     insn = 0x91000000 | (sh << 22) | (imm12 << 10) | (xn << 5) | xd
     return struct.pack('<I', insn)
+
+
+# ── IEEE-754 binary64, the SCALAR forms ──────────────────────────────────
+#
+# A `double` on this path is ONE 64-bit word holding its bit pattern, which is
+# why a float needs no new storage anywhere: a parameter, a struct field, a
+# list element and a return value are all already words.  What does need new
+# instructions is ARITHMETIC, because the word has to reach the machine's
+# floating-point unit for the operation to round, propagate NaN and produce
+# infinities at all — `ADD` on two bit patterns adds the PATTERNS, which is a
+# different number.
+#
+# The register discipline this section exists to state: **a double's bits live
+# in the general register file between operations and in V0..V7 only across
+# one.**  Both files are 64 bits wide, `FMOV` moves a pattern between them
+# without touching a bit of it, and V0..V7 are caller-saved on AAPCS, so the
+# window has to be short — which is exactly the shape of one instruction.  The
+# consequence is that everything else on this path (spills, frames, struct
+# fields, the register allocator) keeps working on a double with no change,
+# and it is why the Lean model needs V0..V7 and nothing else.
+#
+# Every encoding here is checked against `as -arch arm64` by
+# `test_arm64_encoders.py`, which is the oracle rather than a hand-derived bit
+# layout.  Register numbers: the `d` operands name the V file by number and are
+# 0..31 (`XZR` is 31 for the general side, which is what makes a zero constant
+# one instruction).
+
+#: The base word `as` produces for each scalar double operation, with `Rm` in
+#: bits 20..16, `Rn` in bits 9..5 and `Rd` in bits 4..0.  One function per
+#: operation rather than one taking the mnemonic, because every other encoder in
+#: this file is one instruction with one name and
+#: `tools/arm64_insn_audit.py` maps an encoder to a base MNEMONIC by its name —
+#: a single `encode_fp_alu` covering five mnemonics maps to none of them, and
+#: every one of the five then reads as a gap the backend cannot close.
+ARM64_FP_BASES = {
+    "fadd": 0x1E602800,
+    "fsub": 0x1E603800,
+    "fmul": 0x1E600800,
+    "fdiv": 0x1E601800,
+    "fneg": 0x1E614000,
+}
+
+
+def _encode_fp_three(op: str, dd: int, dn: int, dm: int) -> bytes:
+    """`Dd op= Dn, Dm` for the four three-operand scalar double operations.
+
+    Both sources are read before the destination is written, so `dd` may be
+    either of them (`fadd d0, d0, d1` is what the emitter needs and is what `as`
+    produces).
+    """
+    assert op in ARM64_FP_BASES, op
+    assert 0 <= dd <= 31 and 0 <= dn <= 31 and 0 <= dm <= 31
+    return struct.pack('<I', ARM64_FP_BASES[op] | (dm << 16) | (dn << 5) | dd)
+
+
+def encode_fadd_dd_dn_dm(dd: int, dn: int, dm: int) -> bytes:
+    """FADD Dd, Dn, Dm — `Dd = Dn + Dm` on doubles, IEEE-754 binary64.
+
+    This and its three siblings are the arithmetic a `double` needs and an
+    integer word does not have: the result is ROUNDED to the nearest
+    representable double (round-to-nearest-even, ties to even), a NaN operand
+    propagates rather than becoming a number, and an overflow becomes an
+    infinity. Adding two bit patterns gives a third bit pattern, which is a
+    different number, and it is what this backend used to compute for a float
+    `+`.
+    """
+    return _encode_fp_three("fadd", dd, dn, dm)
+
+
+def encode_fsub_dd_dn_dm(dd: int, dn: int, dm: int) -> bytes:
+    """FSUB Dd, Dn, Dm — `Dd = Dn - Dm` on doubles. See `encode_fadd_dd_dn_dm`."""
+    return _encode_fp_three("fsub", dd, dn, dm)
+
+
+def encode_fmul_dd_dn_dm(dd: int, dn: int, dm: int) -> bytes:
+    """FMUL Dd, Dn, Dm — `Dd = Dn * Dm` on doubles. See `encode_fadd_dd_dn_dm`."""
+    return _encode_fp_three("fmul", dd, dn, dm)
+
+
+def encode_fdiv_dd_dn_dm(dd: int, dn: int, dm: int) -> bytes:
+    """FDIV Dd, Dn, Dm — `Dd = Dn / Dm` on doubles. See `encode_fadd_dd_dn_dm`.
+
+    Division is the operation with no table to check it against in the way
+    `+` has one: `1.0/0.0` is `+inf`, `0.0/0.0` is NaN, and `x/0.0` is where
+    CPython raises `ZeroDivisionError`. Refusing the constant divisor is
+    `formal/model.py`'s decision and not the encoder's, because whether a
+    divisor is zero is a fact about the program and only a REFUSAL can say so
+    before the program runs.
+    """
+    return _encode_fp_three("fdiv", dd, dn, dm)
+
+
+def encode_fneg_dd_dn(dd: int, dn: int) -> bytes:
+    """FNEG Dd, Dn — the double in `Dn` with its sign bit flipped.
+
+    Its own instruction and NOT `FSUB Dd, DZR, Dn`, which computes the right
+    number for every input except the one that matters: `0.0 - 0.0` is `+0.0`
+    where CPython's `-0.0` is `-0.0`. The two compare EQUAL, so a program that
+    only compares them cannot tell, and dividing by either gives a different
+    answer — which is the shape of a bug that survives a differential test on
+    arithmetic and appears on a special value.
+
+    Note that this one takes its source in `Rn` and has no `Rm`, which is the
+    same field arrangement `FMOV` uses and not the one the other four use.
+    """
+    assert 0 <= dd <= 31 and 0 <= dn <= 31
+    return struct.pack('<I', ARM64_FP_BASES["fneg"] | (dn << 5) | dd)
+
+
+def encode_fcmp_dn_dm(dn: int, dm: int) -> bytes:
+    """FCMP Dn, Dm — the flag-setting scalar double compare, no result.
+
+    Flags only, like the integer `CMP`, so a conditional branches on them
+    directly and a value site `CSET`s from them — the same split
+    `encode_cmp_xn_xm` and `encode_cset_xd_cond` make for integers.
+
+    **The flags on NaN are the whole reason the condition this feeds is not the
+    integer one.**  IEEE-754 unordered, and ARM's encoding of it, is
+    `NZCV = 0011`: `N=0, Z=0, C=1, V=1`.  So of the integer conditions,
+    `HI`/`CS` (C=1) are TRUE for an unordered compare and `CC`/`LS` (C=0)
+    FALSE.  `a > b` is `HI`, which would make every comparison with a NaN
+    true — so `float_condition` below chooses conditions from the other half of
+    the flag set, where unordered reads as "false", and swaps the operands for
+    the two that need it.  The comparison semantics are decided in
+    `formal/model.py`, once, for both backends.
+    """
+    assert 0 <= dn <= 31 and 0 <= dm <= 31
+    return struct.pack('<I', 0x1E602000 | (dm << 16) | (dn << 5))
+
+
+def encode_fmov_gpr_to_v(dd: int, xn: int) -> bytes:
+    """FMOV Dd, Xn — the word's bits into the floating-point file, unchanged.
+
+    A MOVE, not a conversion: this is the instruction a double's storage and its
+    arithmetic share, and it is why the representation can be "one word holding
+    the bit pattern" without a second one to keep in step.  `xn` may be 31
+    (`XZR`), which is `+0.0` as a double — one instruction instead of a
+    materialised zero.
+    """
+    assert 0 <= dd <= 31 and 0 <= xn <= 31
+    return struct.pack('<I', 0x9E670000 | (xn << 5) | dd)
+
+
+def encode_fmov_v_to_gpr(xd: int, dn: int) -> bytes:
+    """FMOV Xd, Dn — the other direction of `encode_fmov_gpr_to_v`.
+
+    The instruction to read when a `double` leaves an expression: the codegen's
+    contract is that an expression leaves its value in X0, so a float-valued
+    expression has to end here or every caller downstream reads a stale word.
+    """
+    assert 0 <= xd <= 31 and 0 <= dn <= 31
+    return struct.pack('<I', 0x9E660000 | (dn << 5) | xd)
+
+
+def encode_scvtf_dn_xn(dn: int, xn: int) -> bytes:
+    """SCVTF Dn, Xn — the signed 64-bit integer in `Xn` as a double.
+
+    The int-to-float half of `float(x)`, and the reason it is not a load of a
+    constant: a double's bits are not derivable from an integer's by any
+    arithmetic this model performs, so the conversion has to be asked of the
+    machine.  Rounding is round-to-nearest-even, which is what CPython's
+    `float(2**53 + 1)` answers and what a truncating shift would not.
+    """
+    assert 0 <= dn <= 31 and 0 <= xn <= 31
+    return struct.pack('<I', 0x9E620000 | (xn << 5) | dn)
+
+
+def encode_fcvtzs_xn_dn(xd: int, dn: int) -> bytes:
+    """FCVTZS Xd, Dn — the double in `Dn` truncated toward zero into an integer.
+
+    The float-to-int half of `int(x)`, and "toward zero" is what makes it
+    CPython's: `int(2.9)` is 2 and `int(-2.9)` is -2, so this agrees with the
+    language.  Note that the name encodes the SATURATION a conversion out of
+    range performs — a NaN or an infinity becomes `0x8000000000000000` rather
+    than trapping, which is the one documented divergence from CPython (which
+    raises); `formal/model.py::float_int_conversion_note` is where that is
+    stated, and it is a divergence in an input this path cannot see, not an
+    approximation of one it can.
+    """
+    assert 0 <= xd <= 31 and 0 <= dn <= 31
+    return struct.pack('<I', 0x9E780000 | (dn << 5) | xd)

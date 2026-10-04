@@ -13882,10 +13882,9 @@ POINTER_DEREF_REFUSALS = [
      "    t.b = 22\n"
      "    return read_field(t)\n",
      "refuse:a STRUCT, and a struct's value on this path is a frame ADDRESS", None),
-    # A FLOAT pointee.  A formal value has no float kind distinct from an int
-    # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
-    # would put IEEE binary32 bits in a register the program then treats as an
-    # integer — a wrong answer, not an approximation.
+    # A BINARY32 pointee.  "no float kind distinct from an int" is TRUE of it and
+    # only of it: `FLOAT_KIND` is binary64, and a `Float32`'s four bytes are not
+    # a double's eight, so a word holding one still has no kind here.
     ("deref_refuse_float_pointee",
      "def read_f(p: Pointer[Float32]) -> Int:\n"
      "    return Int(p.value())\n"
@@ -13893,6 +13892,24 @@ POINTER_DEREF_REFUSALS = [
      "    var s = \"ABCDEFGH\"\n"
      "    return read_f(s)\n",
      "refuse:this path has no float kind distinct from an int", None),
+    # A BINARY64 pointee, and the row that says why it is refused when its LOAD
+    # is not the problem.  It used to be refused for the same words as the row
+    # above, which became FALSE the moment `FLOAT_KIND` landed: the load of a
+    # `Float64` is one word holding the bit pattern, and it is bit-exact — it is
+    # an `LDR` of eight bytes.  What is missing is that the DEREFERENCE yields a
+    # word whose kind the context decides, and a context that has established
+    # none answers `int`, so `Int(p.value())` here would read the exponent
+    # field.  A row whose stated reason the tree no longer believes is worse
+    # than a missing row: nothing reports it, and the reader cannot tell which
+    # half of the sentence still holds.  `bugs/FORMAL_float_pointer_pointee.md`
+    # is the work that would let the load through.
+    ("deref_refuse_a_binary64_pointee_for_a_different_reason",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_f(s)\n",
+     "refuse:the LOAD is bit-exact", None),
     # A BLOB pointee.  A list is a frame whose FIRST word is its count, so a
     # load at the address would answer with the LENGTH — a plausible number the
     # source never wrote, which is the outcome this table exists to prevent.
@@ -15182,6 +15199,470 @@ SET_UNION_CASES = [
      "        s += v\n"
      "        k += 1\n"
      "    print(\"%d %d %d\" % (len(c), k, s))\n"),
+]
+
+
+# ── IEEE-754 binary64, diffed against CPython ───────────────────────────────
+#
+# Every float answer this backend can get wrong is a value a hand-written
+# expectation would have to have been derived from the same wrong reasoning to
+# get wrong the same way: the rounding of `0.1 + 0.2`, the sign of `0.0 - 0.0`,
+# what a NaN compares greater than, whether `-0.0` is truthy, whether
+# `9007199254740995` rounds up or down. So these are CPython-pair cases rather
+# than four-column ones, and the group is diffed on BOTH architectures because
+# the two machines' floating-point COMPARE instructions report an unordered
+# result differently — `FCMP` sets `NZCV=0011` and `UCOMISD` sets `ZF=PF=CF=1`
+# — so a per-backend choice of condition code would be a per-backend choice of
+# what `a < b` means when one operand is a NaN, and both would BUILD.
+#
+# **What a `double` is here**, and it is why no case needs new storage: one
+# 64-bit word holding its bit pattern. A parameter, a frame slot, a struct
+# field, a list element and a return value are all already words, which is why
+# `through_a_field_and_a_call` is a case about the representation and not a
+# formality, and why nothing in this file's other 600 rows had to change.
+#
+# **Why the `%.17g` format**: it prints every bit of a double round-trippably,
+# so the case compares the exact value rather than a rendering. `%f` would hide
+# the difference between `0.1 + 0.2` and `0.3` at six places and pass it.
+FLOAT_CASES = [
+    # ── arithmetic: the rounding each operation has to perform ───────────────
+    ("float_add_two_literals",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 1.5 + 2.25)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (1.5 + 2.25))\n"),
+    ("float_add_rounds",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 0.1 + 0.2)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (0.1 + 0.2))\n"),
+    ("float_sub_is_negative",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 1.5 - 2.5)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (1.5 - 2.5))\n"),
+    ("float_mul_rounds",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 0.1 * 0.2)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (0.1 * 0.2))\n"),
+    ("float_div_rounds",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 1.0 / 3.0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (1.0 / 3.0))\n"),
+    ("float_div_three_sevenths",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 3.0 / 7.0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (3.0 / 7.0))\n"),
+    # Round-to-nearest-EVEN, which neither a truncating shift nor round-half-away
+    # reproduces.  2**53 + 1 is the first integer a double cannot hold, and
+    # 2**53 + 3 is a tie that rounds UP under ties-to-even.  Both are
+    # `SCVTF`/`CVTSI2SD` questions, and a lowering that widened by a shift
+    # would answer the same integer for both.
+    ("float_of_the_first_unrepresentable_integer",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", float(9007199254740993))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % float(9007199254740993))\n"),
+    ("float_of_a_rounding_tie_rounds_up",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", float(9007199254740995))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % float(9007199254740995))\n"),
+    ("float_of_a_negative_large_integer",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", float(0 - 9007199254740993))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % float(-9007199254740993))\n"),
+    # Overflow is an INFINITY, not a wrap. Probed by COMPARISON rather than
+    # printed, because `%f` of an infinity renders "inf" on one libc and
+    # something else on another and this is a test of the compiler.
+    ("float_multiply_overflows_to_an_infinity",
+     "def is_inf() -> Int:\n"
+     "    var one = 1.0\n"
+     "    var zero = 0.0\n"
+     "    var big = 1e308\n"
+     "    var inf = one / zero\n"
+     "    var r = big * inf\n"
+     "    if r > big:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d\\n\", is_inf())\n"
+     "    return 0\n",
+     "def is_inf():\n"
+     "    return int((1e308 * float('inf')) > 1e308)\n"
+     "\n"
+     "def main():\n"
+     "    print(\"%d\" % is_inf())\n"),
+    # Underflow to a SUBNORMAL, which is where a double's exponent range
+    # differs from a float's. Multiplying two tiny numbers is the only way to
+    # reach it, and it is the case where a narrowing implementation that
+    # computed in float32 would give zero.
+    ("float_multiply_underflows_to_a_subnormal",
+     "def tiny() -> Float64:\n"
+     "    var t = 1e-320\n"
+     "    return t * t\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", tiny())\n"
+     "    return 0\n",
+     "def tiny():\n"
+     "    return 1e-320 * 1e-320\n"
+     "\n"
+     "def main():\n"
+     "    print(\"%.17g\" % tiny())\n"),
+
+    # ── signed zero: the value no ordinary-value test can see ────────────────
+    # `0.0 - 0.0` is `+0.0` in IEEE AND in CPython, so it is a case about the
+    # subtraction and nothing else — which is the point of pairing it with the
+    # unary negation below.
+    ("float_zero_minus_zero_is_positive_zero",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", 0.0 - 0.0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g\" % (0.0 - 0.0))\n"),
+    # UNARY minus. `FNEG` / a sign-bit `XORPD` is the only lowering that flips
+    # the sign of a zero instead of computing a difference, and `NEG` on the
+    # BIT PATTERN is a different defect with the same signature: it turns
+    # `-0.5` into the pattern of a denormal, so `int(-0.5)` answered -8 where
+    # CPython answers 0, measured on BOTH architectures before this row. The
+    # sign is observed through `1.0 / x` because no `%g` rendering distinguishes
+    # `-0.0` from `+0.0`.
+    # `%.17g` DOES distinguish the two zeros (`-0` from `0`), so the observable
+    # needs no arithmetic — which matters, because the obvious one cannot be
+    # used: `1.0 / x` for the sign of a zero is `1.0 / 0.0`, and CPython RAISES
+    # `ZeroDivisionError` there where IEEE (and this path) produce an infinity.
+    # That divergence is real and is `bugs/FORMAL_float_zero_division.md`; a case
+    # whose oracle raises is not a case, so the rendering is the observable.
+    # The `-0.5` in the same program is the guard on the defect: a `NEG` on the
+    # BIT PATTERN — which is what unary minus used to emit — answers a denormal
+    # here, and `int(-0.5)` answered -8 where CPython answers 0.
+    ("float_unary_minus_of_zero_is_negative_zero",
+     "def main() -> Int:\n"
+     "    printf(\"%.17g %.17g %.17g\\n\", -0.0, 0.0 - 0.0, -0.5)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%.17g %.17g %.17g\" % (-0.0, 0.0 - 0.0, -0.5))\n"),
+    # The sign of a quotient follows the SIGNS OF ITS OPERANDS, so the sign of
+    # a zero operand propagates too — which is the only place signed zero is
+    # visible through the arithmetic rather than through a negation.
+    ("float_quotient_sign_follows_its_operands",
+     "def div_sign(a: Float64, b: Float64) -> Float64:\n"
+     "    return a / b\n"
+     "\n"
+     "def is_negative(x: Float64) -> Int:\n"
+     "    var one = 1.0\n"
+     "    var zero = 0.0\n"
+     "    if (one / x) < zero:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d %d %d %d\\n\", is_negative(div_sign(1.0, 0.0 - 3.0)),\n"
+     "           is_negative(div_sign(1.0, 3.0)),\n"
+     "           is_negative(div_sign(0.0 - 1.0, 3.0)),\n"
+     "           is_negative(div_sign(0.0 - 1.0, 0.0 - 3.0)))\n"
+     "    return 0\n",
+     "def div_sign(a, b):\n"
+     "    return a / b\n"
+     "\n"
+     "def is_negative(x):\n"
+     "    return int((1.0 / x) < 0.0)\n"
+     "\n"
+     "def main():\n"
+     "    print(\"%d %d %d %d\" % (is_negative(div_sign(1.0, -3.0)),\n"
+     "                             is_negative(div_sign(1.0, 3.0)),\n"
+     "                             is_negative(div_sign(-1.0, 3.0)),\n"
+     "                             is_negative(div_sign(-1.0, -3.0))))\n"),
+
+    # ── infinities ─────────────────────────────────────────────────────────
+    ("float_infinity_arithmetic",
+     "def one_of() -> Float64:\n"
+     "    return 1.0\n"
+     "\n"
+     "def two_of() -> Float64:\n"
+     "    return 2.0\n"
+     "\n"
+     "def inf_of() -> Float64:\n"
+     "    var one = 1.0\n"
+     "    var zero = 0.0\n"
+     "    return one / zero\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var big = 1e308\n"
+     "    var nbig = 0.0 - 1e308\n"
+     "    var one = one_of()\n"
+     "    var inf = inf_of()\n"
+     "    var up = inf + one\n"
+     "    var down = (0.0 - inf) + one\n"
+     "    var doubled = inf * two_of()\n"
+     "    var undef = inf - inf\n"
+     "    printf(\"%d %d %d %d\\n\", 1 if up > big else 0,\n"
+     "           1 if down < nbig else 0,\n"
+     "           1 if doubled > big else 0,\n"
+     "           1 if undef != undef else 0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    inf = float('inf')\n"
+     "    up = inf + 1.0\n"
+     "    down = -inf + 1.0\n"
+     "    doubled = inf * 2.0\n"
+     "    undef = inf - inf\n"
+     "    print(\"%d %d %d %d\" % (int(up > 1e308), int(down < -1e308),\n"
+     "                           int(doubled > 1e308), int(undef != undef)))\n"),
+
+    # ── NaN: six operators, one operand ─────────────────────────────────────
+    # Produced by the arithmetic rather than written, because `nan` is not a
+    # literal on this path — so the case is also a statement that the COMPARE
+    # sees the value the arithmetic produced. CPython's answer is 000001, and
+    # every cell but the last is one an integer lowering of the same six
+    # operators gets WRONG rather than right by accident: an unordered compare
+    # sets `C=1` on arm64 and `CF=1` on x86-64, so `>` and `>=` read TRUE for a
+    # NaN on both machines.
+    ("float_nan_comparisons",
+     "def nan_of() -> Float64:\n"
+     "    var zero = 0.0\n"
+     "    return zero / zero\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var n = nan_of()\n"
+     "    var one = 1.0\n"
+     "    var out = 0\n"
+     "    if n < one:\n"
+     "        out = out * 10 + 1\n"
+     "    if n > one:\n"
+     "        out = out * 10 + 1\n"
+     "    if n <= one:\n"
+     "        out = out * 10 + 1\n"
+     "    if n >= one:\n"
+     "        out = out * 10 + 1\n"
+     "    if n == n:\n"
+     "        out = out * 10 + 1\n"
+     "    if n != n:\n"
+     "        out = out * 10 + 1\n"
+     "    printf(\"%lld\\n\", out)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    n = float('nan')\n"
+     "    o = 1.0\n"
+     "    out = 0\n"
+     "    for cell in (int(n < o), int(n > o), int(n <= o), int(n >= o),\n"
+     "                 int(n == n), int(n != n)):\n"
+     "        out = out * 10 + cell\n"
+     "    print(\"%d\" % out)\n"),
+
+    # ── the comparison matrix: six operators x twelve operand pairs ──────────
+    # Every operator against every special value, because the failure mode is
+    # per-OPERATOR — an unordered compare's flags make `>` and `>=` read true on
+    # both machines — rather than per-operand, and a matrix is the only shape
+    # that cannot miss a cell.
+    #
+    # ONE SIX-BIT DIGIT PER ROW, and six rows per `printf`.  A single folded
+    # integer was tried first and is wrong by construction: 72 cells do not fit
+    # in the 64-bit accumulator this path has, so the first eight rows are
+    # shifted out and the case cannot see them — and masking CPython to agree
+    # with the wrap hides exactly the cells that were lost.  Six per call keeps
+    # each call inside the eight unnamed variadic arguments the arm64 variadic
+    # area holds (`model.VARIADIC_SLOTS`): a ninth argument prints NOTHING
+    # there, which is how the shape of this case was found.
+    ("float_compare_matrix",
+     "def rows():\n"
+     "    var zero = 0.0\n"
+     "    var nzero = 0.0 - 0.0\n"
+     "    var one = 1.0\n"
+     "    var two = 2.5\n"
+     "    var half = 1.5\n"
+     "    var inf = one / zero\n"
+     "    var ninf = zero - inf\n"
+     "    var nan = zero / zero\n"
+     "    var tiny = 1e-320\n"
+     "    var big = 1e308\n"
+     "    var mhalf = 0.0 - 1.5\n"
+     "    var mtwo = 0.0 - 2.5\n"
+     # The twelve PAIRS the Python oracle below compares, in the same order.
+     # A `Float64` element is one word holding a bit pattern, so this list is
+     # also the only place in the file where a container of doubles is
+     # exercised — and the pairing is stated in both halves because a
+     # MISALIGNED pair list is silent: it answers a number, the wrong one, and
+     # reads as a compiler defect.  (It was one here: the Mojo list was a row
+     # out of step with the oracle from the third pair on, which showed up as
+     # seven of the twelve rows disagreeing.)
+     "    return [zero, nzero, one, two, two, half, half, half, inf, one,\n"
+     "            ninf, one, nan, one, one, nan, nan, nan,\n"
+     "            tiny, big, big, big, mhalf, mtwo]\n"
+     "\n"
+     "def row(i: Int) -> Int:\n"
+     "    var v = rows()\n"
+     "    var a = v[i * 2]\n"
+     "    var b = v[i * 2 + 1]\n"
+     "    var out = 0\n"
+     "    out = out * 2 + (1 if a < b else 0)\n"
+     "    out = out * 2 + (1 if a > b else 0)\n"
+     "    out = out * 2 + (1 if a == b else 0)\n"
+     "    out = out * 2 + (1 if a != b else 0)\n"
+     "    out = out * 2 + (1 if a <= b else 0)\n"
+     "    out = out * 2 + (1 if a >= b else 0)\n"
+     "    return out\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%d %d %d %d %d %d\\n\", row(0), row(1), row(2), row(3),\n"
+     "           row(4), row(5))\n"
+     "    printf(\"%d %d %d %d %d %d\\n\", row(6), row(7), row(8), row(9),\n"
+     "           row(10), row(11))\n"
+     "    return 0\n",
+     "VALUES = [(0.0, -0.0), (1.0, 2.5), (2.5, 1.5), (1.5, 1.5),\n"
+     "          (float('inf'), 1.0), (float('-inf'), 1.0),\n"
+     "          (float('nan'), 1.0), (1.0, float('nan')),\n"
+     "          (float('nan'), float('nan')), (0.0, 1e-320),\n"
+     "          (1e308, 1e308), (-1.5, -2.5)]\n"
+     "\n"
+     "def main():\n"
+     "    for lo in (0, 6):\n"
+     "        digits = \"\"\n"
+     "        for a, b in VALUES[lo:lo + 6]:\n"
+     "            out = 0\n"
+     "            for cell in (int(a < b), int(a > b), int(a == b),\n"
+     "                         int(a != b), int(a <= b), int(a >= b)):\n"
+     "                out = out * 2 + cell\n"
+     "            digits = digits + \"%d\" % out + \" \"\n"
+     "        print(digits.strip())\n"),
+
+    # ── truthiness: -0.0 is the whole test ──────────────────────────────────
+    # `-0.0`'s BITS are nonzero and its value is zero, so a lowering that tests
+    # the word says true where CPython says false — and every OTHER double
+    # (nonzero finite, both infinities, every NaN) has nonzero bits AND is
+    # truthy, so only a negation can see the difference. `0.0 - 0.0` is the
+    # source of a `-0.0` here because unary minus is the subject of the row
+    # above and this one is about what a CONDITION does with the value.
+    ("float_truthiness_of_the_special_values",
+     "def negate(x: Float64) -> Float64:\n"
+     "    return 0.0 - x\n"
+     "\n"
+     "def nan_of() -> Float64:\n"
+     "    var zero = 0.0\n"
+     "    return zero / zero\n"
+     "\n"
+     "def inf_of() -> Float64:\n"
+     "    var one = 1.0\n"
+     "    var zero = 0.0\n"
+     "    return one / zero\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var one = 1.0\n"
+     "    var zero = 0.0\n"
+     "    printf(\"%d %d %d %d %d\\n\",\n"
+     "           1 if negate(zero) else 0,\n"
+     "           1 if nan_of() else 0,\n"
+     "           1 if inf_of() else 0,\n"
+     "           1 if (0.0 - inf_of()) else 0,\n"
+     "           1 if one else 0)\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%d %d %d %d %d\" % (int(bool(0.0 - 0.0)),\n"
+     "                            int(bool(float('nan'))),\n"
+     "                            int(bool(float('inf'))),\n"
+     "                            int(bool(-float('inf'))),\n"
+     "                            int(bool(1.0))))\n"),
+
+    # ── conversions ─────────────────────────────────────────────────────────
+    # `%lld`, not `%d`: `int(1e18)` does not fit a 32-bit conversion, and `%d`
+    # TRUNCATED it rather than reporting it — a format bug this file would
+    # otherwise have recorded as an arithmetic one. Measured on both backends
+    # before the format was fixed: -1486618624 where CPython prints
+    # 1000000000000000000.
+    ("float_int_of_doubles_truncates_toward_zero",
+     "def main() -> Int:\n"
+     "    printf(\"%lld %lld %lld %lld %lld\\n\", int(2.9), int(0.0 - 2.9),\n"
+     "           int(0.0), int(0.0 - 0.5), int(1e18))\n"
+     "    return 0\n",
+     "def main():\n"
+     "    print(\"%d %d %d %d %d\" % (int(2.9), int(-2.9), int(0.0),\n"
+     "                             int(-0.5), int(1e18)))\n"),
+
+    # ── the value has to survive a STORE AND A RELOAD ────────────────────────
+    # A lowering that is right about the OPERATION and wrong about the storage
+    # passes every one-shot row above, because a value never leaves a register
+    # there. This is the row that needs a spill, a slot and a reload.
+    ("float_survives_a_loop_accumulation",
+     "def accumulate() -> Float64:\n"
+     "    var s = 0.0\n"
+     "    var i = 0\n"
+     "    while i < 10:\n"
+     "        s = s + 0.1\n"
+     "        i = i + 1\n"
+     "    return s\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    printf(\"%.17g\\n\", accumulate())\n"
+     "    return 0\n",
+     "def accumulate():\n"
+     "    s = 0.0\n"
+     "    for _ in range(10):\n"
+     "        s = s + 0.1\n"
+     "    return s\n"
+     "\n"
+     "def main():\n"
+     "    print(\"%.17g\" % accumulate())\n"),
+
+    # ── through a field, a parameter and a return ────────────────────────────
+    # A `Float64` struct field is one word holding a bit pattern, so this is a
+    # case about the REPRESENTATION: the value crosses a frame layout, a call
+    # boundary and a return, and each of those is a place a double could be
+    # stored as something else.
+    ("float_through_a_field_a_parameter_and_a_return",
+     "struct P:\n"
+     "    var x: Float64\n"
+     "    var y: Float64\n"
+     "\n"
+     "def scale(x: Float64, k: Float64) -> Float64:\n"
+     "    return x * k\n"
+     "\n"
+     "def negate(x: Float64) -> Float64:\n"
+     "    return 0.0 - x\n"
+     "\n"
+     "def chain() -> Float64:\n"
+     "    var p = P(2.5, 0.5)\n"
+     "    return negate(scale(p.x, p.y))\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var p = P(2.5, 0.5)\n"
+     "    var q = scale(p.x, p.y)\n"
+     "    var r = negate(q)\n"
+     "    printf(\"%.17g %.17g %.17g\\n\", p.x, q, chain())\n"
+     "    return 0\n",
+     "class P:\n"
+     "    def __init__(self, x, y):\n"
+     "        self.x = x\n"
+     "        self.y = y\n"
+     "\n"
+     "def scale(x, k):\n"
+     "    return x * k\n"
+     "\n"
+     "def negate(x):\n"
+     "    return 0.0 - x\n"
+     "\n"
+     "def chain():\n"
+     "    p = P(2.5, 0.5)\n"
+     "    return negate(scale(p.x, p.y))\n"
+     "\n"
+     "def main():\n"
+     "    p = P(2.5, 0.5)\n"
+     "    q = scale(p.x, p.y)\n"
+     "    print(\"%.17g %.17g %.17g\" % (p.x, q, chain()))\n"),
 ]
 
 
@@ -20843,7 +21324,8 @@ def main():
                   | {c[0] for c in REPEAT_CASES}
                   | {c[0] for c in SET_UNION_CASES}
                   | {c[0] for c in CTOR_RECEIVER_CASES}
-                  | {c[0] for c in CALL_RECEIVER_CASES})
+                  | {c[0] for c in CALL_RECEIVER_CASES}
+                  | {c[0] for c in FLOAT_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + COMPTIME_ALIAS_PAIR_CASES
                      + SPREAD_CONSTRUCTION_CASES
@@ -20854,6 +21336,7 @@ def main():
                      + SLICE_CASES + SLICE_BOUND_CASES + CONCAT_CASES
                      + REPEAT_CASES + SET_UNION_CASES
                      + CTOR_RECEIVER_CASES + CALL_RECEIVER_CASES
+                     + FLOAT_CASES
                      if not args.cases or c[0] in args.cases])
     # `BOTH_ARCH_CASES` is the four-column shape, so it rides `selected` and the
     # ordinary `run_case` dispatch; what makes it different is the RUNNER, and
