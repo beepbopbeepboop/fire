@@ -21,18 +21,18 @@ down anywhere the call site can read?**
 
 This instrument answers exactly that and nothing else. It parses; it never
 builds, links, or runs Lean, and it is architecture-blind because the question
-is about source. Five buckets, which are the five answers an implementation of
+is about source. Seven buckets, which are the answers an implementation of
 `formal/monomorph.py::all_instantiation_calls` has to have, in the order they get
 harder:
 
   * `solvable from the annotations at the call site` — every template parameter
-    is decided by a parameter of the declaration (or by its default), and every
-    argument in a matched position has an annotation to unify with. Unifying two
-    annotation strings is then arithmetic rather than inference, and it is the
-    only bucket that needs nothing but a matcher. `def widen[T: AnyType](v: T)`
-    called with an `n: Int` is this bucket — `T := Int` — and so is
-    `is_negative(value)` against `def is_negative[dtype: DType, //](value:
-    SIMD[dtype, _])`.
+    is decided by a parameter of the declaration (or by a default that IS a type
+    spelling), every matched argument has an annotation to unify with, and the
+    answer is CONCRETE. Unifying two annotation strings is then arithmetic rather
+    than inference, and it is the only bucket that needs nothing but a matcher.
+    `def widen[T: AnyType](v: T)` called with an `n: Int` is this bucket —
+    `T := Int` — and so is `is_negative(rhs)` with a `var rhs: Int` against
+    `def is_negative[dtype: DType, //](value: SIMD[dtype, _])`.
   * `the argument's type is written but does not unify` — the declaration names
     the parameter and the argument IS annotated, but its annotation mentions no
     template parameter. `FormatStruct(writer, "…")` is this bucket and the reason
@@ -42,19 +42,46 @@ harder:
     resolution, not string matching. **This is the bucket that decides whether
     the first one is a patch or a project**, and it is the largest in the
     corpus.
-  * `the argument's type is not written down` — the declaration names the
-    parameter, but the argument in that position is a call, an operator, a
-    subscript or a literal, so its type has to come from a RETURN type (this
-    path has no return-type inference) or from literal defaulting. `dealloc(x^)`
-    is this bucket: the argument is a `UnaryOp`.
+  * `the argument's type is not written down` — the argument in a deciding
+    position is a call, an operator, a subscript, a field read or a literal, so
+    its type has to come from a RETURN type (this path has no return-type
+    inference); **or it is annotated with something this path could not mangle**
+    (`SIMD[DType.float32, 4]`'s width is a literal and `type_arg_text` refuses a
+    literal), which is the same work for whoever takes it. `dealloc(x^)` is the
+    first shape: the argument is a `UnaryOp`.
   * `a type argument is not in the arguments at all` — a template parameter that
     appears in no parameter. A phantom, which no amount of argument inspection
     recovers; it needs a DEFAULT.
+  * `a type argument is settled by a comptime default` — **added 2026-10-04.** A
+    parameter no argument decides whose DEFAULT is a comptime expression or a
+    value rather than a type: `is_32bit[target: CompilationTarget =
+    CompilationTarget.current()]()`, `masked[T, invariant: Bool = False]`. It was
+    reported `solvable` before, because a call with no arguments reaches no test
+    at all and a site nothing was inspected of falls out of every one.
+  * `the declaration has no type parameter to substitute` — **added 2026-10-04.**
+    The export rule's generic set has the name and the declaration has nothing
+    to put in a bracket: `def pick[](v: Int)`, and `fcntl[*types: Intable]` read as
+    one until the `*` sigil stopped being treated as punctuation.
+    `monomorph.instantiate` refuses exactly this, so promising an instantiation
+    here is promising one nothing can build.
   * `the declaration could not be read` — the name is a template by the export
-    rule's own generic set and the declaration source would not come out.
+    rule's own generic set and the declaration source would not come out, which
+    includes a struct with no `__init__` and arguments to bind.
     Reported rather than dropped, because a census that loses rows quietly is the
     failure `tools/formal_sweep_causes.py` documents as "nobody has looked", and
     a total that silently excludes sites is the one number nobody can use.
+
+**`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+§5b is the measurement of what the last two buckets and the KEYWORD reading cost
+the first one: 32 sites became 2, and §5's recommendation — "the matcher bucket is
+the only piece of the three that is a patch" — is refuted by it.** The five
+corrections are `_arguments_by_parameter` (a keyword argument is in `call.kwargs`,
+and a reader that walks `call.args` inspects nothing), `_strip_comments` (a `#`
+comment inside a header is both a parameter this reader would misread and a
+bracket `_balanced` would count), `MARKER_PIECES` (a packed `*name: Bound` is a
+parameter), `_is_type_spelling` (a numeric or boolean default is not a type) and
+`_concrete_answer` (an answer that is the enclosing template's own `dtype`, or a
+`Self.T`, is not a type argument at all).
 
 **Two flags ride on every row.** `B` — some parameter has a trait bound other
 than the unconstrained spellings, so a unification alone cannot choose a
@@ -119,11 +146,158 @@ BUCKET_SOLVABLE = "solvable from the annotations at the call site"
 BUCKET_NO_UNIFY = "the argument's type is written but does not unify"
 BUCKET_UNDECLARED = "the argument's type is not written down"
 BUCKET_PHANTOM = "a type argument is not in the arguments at all"
+BUCKET_COMPTIME_DEFAULT = "a type argument is settled by a comptime default"
+BUCKET_NO_PARAMETER = "the declaration has no type parameter to substitute"
 BUCKET_UNREAD = "the declaration could not be read"
 
 # In the order a reader wants them, which is the order they get harder.
+#
+# **Seven, and the last two are the ones this instrument was missing** — see
+# `classify`'s own docstring and
+# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# §5b, which is the measurement of what adding them did to the totals. Both exist
+# because a site that CANNOT be answered by argument inspection used to be
+# reported as `solvable`, and that is the one direction a census may not round:
+# its own header says "a census that rounds an unrecognised shape into `solvable`
+# is the one mistake that would make the total an overstatement, and an
+# overstatement here is a licence to build the wrong thing".
 BUCKETS = [BUCKET_SOLVABLE, BUCKET_NO_UNIFY, BUCKET_UNDECLARED,
-           BUCKET_PHANTOM, BUCKET_UNREAD]
+           BUCKET_PHANTOM, BUCKET_COMPTIME_DEFAULT, BUCKET_NO_PARAMETER,
+           BUCKET_UNREAD]
+
+#: Whether a piece of a parameter or header list binds a parameter at all. `*` is
+#: Mojo's keyword-only marker and `**` a spread; `*name: Bound` is a PACKED
+#: parameter and `*args: *T` a variadic one, and neither is a marker. The old
+#: test was "starts with `*`", which swallowed the packed spelling — and a header
+#: whose only parameter is packed then reads as a declaration with NO type
+#: parameter, which is what put `std/sys/_libc.mojo`'s `fcntl[*types: Intable]`
+#: in the `solvable` bucket with nothing to solve. What to DO with a packed
+#: parameter is the variadic ABI's question
+#: (`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md`) and not this
+#: instrument's; keeping the parameter in the list is what routes the site to a
+#: bucket that says the answer is not in the arguments.
+MARKER_PIECES = ("", "/", "*", "**", "//")
+
+#: The two literals this corpus spells the way an identifier is spelled. Named
+#: rather than pattern-matched because the reader works on TEXT and `type_arg_text`
+#: works on a parsed node, where `False` is a `BoolLiteral` and returns "".
+LITERAL_SPELLINGS = ("True", "False")
+
+
+def _strip_comments(text: str) -> str:
+    """`text` with every `# …` comment removed, newlines kept.
+
+    **Before** any bracket walk, and that ordering is the whole point: a comment
+    inside a signature is not only a parameter this reader would misread, it is
+    also a bracket the walk would count. `std/ffi/__init__.mojo`'s `dlsym` has
+    `# Default `dlsym` result is an OpaquePointer.` on the line above
+    `result_type: OpaquePointer` INSIDE the header's brackets, and the census
+    reported its type parameters as `# Default `dlsym` result is an
+    OpaquePointer.\n    result_type` — a comment read as a parameter, from a
+    declaration that is a template for one ordinary type argument.
+
+    Newlines are preserved rather than replaced by a space because these
+    readers report positions by line (`FunctionDef.line` is 0 and
+    `_def_line`'s docstring explains what a reader does with that), and a comment
+    removed mid-line must not shift the lines below it. The trailing space keeps
+    two tokens from joining into one name.
+    """
+    out = []
+    for line in text.split("\n"):
+        at = line.find("#")
+        out.append(line if at < 0 else line[:at])
+    return "\n".join(out)
+
+
+def _is_type_spelling(text) -> bool:
+    """Whether `text` is a TYPE name this path could substitute.
+
+    The three shapes `formal/monomorph.py::type_arg_text` accepts and nothing
+    else: an identifier, a dotted name, a bracketed application of those. **A
+    call is not one**, and that is the whole test: `is_32bit[target:
+    CompilationTarget = CompilationTarget.current()]()` settles its one type
+    parameter with a COMPTIME EXPRESSION, and `masked[T, invariant: Bool = False]`
+    settles one with a VALUE — neither is a type argument this path can spell,
+    and `type_arg_text` refuses both, so a demand built from either would be a
+    mangled name no instantiation was ever built under.
+
+    **Two literal spellings are excluded by name**, because they are the only
+    VALUES this corpus writes the way an identifier is written and the reader
+    works on TEXT: `invariant: Bool = False` is a comptime parameter holding
+    `False`, and `False` as a type argument is not a type. A default whose
+    brackets carry an `=` (`origin: Origin[mut=mut]`, a type application with a
+    defaulted argument) is not a spelling either, for the same reason
+    `type_arg_text` needs a parsed node to read one and this reader has only the
+    declaration's text.
+    """
+    if not isinstance(text, str):
+        return False
+    text = text.strip()
+    if not text or text in LITERAL_SPELLINGS:
+        return False
+    text = text.strip()
+    if not text:
+        return False
+    i, n = 0, len(text)
+    def name():
+        # A letter or an underscore FIRST, then letters and digits — which is
+        # `_IDENT`'s rule and the reason a numeric default (`rounds: Int = 10`,
+        # `std/random/philox.mojo`'s `Random`) is not a spelling. A reader that
+        # accepted a leading digit called `10` a type and put the site in
+        # `solvable`, which is the rounding this bucket exists to refuse.
+        nonlocal i
+        if i >= n or not (text[i].isalpha() or text[i] == "_"):
+            return ""
+        start = i
+        while i < n and (text[i].isalnum() or text[i] in "_."):
+            i += 1
+        return text[start:i]
+    while i < n:
+        if not name():
+            return False
+        if i < n:
+            if text[i] != "[":
+                return False
+            i += 1
+            while i < n and text[i] != "]":
+                if text[i] == ",":
+                    i += 1
+                    continue
+                if not name():
+                    return False
+                if i < n and text[i] == "[":
+                    i += 1
+            if i >= n:
+                return False
+            i += 1                      # the `]`
+    return True
+
+
+def _parameter_name(piece: str) -> str:
+    """The NAME a parameter piece binds, or "".
+
+    The head before the first `:` at depth zero, and its LAST identifier — which
+    is what a convention prefix leaves behind: `ref[Self.o] writer: Self.T`
+    binds `writer` and `var _alloc: ThinAllocation[Self.T]` binds `_alloc`. It is
+    needed because a KEYWORD argument names its parameter rather than sitting at
+    its index, and `classify` matches keywords by name: `ThinAllocation(
+    unsafe_owned_ptr=self._data)` is the corpus's largest instance of the shape
+    (17 of the 32 sites this instrument called `solvable`, all of them invisible
+    to a reader that only walked `call.args`).
+    """
+    depth = 0
+    for i, ch in enumerate(piece):
+        if ch in "[(<":
+            depth += 1
+        elif ch in "])>":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            head = piece[:i]
+            break
+    else:
+        head = piece
+    idents = _IDENT.findall(head)
+    return idents[-1] if idents else ""
 
 
 # ── the declaration, read off its own source ────────────────────────────────
@@ -209,17 +383,24 @@ def split_top_level(text: str) -> list:
 def is_marker(piece: str) -> bool:
     """Whether a piece of a parameter or header list is a MARKER, not a name.
 
-    `/` is Mojo's positional-only marker, `*` its keyword-only one, and a struct
-    header in this corpus also carries `//` — a line comment — inside its
+    `/` is Mojo's positional-only marker and `*` its keyword-only one, and a
+    struct header in this corpus also carries `//` — a line comment — inside its
     brackets (`struct Pointer[mut: Bool, //, T: AnyType, …]`). Read as a
     parameter, a marker is mentioned by no annotation, so every declaration
     carrying one lands in the phantom bucket: `def dealloc[T: AnyType, /](…)` is
     `std/memory/alloc.mojo`'s, and its four sites were the first rows this
     instrument misfiled.
+
+    **`*name: Bound` is NOT a marker**, and that is the correction
+    `MARKER_PIECES` records: the old test was "starts with `*`", so a PACKED
+    parameter — `fcntl[*types: Intable](fd, cmd, *args: *types)` — was dropped
+    from the header as if it were punctuation, and a declaration whose only type
+    parameter is packed then reads as one with nothing to substitute. The
+    variadic-ABI refusal is the honest answer for those sites and this
+    instrument is not the thing that decides it; what it must not do is call them
+    `solvable`.
     """
-    text = (piece or "").strip()
-    return (not text or text in ("/", "*", "//")
-            or text.startswith("*") or text.startswith("//"))
+    return (piece or "").strip() in MARKER_PIECES
 
 
 def split_default(piece: str) -> tuple:
@@ -414,11 +595,64 @@ def argument_source(arg, declared: dict) -> tuple:
     return "unknown", ""
 
 
-def classify(call, declared: dict, decl):
+def _arguments_by_parameter(params, call):
+    """`[(parameter index, argument node or None)]` — a KEYWORD's position is its
+    name, and a POSITIONAL's is its index.
+
+    The pairing is what `classify` walks instead of `enumerate(call.args)`, and
+    the two are not the same thing: `ThinAllocation(unsafe_owned_ptr=self._data)`
+    passes one argument and it is in `call.kwargs`, so an index walk over
+    `call.args` sees NOTHING and the site falls out of every test into
+    `solvable`. That is not a corner — it is 20 of the 32 sites the pre-2026-10-04
+    version of this instrument reported as `solvable`, and the corpus's largest
+    measured shape among them (`bugs/
+    FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` §5b).
+
+    A keyword wins over the positional at the same index, because a call cannot
+    pass both (`f(x, x=1)` is CPython's `TypeError`, and a call that does is
+    refused by `model.struct_construction_plan` / `bind_call_arguments` long
+    before this reads it). A parameter with no argument at all gets None, which is
+    the DEFAULT's case rather than a missing one.
+    """
+    args = list(call.args or ())
+    kwargs = {k: v for k, v in (getattr(call, "kwargs", None) or ())}
+    out = []
+    for i, (piece, _text) in enumerate(params):
+        name = _parameter_name(piece)
+        if name and name in kwargs:
+            out.append((i, kwargs[name]))
+            continue
+        out.append((i, args[i] if i < len(args) else None))
+    return out
+
+
+def classify(call, declared: dict, decl, enclosing=()):
     """`(bucket, bounded, self_qualified)` for one bare call to a template.
 
     `decl` is `(template parameters, [(piece, mention text)])` or None, which is
-    its own bucket rather than a skip.
+    its own bucket rather than a skip, and `enclosing` is the type parameters of
+    the definition the call is written in (`_own_tparams`) — see
+    `_concrete_answer` for the two measured sites that need them.
+
+    **The order of the questions is the order the facts are decided in**, and the
+    last two are questions the pre-2026-10-04 version did not ask at all — which
+    is why it reported 32 `solvable` sites where 4 are (`…_inferrable.md` §5b):
+
+    1. is there a declaration to read, and does it have anything to substitute?
+       (`fcntl[*types: Intable]` is a template by the export rule and has no type
+       parameter this reader can see, and `monomorph.instantiate` refuses it with
+       exactly that sentence);
+    2. is every parameter mentioned somewhere, or settled by a default? (unchanged,
+       and the phantom bucket);
+    3. **for a parameter no ARGUMENT decides, is its DEFAULT a type this path
+       could substitute?** `is_32bit[target: CompilationTarget =
+       CompilationTarget.current()]()` and `masked[T, invariant: Bool = False]`
+       both settle their last parameter with a comptime EXPRESSION or a VALUE, and
+       `type_arg_text` refuses both — so the site is not `solvable`, and a census
+       that says it is has produced a licence to build the wrong thing;
+    4. for each parameter an argument DOES decide, can that argument's declared
+       type be read, and does a trait-bounded one unify? (the two buckets the
+       doc's §5 buckets 1 and 2 are about).
     """
     if decl is None:
         return BUCKET_UNREAD, False, False
@@ -427,6 +661,8 @@ def classify(call, declared: dict, decl):
     selfq = any("Self" in (text or "") and mentions(text, p)
                 for p, _b, _d in tparams for _n, text in params)
     names = [p for p, _b, _d in tparams]
+    if not names:
+        return BUCKET_NO_PARAMETER, bounded, selfq
     # A parameter no argument can carry. Asked over the WHOLE signature rather
     # than the matched positions, because a parameter nothing mentions is
     # invisible to any argument — and a parameter with a DEFAULT is not that,
@@ -442,13 +678,16 @@ def classify(call, declared: dict, decl):
     if undecided:
         return BUCKET_PHANTOM, bounded, selfq
     bound_of = {p: is_unconstrained(b) for p, b, _d in tparams}
-    for i, arg in enumerate(call.args or []):
-        if i >= len(params):
-            break                      # fewer arguments than parameters, so
-            continue                  # Mojo applies the declared defaults
+    paired = _arguments_by_parameter(params, call)
+    decided_by_an_argument = set()
+    for i, arg in paired:
         deciding = [p for p in names if mentions(params[i][1], p)]
         if not deciding:
             continue                  # this argument decides no type
+        if arg is None:
+            continue                  # …and no argument reached this one at all,
+            #                     which is the DEFAULT's case, asked below
+        decided_by_an_argument.update(deciding)
         kind, text = argument_source(arg, declared)
         if kind != "annotation":
             return BUCKET_UNDECLARED, bounded, selfq
@@ -463,6 +702,22 @@ def classify(call, declared: dict, decl):
         if bounded_deciding \
                 and not any(mentions(text, p) for p in bounded_deciding):
             return BUCKET_NO_UNIFY, bounded, selfq
+        # …and the answer has to be a TYPE ARGUMENT, not the enclosing
+        # template's own parameter reached through the annotation. Asked after
+        # the bound check, so a trait-bound that does not unify is still reported
+        # as the bound-resolution question it is.
+        if not _concrete_answer(text, deciding, enclosing):
+            return BUCKET_UNDECLARED, bounded, selfq
+    # A DEFAULT the path cannot spell, and it is asked only of the parameters no
+    # argument decided: a default that IS a type spelling is the answer
+    # (`origin: Origin[mut=mut]`), and one that is not cannot be mangled into a
+    # demand at all. Which is the difference between `solvable` and this row, and
+    # it is the difference between a feature that answers a site and one that
+    # builds a mangled name nothing was ever compiled under.
+    for p, _b, default in tparams:
+        if default and p not in decided_by_an_argument \
+                and not _is_type_spelling(default):
+            return BUCKET_COMPTIME_DEFAULT, bounded, selfq
     return BUCKET_SOLVABLE, bounded, selfq
 
 
@@ -488,6 +743,55 @@ def is_definition(st) -> bool:
         "StructDef", "TraitDef", "ClassDef")
 
 
+def _own_tparams(defn) -> frozenset:
+    """The type parameters of the FUNCTION TEMPLATE this definition is.
+
+    `fire_compiler`'s own answer (`FunctionDef.comptime_params`), and it is asked
+    for one reason: a call inside a template's body can unify an argument's
+    annotation against a callee's parameter and get the ENCLOSING template's
+    parameter back — `is_negative(val)` inside `def bit_width[dtype: DType,
+    width: Int](val: SIMD[dtype, width])` answers `dtype := dtype` — which is not
+    a type argument any instantiation can be mangled under. A method's enclosing
+    parameters belong to its STRUCT and arrive as `Self.X`, which
+    `_concrete_answer` refuses without knowing them.
+    """
+    return frozenset(getattr(defn, "comptime_params", None) or ())
+
+
+def _concrete_answer(text: str, deciding, enclosing) -> bool:
+    """Whether unifying `text` against `deciding` yields TYPE ARGUMENTS.
+
+    Three ways it does not, and all three are measured sites rather than theories
+    — `std/bit/bit.mojo`'s `is_negative(val)` (the answer is the enclosing
+    template's own `dtype`), `std/memory/owned_pointer.mojo`'s
+    `ThinAllocation(unsafe_owned_ptr=unsafe_from_raw_pointer)` whose parameter is
+    annotated `Pointer[Self.T, MutUntrackedOrigin]` (the answer is `Self.T`), and
+    `std/memory/alloc.mojo`'s `dealloc`, whose whole row is the shape.
+
+    1. **A `Self.`-qualified mention.** `Self.T` names the enclosing TYPE's
+       parameter, and no mangler can spell it.
+    2. **A bare mention of one of the ENCLOSING definition's own type
+       parameters** (`_own_tparams`), which is (1) without the qualification.
+    3. **A deciding parameter the annotation does not mention at all**: the answer
+       is then the whole annotation, so the annotation has to BE a type name —
+       `widen(v: T)` against `n: Int` gives `T := Int`, which is the row this
+       bucket exists for, while `Pointer[Self.T, …]` against an `Int` argument
+       gives a shape mismatch no matcher can paper over.
+    """
+    idents = _IDENT.findall(text or "")
+    for i, ident in enumerate(idents):
+        if ident == "Self" and i + 1 < len(idents):
+            return False
+    if not enclosing:
+        pass
+    for p in deciding:
+        if mentions(text, p) and p in enclosing:
+            return False
+    if any(not mentions(text, p) for p in deciding):
+        return _is_type_spelling(text)
+    return True
+
+
 def _statements_of(st) -> list:
     """Whatever statement lists a struct or trait body carries besides methods."""
     out = []
@@ -511,11 +815,16 @@ def nested_scopes(stmts, path: str) -> list:
     out = []
     for st in stmts or []:
         if isinstance(st, F.FunctionDef):
-            out.append((declared_types(st), _plain_nodes(st)))
+            out.append((declared_types(st), _plain_nodes(st), _own_tparams(st)))
             out.extend(nested_scopes(st.body or [], path + "/" + st.name))
         elif is_definition(st):
             for m in (getattr(st, "methods", None) or []):
-                out.append((declared_types(m), _plain_nodes(m)))
+                # A METHOD's enclosing type parameters are the STRUCT's, and the
+                # corpus reaches them as `Self.X` in the annotations rather than
+                # as a bare name — which `_concrete_answer` refuses whatever the
+                # struct declared, so nothing is lost by not reading the struct's
+                # header here.
+                out.append((declared_types(m), _plain_nodes(m), ()))
                 out.extend(nested_scopes(
                     m.body or [],
                     f"{path}/{getattr(st, 'name', '?')}.{m.name}"))
@@ -549,14 +858,14 @@ def scopes(stmts, scope=None) -> list:
     out = []
     for st in stmts or []:
         if isinstance(st, F.FunctionDef):
-            out.append((declared_types(st), _plain_nodes(st)))
+            out.append((declared_types(st), _plain_nodes(st), _own_tparams(st)))
         elif is_definition(st):
             for m in (getattr(st, "methods", None) or []):
-                out.append((declared_types(m), _plain_nodes(m)))
+                out.append((declared_types(m), _plain_nodes(m), ()))
             for s in _statements_of(st):
                 out.extend(scopes([s], scope))
         else:
-            out.append((scope or {}, list(M.iter_nodes([st]))))
+            out.append((scope or {}, list(M.iter_nodes([st])), ()))
         if is_definition(st):
             out.extend(nested_scopes(
                 st.body if isinstance(st, F.FunctionDef)
@@ -591,7 +900,19 @@ def defining_module(importer: str, module: str):
 
 
 def declaration_for(src: str, name: str, argc: int):
-    """`(template parameters, [(piece, mention text)])` for a call, or None."""
+    """`(template parameters, [(piece, mention text)])` for a call, or None.
+
+    **The comments come off the module source first**, and that ordering is the
+    fix rather than a tidiness: `std/ffi/__init__.mojo`'s `dlsym` carries
+    `# Default `dlsym` result is an OpaquePointer.` on the line above
+    `result_type: OpaquePointer` INSIDE the header's brackets, and a comment read
+    as a parameter is how that declaration came to report a type parameter called
+    `# Default `dlsym` result is an OpaquePointer.`. A comment can also carry a
+    bracket, which would corrupt `_balanced`'s depth count rather than merely
+    misreading one name — so it is stripped here, once per declaration, where
+    every reader below sees comment-free text.
+    """
+    src = _strip_comments(src)
     kind_is_fn = bool(re.search(rf"^\s*(?:def|fn)\s+{re.escape(name)}\s*\[",
                                 src, re.M))
     decl_src = (elaborate.extract_fn_source(src, name, argc) if kind_is_fn
@@ -644,13 +965,13 @@ def collect(paths):
         # makes every total here a function of the corpus's overloads rather than
         # of its call sites.
         wanted = collections.defaultdict(list)
-        for scope, nodes in scopes(stmts):
+        for scope, nodes, enclosing in scopes(stmts):
             for node in nodes:
                 if not isinstance(node, F.CallExpr):
                     continue
                 got = bare_callee(node)
                 if got is not None and got[0] in bindings:
-                    wanted[got].append((node, scope))
+                    wanted[got].append((node, scope, enclosing))
         for (name, argc), sites in sorted(wanted.items()):
             module, defining = bindings[name]
             key = (real, module)
@@ -669,8 +990,8 @@ def collect(paths):
             decl = declaration_for(src, defining, argc)
             spelled = ", ".join(f"{p}: {b}" if b else p
                                 for p, b, _d in (decl[0] if decl else []))
-            for node, scope in sites:
-                bucket, bounded, selfq = classify(node, scope, decl)
+            for node, scope, enclosing in sites:
+                bucket, bounded, selfq = classify(node, scope, decl, enclosing)
                 rows.append((os.path.relpath(path, ROOT), node.line, name,
                              module, bucket, bounded, selfq, spelled))
     return rows, n_files, n_calls, unresolved

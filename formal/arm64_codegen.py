@@ -3681,6 +3681,7 @@ dylib_exports: list = None, globals_base: int = None,
 ctor_field_value=self._ctor_field_value_for(name),
             callee_is_dict=lambda callee: self._callee_is_dict(
                 callee, stack | {name}),
+            callee_returns_value=self._callee_returns_value,
             dict_names=DICT_TYPE_NAMES,
             param_kind=self._param_kinds.for_function(name))
         self._vkinds_cache[name] = vk
@@ -4074,6 +4075,29 @@ ctor_field_value=self._ctor_field_value_for(name),
             return False
         return M.signature_return_type(
             entry.get("signature") or "").strip() == "void"
+
+    def _callee_returns_value(self, name):
+        """Whether a call to the local function `name` produces a value at all.
+
+        The seventh question `ValueKinds` asks about a callee, and the only one
+        whose answer is not about a KIND: a function with no `return` produces
+        nothing, CPython calls that `None`, and a value here is one 64-bit word,
+        so the honest answer for such a call is "not a value this path can carry"
+        rather than a kind. `model.function_returns_a_value` is the ONE reader
+        of the declaration and the body, because the x86-64 backend answers the
+        same question and two readings of "does this function return" is how the
+        two machines come to disagree about a construct.
+
+        NO STACK, unlike `_callee_kind` above, and the difference is the point:
+        this walks one body and stops at the first value-returning `return`, so
+        it cannot recurse into the callee — a cycle is not a thing here. The
+        default for a name that is not a function of this unit is True, which is
+        the safe direction: it leaves the caller with the answer it had, so a
+        linked module's export (whose sources are not here to be read) changes
+        nothing.
+        """
+        fn = self._functions.get(name)
+        return True if fn is None else M.function_returns_a_value(fn)
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -5333,6 +5357,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             if isinstance(a, F.StringLiteral):
                 frags.append(M.print_literal(a))
                 continue
+            # A value this path cannot carry is refused HERE rather than
+            # rendered: `print(g(1, 2))` for a `g` with no `return` printed
+            # whatever `g`'s epilogue left in the return register (measured `0`
+            # on BOTH architectures, where CPython printed `None`), and a printed
+            # `None` is the shape this path has no representation for. The
+            # decision is `ValueKinds.no_value_callee_of` and the words are
+            # `model.returnless_value_refusal`, both shared with x86-64, because
+            # two copies of this question is how the two architectures come to
+            # answer one construct differently.
+            callee = self._vkinds.no_value_callee_of(a)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             kind = self._expr_str_kind(a)
             if kind == M.STR_KIND:
                 frags.append("%s")

@@ -16454,6 +16454,128 @@ def _kind_of_simple(e) -> str | None:
     return None
 
 
+# ── a function that produces NO value, and what that is worth at a use ──────
+#
+# A `def` with no `return` returns NOTHING in CPython, and `None` is not a word:
+# a value on this path is one 64-bit word (`ValueKinds`' own header says so),
+# and a word has no way to say "no value". Both emitters' epilogues leave the
+# return register holding whatever the callee's last instruction put there, so a
+# call to such a function answers a number nobody wrote — measured on BOTH
+# architectures from one source, `print(g(1, 2))` for `def g(a, b): w = 1`
+# printed `0` where CPython printed `None`, and `bugs/
+# FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+# records that the word is not even stable (it is not the caller's leftover
+# either: a call before it that returned 77 did not survive).
+#
+# So this is asked, not guessed. The rule below is that doc's and
+# `tools/formal_returnless_census.py`'s, and the census now calls THESE rather
+# than keeping private copies, because a refusal and the measurement that sized
+# it cannot be allowed to answer "does this function return" differently.
+#
+# The two primitives are separate because the census reports the halves
+# separately and a third thing would be a second rule: a function that DECLARES
+# a return type has said what it means even where the value is not CPython's
+# (`def quiet(a) -> Int32: w = 1; return 0` agrees with CPython, and a
+# declaration is the source's own statement that a value is coming), so it is
+# out of scope here and the corpus measurement in the doc counts it apart.
+
+
+def fn_returns_a_value(fn) -> bool:
+    """Whether `fn`'s own body has a `return` WITH a value, at any depth.
+
+    A nested definition is a different frame with its own returns, so the walk
+    stops at one — the same rule "Read before store" uses for the same reason.
+    Depth, not control flow: `if c: return 1` with a fall-through END answers
+    True, and it should, because CPython returns `None` on the other path and
+    `None` is still not a word. A function that returns a value on ONE path is
+    a function whose result this path cannot represent either; what the refusal
+    below is about is the function that has no value at all, because that is the
+    case where the source never suggests one is coming.
+    """
+    def scan(stmts) -> bool:
+        for st in stmts or []:
+            kind = type(st).__name__
+            if kind == "ReturnStmt":
+                if getattr(st, "value", None) is not None:
+                    return True
+                continue
+            if kind in ("FunctionDef", "StructDef", "TraitDef",
+                        "LambdaExpr"):
+                continue
+            for name in getattr(st, "__dataclass_fields__", ()) or ():
+                child = getattr(st, name, None)
+                if isinstance(child, list) and scan(child):
+                    return True
+        return False
+
+    return scan(getattr(fn, "body", None) or [])
+
+
+def fn_declares_a_return(fn) -> bool:
+    """Whether `fn` STATES a return type — the ONE reader of that, and it
+    delegates rather than repeating `declared_returns_a_value`'s test.
+
+    `-> None` is not a return type here, for the reason that function gives: it
+    is `void` at the ABI (`doc/ABI.md`'s scalar table), so it is read as no value
+    rather than as one word that happens to be spelled `None`. The one case it
+    adds is an EMPTY annotation — a `def f() -> :` states nothing, where the ABI
+    reader's `str(rt).strip() in ("None", "NoneType")` test lets it through —
+    and it is added HERE rather than there because that function's callers are
+    the cross-module declaration paths (`external_declarations` parses another
+    module's own header, where an empty annotation is not a spelling that
+    occurs), while this one reads a body the parser has just produced.
+    """
+    rt = getattr(fn, "return_type", None)
+    if isinstance(rt, str) and not rt.strip():
+        return False
+    return declared_returns_a_value(fn)
+
+
+def function_returns_a_value(fn) -> bool:
+    """Whether a call to `fn` produces a value this path can carry.
+
+    The conjunction of the two halves above, plus the two spellings whose
+    "return value" is the OBJECT rather than a word: a generator yields and a
+    coroutine awaits, so `def f(): yield 1` is not a function that returns
+    nothing, and reading it as one would refuse every `for x in f(y)` in the
+    corpus. The parser's own `is_generator`/`is_async` are the answer, for the
+    reason `tools/formal_returnless_census.py` gives: they are the front end's
+    decision and not a re-read of the body.
+    """
+    if getattr(fn, "is_generator", False) or getattr(fn, "is_async", False):
+        return True
+    return fn_returns_a_value(fn) or fn_declares_a_return(fn)
+
+
+def returnless_value_refusal(callee: str) -> str:
+    """Why rendering the result of `callee(…)`, which returns nothing, is wrong.
+
+    One message for both backends, and it is asked from `_print_call` in each of
+    them rather than written twice, because that is the one position where a
+    value this path cannot carry becomes TEXT: the arithmetic case computes with
+    the word and the `x = f()` case is silent until somebody prints `x`, but a
+    printed `None` is the shape CPython answers and the one a reader recognises.
+
+    The wording discipline is `string_concat_refusal`'s: name the callee, say
+    what CPython answers, say what this path has instead, and say what to do. A
+    reader told only "cannot tell" goes looking for something to look at, and
+    there is nothing here to look at — the number the machine would print is not
+    a number the source wrote.
+    """
+    return (
+        f"print() is asked to render the value of {callee}(…), and {callee} "
+        f"returns nothing: CPython evaluates that call to `None` and prints "
+        f"`None`, and a value on this path is one 64-bit word with no way to "
+        f"say `no value` — the epilogue writes no return register, so the word "
+        f"printed here would be whatever {callee}'s last instruction left "
+        f"there, which is a number nothing in the source wrote (measured on "
+        f"BOTH architectures from this source: CPython printed `None` where "
+        f"this path printed `0`). Refused rather than emitted, because a "
+        f"plausible number is worse than a refusal. Give {callee} a `return`, "
+        f"or do not use its value"
+    )
+
+
 class ValueKinds:
     """What the names of one function hold, decided from its source.
 
@@ -16524,8 +16646,10 @@ class ValueKinds:
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
                  slot_key=None, declared_kind=None, ctor_field_value=None,
                  callee_is_dict=None, dict_names=("Dict", "dict"),
-                 param_kind=None, declared_is_dict=None):
+                 param_kind=None, declared_is_dict=None,
+                 callee_returns_value=None):
         self._int_names = frozenset(int_names)
+        self._fn = fn
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._param_kind = param_kind or (lambda name: None)
@@ -16585,6 +16709,25 @@ class ValueKinds:
         # only thing that says whether that word was written is the initializer
         # this function itself ran.  See `_note_dict_init`.
         self._dict_inits: dict = {}
+        # The names this body bound to a call that produces NO value — the
+        # callee's name, or a `None` tombstone for a name something else binds.
+        # Same shape and same reason as `_ctor_calls` and `_dict_inits`, and the
+        # shape is the point: `v = g()` where `g` returns nothing leaves `v`
+        # holding a word that is not any value, and `print(v)` is where CPython
+        # says `None` and this path would print whatever `g` left behind. One
+        # binding statement is enough to retract the claim, so the map is
+        # order-independent in the same way `_ctor_calls` is. See
+        # `_note_no_value_call` and `no_value_callee_of`.
+        self._no_value_calls: dict = {}
+        # …and the hook that decides whether a CALLEE produces one. It is a hook
+        # and not a lookup because the answer is about ANOTHER function, which
+        # is the emitter's question (`_callee_kind` beside it answers the same
+        # way about kinds, and the stack that stops it recursing is the
+        # emitter's too). The DEFAULT is the safe direction — a callee nothing
+        # can answer for is one this map says nothing about, so every caller
+        # keeps the answer it had.
+        self._callee_returns_value = callee_returns_value or (
+            lambda name: True)
         # The names this function's SIGNATURE binds, kept apart from the ones
         # its body binds, and the reason is the `declared_kind` hook: an
         # unannotated parameter is seeded INT_KIND above, and for a METHOD
@@ -16638,6 +16781,16 @@ class ValueKinds:
         # returns a dict on one path and a list on another has no shape for
         # `d["k"]` and guessing is the fault this axis exists to remove.
         self.return_is_dict = self._returns_dict == {True}
+        # Whether this function produces a value at all — the question
+        # `returnless_value_refusal` is about, and a different one from
+        # `return_kind`: a function with no `return` has no kind to be
+        # undecided about, it has NO RESULT, and `return_kind`'s INT_KIND
+        # default above is exactly the word-that-is-not-a-value this axis exists
+        # to name. Read through the SHARED `function_returns_a_value` rather than
+        # off `_returns` alone, because a declared return type and a generator's
+        # `yield` are both statements that a value is coming and neither is a
+        # `ReturnStmt` in this body.
+        self.returns_a_value = function_returns_a_value(fn)
 
     # ── scanning ───────────────────────────────────────────────────────
 
@@ -16887,6 +17040,69 @@ class ValueKinds:
         elif name in self._dict_inits:
             self._dict_inits[name] = None
 
+    def _note_no_value_call(self, target, value) -> None:
+        """Record (or retract) the evidence that a name holds an EMPTY result.
+
+        `target = g(…)` where `g` returns nothing is the only shape recorded, and
+        the callee has to be a BARE NAME: a call through a receiver (`self.f()`)
+        binds a method, whose body this table does not have, and a dotted callee
+        (`mod.f()`) is a name this unit did not compile. Answering for either
+        would be the by-name mistake `formal/build.py`'s returned-frame table
+        documents — "a name whose definitions disagree is absent from it" — with
+        no table here to hold the disagreement.
+
+        The tombstone is `_ctor_calls`' and `_dict_inits`' rule and is the reason
+        this is not a flow analysis: `v = g()` and then `v = 5` leaves one name
+        with two homes, and a claim read off the first is a claim about one
+        instruction. **A RETRACTION always wins and a claim never does**, which
+        is the one place this map's rule differs from `_ctor_calls`' and it is
+        the difference that matters here: that map keys sites by identity and
+        only needs a later binding to stop a SECOND construction from being
+        claimed, while this one asks a question about the name as a whole ("every
+        binding of `v` in this function is a call that produces no value"), so
+        the first `v = 5` has to end it whatever came before. Two calls that
+        both produce no value are still one claim, hence the claim's own
+        first-wins rule — and both rules are order-INDEPENDENT, which is what
+        makes the two scan passes (they visit the same statements in the same
+        order) agree rather than drift.
+
+        A name in `_conflicts` is left alone: two statements that disagree about
+        what it holds have already made it undecidable, and this axis adds
+        nothing to that.
+        """
+        name = target if isinstance(target, str) else (
+            target.name if isinstance(target, F.IdentExpr) else None)
+        if name is None or name in self._conflicts:
+            return
+        if (isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr)
+                and not self._callee_returns_value(value.func.name)):
+            self._no_value_calls.setdefault(name, value.func.name)
+        else:
+            self._no_value_calls[name] = None
+
+    def no_value_callee_of(self, operand):
+        """The callee whose EMPTY result `operand` is, or None.
+
+        The one reader of "does this expression carry a value at all", and it
+        answers for the two shapes a `print` can be handed: the call itself
+        (`print(g(1, 2))`) and a local whose every binding in this function is
+        such a call (`v = g(1, 2); print(v)`). The second shape is why this is
+        not a single `isinstance` test at the print site, and it is asked of the
+        map `_note_no_value_call` filled rather than of the body, so the print
+        decision and the scan cannot disagree about which binding it was.
+
+        None for everything else, which is the direction that matters: a caller
+        that reads None keeps the answer it had, so an expression this does not
+        recognise is rendered exactly as before.
+        """
+        if isinstance(operand, F.CallExpr) and \
+                isinstance(operand.func, F.IdentExpr):
+            name = operand.func.name
+            return None if self._callee_returns_value(name) else name
+        if isinstance(operand, F.IdentExpr):
+            return self._no_value_calls.get(operand.name)
+        return None
+
     def _note_field_stores(self, target) -> None:
         """Record that a statement writes THROUGH a holder's field.
 
@@ -17056,12 +17272,14 @@ class ValueKinds:
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
+                self._note_no_value_call(s.target, s.value)
             elif isinstance(s, F.VarDecl):
                 self._bind_value(s.name, s.value,
                                  ann=getattr(s, "type_ann", None))
                 self._note_construction(s.name, s.value)
                 self._note_dict_init(s.name, s.value)
                 self._note_field_stores(s.name)
+                self._note_no_value_call(s.name, s.value)
             elif isinstance(s, F.AugAssignStmt):
                 # `x += e` leaves x holding what it held; an unknown x stays
                 # unknown rather than being called an int by the operator.
@@ -17070,6 +17288,7 @@ class ValueKinds:
                 self._note_construction(s.target, s.value)
                 self._note_dict_init(s.target, s.value)
                 self._note_field_stores(s.target)
+                self._note_no_value_call(s.target, s.value)
             elif isinstance(s, F.MultiAssignStmt):
                 vkind = self._own_shape_of(s.value)
                 for t in s.targets:
@@ -17081,6 +17300,7 @@ class ValueKinds:
                     self._note_construction(t, s.value)
                     self._note_dict_init(t, s.value)
                     self._note_field_stores(t)
+                    self._note_no_value_call(t, s.value)
             elif isinstance(s, F.ReturnStmt):
                 self._returns.add(self.kind_of(s.value))
                 # The dict half of the same statement. Recorded beside the kind
@@ -27153,6 +27373,28 @@ def construction_arity_refusal(name: str, got: int, summary: str,
     told the reader of `LaunchError(Exception)` — a docstring and no fields —
     to "give the fields explicitly", which is advice about a class whose
     missing fields are not the problem."""
+    # THE BASE CLAUSE, and it is asked FIRST because a class whose fields are
+    # short because of a base this image cannot see is a different program from
+    # one whose fields are short because the call under-fills them: the first is
+    # fixed by making the base visible and the second by naming the fields, and
+    # the sentence below each one is advice for the other case. The parameter was
+    # plumbed in with the merge that computes it and its sentence went missing
+    # from both arms, so a reader of `class MyErr(Widget): """no fields at
+    # all"""` was told to "give the fields explicitly" about a class whose
+    # missing fields are not the problem — which is the failure this docstring
+    # was written to prevent, and `test_formal_run.py`'s
+    # `constr_refuse_an_undeclared_base_by_name` is the row that caught it.
+    if bases:
+        spelled = ", ".join(repr(b) for b in bases)
+        return (f"constructing {name} with {got} argument(s) does not match "
+                f"its fields ({summary}), and the reason is not the call: "
+                f"{name} derives from {spelled}, which this image does not "
+                f"declare, so the fields {spelled} would have contributed "
+                f"cannot be named here and the field list this call is checked "
+                f"against is {name}'s own. Make the base visible to this image "
+                f"(declare it in a module this unit compiles, or replace the "
+                f"inheritance), which is the same program with a layout this "
+                f"path can compute")
     if not missing:
         return (f"constructing {name} with {got} argument(s) does not match "
                 f"its fields ({summary}), and {name} declares no `__init__` "
