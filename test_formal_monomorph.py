@@ -1333,7 +1333,7 @@ def test_the_census_answers_each_of_the_five_questions(tmpdir):
           f"`Self.T` flag: {got['FormatStruct']}")
 
 
-def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
+def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
     `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
@@ -1346,6 +1346,13 @@ def test_the_census_reads_the_measured_shapes_out_of_the_corpus():
 
     Skipped, with the reason printed and counted, when there is no stdlib
     checkout beside this tree — see `_Skip` and `_stdlib_dir`.
+
+    The scratch directory is taken and unused (`_tmpdir`): this is a static
+    census over the stdlib's SOURCE, so it builds nothing. The parameter is
+    still declared because the runner's contract is that every case takes one —
+    see `_check_case_arities` — and a case that quietly took none raised
+    `TypeError` before its first assertion, which the runner reported as an
+    ERROR for a case whose whole subject is the corpus.
     """
     stdlib = FI._stdlib_dir()
     if stdlib is None:
@@ -1520,6 +1527,37 @@ TESTS = [
 EXPECTED_FAILURES: dict = {}
 
 
+def _check_case_arities() -> None:
+    """Every case takes the run's scratch directory, and says so here.
+
+    The runner calls `fn(tmpdir)` unconditionally, which is the contract; this
+    is the one place that states it, so a case written without the parameter
+    fails at the START of the run naming itself instead of reaching its own
+    first assertion as a `TypeError` the runner reports as an ERROR — an
+    ERROR that reads like the case failed rather than like it never ran, which
+    is how `test_the_census_reads_the_measured_shapes_out_of_the_corpus` spent
+    a run reporting "the census answers each of the five questions" while the
+    case that asks the corpus had never been called.
+
+    An unused scratch directory is named `_tmpdir`, which is the convention the
+    census case above follows; it is not a second arity.
+    """
+    import inspect
+    wrong = []
+    for name, fn in TESTS:
+        params = list(inspect.signature(fn).parameters.values())
+        if len(params) != 1 or params[0].kind in (params[0].VAR_POSITIONAL,
+                                                 params[0].VAR_KEYWORD):
+            wrong.append(f"{fn.__name__} takes "
+                         f"{[p.name for p in params] or 'nothing'}")
+    if wrong:
+        raise SystemExit(
+            "every case in TESTS takes the scratch directory the runner passes "
+            "it, and these do not: " + "; ".join(wrong) +
+            "\n  add the parameter (named `_tmpdir` when the case builds "
+            "nothing) rather than letting the runner discover it at call time.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -1529,6 +1567,8 @@ def main():
         print(f"SKIP: formal output is arm64-only, host is "
               f"{platform.machine()}")
         return 0
+
+    _check_case_arities()
 
     passed = failed = expected = skipped = 0
     try:
