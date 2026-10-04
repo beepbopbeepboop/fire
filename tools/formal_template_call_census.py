@@ -95,9 +95,18 @@ DEFAULT_PATHS = [
     os.path.join(ROOT, "..", "new-modular", "Mojo", "stdlib", "std"),
 ]
 
-# A bound that constrains nothing, spelled every way this corpus spells it. A
-# parameter with one of these is solved by unification alone; anything else is
-# `B` and needs the trait rules to choose between candidates.
+# Bounds that unification can satisfy WITHOUT choosing between candidates, in
+# every spelling this corpus uses. A parameter bounded by one of these takes
+# whatever the argument says; anything else is a TRAIT and a site carrying one is
+# flagged `B`, because that is the case where the answer is not a string
+# comparison — `T: Writer` against a `Some[Writer]` argument has to pick a
+# concrete type for an existential.
+#
+# **This table is the instrument's judgement, and it is printed rather than
+# hidden**: the `B` flag says which rows it decided, so a reader who thinks a
+# bound belongs in the table (or out of it) can see every row that turns on it.
+# `DType` is in it because a `SIMD[dtype, _]` annotation names a DType VALUE, so
+# the unification has nothing to choose.
 UNCONSTRAINED_BOUNDS = {
     "", "anytype", "anything", "any", "dtype", "int", "int8", "int16", "int32",
     "int64", "uint8", "uint16", "uint32", "uint64", "bool", "string",
