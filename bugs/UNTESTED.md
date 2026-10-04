@@ -116,8 +116,8 @@ under either spelling.
 
 Two of the four §5 items are closed and the census has moved; the rest stands.
 
-* **§4.1 — the unregistered test that WRITES bug docs to the tree — is fixed;
-  the `.cpp` it also left behind is NOT.**
+* **§4.1 — the unregistered test that WRITES bug docs to the tree — is fixed,
+  and so is the `.cpp` it also left behind.**
   `test_py314_full.py` took a constant destination and wrote
   `bugs/<CATEGORY>_<path>.md`, so 300 seconds of it produced 25 new bug docs
   and a `grammar_snippet_gen.cpp` at the repo root. It now takes `--root` (and
@@ -125,14 +125,23 @@ Two of the four §5 items are closed and the census has moved; the rest stands.
   reports to `--out` — a fresh temp directory by default, printed at the end —
   and only writes into `bugs/` when `--write-to-bugs` says so. The
   investigation is unchanged; only the destination moved.
-  **Re-measured 2026-10-03 on the merged tree, and the second half of that
-  sentence no longer holds**: the sweep still leaves a `grammar_snippet_gen.cpp`
-  at the repo root. It is not the sweep's own write — `test_py314_full.py`
-  mentions the name only in its docstring — it is a `fire.py build` of one
-  file in the scanned tree emitting into the process's CWD, which for a run
-  started at the repository root is the repository root. `--out` moved the
-  REPORTS; nothing moves the build's own output. Filed as
-  `bugs/TEST_py314_sweep_still_leaves_a_generated_cpp_at_the_repo_root.md`.
+  **Re-measured 2026-10-03 on the merged tree, the second half of that sentence
+  stopped holding**: the sweep still left a `grammar_snippet_gen.cpp` at the
+  repo root, and it was not the sweep's own write — `test_py314_full.py`
+  mentions the name only in its docstring — but a `fire.py build` of one file in
+  the scanned tree emitting into the process's CWD. `--out` moved the REPORTS;
+  nothing moved the build's own output.
+  **Fixed at the source, 2026-10-04**: `fire.build_executable` now puts every
+  intermediate (the generated `.ci`, the objects, the generator `.cpp`) in a
+  scratch directory derived from `output` and removes it on both returns, so a
+  build cannot write into a directory it was not asked to write in. The sweep
+  needed no change of its own — it hands `-o` a path in a temp directory, which
+  is where the scratch now goes. The collision half was the larger prize and
+  was measured: two builds of `a/prog.mojo` and `b/prog.mojo` at the same time
+  both linked a binary that printed `11`, because they shared one `prog.ci`;
+  with the scratch directory derived from `output` each prints its own value.
+  Pinned by `test_module_cache.py`'s
+  `test_two_builds_of_one_basename_keep_their_own_scratch`.
 * **§3.1 — the cached test that could not see its subject — is fixed** (the
   `checked_run.py` side landed earlier; the registry now says
   `extra=['test_examples_parse.py', 'formal/examples']`, so the 46th example is

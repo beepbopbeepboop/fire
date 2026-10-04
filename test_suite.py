@@ -47,12 +47,18 @@ cache in front of the runner rather than the runner:
   the estate   every `test_*.py` in the repo is named by a registered spec, or
                is in a list that says why not. 50 of 81 were named by nothing
               when this was written; 38 excuses over 118 files remain.
+  needles     a string a test pins as a MESSAGE has to be a message the tree
+               can still say. Two bug docs in `bugs/` were one stale needle
+               each — a refusal that was still correct, in a sentence no build
+               could print — and the second cost a session to diagnose because
+               the words were still in the tree, said by a different check.
 
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
 
 import ast
 import contextlib
+import glob
 import io
 import json
 import os
@@ -2803,10 +2809,10 @@ def test_selfhost_key_hashes_nothing_dead():
 def test_the_compiler_imports_from_every_real_entry_point():
     """Every module the compiler is entered through must import FIRST.
 
-    The middle tier and the gimple backend are mutually recursive by design —
+    The middle tier and the gimple backend WERE mutually recursive —
     `mojo/middle/funcs_shared.py` and `mojo/middle/module_shared.py` both
     `import gimple_codegen`, which imports the backend, which imports them
-    back — so the graph has a load order it tolerates and a set it does not,
+    back — so the graph had a load order it tolerated and a set it did not,
     and Python resolves a cycle by letting whichever module the process
     reached first finish, which is why this failure reads as an unrelated
     `ImportError` a long way from the import that closed the loop.
@@ -2839,13 +2845,40 @@ def test_the_compiler_imports_from_every_real_entry_point():
     The probe is EVERY module under `mojo/middle/` and `mojo/backend_gimple/`
     plus the top-level entry points, not a hand-kept shortlist, so a new
     module that closes a cycle is caught by being added rather than by
-    somebody remembering to extend a list. `_LOAD_ORDER_DEPENDENT` is the
-    declared exemption, and it is checked in BOTH directions — a new entry
-    appearing in the failure set fails, and so does an entry in the
-    declaration that no longer fails, because a stale exemption is a hole
-    the next reader cannot see through.
+    somebody remembering to extend a list. `declared` is the exemption list,
+    and it is checked in BOTH directions — a new entry appearing in the
+    failure set fails, and so does an entry in the declaration that no longer
+    fails, because a stale exemption is a hole the next reader cannot see
+    through.
+
+    **It is EMPTY, and getting it that way was nine cycles' worth of work
+    rather than a decision.** Until 2026-10-04 it named eight
+    `mojo/middle/*` modules, with a comment saying each is "load-order
+    dependent" by design — `mojo/middle/funcs_shared.py` and
+    `mojo/middle/module_shared.py` both `import gimple_codegen`, which
+    imports the backend, which imports them back. That was accurate and it
+    was also the thing the check exists to prevent: an exemption is a
+    permanent hole, and nine modules' worth of "already broken" means a NEW
+    cycle in any of them is absorbed into a row that was already red, so the
+    guard guarded nothing for them. The design was never the constraint — the
+    constraint was that nobody had noticed the cycle had only two ends. Each
+    middle module now reaches `gimple_codegen` at its USE SITE (four of the
+    eight imported a module they never read; the other four wanted
+    `_SELFHOST_DIR` / `_selfhost_impl_py_files`, which is what
+    `mojo/backend_gimple/module_gen.py` was already forced to do for the same
+    reason), and every module in both directories imports on its own:
+
+        $ for m in mojo/middle/*.py mojo/backend_gimple/*.py; do
+        >   python3 -c "import ${m%.py}" | tr / .; done
+        36 OK
+
+    So the rule a new cycle has to beat is the middle tier's own: the
+    direction that stays top-level is `backend -> middle`, and an edge the
+    other way is at its use site. `declared` is kept as the declaration
+    rather than deleted, because the two directions are the anti-rot: if a
+    module can no longer be imported first, its entry has to be DELETED in the
+    same commit, which is only a rule if there is a list to delete from.
     """
-    import glob
     import subprocess
     entries = ['fire', 'fire_main', 'myinterpreter', 'reflect',
                'gimple_codegen', 'formal.build', 'formal.model']
@@ -2862,23 +2895,7 @@ def test_the_compiler_imports_from_every_real_entry_point():
             last = [l for l in r.stderr.strip().splitlines() if l.strip()]
             bad.append(f'{mod}: {last[-1] if last else "failed"}')
     failed = {b.split(':', 1)[0] for b in bad}
-    # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
-    # which imports the gimple backend, which imports them back. That is the
-    # middle tier's pre-existing shape — measured identical on master, before
-    # any of the branches this test was written for — so none of the eight can
-    # be the first `mojo.*` import a program makes, and every one of them
-    # DOES import fine behind `gimple_codegen` or `fire.py`. Named rather than
-    # omitted so a reader who finds one of them broken learns it was already
-    # load-order-dependent instead of concluding the exemption is where to
-    # start looking. No `mojo/backend_gimple/*` module is exempt: the backend
-    # sits downstream of `gimple_codegen`, so every one of them is reachable
-    # first and a new cycle among them would be caught here.
-    declared = {
-        'mojo.middle.calls_shared', 'mojo.middle.funcs_shared',
-        'mojo.middle.infra_infer', 'mojo.middle.loops_shared',
-        'mojo.middle.methods_shared', 'mojo.middle.module_shared',
-        'mojo.middle.resolve_shared', 'mojo.middle.stmts_shared',
-    }
+    declared: set = set()
     check('imports: every real entry point imports first',
           failed <= declared, '; '.join(bad))
     check('imports: the load-order exemption list is not stale',
@@ -2888,6 +2905,330 @@ def test_the_compiler_imports_from_every_real_entry_point():
     check('imports: the probe actually probed something', len(entries) >= 30,
           f'only reached {len(entries)} modules — the glob or the list went '
           f'stale and this check is vacuous')
+
+
+# Every `.py` and `.mojo` whose text can end up in a refusal a test pins, and
+# every line of a `formal/hostmods/*.mojo` read as raw text: a hostmod is Mojo
+# source and says things no Python literal can.
+#
+# `test_*.py` is EXCLUDED from this list even though the glob below appears to
+# take it in, and that exclusion is the whole check. A needle is a string
+# literal in a test file, so a corpus that reads the test files satisfies every
+# needle with the needle: the census would report 0 misses on a tree where
+# every message in it had been reworded, which is the failure it exists to
+# catch. Measured — with `test_*.py` in the corpus, 66 of 66 needles "match",
+# including a synthetic tree whose producer had been deleted outright.
+_SAID_BY_PY = ('*.py', 'formal/**/*.py', 'mojo/**/*.py', 'tools/*.py')
+_SAID_BY_RAW = ('formal/hostmods/**/*.mojo',)
+# The calls a needle can be an argument of. `check(needle in text, why)` is this
+# tree's convention everywhere it pins a message; the `assert*` three are the
+# same shape spelled the unittest way.
+_NEEDLE_CALLS = ('check', 'assertTrue', 'assertFalse', 'assertIn')
+# An interpolation: a character the message's own text does not contain and a
+# substituted value does. Matched by `_said_contains`.
+_SUBSTITUTED = None
+_WORD = re.compile(r'\S+')
+
+
+def _said_by(root, pattern, raw=False):
+    """One char list per string the module can SAY, substitutions marked.
+
+    A list of single characters rather than the string, because that is what
+    makes the two awkward shapes work. A needle is usually a FRAGMENT of a
+    message, so it has to be findable in the middle of one (`'DEFINES the
+    name'` out of a fifteen-line refusal); and it often spans a value the
+    message substituted (`'widen binds 3 symbol(s) that nothing provides'` — the
+    `3` is an f-string field). Matching characters with the substitution
+    matching any run of them handles both, where a word-per-token match fails
+    on `'`thing_`'` alone: the template spells it `` ` `` `{attr}` `` `_`, `` —
+    three tokens for one word.
+    """
+    for path in sorted(glob.glob(os.path.join(root, pattern), recursive=True)):
+        if os.path.basename(path).startswith('test_'):
+            continue
+        if raw:
+            try:
+                text = open(path, encoding='utf-8', errors='replace').read()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if line.strip():
+                    yield list(line)
+            continue
+        try:
+            tree = ast.parse(open(path, encoding='utf-8',
+                                  errors='replace').read(), path)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        # A DOCSTRING is not something a module says to a user, and several
+        # quote a message verbatim to explain it — which is how
+        # `model.function_value_refusal`'s surviving docstring kept the deleted
+        # copy's wording alive as something a test could still match. Counting
+        # prose about a message as the message is the same self-satisfying
+        # defect as reading the tests.
+        quoted = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                body = getattr(node, 'body', None)
+                if (body and isinstance(body[0], ast.Expr)
+                        and isinstance(body[0].value, ast.Constant)
+                        and isinstance(body[0].value.value, str)):
+                    quoted.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in quoted:
+                    continue
+                if node.value.strip():
+                    yield list(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                chars = []
+                for value in node.values:
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        chars += list(value.value)
+                    else:
+                        chars.append(_SUBSTITUTED)
+                # An f-string with no text of its own — `f"{a}{b}"` — is not a
+                # template, it is a wildcard that matches every string in the
+                # tree, and one of those makes this census vacuous.
+                if ''.join(c for c in chars if c is not _SUBSTITUTED).strip():
+                    yield chars
+
+
+def _said_contains(needle, said):
+    """Whether one string the tree can say CONTAINS the needle.
+
+    Whitespace is not pinned: these messages are wrapped across source lines
+    and a needle that spans the wrap has a newline in the middle of it, so any
+    whitespace matches any whitespace. Everything else must line up.
+    """
+    def same(a, b):
+        return a == b or (a.isspace() and b.isspace())
+
+    n, m = len(needle), len(said)
+
+    def from_here(i, j):
+        while j < m:
+            c = said[j]
+            if c is _SUBSTITUTED:
+                # A substituted value can be any length, including none, so
+                # every split of the remaining needle is a candidate.
+                for k in range(i, n + 1):
+                    if k == n or from_here(k, j + 1):
+                        return True
+                return False
+            if i >= n:
+                return True
+            if not same(c, needle[i]):
+                return False
+            i, j = i + 1, j + 1
+        return i >= n
+
+    for start in range(m):
+        c = said[start]
+        if c is _SUBSTITUTED:
+            # The needle can START inside a substituted value, which is the
+            # shape every message that names the callee has: `'widen binds 3
+            # symbol(s)…'` against `f"{name} binds {n} symbol(s)…"`. So the
+            # needle index enters at 0 and the substitution absorbs from there.
+            if from_here(0, start):
+                return True
+        elif same(c, needle[0]) and from_here(1, start + 1):
+            return True
+    return False
+
+
+def _is_a_message_fragment(s):
+    """Whether a needle is PROSE — and so names something a module can say.
+
+    The floor is three words at least 90% letters and spaces, which is what
+    separates `'brackets cannot be bound'` from `'typedef'`, `'/tmp/x.dylib'`
+    and `'done-sha256=3@@'`. A test pins a dozen of those in every file and
+    they are not messages; requiring prose is what keeps this check about
+    messages and about nothing else.
+    """
+    if len(s.split()) < 3:
+        return False
+    return sum(c.isalpha() or c == ' ' for c in s) / len(s) > 0.9
+
+
+def _unmatched_needles(root):
+    """`(missing, total, n_said)` for a tree — the census, reusable.
+
+    Split out from the check so the check's own ability to FAIL is pinned on a
+    synthetic tree, which is the only way to know a green run means the
+    messages agree rather than that the walk stopped walking.
+
+    **Only a POSITIVE needle is in scope.** `check(needle not in text, …)`
+    asserts a message is NOT said — `'only function it declares' not in reason`
+    is guarding a branch that was deleted on purpose — and there is nothing to
+    check a negative pin against: the string is supposed to be absent, so
+    "the tree can say it" is the wrong answer and "the tree cannot" is a claim
+    about a message nobody should write. Both of this file's bugs were
+    positive pins, and the fix for a negative one is a different check
+    entirely.
+    """
+    said = []
+    for pattern in _SAID_BY_PY:
+        said += list(_said_by(root, pattern))
+    for pattern in _SAID_BY_RAW:
+        said += list(_said_by(root, pattern, raw=True))
+    # A necessary condition worth having: a message that cannot say any word
+    # of the needle cannot contain it, and this turns 66 x 90,947 into 66 x a
+    # few hundred.
+    words = [frozenset(_WORD.findall(''.join(c for c in s if c is not _SUBSTITUTED)))
+             for s in said]
+    missing, total = [], 0
+    for path in sorted(glob.glob(os.path.join(root, 'test_*.py'))):
+        try:
+            tree = ast.parse(open(path, encoding='utf-8').read(), path)
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, 'id', None) or getattr(func, 'attr', None)
+            if name not in _NEEDLE_CALLS:
+                continue
+            for arg in list(node.args) + [k.value for k in node.keywords]:
+                for sub in ast.walk(arg):
+                    if not (isinstance(sub, ast.Compare)
+                            and isinstance(sub.left, ast.Constant)
+                            and isinstance(sub.left.value, str)
+                            and _is_a_message_fragment(sub.left.value)):
+                        continue
+                    if [type(o).__name__ for o in sub.ops] == ['NotIn']:
+                        continue
+                    needle = sub.left.value
+                    total += 1
+                    needle_words = set(_WORD.findall(needle))
+                    if any((needle_words & w) and _said_contains(needle, s)
+                           for w, s in zip(words, said)):
+                        continue
+                    missing.append(f'{os.path.basename(path)}:{sub.lineno} '
+                                   f'{needle!r}')
+    return missing, total, len(said)
+
+
+def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
+    """A needle and the sentence it pins cannot drift apart unnoticed.
+
+    `check("brackets cannot be bound" in text, …)` is how this tree pins a
+    refusal, and nothing said the sentence and the needle had to agree. Two
+    bugs in `bugs/` were that, and both were the same shape: the refusal was
+    still correct, the words were still in the tree somewhere else, and the
+    TEST was asserting a sentence the build could not print —
+
+      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
+        needles named a copy of `model.function_value_refusal` that Python's
+        rebinding had made DEAD, so the case was red on a tree whose behaviour
+        was right;
+      * `TEST_formal_specialization_cross_module_row_expects_the_bracket_
+        sentence.md`, whose needle was still said — by a different check, for a
+        different shape — so the row read as a regression of the message when
+        the message had only become more specific.
+
+    Either way the reader of the red is sent to the wrong thing, and the cost
+    is a session: both needed one to establish that the behaviour was fine.
+
+    So this is the census, on every gate. Every message-shaped string literal
+    that is the LEFT operand of a positive comparison inside a
+    `check(...)` / `assert*(...)` call in any `test_*.py` must be CONTAINED in
+    something the tree can say. Measured on this tree: 90,947 sayable strings,
+    66 positive needles, **0 unmatched**, 3.1 s — of which 2.3 s is parsing the
+    corpus and 0.2 s is the matching.
+
+    The corpus is deliberately wider than the messages it has to catch. A
+    needle naming a sentence from a module not in it is reported here rather
+    than passing for the wrong reason, and the fix is one line of corpus.
+    """
+    missing, total, n_said = _unmatched_needles(HERE)
+    check('needles: every message a test pins is one the tree can still say',
+          not missing,
+          f'{len(missing)} of {total} message-shaped needles match no string '
+          f'in the tree — either the message was reworded without the test '
+          f'following it, or the corpus above is missing where it is said: '
+          f'{missing[:6]}')
+    check('needles: the census is not vacuous', total >= 40,
+          f'only found {total} positive message-shaped needles — the AST walk '
+          f'or the prose floor went stale and this check would pass on nothing')
+    check('needles: the corpus is not empty', n_said >= 10000,
+          f'only {n_said} sayable strings — the globs or the parser went stale '
+          f'and every needle would be reported missing')
+
+
+def test_the_needle_census_fails_on_a_needle_nothing_says():
+    """The census above, on a tree built to be wrong, so green means something.
+
+    A census that cannot report a miss is a comment with a subprocess in it,
+    and this one has four ways to go vacuous that no amount of reading the real
+    tree would reveal: the glob finds no `test_*.py`, the AST walk stops
+    recognising `check`, the corpus starts reading the test files (which
+    satisfies every needle with itself), and a docstring's quotation of a
+    message counts as the message. All four are exercised here, on a
+    three-file synthetic tree.
+    """
+    def write(name, text):
+        with open(os.path.join(root, name), 'w') as f:
+            f.write(text)
+
+    with tempfile.TemporaryDirectory() as root:
+        write('prod.py',
+              'PLAIN = "the brackets cannot be bound here"\n'
+              'def refuse(name, n):\n'
+              '    return (f"{name} binds {n} symbol(s) that nothing provides"\n'
+              '            f" on this link line")\n')
+        write('test_synthetic.py',
+              'def check(cond, detail=""):\n'
+              '    assert cond, detail\n'
+              'def test_it():\n'
+              '    check("the brackets cannot be bound here" in PLAIN)\n'
+              '    check("widen binds 3 symbol(s) that nothing provides on '
+              'this link line"\n'
+              '          in refuse("widen", 3))\n')
+        missing, total, n_said = _unmatched_needles(root)
+        check('needles: a live tree is not reported missing',
+              not missing and total == 2 and n_said >= 2,
+              f'{missing} / {total} needles, {n_said} sayable — a needle the '
+              f'producer really can say was reported missing, which would '
+              f'make the real check cry wolf')
+        # …and the same tree with ONE of the producer's two messages reworded
+        # under the test that pins it: exactly the drift the census exists to
+        # catch, and exactly what `model.function_value_refusal`'s two
+        # definitions produced — one message, two sentences, and the test
+        # asserting the copy Python's rebinding had made dead. ONE and not two
+        # matters: a census that reports everything missing the moment any
+        # producer changes is a census nobody can act on.
+        write('prod.py',
+              'PLAIN = "the brackets are a comptime parameter list"\n'
+              'def refuse(name, n):\n'
+              '    return (f"{name} binds {n} symbol(s) that nothing provides"\n'
+              '            f" on this link line")\n')
+        missing, total, _ = _unmatched_needles(root)
+        check('needles: a needle the tree can no longer say IS reported',
+              len(missing) == 1 and 'brackets cannot be bound' in missing[0]
+              and total == 2,
+              f'{missing} / {total} — expected exactly the one reworded needle, '
+              f'and nothing else')
+        # …and the docstring exclusion, the quieter half of the same
+        # defect: a module that explains its own message by QUOTING it has
+        # not been reworded, and a census that counts prose as speech
+        # reports it live — which is how the dead copy of
+        # `function_value_refusal` would have stayed pinned forever.
+        write('prod.py',
+              chr(34)*3 + 'The refusal says: the brackets cannot be bound '
+              'here.' + chr(34)*3 + chr(10) +
+              'PLAIN = "the brackets are a comptime parameter list"' + chr(10) +
+              'def refuse(name, n):' + chr(10) +
+              '    return (f"{name} binds {n} symbol(s) that nothing '
+              'provides"' + chr(10) +
+              '            f" on this link line")' + chr(10))
+        missing, total, _ = _unmatched_needles(root)
+        check('needles: a message quoted in a DOCSTRING is not a message said',
+              len(missing) == 1 and 'brackets cannot be bound' in missing[0],
+              f'{missing} — the docstring was counted as speech, so a module '
+              f'that explains its own message keeps every old needle alive')
 
 
 def test_bucket_dedup():
@@ -4743,6 +5084,8 @@ def main():
                test_selfhost_key_is_complete,
                test_selfhost_key_hashes_nothing_dead,
                test_the_compiler_imports_from_every_real_entry_point,
+               test_a_message_a_test_pins_is_still_a_message_the_tree_can_say,
+               test_the_needle_census_fails_on_a_needle_nothing_says,
                test_a_disabled_test_is_registered_but_never_runs,
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,

@@ -50,25 +50,28 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # (gcc rejects a prototype against a later full one). Removing the import
 # removes the declaration instead, which is the fix.
 #
-# `funcs_shared` reaches `gimple_codegen`, which reaches the gimple backend,
-# which reaches `funcs_shared` again, so a top-level import in BOTH middle
-# modules closes a cycle. Whichever of the two the process happened to
-# reach first then died with `ImportError: cannot import name ... from
-# partially initialized module`, and the measured victim was the formal
-# build path, which enters through `reflect` -> `gimple_codegen` and has no
-# other way in: `formal/model.py` `runtime_abi` -> ... ->
-# `mojo/backend_gimple/emit_funcs.py` -> here. The direction that stays
-# top-level is `funcs_shared` -> `gimple_codegen`; every edge back down
-# into the middle tier is at its use site, so importing EITHER middle module
-# first works. See `funcs_shared._struct_method_qualifier._sanitize_qualifier`
-# for the same rule on the other side.
-# Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
+# **There is no `gimple_codegen` import at module scope here, and there was
+# one until 2026-10-04.** This file and `funcs_shared` each did
+# `import gimple_codegen`, which reaches the gimple backend, which reaches both
+# of them again — so whichever the process happened to reach first died with
+# `ImportError: cannot import name ... from partially initialized module`, and
+# `mojo.middle.module_shared` could not be a process's FIRST `mojo.*` import at
+# all. The measured victim was the formal build path, which enters through
+# `reflect` -> `gimple_codegen` and has no other way in:
+# `formal/model.py` `runtime_abi` -> ... -> `mojo/backend_gimple/emit_funcs.py`
+# -> here. The rule that replaces it is the one the gimple tier already follows
+# downwards — `gimple_codegen.py:738` reaches the whole `mojo/backend_gimple/*`
+# tier at module scope and `emit_funcs.py` reads `_selfhost_impl_py_files` out
+# of THIS module there, so the edge the other way is at its use site
+# (`_selfhost_parsed_modules`, below). `mojo/backend_gimple/module_gen.py` does
+# the same for `infra_infer`, for the same reason. See
+# `funcs_shared._struct_method_qualifier._sanitize_qualifier` for the rule on
+# the qualifier side.
+# Closure-scan leaf helpers live in mojo.middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
     _gmi_all_stmts_nonfunc, _selfhost_fn_reassigns_method,
 )
-import gimple_codegen  # constants used by some extracted helpers
-from gimple_codegen import _selfhost_impl_py_files
 from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
@@ -147,7 +150,11 @@ def _selfhost_parsed_modules(sd: str) -> list:
     extra-field scans). A file that fails to parse is cached as a FAILURE and
     contributes an empty statement list.
     """
-    _files = sorted(_selfhost_impl_py_files(sd)
+    # Qualified, for the reason `funcs_shared._selfhost_extracted_fn_index`
+    # states in full: a function-level `from gimple_codegen import name` binds
+    # an int64_t on the self-hosted path, and this name is a FUNCTION value.
+    import gimple_codegen
+    _files = sorted(gimple_codegen._selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
                        ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
                         'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',

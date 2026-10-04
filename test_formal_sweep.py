@@ -600,28 +600,51 @@ class TestDyldProbe(unittest.TestCase):
           goes through the export trie, which is the only place `_macho_symbol`
           is used, so an arm64-only fixture would leave the function that
           replaced the `lstrip` untested.
+        **Which binds the precondition is about, and why it is not "all of
+        them", in two filters rather than one.** An image binds whatever its
+        ENTRY STUB calls as well as whatever the fixture imported, and on x86-64
+        that includes libSystem's `exit` — a name no fixture can give a leading
+        underscore to. So an unfiltered `name.startswith("_")` failed on a bind
+        this test never made: measured, arm64 binds `['__pkg__helper_twice_…']`
+        and x86_64 binds that PLUS `exit`, which is why it passed on one
+        architecture and failed on the other and nobody read it as the same
+        shape failing twice.
 
-        The precondition is asked of the binds the FIXTURE creates, which is not
-        every bind on the link line. An image also binds whatever its ENTRY STUB
-        calls, and on x86-64 that includes libc's `exit` — a name no fixture can
-        give a leading underscore to, so asserting the precondition over the
-        whole bind list failed on a bind this test never made (measured: arm64
-        binds `['__pkg__helper_twice_9f63a2']`, x86_64 binds that plus `exit`).
-        The fixture's own binds are selected STRUCTURALLY rather than by
-        position: a bind the imported library exports under its mangled
-        spelling is this fixture's, and one only libSystem provides is the
-        stub's. Position would be a coin flip — it used to be, and `exit` won.
+        Each side fixed it by a filter, and both are kept because they answer
+        DIFFERENT questions:
+
+        * **the ORDINAL picks the library.** A two-level bind is answered by ONE
+          named library (`test_the_ordinal_decides_which_library_is_consulted`),
+          so a libSystem bind says nothing about what an imported module's
+          mangling did. This is what dyld itself resolves against, so it is the
+          honest filter for "which library's business is this bind".
+        * **the EXPORT SET picks the fixture's binds.** Within the foreign
+          library's ordinals, a bind whose mangled spelling the library actually
+          exports is one this fixture made; anything else would be the imported
+          library's own machinery. Position would be a coin flip — it used to
+          be, and `exit` won.
+
+        Either alone fixes the x86-64 failure; together they also say what the
+        fixture is testing, which is the property the doc recorded as missing.
+        This is the same defect as the assertion this file's `relpkg` case
+        stopped making — a precondition pinned to a spelling rather than to the
+        property — and it was invisible for as long as `setUpClass` raised
+        before this class ran a single case.
         """
         from formal import build as FB
         for arch, image in self.leading_underscore.items():
-            names = [name for _ordinal, name in S._binds(image)]
-            self.assertTrue(names, f"[{arch}] precondition: the image binds "
-                                   f"something")
             dylibs = S._load_dylib_names(image)
-            foreign = next((d for d in dylibs
-                            if "libSystem" not in os.path.basename(d)), None)
+            foreign_ordinals = {i + 1 for i, d in enumerate(dylibs)
+                                if "libSystem" not in os.path.basename(d)}
+            foreign = next((dylibs[i - 1] for i in sorted(foreign_ordinals)),
+                           None)
             self.assertIsNotNone(foreign, f"[{arch}] no imported library on "
                                           f"the link line: {dylibs}")
+            names = [name for ordinal, name in S._binds(image)
+                     if ordinal in foreign_ordinals]
+            self.assertTrue(names, f"[{arch}] precondition: the image binds "
+                                   f"something from the imported library "
+                                   f"{os.path.basename(foreign)}")
             exports = set(FB.macho_dylib_exports(foreign))
             fixture_binds = [n for n in names if S._macho_symbol(n) in exports]
             self.assertTrue(

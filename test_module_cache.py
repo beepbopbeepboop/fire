@@ -1350,13 +1350,76 @@ def test_root_module_circular_import_symbol(wd):
         source = f.read()
     inline_exe = os.path.join(proj, 'root_inline')
     ok = fire.build_executable(root_path, source, output=inline_exe,
-                               work_dir=proj, quiet=True)
+                               quiet=True)
     check("root-circular-import: inline build links", ok)
     if ok:
         rr = _run(inline_exe)
         check("root-circular-import: inline binary prints 42",
               rr.returncode == 0 and rr.stdout.strip() == '42',
               repr(rr.stdout) + repr(rr.stderr))
+
+
+def test_two_builds_of_one_basename_keep_their_own_scratch(wd):
+    """Two modules with the SAME basename, built one after the other, must not
+    share a scratch directory — and must leave none behind.
+
+    `fire.build_executable` used to name every intermediate after the input
+    file's basename in the PROCESS's working directory: the generated `.ci`,
+    the module `.o`, the runtime `.o`, and (when the module has a generator)
+    the `_gen.cpp`/`_gen.o` pair. Two builds of `a/prog.mojo` and `b/prog.mojo`
+    — or the same file built into two trees — therefore both wrote `prog.ci`,
+    and neither took a lock, so one build's gcc could read the other's
+    half-written `.ci`. `tools/suite.py` runs jobs `-j18` from one checkout,
+    so that is reachable by the gate rather than only by hand.
+
+    It is also how a build dirtied the tree: `fire.py build` passed no scratch
+    directory of its own, so `python3 test_py314_full.py` from the repository
+    root left a `grammar_snippet_gen.cpp` there, and two such files were
+    committed before `.gitignore` covered the pattern.
+
+    Both halves are asserted because either alone passes on the old code: the
+    two builds have to SUCCEED and print their OWN values (which is what a
+    colliding `.ci` breaks), and the directories afterwards have to hold no
+    `.ci`, no `.o` and no `.build` (which is what the litter was). The scratch
+    directory is derived from `output` rather than being a `mkdtemp`, so it is
+    deterministic — a given program and output still compile the same bytes,
+    which `-g3`'s debug info would otherwise stop doing.
+    """
+    import fire
+    srcs = {}
+    for where, value in (('a', 11), ('b', 22)):
+        d = os.path.join(wd, 'collide_' + where)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, 'prog.mojo')
+        with open(path, 'w') as f:
+            f.write("def main() raises:\n    print(%d)\n" % value)
+        with open(path) as f:
+            text = f.read()
+        srcs[where] = (path, text, os.path.join(d, 'out'))
+    cwd_before = set(os.listdir(HERE))
+    for where, (path, text, exe) in srcs.items():
+        ok = fire.build_executable(path, text, output=exe, quiet=True)
+        check("scratch: the %s build succeeds" % where, ok,
+              "build_executable returned False for %s" % path)
+        if not ok:
+            continue
+        rr = _run(exe)
+        want = str(11 if where == 'a' else 22)
+        check("scratch: the %s binary prints its OWN value" % where,
+              rr.returncode == 0 and rr.stdout.strip() == want,
+              "%r + %r" % (rr.stdout, rr.stderr))
+    left = []
+    for where in srcs:
+        for dirpath, _dirnames, filenames in os.walk(os.path.join(
+                wd, 'collide_' + where)):
+            for name in filenames:
+                if name.endswith(('.ci', '.o', '.cpp')) or name.startswith('.'):
+                    left.append(os.path.join(dirpath, name))
+    check("scratch: neither build left an intermediate beside its output",
+          not left, "left behind: %r" % (left,))
+    check("scratch: no build wrote into the compiler's own directory",
+          set(os.listdir(HERE)) - cwd_before == set(),
+          "new in %s: %r" % (HERE, sorted(set(os.listdir(HERE)) - cwd_before)))
 
 
 def test_underscore_prefixed_sibling_import_symbol(wd):
@@ -2059,6 +2122,7 @@ def main():
         test_sb1_per_scope_import_distinct_modules(wd)
         test_module_attr_class_alias_constructs_that_class(wd)
         test_root_module_circular_import_symbol(wd)
+        test_two_builds_of_one_basename_keep_their_own_scratch(wd)
         test_underscore_prefixed_sibling_import_symbol(wd)
         test_ambiguous_overload_is_refused_not_first_picked(wd)
     finally:

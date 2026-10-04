@@ -15,7 +15,12 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-import gimple_codegen  # constants used by some extracted helpers
+# NO top-level `import gimple_codegen`: `gimple_codegen` imports the whole
+# `mojo/backend_gimple/*` tier at its own top level (gimple_codegen.py:738)
+# and that tier reads this module back at ITS top level, so a top-level
+# import here means this module cannot be a process's first `mojo.*`
+# import. The one name this file wanted (`_SELFHOST_DIR`) is read at its
+# two use sites instead, after the cheap guards.
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -74,6 +79,7 @@ def _is_selfhost_source_file(path: str) -> bool:
     """
     if not path or not path.endswith('.py'):
         return False
+    import gimple_codegen
     _rp = os.path.realpath(os.path.abspath(path))
     _sd = gimple_codegen._SELFHOST_DIR
     _rsd = os.path.realpath(_sd)
@@ -112,6 +118,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     if not cf or not cf.endswith('.py'):
         return False
     cur_abs = gimple_ctypes.os.path.abspath(cf)
+    import gimple_codegen
     sd = gimple_codegen._SELFHOST_DIR
     # Path-INDEPENDENT sibling signal (`fire_compiler.py` at the tree root),
     # mirroring `_is_selfhost_source_file` above. The bare
