@@ -10789,7 +10789,7 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         return
     if isinstance(node, F.MultiAssignStmt):
         # The same position, in the statement that has a LIST of them.
-        for i, target in enumerate(getattr(node, "targets", None) or []):
+        for target in (getattr(node, "targets", None) or []):
             _rewrite_store_target(target, sites, stores)
         node.value = _rewrite_child(getattr(node, "value", None), sites,
                                     stores)
@@ -10854,7 +10854,9 @@ def _rewrite_store_target(target, sites: dict, stores: set):
     if target is None:
         return
     if isinstance(target, (F.TupleExpr, F.ListExpr)):
-        for i, element in enumerate(getattr(target, "elements", None) or []):
+        # A tuple or list target is a run of targets, not one expression: its
+        # ELEMENTS are stores, each with its own subscript index to reach.
+        for element in (getattr(target, "elements", None) or []):
             _rewrite_store_target(element, sites, stores)
         return
     if isinstance(target, F.SubscriptExpr):
