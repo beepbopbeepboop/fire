@@ -781,14 +781,19 @@ def glob(pathname, recursive = 0, include_hidden = 0) -> List[String]:
     shape for the same reason (`_walk_fill` writes into a blob `walk` sized), and
     it is why `HOST_OWNED_BLOBS` names this export at all.
 
-    So `_iglob` FILLS a caller's blob and this function sizes it: `_iglob_count`
-    is the counting twin of `_iglob_fill`, the same bargain
+    So the WALK fills a caller's blob and this function sizes it:
+    `_iglob_count` is the counting twin of `_iglob_fill`, the same bargain
     `_rlistdir_count`/`_rlistdir_fill` make and for the same reason — a blob's
     length has to be decided before the first word is stored. The cost is that
     the walk runs TWICE, which is the cost `os.listdir` and `os.walk` both pay and
     which their docstrings state; the benefit is that word 0 of the answer is a
     fact about the filesystem and that the block a caller holds was allocated by
     the function the caller called.
+
+    (`_iglob` itself survives as the one helper that wants a blob before any
+    count exists — `_iglob_dirs` hands its answer to a caller that iterates it.
+    It is not the export, so the producer rule is satisfied here rather than
+    evaded beside it.)
     """
     n = _iglob_count(pathname, recursive, 0, include_hidden)
     # SPELLED OUT rather than delegated to `_blob_new`, and the reason is that
