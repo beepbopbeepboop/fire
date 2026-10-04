@@ -45,6 +45,16 @@ because the thing being pinned is the same thing as the rest of the file: what
 the generator says about a construct, checked where the generator can be wrong
 without a Lean run.
 
+**And one class about the SHAPE of what it emits rather than about a
+construct**: `TestStepOkDerivesFromStepResult` pins that the per-instruction
+step-OK lemma (`arm64_step s code ≠ none`) is read off the step-RESULT lemma of
+the same index instead of re-reducing the model's 54-arm `if` chain for every
+instruction. That was 90% of the `native_decide` calls in a generated arm64
+proof -- 120 420 of 133 758 over `formal/examples` -- spent re-deriving a
+corollary of a lemma already in the file, and it is exactly the kind of cost a
+correctness test cannot see: every theorem still typechecked, at twice the
+seconds.
+
 The Lean check is skipped, loudly, when Lean is unavailable; everything else
 runs either way, because a generator that cannot even produce text is worth
 catching without a 27MB library build.
@@ -148,6 +158,69 @@ def _models(prog_source, root_name):
     prog = SimpleNamespace(functions=fns, externs=[])
     root = next((f for f in fns if f.name == root_name), fns[-1])
     return "\n\n".join(G._go_defs_for(prog, root, tc))
+
+
+def _top_level_decls(text):
+    """`{name: declaration text}` for every top-level `theorem`/`def` in a
+    generated Lean file, in source order.
+
+    Split on the column-0 declaration headers rather than on a regular
+    expression for a body, because these files put a whole block certificate in
+    one declaration and a tactic block in another and a header-keyed split gets
+    both without caring which."""
+    decls, order = {}, []
+    lines = text.split("\n")
+    starts = [i for i, l in enumerate(lines)
+              if re.match(r"^(theorem|def|abbrev)\s", l)]
+    for k, i in enumerate(starts):
+        j = starts[k + 1] if k + 1 < len(starts) else len(lines)
+        name = re.match(r"^(?:theorem|def|abbrev)\s+(\S+)", lines[i]).group(1)
+        decls[name] = "\n".join(lines[i:j])
+        order.append(name)
+    decls["__order__"] = order
+    return decls
+
+
+def _STEP_ENTRY_WORD(G, j):
+    """A 32-bit word the step-table decoder resolves to entry `j`.
+
+    Built from the entry's own `(mask, base)` pair -- the same pair
+    `_step_facts` and `_cond_matches` read -- and then searched for, because
+    `_step_branch_index` returns the FIRST entry that matches: the filler bits
+    outside `mask` have to be chosen so that no earlier entry also accepts the
+    word, and which filler does that depends on the entry.  Returns `None` when
+    no filler works, which the caller reports rather than asserting."""
+    mask, base = G._STEP_CONDS[j]
+    free = 0xFFFFFFFF & ~mask if mask is not None else 0
+    for filler in _STEP_FILLERS:
+        word = base | (filler & free)
+        if G._step_branch_index(word) == j:
+            return word
+    return None
+
+
+# Deterministic fillers for the bits an entry leaves free, in the order they are
+# tried.  Zero first (the word the mask alone describes), then whole-field
+# patterns, then the operands an A64 immediate/shifted-register encoding puts in
+# bits 0..10 and 16..20, which is where an earlier entry's mask is most likely
+# to overlap.
+_STEP_FILLERS = (
+    0x00000000, 0xFFFFFFFF, 0x5A5A5A5A, 0xA5A5A5A5,
+    0x00000001, 0x0000001F, 0x001F001F, 0x001F0000,
+    0x0000003E, 0x003E0000, 0x007E0000, 0x1F800000,
+    0x0000FFFF, 0xFFFF0000, 0x0F0F0F0F, 0xF0F0F0F0,
+    0x12345678, 0x89ABCDEF, 0x00010203, 0x03020100,
+)
+
+
+def _entry_code(fb, src_path):
+    """The emitted instruction bytes of `src_path`'s entry function, as `bytes`.
+
+    Read out of the build result rather than re-derived, so the words the test
+    reasons about are the words the proof generator was handed."""
+    out = src_path[:-5] + ".aout"
+    result = fb.compile_formal(src_path, output=out, prove=False, check=False)
+    return result["code"]
 
 
 def _lean():
@@ -989,6 +1062,190 @@ class TestBitTestBranches(unittest.TestCase):
                     G._branch_target(words, pc), pc + delta,
                     f"imm14 decode: word 0x{word:08x} should branch to "
                     f"{pc + delta}, not {G._branch_target(words, pc)}")
+
+
+class TestStepOkDerivesFromStepResult(unittest.TestCase):
+    """`*_step_ok_i` is the step-RESULT lemma of the same index, read as a
+    corollary -- not a second reduction of `arm64_step`.
+
+    The statement is `arm64_step s code ≠ none`, and
+    `_gen_step_result_lemmas` has already proved the strictly stronger
+    `arm64_step s code = <the state this instruction produces>` for the same
+    instruction.  The old proof threw that away and re-derived the corollary
+    from the model's own 54-arm `if` chain: one `native_decide` per entry of
+    the step table (`_step_facts`), then `unfold arm64_step` and two `simp`
+    passes carrying all of them as rewrite lemmas.  Over `formal/examples` that
+    is 2 230 step-OK lemmas and 133 758 out-of-process compilations, 120 420 of
+    them (90%) spent re-deriving a corollary of a lemma already in the file.
+    Measured on `formal/examples/bitops.mojo`: 37.8 s -> 18.9 s wall, 583 KB ->
+    251 KB, `native_decide` 3 207 -> 292.
+
+    Nothing is dropped and nothing is weakened -- the statements are the ones
+    the file always had, and the proof is now a term rather than a computation.
+    What is pinned here is that the corollary is *derived*: a step-OK lemma
+    that silently reverted to re-reducing `arm64_step` would restore the whole
+    cost while every theorem still typechecked.  `test_no_step_ok_lemma_was_
+    dropped` pins the other half, that the derivation did not narrow which
+    instructions get a lemma.
+
+    The one case the derivation cannot cover -- a word the decoder accepts and
+    `_step_rhs` has no right-hand side for -- keeps the discriminator proof, and
+    is covered by `test_the_fallback_covers_a_word_with_no_right_hand_side`
+    rather than left as an untested branch: over the whole step table there is
+    no such word (see `test_the_derivation_is_total_over_the_step_table`), so
+    the corpus cannot reach that path.
+    """
+
+    # A small program, so every step-OK lemma in its proof can be read.
+    PROGRAM = "def main(n: Int) -> Int:\n    x = (n & 255) | 240\n    return x ^ 85\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-stepok-")
+        path, err = _generate(cls.tmp, cls.PROGRAM, "stepok")
+        assert err is None, err
+        with open(path) as fh:
+            cls.text = fh.read()
+        cls.decls = _top_level_decls(cls.text)
+        cls.order = cls.decls.pop("__order__")
+        cls.step_ok = [n for n in cls.order if "_step_ok_" in n]
+        cls.prefix = cls.step_ok[0].rsplit("_step_ok_", 1)[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_every_step_ok_is_derived_from_the_step_result_of_the_same_index(self):
+        self.assertTrue(self.step_ok, "no step-OK lemma was emitted at all")
+        for name in self.step_ok:
+            sr = name.rsplit("_step_ok_", 1)[0] + "_sr_" + name.rsplit("_step_ok_", 1)[1]
+            with self.subTest(lemma=name):
+                self.assertIn(
+                    sr, self.decls,
+                    f"{name} derives from {sr}, which the file does not declare")
+                body = self.decls[name]
+                self.assertIn(f"rw [{sr} s h]", body,
+                              f"{name} does not rewrite with {sr}")
+                self.assertNotIn(
+                    "unfold arm64_step", body,
+                    f"{name} still reduces `arm64_step` itself, so it pays for "
+                    f"the whole 54-arm `if` chain instead of reading the lemma "
+                    f"that already states the step")
+
+    def test_the_step_result_is_declared_before_the_step_ok_that_reads_it(self):
+        """Lean's own scoping, and the reason the two emitters were swapped.
+
+        A `rw [<sr> s h]` needs `<sr>` in scope, so this is a real failure mode
+        and not a style point: in the old emission order the derived proofs are
+        elaborated before the lemmas they name exist, and the diagnostics name
+        nothing recognisable."""
+        first_step_ok = min(i for i, n in enumerate(self.order) if "_step_ok_" in n)
+        last_step_result = max(i for i, n in enumerate(self.order) if "_sr_" in n)
+        self.assertLess(
+            last_step_result, first_step_ok,
+            "a step-RESULT lemma is declared after the first step-OK lemma "
+            "that reads it")
+
+    def test_no_step_ok_lemma_was_dropped(self):
+        """The same set of theorems, one per word the model covers.
+
+        The derivation is a change of PROOF, so the filter deciding which
+        instructions get a step-OK lemma must not have moved with it.  The
+        expected set is recomputed from the generator's own decoder over the
+        bytes the build actually emitted, rather than read off the emitted
+        file, so a filter that silently narrowed fails instead of looking like
+        a smaller file."""
+        import formal.arm64_proof_gen as G
+        import formal.build as fb
+        src = os.path.join(self.tmp, "stepok.mojo")
+        code = _entry_code(fb, src)
+        words = [int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code) - len(code) % 4, 4)]
+        expected = [f"{self.prefix}_step_ok_{i}" for i, w in enumerate(words)
+                    if G._step_branch_index(w) is not None]
+        self.assertEqual(expected, self.step_ok)
+
+    def test_the_derivation_is_total_over_the_step_table(self):
+        """Every word the step decoder accepts has a right-hand side.
+
+        That is what makes the swap total, and it is a fact about the TABLE, so
+        it is checked against the table: for each entry, a word the decoder
+        resolves to it must land in `_step_result_plan`.  Two entries have no
+        such word at all -- `_step_branch_index` never returns them, because a
+        coarser earlier entry already claims every word they match -- and they
+        are named here rather than skipped silently, because that is a property
+        of the model a reader would otherwise have to rediscover."""
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        unreachable = []
+        for j in range(len(G._STEP_CONDS)):
+            word = _STEP_ENTRY_WORD(G, j)
+            if word is None:
+                unreachable.append(j)
+                continue
+            with self.subTest(entry=j):
+                self.assertIn(0, G._step_result_plan(_struct.pack("<I", word)),
+                              f"entry {j} decodes but has no step-RESULT "
+                              f"lemma, so its step-OK lemma would have to "
+                              f"re-reduce `arm64_step`")
+        self.assertEqual(
+            unreachable, [1, 5],
+            "the set of step-table entries no word decodes to has changed; "
+            "if one of them became reachable it needs a `_step_rhs` arm")
+
+    def test_the_fallback_covers_a_word_with_no_right_hand_side(self):
+        """The guard is live code, exercised on a word with no right-hand side.
+
+        `_step_rhs` has no arm for every word the decoder accepts today, so
+        nothing in the corpus reaches the discriminator proof any more.  Rather
+        than delete the guard -- it is what makes the swap safe against a later
+        `_step_rhs` arm disappearing -- this pins that it still works, by
+        removing the right-hand side for one word and asking the generator what
+        it emits."""
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+
+        word = _STEP_ENTRY_WORD(G, 21)          # STP pre-index: has an arm
+        self.assertIsNotNone(word)
+        code = _struct.pack("<I", word)
+        self.assertEqual(list(G._step_result_plan(code)), [0])
+        real_rhs = G._step_rhs
+
+        def no_rhs(w, idx, _real=real_rhs):
+            return None if (w, idx) == (word, G._step_branch_index(word)) \
+                else _real(w, idx)
+
+        G._step_rhs = no_rhs
+        try:
+            self.assertEqual(G._step_result_plan(code), {})
+            text = G._gen_step_lemmas("syn", code, 0x1000)
+        finally:
+            G._step_rhs = real_rhs
+        self.assertIn("theorem syn_step_ok_0", text)
+        self.assertNotIn("rw [syn_sr_0 s h]", text)
+        self.assertIn("unfold arm64_step", text,
+                      "with no step-RESULT lemma to derive from, the "
+                      "discriminator proof is the proof")
+
+    def test_the_step_result_of_every_covered_word_is_still_emitted(self):
+        """The corollary may only lean on lemmas that exist.
+
+        Checked over the whole step table rather than over the emitted file, so
+        the two generators cannot drift apart into "derives from a lemma nobody
+        emits" -- which would be a file that fails to elaborate with no mention
+        of either generator."""
+        import struct as _struct
+        import formal.arm64_proof_gen as G
+        for j in range(len(G._STEP_CONDS)):
+            word = _STEP_ENTRY_WORD(G, j)
+            if word is None:
+                continue
+            code = _struct.pack("<I", word)
+            with self.subTest(entry=j):
+                self.assertIn("theorem syn_sr_0",
+                              G._gen_step_result_lemmas("syn", code, 0x1000))
+                self.assertIn("rw [syn_sr_0 s h]",
+                              G._gen_step_lemmas("syn", code, 0x1000))
 
 
 class TestCallProofs(unittest.TestCase):
