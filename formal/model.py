@@ -588,7 +588,9 @@ MLIR_UNGUARDED_OPS = {
 # **One name, and that is a measurement rather than an undercount.**
 # `__mlir_type.index` is pointer-sized and signed, which is every property the
 # arithmetic below needs (a truncating division, an arithmetic right shift, a
-# signed comparison). `!kgen.scalar<uiN>` is a single scalar too and is
+# signed comparison — and the truncating division is `/`, not `//`, since the
+# floor correction landed; see `MLIR_WORD_ARITH_OPS`'s own block, which is where
+# that fact is measured). `!kgen.scalar<uiN>` is a single scalar too and is
 # deliberately NOT here: an N-bit unsigned integer held in a word wraps at 2^N,
 # so `a + b` over two `ui8` is not the 64-bit add this path emits — answering
 # it would be a wrong answer, and the doc's own count of the 9 word-typed
@@ -615,37 +617,79 @@ MLIR_SELF_TYPE_NAMES = frozenset(("self", "this", "Self"))
 # the design, and it is the reason `bugs/FORMAL_mlir_dialect_refusal_is_false_
 # of_the_word_valued_ops.md`'s "each arm must select instructions from the
 # decisions the two backends already SHARE" is satisfied by construction: `+`,
-# `-`, `*`, `//`, `%`, `&`, `>>` already go through `common_type`,
-# `cmp_signed` and `shift_signedness` in both emitters, so an arm here that
-# re-decided any of them would be a second copy of an answer that exists.
+# `-`, `*`, `/`, `%`, `&`, `>>` already go through `common_type`, `cmp_signed`
+# and `shift_signedness` in both emitters, so an arm here that would re-decide
+# any of them would be a second copy of an answer that exists.
 #
-# The divisors and the shift are the two rows that needed MEASURING rather than
-# reading, because this path's own `//` and `%` are NOT Python's:
+# ## THE DIVISION ROWS, and they are the ones that needed MEASURING rather than
+# ## reading — because this path's `//` and `%` are NOT Python's and HAVE
+# ## CHANGED.
 #
-#     f(-7, 2)  on `__mlir_type.index` parameters   CPython
-#       a // b        -3                            -4
-#       a %  b        -1                             1
-#       a >> b        -2   (arithmetic)              -2
+# The table was first written against a measurement that has since been
+# INVERTED, and the two entries keyed on it were silent wrong answers for as
+# long as that took:
 #
-# so `//` is a TRUNCATING division and `%` a remainder carrying the dividend's
-# sign — which is exactly `index.divs` and `pop.rem`, and exactly what the
-# machine does. `pop.floordiv` is therefore NOT in this table and is the
-# clearest entry that is missing on purpose: FLOOR division is the other
-# semantics, and rewriting it to this path's `//` would be wrong for every
-# negative operand. `pop.div` is absent for the other half of the same
-# question — the name does not say which of the two it is, and a table that
-# picked one would be the name-keyed table § Correction is about.
+#     f(-7, 2)                            this path NOW   CPython
+#       a // b                                -4  floor      -4
+#       a %  b                                 1  divisor    1
+#       a /  b                                -3  TRUNCATES  -3.5   (§6 Phase 7)
+#
+# `model.division_floors` (below) is the one decision both emitters ask, and
+# `lib/ProofLib.lean`'s `fdiv64`/`frem64` are what the source model names; both
+# landed with the floor correction. Before them the same program gave `-3`, `-1`
+# and `-3`, so `//` truncated and `%` carried the DIVIDEND's sign — which is
+# exactly `index.divs` and exactly `pop.rem`, and the table said so. Both of
+# those rows were therefore RIGHT when written and wrong the moment the path
+# started flooring, which is the shape of hazard this section exists to prevent
+# and the reason the rows are re-derived from `division_floors` rather than
+# from a comment:
+#
+#   * **`index.divs` → `/`.** `index.divs` is a TRUNCATING signed division, and
+#     this path's `/` on a signed operand is exactly that —
+#     `division_floors("/", signed)` is False and its own docstring says why
+#     ("there is no float on this path … so `/` is the int-only truncation").
+#     It was `//`, which was the same function while `//` truncated.
+#   * **`pop.rem` → `"srem"`, the shape below.** `pop.rem` is LLVM's `srem`, a
+#     remainder carrying the DIVIDEND's sign; this path's `%` carries the
+#     DIVISOR's, so `%` is wrong for it whenever the signs differ. There is no
+#     one-operator spelling, so the table carries the IDENTITY and the rewrite
+#     builds it: `a - (a / b) * b`, which is `srem` exactly because `/` truncates.
+#
+# **BOTH rows therefore depend on `/` meaning INTEGER truncation**, which is a
+# documented Phase-7 stand-in and not a promise: when real division lands, these
+# two entries have to be re-derived and this comment is what a reader consults
+# first. The dependency is CHECKED rather than trusted —
+# `test_formal_mlir_precedence.py` pins `a / b` for a negative operand on BOTH
+# architectures, so the day `/` stops truncating that row goes red in the same
+# commit as the change rather than leaving a wrong answer behind a true
+# comment. That is the whole difference between this block and a bare list.
+#
+# `pop.floordiv` is NOT in this table, and that is now a deliberate
+# non-widening rather than a correctness gap: this path's `//` IS floor, so
+# `pop.floordiv` → `//` would be exact, and the reason to leave it out is that
+# no site in the corpus reaches it (`std/builtin/simd_length.mojo`'s six
+# `index.*` operations are add/sub/mul/and/divs/shrs). The doc's own §
+# Correction argues against a widening on the strength of a caller that does not
+# exist. `pop.div` is absent for the other half of the same question — the name
+# does not say which division it is, and a table that picked one would be the
+# name-keyed table § Correction is about.
+#
+# The three shapes, and the third is why the third exists: `("binary", op)` is
+# one operator between two operands, `("unary", op)` is one operand, and
+# `("srem", None)` is the one operation this path has no single operator for —
+# `formal/build.py::_dialect_arith_replacement` is the only reader of all three,
+# so the shape and the rewrite cannot come to disagree about which is which.
 MLIR_WORD_ARITH_OPS = {
     "index.add": ("binary", "+"),
     "index.sub": ("binary", "-"),
     "index.mul": ("binary", "*"),
-    "index.divs": ("binary", "//"),
+    "index.divs": ("binary", "/"),
     "index.and": ("binary", "&"),
     "index.shrs": ("binary", ">>"),
     "pop.add": ("binary", "+"),
     "pop.sub": ("binary", "-"),
     "pop.mul": ("binary", "*"),
-    "pop.rem": ("binary", "%"),
+    "pop.rem": ("srem", None),
     "pop.neg": ("unary", "-"),
 }
 
@@ -1144,9 +1188,16 @@ def mlir_dialect_op_refusal(op: str, operand: str = None,
                " What is missing is therefore the OPERATION rather than the "
                "type: this path rewrites a dialect operation to the ordinary "
                "spelling only where the ordinary spelling computes the same "
-               "thing, and this one is not among them — `pop.floordiv` is the "
-               "clearest omission, because FLOOR division is the other "
-               "semantics from this path's `//`, which truncates (measured).")
+               "thing, and this one is not among them — `pop.max` is a "
+               "saturating, NaN-aware selection and is not "
+               "`a if a > b else b`, `pop.abs` is not `-a` on the saturating "
+               "cases, and `pop.div` does not say WHICH of the two divisions it "
+               "is, which is the question `pop.floordiv` and `index.divs` "
+               "between them answer: this path's `//` FLOORS and its `/` "
+               "truncates, both measured, so the two are different rewrites "
+               "rather than one. `pop.floordiv` is absent for the weaker "
+               "reason that no site in the corpus reaches it, which is a "
+               "deliberate non-widening rather than a gap.")
             + " A deliberate deferral, not an impossibility"
         )
     if op.startswith(MLIR_VECTOR_OPS_PREFIX):

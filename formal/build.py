@@ -11758,11 +11758,19 @@ def _dialect_arith_replacement(node, ctx: dict):
         arguments with a bracket whose `pred=` this path has in
         `model.MLIR_CMP_PRED_OPS`;
       * `pop.neg` — `-a`, the one unary the table carries.
+      * `__mlir_op.`pop.rem`(a, b)` — `a - (a / b) * b`, the table's `"srem"`
+        shape. `pop.rem` is LLVM's `srem`, a remainder carrying the DIVIDEND's
+        sign, and this path's `%` carries the DIVISOR's, so there is no
+        single-operator spelling and the identity is built instead — which is
+        `srem` exactly because `/` truncates. That dependency is the table's
+        comment's own and it is checked by a row that measures `/` on both
+        architectures, so this is not an arithmetic identity believed on trust.
       * `pop.floor`, `pop.max`, `pop.floordiv`, `pop.div` — NOT answered even
         with a word operand, each for the reason `model.MLIR_WORD_ARITH_OPS`'s
-        own comment states: floor division is the other semantics from this
-        path's `//` (measured), a saturating or NaN-aware `pop.max` is not
-        `a if a > b else b`, and `pop.div` does not say which division it is.
+        own comment states: `pop.floordiv` is exact now that this path's `//`
+        floors and is left out because no corpus site reaches it,
+        `pop.div` does not say which division it is, and a saturating or
+        NaN-aware `pop.max` is not `a if a > b else b`.
         `model.mlir_operand_clause` is what tells the reader so at the site.
 
     The BRACKET gate is the safety argument for the comparison half and the
@@ -11778,6 +11786,11 @@ def _dialect_arith_replacement(node, ctx: dict):
         return None
     bracket = node.func if isinstance(node.func, F.SubscriptExpr) else None
     args = node.args
+    # `arity` is set on BOTH arms and read after them, because the `srem` shape
+    # below is a property of the TABLE rather than of the comparison branch —
+    # a name left unbound on the `index.cmp` path is the kind of thing that is
+    # only reachable by an operation with no corpus site.
+    arity = "cmp"
     unary = False
     if op in M.MLIR_CMP_OPS:
         symbol = M.mlir_cmp_predicate_op(bracket)
@@ -11800,8 +11813,33 @@ def _dialect_arith_replacement(node, ctx: dict):
     line, col = getattr(node, "line", 0), getattr(node, "col", 0)
     if unary:
         return F.UnaryOp(op=symbol, operand=args[0], line=line, col=col)
+    if arity == "srem":
+        return _srem_expression(args[0], args[1], line, col)
     return F.BinaryOp(op=symbol, left=args[0], right=args[1],
                       line=line, col=col)
+
+
+def _srem_expression(a, b, line: int, col: int):
+    """`a - (a / b) * b` — the one dialect shape with no single operator.
+
+    The table's `"srem"` row, and `model.MLIR_WORD_ARITH_OPS`'s comment is where
+    the measurement behind it lives. Every node carries the ORIGINAL call's
+    position, because `fire_compiler`'s expression walk reports position and a
+    three-node replacement whose tail sat at line 0 would send a reader to the
+    top of the file — the same reason `rewrite_instantiation_calls` copies the
+    base's line onto its `IdentExpr`.
+
+    `a` appears TWICE, which is the identity and also its cost: a
+    dialect `srem` costs one divide, and this costs one divide plus a negate
+    and two multiplies. There is no table entry that avoids it, because there
+    is no `%` on this path with the dividend's sign; `formal/model.py`'s
+    `division_floors` is the decision that says so, and it is asked of `/` here
+    rather than re-decided, so both backends' existing instruction selection
+    applies to all three operators.
+    """
+    def node(op, left, right):
+        return F.BinaryOp(op=op, left=left, right=right, line=line, col=col)
+    return node("-", a, node("*", node("/", a, b), b))
 
 
 def _dialect_select_replacement(node, bools: set):
