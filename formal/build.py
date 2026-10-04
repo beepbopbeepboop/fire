@@ -11945,6 +11945,26 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `external_call`. A construct refusal asked here has to be the
                 # LAST one, not the first.
                 #
+                # `callee_is_a_bound_value` is the FIFTH exclusion and the only
+                # one that is not about a better message: a base name the
+                # enclosing function binds is a WORD, not a symbol, so
+                # "calls a name this unit does not compile" is not true of it
+                # in the first place — there is no declaration to be missing,
+                # because a callee reached through a value has none on either
+                # architecture and gets none. What it does have is a lowering
+                # (the bracket items are leading arguments, read by
+                # `monomorph.supplied_bracket_args`), and a scan that refused
+                # it here would have made this check the wall the emitters'
+                # lowering sat behind:
+                # `std/algorithm/backend/tile.mojo`'s
+                # `workgroup_function[tile_size](offset)` is exactly that call,
+                # and it was THIS refusal a reader of that file met first. The
+                # emitter still refuses the shapes it cannot read — a bracket
+                # this build cannot tell from an index, a keyword, a parameter
+                # whose declared type cannot hold a function — so nothing that
+                # used to be refused here is silently dropped; it is asked
+                # where the declaration would have been read.
+                #
                 # `root_ident.name` and not `model.subscript_callee_name`:
                 # that one takes the CALL, and `iter_nodes` hands this loop the
                 # subscript with no parent to find the call through. Membership
@@ -11956,7 +11976,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
                         and not M.is_external_call_template(sub)
-                        and not M.debug_assert_callee(sub)):
+                        and not M.debug_assert_callee(sub)
+                        and not M.callee_is_a_bound_value(fn, base_name)):
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
@@ -12194,46 +12215,28 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.SubscriptExpr) and isinstance(sub.obj, F.IdentExpr):
                 subscript_bases.add(id(sub.obj))
-        # A FUNCTION of this image read as a VALUE, and it has to be a PRE-PASS
-        # for the same reason `first_mlir` is: the walk below cannot answer it,
-        # because `placed` above deliberately contains every function name of the
-        # image (`placed |= set(_callee_defs(functions))`, which is what lets a
-        # specialization's root through as a callee). So this question is asked
-        # here, of the walk's own sets, and raised in the walk's order.
+        # A FUNCTION of this image read as a VALUE IS NOT A REFUSAL HERE, and
+        # that used to need a pre-pass of its own to say so.
         #
-        # What it replaces, measured on both architectures for
-        # `def call_it(f, x): return f(x)` called `call_it(plain, 5)`:
+        # The pre-pass existed because `placed` deliberately contains every
+        # function name of the image (`placed |= set(_callee_defs(functions))`,
+        # which is what lets a specialization's root through as a callee), so
+        # the walk below cannot tell a function read as a value from a callee.
+        # It answered "a function of this image, read as a value", which for
+        # `call_it(plain, 5)` was refused by `model.function_value_refusal` —
+        # after an earlier wording of the same refusal had been reported as the
+        # allocator's symptom ('plain' has no home: the register allocator
+        # collected no home for it …), which is a TRUE statement about this
+        # pass and a useless one: it sends the reader looking for a
+        # register-allocation bug in a program whose problem was a construct.
         #
-        #     'plain' has no home: the register allocator collected no home for
-        #     it, so the emitter and the allocation walk disagree about this
-        #     function's locals …
-        #
-        # which is a TRUE statement about this pass and a useless one. It names
-        # an internal table, so the reader goes looking for a register-allocation
-        # bug in a program whose real problem is that it asked for a construct
-        # this path does not have — `model.function_value_refusal` says which.
-        #
-        # The exclusions are the walk's own answers rather than a new judgement
-        # about each: a name the function BINDS reads its own (`bound_here` is
-        # `placed` minus the function names, which is what makes a shadowing
-        # local win), a callee is a symbol rather than a read (`callees`), a
-        # SUBSCRIPT base is a type application or a specialization root
-        # (`subscript_bases`), a TYPE position is a type argument
-        # (`type_positions`), a frame slot and a folded module constant are the
-        # two other values a bare name can have here, and
-        # `name_resolves_without_a_local` is the closed list of names that are
-        # values without a home by design.
-        first_function_value = None
-        for sub in M.iter_nodes(fn.body):
-            if not isinstance(sub, F.IdentExpr) or first_function_value:
-                continue
-            if sub.name not in func_names or sub.name in bound_here \
-                    or sub.name in frame_slots or id(sub) in callees \
-                    or id(sub) in subscript_bases or id(sub) in type_positions \
-                    or M.module_constant_literal(sub.name) is not None \
-                    or M.name_resolves_without_a_local(sub.name):
-                continue
-            first_function_value = M.function_value_refusal(sub.name, fn.name)
+        # A function value is a CODE ADDRESS on this path now, materialized by
+        # each backend's `_load_var` and branched through by its `_emit_call`,
+        # so the name HAS a home and the pre-pass has no question left to ask.
+        # It is not deleted for tidiness and not relocated: the walk below is
+        # still the right place for a name it cannot place, and a function name
+        # is placed (as an address) rather than unplaced, which is the whole
+        # difference between the two.
         # The MLIR refusal is raised BEFORE the name-placement walk below, not
         # inside it, and the order is the point: the walk answers "this name has
         # no home", which is TRUE of a dialect root and useless to a reader
@@ -12247,13 +12250,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         if first_mlir is not None:
             raise CodegenError(
                 f"{fn.name}: {first_mlir}" if fn.name else first_mlir)
-        # AFTER the dialect refusal and for the same reason: both name a
-        # CONSTRUCT where the walk would name a symptom, and a dialect root and
-        # a function name are different constructs that cannot collide (one
-        # spells `__mlir_*`), so the order between them is a fixed choice rather
-        # than a precedence that has to be earned.
-        if first_function_value is not None:
-            raise CodegenError(first_function_value)
+        # (A function name read as a value used to be raised HERE, between the
+        # dialect refusal and this walk.  It is answered in the emitters now —
+        # an address is a home — so there is nothing to raise.)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
                 continue

@@ -834,6 +834,25 @@ def encode_jmp_rm64(offset: int) -> bytes:
     return bytes([0xFF, 0x25]) + struct.pack("<I", offset & 0xFFFFFFFF)
 
 
+def encode_call_r64(reg: Reg) -> bytes:
+    """call r64 — an INDIRECT call through a REGISTER, no displacement.
+
+    `FF /2` with mod=11. The sibling of `encode_call_rm64` above, which is the
+    same opcode with mod=00/rm=101 and a disp32 — through MEMORY rather than
+    through a register — and the two are not interchangeable: the register form
+    is what a call through a function VALUE is, because the value is already in
+    a word (a formal value is one 64-bit word, and a function's is its code
+    address), and routing it through a GOT slot would mean inventing a memory
+    location the loader has to fill for a symbol this image already has.
+
+    Two bytes for RAX..RDI and three for R8..R15 (the REX.B prefix), which is
+    why the REX is emitted first rather than folded into the ModRM byte.
+    """
+    if reg.value >= 8:
+        return bytes([_rex(w=1, b=1), 0xFF, _modrm(3, 2, reg.value & 7)])
+    return bytes([0xFF, _modrm(3, 2, reg.value & 7)])
+
+
 def encode_jne_rel32(offset: int) -> bytes:
     """`jne rel32` — branch if the ZERO flag is clear.
 

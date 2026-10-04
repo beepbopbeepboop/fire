@@ -26,6 +26,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 import fire_compiler as F
 import mojo.middle.comptime as comptime_eval
 from formal import model as M
+from formal import monomorph
 from mojo.middle.boundnames import (
     bound_names_in_order, _lbn_target_names,
     _lbn_split_commas,
@@ -1580,6 +1581,22 @@ dylib_exports: list = None, globals_base: int = None,
         if tag is not None:
             self._emit_mov_imm(f"X{dst}", tag)
             return
+        # A FUNCTION of THIS image, read as a value, is its CODE ADDRESS.  Last
+        # of the homes and not the first, because that is what makes shadowing
+        # free: a local or a parameter spelled like a function is found by one of
+        # the four arms above and never reaches here, which is the case
+        # `test_formal_specialization.py`'s shadowing guard pins.
+        #
+        # It is `ADRP`+`ADD` and nothing else, and it is the assembler call a
+        # STRING LITERAL's address already uses (`emit_adrp_add`), so the one
+        # thing being invented here is that the label is code rather than data.
+        # The label a NAME resolves to is bound after every body is out
+        # (`compile()`'s `_entry_labels` loop) and `resolve()` runs after that,
+        # so a function used as a value before its own definition is emitted is
+        # the same address a direct call to it reaches.
+        if name in self._functions:
+            self.asm.emit_adrp_add(dst, name)
+            return
         raise CodegenError(self._no_home(name))
 
     def _emit_stack_floor_guard(self) -> None:
@@ -2005,13 +2022,16 @@ dylib_exports: list = None, globals_base: int = None,
         if "." in name:
             return M.field_access_refusal(name, self.func_name or "<module>",
                                           name.split(".", 1)[0], holder)
-        # A FUNCTION NAME read as a value is not an unplaceable name: both this
-        # emitter and the allocation walk know it is not a local, which is why
-        # neither gave it one, and the allocator sentence below is false in
-        # every clause. Named here for the reason `model.function_value_refusal`
-        # gives — a first-class function has no representation on this path at
-        # all, so the message says that instead of blaming the allocator.
-        if name in self._functions:
+        # A FUNCTION of ANOTHER image, read as a value, has no address here.
+        # This unit has the DECLARATION (it is how the callee's parameters are
+        # bound for an ordinary call into a linked library) and no CODE — the
+        # body is in the library, and materializing an address for it needs a
+        # GOT slot and a stub section this assembler does not have.  It used to
+        # be asked about `name in self._functions`, which `_load_var` now
+        # answers before it comes here: a function of THIS image is an
+        # `ADRP`+`ADD` away and is lowered, so the arm is the cross-image case
+        # and `model.function_value_refusal` is still the sentence for it.
+        if name in self._extern_decls:
             return M.function_value_refusal(name,
                                             self.func_name or "<module>")
         return M.unresolved_name_refusal(
@@ -7668,6 +7688,74 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
+        # A CALLEE THIS FUNCTION BINDS.  `func(i)` inside a function that took
+        # `func` as a parameter is a call through a VALUE, and `name not in
+        # self._functions` below cannot tell it from a call to a C symbol: both
+        # are "a name this unit does not compile", and the extern path's job is
+        # to emit a call to a symbol, so it emitted a call to a symbol spelled
+        # `func`.  The image was then caught by the bind audit four stages
+        # later, as a symbol nothing on the link line provides — a true
+        # statement, and one that says nothing about the construct, so
+        # `stdlib/std/algorithm/backend/cpu/map.mojo` (whose only statement is
+        # `func(i)`) was classified `not-answerable/unresolved-extern` rather
+        # than as the codegen gap it is.
+        #
+        # Asked HERE, at the one line that takes the extern path, and not in the
+        # link audit: a name a function binds is a word in a register, a spill
+        # slot, a receiver's frame or a `__DATA` cell, so there is no code
+        # address in it for a call to land on.  The decision and the words are
+        # `model.callee_is_a_bound_value` / `model.callee_value_refusal`, read
+        # by x86-64 from the same two, so the architectures cannot disagree
+        # about one call.
+        #
+        # IT LOWERS NOW, and what used to be a refusal is one branch through the
+        # word.  `is_extern` is FALSE for it, which is the whole of the change
+        # downstream: every arm guarded on `is_extern` below is about calling a
+        # C symbol and none of them applies to a branch through a value, while
+        # the argument loop, the ABI split and the call itself are the same code
+        # either way.  A function value is a CODE ADDRESS on this path
+        # (`_load_var`'s last home), so `BLR` is the instruction and
+        # `model.value_call_bracket_reading` is what settles the one genuinely
+        # ambiguous shape — a bracketed callee, which is a specialization or an
+        # index and only the parameter's declared type can say.
+        through_value = (not is_extern_call and name not in self._functions
+                         and M.callee_is_a_bound_value(self._cur_fn, name))
+        # …and the name has to be a BARE one. `_callee_symbol` flattens a
+        # subscript callee to its base, so `a.b[3](x)` arrives here as `a.b`
+        # and `a[i](x)` as `a`; only the first of those is a name the function
+        # binds as a callable. `comptime.specialization_name` is the one
+        # recogniser of the bare spelling (`monomorph._callee_base` reaches the
+        # same one), so the test is asked rather than spelled.
+        through_value = through_value and (
+            e.func.name == name if isinstance(e.func, F.IdentExpr)
+            else comptime_eval.specialization_name(e.func) == name)
+        if through_value:
+            ann = M.param_annotation(self._cur_fn, name)
+            # A keyword, or a bracket this build cannot read as a
+            # specialization, is the construct's own refusal; a parameter whose
+            # DECLARED type cannot hold a function is `callee_value_refusal`.
+            # Both are asked here, at the one line that decided the call is
+            # through a value, so the two architectures cannot refuse it
+            # differently.
+            if e.kwargs:
+                raise CodegenError(M.value_call_keyword_refusal(
+                    M.member_chain_text(e.func), "a keyword argument in"))
+            if not M.value_callee_can_hold_a_function(ann):
+                raise CodegenError(M.callee_value_refusal(
+                    name, self._cur_fn, M.member_chain_text(e.func), ann))
+            if isinstance(e.func, F.SubscriptExpr):
+                # A bracketed callee through a value: a specialization, or an
+                # index into a container. Only the parameter's declared type
+                # can say, and it is `model.value_call_bracket_reading`'s
+                # question for one reason —
+                # `std/algorithm/backend/tile.mojo`'s
+                # `workgroup_function: Some[Static1DTileUnitFunc]`, which
+                # cannot be indexed at all, so its brackets can only be
+                # comptime parameters.
+                if M.value_call_bracket_reading(self._cur_fn, name, ann) \
+                        != "specialization":
+                    raise CodegenError(M.value_bracket_reading_refusal(
+                        name, self._cur_fn, ann))
         # The three builtins this emitter intercepts by BARE NAME, read out of
         # `model.EMITTER_BUILTINS` rather than spelled here, for the reason that
         # table's comment gives: the set of names a backend compiles itself is a
@@ -7776,33 +7864,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        # A CALLEE THIS FUNCTION BINDS.  `func(i)` inside a function that took
-        # `func` as a parameter is a call through a VALUE, and `name not in
-        # self._functions` below cannot tell it from a call to a C symbol: both
-        # are "a name this unit does not compile", and the extern path's job is
-        # to emit a call to a symbol, so it emitted a call to a symbol spelled
-        # `func`.  The image was then caught by the bind audit four stages
-        # later, as a symbol nothing on the link line provides — a true
-        # statement, and one that says nothing about the construct, so
-        # `stdlib/std/algorithm/backend/cpu/map.mojo` (whose only statement is
-        # `func(i)`) was classified `not-answerable/unresolved-extern` rather
-        # than as the codegen gap it is.
-        #
-        # Asked HERE, at the one line that takes the extern path, and not in the
-        # link audit: a name a function binds is a word in a register, a spill
-        # slot, a receiver's frame or a `__DATA` cell, so there is no code
-        # address in it for a call to land on.  The decision and the words are
-        # `model.callee_is_a_bound_value` / `model.callee_value_refusal`, read
-        # by x86-64 from the same two, so the architectures cannot disagree
-        # about one call.
-        if not is_extern_call and name not in self._functions \
-                and M.callee_is_a_bound_value(self._cur_fn, name):
-            # The SOURCE's spelling, not the flattened base name: `c.f(…)`
-            # flattens to `c`, and a refusal that names `c` sends the reader
-            # to the wrong line. `member_chain_text` prints both spellings.
-            raise CodegenError(M.callee_value_refusal(
-                name, self._cur_fn, M.member_chain_text(e.func)))
-        is_extern = is_extern_call or name not in self._functions
+        is_extern = is_extern_call or (name not in self._functions
+                                       and not through_value)
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the
         # source as bare `mojo_*` names (`mojo_sqlite3_open`, `mojo_list_len`,
@@ -7857,7 +7920,18 @@ ctor_field_value=self._ctor_field_value_for(name),
             # the export symbol the call binds, and `bind_call_arguments` is
             # the one implementation of "which argument lands on which
             # parameter, and what fills the gap".
-            args = self._bind_call_args(name, e)
+            # A callee reached through a word has NO declaration in this image,
+            # so the binder has nothing to bind against and every argument is
+            # passed exactly as the call site wrote it — in position, with the
+            # specialization's brackets AHEAD of them. That is the same rule
+            # the direct path applies to a generic's comptime parameters
+            # (`comptime.param_names`: they are ordinary leading arguments),
+            # read through the one bracket reader
+            # `formal/monomorph.py::supplied_bracket_args`, so there is one
+            # answer to "what does `f[a, b](x)` pass" rather than one per
+            # backend and one per callee kind.
+            args = (monomorph.supplied_bracket_args(e) + list(e.args)
+                    if through_value else self._bind_call_args(name, e))
         # A comptime specialization `f[a, b](x)` binds the callee's comptime
         # parameters (which are leading arguments on this path), so the bracket
         # expressions are evaluated here, in the caller's scope, and passed
@@ -8018,6 +8092,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         # it, so it is the ADDRESS of the caller's own storage rather than the
         # value in it.
         recv_arg = self._receiver_argument(e, name)
+        # A CALLEE REACHED THROUGH A WORD is evaluated and spilled FIRST, below
+        # every argument, and popped back after them.  Both halves of that are
+        # forced:
+        #
+        #   * first, because the source writes the callee before the arguments
+        #     and an argument expression here can be an arbitrary call that
+        #     clobbers every caller-saved register — so evaluating the callee
+        #     after the arguments would read whatever the last one left;
+        #   * lowest on the stack, because the pops below are a fixed count, so
+        #     a slot pushed UNDER them is the one still there when the count is
+        #     spent, and a slot pushed over them would be popped as argument 0.
+        #
+        # X16 is the destination and X17 the pair's second half: both are
+        # temporaries under AAPCS and neither is an argument register, and at
+        # this point nothing transient is live (the last argument was popped).
+        if through_value:
+            self._emit_expr(e.func.obj if isinstance(e.func, F.SubscriptExpr)
+                            else e.func)
+            self.asm.emit(encode_stp_sp_pre(0, 31))
         for i, arg in enumerate(args[:_ABI_ARG_REGS]):
             if i == recv_arg:
                 self._emit_receiver_argument(arg, name)
@@ -8034,6 +8127,13 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))
+        if through_value:
+            # The callee's own slot, last off the stack and into X16 — one
+            # `LDP` pair whose high half is the X17 the push left, so nothing
+            # else has to move it.  It is popped HERE and not before the
+            # arguments because the pop loop above is a fixed count and this
+            # slot is underneath it.
+            self.asm.emit(encode_ldp_sp_post(16, 17))
         if is_extern:
             # A linked library's export spelling wins over the bare name, so
             # the BL, the GOT slot and the bind stream all name the symbol the
@@ -8067,6 +8167,14 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit_extern_bl(symbol)
             if area:
                 self.asm.emit(encode_add_xd_xn_imm(31, 31, area))
+        elif through_value:
+            # `BLR X16` — the branch-with-link through the word, and the one
+            # instruction `encode_blr_xn` was defined for since before any
+            # lowering called it.  Same frame discipline as the `BL` below it:
+            # this backend puts nothing in X30 across a call (an argument
+            # expression that itself calls runs BEFORE either of them), so the
+            # link register needs no save for the indirect form either.
+            self.asm.emit(encode_blr_xn(16))
         else:
             self.asm.emit(encode_bl(0))
             # The NAME a call reaches, not the label this image happens to keep
