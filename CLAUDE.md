@@ -364,7 +364,7 @@ and the formal host-module rows are the compiled-path async/await cluster, all
 cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
 measured one at a time before being named, with the measurement at its
 registration — plus, since 2026-10-04, `bootstrap-stage2-dumps`, which is the
-one count a FANOUT states (43 of its 46 items exit non-zero) and is therefore
+one count a FANOUT states (40 of its 46 items exit non-zero) and is therefore
 checked against the per-item verdicts rather than against a summary line; see
 `observed_fanout_failures` in `tools/suite.py`. `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
@@ -375,7 +375,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-verify` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the three stage trees, byte for byte | 0.6 s, default class; its cost is all in `bootstrap-stage3-transitive` |
 | `bootstrap-validate` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the same comparison in the Mojo driver's vocabulary | 0.6 s, default class |
-| `bootstrap-stage2-dumps` | `expect=`, count checked (43 of 46) | the compiled binary's per-file `--dump` | 4 s, `tiny`; `bootstrap` |
+| `bootstrap-stage2-dumps` | `expect=`, count checked (40 of 46) | the compiled binary's per-file `--dump` | 4 s, `tiny`; `bootstrap` |
 | the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any

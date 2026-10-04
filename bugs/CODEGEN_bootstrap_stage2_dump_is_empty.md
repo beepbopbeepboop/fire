@@ -16,11 +16,49 @@ Measured on `work/gatefix9`, same command as the entry below:
 
 | | gatefix8 | gatefix9 |
 |---|---|---|
-| items failing | 45 of 46 | **43 of 46** |
-| `TypeError: unhashable type: 'list'` | 20 inputs | **gone** |
+| items failing | 45 of 46 | **40 of 46** |
+| `TypeError: unhashable type: 'list'` | 20 inputs | **gone** (`mojo_id`) |
 | `Unexpected SEMICOLON(';')` at `fire_compiler.py:1301:38` | 2 inputs | 2 inputs (unchanged) |
-| silent SIGSEGV / SIGBUS, no output at all | (not counted separately) | **41 items** |
-| passing | `mojo_failures.mojo` | `mojo_failures.mojo`, `t1.mojo`, `bootstrap_test_single_expr.mojo` |
+| silent SIGSEGV / SIGBUS, no output at all | (not counted separately) | **38 items** |
+| passing | `mojo_failures.mojo` | 6 inputs (`.mojo` and `.py` alike) |
+
+TWO of the SIGSEGVs are closed, one per fix, and each was found by the same
+four-command `lldb` recipe at the top of this file rather than by reading the
+compiled-path source:
+
+* **`mojo_id` (item 0 in "What was fixed")** — 45 to 43.
+* **a struct type tag read was never validated** — 43 to 40.
+  `mojo_read_type_tag`/`_safe` read eight bytes at an address and returned
+  them unvalidated. A heap string passes every check those readers make (it is
+  8-aligned and `malloc_size` is at least 8), so `type(node)` over a plain
+  `str` field of an AST node returned the eight bytes of the STRING — for
+  `hello.mojo` that is `"print"`, i.e. the integer `0x746e697270`, which is
+  inside `[2^31, 2^47)` and therefore accepted by every pointer predicate in
+  the runtime. `_WALK_DATACLASS_CACHE.get(type(node))` then classified that
+  integer as a boxed string and handed it to `strcmp`: a SIGSEGV on an address
+  that was never mapped. A tag is 31 bits by construction
+  (`_struct_type_id` is `h * 31 + c & 2147483647`), and the codegen already
+  returns a literal 0 for a `char *`/container receiver for exactly this
+  reason (`emit_exprs.py`'s `__class__` arm) — so the check is that same rule
+  applied where the receiver is boxed and the codegen cannot see it. Both
+  readers now share one `_mojo_tag_at`.
+
+**What the remaining 38 have in common, as far as it is measured:** they are
+crashes, not diagnostics, so the census needs one crash at a time and the
+`lldb` recipe is the instrument. The next two measured, both AFTER the two
+fixes above, so both are still open:
+
+1. `mojo_dict_order_indices` dereferencing `0x4d4a424f58310001` — that is
+   `MOJO_BOX_MAGIC`, a `MojoBox`'s first field, so a box's CONTENTS reached a
+   caller as the box. Reached from `gen_module_impl` →
+   `infer_return_elem_type` → `_scratch_vt.update(_as_dict(_base_var_types))`
+   (`mojo/middle/resolve_shared.py:1141`), i.e. the SECOND argument of
+   `mojo_dict_update` is the magic, not a dict. Same family as
+   `bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`'s "a value
+   read out of a heterogeneous container" case: something hands a struct's
+   first word to a consumer that expected the pointer.
+2. the `SEMICOLON` refusal, which is a PARSER bug and not a crash — see "the
+   second, independent class" in the gatefix8 entry below.
 
 So the remaining class is a CRASH, not a diagnostic, and it is now the whole of
 what is left: 41 of the 46 inputs take the binary down with no message, and

@@ -1459,7 +1459,7 @@ test('gimplerunner', [PY, 'test_gimple_runner.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_gimple_runner.py', 'build_config.py',
                              'exec_budget.py',      # imported: must be in the key
                              RUNTIME_SRC, RUNTIME_HDR, 'gimple_codegen.py'],
-     expect='4 of 378: compile-and-execute rows the merge of ten branches '
+     expect='4 of 379: compile-and-execute rows the merge of ten branches '
             'left red — none fails on the branch that added it; see '
             'bugs/MERGE_bugs4_gimplerunner_four_remaining.md',
      desc='compile-and-execute: plain programs, structs, closures, stdlib calls')
@@ -2084,12 +2084,13 @@ fanout('bootstrap-stage2-dumps',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        items_are_files=True,
-       expect='43 of 46: the self-hosted binary dumps a correct `.pyi` and a '
-              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — 41 of '
+       expect='40 of 46: the self-hosted binary dumps a correct `.pyi` and a '
+              '`.tok`/`.ast` byte-identical to stage1\'s, then FAILS — 38 of '
               'them die on SIGSEGV/SIGBUS with no output at all, and the two '
               '`.py` closure inputs are refused with `Unexpected SEMICOLON`. '
-              'Re-measured 2026-10-04 (it was 45 of 46 before `mojo_id` '
-              'closed the `TypeError: unhashable type: \'list\'` class). See '
+              'Re-measured 2026-10-04: 45 of 46 before `mojo_id` closed the '
+              '`TypeError: unhashable type: \'list\'` class, 43 before the '
+              'struct-tag read was validated. See '
               'bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md',
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into

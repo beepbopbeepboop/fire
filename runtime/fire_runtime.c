@@ -7043,6 +7043,48 @@ static int _mojo_tagged_addr_ok(int64_t addr)
     return 1;
 }
 
+/* The ONE read of a struct's leading `__mojo_type_id`, for both readers
+ * below, and it validates what it read.
+ *
+ * A tag is 31 bits BY CONSTRUCTION: `_struct_type_id(name)` is
+ * `h * 31 + c & 2147483647` (mojo/middle/exprtypes.py), and every struct the
+ * backend emits stamps one into its first field (module_gen.py's two
+ * `_struct_type_id` call sites). The codegen already relies on that where it
+ * CAN see the receiver: `__class__` on a `char *`/`MojoList *`/`MojoSet *`/
+ * `MojoDict *` lowers to a literal 0 for exactly this reason (emit_exprs.py's
+ * `__class__` arm — "every real struct tag comes from `_struct_type_id`, a
+ * nonzero hash"). This is the same rule for the receivers it cannot see,
+ * which is every value boxed as an int64_t — an erased parameter, a field read
+ * out of a heterogeneous container, a call result.
+ *
+ * So a wider word is not a failed tag read: it is a SUCCESSFUL read of eight
+ * bytes that are something else. The case that matters is a `char *` where a
+ * struct pointer was expected — the compiler's own generic AST walkers recurse
+ * into plain `str` fields, a heap string is a valid 8-aligned allocation of at
+ * least 8 bytes, and its first eight CHARACTERS came back as an "identity".
+ *
+ * That is not a cosmetic wrong answer. `mojo/middle/exprtypes.py`'s
+ * `_WALK_DATACLASS_CACHE` is keyed by `type(node)`, so the bytes of the string
+ * "print" became the integer 0x746e697270 — inside [2^31, 2^47), which every
+ * pointer predicate in this file accepts — and the dict store then classified
+ * it as a boxed string and handed it to `strcmp`, i.e. dereferenced an address
+ * that was never mapped. SIGSEGV, on the self-hosted compiler's own AST walk
+ * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md; the same shape as
+ * bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, at its one
+ * producer this file can answer for).
+ *
+ * 0 is the honest answer for a value that is not a tagged struct, and it is
+ * what these readers already return for every address they refuse — so the
+ * check makes the read's failure mode match its own contract instead of
+ * inventing an identity out of adjacent memory. */
+static int64_t _mojo_tag_at(int64_t addr)
+{
+    if (!_mojo_tagged_addr_ok(addr)) return 0;
+    int64_t tag = *(int64_t *)(intptr_t)addr;
+    if (tag <= 0 || tag > 0x7fffffff) return 0;
+    return tag;
+}
+
 int64_t mojo_read_type_tag(int64_t addr) {
     /* Was: `if (!addr) return 0; return *(int64_t*)addr;` — but once the
      * compiler's own generic AST walkers actually recurse (mojo_isinstance
@@ -7051,8 +7093,7 @@ int64_t mojo_read_type_tag(int64_t addr) {
      * type-tag, and the bare deref segfaulted. Same guard as
      * mojo_read_type_tag_safe: nothing legitimate lives below 2GiB on any
      * platform this runtime targets. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_tag_at(addr);
 }
 
 /* Like mojo_read_type_tag, but for callers that don't statically know
@@ -7073,8 +7114,7 @@ int64_t mojo_read_type_tag_safe(int64_t addr) {
      * here and dereference the tag as a pointer. On every platform this
      * runtime targets a genuine heap/stack/static address is far above
      * 2GiB, so nothing legitimate is lost. */
-    if (!_mojo_tagged_addr_ok(addr)) return 0;
-    return *(int64_t *)(intptr_t)addr;
+    return _mojo_tag_at(addr);
 }
 
 char *mojo_str(void *obj) {

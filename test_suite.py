@@ -1193,7 +1193,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           'reader sees',
           stated == {'async-runtime-scaffold': 1, 'async-void-return': 3,
                      'async-with-lock-guard': 2,
-                     'bootstrap-stage2-dumps': 43, 'coro-detached-async': 2,
+                     'bootstrap-stage2-dumps': 40, 'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1213,7 +1213,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
           f'is for. `bootstrap-stage2-dumps` is the one count a FANOUT states '
-          f'(43 of its 46 items exit non-zero), and it is checked against the '
+          f'(40 of its 46 items exit non-zero), and it is checked against the '
           f'per-item verdicts rather than against a summary line \u2014 see '
           f'`observed_fanout_failures`. `gimplerunner` is the merge worker\u0027s '
           f'4 of 379 \u2014 the '
