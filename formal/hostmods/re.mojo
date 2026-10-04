@@ -66,8 +66,8 @@ WHAT IS NOT HERE, AND THE REASON IS THE SAME FOR ALL OF IT
     `(?x: ... )` is not implemented, and `_p_inline`'s own docstring says why:
     flags are one word `_vm` reads once at entry, so a flag that changes inside
     a compiled program needs the matcher to carry a mutable word through
-    `_step`. `test_re_formal.py`'s `test_the_scoped_flag_form_is_refused_and_
-    named` asserts that boundary rather than leaving it implicit.
+    `_step`. `test_re_formal.py` asserts that boundary rather than
+    leaving it implicit, in a test named for the SCOPED form's refusal.
   * **`re.escape` and `re.sub` return `malloc`'d buffers** the CALLER owns,
     exactly as `os/_syscalls.mojo`'s string functions do, and exactly for the
     same reason: a `str` here is a bare `char *` into read-only text, and
@@ -851,9 +851,9 @@ def _p_group(a, code, nxt: Int) -> Int:
         # `_p_alt` and `_p_cat` each emit a JMP of their own first, so the count
         # at the first flag group is 4 and at the second is 5 -- measured -- and
         # a test against either number refuses one of the two spellings CPython
-        # accepts. So the rule is CPython's own: **nothing but other flag groups
-        # may precede this one**, which `_p_at_head` reads straight
-        # off the pattern source.
+        # accepts. So the rule is CPython's own: **nothing but other
+        # flag groups may precede this one**, which `_p_at_head` reads
+        # straight off the pattern source.
         #
         # OR-ing into `_P_FLAGS` is the whole of the implementation, and it is
         # enough because the three consumers read it at the right time:
