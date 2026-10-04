@@ -5347,6 +5347,47 @@ def main():
         print("fell back")
 """, "fell back\n")
 
+    # The other end of the same marker: a member that IS a C library
+    # function. `math.floor(1.5)` used to print `0` and exit 0 (the generic
+    # scalar passthrough returning the module marker unchanged), then to raise
+    # `NotImplementedError` once the marker became loud — both wrong, because
+    # `<math.h>` is in every generated preamble and `_LIBC_SIGS` already pins
+    # the signatures. `math.<fn>` now lowers to the libm symbol, which is the
+    # same mechanism `os.environ` / `os.path.isdir` / `os.unlink` already use.
+    #
+    # `floor` / `ceil` / `trunc` are in the program for the one thing that is
+    # NOT a plain rename: Python's three return an `int` and C's three return
+    # a `double`, so without the truncation `math.floor(1.5)` prints `1.0`.
+    # `hypot` and `pow` are two-argument members, so the arity check in
+    # `module_member_libc`'s caller is exercised. `gcd` is the negative: an
+    # INTEGER member that is not libm at all, and the honest answer for it is
+    # still the named raise — which is why the table's absence is a decision
+    # rather than a gap.
+    test_gimple_stdout("gimple_math_module_members_lower_to_libm", """\
+import math
+
+def main():
+    print(math.floor(1.5))
+    print(math.ceil(1.2))
+    print(math.trunc(-1.7))
+    print(math.floor(-1.5))
+    print(math.sqrt(2))
+    print(math.fabs(-2.5))
+    print(math.pow(2, 10))
+    print(math.hypot(3, 4))
+    print(math.log10(1000), math.copysign(3, -1))
+main()
+""", "1\n2\n-1\n-2\n1.4142135623730951\n2.5\n1024.0\n5.0\n3.0 -3.0\n")
+
+    test_gimple_runtime_error("gimple_math_non_libm_member_still_raises", """\
+import math
+
+def main():
+    print(math.gcd(4, 6))
+main()
+""", "NotImplementedError: math.gcd: module 'math' is not compiled into this "
+       "binary")
+
     # `bytes` raises are the same mechanism reached a different way; keeping
     # this one next to the module-marker case is the point — an unavailable
     # thing should say so, whichever route it took to be unavailable.
