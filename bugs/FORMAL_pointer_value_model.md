@@ -90,6 +90,42 @@ refusal class this path can decide and moves no file. It is worth having
 because the refusal was a *false* limit rather than an unknown one: the model
 said the answer was the identity and then declined to give it.
 
+### Before/after over twelve real modules, which is the standard this change owes
+
+It edits `formal/build.py`'s holder fixpoint, which runs for **every function in
+every module**, so "the new cases pass" is not the evidence — the evidence is
+that nothing else moved. Twelve modules, each built twice from a `git archive
+HEAD` export with no diff applied, comparing the build's whole output:
+
+```
+IDENTICAL  formal/model.py            IDENTICAL  std/builtin/string.mojo
+IDENTICAL  formal/build.py            IDENTICAL  std/collections/optional.mojo
+IDENTICAL  gimple_codegen.py          IDENTICAL  std/collections/list.mojo
+IDENTICAL  myinterpreter.py           IDENTICAL  formal/x86_64_decode.py
+IDENTICAL  test_suite.py              IDENTICAL  tools/formal_sweep.py
+IDENTICAL  formal/hostmods/concurrent/futures.mojo
+IDENTICAL  formal/hostmods/subprocess.mojo
+IDENTICAL  formal/hostmods/ctypes.mojo
+```
+
+`myinterpreter.py` and `formal/model.py` are in that list deliberately: they are
+the two largest modules the pass sees, and `formal/build.py`'s own source is a
+file this change edits.
+
+Three of those BUILD, and the artifacts are the stronger check:
+
+| artifact | before vs after |
+|---|---|
+| `futures.mojo` (67 568 bytes) | **byte-identical** |
+| `subprocess.mojo` (83 984 bytes) | **byte-identical** |
+| `ctypes.mojo` (67 712 bytes) | 43 bytes differ, in two clusters and **neither is code**: 12 inside an `LC_LOAD_DYLIB` name (the CAS dylib's content hash, which includes the output path — and the two trees were given two different ones on purpose) and 31 inside the `LC_CODE_SIGNATURE` region (`dataoff 49328`, `datasize 18384`). Two trees cannot produce one signature without one path. |
+
+**What this does not cover, and it is the integrator's:** a whole-scope
+`tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
+are a sample chosen for size and for the fact that three of them build at all;
+they are not a census, and the doc that would settle the question is
+`bugs/FORMAL_sweep_work_map_2026-10-04_b10.md`'s next round.
+
 ### §9's sixth item, re-measured: the x86-64 one-field field read is FIXED, and
 ### what the measurement was is the record
 
