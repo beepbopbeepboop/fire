@@ -9832,6 +9832,51 @@ print(str(d))
             print("PASS  user_struct_named_parser_emits_its_own_layout_and_qualifier")
             _PASS += 1
 
+    # `id(x)` must be an INT, and the generated stub returned the VALUE
+    # (`static int64_t id (int64_t x) { return x; }`). For a container that is
+    # the live HANDLE, so the container registries read the token as that
+    # container: `mojo/middle/lambdareduce.py`'s `if id(body) in cache` reached
+    # `mojo_dict_key_for`, which rightly refuses a list as a dict key, and the
+    # self-hosted compiler raised `TypeError: unhashable type: 'list'` inside
+    # gen_module_impl on every input — the failure that stopped it compiling
+    # anything (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+    #
+    # CPython is the oracle and the program states no expected output, because
+    # the addresses differ. What has to match is the SEMANTICS: the token is
+    # stable for one object, distinct across objects, usable as a dict/set
+    # member, and readable back as an integer.
+    test_gimple_matches_cpython("gimple_id_is_an_integer", """\
+def show(label, x):
+    print(label, isinstance(id(x), int), id(x) == id(x))
+
+def main():
+    a = [1, 2]
+    b = [1, 2]
+    show('list', a)
+    show('list', b)
+    print('distinct', id(a) != id(b))
+    print('same', id(a) == id(a))
+    # The shape that raised: a membership test keyed by an id.
+    cache = {}
+    print('miss', id(a) in cache)
+    cache[id(a)] = 'A'
+    print('hit', id(a) in cache, cache[id(a)] == 'A')
+    print('other', id(b) in cache)
+    # A set of ids, and reading one back as a number.
+    ids = {id(a), id(b), id(a)}
+    print('set', len(ids), int(id(a)) > 0, id(None) == id(None))
+    # id() of a non-container is still an integer, and distinct objects of
+    # different kinds never share a token.
+    s = 'text'
+    t = 'text'
+    print('str', id(s) != id(t), isinstance(id(s), int))
+    # The dict VALUE survives a round trip through the token's integer form.
+    d = {int(id(a)): 'v'}
+    print('int key', d[int(id(a))] == 'v')
+
+main()
+""")
+
     _parser_struct_and_symbols()
 
 

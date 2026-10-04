@@ -1,5 +1,71 @@
 # CODEGEN_bootstrap_stage2_dump_is_empty: the self-hosted binary exits 0 and writes no dump
 
+## Status (2026-10-04, work/gatefix9 — the `TypeError` is FIXED and was never
+## in `gen_module_impl`: it was `id()`, and what is left is a SIGSEGV)
+
+**Still open, and still the right owner of this class. The `TypeError` class
+below is closed — its own entry, further down, says where it actually was,
+because the localisation in the gatefix8 entry above it ("`gen_module_impl`'s
+prologue, input-independent") was WRONG and cost most of a session to
+overturn.**
+
+Measured on `work/gatefix9`, same command as the entry below:
+
+    $ python3 tools/suite.py bootstrap-stage2-dumps --no-cache
+    suite: 4 passed, 1 failed, 0 skipped  (5 tests, 95 jobs, 229.7 s)
+
+| | gatefix8 | gatefix9 |
+|---|---|---|
+| items failing | 45 of 46 | **43 of 46** |
+| `TypeError: unhashable type: 'list'` | 20 inputs | **gone** |
+| `Unexpected SEMICOLON(';')` at `fire_compiler.py:1301:38` | 2 inputs | 2 inputs (unchanged) |
+| silent SIGSEGV / SIGBUS, no output at all | (not counted separately) | **41 items** |
+| passing | `mojo_failures.mojo` | `mojo_failures.mojo`, `t1.mojo`, `bootstrap_test_single_expr.mojo` |
+
+So the remaining class is a CRASH, not a diagnostic, and it is now the whole of
+what is left: 41 of the 46 inputs take the binary down with no message, and
+the two `.py` closure inputs are the `SEMICOLON` refusal. `bootstrap-stage2-dumps`
+carries a count-checked `expect=` marker again (43 of 46), and the count is
+checked against the per-item verdicts — see the 2026-10-04 entry in
+`tools/suite.py`'s marker history for why that job is red again after a day of
+carrying no marker at all.
+
+### How the `TypeError` was located (the instrument, for the next person)
+
+The entry below sends you to a C main linked against `stage1/fire.ci`. The
+cheaper half of that is **lldb on `stage2/mojo` itself**, and it is four
+commands:
+
+    $ cd stage2
+    $ lldb -b -o 'breakpoint set -n mojo_dict_key_for' -o run -o 'bt 6' -o quit \
+          -- ./mojo --dump ../.tmp/one.mojo
+    frame #0: mojo`mojo_dict_key_for
+    frame #1: mojo`_kw_kind
+    frame #2: mojo`mojo_dict_set_str_kw        <- or mojo_dict_contains_kw
+    frame #3: mojo`_mojo_middle_types_toplevel  <- the first hit, NOT the crash
+    frame #4: mojo`main
+
+Two things about that, both of which cost time here:
+
+* **The FIRST hit is not the crash.** `mojo_dict_key_for` is called for every
+  container dict key, and the first one — `_MODULE_ATTR_CTYPES`'s
+  `('os', 'environ')` tuple key, which is a legitimate tuple — is fine. The
+  crash is the SECOND hit. `continue` once and read the backtrace again.
+* **The `TypeError` was never in `gen_module_impl`.** `mojo_dict_key_for`
+  raises `unhashable type: 'list'` for a list used as a dict key, and the key
+  the compiled path handed it was a live list HANDLE. Reading the list's slots
+  out of the debugger is what named it: patch `mojo_dict_key_for` in a COPY of
+  `runtime/fire_runtime.c` to print the list it was given (its length and its
+  slots), relink `stage1/fire.ci` against the copy (25 s, one `gcc -fgimple`
+  command — see the entry below for the exact argv), and the answer is one
+  line. What it showed was a ONE-element list holding pointer bytes, used as
+  the key of `if id(body) in cache` in `mojo/middle/lambdareduce.py`.
+
+`id()` was the defect; see "What was fixed" below for the fourth item. The
+whole `TypeError` class was ONE line of generated code (`static int64_t id
+(int64_t x) { return x; }`) that no amount of reading `gen_module_impl` would
+have found.
+
 ## Status (2026-10-04, work/gatefix8 — the class is much narrower: THREE root
 ## causes found and fixed, `.tok`/`.ast` are now byte-identical, and what is
 ## left is a `TypeError` inside the compiled `gen_module`)
@@ -77,7 +143,25 @@ for that file is byte-identical, so the divergence is in
 `fire_compiler.py::_split_on_separators` or in phase 2's sub-statement loop, not
 in the lexer.
 
-### What was fixed (three root causes, each with its own evidence)
+### What was fixed (four root causes, each with its own evidence)
+
+0. **`id()` returned the VALUE instead of an identity** (`work/gatefix9`, the
+   fourth and last of this class's non-crash defects). The generated stub was
+   `static int64_t id (int64_t x) { return x; }`, so `id(x)` on a container
+   handed back the live HANDLE — and the container registries
+   (`mojo_is_registered_list` and its siblings) then read that token as the
+   container itself. `mojo/middle/lambdareduce.py`'s `if id(body) in cache`
+   therefore reached `mojo_dict_key_for`, which is right to refuse a list as a
+   dict key, and the compiler raised `TypeError: unhashable type: 'list'`.
+   Fixed with `mojo_id` (runtime): an INTERNED box holding the word, which is
+   this runtime's existing representation for "an int64_t that is not
+   self-describing", and which every classifier already reads as an integer
+   (`mojo_boxed_is_str` excludes boxes, `_value_kind` matches only the
+   container registries). Interning is load-bearing rather than tidy: it is
+   what makes `id(x) == id(x)`, which `cache[id(body)]` — read then written —
+   depends on. Test: `gimple_id_is_an_integer` in `test_gimple_runner.py`,
+   CPython as the oracle; it fails on the old stub by dying at exactly the
+   membership test.
 
 1. **`str`'s optional `[start[, end]]` window was dropped** by every arm of
    `_lower_str_method` (`startswith`/`endswith`/`find`/`index`/`rfind`/
@@ -103,8 +187,15 @@ in the lexer.
    file with `Expected '0' got ')'`. Fixed at every padding site
    (`_default_expr_to_pair(param_ctype=...)`), which is why `.ast` is now real.
 
-**The instrument, for whoever picks this up** (it is ~100 s per rebuild and it
-is what made three fixes possible inside one session):
+### The instrument, for whoever picks this up
+
+(The `lldb` recipe is at the top of this file and is the cheap half — four
+commands, no rebuild. What follows is the expensive half, needed only to reach
+the stages before `gen_module`.)
+
+**The instrument, for whoever picks this up** (it is ~25 s per rebuild — the
+~100 s in the gatefix8 entry was measured on an older tree — and it is what
+made four fixes possible across two sessions):
 
 1. `python3 -c "from gimple_codegen import compile_to_gimple; compile_to_gimple(open('fire_compiler.py').read(), do_imports=False, filename='fire_compiler.py')"`
    — 2.1 s, 1.9 MB of C for the whole front end. Two edits make it gcc-able:

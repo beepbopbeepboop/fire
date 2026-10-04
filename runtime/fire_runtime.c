@@ -1055,6 +1055,115 @@ char *mojo_repr_boxed(int64_t v)
 }
 
 
+/* ── id(): an identity token that IS an integer ─────────────────────────────
+ *
+ * CPython's `id(x)` is an `int`, and every consumer in this runtime depends
+ * on that being true rather than on the value being an address: the self-host
+ * closure keys its memo caches on it (`if id(body) in cache`, `{id(n) for n
+ * in ...}`, `str(id(func))`), so a token that any predicate here reads as
+ * something other than an integer is a WRONG ANSWER, not an approximation.
+ *
+ * What this replaces was the generated stub `static int64_t id (int64_t x)
+ * { return x; }` — the VALUE rather than the identity. For an integer
+ * argument that is merely imprecise; for a container it hands back the live
+ * HANDLE, and the container registries (`mojo_is_registered_list` and its
+ * siblings) then read the token as that very container. `mojo_dict_key_for`
+ * correctly refuses a list as a dict key, so
+ * `mojo/middle/lambdareduce.py`'s `if id(body) in cache` raised
+ * `TypeError: unhashable type: 'list'` — inside `gen_module_impl`, on every
+ * input including an empty one, which is why the self-hosted compiler
+ * compiled nothing at all (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ *
+ * So the token is a BOX holding the address. A box is this runtime's existing
+ * answer to "an int64_t that is not self-describing", and every classifier
+ * already treats a registered box as an integer: `mojo_boxed_is_str` excludes
+ * boxes (so the token is never mistaken for a string) and `_value_kind`
+ * matches only the list/dict/set registries (so never for one of those).
+ * `int(token)` and `str(token)` read it back through `mojo_box_int` /
+ * `mojo_repr_boxed` as the object's own address, so a program that PRINTS an
+ * id still prints an address, as it does under CPython.
+ *
+ * The box is INTERNED per address, and that is not an optimisation: it is what
+ * makes `id(x) == id(x)`, which the caches depend on (`cache[id(body)]` reads
+ * and then writes the same key, so a fresh box per call would never hit).
+ * The table is open-addressed on the word itself, the same shape as `_PtrReg`
+ * above, and deliberately NOT a `MojoDict` keyed by the value: a container key
+ * makes a dict build a CONTENT key — walking the whole list — on every single
+ * `id()` call, and `id()` is called on statement lists in inner loops.
+ *
+ * The table is never pruned. That is the same rule the box cache follows (a
+ * boxed value read out of a list outlives the list) and it is what keeps
+ * `id(x)` STABLE for the life of the process; one 24-byte cell per distinct
+ * `id()`-ed word is a rounding error against the containers themselves.
+ * Occupancy is `v[j] != 0` rather than `k[j] != 0`, because the key here is
+ * an arbitrary word and one of them is 0 (`id(None)`). */
+typedef struct {
+    uint64_t *k;
+    uint64_t *v;      /* the box address; 0 means the slot is empty */
+    uint64_t  cap;    /* power of two */
+    uint64_t  used;
+    int       shift;  /* 64 - log2(cap) */
+} _IdTab;
+
+static _IdTab _id_tab;
+
+static void _id_rehash(uint64_t ncap)
+{
+    uint64_t *ok = _id_tab.k, *ov = _id_tab.v, ocap = _id_tab.cap;
+    _id_tab.k = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
+    _id_tab.v = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
+    _id_tab.cap = ncap;
+    _id_tab.shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) _id_tab.shift--;
+    _id_tab.used = 0;
+    for (uint64_t i = 0; i < ocap; i++) {
+        if (!ov[i]) continue;
+        uint64_t h = ((ok[i] >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
+        while (_id_tab.v[h]) h = (h + 1) & (ncap - 1);
+        _id_tab.k[h] = ok[i];
+        _id_tab.v[h] = ov[i];
+        _id_tab.used++;
+    }
+    free(ok);
+    free(ov);
+}
+
+static uint64_t _id_slot(uint64_t key)
+{
+    uint64_t mask = _id_tab.cap - 1;
+    uint64_t j = ((key >> 3) * 0x9E3779B97F4A7C15ULL) >> _id_tab.shift;
+    while (_id_tab.v[j] && _id_tab.k[j] != key) j = (j + 1) & mask;
+    return j;
+}
+
+int64_t mojo_id(int64_t x)
+{
+    if (!_id_tab.cap) _id_rehash(256);
+    uint64_t key = (uint64_t)x;
+    uint64_t j = _id_slot(key);
+    if (_id_tab.v[j]) return (int64_t)_id_tab.v[j];
+    /* Same load invariant as `_pr_add`: grow at half full, so a probe always
+     * reaches an empty slot. */
+    if ((_id_tab.used + 1) * 2 > _id_tab.cap) {
+        _id_rehash(_id_tab.cap * 2);
+        j = _id_slot(key);
+    }
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    /* Out of memory is not a shape this runtime reports; returning the word
+     * unchanged keeps the program running with the OLD (wrong) answer rather
+     * than a NULL token that would read as `id(x) == 0`. */
+    if (!bx) return x;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = x;
+    bx->kind = 'i';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    _id_tab.k[j] = key;
+    _id_tab.v[j] = (uint64_t)(uintptr_t)bx;
+    _id_tab.used++;
+    return (int64_t)(uintptr_t)bx;
+}
+
+
 /* The ONE definition of "this int64_t is a real heap/static pointer", shared
  * by every predicate in this file that has to dereference one. Both
  * requirements below are what makes that safe, and both were found by
