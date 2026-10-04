@@ -1963,24 +1963,33 @@ theorem x86_step_lea_rm64_disp32 (s : X86State) (code : Nat → UInt8)
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_rm_ne, h_reg,
         h_dst, h_dst_lt]
 
-/-- `lea r64, [rip + disp32]` (REX.W 8D /r, mod=00, rm=101).
+/-- `lea r64, [rip + disp32]` (REX.W 8D /r, mod=0, rm=101) — the RIP-relative
+    mode of the instruction above, and the ONE thing about it that the
+    base+disp statement does not say: with `mod = 00` and `rm = 101` the r/m
+    field is not a register at all, it is the instruction pointer, so there is
+    no base register to read and the displacement counts from the END of the
+    instruction rather than from its start. `x86_mem_addr`'s `ripRel` arm is
+    exactly that — `if ripRel then endAddr` — so the address here is
+    `Int.ofNat (m + 7) + disp` and the register operand is absent.
 
-    The one addressing mode with NO base register: the address is `endAddr +
-    disp`, and `endAddr` is the address AFTER the whole instruction -- 7 bytes
-    here, `rip + 3` for the ModRM plus the 4-byte displacement the mode carries.
-    That is the whole difference from `x86_step_lea_rm64_disp32` above and the
-    whole reason it cannot be that theorem: applying a `base + disp` statement
-    to this encoding does not fail, it proves a claim about `lea r, [r11]`.
+    Both halves matter and they fail differently. Getting the base wrong (using
+    the rm field's register, as the disp32 lemma's shape invites) states a
+    different address and so a different instruction; getting the LENGTH wrong
+    — `m + 7` versus `m + 4` — keeps the base register out of it but moves the
+    anchor, which is the `81`-versus-`83` shape this file already records. Both
+    producers in the backend emit this form: the stack-floor guard's
+    `lea r11, [rip+&floor]` in every prologue that has an entry
+    (`formal/x86_64_codegen.py::_emit_stack_floor_guard`), and
+    `_emit_global_init`'s RIP-relative `lea` for every address-valued module
+    global (its own docstring, "Why code and not a relocation"), so one theorem
+    closes both.
 
-    `rm = 5` is carried as a HYPOTHESIS rather than fixed in the statement
-    because it is what selects the mode, in `x86_mem_addr`'s `ripRel` and here;
-    it also makes the `rm ≠ 4` exclusion the disp32 sibling needs unnecessary,
-    since `5 ≠ 4` already, and a hypothesis that cannot fail is a hypothesis
-    nobody has to justify.
-
-    Like the sibling, `lea` writes the TRUNCATED address to a register and reads
-    no memory, which is why `x86_mem_addr` appears in the `simp` set with no
-    `mem_read_bytes` beside it. -/
+    `h_rm_ne5` is what pins the mode at the STATEMENT level. The model derives
+    `ripRel` from `mode = 0 && rm = 5` rather than being told it, so a caller
+    that did not establish this could apply the theorem to a `lea [rbx+disp]`
+    and be handed a proof about a different address — the failure mode
+    `_FORMS`' own header calls out ("a new form needs both, and a mismatch
+    between them is a proof failure rather than a silent gap"). -/
 theorem x86_step_lea_r64_rip (s : X86State) (code : Nat → UInt8)
     (m : Nat) (rex modrm : UInt8) (reg dst : Nat) (disp : Int)
     (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x8d)
@@ -1991,10 +2000,19 @@ theorem x86_step_lea_r64_rip (s : X86State) (code : Nat → UInt8)
     (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
     (h_dst : reg + x86_rex_r rex = dst) (h_dst_lt : dst < 16) :
     x86_step s code = some { x86_set_reg s dst
-        (UInt64.ofNat ((Int.ofNat m + 3 + 4 + disp).toNat % 18446744073709551616)) with
-        rip := m + 3 + 4 } := by
+        (UInt64.ofNat ((Int.ofNat (m + 7) + disp).toNat % 18446744073709551616)) with
+        rip := m + 7 } := by
+  -- `x86_mem_addr` builds its return length as `sibExtra + dispN` and the model
+  -- adds that to `atp`, so its `Int.ofNat` argument arrives as `m + 3 + 4`
+  -- rather than `m + 7`.  The two are the same number and not the same TERM,
+  -- and nothing in this file's simp set normalises Nat addition, so the length
+  -- is proved equal once and handed to `simp` as a rewrite.  Stating the
+  -- conclusion as `m + 3 + 4` would also elaborate -- measured -- and would be
+  -- a proof about the number the model happens to spell rather than about the
+  -- instruction length, which is the thing a reader is checking.
+  have hlen : m + 3 + 4 = m + 7 := by omega
   simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
-        x86_rm_read, x86_rm_write,
+        x86_rm_read, x86_rm_write, hlen,
         h_rip, h_b0, h_b1, h_b2, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
         h_dst, h_dst_lt]
 

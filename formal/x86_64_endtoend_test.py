@@ -557,27 +557,18 @@ _SUCCS = {
         "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat "
         "(x86_get_reg $s ($rm + x86_rex_b $rex)).toNat + $disp).toNat % "
         "18446744073709551616)) with rip := $next }",
-    # The RIP-relative `lea` is that row with the BASE REGISTER replaced by the
-    # instruction's own end address -- and the address and the next pc are both
-    # written as `Int.ofNat $m + 3 + 4` rather than as `$m + 7`, which is the
-    # shape `x86_step_lea_r64_rip`'s own conclusion has.
-    #
-    # That is not a style preference, it is what makes the step close: the model
-    # computes `endAddr` as `rip + 3 + extra` and `extra` as the `0 + 4` that
-    # `x86_mem_addr` returns, so its `rip` field is `m + 3 + 4` and its address
-    # is `↑m + 3 + 4 + disp`.  A successor stating `m + 7` instead leaves two
-    # records differing in arithmetic the congruence check will not evaluate --
-    # `mem : Nat → UInt8` is a function field -- and the error is a "Type
-    # mismatch" with both sides printed in full and neither naming the field.
-    # Measured: that was the whole of `x86_step_lea_r64_rip`'s first attempt, and
-    # transcribing the model's own expressions is what closed it.
-    #
-    # `simp` still reduces `4096 + 3 + 4` to a literal, which is what the NEXT
-    # step's `rip` side condition needs, so quoting the model costs nothing
-    # there.
+    # `Int.ofNat ($m + 7)` verbatim, because this row is compared against the
+    # lemma's own conclusion by `exact Option.some.inj` and nothing rewrites in
+    # between: the model's own term is `↑m + 3 + 4 + disp` (`x86_mem_addr` builds
+    # its return length as `sibExtra + dispN`), which is the same NUMBER and a
+    # different TERM, and a successor stating the model's spelling comes back
+    # unproved against a lemma stating the length.  Measured both ways: writing
+    # `m + 3 + 4` here and there closes by `rfl` too, but it makes the table a
+    # copy of how the model happens to spell a length rather than a copy of what
+    # the instruction does, and the two sides then have to be changed together.
     "lea_r64_rip":
-        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat $m + 3 + 4 + $disp).toNat "
-        "% 18446744073709551616)) with rip := $m + 3 + 4 }",
+        "{ x86_set_reg $s $dst (UInt64.ofNat ((Int.ofNat ($m + 7) + $disp).toNat "
+        "% 18446744073709551616)) with rip := $next }",
     "mov_rm64_r64_reg":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) with rip := $next }",
