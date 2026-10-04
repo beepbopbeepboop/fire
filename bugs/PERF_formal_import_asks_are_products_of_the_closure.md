@@ -17,6 +17,15 @@ top is somewhere it never looked.**
 
 ## 1. Re-measurement, 44 files, both architectures
 
+**The base these numbers were taken on is `3c3516db`, and master was 27 commits
+ahead of it by the end of the pass** (the integrator merged `work/formal19-1`,
+`work/formal19-2`, `work/gatefix5` and others underneath). §4a and §4b were
+re-read against master's tip and are still open there; §4c was closed there
+while this pass ran and says so. Every measurement below is a measurement of
+`3c3516db` plus this branch's three commits, and the two fixed costs are
+behaviour-preserving (byte-identical artifacts, §2.2), so the fix composes with
+whatever landed after it.
+
 The spread is round 1's: 21 small `formal/examples/*.mojo` (the fixed cost),
 the stdlib's largest files sampled across its tree, and this repository's
 largest `.py`, chosen so the sample contains both ends.
@@ -225,7 +234,8 @@ with the memo removed (20 scans for 20 asks instead of 1).
 Re-profiled after §2 + §3, `std/simd.mojo` is 6.3 s and its whole remaining
 `formal/model.py` cost is 0.18 s of `unit_field_evidence` and 0.09 s of
 `struct_method_receiver_reads`. The profile's shape has inverted: what is left
-is the import closure walking, not the per-function model work.
+is the import closure walking, not the per-function model work — and on master's
+tip, with §c below already landed, less of it still.
 
 ### a. `module_templates_by_path` is still walked once per imported module
 
@@ -257,15 +267,22 @@ it is idempotent") without fixing it.
 MODULE, which is what `formal/build.py::parse_module` already does for an entry
 file. `attach_field_evidence` is already the whole-module form.
 
-### c. `struct_receiver_stores` visits every node of every method body
+### c. `struct_receiver_stores` visited every node — **ALREADY FIXED ON MASTER, do not redo it**
 
-Round 1's §6 residue, still open, and unchanged by this pass: it walks all
-nodes of all method bodies to find assignment statements (2.05 s of a 3.4 s
-instrumented `myinterpreter.py` when round 1 measured it; 0.056 s of the 6.3 s
-`std/simd.mojo` now). Round 1's own measurement is the finding — a walk that
-descends only into list-valued fields of a statement reaches the same
-assignments over ~8x fewer nodes, and **this pass re-measured the node counts
-on current master** (`.tmp/walkbench.py`, identical node sequences checked):
+**This residue was open when this pass ran and master closed it while this pass
+was running** (`078ecbed` "the receiver-store census walks STATEMENTS, and the
+differential that says it may", plus `tools/formal_field_walk_differential.py`).
+`formal/model.py::struct_receiver_stores` on master's tip reads through
+`iter_statement_nodes` rather than `iter_nodes`, which is exactly the walk
+round 1's §6 specified. **Nothing to do here; the point of recording it is that
+a doc which names a landed fix as an open residue sends the next reader to redo
+it.** This branch was cut from `3c3516db` and master was 27 commits ahead of it
+when these numbers were taken, which is why §4a and §4b below were re-checked
+against master's tip and §4c had not.
+
+What this pass contributes is the PREMISE measured on its own base
+(`.tmp/walkbench.py`, identical node sequences checked, `myinterpreter.py` /
+`formal/model.py` / `formal/build.py`):
 
 | | nodes in the full walk | nodes in a statement walk | time |
 |---|---|---|---|
@@ -273,19 +290,13 @@ on current master** (`.tmp/walkbench.py`, identical node sequences checked):
 | `formal/model.py` | 41 167 | 8 121 (5.1x) | 47.15 → 6.55 ms |
 | `formal/build.py` | 28 160 | 4 922 (5.7x) | 27.19 → 3.27 ms |
 
-**Also measured here and NOT worth landing:** replacing `iter_nodes`'s
-recursive generator with an explicit stack, which is the obvious "make the hot
-loop cheaper" move, is **not** faster — 16.24 ms against 14.97 ms per walk on
-`myinterpreter.py`, 45.16 against 47.15 on `formal/model.py`, i.e. inside noise
-in both directions. `yield from` delegation is not the cost; the per-node
-Python work is. Recorded so the next profile of this pipeline does not re-derive
-it.
-
-**Next step:** round 1's, unchanged and still the right one — land the
-statement-position walk behind a DIFFERENTIAL TEST over its 516-file corpus
-comparing the two walks' assignment SETS per struct, since the failure mode if
-a future node type breaks the premise is a field set missing a store (two real
-fields aliased into one slot), which is worse than a refusal.
+and one negative measurement that is **not** on master and should not be
+re-derived: replacing `iter_nodes`'s recursive generator with an explicit stack,
+which is the obvious "make the hot loop cheaper" move, is **not** faster —
+16.24 ms against 14.97 ms per walk on `myinterpreter.py`, 45.16 against 47.15 on
+`formal/model.py`, i.e. inside noise in both directions. `yield from` delegation
+is not the cost; the per-node Python work is. So a future pass should look for
+fewer NODES, not a faster descent.
 
 ### d. `_bracket_depth_by_line` is a whole-module scan inside `elaborate.py`
 
