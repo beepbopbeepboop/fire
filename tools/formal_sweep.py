@@ -815,6 +815,18 @@ _REFUSAL_FAMILIES = (
     # "asks for a container element" — is therefore NOT one of them. That is what
     # stops the row below from swallowing the two above it, which is the failure
     # a broad marker produces silently.
+    # The FRAME half of the same family, and it is ABOVE the scalar row for the
+    # reason the comment above this tuple states: first match wins, and the
+    # scalar row's marker — "is a struct field declared to hold" — is a prefix
+    # of the frame message's own clause ("is a struct field declared to hold a
+    # FRAME"), so a scalar row above it would swallow every frame finding and
+    # send a planner looking for an annotation that is not the problem.  Its own
+    # fix (a subscript of a struct is `__getitem__`) is not the scalar row's.
+    #
+    # The frame refusal is `model.frame_slot_element_refusal`'s, asked AFTER the
+    # dict and string readings rather than from `NON_CONTAINER_SLOT_KINDS` — see
+    # that constant — and this marker is the clause only its message carries.
+    ("declared to hold a FRAME", "container operation on a frame slot"),
     ("is a struct field declared to hold", "container operation on a scalar slot"),
     ("carries no count at offset 0", "element of a value that is not a container"),
     ("is a value this function bound to an integer",

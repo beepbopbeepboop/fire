@@ -6612,17 +6612,65 @@ def non_container_element_refusal(op: str, spelled: str, function: str,
 #: cannot read, and refusing it would refuse every `h.xs[i]` on a field whose
 #: declaration is in another module.
 #:
-#: `FRAME_KIND` is absent here too, and for a different reason — a field whose
-#: declared type is a framed struct of this module holds an ADDRESS, and reading
-#: that as a container is a wrong ANSWER rather than a fault.  It is refused, but
-#: by `frame_slot_element_refusal` and NOT from this set, because this set is
-#: asked BEFORE the string and dict readings are dispatched and a frame-typed
-#: field is exactly what those two need to keep answering: `self._dict[k]` in
-#: `std/collections/dict.mojo` reads a dict because its DECLARATION says
-#: `Dict[...]`, and `declared_type_kind` resolves that annotation against the
-#: module's own `struct Dict`, so the emitter's kind for the base is a frame.
-#: Putting the kind here would refuse a dict lookup that works, which is the
-#: failure mode every other fix in this family is arranged to avoid.
+#: **`FRAME_KIND` was IN this set on 2026-10-04 and is deliberately OUT of it
+#: again, and both positions have a measurement.**  It went IN on the argument
+#: that a frame-valued field read as a container is a wrong ANSWER rather than a
+#: fault, and the argument was answered with numbers rather than with taste:
+#:
+#:     struct Deep:  var x: Int;  var y: Int
+#:     struct Wrap:  var d: Deep;  var t: Int
+#:     w.d.x = 3 ; w.d.y = 4 ; printf("%d", w.d[0])
+#:
+#: | | arm64 | x86-64 |
+#: |---|---|---|
+#: | `w.d[0]` | **4**, exit 0 | **4**, exit 0 |
+#: | `h.d[1]` where `Deep` declares `__getitem__` | **0**, exit 0 | **-1927469536**, exit 0 |
+#:
+#: Two architectures, two different wrong answers, exit 0. The arithmetic is why:
+#: the blob walk reads `count = mem_read_u64(w + 0)`, which is `Deep`'s FIRST
+#: FIELD, and then `addr = w + 8 + 8·count` — so which field an index reaches is
+#: decided by the values in the frame rather than by the index. (CPython refuses
+#: the shape outright, `TypeError: 'Deep' object is not subscriptable`, so there
+#: is no oracle number; that is the other half of why a refusal and not a better
+#: lowering. `frame_slot_element_refusal` below carries the full argument.)
+#:
+#: It is OUT because of the OTHER half of the same census, which is the one that
+#: was misattributed the first time. Every `X.<field>[i]` site classified by its
+#: SLOT's kind (`struct_field_kind`) rather than by its annotation alone, with a
+#: type name a shared table already classifies left out of the module's own
+#: struct table:
+#:
+#: | slot kind | sites |
+#: |---|---|
+#: | nothing reachable in the file (a module attribute, or a struct from another module) | 404 |
+#: | an IDENTITY type ctor (`String` / `Pointer` / `UnsafePointer` / …) | 65 |
+#: | a declared name this path has no kind for | 62 |
+#: | a container (`List` / `Dict` / `Tuple` / …) | 3 |
+#: | a frame | 2 |
+#: | a POINTER | 1 |
+#: | **an integer or a type tag** | **0** |
+#:
+#: 537 sites over 252 files, and **the whole frame row is two sites, both of them
+#: `self._dict[key]`** in `std/collections/dict.mojo`'s own
+#: `StringDict.__getitem__`/`__setitem__`. That is the same two sites the earlier
+#: 2 642-site reading put at 7, and the difference is a name collision rather
+#: than a corpus change: a `Dict[...]` annotation read through the module's own
+#: `struct Dict` — which is how the KIND axis classifies it, deliberately, because
+#: a field declared a struct of this module does hold that struct's address.
+#:
+#: **So widening this set refuses a dict lookup that WORKS, and that is the whole
+#: reason it stays out.**  The two axes disagree on `self._dict` and both are
+#: right: the kind axis (`struct_field_kind`) answers `FRAME_KIND` because the
+#: annotation names this module's `struct Dict`, while the dict axis
+#: (`ValueKinds::is_dict_value` → `frame_slot_field_is_dict` →
+#: `declared_type_is_dict`) answers "a dict" from the same annotation read
+#: against `DICT_TYPE_NAMES`. The dict axis is asked FIRST
+#: (`_is_dict_key_subscript`, then the string path), and this set is asked before
+#: both — so a `FRAME_KIND` member here fires on the two sites whose dict answer
+#: is the one that keeps `std/collections/dict.mojo` compiling. `h.d[1]`'s wrong
+#: numbers are real and are refused, one gate later, by
+#: `frame_slot_element_refusal` — which is why the `__getitem__` row in
+#: `test_formal_x86_64_parity.py` is refused under THIS arrangement too.
 NON_CONTAINER_SLOT_KINDS = (INT_KIND, TYPE_KIND)
 
 #: The kinds the BLOB fallback may not read an element out of, asked AFTER the
@@ -6670,26 +6718,44 @@ def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | N
 
     **A REFUSAL and not a lowering, decided, with the alternatives named.**  A
     load at `base + 8i` is what `w.d.x` already is one level up, so it is
-    available; it is declined for two reasons.  First, the index is not a field
-    NAME: slot `i` of the frame is the struct's `i`-th declared field for
-    `i < len(fields)`, and past that it is a spill slot or scratch — a value with
-    no field behind it, so a lowering would have to invent the bound that makes
-    it an answer, and `w.d[i]` is not a program whose meaning is worth inventing
-    one for.  Second, the two sibling rules already refuse a non-container base
-    (a bare name holding a frame, and a field declared an integer or a type tag),
-    and a third answer for the same mistake is a decision this path would then
-    have to keep consistent.  Refusing also keeps the emitter side free of a new
-    arm on BOTH architectures, which is why the two cannot come to answer this
-    differently.
+    available; it is declined for two reasons that are both facts rather than
+    preferences.  First, CPython has no such operation
+    (`TypeError: 'Deep' object is not subscriptable`), so there is no oracle for
+    a lowering to be right about.  Second, and decisively: **when the declared
+    struct declares `__getitem__` the subscript is a METHOD CALL and not a slot
+    load**, so `base + 8i` is not one lowering but two, and the second is
+    dispatch — a mechanism this backend does not have for a field's declared
+    type.  Measured, and the measurement is why the alternative looks like a fix
+    at all: `h.d[1]` with `Deep.__getitem__` returning `a + k` printed **0** on
+    arm64 and **-1927469536** on x86-64, exit 0 on both.  Two architectures, two
+    different wrong answers, and neither of them is `base + 8i`.
+
+    The index is not a field NAME either, which is a third and weaker reason: slot
+    `i` of the frame is the struct's `i`-th declared field for `i < len(fields)`,
+    and past that it is a spill slot or scratch — a value with no field behind it,
+    so a lowering would have to invent the bound that makes it an answer.  And the
+    two sibling rules already refuse a non-container base (a bare name holding a
+    frame, and a field declared an integer or a type tag), so a third answer for
+    the same mistake is a decision this path would then have to keep consistent.
+    Refusing also keeps the emitter side free of a new arm on BOTH architectures,
+    which is why the two cannot come to answer this differently.
 
     **Asked AFTER the string and dict readings, and that placement is the
     corpus.**  `FRAME_KIND` is `frame_slot_element_refusal`'s only kind, and the
     emitters call it where the BLOB fallback begins — after
     `_is_dict_key_subscript` and after the string path.  It is not in
-    `NON_CONTAINER_SLOT_KINDS`, which is asked before both: a frame-typed field
-    is what a DICT lookup's base looks like.  Measured with
-    `tools/formal_frame_slot_subscript_census.py` over this repository and the
-    stdlib, every `X.<field>[i]` site classified by its field's declared type:
+    `NON_CONTAINER_SLOT_KINDS`, which is asked before both, and the two axes
+    disagree on the one base that makes that matter: `self._dict` is a FRAME on
+    the kind axis (`struct_field_kind` reads its `Dict[...]` annotation against
+    the module's own `struct Dict`) and a DICT on the dict axis
+    (`ValueKinds::is_dict_value` → `frame_slot_field_is_dict` →
+    `declared_type_is_dict` reads the same annotation against `DICT_TYPE_NAMES`).
+    The dict axis is the one asked first, and it is the one that keeps
+    `std/collections/dict.mojo`'s `StringDict` compiling.
+
+    Measured with `tools/formal_frame_slot_subscript_census.py` over this
+    repository and the stdlib, every `X.<field>[i]` site classified by its
+    field's declared type:
 
     | declared kind | sites |
     |---|---|
@@ -6701,13 +6767,14 @@ def frame_slot_element_refusal(op: str, base_kind, spelled_base: str) -> str | N
     | **a framed struct of the module** | **2** |
 
     and **both of the two are the dict case**: `self._dict` in
-    `std/collections/dict.mojo`'s `__getitem__` and `__setitem__`, annotated
-    `Dict[...]`, which `declared_type_kind` resolves against that module's own
-    `struct Dict` — a NAME collision, and the only two sites in the corpus where
-    a frame kind is reached at all.  Which is why the set above is one kind and
-    not two, and why the placement after the dict dispatch is load-bearing
-    rather than tidier: the census says the corpus has nothing to lose, and the
-    placement is what makes that true rather than a claim about it.
+    `std/collections/dict.mojo`'s `__getitem__` and `__setitem__`.  Which is why
+    the set above is one kind and not two, and why the placement after the dict
+    dispatch is load-bearing rather than tidier: the census says the corpus has
+    nothing to lose, and the placement is what makes that true rather than a
+    claim about it.  `NON_CONTAINER_SLOT_KINDS` carries the SECOND reading of the
+    same corpus — classified by the slot's kind rather than by its annotation,
+    which is the reading that found the `h.d[1]` numbers above and still leaves
+    the frame row at the same two `self._dict[key]` sites.
     """
     if base_kind not in FRAME_SLOT_ELEMENT_KINDS:
         return None
@@ -6753,24 +6820,13 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         `NON_CONTAINER_SLOT_KINDS`, and the gate is the kind rather than the
         base's SPELLING because a kind is returned only where the source says
         what the slot holds. Why `None` is excluded from that tuple is measured
-        rather than argued: every `X.<field>[i]` in the 610-file stdlib corpus,
-        classified by its field's declared type —
-
-        | declared kind | sites |
-        |---|---|
-        | nothing reachable in the file (a module attribute, or a struct from another module) | 2 446 |
-        | a POINTER (`Pointer` / `OptionalPointer`) | 85 |
-        | a declared name this path has no kind for | 66 |
-        | a container (`List` / `Dict` / `Tuple` / `Array` / `Optional` / …) | 37 |
-        | a string | 1 |
-        | a framed struct of the module | 7 |
-        | **an integer or a type tag** | **0** |
-
-        So the refusal costs the corpus nothing, and the permissive `None` is
-        what the other 2 446 sites get — which is the right answer for them: an
-        unclassified slot is a word, a word is a container as far as this path
-        can tell, and the corpus's untyped parameter and module-attribute
-        subscripts are the bulk of the language.
+        rather than argued, and so is why `FRAME_KIND` is: the census, its
+        corrected reading and its earlier wrong one are all in
+        `NON_CONTAINER_SLOT_KINDS`' own comment, and the short version is that
+        the frame row is `self._dict[key]` in `std/collections/dict.mojo` — the
+        one base in the corpus whose dict reading is dispatched before this
+        function is asked. `frame_slot_element_refusal` owns the frame, asked
+        after those readings, which is why this is three arms and not four.
       * **A scalar LITERAL.** `5[0]`, `1.5[i]`, `True[0]`. The node IS the
         value, so there is no default and no declaration to disagree with, and
         nothing about it can be a container. This arm is why the shape reached
@@ -6785,6 +6841,18 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         no count. This is the one arm both halves of the family reach for the
         same construct, which is why it is asked once here rather than once in
         each.
+
+    **The frame is NOT refused here, and that is a placement rather than an
+    omission.** A field declared a framed struct of this module holds that
+    struct's ADDRESS, so reading it as a container is a wrong answer rather than
+    a fault (`w.d[0]` printed `Deep`'s SECOND field where a reader means its
+    first, on both architectures), and the whole of the reasoning for refusing it
+    — the arithmetic, the `__getitem__` measurement, and why a load at `base + 8i`
+    is not offered instead — is `frame_slot_element_refusal`'s. It is asked one
+    step later because `self._dict[key]` classifies as a frame on the KIND axis
+    and as a dict on the dict axis at the same time, and the dict reading is the
+    one that keeps the stdlib's `StringDict` compiling. See
+    `NON_CONTAINER_SLOT_KINDS`.
 
     **Not refused, and the reasons are the same two the rest of the family
     gives.** `None` for the kind — an unclassified base keeps the container
@@ -6808,8 +6876,8 @@ def scalar_container_base_evidence(expr, kind) -> str | None:
         return ("a struct field declared to hold an integer — a frame slot is "
                 "ONE word, and a subscript needs a pointer plus a stride, so "
                 "there is nothing in the slot to compute a stride from, which "
-                "is why this is a refusal rather than a cheaper index — and it "
-                "is classified as that because the SOURCE says so, not because "
+                "is why this is a refusal rather than a cheaper index — and it is "
+                "classified as that because the SOURCE says so, not because "
                 "the image could read it")
     if isinstance(expr, (F.IntLiteral, F.FloatLiteral, F.BoolLiteral)):
         return ("a number — the literal carries no count at offset 0 and no "
@@ -6879,6 +6947,8 @@ def scalar_container_base_refusal(op: str, spelled_obj: str, evidence: str,
             f"tuple you built, take the container as a PARAMETER of {function} "
             f"where the caller's value decides, or pass the value itself to the "
             f"function that wants it")
+
+
 
 def string_iteration_refusal(where: str, function: str) -> str:
     """Why ITERATING a `char *` is refused. Always a refusal.

@@ -1857,6 +1857,146 @@ class TestAstBridgeCallLimit(unittest.TestCase):
                          "file quietly admitting something new")
 
 
+class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
+    """A `B.cond` obligation's `simp` set must carry ITS OWN flag lemma.
+
+    The backend lowers a comparison to `CMP` + `B.cond`, not to `CMP` + `CSET` +
+    `CBZ`, so a conditional branch has no `CSET` to read a flag predicate from.
+    `_cset_cond` already falls back to the terminator's own condition field
+    (its docstring says so), and the guard on that value passed — but the
+    `simp` set the emitted chain closes with was built from `_cset_conds`, which
+    enumerates `CSET`s and finds none. So the chain carried
+    `simp [h, Arm64State.init]` with **no flag lemma at all**, and the raw
+    `arm64_matches_condition 11 (arm64_subs_flags …) = true` had nothing to
+    reduce it. That is
+    `bugs/FORMAL_a_conditions_operand_read_through_an_earlier_stores_slot.md`,
+    and it is pinned here rather than in `test_formal.py` because the thing
+    under test is the text the generator emits — which is this file's whole
+    subject, and which is checkable with no Lean run at all.
+
+    Three assertions, and the second is the one that is easy to get wrong in the
+    direction of a no-op:
+
+    * **every `hcond` chain's closing `simp` names a flag lemma.** A chain with
+      `simp [h, Arm64State.init]` is the defect, and it is a silent one: the
+      file still generates.
+    * **the lemma is the BRANCH'S.** `b.lt` is `arm64_flag_lt_s`, so a chain
+      testing a signed `lt` must name the signed one — a table that answered
+      with the unsigned `arm64_flag_lt` would produce a chain that reduces the
+      predicate to the WRONG order and still elaborates.
+    * **one table answers "which condition code", not two.** `_fl_map` was a
+      private copy of `_COND_LEMMA` in this same function, ten entries, key for
+      key identical; it is gone, and this asserts the two are still one table by
+      naming `_COND_LEMMA` as the only source (the generator source check below
+      fails if a second table reappears).
+
+    What is NOT asserted, and is the honest edge: the lemma being in the `simp`
+    set is necessary and not sufficient, because the chain's earlier
+    `simp only` unfolds `arm64_subs_flags` / `arm64_matches_condition` — and
+    `simp only` is irreversible, so a lemma in a LATER `simp` can never match
+    the term the earlier line expanded. `sum_range.mojo`'s own `hcond_4` is the
+    measured case (`0 ^^^ 0x8000… < n ^^^ 0x8000…`, a RANGE, which
+    `by_cases` + `simp [h]` cannot ground because it leaves `n` free on both
+    branches), and the chain order that would let the lemma fire is written down
+    there rather than landed here — it changes 26 of the 49 generated arm64
+    proofs and a light worker cannot Lean-verify that.
+    """
+
+    RANGE = ("def sum_range(n):\n"
+             "    total = 0\n"
+             "    for i in range(n):\n"
+             "        total += i\n"
+             "    return total\n")
+
+    EQUALITY = ("def is_zero(n):\n"
+                "    if n == 0:\n"
+                "        return 1\n"
+                "    else:\n"
+                "        return 0\n")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-flaglemma-")
+        cls.ranges, cls.range_err = _generate(cls.tmp, cls.RANGE, "flagrange")
+        cls.equal, cls.equal_err = _generate(cls.tmp, cls.EQUALITY, "flageq")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _hcond_closers(self, path):
+        """The closing `simp [h, …] <;> bv_decide` line of every `hcond`.
+
+        Scanned line by line rather than by one regex over the block, because
+        the block's own extent is not something this file should have to know:
+        `hcond_bi`'s body ends at whatever the walk emits next, and that has
+        changed shape more than once (a `by_cases hc_bi` today, an `exact`
+        before it).  The rule is the two anchors: the `have hcond_` line opens a
+        block and the FIRST `simp [h,` line inside it is the closer, because the
+        body's earlier lines are `rw [hsid_…]` and `simp only […]`.
+        """
+        out = []
+        pending = None
+        with open(path) as fh:
+            for line in fh:
+                if "have hcond_" in line:
+                    pending = line.strip().split()[1]
+                    continue
+                if pending is None:
+                    continue
+                if "simp [h," in line:
+                    out.append((pending, line.strip()))
+                    pending = None
+        return out
+
+    def test_both_shapes_generate(self):
+        self.assertIsNone(self.range_err, self.range_err)
+        self.assertIsNone(self.equal_err, self.equal_err)
+
+    def test_every_hcond_chain_closes_with_a_flag_lemma(self):
+        for name, path in (("range", self.ranges), ("equality", self.equal)):
+            closers = self._hcond_closers(path)
+            self.assertTrue(closers, f"{name}: no hcond chain found in {path}")
+            for hid, line in closers:
+                self.assertRegex(
+                    line, r"simp \[h, arm64_flag_",
+                    f"{name}: {hid} closes with `{line}` and no flag lemma, so "
+                    f"the raw arm64_matches_condition predicate has nothing to "
+                    f"reduce it and bv_decide is handed an expression with an "
+                    f"opaque register in it")
+
+    def test_the_lemma_is_the_one_the_branch_tests(self):
+        """`b.lt` is a SIGNED less-than, and the signed lemma is the only right
+        answer. An unsigned `arm64_flag_lt` would reduce the predicate to an
+        order the machine does not test and the chain would still elaborate —
+        which is the failure a presence check cannot see and a spelling check
+        can.
+        """
+        chains = self._hcond_closers(self.ranges)
+        self.assertTrue(chains, "no hcond chain in the range proof")
+        # The pairing: the branch a chain states is the branch whose code its
+        # lemma names, so the two are read off the SAME chain rather than off
+        # the file.  A chain whose statement says condition 11 and whose closer
+        # does not name the signed lemma is the defect this test exists for.
+        with open(self.ranges) as fh:
+            text = fh.read()
+        lines = []
+        for hid, line in chains:
+            stmt = re.search(r"have " + re.escape(hid) + r" : (.*?) := by",
+                             text)
+            lines.append((stmt.group(1) if stmt else "", line))
+        signed = [line for stmt, line in lines
+                  if "arm64_matches_condition 11" in stmt]
+        self.assertTrue(
+            signed,
+            "the range program's preheader branch is `b.lt` (raw condition code "
+            "11) and no chain mentions it, so this assertion is not looking at "
+            f"the branch it means to: {lines}")
+        for line in signed:
+            self.assertIn("arm64_flag_lt_s", line)
+            self.assertNotIn("arm64_flag_lt,", line)
+
+
 class TestLoopContractBlocks(unittest.TestCase):
     """Which block is a loop's TEST, asked once and asked right.
 

@@ -4854,8 +4854,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         one: a name this function bound to a number is still that arm's
         business, and this one would not answer it.
         """
-        evidence = M.scalar_container_base_evidence(
-            obj, self._expr_str_kind(obj))
+        kind = self._expr_str_kind(obj)
+        evidence = M.scalar_container_base_evidence(obj, kind)
         if evidence is None:
             return
         raise CodegenError(M.scalar_container_base_refusal(
