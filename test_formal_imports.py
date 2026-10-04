@@ -1593,6 +1593,88 @@ def test_an_unclassified_stdlib_name_is_not_called_a_typo(tmpdir, _shared):
           f"{text[-300:]}")
 
 
+def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
+    """The other half of the row above: those 200-odd names have NO consumer.
+
+    `test_an_unclassified_stdlib_name_is_not_called_a_typo` pins what a build
+    SAYS about a name in no tier, and it says the true thing: this tree cannot
+    say whether the module is reachable. What it cannot pin is whether that
+    matters, because "unclassified" is a statement about the table and not about
+    the corpus. The corpus question is the one that decides how much of the
+    table is worth filling, and it is cheap to ask of every `.mojo` file rather
+    than of the ones a sweep happened to reach:
+
+        unclassified names  x  files that IMPORT one of them  =  (must be empty)
+
+    Measured over this repository and the stdlib on 2026-10-03, it is EMPTY --
+    not one of the 223 was imported by any of the 370 files, which is why
+    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` stopped asking for
+    222 per-name judgements: there is no measurement to tell a right entry from
+    a plausible one, and no file whose answer changes. Asserting it here makes
+    that a standing invariant rather than a snapshot, and it is a TRIPWIRE with
+    a direction: the day a file imports `binascii`, this goes red and the fix is
+    to place the name by the rule in `formal/imports.py`, which is the only
+    thing that can answer the question the new consumer has asked.
+
+    The stdlib half SKIPS when it is absent, on purpose and for the reason
+    `test_formal_mlir_precedence.py`'s census says: the stdlib lives OUTSIDE
+    this repository, and "there is no corpus here" must not print the same word
+    as "every consumer of these names is classified". The repository half is
+    unconditional, so the invariant is still checked on a checkout without it.
+    """
+    import sys as _sys
+    # "In no tier" is not the whole of it, and the difference is 20-odd names
+    # that are answered: a name this tree has WRITTEN leaves its tier (see the
+    # rule on `HOST_MODELLED`), so `os`, `sys` and `os._syscalls` answer
+    # `host_module_tier` with `''` while being the three most-imported modules
+    # in the corpus. So the set is the doc's own -- no tier AND no module --
+    # resolved through the resolver rather than through a path spelling, which
+    # is what makes `os._syscalls` (a submodule of an answered package) count as
+    # answered.
+    probe = os.path.join(HERE, "formal", "arm64.py")
+    unclassified = {n for n in _sys.stdlib_module_names
+                    if not I.host_module_tier(n)
+                    and not I.resolve_module_path(n, relative_to=probe,
+                                                 project_root=probe)}
+    check(len(unclassified) > 100,
+          f"precondition: only {len(unclassified)} CPython standard-library "
+          "names are in no tier, so this row is about the names in no tier "
+          "only if there are many of them")
+    roots = [(HERE, "this repository")]
+    stdlib = os.path.join(HERE, "..", "new-modular", "Mojo", "stdlib", "std")
+    if os.path.isdir(stdlib):
+        roots.append((stdlib, "the stdlib"))
+    consumers = []
+    scanned = 0
+    for root, what in roots:
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in sorted(dirs)
+                       if d not in (".git", "build", ".tmp", "__pycache__")]
+            for name in sorted(files):
+                if not name.endswith(".mojo"):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path, "rb") as f:
+                        source = f.read()
+                    stmts = I.parse_module_for_closure(source, path)
+                except Exception:  # noqa: BLE001 — a file this path cannot
+                    continue        # parse is not a consumer of anything
+                scanned += 1
+                for mod in I.imported_modules(stmts):
+                    top = mod.split(".")[0]
+                    if top in unclassified:
+                        consumers.append((mod, os.path.relpath(path, root)))
+    check(scanned > 100,
+          f"only {scanned} .mojo files were scanned, so this row is not "
+          "covering the corpus it claims to cover")
+    check(not consumers,
+          "these files import a CPython standard-library name that no tier "
+          "classifies, so nothing here can say whether the module is "
+          f"reachable and the file's host-import row has no verdict: "
+          f"{consumers[:10]}")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -3417,6 +3499,8 @@ TESTS = [
      test_a_host_module_refusal_says_what_this_target_offers),
     ("an unclassified CPython stdlib name is not called a typo",
      test_an_unclassified_stdlib_name_is_not_called_a_typo),
+    ("no unclassified stdlib name is imported by anything",
+     test_no_unclassified_stdlib_name_is_imported_by_anything),
     ("a package that only re-exports builds and runs",
      test_package_reexport_builds_and_runs),
     ("a package dylib exports nothing and says namespace",

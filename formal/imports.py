@@ -911,11 +911,25 @@ def host_module_tier(name: str) -> str:
 
 
 def _host_tier_conflicts() -> list:
-    """Names in both tiers, and (for auditing a future edit) names in neither.
+    """Names in BOTH tiers, which is a partition bug and nothing else.
 
-    Empty is correct. This exists so a name added to one tier and forgotten in
-    the other is a visible failure rather than a silent change to a verdict
-    nobody reads a diff for. The suite asserts on it.
+    Empty is correct. This exists so a name added to one tier and forgotten in the
+    other is a visible failure rather than a silent change to a verdict
+    nobody reads a diff for. The suite asserts on it, in three files.
+
+    **It does not report names in NEITHER tier, and that is not an omission.**
+    An earlier version of this docstring said it did, and the sentence was false:
+    217 CPython standard-library names are in no tier (measured; see
+    `test_formal_imports.py::test_an_unclassified_stdlib_name_is_not_called_a_typo`,
+    which asserts the count is still large enough for its row to be about
+    anything), so a "names in neither" half could never be empty and asserting it
+    empty would be a red suite rather than a discipline. "In no tier" is a
+    STATEMENT ABOUT THE TABLE, and the table is allowed to have gaps: a name
+    nobody imports has no consumer whose answer the classification would change,
+    which is measured — and enforced as a tripwire, so a name that acquires one
+    and is still unclassified is a failure — by
+    `test_formal_imports.py::test_no_unclassified_stdlib_name_is_imported_by_anything`.
+    That test is where the question this sentence used to claim belongs.
     """
     return sorted(HOST_UNREACHABLE & HOST_MODELLED)
 
