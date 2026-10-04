@@ -4,13 +4,68 @@
 `_emit_div_shift_pow`, `formal/x86_64_codegen.py`'s `_emit_div_mod`, the
 source-level model in `lib/ProofLib.lean`, and `formal/arm64_proof_gen.py`'s /
 `formal/x86_64_proof_gen.py`'s `_expr_go` / `_expr_go_t`.
-**Status: NOT FIXED, and NOT attempted by a light worker — re-measured
-2026-10-03 (the table below is unchanged), the emitted shape is now DERIVED and
-written down in §"The emitted shape", and the blocker is named with its number:
-the `lib/ProofLib.olean` build peaks at 7.82 GB, which does not fit under the
-8 GB a light worker here is given, and the emitted code and the model cannot
-move apart. §"Why this was not attempted" says what a worker with the ceiling
-should do first.**
+**Status 2026-10-04 (`work/formal16-4`): the RUNTIME half is FIXED and MEASURED
+on both backends — `//` floors, `%` takes the sign of the divisor, and 100 of
+100 `--mix signed` programs now agree with CPython where 26 of 100 did. The
+LEAN half is LANDED but UNVERIFIED, and §"What is left" says exactly what has to
+be run. Two things in the sections below are WRONG and are corrected in place:
+§"The emitted shape" prescribes a `fdiv64` whose condition is `sKey a = sKey b`,
+which is `a = b` (`sKey` is an involution) and makes `1 // 2` answer `-1`; and
+its instruction counts were short by two on arm64, for a reason §"The emitted
+shape, corrected" gives.**
+
+## What landed, and what it measured
+
+| | before | after |
+|---|---|---|
+| `tools/formal_fuzz.py --arch arm64 --mix signed --seeds 0-99 -j 4` | **26 match, 74 MISMATCH** (511 s, each mismatch minimised and attributed) | **100 match, 0 mismatch** (17 s) |
+| the same over `--arch x86_64` | — | **100 match, 0 mismatch** (21 s) |
+| `test_formal_run.py` | `neg_div_rem`/`neg_mod` PINNED the truncating answers | rewritten to CPython's, plus `both_arch_floor_division_and_modulo_agree_with_cpython`: 16 sign combinations of `//` and `%` in one program, both architectures |
+| `tools/formal_fuzz.py`'s `KNOWN_DIVERGENCES` | `floordiv` + `modulo` rows | **deleted** — and `--mix signed`, `FEATURE_PATTERNS`, `NEUTRALISERS` and `test_formal_fuzz.py`'s `MIX_MUST_REACH` all KEPT, so a regression to truncating is reported rather than re-absorbed |
+
+The emitter, the model and the generator moved in ONE commit, which is what
+§"Why this is not a patch" demands: `_emit_floor_correction` on both backends,
+`fdiv64`/`frem64`/`sneg` in `lib/ProofLib.lean` with `evalExpr`'s and `evalBin`'s
+`//` and `%` arms repointed at them, `_expr_go`/`_expr_go_t` naming the floored
+terms, and `arm64_cset_lt_s` added to the library because `sneg`'s only consumer
+is a signed `CSET` and no `CSET`-signed bridge existed.
+
+## What is left, and it is one command
+
+**The proof side is authored and has never been run.** `lib/ProofLib.olean`'s
+build peaks at 7.82 GB and this branch's ceiling is 8 GB: the build was
+ATTEMPTED under `tools/memslot.py --gb 8` and killed by signal 15 at the ceiling,
+which is the same number this document predicted and is the reason the earlier
+passes did not attempt it. So the following are written and unverified, in
+decreasing order of how much they would hurt if they are wrong:
+
+1. **`fdiv64`/`frem64`/`sneg` elaborate.** They are three plain `def`s over
+   `sdiv64`/`sKey`, and a syntax error here breaks the library for EVERY proof in
+   the tree rather than for a division.
+2. **`arm64_cset_lt_s` proves.** It is `arm64_cset_le`'s statement with condition
+   code 11 and `arm64_flag_lt_s`, and its proof is `arm64_cset_le`'s with `≤`
+   replaced by `<`.
+3. **The terminal value flow of a dividing block closes.** The design target is
+   that it needs NO new lemma: the model's correction is
+   `(if r ≠ 0 then 1 else 0) &&& (sneg r ^^^ sneg b)` and the machine's is
+   `AND` of a `CSET ne` and an `EOR` of two `CSET lt`, which reduce to the same
+   expression through `arm64_cset_ne`/`arm64_cset_lt_s` — both added to
+   `_VALUE_SIMP`, along with the three definitions, because a folded
+   `frem64 n 7` is an opaque term next to a chain of `MSUB`/`CSET`/`AND`/`SUB`
+   steps. If it does NOT close, the walk terminal's
+   `all_goals (first | done | sorry)` admits it, and the way to see that is
+   `formal/lean.py::proof_census`'s `n_sorries` — which is what
+   `formal/examples/floordiv.mojo` (added for exactly this) is for.
+
+```
+MEMLIMIT_GB=16 python3 tools/memslot.py --gb 16 --label prooflib -- \
+    python3 -c "import sys;sys.path.insert(0,'.');from formal.lean import *;ensure_library(find_lean('.'),'lib')"
+MEMLIMIT_GB=16 python3 tools/memslot.py --gb 16 --label formal -- python3 test_formal.py
+```
+
+`test_formal.py`'s corpus is where `formal/examples/floordiv.mojo` is picked up
+(50 files before it, 51 after) and it is the only example that divides by
+operands whose signs disagree, so it is the one that would go red.
 
 Found 2026-10-03 on `work/formal14-fuzz-arm64` by `tools/formal_fuzz.py`, which
 puts `%` and `//` in its operator pool precisely because a generator that cannot
@@ -87,28 +142,100 @@ to be shown equal to the source model's term for `//`, which today is `sdiv64`.
 
 **The shape the model should take, and why it is not `Int.fdiv`.** Point
 `evalExpr`'s `//` and `%` at new `fdiv64` / `frem64` and define them over the
-machine's OWN terms rather than over `Int.fdiv`:
+machine's OWN terms rather than over `Int.fdiv`. **The draft below is WRONG and
+is kept so the error is visible; what landed is in the next section.**
 
 ```lean
 def fdiv64 (a b : UInt64) : UInt64 :=
   if b = 0 then 0 else
     let q := sdiv64 a b; let r := srem64 a b
-    if r = 0 ∨ sKey a = sKey b then q else q - 1
+    if r = 0 ∨ sKey a = sKey b then q else q - 1        -- ← WRONG
 def frem64 (a b : UInt64) : UInt64 := a - b * fdiv64 a b
 ```
 
-That is `Int.fdiv` mathematically — the correction condition is exactly "the
-remainder is non-zero and the operands' signs differ", and `frem64` is
-`a - b*floor(a/b)`, which is Python's `%` — but it is built from `sdiv64` /
-`srem64` / `sKey`, the terms the machine's own steps already compute. The
-property `sdiv64`'s comment claims for the model ("the source model and the value
-flow cannot drift") is then preserved by construction instead of by a bridge
-lemma, which is the difference between a change that needs one new theorem and a
-change that needs a theorem about `Int.fdiv` over two's-complement words
-(`srem64_sub` is 60 lines of exactly that, and it is the shape a second one
-would take). The price is that "this is Python's floor division" becomes a fact
-to be argued rather than a definition, so the honest version states both and
-proves the equality where it can be afforded.
+**`sKey a = sKey b` is `a = b`, and `1 // 2` is the program that says so.**
+`sKey x = x ^^^ 0x8000000000000000` is an INVOLUTION, so `sKey a = sKey b` holds
+exactly when `a = b` — it says the operands are the same number, not that they
+have the same sign. `1 // 2` has `q = 0`, `r = 1 ≠ 0` and `a ≠ b`, so the draft
+answers `0 - 1`. Measured over 80 358 pairs (every product of 24 edge values,
+plus 80 000 random ones), the draft is wrong on **49 355 of them** and its first
+counterexample is that one.
+
+The reading it wants — "the remainder is non-zero and the operands' signs
+DIFFER" — needs the sign BITS, and the whole correction is decided from `r` and
+the divisor, which is what makes one shape serve both backends (`IDIV` leaves
+the dividend nowhere). So the sign comparison is `sneg`, a 0/1 word, and the
+correction is the machine's own `AND` of the two facts.
+
+That is still `Int.fdiv` mathematically and still built from terms the machine's
+own steps compute, so `sdiv64`'s property ("the source model and the value flow
+cannot drift") is preserved by construction rather than by a bridge lemma. The
+price is unchanged: "this is Python's floor division" becomes a fact to be
+argued rather than a definition, so the honest version states both and proves
+the equality where it can be afforded.
+
+## The emitted shape, corrected (what actually landed)
+
+```lean
+/-- 1 when the sign bit is set — the value `CMP Xd, #0 ; CSET Xd, lt` writes. -/
+def sneg (x : UInt64) : UInt64 := if sKey x < sKey 0 then 1 else 0
+
+def fdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0
+  else
+    let q := sdiv64 a b
+    let r := a - q * b
+    q - ((if r ≠ 0 then (1 : UInt64) else 0) &&& (sneg r ^^^ sneg b))
+
+def frem64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else a - fdiv64 a b * b
+```
+
+Three differences from the draft above, each load-bearing:
+
+* **`r := a - q * b`, not `srem64 a b`.** They are equal (`lib/work.lean`'s
+  `srem64_sub`), but `a - q*b` is the machine's `MSUB` term, so the block and the
+  model are the same expression without crossing that lemma. `srem64` stays for
+  `/`.
+* **The correction is written as the machine writes it** — `&&&` and `^^^` over
+  two 0/1 words — rather than as nested `if`s. `simp only` then reduces the
+  block's `AND`/`EOR` of a `CSET ne` and two `CSET lt` (through
+  `arm64_cset_ne` and the new `arm64_cset_lt_s`) to this exact term, and the
+  residual goal is `rfl`.
+* **`frem64`'s multiplication order** is `a - fdiv64 a b * b`, matching what
+  `MSUB Xd, Xn, Xm, Xa` computes (`Xa - Xn * Xm`), so the remainder's goal is
+  the same term rather than a commutativity step from it.
+
+**TEN instructions on arm64, not eight.** The table above spends `EOR` on
+`r XOR d` and one signed test on the result; what landed takes the two sign bits
+separately and `EOR`s the two 0/1 words, which is two instructions longer and
+needs no lemma about the sign of an XOR:
+
+| | arm64 (all modelled: `MSUB` 47, `CMP` 13, `CSET` 30, `EOR` 8, `AND` 7, `SUB` 3) | x86-64 (all modelled in `lib/X86.lean`) |
+|---|---|---|
+| `q = tdiv(n, d)` | `SDIV X2, X0, X1` | `CQO ; IDIV R11` |
+| `r = n - q*d` | `MSUB X3, X2, X1, X0` | already in RDX |
+| `sneg r` | `CMP X3, #0 ; CSET X5, lt` | `MOV R8, RDX ; XOR R8, R11 ; TEST R8, R8 ; SETL R8` |
+| `sneg d` | `CMP X1, #0 ; CSET X6, lt` | — (folded into the XOR above) |
+| `c1 = (r ≠ 0)` | `CMP X3, #0 ; CSET X4, ne` | `TEST RDX, RDX ; SETNE R9` |
+| `c = c1 & (sneg r ^^^ sneg d)` | `EOR X6, X5, X6 ; AND X4, X4, X6` | `AND R9, R8` |
+| `q' = q - c` | `SUB X2, X2, X4` | `SUB RAX, R9` |
+| `//` | `MOV X0, X2` | — (RAX already holds it) |
+| `%` | `MSUB X0, X2, X1, X0` | `NEG R9 ; AND R9, R11 ; ADD RDX, R9` |
+
+The x86-64 side uses `r XOR d` and one signed test because its `IDIV` destroys
+the dividend, so `t = r ^ b` is the only way to ask "do the signs differ" in
+one test — and its end-to-end theorem is a `sorry`
+(`bugs/FORMAL_x86_64_end_to_end_proof.md`), so nothing is proved about those
+terms either way. **The two backends' corrections differ in instruction count and
+in nothing else**, which is the property the draft's insistence on `r` and the
+divisor was reaching for.
+
+Both shapes were checked against CPython before either was written: the arm64
+ten-instruction chain and the model's definition agree with `//` and `%` on all
+120 571 pairs of a 26-value edge product plus 120 000 random ones, including
+`±2^63`, `±1`, `0` divisors-by-one, and every row of the table at the top of this
+document.
 
 ## Why this was not attempted
 
@@ -133,6 +260,14 @@ program, with no way to check it, is worse than the divergence, which is loud in
 a fuzz sweep and attributed. So the work is written down instead, and the next
 worker should take it with the ceiling the library build needs (`MEMLIMIT_GB`
 above 8, or the `prooflib` step's own class) rather than under this one.
+
+**The second bullet is what 2026-10-04 confirmed, and the first is what it
+avoided.** The whole change landed in one commit with the model in it, so the
+"honest intermediate state" was never on a branch; and the library build was
+attempted under `tools/memslot.py --gb 8` and killed at the ceiling
+(`memcap: prooflib -- ceiling 8.0 GB … interrupted by signal 15`), which is the
+same 7.82 GB this section names, measured again. Everything in §"What is left" is
+downstream of that one number.
 
 ## What is wrong
 
@@ -212,6 +347,14 @@ here rather than attempted.
 
 ## The next step, in order
 
+**EVERY STEP BELOW IS DONE (2026-10-04, `work/formal16-4`), in the order it
+prescribes, in ONE commit — model, arm64, x86-64, generator, tests, fuzzer table,
+and `formal/examples/floordiv.mojo` for step 6. What is left is §"What is left"
+at the top: the Lean run, which this branch's ceiling cannot make.** The steps
+are kept because each names a piece of work a reader would otherwise re-derive,
+and because step 1's own warning (the paragraph below) is the reason they were
+done together rather than in order over four commits.
+
 **As of 2026-10-03 step 1 is wrong as written and should be read with §The
 emitted shape above.** Landing the source model ALONE, with both backends still
 emitting `SDIV`, is not the honest intermediate state — it is a tree in which
@@ -221,6 +364,17 @@ or not at all, and the order inside that commit is: model first (so the
 definition the generator will name exists), then arm64, then x86-64, then the
 generator's `_expr_go` / `_expr_go_t` (`sdiv64` → `fdiv64`, `srem64` →
 `frem64`), then the tests.
+
+**Two of the steps below are superseded by what landed, and it is worth saying
+which.** Step 1 said "no new theorem in this step", and one was needed:
+`arm64_cset_lt_s`, because `sneg` is defined through `sKey` (so that the model's
+`if` and the machine's `CSET lt` are the same term) and the library had bridges
+for `eq`/`ne`/`le` and none for a signed `CSET`. It is 4 lines and a structural
+copy of `arm64_cset_le`. Step 6's "re-enable the Lean-checking tests" is also
+moot: the eight Lean-checking tests are no longer `disabled=` on `master`
+(`tools/suite.py`, 2026-10-03), so `test_formal.py` and its 50 examples run in
+the `proofs` bucket again — and `formal/examples/floordiv.mojo` is now one of
+them.
 
 0. **Get a ceiling the library build fits under** (§Why this was not attempted).
    Everything below is blocked on it and nothing below is blocked on anything
@@ -286,13 +440,34 @@ result to expect from a rule both backends read from `formal/model.py` and
 
 ## Reproducing
 
+**Before the fix** (this tree, 2026-10-04, the correction's one guard turned
+off so the number is the same code path the fuzzer saw):
+
 ```console
-$ python3 tools/memslot.py --gb 8 --label fuzz -- \
-      python3 tools/formal_fuzz.py --arch arm64 --mix signed --seeds 0-299 -j 2
-  … 37  modulo: `%` takes the sign of the DIVIDEND instead of the divisor
-  … 15  floordiv: `//` truncates toward zero instead of flooring
-$ python3 test_formal_run.py neg_div_rem neg_mod     # the two rows that PIN it
+$ python3 tools/memslot.py --gb 8 --label fz -- \
+      python3 tools/formal_fuzz.py --arch arm64 --mix signed --seeds 0-99 -j 4
+formal_fuzz seed=formal-fuzz mix=signed backends=arm64 programs=100 in 511.0s (0.2/s, jobs=4)
+  match              26
+  MISMATCH-ARM64     74
 ```
+
+**After it** (the whole of §"What landed"):
+
+```console
+$ python3 tools/memslot.py --gb 8 --label fz -- \
+      python3 tools/formal_fuzz.py --arch arm64 --mix signed --seeds 0-99 -j 4
+  match              100
+$ … --arch x86_64 --mix signed --seeds 0-99 -j 4
+  match              100
+$ python3 test_formal_run.py neg_div_rem neg_mod \
+      both_arch_floor_division_and_modulo_agree_with_cpython
+  PASS  neg_div_rem (1)
+  PASS  neg_mod (1)
+  PASS  both_arch_floor_division_and_modulo_agree_with_cpython (0)
+```
+
+The 511 s against 17 s is not the fix being slow: a mismatch is minimised and
+attributed and an agreement is not.
 
 `--mix strings` is the other half of this table's corpus (`s[i]`), and
 `--mix core` is the quiet one: it divides only by a positive divisor over a

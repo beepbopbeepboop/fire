@@ -134,10 +134,17 @@ def check_generator(mix, indexes, verbose=False):
 
 #: mix -> the feature it must keep producing, and why that mix exists.
 MIX_MUST_REACH = {
+    # The reason this row survives the fix it was written for: `--mix signed`
+    # is the only place a signed-over-signed division is generated, `//` now
+    # FLOORS and `%` takes the sign of the divisor on both backends, and this
+    # assertion is what makes a regression to truncating a FINDING rather than
+    # a known divergence. `KNOWN_DIVERGENCES` has no `floordiv`/`modulo` row
+    # any more; if the construct stopped being emitted, the corpus would go
+    # quiet and the regression would have nothing to show up in.
     "signed": ("floordiv",
                "`--mix signed` is the only place a signed-over-signed division "
-               "is generated, which is the whole of the floor/truncate "
-               "disagreement"),
+               "is generated, and `//` floors now, so this is the assertion "
+               "that a backend which went back to truncating is reported"),
     "strings": ("str_subscript",
                 "`s[i]` is a byte rather than a one-character string, and the "
                 "corpus has to produce it for the row to stay live"),

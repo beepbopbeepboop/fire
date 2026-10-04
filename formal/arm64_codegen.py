@@ -8909,6 +8909,78 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_b_to(loop)
         self.asm.label(done)
 
+    def _emit_floor_correction(self) -> None:
+        """`q_trunc - c` in place, for a signed `//` or `%`. X2 holds `SDIV`'s
+        quotient on entry and the FLOORED quotient on exit.
+
+        **Why this exists at all.** `SDIV` truncates toward zero and Python's
+        `//` floors, so the two disagree exactly when the operands' signs
+        differ: `7 // -2` is `-4` here and `-3` from a bare `SDIV`, and
+        `x % 2 == 1` — the standard odd test — answered `0` for every negative
+        odd `x`. No arrangement of negations reaches a floor (every
+        `±tdiv(±a, ±b)` is still truncating), so the correction is conditional
+        and this is it.
+
+        **The shape, and why it is decided from `r` and the DIVISOR.** With
+        `q = tdiv(a, b)` and `r = a - q*b`,
+
+            q_floor = q - c,  r_floor = r + b*c,  c = [r ≠ 0] & [sign r ≠ sign b]
+
+        and `sign r = sign a` for every inexact division, so `c` can be read off
+        `r` and `b` without the dividend — which is what lets the SAME shape
+        serve x86-64, where `IDIV` leaves the dividend nowhere. Reading the
+        signs off `r` and `b` rather than off `a` and `b` is also what makes
+        the correction one `EOR` instead of a sign compare and an
+        inequality-to-boolean conversion.
+
+        **TEN instructions, every one of them already modelled** — `MSUB` 47,
+        `CMP` 13, `CSET` 30, `EOR` 8, `AND` 7 and `SUB` 3 in
+        `formal/arm64_proof_gen.py`'s `_STEP_CONDS`, each with a `_step_rhs`
+        case, so the per-instruction certificates the generator emits from that
+        table need nothing new. What the correction DOES cost is the block's
+        terminal goal, and `fdiv64` in `lib/ProofLib.lean` is shaped to be the
+        same expression this emits: `CSET ne` is `(if r ≠ 0 then 1 else 0)`,
+        `CSET lt` is `sneg`, and the `AND`/`EOR` are `&&&`/`^^^` over those, so
+        the block's value and the model's term are the same term rather than a
+        bridge lemma apart.
+
+        **Two sign bits, not `r XOR b`.** The sign of an XOR is the XOR of the
+        signs, so `EOR` + one `CMP`/`CSET` on `r^b` would answer "the signs
+        differ" in four instructions where this spends six — and the x86-64
+        backend, whose one-operand `IDIV` makes `r XOR b` the only way to get
+        there in one test, does exactly that. The two words differ; what does
+        not is what they compute, and this one is chosen so that the model's
+        `sneg r ^^^ sneg b` is the SAME expression the block computes rather
+        than a lemma about the sign of an XOR away from it.
+
+        **X3-X6 are scratch here.** The two operands are in X0/X1, the divide's
+        quotient is in X2 (which the divide path already used before this), and
+        every value the frame keeps lives in the callee-saved X19-X28 or the
+        spill area — the same convention the flag and stack-guard emissions
+        above use for X8/X13/X16.
+
+        Only `//` and `%` get it. `/` stays truncating on purpose: there is no
+        float in this model, so `7 / 2` is `-3` for `7 / -2` reasons rather
+        than `-3.5`, and that gap is `FORMAL.md` §6 Phase 7's rather than this
+        operator's. An UNSIGNED divide needs no correction at all — two
+        non-negative operands cannot have differing signs — which is why the
+        guard is `signed` and the unsigned path is byte-for-byte what it was.
+        """
+        # r = a - q*b, with q in X2 and the operands in X0/X1.
+        self.asm.emit(encode_msub_xd_xn_xm_xa(3, 2, 1, 0))
+        # X4 = [r ≠ 0] -- the division was inexact.
+        self.asm.emit(encode_cmp_xn_imm(3, 0))
+        self.asm.emit(encode_cset_xd_cond(4, "ne"))
+        # X5 = [r <s 0], X6 = [b <s 0] -- the two sign bits, as 0/1 words.
+        self.asm.emit(encode_cmp_xn_imm(3, 0))
+        self.asm.emit(encode_cset_xd_cond(5, "lt"))
+        self.asm.emit(encode_cmp_xn_imm(1, 0))
+        self.asm.emit(encode_cset_xd_cond(6, "lt"))
+        # X6 = "the signs differ", X4 = the correction, X2 -= it.
+        self.asm.emit(encode_eor_xd_xn_xm(6, 5, 6))
+        self.asm.emit(encode_and_xd_xn_xm(4, 4, 6))
+        self.asm.emit(encode_sub_xd_xn_xm(2, 2, 4))
+
     def _emit_div_shift_pow(self, e: F.BinaryOp, op: str) -> None:
         """`/` `//` `%` `<<` `>>` `**` on the formal arm64 path.
 
@@ -8945,6 +9017,8 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_sdiv_xd_xn_xm(2, 0, 1))
             else:
                 self.asm.emit(encode_udiv_xd_xn_xm(2, 0, 1))
+            if signed and op in ("//", "%"):
+                self._emit_floor_correction()
             if op in ("/", "//"):
                 self.asm.emit(encode_mov_zr_xn(0, 2))
             else:

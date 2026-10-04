@@ -72,9 +72,12 @@ because it is a property of the GENERATOR and not of the harness: CPython's
 integers are unbounded and a formal value is one 64-bit word, so every growing
 term is masked back into `0..0xFFFF`; the signed family is `-32..32` combined
 with `+`/`-` only; and `//`/`%` appear only over a non-negative dividend and an
-odd divisor (`| 1`), because flooring versus truncating is a DOCUMENTED model
-decision (`bugs/FORMAL_floor_division_on_a_signed_operand_is_truncated.md`) and a
-zero divisor is a trap on the oracle.
+odd divisor (`| 1`). A zero divisor is a trap on the oracle, and the
+non-negative dividend was there because flooring versus truncating used to be an
+UNIMPLEMENTED model decision — it is implemented now (`fdiv64`/`frem64` in
+`lib/ProofLib.lean`, and both emitters carry the correction), so the restriction
+is a choice about what the Lean corpus costs rather than a limit, and widening it
+is the proof fuzzer's own decision to take with a Lean run behind it.
 
 One thing is generated ON PURPOSE and is the reason a corpus of unsigned words
 would still be worth building: comparisons MIX the two families.  A signed

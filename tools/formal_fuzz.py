@@ -344,17 +344,22 @@ STACK_TRAP_STATUS = 2
 #
 # **A row here is a CLAIM that the tool still measures the construct.** The
 # anti-rot is the row's own life: delete the construct's row in the same commit
-# that fixes it, or the corpus stops covering the day the bug goes away and the
-# table becomes a list of things nobody looks for. `bugs/
-# FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §5 says so with its
-# own row as the example.
+# that fixes it, or a construct the corpus still emits is reported as an
+# UNEXPLAINED disagreement forever and the table stops being read as the short
+# list of things still known to be wrong. `floordiv` and `modulo` were the
+# example and their rows are GONE (2026-10-04): `//` floors and `%` takes the
+# sign of the divisor on both backends now -- `fdiv64`/`frem64` in
+# `lib/ProofLib.lean` over an `SDIV`/`IDIV` correction in each emitter -- so
+# `--mix signed` emitting a signed-over-signed division is a construct that
+# AGREES, and a program that stops agreeing is a finding.
+#
+# **The rows are gone; the corpus is not.** `FEATURE_PATTERNS`,
+# `NEUTRALISERS` and `--mix signed` all still carry `floordiv`/`modulo`, and
+# `test_formal_fuzz.py`'s `MIX_MUST_REACH` still asserts the mix reaches
+# `floordiv`, because the regression this table would have hidden is the one
+# worth catching: a backend that went back to truncating would otherwise be
+# reported as a known divergence again rather than as a new bug.
 KNOWN_DIVERGENCES = {
-    "floordiv": (
-        "`//` truncates toward zero instead of flooring (bugs/"
-        "FORMAL_floor_division_on_a_signed_operand_is_truncated.md)"),
-    "modulo": (
-        "`%` takes the sign of the DIVIDEND instead of the divisor (same doc as "
-        "`floordiv`)"),
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
         "FORMAL_string_value_model.md)"),

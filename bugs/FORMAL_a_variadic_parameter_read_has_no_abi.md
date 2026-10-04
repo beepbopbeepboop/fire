@@ -119,10 +119,12 @@ receiver's frame or a folded constant — none of which is "a count of words".
    `test_formal_run.py`'s `BOTH_ARCH_CASES` ladder for the stack-argument convention; it says
    nothing about a function that *declares* `*args` and reads it, and a grep of the generator for
    `*args` / `variadic` finds only that bullet. So a generator that cannot emit the construct
-   cannot notice the day it is fixed — the same anti-rot
-   `FORMAL_floor_division_on_a_signed_operand_is_truncated.md` §5 step 5 records for
-   `floordiv`/`modulo`, where deleting a `KNOWN_DIVERGENCES` row without deleting the mix would
-   have left both rows UNREACHABLE behind a green run.
+   cannot notice the day it is fixed — the same anti-rot `tools/formal_fuzz.py`'s
+   `KNOWN_DIVERGENCES` header records for `floordiv`/`modulo`: their rows are gone (2026-10-04 —
+   `//` floors and `%` takes the sign of the divisor on both backends) while `--mix signed`,
+   `FEATURE_PATTERNS`, `NEUTRALISERS` and `test_formal_fuzz.py`'s `MIX_MUST_REACH` all still carry
+   the construct, because deleting the row without keeping the mix would have left a regression
+   invisible behind a green run.
 
 ## Why no light worker landed it
 

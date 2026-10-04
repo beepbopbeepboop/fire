@@ -94,10 +94,18 @@ CASES = [
      "def main(n):\n    a = -8\n    b = a >> 2\n    if b == 0 - 2:\n        return 1\n    return 0\n", 1, None),
     ("print_negative",
      "def main(n):\n    a = -7\n    printf(\"%d\\n\", a)\n    return 3\n", 3, "-7"),
+    # `/` and `%`. `/` stays a TRUNCATING integer divide (`-7 / 2` is -3, not
+    # CPython's -3.5: there is no float in this model, which is `FORMAL.md` §6
+    # Phase 7's gap and not this operator's). `%` is Python's, which takes the
+    # sign of the DIVISOR: `-7 % 2` is 1. The `0 - 1` these two rows used to
+    # expect was `-7 % 2 == -1` and `-7 % 3 == -1`, both of which are the
+    # truncating remainder, i.e. the bug this pair was the discovery cost of --
+    # see `both_arch_floor_division_and_modulo_agree_with_cpython` below, which
+    # is the whole sign matrix.
     ("neg_div_rem",
-     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+     "def main(n):\n    a = 0 - 7\n    if a / 2 == 0 - 3 and a % 2 == 1:\n        return 1\n    return 0\n", 1, None),
     ("neg_mod",
-     "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 0 - 1:\n        return 1\n    return 0\n", 1, None),
+     "def main(n):\n    a = 0 - 7\n    b = a % 3\n    if b == 2:\n        return 1\n    return 0\n", 1, None),
     # Controls.
     ("pos_still_works",
      "def main(n):\n    a = 3\n    b = 2\n    if a > b:\n        return 1\n    return 0\n", 1, None),
@@ -7360,6 +7368,33 @@ BOTH_ARCH_CASES = [
      "        if second == 43:\n"
      "            return 7\n"
      "    return 3\n", 7, "annotated=42 untyped=43"),
+    # ── FLOOR DIVISION AND MODULO, both architectures ──────────────────────
+    #
+    # `//` FLOORS and `%` takes the sign of the DIVISOR; `SDIV`/`IDIV` truncate
+    # and take the sign of the DIVIDEND. The two therefore disagree exactly when
+    # the operands' signs differ, and before the correction these rows were -3,
+    # -3, -4, -1, 1, -1, 1, 0 where CPython says -3, -4, -4, 2, -2, -1, 1, 1.
+    # Every expected value below is CPython 3.14's, computed rather than typed,
+    # and the whole corpus is in ONE program so that one build per architecture
+    # answers all sixteen rows -- a truncating `//` and a correct `%` cannot
+    # disagree inside this program, so a partial fix cannot pass half of it.
+    #
+    # The first eight lines are the sign matrix (both orders of both signs, plus
+    # the two exact divisions), and the last two are the idiom no amount of
+    # reading the spec finds: `x % 2 == 1` is the standard ODD test and it
+    # answered 0 for every negative odd x, which is a wrong answer from correct-
+    # looking code rather than an exotic one. `1 // 2` is here for the same
+    # reason and is the FIRST thing that breaks if the correction's condition is
+    # written as `sKey a = sKey b` (which is `a = b`, so it would answer -1).
+    ("both_arch_floor_division_and_modulo_agree_with_cpython",
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", 0 - 7 // 2, 7 // (0 - 2), (0 - 8) // 2, 7 // 2)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) % 3, 7 % (0 - 3), (0 - 7) % (0 - 3), 7 % 3)\n"
+     "    printf(\" %d %d\", 1 if (0 - 7) % 2 == 1 else 0, 1 if (0 - 8) % 2 == 0 else 0)\n"
+     "    printf(\" %d %d %d %d\", (0 - 7) // (0 - 2), 1 // 2, (0 - 1) // (0 - 2), (0 - 6) // 4)\n"
+     "    printf(\" %d\", (0 - 7) % (0 - 2))\n"
+     "    return 0\n", 0,
+     "-3 -4 -4 3 2 -2 -1 1 1 1 3 0 0 -2 -1"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before

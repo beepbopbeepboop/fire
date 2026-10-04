@@ -6169,6 +6169,62 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         self.asm.label(skip_label)
         self.asm.label(end_label)
 
+    def _emit_floor_correction(self, op: str) -> None:
+        """`q_trunc - c` in RAX, for a signed `//` or `%`. RAX holds `IDIV`'s
+        quotient and RDX its remainder on entry.
+
+        **The same correction arm64's `_emit_floor_correction` computes, and
+        for the same reason.** `IDIV` truncates toward zero and Python's `//`
+        floors, so the two disagree exactly when the operands' signs differ
+        (`7 // -2` is `-4`, not `-3`), no arrangement of negations reaches a
+        floor, and the fix is the conditional `q - c` with
+        `c = [r ≠ 0] & [sign r ≠ sign b]`.
+
+        **`r XOR b` is the sign comparison.** The sign of an XOR is the XOR of
+        the signs, so one `TEST`/`SETL` on `r^b` answers "the signs differ"
+        where arm64 spends two `CMP`/`CSET` pairs — the two backends then differ
+        only in instruction count, not in what they compute, which is the
+        property worth having between them.
+
+        **Why the remainder is corrected as `r + b*c` and not as `a - q'*b`.**
+        arm64 can do the second because `MSUB` still has the dividend in X0,
+        and it does: that is why its two operators share one `SUB` and one
+        `MSUB`. `IDIV` destroys the dividend — `CQO` puts its sign into RDX and
+        `IDIV` consumes RDX:RAX — so on this backend the remainder has to come
+        back from `r`, and `r + b*c` is the same number as `a - q'*b` because
+        `r = a - q*b` and `q' = q - c`. `b*c` for a `c` that is 0 or 1 is
+        `b AND (0 - c)`, which is what the `NEG`/`AND` pair computes; there is
+        no `MUL` because `imul` would need the operand this backend no longer
+        has.
+
+        `R8`, `R9` and `R11` are the scratch the divide path already claimed:
+        R11 holds the divisor across `IDIV`, and R8/R9 are temporaries in every
+        comparison and compare-chain this backend emits.
+
+        Only `//` and `%` get it, and only when the operands are signed — two
+        non-negative operands cannot have differing signs, so the unsigned path
+        is byte-for-byte what it was, and `/` stays truncating on purpose
+        (`FORMAL.md` §6 Phase 7: there is no float in this model).
+        """
+        # R8 = r XOR b, so R8's sign bit is "the two signs differ".
+        self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.RDX))
+        self.asm.emit(encode_xor_r64_r64(Reg.R8, Reg.R11))
+        self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
+        self._emit_setcc_bool(Reg.R8, "setl")
+        # R9 = [r ≠ 0] — the division was inexact. TEST leaves RDX alone, so
+        # the remainder is still there for the `%` correction below.
+        self.asm.emit(encode_test_r64_r64(Reg.RDX, Reg.RDX))
+        self._emit_setcc_bool(Reg.R9, "setne")
+        # R9 = the correction.
+        self.asm.emit(encode_and_r64_r64(Reg.R9, Reg.R8))
+        if op == "//":
+            self.asm.emit(encode_sub_r64_r64(Reg.RAX, Reg.R9))
+        else:
+            # RDX = r + b*c, in place.
+            self.asm.emit(encode_neg_r64(Reg.R9))
+            self.asm.emit(encode_and_r64_r64(Reg.R9, Reg.R11))
+            self.asm.emit(encode_add_r64_r64(Reg.RDX, Reg.R9))
+
     def _emit_div_mod(self, e: F.BinaryOp, op: str) -> None:
         """`/` `//` `%`.
 
@@ -6203,6 +6259,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         else:
             self.asm.emit(encode_xor_edx_edx())
             self.asm.emit(encode_div_r64(Reg.R11))
+        if signed and op in ("//", "%"):
+            self._emit_floor_correction(op)
         if op == "%":
             self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.RDX))
         self._emit_trunc(common_type(self._ttype(e.left),

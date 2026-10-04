@@ -990,24 +990,26 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         bit = {"&": "&&&", "|": "|||", "^": "^^^"}
         if k in bit:
             return f"({l} {bit[k]} {r})"
-        if k in ("/", "//"):
-            # Signedness-sensitive: the codegen picks SDIV (truncating toward
-            # zero) for a signed operand type and UDIV otherwise, and the model
-            # has to name the same instruction.  Same for `%` (MSUB + the
-            # matching remainder lemma) and `>>` (ASR, which propagates the sign
-            # bit; LSR would shift a negative value in from the top).  These
-            # were the last three places the untyped model could disagree with
-            # the machine about an unannotated `int`, after the comparisons.
+        # `/` and `//` are DIFFERENT functions here and the two arms must not
+        # be merged: `/` is a truncating integer divide (`sdiv64`, and UInt64's
+        # `/` when unsigned) because this model has no float -- that gap is
+        # FORMAL.md's Phase 7 -- while `//` is Python's FLOOR, which the
+        # machine reaches with SDIV plus a correction the model names as
+        # `fdiv64`.  `%` takes the sign of the DIVISOR for the same reason and
+        # is `frem64`.  All three are signedness-sensitive (SDIV/UDIV, MSUB,
+        # ASR), which is what the `cmp_signed` question is still deciding.
+        if k == "/" or k == "//":
             if vtypes is not None and cmp_signed(
                     common_type(infer_expr(e.left, vtypes, call_types),
                                 infer_expr(e.right, vtypes, call_types))):
-                return f"(sdiv64 {l} {r})"
+                return (f"(sdiv64 {l} {r})" if k == "/"
+                        else f"(fdiv64 {l} {r})")
             return f"({l} / {r})"
         if k == "%":
             if vtypes is not None and cmp_signed(
                     common_type(infer_expr(e.left, vtypes, call_types),
                                 infer_expr(e.right, vtypes, call_types))):
-                return f"(srem64 {l} {r})"
+                return f"(frem64 {l} {r})"
             return f"({l} % {r})"
         if k == "<<":
             return f"({l} <<< {r})"
@@ -1241,16 +1243,18 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
             return _t_wrap(f"({l} {bit[k]} {r})", t)
-        if k in ("/", "//"):
+        if k == "/" or k == "//":
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
-            fnm = "sdiv64" if cmp_signed(t) else "/"
-            return _t_wrap(f"({fnm} {l} {r})" if fnm == "sdiv64" else f"({l} / {r})", t)
+            if cmp_signed(t):
+                fnm = "sdiv64" if k == "/" else "fdiv64"
+                return _t_wrap(f"({fnm} {l} {r})", t)
+            return _t_wrap(f"({l} / {r})", t)
         if k == "%":
             t = common_type(infer_expr(e.left, vtypes, call_types),
                             infer_expr(e.right, vtypes, call_types))
             if cmp_signed(t):
-                return _t_wrap(f"(srem64 {l} {r})", t)
+                return _t_wrap(f"(frem64 {l} {r})", t)
             return _t_wrap(f"({l} % {r})", t)
         if k == "<<":
             t = common_type(infer_expr(e.left, vtypes, call_types),
@@ -2599,7 +2603,20 @@ _VALUE_SIMP = (
     "u64_sub_sub, u64_sub_add, u64_ofNat_add, u64_ofNat_sub, "
     "mem_read_after_write_u64_slot, mem_read_after_write_u64_slot', "
     "mem_read_after_write_u64, "
-    "arm64_cset_eq, UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
+    # `arm64_cset_ne` and `arm64_cset_lt_s` are what `fdiv64`'s correction
+    # reduces through: the correction is `AND` of a `CSET ne` and an `EOR` of
+    # two `CSET lt`, and these are the lemmas that turn each of those into the
+    # `if` the model's own definition is written with.  Without them the block
+    # and the model are one lemma apart and no amount of unfolding closes it.
+    "arm64_cset_eq, arm64_cset_ne, arm64_cset_lt_s, "
+    # The FLOOR-division model's three definitions, and they are here for the
+    # same reason the CSET bridges above are: the terminal value flow of a
+    # dividing block has to reduce the model's term to the expression the block
+    # computes, and `simp only` reaches that only if it is told to unfold them.
+    # Left folded, `frem64 n 7` is an opaque term next to a chain of `MSUB`/
+    # `CSET`/`AND`/`SUB` steps, and nothing in the tactic soup below closes that.
+    "fdiv64, frem64, sneg, "
+    "UInt64.add_zero, u64_ofNat_zero, UInt64.ofNat_toNat"
 )
 
 # `u64_sub_add` folds `(sp - a) + b` into a single subtraction.  Removing it

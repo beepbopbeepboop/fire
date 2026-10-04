@@ -845,6 +845,60 @@ closes the bridge instead of leaving a signed/unsigned pair to be noticed by
 `bv_decide` as a "spurious counterexample". -/
 def sKey (x : UInt64) : UInt64 := x ^^^ 0x8000000000000000
 
+/-- 1 when the SIGN BIT of a two's-complement word is set, and 0 when it is
+    clear — as a 0/1 WORD, because that is what the machine computes.
+
+    Stated through `sKey` rather than as `x >>> 63` for the reason every
+    comparison in this file is: the machine's `CMP Xd, #0 ; CSET Xd, lt` pair
+    writes exactly this value, and `arm64_cset_lt_s` is the lemma that reduces
+    that CSET to this term, so a block's own `CSET` and the model's `if` are the
+    same expression and `simp` closes the bridge.  `sKey x < sKey 0` is that
+    XOR-with-the-top-bit key compared against zero, which is the sign test
+    itself; the arithmetic reading of it (`(x >>> 63) = 1`) is what `fdiv64`
+    below is measured against, and the two agree on every 64-bit word because
+    flipping the top bit reverses an unsigned order exactly when that bit was
+    set. -/
+def sneg (x : UInt64) : UInt64 := if sKey x < sKey 0 then 1 else 0
+
+/-- Python's FLOOR division over two's-complement 64-bit words.
+
+    `SDIV` and `IDIV` truncate toward zero, and **no encoding built on them can
+    floor**: every `q = ±tdiv(±a, ±b)` reachable by negating one side, both
+    sides or the quotient is still a truncating quotient, so the correction has
+    to be conditional.  With `q = sdiv64 a b` and `r = a - q*b` the answer is
+    `q - c`, where `c` is 1 exactly when the division was INEXACT and the two
+    operands' signs differ — which is the machine's `AND` of a `CSET ne` and an
+    `EOR` of two `CSET lt`, and is spelled here over those same terms so the
+    block reduces to this definition instead of crossing a bridge lemma about
+    `Int.fdiv` over two's-complement words.
+
+    **The correction is decided from `r` and `b`, never from `a`.**  That is what
+    makes one shape serve both backends: `IDIV` leaves `q` in RAX and `r` in
+    RDX and the dividend nowhere, so an `frem64` that needed `a` would have no
+    way to be computed on x86-64.  It is also the identity the correction is
+    *true* by — the sign of a truncating remainder is the sign of the dividend,
+    so "the signs differ" can be read off `r` in place of `a` — and it is the
+    one thing this definition must not get wrong: an earlier draft tested
+    `sKey a = sKey b`, and `sKey` is an involution, so that is `a = b`, which
+    makes `1 // 2` answer `-1`.
+
+    `b = 0` answers 0 here for the reason `sdiv64` does — the CBZ/div0 path
+    traps before any of this runs, so the arm is unreachable and is here to keep
+    the definition total. -/
+def fdiv64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0
+  else
+    let q := sdiv64 a b
+    let r := a - q * b
+    q - ((if r ≠ 0 then (1 : UInt64) else 0) &&& (sneg r ^^^ sneg b))
+
+/-- Python's `%` over the same words: `a - (a // b) * b`, which is `fdiv64`'s
+    quotient in the machine's OWN multiplication order (`MSUB Xd, Xn, Xm, Xa`
+    computes `Xa - Xn * Xm`, so the remainder's goal is `a - q' * b` and the
+    two are the same term rather than a commutativity step apart). -/
+def frem64 (a b : UInt64) : UInt64 :=
+  if b = 0 then 0 else a - fdiv64 a b * b
+
 /-- Source semantics: evaluate expressions with a call handler for recursion -/
 def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
   match e with
@@ -881,9 +935,17 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   -- machine's SDIV/MSUB/ASR steps compute (see `arm64_step`), so the source
   -- model and the value flow cannot drift.  Reading `/` as UInt64's would make
   -- `-7 / 2` a huge positive number, which is a model of a different language.
+  --
+  -- **`//` and `%` are NOT `sdiv64`/`srem64`, and the difference is the whole
+  -- of `fdiv64`/`frem64`.**  Python's `//` FLOORS and its `%` takes the sign of
+  -- the DIVISOR, so the two disagree with a truncating divide exactly when the
+  -- operands' signs differ — `7 // -2` is -4 and not -3, and `x % 2 == 1` is
+  -- the standard odd test and answered 0 for every negative odd `x`.  `/` stays
+  -- `sdiv64` because there is no float in this model and that gap is
+  -- `FORMAL.md` §6 Phase 7's, not this arm's.
   | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "//" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "%" l r => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "//" l r => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | MojoExpr.binop "%" l r => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "<<" l r => evalExpr callFunc l env <<< evalExpr callFunc r env
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -1032,8 +1094,8 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
   | "|" => evalExpr callFunc l env ||| evalExpr callFunc r env
   | "^" => evalExpr callFunc l env ^^^ evalExpr callFunc r env
   | "/" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "//" => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | "%" => srem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "//" => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
+  | "%" => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "<<" => evalExpr callFunc l env <<< evalExpr callFunc r env
   | ">>" => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | "**" => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
@@ -3499,6 +3561,24 @@ theorem arm64_cset_le (a b : UInt64) :
   by_cases h : a ≤ b
   · rw [if_pos ((arm64_flag_le a b).mpr h), if_pos h]
   · rw [if_neg (fun hc => h ((arm64_flag_le a b).mp hc)), if_neg h]
+
+/-- The SIGNED less-than CSET, which is the fourth member of this family and
+    the one `sneg` needs: `CMP Xd, #0 ; CSET Xd, lt` is how both emitters ask
+    "is this word negative", and `arm64_cset_lt_s x 0` says the word it wrote
+    is `sneg x`.
+
+    It was missing while `arm64_cset_eq`/`_ne`/`_le` were here, and the three
+    that exist were all reachable from `if`-lowering; the signed one is
+    reachable only from a CORRECTION like `fdiv64`'s, which is why nothing
+    asked for it until `//` and `%` started flooring.  The statement is
+    `arm64_cset_le`'s with condition code 11 and `arm64_flag_lt_s`, which is
+    the same `sKey` order every other signed predicate in this file uses. -/
+theorem arm64_cset_lt_s (a b : UInt64) :
+    (if arm64_matches_condition 11 (arm64_subs_flags a b) then (1 : UInt64) else 0)
+      = (if (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) then 1 else 0) := by
+  by_cases h : (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000)
+  · rw [if_pos ((arm64_flag_lt_s a b).mpr h), if_pos h]
+  · rw [if_neg (fun hc => h ((arm64_flag_lt_s a b).mp hc)), if_neg h]
 
 /-! # Generic countdown-style while-loop contract
 
