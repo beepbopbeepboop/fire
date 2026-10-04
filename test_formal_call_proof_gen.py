@@ -131,6 +131,42 @@ REFUSED = {
 }
 
 
+# Programs with TWO calls OUT OF THE IMAGE, which is a different refusal from
+# the one above and gets its own table because `test_intra_image_call_is_refused_
+# by_name` asserts the "interprocedural" wording that this message does not use.
+#
+# **The walk discharges an out-of-image call by HALTING at it, and it halts at
+# ONE address** (`exit_at`, threaded into every `runs_avoid_append` the run
+# chain is built from). A program with two such calls has a path that reaches
+# the second without passing the first, so one halt address cannot discharge
+# both, and the honest statement is a disjunction over them.
+#
+# This is the PRECONDITION for
+# `bugs/FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_
+# prints_nothing` — an exit that flushes is a `BL fflush`, and every flush site
+# is one more address the walk cannot halt at. So the refusal below is the thing
+# that work is waiting on, and pinning it is how a fix becomes measurable: when
+# the disjunction lands, this row flips from a refusal to a proof.
+#
+# The fixture is TWO `printf`s on opposite arms of an `if`, which is the
+# smallest program that has the shape. It matters that it needs no change to
+# `formal/arm64_codegen.py` to reproduce: the doc's own experiment patched a
+# flush into a divide-by-zero arm, and a two-line program reaches the same
+# refusal — so the next worker does not have to edit an emitter to measure
+# whether the precondition moved.
+TWO_OPAQUE_CALLS = {
+    "two_opaque_calls": (
+        "def main(n):\n"
+        "    if n > 0:\n"
+        "        printf(\"pos\\n\")\n"
+        "    else:\n"
+        "        printf(\"neg\\n\")\n"
+        "    return 0\n",
+        "two calls out of the image on paths of their own: the walk's halt "
+        "address is one, so the theorem would have to be a disjunction"),
+}
+
+
 def _functions(source):
     """The `FunctionDef`s of a Mojo source, in source order."""
     from formal.build import parse_module
@@ -1150,7 +1186,8 @@ class TestCallProofs(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="a2-call-")
         cls.proofs = {}
         cls.errors = {}
-        for name, (src, _why) in list(PROGRAMS.items()) + list(REFUSED.items()):
+        for name, (src, _why) in (list(PROGRAMS.items()) + list(REFUSED.items())
+                                  + list(TWO_OPAQUE_CALLS.items())):
             p, err = _generate(cls.tmp, src, name)
             cls.proofs[name] = p
             cls.errors[name] = err
@@ -1185,6 +1222,49 @@ class TestCallProofs(unittest.TestCase):
                           f"{name}: the refusal must say what is actually "
                           f"missing and what would close it, so a reader can "
                           f"tell it from a recursion gap: {err}")
+
+    def test_two_calls_out_of_the_image_are_refused_by_name(self):
+        """TWO opaque calls, and the refusal has to be about the halt ADDRESS.
+
+        One out-of-image call is proved, as `reaches_call_at_0x…`: the model
+        stops there and the theorem says the run gets there, for every input.
+        Two is a different shape, because the second has a path of its own and
+        the walk's halt address is one — so the theorem would have to be a
+        DISJUNCTION over the two addresses, and the framework has no way to
+        say that.
+
+        What this pins is the state of that gap, in the three ways a reader
+        needs to tell it apart from its neighbours: it is refused rather than
+        emitted (an emitted theorem here would be FALSE — `arm64_step` answers
+        `none` at both addresses, so `x0 = mojo n`'s `none` branch is `False`);
+        the message names BOTH addresses and says the disjunction is what is
+        missing, which is what a taker needs to size it; and it does NOT come
+        out as the recursion error, which is the misdescription this file
+        exists to keep out of a program with no recursion in it.
+
+        The control is `PROGRAMS['print']` above, which is ONE such call and
+        still generates: a guard that refuses both is a different backend.
+        """
+        for name in TWO_OPAQUE_CALLS:
+            err = self.errors[name]
+            self.assertIsNotNone(err,
+                                 f"{name}: expected a refusal, got a proof — "
+                                 f"and a proof here would be false, because "
+                                 f"`arm64_step` returns `none` at both calls")
+            self.assertNotIn("recursion argument bound", err,
+                             f"{name}: the old recursion-only error "
+                             f"misdescribes a program with no recursion in it")
+            self.assertIn("calls this walk cannot follow", err,
+                          f"{name}: the refusal must name the gap (two calls, "
+                          f"one halt address): {err}")
+            self.assertIn("disjunction", err,
+                          f"{name}: the refusal must say what would close it, "
+                          f"so a reader can size the work: {err}")
+            self.assertEqual(len(set(re.findall(r"0x[0-9a-f]+ -> 0x[0-9a-f]+",
+                                                err))),
+                             2,
+                             f"{name}: both call sites must be named, since "
+                             f"each is a path the other is not on: {err}")
 
     def test_the_extern_call_states_what_the_model_supports(self):
         p = self.proofs["print"]
