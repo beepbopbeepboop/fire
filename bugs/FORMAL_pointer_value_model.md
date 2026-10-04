@@ -1,6 +1,6 @@
 # FORMAL_pointer_value_model: what a pointer IS on the formal path, and why the 54-file group was never about that
 
-**§9 status, re-measured 2026-10-05 (`work/formal23-5-r2`): SIX of the eight
+**§9 status, re-measured 2026-10-04 (`work/formal23-5-r2`): SIX of the eight
 items in "Also found, and NOT fixed" are now closed, and the two that remain are
 both named as another lane's question.** Closed: the `p + k` offset scale
 (2026-10-03), the x86-64 one-field-struct field read (**measured fixed on this
@@ -635,7 +635,7 @@ candidate. Everything downstream — the frame layout, the escape analysis, the
 field reads — already exists and already works for a directly constructed
 struct. `formal/build.py` is not this change's lane.
 
-> **Answered 2026-10-05 (`work/formal23-5-r2`), and the paragraph above is what
+> **Answered 2026-10-04 (`work/formal23-5-r2`), and the paragraph above is what
 > was asked for.** `model.pointer_frame_pointee` is the recognition, its three
 > consumers are the seeding, the returned-frame decision and the two backends,
 > and `p.value().b` answers 22 on arm64 and on x86-64 where this section records
@@ -1093,7 +1093,7 @@ the `("frame", …)` branch of §4 and is refused for a different reason.
   construction.
 - **The struct-pointee branch is correct and unreachable**, which is §4. One
   line in the holder fixpoint closes it and it is `formal/build.py`.
-  **CLOSED 2026-10-05 (`work/formal23-5-r2`)** — `pointer_frame_pointee` plus its
+  **CLOSED 2026-10-04 (`work/formal23-5-r2`)** — `pointer_frame_pointee` plus its
   three consumers, and `p.value()` on a `Pointer[SomeStruct]` answers 22 where it
   used to answer 0 and refuse. The "next step" paragraph below is the record of
   what was asked for; the section at the head of this file is what landed.
