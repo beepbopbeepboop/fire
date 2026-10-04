@@ -40,6 +40,7 @@ import mojo.middle.lambdareduce as _gld
 import gimple_codegen
 import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.calls_shared via explicit imports.
@@ -2762,8 +2763,17 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if actual == 'MojoSet *':
             sp = gen._coerce_to_type('int64_t', 'MojoSet *', av)
             return 'int64_t', gen._new_val('int64_t', f'mojo_set_len ({sp})')
-        lp = gen._coerce_to_type('int64_t', 'MojoList *', av)
-        return 'int64_t', gen._new_val('int64_t', f'mojo_list_len ({lp})')
+        # No recorded actual type: the box is this codegen's answer for a value
+        # with no single C type, which for a PARAMETER is the shape where the
+        # call sites disagree — `lst([1, 2, 3])` and `lst("abcd")` — and
+        # committing to `mojo_list_len` reads the string's own bytes as a
+        # MojoList header. That answer is not wrong-shaped but
+        # heap-dependent: it was stable per run and arbitrary across runs, so
+        # no value comparison could ever catch it. The registries
+        # (`emit_infra._len_of_boxed`) are what know which kind this is, and
+        # its last arm is this very `mojo_list_len`, so every input the
+        # registries do not recognise keeps exactly the answer it had.
+        return 'int64_t', ginf._len_of_boxed(gen, av)
     return 'int64_t', gen._new_val('int64_t', f'(int64_t)0  /* len() on unsupported type {at} */')
 
 

@@ -8755,6 +8755,33 @@ def main():
     f({"x": 2})
 ''', 'f', False)
 
+    # `len()` on a parameter whose call sites are BOTH a container and a
+    # string. One C type per slot means the parameter is declared `int64_t`
+    # and the lowering has to ASK which kind it is holding; it committed to
+    # `mojo_list_len`, so the string's own bytes were read as a MojoList
+    # header and the answer was whatever followed the pointer on the heap —
+    # stable within a run, arbitrary across runs, which is why this is the
+    # repeated-run helper and not `test_gimple_stdout`.
+    #
+    # The dict, set and bytes rows are the other half of the same question:
+    # each was measured wrong or wrong-only-by-accident before (the bytes one
+    # was right solely because `MojoBytes.len` sits at `MojoList.len`'s
+    # offset), so a fix that added a string arm alone would trade one wrong
+    # answer for another.
+    test_gimple_stdout_repeated("gimple_len_of_param_called_with_list_and_str", """\
+def lst(x):
+    return len(x)
+
+def main():
+    print(lst([1, 2, 3]))
+    print(lst("abcd"))
+    print(lst({"a": 1, "b": 2}))
+    print(lst({1, 2, 3}))
+    print(lst((1, 2)))
+    print(lst(b"abc"))
+main()
+""", "3\n4\n2\n3\n2\n3\n")
+
     # CODEGEN_function_scoped_import_module_not_inlined: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,

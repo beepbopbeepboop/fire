@@ -401,7 +401,31 @@ def test_every_declaration_is_seen():
     # behaviour; a decimal address on this target). One name: the codegen half
     # is a `print` dispatch arm, which adds no runtime entry point. bugs4-8
     # counted from its own base's 543 and wrote `544`.
-    for header, want in (('fire_runtime.h', 565),
+    for header, want in (('fire_runtime.h', 571),
+    # 570 -> 571 (2026-10-04, `bugs6-2`): `mojo_is_registered_bytes`, the
+    # fourth and last member of the container-registry family. A boxed
+    # `MojoBytes *` is pointer-shaped and is none of a list, dict, set or box,
+    # so `mojo_boxed_is_str` classified it as a STRING — harmless until
+    # `len()` on a polymorphic parameter read the answer through that
+    # classification (`emit_infra._len_of_boxed`), where `mojo_strlen` walked
+    # the bytes payload for a NUL and got a length right only because
+    # `MojoBytes.len` sits at `MojoList.len`'s offset. One name, taken from
+    # the call; the codegen half (`_len_of_boxed`'s block layout) adds no
+    # runtime entry point, and the registry entry itself is file-local.
+    #
+    # 565 -> 570, the gap this closes first: FIVE names had landed on the
+    # header without a ledger line here, so this count was already red by five
+    # before this change. Measured against the header at each commit, so the
+    # names are attributed and not guessed:
+    #   +4  a35765a0, `str`'s `[start[, end]]` window: `mojo_str_count_from`,
+    #       `mojo_str_endswith_from`, `mojo_str_rfind_from`,
+    #       `mojo_str_startswith_from` — the offset-taking twins the slices
+    #       needed, so the codegen half is a changed call and not a new
+    #       entry point per method.
+    #   +1  d8cdca63, `mojo_regex_split` for a compiled pattern's `.split()`.
+    # A count assertion that is red for a reason its own ledger does not
+    # mention is worse than no count at all, so the numbers are now the ones
+    # the header actually has.
     # 561 -> 565 (2026-10-02, `bugs4-9`), FOUR names on the merged header
     # (its own ledger said five, from its base's 543 -> 548):
     #   +1  `mojo_str_cat_free`, the left-operand-releasing cat every repr
