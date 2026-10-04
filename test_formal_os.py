@@ -23,10 +23,13 @@ Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image, and an entire class of Mach-O emission bug
 can be green there; every case here exits with a status this file checks.
 
-Groups: `strings`, `posixpath`, `fs`, `env`, `dirs`. With no argument, all of
-them. `posixpath` is the `strings` corpus and the same oracle under CPython's
-other name for the same module, which is what a re-export needs to be measured
-rather than assumed.
+Groups: `strings`, `posixpath`, `fs`, `env`, `dirs`, `blob`, `inplace`. With no
+argument, all of them. `posixpath` is the `strings` corpus and the same oracle
+under CPython's other name for the same module, which is what a re-export needs
+to be measured rather than assumed. `inplace` is the one that builds nothing:
+`os.path`'s `join` once wrote past the end of a `malloc`'d block on its
+trailing-separator branch, answered correctly, and passed every differential in
+this file — so the property it checks is the property a corpus cannot see.
 """
 import argparse
 import os
@@ -1094,7 +1097,104 @@ def group_blob(tmpdir, verbose):
     return True, ""
 
 
+def group_inplace(tmpdir, verbose):
+    """The only UNBOUNDED write in `formal/hostmods/` has no caller.
+
+    Static, and it is static because nothing else can be: `os.path`'s `join`
+    used to hand `str_append` a `str_dup(a)` — a block of `strlen(a) + 1`, room
+    for `a` and its terminator and nothing else — and append `b` to it, so
+    every byte of `b` and its own terminator landed past the end of the
+    allocation. **`join`'s ANSWER stayed correct and every differential test of
+    it passed**; the 84-case `strings` corpus below is the proof of that, and it
+    has 14 cases through the trailing-separator branch. What showed it was a
+    CALLER that overran on every entry of a walk:
+    `formal/hostmods/glob.mojo`'s `**` under `recursive=True`, which aborted
+    10 runs in 10 with `malloc: Heap corruption detected`, and
+    `test_formal_glob.py`'s `listing` and `hidden` groups are its regression
+    test.
+
+    **A longer corpus cannot catch this class**, which is why this group exists
+    instead of more cases: a wrong answer is what a differential test can see,
+    and the defect had none. Nor can an allocation watcher —
+    `formal/model.py` has no `malloc_size` and a probe for one is refused as a
+    call to a name no module declares. What is left is the property itself, read
+    off the source: `strcat` is the one write in `formal/hostmods/` that does
+    not size what it writes, so it has to have no caller, and the
+    `str_append(str_dup(…))` shape that was the bug must not be able to come
+    back. (`bugs/FORMAL_os_path_join_overran_its_buffer_on_the_trailing_
+    separator_branch.md` carried the measurement and is deleted with this.)
+    """
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "formal", "hostmods")
+    sources = {}
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in sorted(filenames):
+            if name.endswith(".mojo"):
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    sources[os.path.relpath(path, root)] = f.read()
+    if not sources:
+        return False, (f"no `.mojo` under {root}, so this group measured "
+                       f"nothing")
+
+    def call_sites(needle):
+        """The (file, line) of every line mentioning `needle`, minus a definition
+        and minus a docstring line — the two places the name is not a CALL."""
+        out = []
+        for rel, text in sources.items():
+            for i, line in enumerate(text.splitlines(), 1):
+                stripped = line.strip()
+                if needle not in line:
+                    continue
+                if stripped.startswith("def ") or stripped.startswith("#"):
+                    continue
+                out.append(f"{rel}:{i}: {stripped[:90]}")
+        return out
+
+    strcats = []
+    for rel, text in sources.items():
+        for i, line in enumerate(text.splitlines(), 1):
+            if re.search(r"\bstrcat\s*\(", line) and not line.strip().startswith("#"):
+                strcats.append(f"{rel}:{i}: {line.strip()[:90]}")
+    if len(strcats) != 1 or not strcats[0].startswith("os/_syscalls.mojo:"):
+        return False, (f"`strcat(` appears at {strcats}, and the property this "
+                       f"group checks is that it appears ONCE — in "
+                       f"`_syscalls.mojo::str_append`, the one write in "
+                       f"`formal/hostmods/` that does not size what it writes. "
+                       f"A second one is a second unbounded write with no "
+                       f"caller-shaped reason to exist")
+    callers = call_sites("str_append")
+    if callers:
+        return False, (f"`str_append` is called at {callers}. It appends IN "
+                       f"PLACE and nothing checks that the room is there, so "
+                       f"every caller has to be a buffer with the append's room "
+                       f"already reserved; `str_build(a, b)` is the spelling "
+                       f"that sizes the allocation, and it is what almost every "
+                       f"caller wants")
+    shape = []
+    for rel, text in sources.items():
+        for i, line in enumerate(text.splitlines(), 1):
+            # The COMMENT above `join`'s branch spells the forbidden shape out
+            # in full, because that is where the reason it is forbidden lives —
+            # so a scan that counted prose would fail on the fix.
+            if line.strip().startswith("#"):
+                continue
+            if re.search(r"str_append\s*\(\s*str_dup\s*\(", line):
+                shape.append(f"{rel}:{i}")
+    if shape:
+        return False, (f"{shape} calls `str_append(str_dup(…), …)`, which is "
+                       f"the overrun exactly: `str_dup(a)` is `strlen(a) + 1` "
+                       f"bytes, so every byte of the appended string and its "
+                       f"terminator are written past the end of the allocation")
+    if verbose:
+        print(f"      1 unbounded write (`strcat`), 0 callers, 0 "
+              f"`str_append(str_dup(…))` shapes, over {len(sources)} hostmod "
+              f"sources")
+    return True, ""
+
+
 GROUPS = {
+    "inplace": group_inplace,
     "strings": group_strings,
     "posixpath": group_posixpath,
     "fs": group_fs,
