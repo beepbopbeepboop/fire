@@ -131,6 +131,21 @@ def _tag_leaf(tactic: str, site: str, note: str = "") -> str:
     return f"{tactic}  -- {CFG_LEAF_TAG}: {site}{tail}"
 
 
+def _leaf_tag_line(site: str) -> str:
+    """The site's name as a comment line of its OWN.
+
+    For a leaf whose tactic text is spliced into the middle of a larger term
+    (the loop contract's `hstep` closer): a `--` comment runs to end of line, so
+    a tag appended to the fragment would swallow the caller's closing paren and
+    the file would not parse.  `no_admission_fallback` reads a standalone tag as
+    naming the NEXT line, which is why that function carries the rule and not
+    this one.
+    """
+    if site not in CFG_LEAF_SITES:
+        raise ValueError(f"unregistered CFG leaf site: {site!r}")
+    return f"-- {CFG_LEAF_TAG}: {site}"
+
+
 def _cfg_leaf(A, ind: str, site: str, tactic: str, *, note: str = "") -> None:
     """Emit one CFG leaf's closing tactic, tagged with the site that owns it.
 
@@ -168,19 +183,28 @@ def no_admission_fallback(proof_text: str) -> str:
     closes whatever reaches it, so a proof that admits three times looks the
     same whether one leaf or three were the problem; replacing the fallback
     with `done` makes Lean report `unsolved goals` **at the line of the leaf
-    that failed**, and the tag on that line names the site.  That is a
-    measurement; the census of what the corpus really admits is what Lean
-    reports with the fallbacks left in place, and both are wanted.
+    that failed**, and the tag names the site.  That is a measurement; the
+    census of what the corpus really admits is what Lean reports with the
+    fallbacks left in place, and both are wanted.
 
     Only TAGGED leaves are touched.  The other admissions in a generated proof
     -- the host contracts (`admitted_*`), the dylib export stubs, the extern
     step -- are a different family with their own owners, and silently
     converting them to `done` would report a failure this function is not
     measuring.
+
+    A leaf is tagged by a comment on its own line when its tactic text is
+    spliced into the middle of a larger term (the loop contract's `hstep`
+    closer), so a line counts as tagged if it carries the tag or the line
+    before it does.
     """
     out = []
+    tagged_before = False
     for line in proof_text.splitlines():
-        if CFG_LEAF_TAG in line and "sorry" in line:
+        standalone = line.lstrip().startswith(f"-- {CFG_LEAF_TAG}:")
+        tagged = standalone or tagged_before or (CFG_LEAF_TAG in line)
+        tagged_before = standalone
+        if tagged and "sorry" in line:
             head, _, tail = line.rpartition("sorry")
             line = f"{head}done{tail}"
         out.append(line)
@@ -3639,8 +3663,8 @@ def loop_test_def(name: str, words: dict, pc: int):
     return [f"def {sym} (s : Arm64State) : Bool :=", f"  {body}"], sym
 
 
-def _cond_step_tactic(qsym: str) -> str:
-    """Closing tactic for the `hstep` obligation of a loop contract.
+def _cond_step_arg(name: str, cbz_idx: int, qsym: str) -> list:
+    """The `hstep` obligation of a loop contract, with its leaf named.
 
     With the contract parameterised over `q` (see `loop_test_def`) the goal is
     `arm64_step s code = some (if q s then … else …)` with `q` the very
@@ -3648,21 +3672,14 @@ def _cond_step_tactic(qsym: str) -> str:
     outright: both branches are then closed by `simp` on the pc rewrite.  That
     is the whole reason this obligation is no longer a hole.
 
-    NOT tagged here, although it is a CFG leaf that admits: its text is spliced
-    into the middle of a larger term by `_cond_step_arg`, and a `--` comment
-    runs to end of line, so a tag appended here would swallow the caller's
-    closing paren and the file would not parse.
+    The leaf's name goes on a line of its OWN rather than at the end of the
+    tactic line -- see `_leaf_tag_line` for why that is not a style choice.
     """
-    return (f"by_cases hc : {qsym} s = true <;> simp [{qsym}, hs, hc] <;> "
-            f"all_goals (first | decide | native_decide | omega | rfl | done | "
-            f"{_HOLE})")
-
-
-def _cond_step_arg(name: str, cbz_idx: int, qsym: str) -> list:
-    """The `hstep` obligation's argument, with its leaf named on its own line."""
-    return [f"-- {CFG_LEAF_TAG}: loop-cond-step",
-            f"(by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; "
-            f"{_cond_step_tactic(qsym)})"]
+    inner = (f"by_cases hc : {qsym} s = true <;> simp [{qsym}, hs, hc] <;> "
+             f"all_goals (first | decide | native_decide | omega | rfl | done | "
+             f"{_HOLE})")
+    return [_leaf_tag_line("loop-cond-step"),
+            f"(by intro s hs; rw [{name}_sr_{cbz_idx} s hs]; {inner})"]
 
 
 def _source_cond_code(block, words: dict):
