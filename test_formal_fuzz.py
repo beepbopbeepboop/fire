@@ -352,14 +352,30 @@ MIX_BUILD_INDEXES = 2
 MIX_BUILD_ARCH = "x86_64"
 
 #: Mixes whose constructs are NOT supposed to lower, so "no answer" is the
-#: expected outcome for them and requiring one would be requiring a bug. There
-#: are none today, and the empty table is the point: a family added to `MIXES`
-#: is a family whose construct the backend lowers, so a mix that cannot produce
-#: an answer is a mix that cannot find anything. The `field_read` row in
-#: `tools/formal_fuzz.py` is why this check exists at all — 284 of 300 generated
-#: class programs were ONE refusal, which is a family that measures nothing and
-#: a suite that reported numbers.
-MIXES_NOT_LOWERED = ()
+#: expected outcome for them and requiring one would be requiring a bug. The
+#: table has exactly one row, and it is a REFUSAL that a fix turned a silent
+#: wrong answer into — which is the shape worth naming, because the alternative
+#: reading of an all-refused mix ("a family that measures nothing") is what this
+#: check exists to catch and the two are told apart by the doc each row cites:
+#:
+#:   `fstrings` — `f"n={n}"` printed the literal's own SOURCE SPELLING on both
+#:   architectures (exit 0) until the fuzz-3 sweep found it, and it is refused
+#:   now because composition needs a buffer a `char *` has nowhere to put it in
+#:   (`formal/model.py`'s `interpolated_literal_refusal`, pinned by
+#:   `test_formal_run.py`'s `fstring_literal_refused`). So the mix answers with
+#:   refusals BY DESIGN, and dropping it the day interpolation is implemented is
+#:   what would turn this row into the hole the check is for.
+#:
+#: There were none before that, and the row above is why the empty table is a
+#: fact rather than a shrug: a family added to `MIXES` is a family whose
+#: construct the backend lowers unless it comes with a doc saying otherwise. The
+#: `field_read` row in `tools/formal_fuzz.py` is why the check exists at all —
+#: 284 of 300 generated class programs were ONE refusal, which is a family that
+#: measures nothing and a suite that reported numbers.
+MIXES_NOT_LOWERED = {
+    "fstrings": "formal/model.py:interpolated_literal_refusal (a documented "
+                "refusal, pinned by test_formal_run.py)",
+}
 
 
 def check_mix_builds(mix, indexes, verbose):
